@@ -1,4 +1,4 @@
-//! WIRING: unwired - verify_app_binding_payment has no in-tree caller by design: bud_getapp_bindingPayment returns the proof to the caller, who verifies it against their own trust anchor (documented in rpc/api.rs).
+//! WIRING: unwired - `verify_app_binding_payment` has no in-tree caller by design: `bud_getapp_bindingPayment` returns the proof to the caller, who verifies it against their own trust anchor (documented in rpc/api.rs).
 //! WIRING: wired - registration, ownership claims, payments, solver intents,
 //! bids, fulfilment and refunds run in block through `SettlementTx::app_binding`;
 //! the Ethereum-side `app_bindingExecutor` contract is ().
@@ -841,10 +841,15 @@ fn apply_claim(
     app_binding_id: &[u8; 32],
     payout: Address,
 ) -> Result<(), SettlementTxError> {
-    // Everything that accrued while nobody owned the application moves to
-    // its owner now. Prove the credit fits before changing either account or
+    if payout == app.mirror_account {
+        return Err(refused(
+            "AppBinding payout cannot be the unkeyed mirror account itself",
+        ));
+    }
+    // Everything spendable that accrued while nobody owned the application moves
+    // to its owner now. Prove the credit fits before changing either account or
     // the owner row, so a direct caller also gets an atomic refusal.
-    let swept = state.get_balance(&app.mirror_account);
+    let swept = state.spendable_balance(&app.mirror_account);
     if swept > 0 {
         state
             .get_balance(&payout)
@@ -861,7 +866,7 @@ fn apply_claim(
     }
     if swept > 0 {
         let mirror = state.get_or_create(&app.mirror_account);
-        mirror.balance = 0;
+        mirror.balance = mirror.balance.saturating_sub(swept);
         state.mark_dirty(&app.mirror_account);
         credit(state, &payout, swept)?;
     }
@@ -1015,20 +1020,20 @@ pub fn execute_app_binding_tx(
                     "a retired AppBinding application cannot be claimed",
                 ));
             }
-            let domain = state
-                .settlement
-                .domains
-                .get(app.domain_key)
-                .filter(|domain| domain.is_active())
-                .ok_or_else(|| refused("the remote app binding's domain is not Active"))?;
-            let bootstrapped = crate::settlement::domains::anchor_recognized_chain(domain.id)
-                .is_some()
-                || state.poa_is_permissioned(domain.id);
-            if !bootstrapped {
-                return Err(refused(
-                    "a permissionlessly registered domain cannot authorize AppBinding claims",
-                ));
-            }
+            crate::settlement::finality_gate::enforce_domain_not_refuted(
+                &state.settlement,
+                block,
+                crate::settlement::finality_gate::ValueGate::AppBindingClaim,
+                app.domain_key,
+            )
+            .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+            crate::settlement::finality_gate::enforce_sentry_circuit_clear(
+                &state.bridge_state.consensus_sentry,
+                crate::settlement::finality_gate::ValueGate::AppBindingClaim,
+                app.domain_key,
+            )
+            .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+            ensure_serving_origin(state, app.domain_key)?;
             if evidence.chain.domain_id() != app.domain_key {
                 return Err(refused(
                     "AppBinding claim evidence comes from another domain",
@@ -1077,6 +1082,7 @@ pub fn execute_app_binding_tx(
             apply_claim(state, &app, app_binding_id, *payout)?;
             if let Some(row) = state.settlement.app_binding.apps.get_mut(app_binding_id) {
                 row.anchored_claim_cursor = Some(cursor);
+                row.claim_expiry = row.claim_expiry.max(block);
             }
             Ok(())
         }
@@ -1108,14 +1114,7 @@ pub fn execute_app_binding_tx(
                     "a retired AppBinding application cannot be claimed",
                 ));
             }
-            if !state
-                .settlement
-                .domains
-                .get(app.domain_key)
-                .is_some_and(crate::domain::types::ConsensusDomain::is_active)
-            {
-                return Err(refused("the remote app binding's domain is not Active"));
-            }
+            ensure_serving_origin(state, app.domain_key)?;
             if *valid_until_block <= app.claim_expiry {
                 return Err(refused(
                     "the AppBinding claim signature is not newer than the last accepted signature",
@@ -1661,7 +1660,7 @@ fn settle_expired_intent(
     credit(state, &intent.owner, intent.max_payment)
 }
 
-/// Retire every AppBinding intent past its deadline, deterministically, at the block
+/// Retire every `AppBinding` intent past its deadline, deterministically, at the block
 /// height the transition is applying.
 ///
 /// Only `Fulfill` and `Refund` removed a row before this, and both need a
@@ -2493,7 +2492,7 @@ mod tests {
     }
 
     /// Adding the two replay watermarks is a consensus-state migration, not a
-    /// reason to rewrite every existing AppBinding commitment. Default fields are
+    /// reason to rewrite every existing `AppBinding` commitment. Default fields are
     /// omitted, so a pre-watermark application has the exact bincode bytes it
     /// had before this release; JSON snapshots without the fields restore both
     /// defaults explicitly.
@@ -2744,6 +2743,8 @@ mod tests {
                 object_layer_root: None,
                 proof_root: None,
                 proven_height: 0,
+                ulp_domains_root: None,
+                finality_certificate_root: None,
             },
             block_height: 15,
             state_root: "00".repeat(32),
@@ -3676,5 +3677,76 @@ mod tests {
             format!("{err:?}").contains("permissionlessly registered domain"),
             "got: {err:?}"
         );
+    }
+
+    #[test]
+    fn claim_by_signature_enforces_serving_origin_blocks_mirror_self_payout_and_preserves_locks() {
+        const SIGNATURE: &str = "d988638ac25e6650eb787f5ccc329eecc9af09d0848904c3f88948628ac3afe335e456596a9c5234d20371a472d961555aeb9768a78961699233975f3e6998511c";
+        let operator = Address::from([0x01; 32]);
+        let registrant = Address::from([0x02; 32]);
+        let payout = Address::from([0x33; 32]);
+        let mut state = state_with_domain(operator);
+        state.add_balance(&registrant, 1_000_000);
+        let eoa = hex::decode("2c7536e3605d9c16a7a3d7b1898e529396a65c23").unwrap();
+        run_binding_tx(
+            &mut state,
+            &ctx(registrant),
+            &BindingTx::Register {
+                domain_key: DOMAIN,
+                origin_app: eoa.clone(),
+                manifest_hash: [0x11; 32],
+            },
+        )
+        .unwrap();
+        let id = calc_binding_id(DOMAIN, &eoa);
+        let claim = BindingTx::ClaimBySignature {
+            app_binding_id: id,
+            payout,
+            valid_until_block: 100,
+            signature: hex::decode(SIGNATURE).unwrap(),
+        };
+
+        // Turning off bridge_enabled on an Active domain must refuse ClaimBySignature.
+        state
+            .settlement
+            .domains
+            .get_mut(DOMAIN)
+            .unwrap()
+            .bridge_enabled = false;
+        let bridge_err = execute_app_binding_tx(&mut state, &ctx(registrant), &claim).unwrap_err();
+        assert!(
+            bridge_err
+                .to_string()
+                .contains("not active with finality anchoring"),
+            "disabled bridge must refuse claim: {bridge_err}"
+        );
+        state
+            .settlement
+            .domains
+            .get_mut(DOMAIN)
+            .unwrap()
+            .bridge_enabled = true;
+
+        // Payout equal to the unkeyed mirror account must be refused by apply_claim.
+        let app_snapshot = state.settlement.app_binding.apps.get(&id).unwrap().clone();
+        let self_err =
+            apply_claim(&mut state, &app_snapshot, &id, app_snapshot.mirror_account).unwrap_err();
+        assert!(
+            self_err.to_string().contains("mirror account"),
+            "self-mirror payout must fail: {self_err}"
+        );
+
+        // Non-spendable reserve balance on the mirror stays locked; normal spendable sweeps.
+        let mirror_addr = app_snapshot.mirror_account;
+        state.add_balance(&mirror_addr, 500);
+        state.burn_reserve_address = Some(mirror_addr);
+        execute_app_binding_tx(&mut state, &ctx(registrant), &claim).unwrap();
+        assert_eq!(state.get_balance(&payout), 0);
+        assert_eq!(state.get_balance(&mirror_addr), 500);
+        state.burn_reserve_address = None;
+        let app_after = state.settlement.app_binding.apps.get(&id).unwrap().clone();
+        apply_claim(&mut state, &app_after, &id, payout).unwrap();
+        assert_eq!(state.get_balance(&payout), 500);
+        assert_eq!(state.get_balance(&mirror_addr), 0);
     }
 }

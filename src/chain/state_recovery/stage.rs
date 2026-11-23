@@ -30,9 +30,8 @@
 //!
 //! # What this adds to the state recovery layer
 //!
-//! The existing artifact reproduction layer (`bud/src/bud_format_regeneration.rs`) does
-//! something different and complementary: given a damaged *input*, it
-//! regenerates the canonical bytes and refuses to let a divergent version be
+//! The artifact reproduction layer regenerates canonical object bytes from a
+//! damaged input and refuses to let a divergent version be
 //! published. That is repair at the level of one artifact.
 //!
 //! This module works at the level of the *node's own state*. Its question is:

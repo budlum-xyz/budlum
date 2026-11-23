@@ -1,7 +1,7 @@
 //! B.U.D. storage deals and retrieval challenges (
 //! Vision).
 //!
-//! **Production boundary:** the BudZKVM `VerifyMerkle` 64-depth soundness gate
+//! **Production boundary:** the `BudZKVM` `VerifyMerkle` 64-depth soundness gate
 //! Is still treated as incomplete for mainnet claims. Every `open_deal` requires
 //! A structurally valid `ProofEnvelope` plus `storage_root`, and challenge answers
 //! Bind that envelope to chain/deal/challenge context, but this module must not
@@ -248,6 +248,7 @@ impl StorageEconomicsParams {
     /// escrowed anyway, and the caller checks the payer balance against the
     /// value returned here, so a saturated total is refused at that check
     /// rather than silently becoming a small number.
+    #[must_use]
     pub fn total_fee(&self, shard_bytes: u64, epochs: u64) -> u64 {
         let scaled = u128::from(self.fee_per_byte_epoch)
             .saturating_mul(u128::from(shard_bytes))
@@ -316,6 +317,7 @@ pub struct StorageDeal {
 }
 
 impl StorageDeal {
+    #[must_use]
     pub fn is_active(&self) -> bool {
         self.status == DealStatus::Active
     }
@@ -325,12 +327,14 @@ impl StorageDeal {
     /// Reads `shard_bytes` recorded at open time rather than looking the
     /// manifest up again, so the price cannot move under an agreement that
     /// has already been escrowed.
+    #[must_use]
     pub fn total_fee(&self, epochs: u64) -> u64 {
         self.economics.total_fee(self.shard_bytes, epochs)
     }
 
     /// Number of epochs the deal is scheduled to last. `0` is a
     /// Configuration error caught at deal-open time.
+    #[must_use]
     pub fn duration_epochs(&self) -> u64 {
         self.deal_end_epoch.saturating_sub(self.deal_start_epoch)
     }
@@ -469,6 +473,7 @@ pub struct StorageChallengeRangeInput<'a> {
 
 impl StorageChallengeProofContext {
     /// Builds a challenge proof context from registry state.
+    #[must_use]
     pub fn from_registry(
         chain_id: u64,
         challenge: &RetrievalChallenge,
@@ -495,6 +500,7 @@ impl StorageChallengeProofContext {
         }
     }
 
+    #[must_use]
     pub fn digest(&self, storage_root: &Hash32, range_hash: &ContentId) -> [u8; 32] {
         use sha3::{Digest, Keccak256};
         let mut hasher = Keccak256::new();
@@ -577,6 +583,7 @@ pub struct ChallengeResult {
 }
 
 /// Fixed devnet/testnet replication target for devnet hardening.
+///
 /// A missed challenge creates a reallocation ticket for the failed replica slot
 /// So independent nodes can observe and repair under-replication without an
 /// Off-chain team-operated scheduler. Mainnet storage remains fail-closed until
@@ -1410,8 +1417,8 @@ pub struct StorageChallengeProofBundle {
 fn storage_challenge_hash4(tag: &[u8], a: &[u8], b: &[u8], level: u64) -> [u64; 4] {
     let digest = crate::core::hash::hash_fields_bytes(&[tag, a, b, &level.to_le_bytes()]);
     let mut out = [0u64; 4];
-    for (idx, chunk) in digest.chunks_exact(8).enumerate() {
-        let arr: [u8; 8] = chunk.try_into().unwrap_or([0u8; 8]);
+    for (idx, chunk) in digest.as_chunks::<8>().0.iter().enumerate() {
+        let arr: [u8; 8] = *chunk;
         out[idx] = u64::from_le_bytes(arr) % bud_vm::GOLDILOCKS_P;
     }
     out
@@ -1487,7 +1494,7 @@ pub fn prove_storage_challenge_proof(
 }
 
 /// Build an isolated AIR witness for negative tests without activating
-/// VerifyMerkle on a production chain. The default verifier still rejects
+/// `VerifyMerkle` on a production chain. The default verifier still rejects
 /// this bundle and it can never earn storage credit.
 #[cfg(test)]
 pub(crate) fn prove_storage_challenge_proof_for_isolated_air_tests(
@@ -1581,6 +1588,7 @@ fn prove_storage_challenge_proof_with_mode(
 }
 
 impl StorageRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -1605,6 +1613,7 @@ impl StorageRegistry {
         self.results.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.next_deal_id == 0
             && self.next_challenge_id == 0
@@ -1629,6 +1638,7 @@ impl StorageRegistry {
             && self.scoped_self_host_policies.is_empty()
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -2444,6 +2454,7 @@ impl StorageRegistry {
         floor.saturating_add(steps).min(STORAGE_REPLICATION_TARGET)
     }
 
+    #[must_use]
     pub fn get_manifest(&self, manifest_id: &ContentId) -> Option<&ContentManifest> {
         self.manifests.get(manifest_id)
     }
@@ -2636,7 +2647,7 @@ impl StorageRegistry {
     }
 
     /// Record a Classic confidential body commit. Refuses plaintext encryption
-    /// (see ConfidentialBodyCommit::new) and refuses a Three edition manifest
+    /// (see `ConfidentialBodyCommit::new`) and refuses a Three edition manifest
     /// when one is already registered for this id (body vs recipe category).
     /// The `owner` is the address the commit is recorded for: an unattributed
     /// body commit would leave later view grants with nobody whose word counts.
@@ -2899,27 +2910,28 @@ impl StorageRegistry {
         // used to be three answers: the profiles said closed
         // (`[features] verify_merkle = false`), startup printed the value as
         // "not applied", and this function required the envelope anyway, so a
-        // client that followed the profile was refused. See B-0049.
+        // client that followed the profile was refused.
         //
-        // Closed gate: the envelope is optional. A deal that carries none opens
-        // and records `merkle_proof: None`, which says "no proof claimed".
-        // Open gate: the envelope and the root are both mandatory, and the
-        // envelope is still only format-checked until the 64-depth verifier
-        // exists. Requiring a blob we cannot verify protects nothing, which is
-        // the second thing the old shape got wrong.
-        match (
-            domain_params.require_merkle_proof,
-            merkle_proof.clone(),
-            storage_root,
-        ) {
-            (true, None, _) | (true, _, None) => {
+        // Closed gate: the proof ENVELOPE is optional - a deal that carries
+        // none records `merkle_proof: None`, "no proof claimed". The
+        // 32-byte storage ROOT is mandatory under either gate: carrying a
+        // commitment costs nothing, and without one every later challenge
+        // on the deal is unanswerable and unfaultable, which pays an
+        // operator for storing nothing. The gate only decides whether the
+        // envelope must come along; the envelope is still format-checked
+        // until the 64-depth verifier exists.
+        let Some(root) = storage_root else {
+            return Err(StorageError::MerkleProofRequired);
+        };
+        match (domain_params.require_merkle_proof, merkle_proof.clone()) {
+            (true, None) => {
                 return Err(StorageError::MerkleProofRequired);
             }
-            (_, Some(proof_bytes), Some(root)) => {
+            (_, Some(proof_bytes)) => {
                 Self::validate_merkle_proof_format(&proof_bytes, &root)?;
             }
             // Closed gate and no envelope: nothing claimed, nothing to check.
-            (false, None, _) | (false, _, None) => {}
+            (false, None) => {}
         }
         if start_epoch >= end_epoch {
             return Err(StorageError::InvalidEpochRange {
@@ -3155,13 +3167,13 @@ impl StorageRegistry {
     #[allow(clippy::too_many_arguments)]
     /// Maximum concurrent open challenges per deal.
     /// Prevents spam attacks where a single deal gets unlimited challenges,
-    /// Growing the `StorageRegistry`'s challenge BTreeMap without bound.
+    /// Growing the `StorageRegistry`'s challenge `BTreeMap` without bound.
     const MAX_OPEN_CHALLENGES_PER_DEAL: usize = 10;
 
     /// Opener bond charged per KiB of the challenged byte range.
     ///
     /// A challenge costs the operator a read plus a hash over the range. On
-    /// commodity NVMe that is roughly 20 ms for the 16 `MiB` maximum chunk and
+    /// commodity `NVMe` that is roughly 20 ms for the 16 `MiB` maximum chunk and
     /// 0.3 ms for the 256 KiB default - small individually, but the rate limit
     /// is keyed on `(operator, manifest)`, so an operator serving 1000
     /// manifests can be made to spend seconds of I/O per epoch by an attacker
@@ -3183,7 +3195,7 @@ impl StorageRegistry {
     pub const MAX_OPEN_CHALLENGES_PER_OPERATOR: usize = 16;
 
     /// Mainnet floor above the uncalibrated 1-unit-per-`KiB` rate.
-    /// `required_opener_bond` for 16 `MiB` is 16_384; this floor dominates it.
+    /// `required_opener_bond` for 16 `MiB` is `16_384`; this floor dominates it.
     /// Storage economics stay disabled on mainnet today; the constant is
     /// the policy the actor will apply the day that gate opens.
     pub const MAINNET_MIN_OPENER_BOND: u64 = 1_000_000;
@@ -3192,6 +3204,7 @@ impl StorageRegistry {
     ///
     /// Rounds the range up to whole KiB so a 1-byte challenge costs the same
     /// as a 1 KiB one; the operator's seek dominates at that size anyway.
+    #[must_use]
     pub fn required_opener_bond(range_len: u64) -> u64 {
         let kib = range_len.div_ceil(1024);
         Self::MIN_OPENER_BOND.max(kib.saturating_mul(Self::OPENER_BOND_PER_KIB))
@@ -3742,7 +3755,7 @@ impl StorageRegistry {
 
     /// The stored coding audit with this id, while the registry holds it.
     ///
-    /// WIRING: read by `StorageTx::AnswerCodingAudit` (storage_tx.rs) to bound
+    /// WIRING: read by `StorageTx::AnswerCodingAudit` (`storage_tx.rs`) to bound
     /// the answer by the audited manifest before the registry checks it.
     #[must_use]
     pub fn coding_audit(&self, audit_id: u64) -> Option<&StoredCodingAudit> {
@@ -4030,7 +4043,7 @@ impl StorageRegistry {
     /// Hash and trusts off-chain verifiers to confirm it. This is
     /// The documented interim-challenge limitation.
     ///
-    /// Range_hash must be non-zero (empty hash = invalid response).
+    /// `Range_hash` must be non-zero (empty hash = invalid response).
     /// Full hash verification deferred to ZK proof integration.
     ///
     /// # Errors
@@ -4106,6 +4119,9 @@ impl StorageRegistry {
                 now_epoch: response_epoch,
             });
         }
+        if deal.storage_root.is_none() {
+            return Err(StorageError::MerkleProofRequired);
+        }
 
         // === B.U.D.: full STARK proof verification ===
         //
@@ -4149,8 +4165,14 @@ impl StorageRegistry {
                         "ZK proof (ProofEnvelope) is mandatory for storage challenge verification"
                             .into(),
                     )),
-                    // Missing commitment is not evidence of operator fault.
-                    (None, _) => Ok(()),
+                    // A deal with no commitment cannot prove possession, and
+                    // since every open now records a root, a missing one is a
+                    // legacy row, not an honest answer: the challenge cannot
+                    // resolve Answered, so the deadline path faults it and
+                    // the payer's refund runs.
+                    (None, _) => Err(StorageError::InvalidMerkleProof(
+                        "deal carries no storage commitment; possession cannot be proven".into(),
+                    )),
                 }
             };
 
@@ -4724,6 +4746,7 @@ impl StorageRegistry {
     /// Excludes deals that have already matured: past `deal_end_epoch` the
     /// renewal offer has expired and the shard is the reallocation path's
     /// problem.
+    #[must_use]
     pub fn deals_in_renewal_window(&self, now_epoch: u64) -> Vec<(u64, Address, u64)> {
         self.deals
             .values()
@@ -5051,14 +5074,17 @@ impl StorageRegistry {
 
     /// Rows in the ticket map, for the `budlum_storage_reallocation_rows`
     /// gauge: a number that only ever rises means the sweep is not running.
+    #[must_use]
     pub fn reallocation_ticket_count(&self) -> usize {
         self.reallocations.len()
     }
 
+    #[must_use]
     pub fn all_reallocation_tickets(&self) -> Vec<&StorageReallocationTicket> {
         self.reallocations.values().collect()
     }
 
+    #[must_use]
     pub fn get_reallocation_ticket(&self, ticket_id: u64) -> Option<&StorageReallocationTicket> {
         self.reallocations.get(&ticket_id)
     }
@@ -5148,6 +5174,7 @@ impl StorageRegistry {
     /// Deliberately not `k + margin`. The margin belongs to the reallocation
     /// sweep, which opens a ticket the moment a term lapses; this number is
     /// the hard line where refusing the exit is the only thing left.
+    #[must_use]
     pub fn permanence_floor(&self, manifest_id: ContentId) -> u32 {
         self.manifests
             .get(&manifest_id)
@@ -5156,7 +5183,7 @@ impl StorageRegistry {
 
     /// B.U.D.: validate merkle proof format.
     /// Checks that `proof_bytes` deserializes to a valid `ProofEnvelope`.
-    /// Full STARK verification (Plonky3Adapter::verify) is deferred to
+    /// Full STARK verification (`Plonky3Adapter::verify`) is deferred to
     /// Nodes with the bud-proof crate and prover capability.
     ///
     /// # Errors
@@ -5192,14 +5219,17 @@ impl StorageRegistry {
 
     // ---- Queries (all read-only, no state change) --------------------
 
+    #[must_use]
     pub fn get_deal(&self, deal_id: u64) -> Option<&StorageDeal> {
         self.deals.get(&deal_id)
     }
 
+    #[must_use]
     pub fn get_challenge(&self, challenge_id: u64) -> Option<&RetrievalChallenge> {
         self.challenges.get(&challenge_id)
     }
 
+    #[must_use]
     pub fn get_result(&self, challenge_id: u64) -> Option<&ChallengeResult> {
         self.results.get(&challenge_id)
     }
@@ -5210,6 +5240,7 @@ impl StorageRegistry {
     /// Tests, and later pruning/archive logic reason about the richer lifecycle
     /// Vocabulary without changing the currently stable `DealStatus` storage
     /// Format in one step.
+    #[must_use]
     pub fn lifecycle_state(&self, deal_id: u64) -> Option<crate::storage::StorageLifecycleState> {
         let deal = self.deals.get(&deal_id)?;
         match deal.status {
@@ -5255,6 +5286,7 @@ impl StorageRegistry {
         }
     }
 
+    #[must_use]
     pub fn deals_for_shard(
         &self,
         manifest_id: &ContentId,
@@ -5266,6 +5298,7 @@ impl StorageRegistry {
             .unwrap_or_default()
     }
 
+    #[must_use]
     pub fn deals_for_manifest(&self, manifest_id: &ContentId) -> Vec<&StorageDeal> {
         self.deals
             .values()
@@ -5315,6 +5348,7 @@ impl StorageRegistry {
     /// active and keep earning their epoch rewards, and the manifest stays
     /// registered, so crediting the unearned fee here would pay the same epochs
     /// twice.
+    #[must_use]
     pub fn prune_fee_refunds(
         &self,
         manifest_id: &ContentId,
@@ -5387,14 +5421,17 @@ impl StorageRegistry {
         total.saturating_add(cur_end - cur_start)
     }
 
+    #[must_use]
     pub fn all_deals(&self) -> Vec<&StorageDeal> {
         self.deals.values().collect()
     }
 
+    #[must_use]
     pub fn all_challenges(&self) -> Vec<&RetrievalChallenge> {
         self.challenges.values().collect()
     }
 
+    #[must_use]
     pub fn all_results(&self) -> Vec<&ChallengeResult> {
         self.results.values().collect()
     }
@@ -5450,6 +5487,7 @@ impl StorageRegistry {
         dropped
     }
 
+    #[must_use]
     pub fn active_replica_count(&self, manifest_id: &ContentId, shard_id: &ContentId) -> usize {
         self.deals_for_shard(manifest_id, shard_id)
             .into_iter()
@@ -5471,6 +5509,7 @@ impl StorageRegistry {
     /// There is one version, parameterised by `epoch`. Leaving two versions,
     /// one that sees demand and one that does not, would let the caller choose
     /// which target is applied.
+    #[must_use]
     pub fn under_replicated_shards(&self, epoch: u64) -> Vec<(ContentId, ContentId, usize)> {
         self.deals_by_shard
             .keys()
@@ -5552,6 +5591,7 @@ impl StorageRegistry {
     /// shards held once is fully recoverable, yet every shard is "under
     /// replicated" at 1 < 3. The same object down to three shards, each held
     /// three times, looks healthy shard-by-shard and is already unrecoverable.
+    #[must_use]
     pub fn live_shard_count(&self, manifest_id: &ContentId) -> u32 {
         let Some(manifest) = self.manifests.get(manifest_id) else {
             return 0;
@@ -5574,6 +5614,7 @@ impl StorageRegistry {
     /// and a repair deal opened then would only burn an operator bond. Use
     /// [`StorageRegistry::unrecoverable_objects`] to see those; they need an
     /// operator alarm, not a repair.
+    #[must_use]
     pub fn objects_needing_repair(&self, margin: u32) -> Vec<(ContentId, u32, u32)> {
         self.manifests
             .iter()
@@ -5599,6 +5640,7 @@ impl StorageRegistry {
     ///
     /// Returns `(manifest_id, live, k, margin)` so a caller can log why an
     /// object was selected without recomputing the rule.
+    #[must_use]
     pub fn objects_below_own_repair_margin(&self) -> Vec<(ContentId, u32, u32, u32)> {
         self.manifests
             .iter()
@@ -5623,6 +5665,7 @@ impl StorageRegistry {
     /// unrecoverable one has already lost data, and opening deals for it
     /// accomplishes nothing. Surfacing the two together would let the second
     /// hide inside the first.
+    #[must_use]
     pub fn unrecoverable_objects(&self) -> Vec<(ContentId, u32, u32)> {
         self.manifests
             .iter()
@@ -5741,6 +5784,7 @@ impl StorageRegistry {
 /// Canonical, domain-tagged byte encoding of a `StorageDeal`. Used in
 /// Audit logs and the (future) `GlobalBlockHeader.storage_root` aggregation
 /// (vision).
+#[must_use]
 pub fn storage_deal_leaf_hash(deal: &StorageDeal) -> Hash32 {
     let status = [match deal.status {
         DealStatus::Active => 0,
@@ -6688,7 +6732,7 @@ mod tests {
 
     /// A closed `VerifyMerkle` gate means a deal opens without an envelope.
     ///
-    /// Before B-0049 every profile set `[features] verify_merkle = false`,
+    /// Previously every profile set `[features] verify_merkle = false`,
     /// startup printed the value as "not applied", and `open_deal` required the
     /// envelope anyway. A client that followed the profile was refused by the
     /// chain with `MerkleProofRequired` and had no way to find out why.
@@ -6697,6 +6741,23 @@ mod tests {
         let mut reg = StorageRegistry::new();
         let m = good_manifest();
         let shard = &m.shards[0];
+        // The envelope stays optional under the closed gate, but the
+        // 32-byte commitment is mandatory under either: a deal without one
+        // makes every later challenge unanswerable and unfaultable.
+        let refused = reg.open_deal(
+            42,
+            &m,
+            shard.shard_id,
+            operator(),
+            0,
+            10,
+            20,
+            good_econ(),
+            &params(),
+            None,
+            None,
+        );
+        assert!(matches!(refused, Err(StorageError::MerkleProofRequired)));
         let id = reg
             .open_deal(
                 42,
@@ -6709,13 +6770,25 @@ mod tests {
                 good_econ(),
                 &params(),
                 None,
-                None,
+                Some([0x42; 32]),
             )
-            .expect("a closed gate must not demand a proof it cannot check");
+            .expect("a closed gate must not demand a proof envelope it cannot check");
         let deal = reg.get_deal(id).expect("deal exists");
         assert!(
-            deal.merkle_proof.is_none() && deal.storage_root.is_none(),
-            "a deal opened with no envelope must record that it claims no proof"
+            deal.merkle_proof.is_none() && deal.storage_root.is_some(),
+            "no envelope claimed, but the commitment is always recorded"
+        );
+
+        // Even while challenge proofs are contained, a legacy/restored deal
+        // missing its commitment root cannot resolve Answered.
+        reg.deals.get_mut(&id).expect("deal exists").storage_root = None;
+        let cid = reg
+            .open_challenge(id, 0, 4, 11, 18, opener(), 50)
+            .expect("open challenge");
+        let ans = reg.answer_challenge(cid, ContentId([1u8; 32]), operator(), 12, None);
+        assert!(
+            matches!(ans, Err(StorageError::MerkleProofRequired)),
+            "a commitment-less deal must not resolve Answered under the contained regime"
         );
     }
 
@@ -6732,7 +6805,11 @@ mod tests {
             require_merkle_proof: true,
             ..params()
         };
-        let cases: [(&str, Option<Vec<u8>>, Option<Hash32>); 3] = [
+        // A named case type rather than the bare tuple: the tuple's three
+        // nested generics are what `clippy::type_complexity` reads, and the
+        // alias says what the three positions mean without changing them.
+        type OpenGateCase = (&'static str, Option<Vec<u8>>, Option<Hash32>);
+        let cases: [OpenGateCase; 3] = [
             ("no proof and no root", None, None),
             ("a proof without a root", Some(valid_merkle_proof()), None),
             ("a root without a proof", None, Some([0x42u8; 32])),
@@ -7265,7 +7342,7 @@ mod tests {
     }
 
     /// A format-valid test envelope (an honest marker - NOT a REAL STARK
-    /// proof; a minimal ProofEnvelope that can be bincode-deserialized).
+    /// proof; a minimal `ProofEnvelope` that can be bincode-deserialized).
     /// NOTE: the inline 78-byte arrays in a0671c4 gave a type error (E0308)
     /// and hid the intent; the helper was restored.
     fn valid_merkle_proof() -> Vec<u8> {
@@ -8699,10 +8776,8 @@ mod tests {
 
     #[test]
     fn deal_open_rejects_missing_merkle_proof() {
-        // Gate (9d82f61): with the gate open, None must yield
-        // MerkleProofRequired. The gate is what decides whether the envelope is
-        // mandatory, so the lock states the gate it is testing.
-        // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
+        // Gate (9d82f61): with the VerifyMerkle gate open, None must always yield
+        // MerkleProofRequired. REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
         let open_params = StorageDomainParams {
             require_merkle_proof: true,
             ..params()
@@ -8730,15 +8805,8 @@ mod tests {
 
     #[test]
     fn deal_open_rejects_malformed_merkle_proof() {
-        // Format gate: a blob that cannot be deserialized must yield
-        // InvalidMerkleProof. A malformed envelope is refused whichever way the
-        // gate points, and this fixture opens it so the format check is what
-        // the test sees.
+        // Format gate: a blob that cannot be deserialized must yield InvalidMerkleProof.
         // REGRESSION LOCK - deleted in a0671c4, restored; DO NOT DELETE.
-        let open_params = StorageDomainParams {
-            require_merkle_proof: true,
-            ..params()
-        };
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
@@ -8752,7 +8820,7 @@ mod tests {
                 100,
                 200,
                 good_econ(),
-                &open_params,
+                &params(),
                 Some(vec![0u8; 64]), // kasitli bozuk zarf: deserialize edilemez
                 Some([0x42u8; 32]),
             )
@@ -9962,12 +10030,12 @@ mod tests {
         /// Roots taken at 3dcbe16^ (before coding audits existed) for the
         /// same registry. A registry that never opened an audit must keep
         /// them byte for byte, or a chain that has no audit yet forks.
-        /// GOLDEN_CODED_ROOT re-frozen at 1101: manifest/deal serialization
+        /// `GOLDEN_CODED_ROOT` re-frozen at 1101: manifest/deal serialization
         /// grew fields after 3dcbe16 (provenance commitments), so the coded
         /// fixture's root moved while the empty root - the side that must
         /// never move - did not.
         ///
-        /// GOLDEN_CODED_ROOT re-frozen again at 1105: the manifest now carries
+        /// `GOLDEN_CODED_ROOT` re-frozen again at 1105: the manifest now carries
         /// the column commitments of its parity shards, which enter the
         /// manifest id, and the registry root commits that id. The empty root
         /// is unchanged again - a chain that has no audit yet still forks for

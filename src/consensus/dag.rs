@@ -213,7 +213,13 @@ impl ConsensusEngine for DagEngine {
                 .map_err(|_| ConsensusError("DAG state lock poisoned".into()))?;
             for parent in &parent_hashes {
                 if parent == GENESIS_ZERO_HASH {
-                    continue;
+                    if block.index == 1 {
+                        continue;
+                    }
+                    return Err(ConsensusError(format!(
+                        "DAG block height {} cannot reference implicit genesis zero hash",
+                        block.index
+                    )));
                 }
                 let known_height = graph
                     .heights
@@ -274,15 +280,42 @@ impl ConsensusEngine for DagEngine {
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
+        if chain.is_empty() {
+            return 0;
+        }
+        let mut seen_heights: std::collections::BTreeMap<&str, u64> =
+            std::collections::BTreeMap::new();
         let mut max_valid_height = 0u128;
         let mut parent_refs = 0u128;
-        for block in chain {
-            if block.hash != block.calculate_hash() {
+        for (idx, block) in chain.iter().enumerate() {
+            if block.hash.is_empty() || block.hash != block.calculate_hash() {
+                return 0;
+            }
+            if seen_heights.contains_key(block.hash.as_str()) {
                 return 0;
             }
             let Ok(parents) = self.validate_parent_list(block) else {
                 return 0;
             };
+            if idx > 0 {
+                for parent in &parents {
+                    if parent == GENESIS_ZERO_HASH {
+                        if block.index != 1 {
+                            return 0;
+                        }
+                        continue;
+                    }
+                    let Some(&parent_height) = seen_heights.get(parent.as_str()) else {
+                        return 0;
+                    };
+                    if parent_height >= block.index {
+                        return 0;
+                    }
+                }
+            } else if block.index > 1 && parents.iter().any(|p| p == GENESIS_ZERO_HASH) {
+                return 0;
+            }
+            seen_heights.insert(block.hash.as_str(), block.index);
             max_valid_height = max_valid_height.max(u128::from(block.index));
             parent_refs = parent_refs.saturating_add(parents.len() as u128);
         }
@@ -426,5 +459,33 @@ mod tests {
         future_block.timestamp = u128::from(u64::MAX);
         future_block.hash = future_block.calculate_hash();
         assert!(plugin.validate_domain_block(&future_block, ctx).is_err());
+    }
+
+    #[test]
+    fn dag_rejects_genesis_zero_hash_above_height_one_and_unlinked_fork_score() {
+        let engine = DagEngine::new(DAGConfig::default());
+        let b1 = make_block(1, GENESIS_ZERO_HASH);
+        let b2 = make_block(2, &b1.hash);
+        engine.add_block(&b1).expect("add b1");
+        engine.add_block(&b2).expect("add b2");
+
+        // Height >= 2 citing GENESIS_ZERO_HASH must never bypass DAG ancestry checks.
+        let phantom_root = make_block(50, GENESIS_ZERO_HASH);
+        assert!(
+            engine
+                .validate_block(
+                    &phantom_root,
+                    &[b1.clone(), b2.clone()],
+                    &AccountState::new()
+                )
+                .is_err(),
+            "height-50 block citing GENESIS_ZERO_HASH bypassed parent validation"
+        );
+
+        // Disconnected candidate blocks must score 0 and never outrank a linked DAG chain.
+        let unlinked_high = make_block(999, &"ab".repeat(32));
+        let candidate = vec![b1.clone(), unlinked_high];
+        assert_eq!(engine.fork_choice_score(&candidate), 0);
+        assert!(!engine.is_better_chain(&[b1, b2], &candidate));
     }
 }

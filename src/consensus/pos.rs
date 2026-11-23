@@ -228,6 +228,11 @@ impl PoSEngine {
             .map_err(|_| ConsensusError("Failed to acquire read lock on checkpoints".into()))
     }
 
+    /// Record `block` as a committed `PoS` checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError`] when persisting the checkpoint fails.
     pub fn add_checkpoint(
         &self,
         block: &Block,
@@ -282,16 +287,24 @@ impl PoSEngine {
     }
     /// The last checkpoint this node has established, and its hash.
     ///
-    /// Returns `None` when no checkpoint exists yet, which is a genuinely
+    /// `Ok(None)` when no checkpoint exists yet, which is a genuinely
     /// different state from "checkpoint at height 0" and has to stay
     /// distinguishable: a node with no checkpoint has nothing to anchor
     /// against and must not silently behave as though it were anchored at
     /// genesis.
-    pub fn last_checkpoint(&self) -> Option<(u64, String)> {
+    ///
+    /// # Errors
+    ///
+    /// [`ConsensusError`] when the checkpoint lock is poisoned. `.ok()` here
+    /// folded that into `Ok(None)`, so an unreadable checkpoint set answered
+    /// exactly like an empty one - and the caller below treats an empty one as
+    /// "nothing to violate". `get_checkpoints` next door has always reported
+    /// the poisoning; this now matches it.
+    pub fn last_checkpoint(&self) -> Result<Option<(u64, String)>, ConsensusError> {
         self.checkpoints
             .read()
-            .ok()
-            .and_then(|guard| guard.last().map(|c| (c.block_index, c.block_hash.clone())))
+            .map(|guard| guard.last().map(|c| (c.block_index, c.block_hash.clone())))
+            .map_err(|_| ConsensusError("Failed to acquire read lock on checkpoints".into()))
     }
 
     /// Whether `chain` contains this node's last checkpoint at the height and
@@ -303,7 +316,18 @@ impl PoSEngine {
     /// matter of mechanism design*, whatever its length. A candidate that
     /// does not contain the checkpoint is such a fork.
     pub fn chain_honours_checkpoint(&self, chain: &[Block]) -> bool {
-        let Some((height, hash)) = self.last_checkpoint() else {
+        let checkpoint = match self.last_checkpoint() {
+            Ok(found) => found,
+            Err(err) => {
+                // The lock is poisoned: this node cannot say what its revert
+                // limit is, and a fork it cannot bound is not honoured.
+                // Answering "nothing to violate" here would retire the limit
+                // exactly when the node is least trustworthy.
+                tracing::error!("{err}; fork choice honours no checkpoint");
+                return false;
+            }
+        };
+        let Some((height, hash)) = checkpoint else {
             // Nothing established yet: nothing to violate.
             return true;
         };
@@ -331,6 +355,10 @@ impl PoSEngine {
     /// VRF outputs and producer identities enter the transcript: block hashes,
     /// Timestamps and transaction ordering are deliberately excluded so a
     /// Proposer cannot grind future leadership by changing header fields.
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError`] when the epoch length is zero, the chain has no genesis
+    /// anchor, or the anchor is not height 0 on `chain_id`.
     pub fn epoch_randomness_from_chain(
         &self,
         chain_id: u64,
@@ -420,6 +448,11 @@ impl PoSEngine {
     /// rounds `0..MAX_LEADER_ROUNDS`, and each round draws a different VRF
     /// seed, so a slot with no eligible leader in round 0 re-rolls instead of
     /// stalling forever. Validation recovers the round from `block.nonce`.
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError`] when the epoch length is zero, the slot/epoch pair is
+    /// non-canonical, the round exceeds `MAX_LEADER_ROUNDS`, or the epoch randomness cannot
+    /// be derived (see [`Self::epoch_randomness_from_chain`]).
     pub fn calculate_seed_with_chain(
         &self,
         chain_id: u64,
@@ -533,9 +566,9 @@ impl PoSEngine {
             .is_some_and(|v| v.active && !v.slashed && v.stake >= self.config.min_stake)
     }
 
-    /// Lock-order fixture: the POS_STATE writer is gone; this
+    /// Lock-order fixture: the `POS_STATE` writer is gone; this
     /// stays only so `consensus_lock_order_loom` can pin the checkpoints ->
-    /// slashing_evidence lock order.
+    /// `slashing_evidence` lock order.
     #[cfg(test)]
     pub fn serialize_state(&self) -> Result<Vec<u8>, String> {
         let epoch_seed = self
@@ -725,8 +758,7 @@ impl PoSEngine {
                             let mut used = 0usize;
                             for evidence in evidences.iter() {
                                 let encoded = serde_json::to_vec(evidence)
-                                    .map(|bytes| bytes.len())
-                                    .unwrap_or(usize::MAX);
+                                    .map_or(usize::MAX, |bytes| bytes.len());
                                 if encoded <= crate::consensus::MAX_SLASHING_EVIDENCE_BYTES
                                     && used.saturating_add(encoded)
                                         <= crate::consensus::MAX_SLASHING_EVIDENCE_BYTES
@@ -1509,12 +1541,15 @@ impl ConsensusEngine for PoSEngine {
         let next_slot = block.index.saturating_add(1);
         let next_epoch = next_slot / self.config.epoch_length;
         match self.epoch_randomness_from_chain(block.chain_id, next_epoch, chain) {
-            Ok(randomness) => match self.epoch_seed.write() {
-                Ok(mut cached) => *cached = randomness,
-                Err(_) => tracing::error!("PoS replay-derived randomness cache lock is poisoned"),
-            },
+            Ok(randomness) => {
+                if let Ok(mut cached) = self.epoch_seed.write() {
+                    *cached = randomness;
+                } else {
+                    tracing::error!("PoS replay-derived randomness cache lock is poisoned");
+                }
+            }
             Err(error) => {
-                tracing::error!("Failed to refresh replay-derived PoS randomness cache: {error}")
+                tracing::error!("Failed to refresh replay-derived PoS randomness cache: {error}");
             }
         }
     }
@@ -1631,7 +1666,35 @@ impl ConsensusEngine for PoSEngine {
 #[cfg(test)]
 mod tests {
 
-    /// C-12 regression: the PoS engine validates `block.epoch == block.index /
+    /// A poisoned checkpoint lock must not read as "no checkpoint yet".
+    ///
+    /// `last_checkpoint` used to fold the poisoning into `None` with `.ok()`,
+    /// and `chain_honours_checkpoint` reads `None` as "nothing to violate". So
+    /// the one moment this node cannot say what its revert limit is, was the
+    /// moment every fork was honoured.
+    #[test]
+    fn a_poisoned_checkpoint_lock_does_not_retire_the_revert_limit() {
+        let engine = std::sync::Arc::new(PoSEngine::new(PoSConfig::default(), None));
+        let poisoner = std::sync::Arc::clone(&engine);
+        let poisoned = std::thread::spawn(move || match poisoner.checkpoints.write() {
+            // Holding the guard while unwinding is what poisons the lock.
+            Ok(_held) => panic!("poison the checkpoint lock on purpose"),
+            Err(_) => panic!("a fresh lock cannot already be poisoned"),
+        })
+        .join();
+        assert!(poisoned.is_err(), "the helper thread must have panicked");
+
+        assert!(
+            engine.last_checkpoint().is_err(),
+            "a poisoned lock is an error, not an empty checkpoint set"
+        );
+        assert!(
+            !engine.chain_honours_checkpoint(&[]),
+            "an unbounded fork must not be honoured because the lock is poisoned"
+        );
+    }
+
+    /// C-12 regression: the `PoS` engine validates `block.epoch == block.index /
     /// Config.epoch_length`, while the chain layer derives epoch boundaries
     /// From `chain_config::epoch_len_for_chain_id`. If the default drifts away
     /// From every real network, a caller that forgets to override it silently

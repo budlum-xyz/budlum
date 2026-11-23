@@ -27,7 +27,7 @@ pub const BITCOIN_SPV_ADAPTER: &str = "bitcoin-spv-v1";
 /// Canonical name of the storage-attestation domain finality adapter.
 ///
 /// Set as the `ConsensusDomain::finality_adapter` value when registering a
-/// `StorageAttestation` domain. Distinct from the PoW header-chain adapter
+/// `StorageAttestation` domain. Distinct from the `PoW` header-chain adapter
 /// (`POW_HEADER_CHAIN_ADAPTER`) because storage finality is **not** the same
 /// Shape as bounded-PoW header finality (will introduce
 /// `StorageFinalityAdapter`, vision +).
@@ -79,12 +79,12 @@ pub enum ConsensusKind {
 impl ConsensusKind {
     pub fn as_bytes(&self) -> Vec<u8> {
         match self {
-            ConsensusKind::PoW => b"pow".to_vec(),
-            ConsensusKind::PoS => b"pos".to_vec(),
-            ConsensusKind::PoA => b"poa".to_vec(),
-            ConsensusKind::Bft => b"bft".to_vec(),
-            ConsensusKind::Zk => b"zk".to_vec(),
-            ConsensusKind::StorageAttestation(params) => {
+            Self::PoW => b"pow".to_vec(),
+            Self::PoS => b"pos".to_vec(),
+            Self::PoA => b"poa".to_vec(),
+            Self::Bft => b"bft".to_vec(),
+            Self::Zk => b"zk".to_vec(),
+            Self::StorageAttestation(params) => {
                 // Tag + parameters: distinct from any `Custom(...)` string so
                 // Downstream code that already pattern-matches on `as_bytes`
                 // Can recognize storage domains unambiguously.
@@ -92,37 +92,37 @@ impl ConsensusKind {
                 out.extend_from_slice(&crate::domain::storage_params::storage_params_bytes(params));
                 out
             }
-            ConsensusKind::AiInference => b"ai_inference".to_vec(),
-            ConsensusKind::Dag => b"dag".to_vec(),
-            ConsensusKind::Poh => b"poh".to_vec(),
-            ConsensusKind::Pospace => b"pospace".to_vec(),
-            ConsensusKind::Custom(name) => format!("custom:{name}").into_bytes(),
+            Self::AiInference => b"ai_inference".to_vec(),
+            Self::Dag => b"dag".to_vec(),
+            Self::Poh => b"poh".to_vec(),
+            Self::Pospace => b"pospace".to_vec(),
+            Self::Custom(name) => format!("custom:{name}").into_bytes(),
         }
     }
 
     /// Convenience: is this a B.U.D. storage domain?
     pub fn is_storage(&self) -> bool {
-        matches!(self, ConsensusKind::StorageAttestation(_))
+        matches!(self, Self::StorageAttestation(_))
     }
 
     /// Convenience: is this an AI Inference domain?
     pub fn is_ai(&self) -> bool {
-        matches!(self, ConsensusKind::AiInference)
+        matches!(self, Self::AiInference)
     }
 
     /// Convenience: is this a DAG domain?
     pub fn is_dag(&self) -> bool {
-        matches!(self, ConsensusKind::Dag)
+        matches!(self, Self::Dag)
     }
 
-    /// Convenience: is this a PoH domain?
+    /// Convenience: is this a `PoH` domain?
     pub fn is_poh(&self) -> bool {
-        matches!(self, ConsensusKind::Poh)
+        matches!(self, Self::Poh)
     }
 
-    /// Convenience: is this a PoSpace domain?
+    /// Convenience: is this a `PoSpace` domain?
     pub fn is_pospace(&self) -> bool {
-        matches!(self, ConsensusKind::Pospace)
+        matches!(self, Self::Pospace)
     }
 }
 
@@ -144,10 +144,10 @@ pub enum RootScheme {
 impl RootScheme {
     pub fn as_bytes(&self) -> Vec<u8> {
         match self {
-            RootScheme::BudlumBlockV2 => b"budlum-block-v2".to_vec(),
-            RootScheme::Sha256 => b"sha256".to_vec(),
-            RootScheme::Sha3_256 => b"sha3-256".to_vec(),
-            RootScheme::Custom(name) => {
+            Self::BudlumBlockV2 => b"budlum-block-v2".to_vec(),
+            Self::Sha256 => b"sha256".to_vec(),
+            Self::Sha3_256 => b"sha3-256".to_vec(),
+            Self::Custom(name) => {
                 let mut out = b"custom:".to_vec();
                 out.extend_from_slice(name.as_bytes());
                 out

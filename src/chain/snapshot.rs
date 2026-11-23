@@ -619,7 +619,14 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// Once a claim writes either watermark, the snapshot must identify itself as
 /// schema 15: an older binary must skip it as future state rather than ignore
 /// the fields and restore replayable ownership claims.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 15;
+///
+/// Schema 16 carries and digests the quantum-account registry. The registry
+/// is folded into the state root only while nonempty, so an empty registry
+/// keeps this snapshot byte-exact even under the new version; a node that
+/// dropped a registered account would compute a different root, which is why
+/// the field enters the digest under the `>= 16` gate rather than being left
+/// for serde defaults to silently restore as empty.
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 17;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -801,6 +808,22 @@ pub struct StateSnapshotV2 {
     /// verifying against their pinned digests.
     #[serde(default)]
     pub vault: Option<crate::socialfi::VaultRegistry>,
+    /// The quantum-account registry (schema-16 bump). `#[serde(default)]` so
+    /// pre-registry snapshots load; the field enters the digest under the
+    /// `>= 16` gate, so a pre-16 pinned digest stays byte-exact.
+    #[serde(default)]
+    pub quantum_accounts: Option<crate::account_abstraction::registry::QuantumAccountRegistry>,
+    /// The shared-pool deposit escrow (schema-17 bump): the money locked
+    /// behind occupancy rows of the `tokenomics::pool_deposit` table.
+    /// `#[serde(default)]` so pre-deposit snapshots load; the field enters
+    /// the digest under the `>= 17` gate, so a pre-17 pinned digest stays
+    /// byte-exact.
+    #[serde(default)]
+    pub pool_deposit_escrow: Option<BTreeMap<Address, u64>>,
+    /// Row-level deposit records (schema-17 group, same gate as the
+    /// aggregate escrow above).
+    #[serde(default)]
+    pub pool_deposit_rows: Option<BTreeMap<String, (Address, u64)>>,
 
     // --- C4 (P2): manifest signature (schema-4 wire). ---
     // RFC_GAP1 section 7: Ed25519 single signature + trust list + AllowUnsigned transition.
@@ -1016,6 +1039,9 @@ impl StateSnapshotV2 {
             proof_market: Some(account_state.proof_market.clone()),
             identity: Some(account_state.identity.clone()),
             vault: Some(account_state.vault.clone()),
+            quantum_accounts: Some(account_state.quantum_accounts.clone()),
+            pool_deposit_escrow: Some(account_state.pool_deposit_escrow.clone()),
+            pool_deposit_rows: Some(account_state.pool_deposit_rows.clone()),
             // `Registry`, `liveness`, and `invalid_votes` are no longer
             // Fields on `AccountState` (ghost-hunted). The struct fields were
             // Already removed above; the live state is recovered by routing
@@ -1219,6 +1245,23 @@ impl StateSnapshotV2 {
         if self.schema_version >= 6 {
             hash_opt_serializable(&mut hasher, &self.vault);
         }
+        // --- The quantum-account registry (schema-16 bump). At 15 and below
+        //     the field cannot affect the digest, so every pre-registry pinned
+        //     hash stays reproducible byte for byte; at 16 and above a node
+        //     that dropped a registered account produces a different hash
+        //     rather than a quietly-valid snapshot. ---
+        if self.schema_version >= 16 {
+            hash_opt_serializable(&mut hasher, &self.quantum_accounts);
+        }
+        // --- The shared-pool deposit escrow (schema-17 bump). Same gate
+        //     logic: at 16 and below the field cannot affect the digest, so
+        //     every pre-deposit pinned hash stays byte-exact; at 17 and
+        //     above a node that dropped a locked deposit produces a
+        //     different hash rather than a quietly-valid snapshot. ---
+        if self.schema_version >= 17 {
+            hash_opt_serializable(&mut hasher, &self.pool_deposit_escrow);
+            hash_opt_serializable(&mut hasher, &self.pool_deposit_rows);
+        }
         // --- The PoA admission + compliance pair (schema-7 bump, /.
         // Same gate logic as identity and vault: at 6 and
         //     below these fields cannot affect the digest, at 7 and above a
@@ -1394,10 +1437,13 @@ impl StateSnapshotV2 {
     /// An empty/corrupt snapshot. This is the exact failure class that hid the
     /// Registry tuple-key bug.
     ///
+    /// Convenience: fallible variant of [`Self::to_bytes`] used by snapshot
+    /// persistence and round-trip verification.
+    ///
     /// # Errors
     ///
     /// Returns an error if the operation fails.
-    pub fn try_to_bytes(&self) -> Result<Vec<u8>, String> {
+    pub(crate) fn try_to_bytes(&self) -> Result<Vec<u8>, String> {
         serde_json::to_vec(self).map_err(|e| format!("Failed to serialize snapshot V2: {e}"))
     }
 
@@ -2641,7 +2687,7 @@ mod tests {
         let mut account_state = AccountState::new();
         account_state
             .note_registry
-            .insert_note_for_owner([7u8; 32], Address::zero())
+            .insert_note_for_owner(budlum_note_packing::hash_from_field(7), Address::zero())
             .expect("a fresh registry accepts a note");
 
         let mut snapshot = StateSnapshotV2::from_state(
@@ -2667,7 +2713,7 @@ mod tests {
         );
     }
 
-    /// The PoA admission records and the compliance ledger cross the wire
+    /// The `PoA` admission records and the compliance ledger cross the wire
     /// INSIDE the digest: a peer that empties an
     /// admission set or drops a freeze invalidates the snapshot instead of
     /// quietly unpermissioning a domain or clearing a gate.
@@ -2808,7 +2854,7 @@ mod tests {
     /// Only the keys of the schema-4 change.
     const SCHEMA4_ONLY_KEYS: &[&str] = &["manifest_signer", "manifest_signature", "trust_policy"];
 
-    /// PoA admission records: a field added with `#[serde(default)]`.
+    /// `PoA` admission records: a field added with `#[serde(default)]`.
     ///
     /// It shipped WITHOUT a version bump, on the argument that absence
     /// defaults to an empty record ("not permissioned"), which is the truth
@@ -2850,6 +2896,10 @@ mod tests {
     /// Only the keys of the schema-13 change.
     const SCHEMA13_KEYS: &[&str] = &["validator_directory"];
     const SCHEMA14_KEYS: &[&str] = &["bud3_registry"];
+    /// Quantum-account registry: the schema-16 change.
+    const SCHEMA16_KEYS: &[&str] = &["quantum_accounts"];
+    /// Shared-pool deposit escrow: the schema-17 change.
+    const SCHEMA17_KEYS: &[&str] = &["pool_deposit_escrow", "pool_deposit_rows"];
 
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
     /// the fields it must not lose. `snapshot_hash` is deliberately outside:
@@ -3012,6 +3062,11 @@ mod tests {
             "validator_directory",
             // B.U.D. 3.0 registry (schema-14 digest; carried unbound in 13)
             "bud3_registry",
+            // quantum-account registry (schema-16 bump: default-filled AND digested)
+            "quantum_accounts",
+            // shared-pool deposit escrow (schema-17 bump: default-filled AND digested)
+            "pool_deposit_escrow",
+            "pool_deposit_rows",
             // identity registry (schema-5 bump: default-filled AND digested)
             "identity",
             // vault folder registry (schema-6 bump: same discipline)
@@ -3056,6 +3111,8 @@ mod tests {
                 SCHEMA12_KEYS,
                 SCHEMA13_KEYS,
                 SCHEMA14_KEYS,
+                SCHEMA16_KEYS,
+                SCHEMA17_KEYS,
             ]
             .concat(),
             2,
@@ -3075,6 +3132,8 @@ mod tests {
             SCHEMA12_KEYS,
             SCHEMA13_KEYS,
             SCHEMA14_KEYS,
+            SCHEMA16_KEYS,
+            SCHEMA17_KEYS,
         ]
         .concat()
         {
@@ -3174,7 +3233,7 @@ mod tests {
             .unwrap();
         account_state
             .note_registry
-            .insert_note_for_owner([9u8; 32], Address::zero())
+            .insert_note_for_owner(budlum_note_packing::hash_from_field(9), Address::zero())
             .expect("a fresh record accepts the note");
         let mut params = legacy_params(64);
         params.finality_certificates = vec![schema2_cert()];
@@ -3192,6 +3251,8 @@ mod tests {
                 SCHEMA12_KEYS,
                 SCHEMA13_KEYS,
                 SCHEMA14_KEYS,
+                SCHEMA16_KEYS,
+                SCHEMA17_KEYS,
             ]
             .concat(),
             3,
@@ -3209,6 +3270,8 @@ mod tests {
             SCHEMA12_KEYS,
             SCHEMA13_KEYS,
             SCHEMA14_KEYS,
+            SCHEMA16_KEYS,
+            SCHEMA17_KEYS,
         ]
         .concat()
         {
@@ -3274,11 +3337,11 @@ mod tests {
         assert_eq!(rebuilt.timed_burn.years_burned, 2);
     }
 
-    /// A blob without PoA admission records (still a valid schema-4 snapshot,
+    /// A blob without `PoA` admission records (still a valid schema-4 snapshot,
     /// because the version was not bumped).
     ///
     /// What this migration path must lock is not a data move but a
-    /// **security assumption**: when a snapshot carrying no PoA admission
+    /// **security assumption**: when a snapshot carrying no `PoA` admission
     /// record is restored, the domain **must not be treated as permissioned**.
     /// Otherwise a chain opened from an old snapshot looks like a permissioned
     /// domain where nobody has been admitted, and can never produce a block.
@@ -3302,6 +3365,8 @@ mod tests {
                 SCHEMA12_KEYS,
                 SCHEMA13_KEYS,
                 SCHEMA14_KEYS,
+                SCHEMA16_KEYS,
+                SCHEMA17_KEYS,
             ]
             .concat(),
             4,
@@ -3318,6 +3383,8 @@ mod tests {
             SCHEMA12_KEYS,
             SCHEMA13_KEYS,
             SCHEMA14_KEYS,
+            SCHEMA16_KEYS,
+            SCHEMA17_KEYS,
         ]
         .concat()
         {
@@ -3412,6 +3479,41 @@ mod tests {
             digest_a,
             s8_b.calculate_digest(),
             "pre-schema-9 snapshots must ignore external_bond_escrow so stored digests remain valid"
+        );
+    }
+
+    #[test]
+    fn schema17_gates_pool_deposit_escrow_digest_without_breaking_legacy_snapshots() {
+        let state = AccountState::new();
+        let mut s17_none = StateSnapshotV2::from_state(&state, legacy_params(1));
+        s17_none.pool_deposit_escrow = None;
+        s17_none.pool_deposit_rows = None;
+        s17_none.snapshot_hash = hex::encode(s17_none.calculate_digest());
+
+        let mut escrow = BTreeMap::new();
+        escrow.insert(Address::from([6u8; 32]), 100_000);
+        let mut rows = BTreeMap::new();
+        rows.insert(
+            "identity-record:aa".to_string(),
+            (Address::from([6u8; 32]), 100_000u64),
+        );
+        let mut s17_populated = s17_none.clone();
+        s17_populated.pool_deposit_escrow = Some(escrow);
+        s17_populated.pool_deposit_rows = Some(rows);
+        assert!(
+            !s17_populated.verify(),
+            "schema 17 digest must commit pool_deposit_escrow"
+        );
+
+        let mut s16_a = s17_none;
+        s16_a.schema_version = 16;
+        let digest_a = s16_a.calculate_digest();
+        let mut s16_b = s17_populated;
+        s16_b.schema_version = 16;
+        assert_eq!(
+            digest_a,
+            s16_b.calculate_digest(),
+            "pre-schema-17 snapshots must ignore pool_deposit_escrow so stored digests remain valid"
         );
     }
 
