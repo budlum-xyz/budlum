@@ -2608,24 +2608,37 @@ mod tests {
         );
         assert!(verify_leg_against_target(&feeless, Some(&quote), 1, [0x01; 32]).is_err());
 
-        // A fee or asset that differs from the quote, and a direct leg that
-        // charges, are refused as well.
+        // A fee, source identity, or target identity that differs from the
+        // quote is refused as well.
         let mut wrong_fee = leg(405);
         wrong_fee.fee_bps = 0;
         assert!(verify_leg_against_target(&wrong_fee, Some(&quote), 1, [0x01; 32]).is_err());
         let mut wrong_asset = leg(405);
         wrong_asset.source_asset_id = [0x03; 32];
         assert!(verify_leg_against_target(&wrong_asset, Some(&quote), 1, [0x01; 32]).is_err());
-        let direct = SplitTenderLeg {
+        let mut wrong_target_quote = quote.clone();
+        wrong_target_quote.target_asset_id = [0x09; 32];
+        assert!(
+            verify_leg_against_target(&leg(405), Some(&wrong_target_quote), 1, [0x01; 32]).is_err()
+        );
+
+        let amount_mismatch = SplitTenderLeg {
             direct_same_domain: true,
             quote_id: None,
             fee_bps: 0,
             ..leg(405)
         };
-        assert!(verify_leg_against_target(&direct, None, 1, [0x01; 32]).is_err());
-        let honest_direct = SplitTenderLeg {
+        assert!(verify_leg_against_target(&amount_mismatch, None, 1, [0x01; 32]).is_err());
+        let wrong_target_direct = SplitTenderLeg {
             source_debited: 400,
-            ..direct
+            ..amount_mismatch
+        };
+        assert!(verify_leg_against_target(&wrong_target_direct, None, 1, [0x01; 32]).is_err());
+        let honest_direct = SplitTenderLeg {
+            source_domain: 1,
+            source_asset_id: [0x01; 32],
+            source_symbol: String::from("BUD"),
+            ..wrong_target_direct
         };
         assert_eq!(
             verify_leg_against_target(&honest_direct, None, 1, [0x01; 32]),
