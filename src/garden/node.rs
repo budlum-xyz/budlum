@@ -4411,6 +4411,79 @@ mod tests {
         .expect("the guest never became a validator");
     }
 
+    /// Inviting is not a host privilege. Any seated validator produces a
+    /// record for the same Garden, and someone joins with it.
+    ///
+    /// This matters for what a Garden is: the host's only standing power is
+    /// liveness. If only the host could invite, a host who stepped away
+    /// would close the door behind them, and the Garden would be the host's
+    /// property rather than its members'.
+    #[tokio::test]
+    async fn garden_invite_any_validator() {
+        let host_handle = host().await;
+        let from_host = host_handle.invite().await.unwrap();
+
+        let guest = spawn(
+            GardenEntry::Invite(from_host.clone()),
+            config("guest", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while guest.status().await.unwrap()["active_validators"] != 2 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the guest never became a validator");
+
+        // The guest is not the host, and it hands out a record of its own.
+        assert_eq!(
+            guest.status().await.unwrap()["me"]["host"],
+            json!(false),
+            "the guest must not be the host for this test to mean anything"
+        );
+        let from_guest = guest.invite().await.unwrap();
+
+        // It names the same Garden, not a new one.
+        assert_eq!(from_guest.chain_id, from_host.chain_id);
+        assert_eq!(from_guest.genesis_hash, from_host.genesis_hash);
+        assert_eq!(from_guest.token, from_host.token);
+
+        // It is a record, so it obeys the record's rules.
+        let link = from_guest.to_link();
+        assert!(
+            link.len() <= super::super::invite::MAX_INVITE_BYTES,
+            "a guest's invite is {} bytes",
+            link.len()
+        );
+        assert_eq!(GardenInvite::parse(&link).unwrap(), from_guest);
+        assert_eq!(from_guest.qr_content().unwrap(), link);
+
+        // And it works: a third node joins on the guest's invite alone.
+        let latecomer = spawn(
+            GardenEntry::Invite(from_guest),
+            config("latecomer", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .expect("a validator's invite did not admit anyone");
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while latecomer.status().await.unwrap()["active_validators"] != 3 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the latecomer never became a validator");
+
+        latecomer.leave().await.unwrap();
+        guest.leave().await.unwrap();
+        host_handle.leave().await.unwrap();
+    }
+
     /// One peer of the invite refuses. The join goes on with the next one:
     /// every validator stands in the invites the others hand out, so a
     /// single refusal must not be the answer of the Garden.
