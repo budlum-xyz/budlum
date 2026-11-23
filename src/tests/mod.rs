@@ -94,6 +94,8 @@ pub mod hash_input_serialize_locks;
 #[cfg(test)]
 pub mod identity_tx_door;
 #[cfg(test)]
+pub mod intake_root_honesty;
+#[cfg(test)]
 pub mod integration;
 #[cfg(test)]
 pub mod liveness_consensus;
