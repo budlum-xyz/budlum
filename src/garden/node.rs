@@ -4482,6 +4482,65 @@ mod tests {
         host_handle.leave().await.unwrap();
     }
 
+    /// A Frozen Garden still hands out its invite.
+    ///
+    /// Freezing stops new blocks, not the Garden's identity. The record a
+    /// validator hands out names the chain, the genesis and the token; none
+    /// of those move while the host is away. If freezing also silenced the
+    /// invite, a host who lost their phone would take the door with them,
+    /// and the members left behind could not even tell anyone which Garden
+    /// they are in.
+    #[tokio::test]
+    async fn garden_invite_while_frozen() {
+        let host_handle = host().await;
+        let invite = host_handle.invite().await.unwrap();
+
+        let guest = spawn(
+            GardenEntry::Invite(invite.clone()),
+            config("guest", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while guest.status().await.unwrap()["active_validators"] != 2 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the guest never became a validator");
+
+        // The host goes. With the host silent past host_timeout_ms, every
+        // remaining validator observes Frozen.
+        host_handle.leave().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while guest.status().await.unwrap()["status"] != json!("Frozen") {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the Garden never froze after the host left");
+
+        // Frozen, and still able to say which Garden this is.
+        let frozen_invite = guest
+            .invite()
+            .await
+            .expect("a Frozen Garden refused to hand out its invite");
+        assert_eq!(frozen_invite.chain_id, invite.chain_id);
+        assert_eq!(frozen_invite.genesis_hash, invite.genesis_hash);
+        assert_eq!(frozen_invite.token, invite.token);
+
+        let link = frozen_invite.to_link();
+        assert_eq!(GardenInvite::parse(&link).unwrap(), frozen_invite);
+        assert_eq!(frozen_invite.qr_content().unwrap(), link);
+
+        // Still Frozen: reading the invite did not restart anything.
+        assert_eq!(guest.status().await.unwrap()["status"], json!("Frozen"));
+
+        guest.leave().await.unwrap();
+    }
+
     /// One peer of the invite refuses. The join goes on with the next one:
     /// every validator stands in the invites the others hand out, so a
     /// single refusal must not be the answer of the Garden.
