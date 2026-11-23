@@ -10,7 +10,7 @@
 //! ```
 //!
 //! The second is the worse of the two, and its name is why it survived
-//! review. "init_genesis_account" describes a moment in the chain's life, and
+//! review. "`init_genesis_account`" describes a moment in the chain's life, and
 //! the body checked nothing about that moment: no height, no network, no
 //! genesis flag. Measured against the body as it stood:
 //!
@@ -138,8 +138,7 @@ fn a_development_chain_still_gets_funded() {
     );
 }
 
-/// The refill behaviour that made this worth gating, pinned on devnet so the
-/// finding stays legible: the faucet is not a mint loop, it is a refill.
+/// Refill invariant: the faucet is not a mint loop, it is a refill.
 #[test]
 fn the_faucet_refills_rather_than_stacking() {
     let mut bc = devnet_chain();

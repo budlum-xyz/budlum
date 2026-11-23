@@ -1,7 +1,7 @@
 //! Repeated invalid-signature vote tracking.
 //!
 //! Rejects every cryptographically-invalid finality vote at ingest
-//! (closing a single-signature DoS). But a rejected vote never enters the
+//! (closing a single-signature `DoS`). But a rejected vote never enters the
 //! Aggregate, so the sender paid nothing - a validator could spam garbage
 //! Signatures forever. This module closes that gap with the SAME pattern as
 //! [`LivenessTracker`](crate::registry::LivenessTracker): a persisted per-epoch
@@ -86,15 +86,18 @@ pub struct InvalidVoteTracker {
 }
 
 impl InvalidVoteTracker {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.current_epoch == 0 && self.counts.is_empty() && self.reported.is_empty()
     }
 
     /// Current invalid-vote count for a validator in the tracker's active epoch.
+    #[must_use]
     pub fn invalid_count(&self, validator: &Address) -> u64 {
         self.counts.get(validator).copied().unwrap_or(0)
     }
@@ -109,6 +112,7 @@ impl InvalidVoteTracker {
     }
 
     /// The epoch the current counts belong to.
+    #[must_use]
     pub fn current_epoch(&self) -> u64 {
         self.current_epoch
     }
@@ -251,6 +255,7 @@ impl InvalidVoteTracker {
 }
 
 impl InvalidVoteTracker {
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -379,7 +384,7 @@ mod tests {
         }
     }
 
-    /// PR #97 review: the counter can no longer be pinned at one.
+    /// The counter can no longer be pinned at one.
     ///
     /// One rejected vote has exactly one wire spelling that the vote-auth
     /// preimage covers, so a bonded validator can re-wrap it without limit and

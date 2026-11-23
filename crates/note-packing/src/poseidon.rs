@@ -599,6 +599,71 @@ pub fn hash_from_elements(elements: [u64; OUTPUT]) -> NoteHash {
     out
 }
 
+/// Hash up to eight canonical Goldilocks elements, refusing any element at or
+/// above `GOLDILOCKS_P` instead of silently reducing it modulo `p`.
+///
+/// Convenience: checked counterpart to [`hash`] preventing two distinct
+/// unreduced inputs from colliding into one Poseidon digest.
+#[must_use]
+pub fn try_hash(inputs: [u64; RATE]) -> Option<[u64; OUTPUT]> {
+    if inputs.iter().any(|&v| v >= GOLDILOCKS_P) {
+        return None;
+    }
+    Some(hash(inputs))
+}
+
+/// Hash up to eight canonical Goldilocks elements with an explicit non-zero
+/// domain separator placed in the first sponge capacity lane (`state[RATE]`).
+///
+/// Refuses `domain == 0`, `domain >= GOLDILOCKS_P`, or any input element at or
+/// above `GOLDILOCKS_P`, giving strict capacity-level domain separation between
+/// leaf hashes, internal Merkle nodes, note commitments, owner keys, nullifiers,
+/// and deterministic output `rho` derivations.
+///
+/// Convenience: exposed for domain-separated V2 privacy commitment and tree hashes.
+#[must_use]
+pub fn hash_with_domain(domain: u64, inputs: [u64; RATE]) -> Option<[u64; OUTPUT]> {
+    if domain == 0 || domain >= GOLDILOCKS_P || inputs.iter().any(|&v| v >= GOLDILOCKS_P) {
+        return None;
+    }
+    let mut state = [0u64; WIDTH];
+    state[..RATE].copy_from_slice(&inputs);
+    state[RATE] = domain;
+    let out = permute(state);
+    Some([out[0], out[1], out[2], out[3]])
+}
+
+/// Compress two canonical 256-bit digests under an explicit non-zero sponge
+/// capacity domain tag so internal Merkle nodes can never collide with leaves.
+///
+/// Convenience: exposed for depth-32 privacy Merkle tree internal nodes.
+#[must_use]
+pub fn compress_with_domain(
+    domain: u64,
+    left: [u64; OUTPUT],
+    right: [u64; OUTPUT],
+) -> Option<[u64; OUTPUT]> {
+    hash_with_domain(
+        domain,
+        [
+            left[0], left[1], left[2], left[3], right[0], right[1], right[2], right[3],
+        ],
+    )
+}
+
+/// Pack four canonical field elements into a 32-byte note hash, refusing any
+/// element at or above `GOLDILOCKS_P`.
+///
+/// Convenience: checked counterpart to [`hash_from_elements`] symmetric with
+/// [`elements_from_hash`].
+#[must_use]
+pub fn try_hash_from_elements(elements: [u64; OUTPUT]) -> Option<NoteHash> {
+    if elements.iter().any(|&v| v >= GOLDILOCKS_P) {
+        return None;
+    }
+    Some(hash_from_elements(elements))
+}
+
 /// Read four field elements out of a 32-byte note hash. `None` when an element is
 /// not a canonical field value, because such a hash was not produced by [`hash`].
 #[must_use]
@@ -695,5 +760,30 @@ mod tests {
         let mut packed = hash_from_elements([1, 2, 3, 4]);
         packed[16..24].copy_from_slice(&GOLDILOCKS_P.to_le_bytes());
         assert_eq!(elements_from_hash(&packed), None);
+        assert_eq!(try_hash_from_elements([1, 2, GOLDILOCKS_P, 4]), None);
+        let max_valid = [1, 2, GOLDILOCKS_P - 1, 4];
+        assert!(try_hash_from_elements(max_valid).is_some());
+        assert_eq!(try_hash([GOLDILOCKS_P, 0, 0, 0, 0, 0, 0, 0]), None);
+    }
+
+    #[test]
+    fn capacity_domain_tag_separates_leaves_and_internal_nodes() {
+        let left = [11u64, 22, 33, 44];
+        let right = [55u64, 66, 77, 88];
+        let raw_leaf = [11u64, 22, 33, 44, 55, 66, 77, 88];
+
+        let leaf_digest = hash_with_domain(1, raw_leaf).expect("valid domain leaf hash");
+        let node_digest = compress_with_domain(2, left, right).expect("valid domain node hash");
+        let untagged = compress(left, right);
+
+        assert_ne!(leaf_digest, node_digest);
+        assert_ne!(leaf_digest, untagged);
+        assert_ne!(node_digest, untagged);
+        assert_eq!(hash_with_domain(0, raw_leaf), None);
+        assert_eq!(hash_with_domain(GOLDILOCKS_P, raw_leaf), None);
+        assert_eq!(
+            compress_with_domain(2, [GOLDILOCKS_P, 0, 0, 0], right),
+            None
+        );
     }
 }

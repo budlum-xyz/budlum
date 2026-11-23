@@ -711,7 +711,13 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
     }
 
     fn preprocessed_trace(&self) -> Option<p3_matrix::dense::RowMajorMatrix<F>> {
-        let degree = (3 * self.num_steps + 1).next_power_of_two().max(16);
+        let degree = self
+            .num_steps
+            .checked_mul(3)
+            .and_then(|rows| rows.checked_add(1))
+            .and_then(usize::checked_next_power_of_two)
+            .map(|rows| rows.max(16))?;
+        let total_cells = degree.checked_mul(PREPROCESSED_WIDTH)?;
         // PC, RAW_INST, IS_ACTIVE, then the decoded fields OPCODE, RD, RS1,
         // RS2, IMM.
         //
@@ -728,7 +734,7 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
         // reinterpretation the decoder already performs. Two copies of that
         // rule is one copy too many: if they ever disagree the honest prover
         // is the one that fails.
-        let mut values = vec![F::ZERO; degree * PREPROCESSED_WIDTH];
+        let mut values = vec![F::ZERO; total_cells];
         for i in 0..degree {
             let pc = i as u64;
             let inst = self.program.get(i).copied().unwrap_or(0);
@@ -740,13 +746,24 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
             // A word that does not decode contributes zero for the immediate.
             // Such a row can never be matched by a CPU row anyway: the VM
             // refuses to step on it, so no trace row carries that pc.
-            let imm = bud_isa::Instruction::decode_any(inst)
-                .map(|d| d.imm)
-                .unwrap_or(0);
-            let imm_field = if imm < 0 {
-                F::ZERO - F::from_u64((-(imm as i64)) as u64)
-            } else {
-                F::from_u64(imm as u64)
+            let decoded = bud_isa::Instruction::decode_any(inst).ok();
+            // Extended 256-bit caller-word syscalls (10..=13) are only valid in
+            // native UEL execution; ExecutionPublicInputs commits only the 64-bit
+            // `sender`, so BudAir must reject any program containing Syscall
+            // 10..=13 fail-closed rather than folding them into `unknown_syscall`.
+            if i < self.program.len()
+                && matches!(
+                    decoded,
+                    Some(d)
+                        if d.opcode == bud_isa::Opcode::Syscall && (10..=13).contains(&d.imm)
+                )
+            {
+                return None;
+            }
+            let imm = decoded.map(|d| d.imm).unwrap_or(0);
+            let imm_field = match u64::try_from(imm) {
+                Ok(non_neg) => F::from_u64(non_neg),
+                Err(_) => F::ZERO - F::from_u64(u64::from(imm.unsigned_abs())),
             };
             values[i * PREPROCESSED_WIDTH] = F::from_u64(pc);
             values[i * PREPROCESSED_WIDTH + 1] = F::from_u64(inst);
@@ -862,6 +879,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             + is_poseidon.clone()
             + is_syscall.clone()
             + is_verify_merkle.clone()
+            + is_verify_inference.clone()
             + is_privacy_commit.clone()
             + is_nullifier_check.clone()
             + is_sum_conservation.clone();
@@ -897,10 +915,9 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         builder.assert_bool(is_poseidon.clone());
         builder.assert_bool(is_syscall.clone());
         builder.assert_bool(is_verify_merkle.clone());
-        // Reserved opcode 0x1F: the selector and the expansion flag are zero
-        // on every row. A row that carries opcode 0x1F then matches no
-        // selector, so the exclusivity sum below cannot reach one.
-        builder.assert_zero(is_verify_inference.clone());
+        // Opcode 0x1F executes in a single trace row bound to the 30-round
+        // Poseidon gadget; legacy multi-row expansion fillers stay disallowed.
+        builder.assert_bool(is_verify_inference.clone());
         builder.assert_zero(cur[COL_INFERENCE_IS_EXPAND].into());
         builder.assert_bool(is_privacy_commit.clone());
         builder.assert_bool(is_nullifier_check.clone());
@@ -1572,6 +1589,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             + is_poseidon.clone() * ten.clone()
             // Expansion rows reuse opcode 0x1E but must not re-charge gas.
             + is_verify_merkle.clone() * (one.clone() - is_expand.clone()) * ten.clone()
+            + is_verify_inference.clone() * ten.clone()
             // Privacy opcodes share Poseidon gas cost (10).
             + is_privacy_commit.clone() * ten.clone()
             + is_nullifier_check.clone() * ten.clone()
@@ -1591,6 +1609,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 - is_swrite.clone()
                 - is_poseidon.clone()
                 - is_verify_merkle.clone()
+                - is_verify_inference.clone()
                 - is_privacy_commit.clone()
                 - is_nullifier_check.clone()
                 - is_sum_conservation.clone()
@@ -1608,8 +1627,10 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .assert_zero(cur[COL_GAS_USED].into());
         let cur_gas: AB::Expr = cur[COL_GAS_USED].into();
         let nxt_gas: AB::Expr = nxt[COL_GAS_USED].into();
+        let is_active_synth_halt: AB::Expr = cpu_active.clone() * cur[COL_EXIT_CODE].into();
         builder
             .when_transition()
+            .when(one.clone() - is_active_synth_halt)
             .assert_zero(nxt_gas - cur_gas.clone() - gas_cost);
 
         let expected_gas = public_inputs[34].into()
@@ -1713,6 +1734,17 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .when_first_row()
                 .assert_zero(cur[COL_INIT_ROOT_0 + j].into() - public_inputs[10 + j].into());
         }
+        for j in 4..8 {
+            builder
+                .when_first_row()
+                .assert_zero(cur[COL_INIT_ROOT_0 + j].into());
+        }
+
+        // (1d) Limbs 4..7 of `initial_state_root` (bytes 16..32) carry no commitment:
+        // the memory image takes limbs 0 and 1, the register image limbs 2 and 3. They
+        // were compared with a column the prover fills from the public input itself, so
+        // any value verified as free data. Pinned to zero, which is what every honest
+        // caller (`initial_state_root_of`) already supplies.
         for j in 4..8 {
             builder
                 .when_first_row()
@@ -1929,6 +1961,18 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .when(cpu_active.clone())
                 .assert_zero(cur[COL_EXIT_CODE].into() - expected_exit);
         }
+
+        // (6b) Bind exit_code to boolean {0, 1} on the active Halt row and force
+        // zero on every non-Halt row. A clean Halt (exit_code == 0) remains active
+        // in the Program CTL so the ROM proves `program[pc]` is a real Halt, whereas
+        // a synthetic fault Halt (exit_code == 1) skips the ROM fetch.
+        builder
+            .when(one.clone() - is_halt.clone())
+            .assert_zero(cur[COL_EXIT_CODE]);
+        builder
+            .when(is_halt.clone())
+            .when(cpu_active.clone())
+            .assert_bool(cur[COL_EXIT_CODE]);
 
         // (7) chain_id: first row, COL_CHAIN_ID == public[0] (low 32 bits)
         {
@@ -2582,9 +2626,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             // Only the opcodes that write `rd` publish a write. Every other
             // row reads `rd` at its current value, so the register table, and
             // not the prover, decides what that value is. The selectors are
-            // mutually exclusive, so the sum is boolean. VerifyInference is
-            // left out: its selector is held at zero above and the opcode is
-            // outside `is_real_op`.
+            // mutually exclusive, so the sum is boolean.
             // Some selectors were moved into `when(...)` above, so they are
             // read from the row again here.
             let sel = |col: usize| -> AB::Expr { cur[col].into() };
@@ -2607,6 +2649,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 + sel(COL_IS_POSEIDON)
                 + sel(COL_IS_SYSCALL)
                 + sel(COL_IS_VERIFY_MERKLE)
+                + sel(COL_IS_VERIFY_INFERENCE)
                 + sel(COL_IS_PRIVACY_COMMIT)
                 + sel(COL_IS_NULLIFIER_CHECK)
                 + sel(COL_IS_SUM_CONSERVATION);
@@ -2741,7 +2784,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 + is_pop * cur[COL_RD_VAL_NEW].into()
                 + is_call * (cur[COL_PC].into() + one.clone())
                 + is_ret * cur[COL_NEXT_PC].into()
-                + is_sread * cur[COL_RD_VAL_NEW].into()
+                + is_sread.clone() * cur[COL_RD_VAL_NEW].into()
                 + is_swrite.clone() * cur[COL_RS1_VAL].into()
                 + is_merkle_expand_mem * cur[COL_VM_MERKLE_SIBLING].into()
                 + is_merkle_key_read * cur[COL_VM_MERKLE_KEY].into();
@@ -2882,9 +2925,10 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             // 1 original + 8 expansion rows map to 1 preprocessed ROM row;
             // without COL_INFERENCE_IS_EXPAND here the LogUp multiplicity
             // never balances and every VerifyInference proof is InvalidProof.
-            let is_expand: AB::Expr =
-                cur[COL_VM_MERKLE_IS_EXPAND].into() + cur[COL_INFERENCE_IS_EXPAND].into();
-            let prog_active: AB::Expr = cpu_active.clone() * (one.clone() - is_expand);
+            let is_non_prog_fetch: AB::Expr = cur[COL_VM_MERKLE_IS_EXPAND].into()
+                + cur[COL_INFERENCE_IS_EXPAND].into()
+                + cur[COL_EXIT_CODE].into();
+            let prog_active: AB::Expr = cpu_active.clone() * (one.clone() - is_non_prog_fetch);
             let prog_active_ext: AB::ExprEF = prog_active.into();
             // A row outside the program can lend nothing: the multiplicity can be
             // non-zero only on a real ROM row (pre_active=1).
@@ -3096,16 +3140,18 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .when(is_gte)
             .assert_eq(rd_val_new.clone(), one.clone() - cmp_lt_raw.clone());
 
-        // --- Poseidon hash gadget (4 rounds, alpha=7) ---
+        // --- Poseidon hash gadget (30 rounds, alpha=7) ---
         // Shared by:
         //   * Poseidon opcode (0x19): state=[rs1, rs2, 0..] ; rd = out
+        //   * VerifyInference (0x1F): state=[rs1, rs2, DOMAIN_VERIFY_INFERENCE, imm, 0..] ; rd = out
         //   * PrivacyCommit (0x20):   state=[rs1, rs2, imm, 0..] ; rd = out
         //   * NullifierCheck (0x21):  state=[rs2, DOMAIN_NULLIFIER, 0..] ;
         //                            Rd = 1 iff out == rs1 (claimed nullifier)
-        // Witness columns COL_POSEIDON_* are reused; at most one of the three
-        // Selectors is 1 (selector exclusivity via is_cpu == 1).
+        // Witness columns COL_POSEIDON_* are reused; at most one selector is 1
+        // (selector exclusivity via is_cpu == 1).
         {
             let p_poseidon: AB::Expr = is_poseidon.clone();
+            let p_inf: AB::Expr = is_verify_inference.clone();
             let p_commit: AB::Expr = is_privacy_commit.clone();
             let p_null: AB::Expr = is_nullifier_check.clone();
             let p_sw: AB::Expr = is_swrite.clone();
@@ -3113,6 +3159,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let p_merkle: AB::Expr = cur[COL_MERKLE_HASH].into();
             // Any row that needs the Poseidon gadget.
             let p: AB::Expr = p_poseidon.clone()
+                + p_inf.clone()
                 + p_commit.clone()
                 + p_null.clone()
                 + p_sw.clone()
@@ -3122,6 +3169,9 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let opcode_at: AB::Expr = cur[COL_OPCODE].into();
             builder.assert_zero(
                 p_poseidon.clone() * (opcode_at.clone() - AB::Expr::from(AB::F::from_u64(0x19))),
+            );
+            builder.assert_zero(
+                p_inf.clone() * (opcode_at.clone() - AB::Expr::from(AB::F::from_u64(0x1F))),
             );
             builder.assert_zero(
                 p_commit.clone() * (opcode_at.clone() - AB::Expr::from(AB::F::from_u64(0x20))),
@@ -3139,12 +3189,15 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
 
             // Initial state:
             //   Poseidon:        s0=rs1, s1=rs2, s2..s7=0
+            //   VerifyInference: s0=rs1(model), s1=rs2(input), s2=DOMAIN_VERIFY_INFERENCE, s3=imm, s4..s7=0
             //   PrivacyCommit:   s0=rs1(amount), s1=rs2(blinding), s2=imm(recipient), s3..s7=0
             //   NullifierCheck:  s0=rs2(secret), s1=DOMAIN_NULLIFIER, s2..s7=0
             //   SWrite (0x1C):   s0=slot(imm), s1=val(rs1), s2..s5=prev_acc
             //                    (COL_STATE_WRITES_0..7 = 4 x u64), s6..s7=0
             // DOMAIN_NULLIFIER = 0x4e554c4c49464552 ("NULLIFER") - must match bud-vm.
             let domain_nullifier = AB::Expr::from(AB::F::from_u64(0x4e554c4c49464552));
+            let domain_verify_inference =
+                AB::Expr::from(AB::F::from_u64(bud_vm::DOMAIN_VERIFY_INFERENCE));
             // HIGH CWE-345: prev_acc lane k (u64) from the 8 x u32-limb
             // accumulator committed in COL_STATE_WRITES_0..7.
             let acc_lane = |k: usize| {
@@ -3163,15 +3216,19 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             };
             let mut expected: Vec<AB::Expr> = vec![AB::Expr::ZERO; POSEIDON_WIDTH];
             expected[0] = p_poseidon.clone() * rs1_val.clone()
+                + p_inf.clone() * rs1_val.clone()
                 + p_commit.clone() * rs1_val.clone()
                 + p_null.clone() * rs2_val.clone()
                 + p_sw.clone() * storage_slot.clone();
             expected[1] = p_poseidon.clone() * rs2_val.clone()
+                + p_inf.clone() * rs2_val.clone()
                 + p_commit.clone() * rs2_val.clone()
                 + p_null.clone() * domain_nullifier
                 + p_sw.clone() * rs1_val.clone();
-            expected[2] = p_commit.clone() * imm.clone() + p_sw.clone() * acc_lane(0);
-            expected[3] = p_sw.clone() * acc_lane(1);
+            expected[2] = p_commit.clone() * imm.clone()
+                + p_sw.clone() * acc_lane(0)
+                + p_inf.clone() * domain_verify_inference;
+            expected[3] = p_sw.clone() * acc_lane(1) + p_inf.clone() * imm.clone();
             expected[4] = p_sw.clone() * acc_lane(2);
             expected[5] = p_sw.clone() * acc_lane(3);
             for k in 0..4 {
@@ -3265,10 +3322,33 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 }
             }
 
-            // Poseidon opcode + PrivacyCommit: rd equals the Poseidon output.
+            // Poseidon opcode + PrivacyCommit + VerifyInference: rd equals the Poseidon output.
             builder
-                .when(p_poseidon.clone() + p_commit.clone())
+                .when(p_poseidon.clone() + p_commit.clone() + p_inf.clone())
                 .assert_eq(rd_val_new.clone(), poseidon_out.clone());
+
+            // VerifyInference witness columns: pin on VerifyInference rows and zero
+            // everywhere else (COL_INFERENCE_MODEL_COMMIT aliases COL_STORAGE_SLOT_INV
+            // on SRead/SWrite rows).
+            builder
+                .when(p_inf.clone())
+                .assert_eq(cur[COL_INFERENCE_MODEL_COMMIT].into(), rs1_val.clone());
+            builder
+                .when(p_inf.clone())
+                .assert_eq(cur[COL_INFERENCE_INPUT_COMMIT].into(), rs2_val.clone());
+            builder.when(p_inf.clone()).assert_eq(
+                cur[COL_INFERENCE_OUTPUT_COMMIT].into(),
+                poseidon_out.clone(),
+            );
+            builder
+                .when(one.clone() - p_inf.clone())
+                .assert_zero(cur[COL_INFERENCE_INPUT_COMMIT].into());
+            builder
+                .when(one.clone() - p_inf.clone())
+                .assert_zero(cur[COL_INFERENCE_OUTPUT_COMMIT].into());
+            builder
+                .when(one.clone() - is_sread.clone() - is_swrite.clone() - p_inf.clone())
+                .assert_zero(cur[COL_INFERENCE_MODEL_COMMIT].into());
 
             // NullifierCheck: rd is boolean equality of (poseidon_out == rs1/claimed).
             // Reuse COL_EQ_DIFF_INV as inverse witness for (out - claimed).
@@ -3309,5 +3389,177 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .assert_eq(rd_val_new.clone(), one.clone() - is_nonzero);
             builder.when(sc).assert_bool(rd_val_new.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod base_air_boundary_tests {
+    use super::*;
+    use bud_isa::{Instruction, Opcode};
+    use p3_field::PrimeCharacteristicRing;
+    use p3_goldilocks::Goldilocks;
+    use p3_matrix::Matrix;
+
+    #[test]
+    fn base_air_metadata_and_degree_boundaries_are_exact_and_overflow_safe() {
+        let air = BudAir {
+            num_steps: 2,
+            program: vec![Opcode::Halt as u64],
+        };
+        assert_eq!(BaseAir::<Goldilocks>::width(&air), TRACE_WIDTH);
+        assert_eq!(BaseAir::<Goldilocks>::num_public_values(&air), 56);
+        assert!(
+            BaseAir::<Goldilocks>::preprocessed_next_row_columns(&air).is_empty(),
+            "preprocessed trace looks up current-row tuples only; next-row columns must stay empty"
+        );
+
+        // Degree law: `(3 * num_steps + 1).next_power_of_two().max(16)`.
+        // `num_steps = 11` exercises the `3 * 11 = 33` straddle: `33 + 1 = 34 -> 64`
+        // whereas `33 - 1 = 32 -> 32`.
+        for (num_steps, expected_height) in [
+            (0usize, 16usize),
+            (1, 16),
+            (5, 16),
+            (6, 32),
+            (10, 32),
+            (11, 64),
+            (21, 64),
+            (22, 128),
+        ] {
+            let trace = BaseAir::<Goldilocks>::preprocessed_trace(&BudAir {
+                num_steps,
+                program: vec![Opcode::Halt as u64],
+            })
+            .expect("bounded step count must produce a preprocessed matrix");
+            assert_eq!(trace.width(), PREPROCESSED_WIDTH);
+            assert_eq!(trace.height(), expected_height, "num_steps={num_steps}");
+        }
+
+        // Arithmetic overflow on extreme `num_steps` returns `None` instead of panicking.
+        assert!(BaseAir::<Goldilocks>::preprocessed_trace(&BudAir {
+            num_steps: usize::MAX,
+            program: Vec::new(),
+        })
+        .is_none());
+        assert!(BaseAir::<Goldilocks>::preprocessed_trace(&BudAir {
+            num_steps: (usize::MAX / 3) + 1,
+            program: Vec::new(),
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn base_air_preprocessed_trace_enforces_exact_program_end_and_signed_immediates() {
+        let i_zero = Instruction {
+            opcode: Opcode::Add,
+            rd: 3,
+            rs1: 11,
+            rs2: 29,
+            imm: 0,
+        }
+        .try_encode()
+        .expect("valid instruction");
+        let i_pos = Instruction {
+            opcode: Opcode::Sub,
+            rd: 7,
+            rs1: 14,
+            rs2: 2,
+            imm: 37,
+        }
+        .try_encode()
+        .expect("valid instruction");
+        let i_neg_one = Instruction {
+            opcode: Opcode::Jmp,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: -1,
+        }
+        .try_encode()
+        .expect("valid instruction");
+        let i_min = Instruction {
+            opcode: Opcode::Load,
+            rd: 31,
+            rs1: 17,
+            rs2: 5,
+            imm: i32::MIN,
+        }
+        .try_encode()
+        .expect("valid instruction");
+        let i_halt = Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .try_encode()
+        .expect("valid instruction");
+
+        let program = vec![i_zero, i_pos, i_neg_one, i_min, i_halt];
+        let air = BudAir {
+            num_steps: 2,
+            program: program.clone(),
+        };
+        let trace = BaseAir::<Goldilocks>::preprocessed_trace(&air).expect("preprocessed trace");
+        assert_eq!(trace.height(), 16);
+
+        let cell = |row: usize, col: usize| trace.values[row * PREPROCESSED_WIDTH + col];
+
+        // Every in-bounds row [0, program.len()) has IS_ACTIVE == 1; every
+        // out-of-bounds row [program.len(), degree) - specifically `pc == program.len()` -
+        // MUST have IS_ACTIVE == 0 so a prover cannot execute a phantom Halt past end.
+        for (row, word) in program.iter().enumerate() {
+            assert_eq!(cell(row, 0), Goldilocks::from_u64(row as u64));
+            assert_eq!(cell(row, 1), Goldilocks::from_u64(*word));
+            assert_eq!(
+                cell(row, 2),
+                Goldilocks::ONE,
+                "in-bounds row {row} must be active"
+            );
+        }
+        for row in program.len()..trace.height() {
+            assert_eq!(cell(row, 0), Goldilocks::from_u64(row as u64));
+            assert_eq!(cell(row, 1), Goldilocks::ZERO);
+            assert_eq!(
+                cell(row, 2),
+                Goldilocks::ZERO,
+                "out-of-bounds row {row} (including pc == program.len()) must be inactive"
+            );
+            assert_eq!(cell(row, 7), Goldilocks::ZERO);
+        }
+
+        // Row 0: imm == 0, decoded opcode/rd/rs1/rs2 exact.
+        assert_eq!(cell(0, 3), Goldilocks::from_u64(Opcode::Add as u64));
+        assert_eq!(cell(0, 4), Goldilocks::from_u64(3));
+        assert_eq!(cell(0, 5), Goldilocks::from_u64(11));
+        assert_eq!(cell(0, 6), Goldilocks::from_u64(29));
+        assert_eq!(cell(0, 7), Goldilocks::ZERO);
+
+        // Row 1: imm == +37.
+        assert_eq!(cell(1, 3), Goldilocks::from_u64(Opcode::Sub as u64));
+        assert_eq!(cell(1, 4), Goldilocks::from_u64(7));
+        assert_eq!(cell(1, 5), Goldilocks::from_u64(14));
+        assert_eq!(cell(1, 6), Goldilocks::from_u64(2));
+        assert_eq!(cell(1, 7), Goldilocks::from_u64(37));
+
+        // Row 2: imm == -1 -> P - 1 (additive inverse of 1 in Goldilocks).
+        assert_eq!(cell(2, 7), Goldilocks::ZERO - Goldilocks::ONE);
+        assert_eq!(cell(2, 7) + Goldilocks::ONE, Goldilocks::ZERO);
+
+        // Row 3: imm == i32::MIN (-2^31) -> P - (2^31 mod P), without signed overflow.
+        let expected_min = Goldilocks::ZERO - Goldilocks::from_u64(1u64 << 31);
+        assert_eq!(cell(3, 4), Goldilocks::from_u64(31));
+        assert_eq!(cell(3, 5), Goldilocks::from_u64(17));
+        assert_eq!(cell(3, 6), Goldilocks::from_u64(5));
+        assert_eq!(cell(3, 7), expected_min);
+
+        // An empty program has zero active rows, including row 0.
+        let empty_trace = BaseAir::<Goldilocks>::preprocessed_trace(&BudAir {
+            num_steps: 1,
+            program: Vec::new(),
+        })
+        .expect("empty program trace");
+        assert_eq!(empty_trace.values[2], Goldilocks::ZERO);
     }
 }

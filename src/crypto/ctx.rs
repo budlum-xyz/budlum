@@ -22,9 +22,9 @@
 /// The longest context FIPS 204 and FIPS 205 accept, in bytes.
 pub const MAX_CONTEXT_LEN: usize = 255;
 
-/// User transaction and bundle (TxV7).
+/// User transaction and bundle (`TxV7`).
 pub const TX_V7: &[u8] = b"BDLM/TX/V7";
-/// Multisig transaction (TxV8).
+/// Multisig transaction (`TxV8`).
 pub const TX_V8: &[u8] = b"BDLM/TX/V8";
 /// Block.
 pub const BLOCK_V6: &[u8] = b"BDLM/BLOCK/V6";
@@ -42,7 +42,7 @@ pub const COLD_V1: &[u8] = b"BDLM/COLD/V1";
 pub const EVIDENCE_V2: &[u8] = b"BDLM/EVIDENCE/V2";
 /// Snapshot manifest.
 pub const SNAPSHOT_V2: &[u8] = b"BDLM/SNAPSHOT/V2";
-/// PoA authority signature.
+/// `PoA` authority signature.
 pub const POA_V2: &[u8] = b"BDLM/POA/V2";
 /// Storage deal and channel.
 pub const STORAGE_V2: &[u8] = b"BDLM/STORAGE/V2";
@@ -66,9 +66,9 @@ pub const RESEAL_V1: &[u8] = b"BDLM/RESEAL/V1";
 /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const RELEASE_V1: &[u8] = b"BDLM/RELEASE/V1";
 
-/// V5 user transaction (ML-DSA-87 alone). Devnet only: TxV7 replaces it.
+/// V5 user transaction (ML-DSA-87 alone). Devnet only: `TxV7` replaces it.
 pub const TX_V5: &[u8] = b"BDLM/TX/V5";
-/// V6 threshold multisig transaction. Devnet only: TxV8 replaces it.
+/// V6 threshold multisig transaction. Devnet only: `TxV8` replaces it.
 pub const TX_V6: &[u8] = b"BDLM/TX/V6";
 /// Guardian vote on a wallet recovery proposal.
 pub const GUARDIAN_V1: &[u8] = b"BDLM/GUARDIAN/V1";
@@ -90,6 +90,27 @@ pub const BRIDGE_V1: &[u8] = b"BDLM/BRIDGE/V1";
 /// relay transaction's own context: the sender authenticates the message and
 /// the submitting relayer authenticates the transaction.
 pub const CROSS_DOMAIN_V1: &[u8] = b"BDLM/CROSS_DOMAIN/V1";
+
+/// Validator operator key: the custody quota update.
+pub const VALIDATOR_V1: &[u8] = b"BDLM/VALIDATOR/V1";
+
+/// Foreign-lane account adoption ML-DSA-87 companion signature.
+pub const ADOPT_FOREIGN_V1: &[u8] = b"BDLM/ADOPT_FOREIGN/V1";
+
+/// AI answer proof bundle verification-level attestation signature.
+pub const APB_LEVEL_V1: &[u8] = b"BDLM/APB_LEVEL/V1";
+
+/// Universal Execution Layer transaction envelope (`UelTx`).
+pub const UEL_TX_V1: &[u8] = b"BDLM/UEL_TX/V1";
+
+/// Aggregator ownership attestation over a segment's `tick_pi`.
+pub const AGG_SEGMENT_V1: &[u8] = b"BDLM/AGG_SEGMENT/V1";
+/// An address owner's PQ-hybrid signature binding the address to a Budlum
+/// identity (`wallet::identity_profile::LinkedAccountClaim`).
+pub const IDENTITY_ADDR_LINK_V1: &[u8] = b"BDLM/IDENTITY_ADDR_LINK/V1";
+/// A payer's PQ-hybrid signature over a pre-authorized offline spend voucher
+/// (`unification::payment_router::SignedOfflineVoucher`).
+pub const OFFLINE_VOUCHER_V1: &[u8] = b"BDLM/OFFLINE_VOUCHER/V1";
 
 /// table, in the order of section 6.5.
 pub const TABLE: &[&[u8]] = &[
@@ -127,6 +148,13 @@ pub const EXTRAS: &[&[u8]] = &[
     KEY_BINDING_V1,
     BRIDGE_V1,
     CROSS_DOMAIN_V1,
+    VALIDATOR_V1,
+    ADOPT_FOREIGN_V1,
+    APB_LEVEL_V1,
+    UEL_TX_V1,
+    AGG_SEGMENT_V1,
+    IDENTITY_ADDR_LINK_V1,
+    OFFLINE_VOUCHER_V1,
 ];
 
 /// Whether `ctx` is a registered context string.

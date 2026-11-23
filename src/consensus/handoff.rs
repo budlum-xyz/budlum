@@ -1,290 +1,81 @@
-//! The Handoff Certificate committee.
+//! The Handoff Certificate committee and node-side signature binding (K-4, K-G.6).
 //!
-//! The Handoff Certificate is the one QC blob that stays persistent. When the validator set
-//! has more than [`COMMITTEE_SIZE`] members, its PQ part is signed by a committee of exactly
-//! that many members instead of the whole set. The committee is a function of the validator
-//! addresses and the epoch randomness of the Filiz chain, so every node derives the same one
-//! and no validator chooses its own seat: members are ranked by
-//! `SHA3-256(tag || randomness || address)` and the lowest ranks sit.
+//! The committee is a function of the validator addresses and the epoch
+//! randomness of the Filiz chain (`consensus::filiz::epoch_randomness`), so
+//! every node and phone derives the same one.
 //!
-//! [`HandoffCertificate`] is the certificate itself: the outgoing set's
-//! committee signs, with ML-DSA-65 under `BDLM/HANDOFF/V1`, the move from the
-//! digest of the set of epoch `e` to the digest of the set of epoch `e + 1`.
-//! It carries no TTL and is stored for good (`Storage::save_handoff_cert`),
-//! so a light client that trusts one set can follow every later set with
-//! [`follow_handoffs`] without any classical signature.
+//! The wire types ([`HandoffMember`], [`HandoffSignature`], [`HandoffCertificate`],
+//! [`HandoffError`]), the deterministic Filiz committee seating ([`handoff_committee`],
+//! [`handoff_committee_weighted`]), the set digest ([`set_digest`]), and the
+//! pure quorum/chain walk ([`follow_handoffs_with`]) are defined once in
+//! `budlum_types::handoff` so the mobile core (`budlum-mobile-core`) and the
+//! full node run the exact same implementation without linking `budlum-core`.
+//!
+//! This module re-exports those shared types for Filiz handoff persistence and
+//! binds them to the node's [`crate::crypto::scheme::SchemeStatusRegistry`]
+//! (`consensus::filiz::epoch_randomness`) and [`crate::crypto::pq::verify_in`]
+//! under `BDLM/HANDOFF/V1`.
+//! WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
 
-use serde::{Deserialize, Serialize};
-use sha3::{Digest, Sha3_256};
+pub use budlum_types::handoff::{
+    follow_handoffs_with, handoff_committee, handoff_committee_weighted, member_set_is_valid,
+    set_digest, HandoffCertificate, HandoffError, HandoffMember, HandoffSignature, COMMITTEE_SIZE,
+};
 
-/// The committee size above which the PQ part of a Handoff Certificate is committee signed.
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
-pub const COMMITTEE_SIZE: usize = 512;
-
-const COMMITTEE_TAG: &[u8] = b"BDLM_HANDOFF_COMMITTEE_V1";
-
-fn rank(randomness: &[u8; 32], address: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha3_256::new();
-    hasher.update((COMMITTEE_TAG.len() as u64).to_le_bytes());
-    hasher.update(COMMITTEE_TAG);
-    hasher.update(randomness);
-    hasher.update((address.len() as u64).to_le_bytes());
-    hasher.update(address);
-    hasher.finalize().into()
-}
-
-/// The indices (into `validators`) of the members that sign the PQ part of the Handoff
-/// Certificate, in ascending index order. With [`COMMITTEE_SIZE`] or fewer validators every
-/// index is returned: the whole set signs. A duplicate address ranks by its own hash and an
-/// index tie-break, so the result stays total and deterministic.
+/// Extract the [`HandoffMember`] list from a finality [`crate::chain::finality::ValidatorSetSnapshot`],
+/// preserving snapshot order.
 #[must_use]
 /// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
-pub fn handoff_committee(validators: &[Vec<u8>], randomness: &[u8; 32]) -> Vec<usize> {
-    if validators.len() <= COMMITTEE_SIZE {
-        return (0..validators.len()).collect();
-    }
-    let mut ranked: Vec<([u8; 32], usize)> = validators
+pub fn from_snapshot(
+    snapshot: &crate::chain::finality::ValidatorSetSnapshot,
+) -> Vec<HandoffMember> {
+    snapshot
+        .validators
         .iter()
-        .enumerate()
-        .map(|(index, address)| (rank(randomness, address), index))
-        .collect();
-    ranked.sort_unstable();
-    let mut seats: Vec<usize> = ranked
-        .into_iter()
-        .take(COMMITTEE_SIZE)
-        .map(|(_, index)| index)
-        .collect();
-    seats.sort_unstable();
-    seats
+        .map(|entry| HandoffMember {
+            address: entry.address.as_bytes().to_vec(),
+            bls_public_key: entry.bls_public_key.clone(),
+            pop_signature: entry.pop_signature.clone(),
+            pq_public_key: entry.pq_public_key.clone(),
+            stake: entry.stake,
+        })
+        .collect()
 }
 
-const SET_TAG: &[u8] = b"BDLM_HANDOFF_SET_V1";
-const CERT_TAG: &[u8] = b"BDLM_HANDOFF_CERT_V1";
-
-fn absorb(hasher: &mut Sha3_256, field: &[u8]) {
-    hasher.update((field.len() as u64).to_le_bytes());
-    hasher.update(field);
-}
-
-/// One validator as the Handoff Certificate sees it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HandoffMember {
-    pub address: Vec<u8>,
-    pub bls_public_key: Vec<u8>,
-    pub pop_signature: Vec<u8>,
-    pub pq_public_key: Vec<u8>,
-    pub stake: u64,
-}
-
-impl HandoffMember {
-    /// The members of a finality validator snapshot, in snapshot order.
-    #[must_use]
-    pub fn from_snapshot(snapshot: &crate::chain::finality::ValidatorSetSnapshot) -> Vec<Self> {
-        snapshot
-            .validators
-            .iter()
-            .map(|entry| Self {
-                address: entry.address.as_bytes().to_vec(),
-                bls_public_key: entry.bls_public_key.clone(),
-                pop_signature: entry.pop_signature.clone(),
-                pq_public_key: entry.pq_public_key.clone(),
-                stake: entry.stake,
-            })
-            .collect()
-    }
-}
-
-/// The digest of the validator set of `epoch` on `chain_id`: every member's
-/// address, BLS consensus key, PoP signature, ML-DSA-65 key and stake, length
-/// prefixed, in set order.
-#[must_use]
-pub fn set_digest(chain_id: u64, epoch: u64, members: &[HandoffMember]) -> [u8; 32] {
-    let mut hasher = Sha3_256::new();
-    absorb(&mut hasher, SET_TAG);
-    absorb(&mut hasher, &chain_id.to_le_bytes());
-    absorb(&mut hasher, &epoch.to_le_bytes());
-    absorb(&mut hasher, &(members.len() as u64).to_le_bytes());
-    for member in members {
-        absorb(&mut hasher, &member.address);
-        absorb(&mut hasher, &member.bls_public_key);
-        absorb(&mut hasher, &member.pop_signature);
-        absorb(&mut hasher, &member.pq_public_key);
-        absorb(&mut hasher, &member.stake.to_le_bytes());
-    }
-    hasher.finalize().into()
-}
-
-/// One committee member's ML-DSA-65 signature; `index` is the member's
-/// position in the outgoing set.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
-pub struct HandoffSignature {
-    pub index: u32,
-    pub signature: Vec<u8>,
-}
-
-/// The persistent certificate that hands the chain from the set of `epoch`
-/// to the set of `epoch + 1`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HandoffCertificate {
-    pub chain_id: u64,
-    pub epoch: u64,
-    pub outgoing_set: [u8; 32],
-    pub incoming_set: [u8; 32],
-    /// The epoch randomness that seats the committee
-    /// (`consensus::filiz::epoch_randomness`).
-    pub randomness: [u8; 32],
-    /// Ascending by index; only committee members.
-    pub signatures: Vec<HandoffSignature>,
-}
-
-/// Why a Handoff Certificate or a chain of them was refused.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
-pub enum HandoffError {
-    #[error("the outgoing set does not match the certificate")]
-    OutgoingSet,
-    #[error("the incoming set does not match the certificate")]
-    IncomingSet,
-    #[error("the certificate is for chain {got}, expected {expected}")]
-    Chain { expected: u64, got: u64 },
-    #[error("the certificate hands over epoch {got}, expected {expected}")]
-    Epoch { expected: u64, got: u64 },
-    #[error("signature indices are not strictly ascending")]
-    Order,
-    #[error("index {0} is not a committee seat")]
-    NotCommittee(u32),
-    #[error("the certificate randomness is not the epoch randomness")]
-    Randomness,
-    #[error("{signed} of {committee} committee members signed; more than two thirds are required")]
-    Quorum { signed: usize, committee: usize },
-    #[error("the signature of member {index} does not verify: {reason}")]
-    Signature { index: u32, reason: String },
-}
-
-impl HandoffCertificate {
-    /// The bytes every committee member signs.
-    #[must_use]
-    pub fn signing_message(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(8 * 6 + CERT_TAG.len() + 8 + 8 + 96);
-        for field in [
-            CERT_TAG,
-            &self.chain_id.to_le_bytes(),
-            &self.epoch.to_le_bytes(),
-            &self.outgoing_set,
-            &self.incoming_set,
-            &self.randomness,
-        ] {
-            out.extend_from_slice(&(field.len() as u64).to_le_bytes());
-            out.extend_from_slice(field);
-        }
-        out
-    }
-
-    /// An unsigned certificate for the move from `outgoing` to `incoming`.
-    #[must_use]
-    /// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
-    pub fn unsigned(
-        chain_id: u64,
-        epoch: u64,
-        outgoing: &[HandoffMember],
-        incoming: &[HandoffMember],
-        randomness: [u8; 32],
-    ) -> Self {
-        Self {
-            chain_id,
-            epoch,
-            outgoing_set: set_digest(chain_id, epoch, outgoing),
-            incoming_set: set_digest(chain_id, epoch.saturating_add(1), incoming),
-            randomness,
-            signatures: Vec::new(),
-        }
-    }
-
-    /// Add one member's signature, keeping the index order.
-    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
-    pub fn insert_signature(&mut self, index: u32, signature: Vec<u8>) {
-        match self.signatures.binary_search_by_key(&index, |s| s.index) {
-            Ok(at) => self.signatures[at].signature = signature,
-            Err(at) => self
-                .signatures
-                .insert(at, HandoffSignature { index, signature }),
-        }
-    }
-
-    /// Verify the certificate against the outgoing set it names and the
-    /// canonical epoch randomness the chain computed for `self.epoch`.
-    ///
-    /// `epoch_randomness` is the caller's independent knowledge of
-    /// `consensus::filiz::epoch_randomness(chain_id, epoch, canonical_reveals)`.
-    /// The certificate carries its own `randomness` field, and that field seats
-    /// the committee - so a certificate that names its own randomness would
-    /// pick its own committee out of the outgoing set and its signatures would
-    /// agree with that choice. Comparing the field against the value the
-    /// verifier trusts is what turns the committee from the certificate's
-    /// claim into the chain's seating.
-    ///
-    /// # Errors
-    ///
-    /// [`HandoffError`] for a set mismatch, a randomness that is not the
-    /// epoch's, a signer outside the committee, an order violation, two
-    /// thirds not reached, or a bad signature.
-    pub fn verify_in(
-        &self,
-        registry: &crate::crypto::scheme::SchemeStatusRegistry,
-        outgoing: &[HandoffMember],
-        epoch_randomness: [u8; 32],
-    ) -> Result<(), HandoffError> {
-        if set_digest(self.chain_id, self.epoch, outgoing) != self.outgoing_set {
-            return Err(HandoffError::OutgoingSet);
-        }
-        if self.randomness != epoch_randomness {
-            return Err(HandoffError::Randomness);
-        }
-        let addresses: Vec<Vec<u8>> = outgoing.iter().map(|m| m.address.clone()).collect();
-        let committee = handoff_committee(&addresses, &epoch_randomness);
-        if !self.signatures.windows(2).all(|w| w[0].index < w[1].index) {
-            return Err(HandoffError::Order);
-        }
-        for entry in &self.signatures {
-            if committee.binary_search(&(entry.index as usize)).is_err() {
-                return Err(HandoffError::NotCommittee(entry.index));
-            }
-        }
-        let signed = self.signatures.len();
-        if committee.is_empty() || signed * 3 <= committee.len() * 2 {
-            return Err(HandoffError::Quorum {
-                signed,
-                committee: committee.len(),
-            });
-        }
-        let message = self.signing_message();
-        for entry in &self.signatures {
-            let member = &outgoing[entry.index as usize];
-            crate::crypto::pq::verify_in(
-                registry,
-                crate::crypto::scheme::SchemeId::ML_DSA_65,
-                &member.pq_public_key,
-                &message,
-                crate::crypto::ctx::HANDOFF_V1,
-                &entry.signature,
-            )
-            .map_err(|e| HandoffError::Signature {
-                index: entry.index,
-                reason: e.to_string(),
-            })?;
-        }
-        Ok(())
-    }
-}
-
-/// Follow a chain of Handoff Certificates from a trusted set of
-/// `start_epoch`. Each step is a certificate and the incoming set it names;
-/// the result is the last set the chain reaches.
+/// Verify `cert` against `outgoing` and the canonical `epoch_randomness` under
+/// the chain's [`crate::crypto::scheme::SchemeStatusRegistry`].
 ///
 /// # Errors
 ///
-/// The first step that does not continue the chain or does not verify.
+/// [`HandoffError`] for a set mismatch, randomness mismatch, non-committee
+/// signer, non-ascending order, quorum shortfall, or failed ML-DSA-65 signature.
+/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
+pub fn verify_in(
+    cert: &HandoffCertificate,
+    registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    outgoing: &[HandoffMember],
+    epoch_randomness: [u8; 32],
+) -> Result<(), HandoffError> {
+    cert.verify_with(outgoing, epoch_randomness, |pk, message, signature| {
+        crate::crypto::pq::verify_in(
+            registry,
+            crate::crypto::scheme::SchemeId::ML_DSA_65,
+            pk,
+            message,
+            crate::crypto::ctx::HANDOFF_V1,
+            signature,
+        )
+        .map_err(|e| e.to_string())
+    })
+}
+
+/// Follow a chain of [`HandoffCertificate`] steps from a trusted set of
+/// `start_epoch` under `registry`.
+///
+/// # Errors
+///
+/// The first step that breaks contiguity, set binding, randomness, quorum, or
+/// ML-DSA-65 verification.
 /// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
 pub fn follow_handoffs<'a>(
     registry: &crate::crypto::scheme::SchemeStatusRegistry,
@@ -294,9 +85,12 @@ pub fn follow_handoffs<'a>(
     steps: &'a [(HandoffCertificate, Vec<HandoffMember>)],
     epoch_randomness: &dyn Fn(u64) -> [u8; 32],
 ) -> Result<(u64, &'a [HandoffMember]), HandoffError> {
+    if !member_set_is_valid(trusted) {
+        return Err(HandoffError::OutgoingSet);
+    }
     let mut epoch = start_epoch;
     let mut current = trusted;
-    for (cert, incoming) in steps {
+    for (cert, next) in steps {
         if cert.chain_id != chain_id {
             return Err(HandoffError::Chain {
                 expected: chain_id,
@@ -309,12 +103,18 @@ pub fn follow_handoffs<'a>(
                 got: cert.epoch,
             });
         }
-        cert.verify_in(registry, current, epoch_randomness(cert.epoch))?;
-        epoch = epoch.saturating_add(1);
-        if set_digest(chain_id, epoch, incoming) != cert.incoming_set {
+        verify_in(cert, registry, current, epoch_randomness(epoch))?;
+        epoch = epoch.checked_add(1).ok_or(HandoffError::Epoch {
+            expected: u64::MAX,
+            got: cert.epoch,
+        })?;
+        if !member_set_is_valid(next) {
             return Err(HandoffError::IncomingSet);
         }
-        current = incoming;
+        if cert.incoming_set != set_digest(chain_id, epoch, next) {
+            return Err(HandoffError::IncomingSet);
+        }
+        current = next;
     }
     Ok((epoch, current))
 }
@@ -324,7 +124,9 @@ mod tests {
     use super::*;
 
     fn set(n: usize) -> Vec<Vec<u8>> {
-        (0..n).map(|i| (i as u32).to_be_bytes().to_vec()).collect()
+        (0..n)
+            .map(|i| u32::try_from(i).unwrap_or(u32::MAX).to_be_bytes().to_vec())
+            .collect()
     }
 
     #[test]
@@ -395,7 +197,7 @@ mod tests {
         let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
 
         let cert = signed(&keys, &outgoing, &incoming, &[0, 1, 2]);
-        assert_eq!(cert.verify_in(&registry, &outgoing, [3; 32]), Ok(()));
+        assert_eq!(verify_in(&cert, &registry, &outgoing, [3; 32]), Ok(()));
         let steps = vec![(cert.clone(), incoming.clone())];
         let (epoch, reached) =
             follow_handoffs(&registry, 7, 4, &outgoing, &steps, &|_| [3; 32]).expect("follows");
@@ -408,19 +210,19 @@ mod tests {
         let mut renamed = cert.clone();
         renamed.randomness = [4; 32];
         assert_eq!(
-            renamed.verify_in(&registry, &outgoing, [3; 32]),
+            verify_in(&renamed, &registry, &outgoing, [3; 32]),
             Err(HandoffError::Randomness)
         );
 
         let short = signed(&keys, &outgoing, &incoming, &[0, 1]);
         assert!(matches!(
-            short.verify_in(&registry, &outgoing, [3; 32]),
+            verify_in(&short, &registry, &outgoing, [3; 32]),
             Err(HandoffError::Quorum { .. })
         ));
         let mut swapped = cert.clone();
         swapped.signatures[0].signature = swapped.signatures[1].signature.clone();
         assert!(matches!(
-            swapped.verify_in(&registry, &outgoing, [3; 32]),
+            verify_in(&swapped, &registry, &outgoing, [3; 32]),
             Err(HandoffError::Signature { .. })
         ));
         let mut forged_bls = incoming.clone();
@@ -444,5 +246,161 @@ mod tests {
                 32]),
             Err(HandoffError::IncomingSet)
         );
+    }
+
+    #[test]
+    fn seat_majority_without_two_thirds_stake_is_refused() {
+        let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        let keys: Vec<_> = (0..4)
+            .map(|_| crate::crypto::primitives::PqKeyPair::generate())
+            .collect();
+        let mut outgoing = members(&keys);
+        // Member 3 holds 1_000 stake; members 0..3 hold 1 stake each (3/4 seats, 3/1003 stake).
+        outgoing[0].stake = 1;
+        outgoing[1].stake = 1;
+        outgoing[2].stake = 1;
+        outgoing[3].stake = 1_000;
+        let incoming = outgoing.clone();
+
+        let low_stake_cert = signed(&keys, &outgoing, &incoming, &[0, 1, 2]);
+        assert!(
+            matches!(
+                verify_in(&low_stake_cert, &registry, &outgoing, [3; 32]),
+                Err(HandoffError::Quorum {
+                    signed: 3,
+                    committee: 4
+                })
+            ),
+            "3 of 4 seats with <2/3 committed stake must not clear handoff quorum"
+        );
+
+        let high_stake_cert = signed(&keys, &outgoing, &incoming, &[0, 1, 3]);
+        assert!(verify_in(&high_stake_cert, &registry, &outgoing, [3; 32]).is_ok());
+    }
+
+    #[test]
+    fn follow_handoffs_refuses_invalid_successor_sets() {
+        let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        let keys: Vec<_> = (0..3)
+            .map(|_| crate::crypto::primitives::PqKeyPair::generate())
+            .collect();
+        let outgoing = members(&keys);
+
+        let empty_incoming: Vec<HandoffMember> = Vec::new();
+        let cert_empty = signed(&keys, &outgoing, &empty_incoming, &[0, 1, 2]);
+        assert_eq!(
+            follow_handoffs(
+                &registry,
+                7,
+                4,
+                &outgoing,
+                &[(cert_empty, empty_incoming)],
+                &|_| [3; 32]
+            ),
+            Err(HandoffError::IncomingSet)
+        );
+
+        let mut zero_stake = outgoing.clone();
+        zero_stake[0].stake = 0;
+        let cert_zero = signed(&keys, &outgoing, &zero_stake, &[0, 1, 2]);
+        assert_eq!(
+            follow_handoffs(
+                &registry,
+                7,
+                4,
+                &outgoing,
+                &[(cert_zero, zero_stake)],
+                &|_| [3; 32]
+            ),
+            Err(HandoffError::IncomingSet)
+        );
+
+        let mut dup = outgoing.clone();
+        dup[1].address = dup[0].address.clone();
+        let cert_dup = signed(&keys, &outgoing, &dup, &[0, 1, 2]);
+        assert_eq!(
+            follow_handoffs(&registry, 7, 4, &outgoing, &[(cert_dup, dup)], &|_| [3; 32]),
+            Err(HandoffError::IncomingSet)
+        );
+    }
+
+    #[test]
+    fn large_validator_set_verifies_and_resists_minimum_stake_sybils() {
+        let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        // Verify stake-weighted committee seating over > COMMITTEE_SIZE (512)
+        // validators: 60 heavily bonded validators (stake 10_000_000 each) plus
+        // 740 minimum-stake sybils (stake 1 each) = 800 total validators.
+        let mut mixed = Vec::with_capacity(800);
+        for i in 0u32..800 {
+            mixed.push(HandoffMember {
+                address: i.to_be_bytes().to_vec(),
+                pq_public_key: vec![1u8],
+                bls_public_key: Vec::new(),
+                pop_signature: Vec::new(),
+                stake: if i < 60 { 10_000_000 } else { 1 },
+            });
+        }
+        let seated = handoff_committee_weighted(&mixed, &[0xA5; 32]);
+        assert_eq!(seated.len(), COMMITTEE_SIZE);
+        let committee_stake: u128 = seated.iter().map(|&idx| u128::from(mixed[idx].stake)).sum();
+        let sybil_stake: u128 = seated
+            .iter()
+            .filter(|&&idx| idx >= 60)
+            .map(|&idx| u128::from(mixed[idx].stake))
+            .sum();
+        let bonded_seated = seated.iter().filter(|&&idx| idx < 60).count();
+        assert_eq!(
+            bonded_seated, 60,
+            "every heavily bonded validator is seated ahead of minimum-stake sybils"
+        );
+        assert!(
+            sybil_stake.saturating_mul(3) <= committee_stake.saturating_mul(2),
+            "740 minimum-stake sybils cannot reach 2/3 of committee stake"
+        );
+
+        // End-to-end signed verification with real PQ keys: 11 of 16 (> 2/3) pass,
+        // 10 of 16 (<= 2/3) are refused with exact InsufficientStake totals.
+        let keys: Vec<_> = (0..16)
+            .map(|_| crate::crypto::primitives::PqKeyPair::generate())
+            .collect();
+        let outgoing = members(&keys);
+        let incoming = outgoing.clone();
+        let committee = handoff_committee_weighted(&outgoing, &[3; 32]);
+        assert_eq!(committee.len(), 16);
+        let pass_cert = signed(&keys, &outgoing, &incoming, &committee[..11]);
+        assert_eq!(verify_in(&pass_cert, &registry, &outgoing, [3; 32]), Ok(()));
+        let short_cert = signed(&keys, &outgoing, &incoming, &committee[..10]);
+        assert_eq!(
+            verify_in(&short_cert, &registry, &outgoing, [3; 32]),
+            Err(HandoffError::Quorum {
+                signed: 10,
+                committee: 16,
+            })
+        );
+    }
+
+    #[test]
+    fn node_handoff_types_are_the_shared_budlum_types_definitions() {
+        fn same_cert(shared: budlum_types::handoff::HandoffCertificate) -> HandoffCertificate {
+            shared
+        }
+        fn same_member(shared: budlum_types::handoff::HandoffMember) -> HandoffMember {
+            shared
+        }
+        let m = same_member(budlum_types::handoff::HandoffMember {
+            address: vec![1; 32],
+            bls_public_key: vec![2; 48],
+            pop_signature: vec![3; 96],
+            pq_public_key: vec![4; 32],
+            stake: 10,
+        });
+        let cert = same_cert(budlum_types::handoff::HandoffCertificate::unsigned(
+            45_261,
+            1,
+            std::slice::from_ref(&m),
+            std::slice::from_ref(&m),
+            [5; 32],
+        ));
+        assert_eq!(cert.chain_id, 45_261);
     }
 }

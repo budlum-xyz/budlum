@@ -81,10 +81,29 @@ pub fn api_key_from_env() -> Result<Option<String>, String> {
 /// header value cannot carry one and a key file that holds two lines is not a
 /// key file.
 ///
+/// The file is opened once and every check reads the handle's own metadata, so
+/// what is checked is what is read. A path that is a symbolic link is refused
+/// outright: `metadata` followed the link and measured and read whatever the
+/// link pointed at, which let a link planted in a writable directory swap in
+/// another file between the mode check and the read.
+///
 /// # Errors
 /// As [`api_key_from_env`], for the given path.
 fn read_api_key(path: &Path) -> Result<String, String> {
-    let metadata = std::fs::metadata(path)
+    use std::io::Read;
+
+    let link = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("cannot stat RPC key file {}: {e}", path.display()))?;
+    if link.file_type().is_symlink() {
+        return Err(format!(
+            "RPC key file {} is a symlink; the key must sit in a regular file of its own",
+            path.display()
+        ));
+    }
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("cannot read RPC key file {}: {e}", path.display()))?;
+    let metadata = file
+        .metadata()
         .map_err(|e| format!("cannot stat RPC key file {}: {e}", path.display()))?;
     if !metadata.is_file() {
         return Err(format!(
@@ -92,15 +111,25 @@ fn read_api_key(path: &Path) -> Result<String, String> {
             path.display()
         ));
     }
-    check_secret_file_mode(path)?;
+    check_secret_file_mode(&metadata, path)?;
     if metadata.len() > MAX_API_KEY_BYTES {
         return Err(format!(
             "RPC key file {} is larger than {MAX_API_KEY_BYTES} bytes; it does not hold a key",
             path.display()
         ));
     }
-    let raw = std::fs::read_to_string(path)
+    // `take` bounds the read even if the file grows after the check above.
+    let mut raw = String::new();
+    (&mut file)
+        .take(MAX_API_KEY_BYTES.saturating_add(1))
+        .read_to_string(&mut raw)
         .map_err(|e| format!("cannot read RPC key file {}: {e}", path.display()))?;
+    if raw.len() as u64 > MAX_API_KEY_BYTES {
+        return Err(format!(
+            "RPC key file {} is larger than {MAX_API_KEY_BYTES} bytes; it does not hold a key",
+            path.display()
+        ));
+    }
     let key = raw.trim();
     if key.is_empty() {
         return Err(format!("RPC key file {} is empty", path.display()));
@@ -116,10 +145,8 @@ fn read_api_key(path: &Path) -> Result<String, String> {
 
 /// Refuse a key file that group or others can read (Unix only).
 #[cfg(unix)]
-fn check_secret_file_mode(path: &Path) -> Result<(), String> {
+fn check_secret_file_mode(metadata: &std::fs::Metadata, path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    let metadata = std::fs::metadata(path)
-        .map_err(|e| format!("cannot stat RPC key file {}: {e}", path.display()))?;
     let mode = metadata.permissions().mode();
     if mode & 0o077 != 0 {
         return Err(format!(
@@ -134,7 +161,7 @@ fn check_secret_file_mode(path: &Path) -> Result<(), String> {
 
 /// Non-Unix builds have no POSIX mode bits to check.
 #[cfg(not(unix))]
-fn check_secret_file_mode(_path: &Path) -> Result<(), String> {
+fn check_secret_file_mode(_metadata: &std::fs::Metadata, _path: &Path) -> Result<(), String> {
     Ok(())
 }
 
@@ -261,5 +288,20 @@ mod tests {
             Some(value) => std::env::set_var(API_KEY_FILE_ENV, value),
             None => std::env::remove_var(API_KEY_FILE_ENV),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_key_file_is_refused() {
+        use std::os::unix::fs::symlink;
+        let temp = TempKey::new("symlink");
+        let real = temp.write("real.key", b"0123456789abcdef0123456789abcdef\n");
+        let link = temp.dir.join("link.key");
+        symlink(&real, &link).unwrap();
+        let err = read_api_key(&link).expect_err("symlink key path must be refused");
+        assert!(
+            err.contains("symlink") || err.contains("regular"),
+            "got: {err}"
+        );
     }
 }

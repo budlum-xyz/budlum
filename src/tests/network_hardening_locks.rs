@@ -1,12 +1,12 @@
 //! Locks for network-layer hardening that is easy to undo by accident.
 //!
-//! Two classes of finding live here:
+//! Two classes of network invariants live here:
 //!
 //!   * A poisoned mutex must degrade the affected request, not kill the node.
 //!     `src/network/node.rs` holds ~20 lock sites; all but one already matched
 //!     on the result or exited deliberately, and the odd one out turned an
 //!     optional content fetch into a node-wide panic.
-//!   * `Gossipsub`'s defaults are the network's DoS surface. They are currently
+//!   * `Gossipsub`'s defaults are the network's `DoS` surface. They are currently
 //!     accepted deliberately, and this file records which ones were checked so
 //!     "we never looked" cannot be confused with "we looked and accepted".
 
@@ -211,8 +211,12 @@ mod tests {
         // The compensating control predates scoring and must not be dropped
         // now that scoring exists - they cover different things: PeerManager
         // bans on protocol violations, scoring degrades on mesh behaviour.
+        // The gossip entry point asks through `check_rate_limit_from`, which
+        // is the relay-aware wrapper over `check_rate_limit`: the second hop of
+        // a relayed message is not the author and must not be charged as one,
+        // while its first hop still is.
         assert!(
-            NODE_RS.contains("peer_manager_lock().check_rate_limit(&peer_id)"),
+            NODE_RS.contains("check_rate_limit_from(&peer_id, gossip_authored)"),
             "PeerManager rate limiting must stay alongside peer scoring, \
              called on the inbound message path"
         );
@@ -310,16 +314,37 @@ mod tests {
                  either the list or the publisher drifted"
             );
         }
+        // The aggregation topics are named once, scored in a loop of their
+        // own right after, and joined from the same list.
+        let list = NODE_RS
+            .find("const AGGREGATION_TOPICS: [&str; 2] = [")
+            .expect("the aggregation topic list must exist");
+        let names = &NODE_RS[list..(list + 200).min(NODE_RS.len())];
+        assert!(names.contains("TOPIC_AGG_OBJECT") && names.contains("TOPIC_AGG_FRAME"));
+        let scored = NODE_RS[at..]
+            .find("for topic in AGGREGATION_TOPICS {")
+            .map(|offset| at + offset)
+            .expect("the aggregation topics must be scored");
+        let window = &NODE_RS[scored..(scored + 250).min(NODE_RS.len())];
+        assert!(
+            window.contains("score_params.topics.insert"),
+            "the aggregation topic loop must register each topic with the scorer"
+        );
+        assert_eq!(
+            NODE_RS.matches("for topic in AGGREGATION_TOPICS {").count(),
+            2,
+            "the aggregation topics are scored at build time and joined on request"
+        );
     }
 
     /// A sync request leaves this node over `/sync`, never over gossip.
     ///
     /// The gossip arms for `GetHeaders` and `GetBlocksRange` stopped
-    /// answering when the reflected-amplification finding was fixed: a reply
+    /// answering to prevent reflected amplification: a reply
     /// published to the topic reaches the whole mesh, not the asker. The
     /// requesting side was never moved, so every `GetHeaders` this node sent
     /// was published to a topic on which every receiver only logs and
-    /// `continue`s. No `Headers` ever came back, the request_response chain
+    /// `continue`s. No `Headers` ever came back, the `request_response` chain
     /// never started, and a node that missed one block could not catch up
     /// again. `sync_state` sat at 1 until `SYNC_TIMEOUT_SECS` reset it, and
     /// the next trigger repeated the cycle.
@@ -556,7 +581,8 @@ mod tests {
     /// that height is refused with `Previous hash mismatch`. Charging that as
     /// an invalid block bans an honest validator for an hour at ten
     /// occurrences (`BAN_THRESHOLD` is -100): a four-validator devnet that
-    /// splits a slot then silences the node whose block it needs, which is the failure this arm closes. The arm must classify the refusal before it penalises, must
+    /// splits a slot then silences the node whose block it needs. The arm must
+    /// classify the refusal before it penalises, must
     /// answer `Ignore` rather than `Reject`, and must keep the banning path for
     /// every other refusal.
     #[test]

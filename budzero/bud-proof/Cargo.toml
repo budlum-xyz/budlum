@@ -22,12 +22,13 @@ p3-commit = "=0.8.0"
 p3-challenger = "=0.8.0"
 p3-symmetric = "=0.8.0"
 p3-keccak = "=0.8.0"
+p3-keccak-air = "=0.8.0"
 p3-fri = "=0.8.0"
 p3-util = "=0.8.0"
 p3-goldilocks = "=0.8.0"
 p3-merkle-tree = "=0.8.0"
 p3-dft = "=0.8.0"
-postcard = { version = "1.0", features = ["alloc"] }
+postcard = { version = "1.0", default-features = false, features = ["alloc"] }
 tracing = "0.1"
 p3-maybe-rayon = "=0.8.0"
 tiny-keccak = { version = "2.0", features = ["keccak"] }

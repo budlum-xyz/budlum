@@ -2,7 +2,7 @@
 #
 # WHY ON TOP OF THE EXISTING SCANNERS: the repo already has cargo-audit (RustSec),
 # cargo-deny (RustSec) and OSV-Scanner (the OSV.dev aggregator). Grype adds two
-# Ekliyor:
+# distinct signals:
 #
 #   1) The EPSS score. A measurable answer to "is this vulnerability exploited in
 #      the wild"; present neither in RustSec nor OSV.dev. It changes priority:
@@ -25,12 +25,12 @@ name: Grype
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses, agg/phase-5-pcs-claims]
   push:
     branches: [main]
   schedule:
     # Weekly: a new advisory can be published without the code changing.
-    - cron: "0 6 * * 3"
+    - cron: "0 22 * * 0" # Sunday 22:00 UTC, after the deep fuzz window
   workflow_dispatch:
 
 permissions:
@@ -107,7 +107,7 @@ jobs:
 
       - name: Upload SARIF (Security tab)
         if: always()
-        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: grype.sarif
           category: grype

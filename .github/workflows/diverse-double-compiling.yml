@@ -33,12 +33,15 @@ name: Diverse Double Compiling
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+  # Heavy battery. It runs on the schedule, on demand (the evidence-window
+  # owner dispatches it on the wave head) and on pushes to `main`. It is out
+  # of the pull-request path on purpose: one push was queueing more work than
+  # the shared runner pool could finish, and the budget gate
+  # `ci-pull-request-fanout-is-budgeted` pins that path's size.
   schedule:
     # Once a week: two full builds are expensive, and backdoor classes do not
     # change on every commit.
-    - cron: "0 4 * * 1"
+    - cron: "0 9 * * 4" # Thursday 09:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -50,9 +53,13 @@ concurrency:
 
 jobs:
   compile-with:
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
     name: Stage 1 (${{ matrix.label }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: false
       matrix:
@@ -101,7 +108,9 @@ jobs:
       - name: Build
         run: |
           set -euo pipefail
-          cargo build --release 2>&1 | tail -5
+          # Keep every rustc line in the job log and still fail on the compiler's
+          # exit status: truncation here hides the real cause of a red stage.
+          cargo build --release 2>&1 | tee /tmp/build-stage1.log; exit "${PIPESTATUS[0]}"
 
       - name: Canonical digests
         id: digests
@@ -118,7 +127,7 @@ jobs:
           # No `|| true`. If the gate does not run this job goes red: something
           # unmeasurable cannot be counted green, and a silently skipped stage empties
           # the comparison.
-          (cd xtask/gates && cargo run --release --quiet -- regeneration) > /tmp/proghash.txt 2>&1
+          (cd xtask/gates && cargo run --release --quiet -- canonical-programs-reproduce) > /tmp/proghash.txt 2>&1
           PROGRAM=$(grep -oE "program-hash [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
           test -n "${PROGRAM}"
           # The matmul guest is the largest canonical program; its hash is the
@@ -180,6 +189,8 @@ jobs:
           retention-days: 7
 
   compare:
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
     name: Stage 2 compare (bit-for-bit on canonical values)
     runs-on: ubuntu-latest
     needs: compile-with

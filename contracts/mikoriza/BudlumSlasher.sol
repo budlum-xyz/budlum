@@ -27,26 +27,47 @@ struct DoubleVote {
 }
 
 contract BudlumSlasher {
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
+
     IBudlumSlashTarget public immutable registrar;
     uint64 public immutable budlumChainId;
     bytes32 public immutable g2GeneratorHash;
 
     mapping(bytes32 => bool) public slashed;
+    uint256 private _reentrancyLock;
 
-    event DoubleVoteSlashed(
-        bytes32 indexed budlumValidator, address indexed operator, uint64 epoch, uint64 height
-    );
+    event DoubleVoteSlashed(bytes32 indexed budlumValidator, address indexed operator, uint64 epoch, uint64 height);
 
     error SameHash();
     error UntrustedGenerator();
     error NotBound(bytes32 budlumValidator);
     error AlreadySlashed(bytes32 key);
     error SignatureInvalid(string which);
+    error InvalidSlasherConfig();
+    error InvalidDoubleVote();
+    error ReentrantCall();
 
     constructor(address registrar_, uint64 budlumChainId_, bytes32 g2GeneratorHash_) {
+        if (
+            registrar_ == address(0) || (registrar_.code.length == 0 && registrar_ != msg.sender) || budlumChainId_ == 0
+                || g2GeneratorHash_ == bytes32(0)
+        ) {
+            revert InvalidSlasherConfig();
+        }
         registrar = IBudlumSlashTarget(registrar_);
         budlumChainId = budlumChainId_;
         g2GeneratorHash = g2GeneratorHash_;
+        _reentrancyLock = _NOT_ENTERED;
+    }
+
+    modifier nonReentrant() {
+        if (_reentrancyLock == _ENTERED) {
+            revert ReentrantCall();
+        }
+        _reentrancyLock = _ENTERED;
+        _;
+        _reentrancyLock = _NOT_ENTERED;
     }
 
     function checkpointSigningMessage(uint64 epoch, uint64 height, bytes memory checkpointHash)
@@ -64,11 +85,16 @@ contract BudlumSlasher {
         );
     }
 
-    function slashDoubleVote(
-        DoubleVote calldata vote,
-        bytes calldata pubkey,
-        bytes calldata g2Generator
-    ) external {
+    function slashDoubleVote(DoubleVote calldata vote, bytes calldata pubkey, bytes calldata g2Generator)
+        external
+        nonReentrant
+    {
+        if (
+            vote.budlumValidator == bytes32(0) || vote.operator == address(0) || vote.hashA.length == 0
+                || vote.hashB.length == 0
+        ) {
+            revert InvalidDoubleVote();
+        }
         if (keccak256(vote.hashA) == keccak256(vote.hashB)) {
             revert SameHash();
         }
@@ -92,14 +118,18 @@ contract BudlumSlasher {
         if (!registrar.wasBound(vote.budlumValidator, vote.operator, pubkey)) {
             revert NotBound(vote.budlumValidator);
         }
-        if (!BudlumBls.verify(
-            pubkey, checkpointSigningMessage(vote.epoch, vote.height, vote.hashA), vote.negSigA, g2Generator
-        )) {
+        if (
+            !BudlumBls.verify(
+                pubkey, checkpointSigningMessage(vote.epoch, vote.height, vote.hashA), vote.negSigA, g2Generator
+            )
+        ) {
             revert SignatureInvalid("first");
         }
-        if (!BudlumBls.verify(
-            pubkey, checkpointSigningMessage(vote.epoch, vote.height, vote.hashB), vote.negSigB, g2Generator
-        )) {
+        if (
+            !BudlumBls.verify(
+                pubkey, checkpointSigningMessage(vote.epoch, vote.height, vote.hashB), vote.negSigB, g2Generator
+            )
+        ) {
             revert SignatureInvalid("second");
         }
     }

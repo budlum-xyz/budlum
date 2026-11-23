@@ -6,7 +6,7 @@
 //! side EXACTLY, so the only un-priced term left in the first-order
 //! decomposition is the message-into-checksum cross-correlation (the
 //! reviewer's formal refinement, question 1 of
-//! docs/BPQS_INDEPENDENT_REVIEW_CALL.md).
+//! `crates/bpqs/SECURITY-ARGUMENT.md` section 6; the standalone review-call document was retired).
 //!
 //! Ground truth used here (must match crates/bpqs/src/params.rs):
 //!  - LEN = 67 for any w = 16 row; 64 message digits + 3 checksum digits.

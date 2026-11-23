@@ -42,13 +42,13 @@ mod tests {
         }
     }
 
-    /// Eclipse /24 bound still enforced at PeerManager.
+    /// Eclipse /24 bound still enforced at `PeerManager`.
     #[test]
     fn eclipse_bound_still_active() {
-        use crate::network::peer_manager::{PeerManager, SubnetKey};
+        use crate::network::peer_manager::PeerManager;
         let mut pm = PeerManager::new();
         assert_eq!(pm.max_peers_per_subnet(), 4);
-        let s = SubnetKey::Ipv4([198, 51, 100]);
+        let s: [u8; 3] = [198, 51, 100];
         for _ in 0..4 {
             let peer = libp2p::identity::Keypair::generate_ed25519()
                 .public()
@@ -87,7 +87,7 @@ mod tests {
         )
     }
 
-    /// H6.3: RequireSigned fails closed without signature.
+    /// H6.3: `RequireSigned` fails closed without signature.
     #[test]
     fn require_signed_fails_without_signature() {
         let mut snap = sample_snapshot();
@@ -124,7 +124,7 @@ mod tests {
         );
     }
 
-    /// Migration_report rejects ancient / future schemas; accepts current.
+    /// `Migration_report` rejects ancient / future schemas; accepts current.
     #[test]
     fn migration_report_bounds() {
         let mut snap = sample_snapshot();

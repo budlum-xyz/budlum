@@ -2,8 +2,11 @@ use budlum_core::chain::blockchain::Blockchain;
 use budlum_core::chain::chain_actor::ChainActor;
 use budlum_core::chain::snapshot::PruningManager;
 use budlum_core::cli::{ConsensusType, NodeConfig};
+use budlum_core::consensus::dag::{DAGConfig, DagEngine};
 use budlum_core::consensus::poa::{PoAConfig, PoAEngine};
+use budlum_core::consensus::poh::{PohConfig, PohEngine};
 use budlum_core::consensus::pos::{PoSConfig, PoSEngine};
+use budlum_core::consensus::pospace::{PoSpaceConfig, PoSpaceEngine};
 use budlum_core::consensus::pow::PoWEngine;
 use budlum_core::consensus::ConsensusEngine;
 use budlum_core::core::address::Address;
@@ -11,12 +14,13 @@ use budlum_core::core::transaction::Transaction;
 use budlum_core::crypto::primitives::{KeyPair, ValidatorKeys};
 use budlum_core::crypto::signer::ConsensusSigner;
 use budlum_core::domain::{
-    BftDomainPlugin, ConsensusKind, PoADomainPlugin, PoSDomainPlugin, PoWDomainPlugin,
+    BftDomainPlugin, ConsensusKind, DagDomainPlugin, PoADomainPlugin, PoSDomainPlugin,
+    PoWDomainPlugin, PohDomainPlugin, PospaceDomainPlugin,
 };
 use budlum_core::network::node::Node;
 use budlum_core::network::protocol::NetworkMessage;
+use budlum_core::persistence::db::Storage;
 use budlum_core::rpc::{RpcMode, RpcSecurityConfig, RpcServer};
-use budlum_core::storage::db::Storage;
 
 use clap::Parser;
 use std::path::{Path, PathBuf};
@@ -42,6 +46,65 @@ fn load_signing_key(path: &str) -> Option<KeyPair> {
             None
         }
     }
+}
+
+/// Read a 32-byte FIPS 204 ML-DSA-87 seed from an owner-only (0600), non-symlink
+/// regular file (max 128 bytes) holding 64 hex characters (optional `0x` prefix).
+fn read_aggregator_seed(path: &str) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+    use std::io::Read;
+    let lmeta = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("cannot stat aggregator key file {path}: {e}"))?;
+    if lmeta.file_type().is_symlink() || !lmeta.is_file() {
+        return Err(format!(
+            "aggregator key file {path} must be a non-symlink regular file"
+        ));
+    }
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("cannot open aggregator key file {path}: {e}"))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("cannot stat open aggregator key file {path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("aggregator key file {path} must be a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if (meta.dev(), meta.ino()) != (lmeta.dev(), lmeta.ino()) {
+            return Err(format!(
+                "aggregator key file {path} changed concurrently during open"
+            ));
+        }
+        if meta.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "aggregator key file {path} has overly permissive permissions (must be 0600)"
+            ));
+        }
+    }
+    if meta.len() > 128 {
+        return Err(format!(
+            "aggregator key file {path} is too large ({} bytes, max 128)",
+            meta.len()
+        ));
+    }
+    let mut raw = zeroize::Zeroizing::new(String::new());
+    file.read_to_string(&mut raw)
+        .map_err(|e| format!("cannot read aggregator key file {path}: {e}"))?;
+    let trimmed = raw.trim();
+    let hex_str = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    let decoded = zeroize::Zeroizing::new(
+        hex::decode(hex_str)
+            .map_err(|e| format!("aggregator key file {path} is not valid hex: {e}"))?,
+    );
+    if decoded.len() != 32 {
+        return Err(format!(
+            "aggregator key file {path} must decode to 32 bytes, got {}",
+            decoded.len()
+        ));
+    }
+    let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+    seed.copy_from_slice(&decoded);
+    Ok(seed)
 }
 
 /// Claims `path` for a new secret key file. It fails when the path already exists, so key
@@ -83,7 +146,7 @@ fn claim_new_key_file_or_exit(path: &str) {
 const PRODUCER_SYNC_HOLD: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The daemon block-production loop runs for every engine that produces from this process.
-/// PoA is included: the engine signs only when this node is the elected leader, and
+/// `PoA` is included: the engine signs only when this node is the elected leader, and
 /// `produce_block` returns `None` for the other slots.
 fn daemon_producer_loop_runs(consensus_type: ConsensusType) -> bool {
     matches!(
@@ -107,35 +170,127 @@ fn write_database_backup(
     backup_dir: &Path,
     retention_count: usize,
 ) -> std::io::Result<PathBuf> {
+    if retention_count == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "backup retention count must be at least one",
+        ));
+    }
     std::fs::create_dir_all(backup_dir)?;
+    // Serialize creation and pruning across cooperating processes. An in-flight
+    // reservation must not be mistaken for an expired backup by another writer.
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(backup_dir.join(".budlum-backup.lock"))?;
+    lock.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "another backup writer holds the backup lock",
+        ),
+        std::fs::TryLockError::Error(error) => error,
+    })?;
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(std::io::Error::other)?
         .as_millis();
     let path = backup_dir.join(format!("budlum-{timestamp_ms}.budbak"));
-    storage.create_snapshot(&path)?;
-    Storage::verify_snapshot(&path)?;
-
-    let mut backups: Vec<PathBuf> = std::fs::read_dir(backup_dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|candidate| {
-            candidate
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("budlum-") && name.ends_with(".budbak"))
-        })
-        .collect();
-    backups.sort();
-    let remove_count = backups.len().saturating_sub(retention_count);
-    for expired in backups.into_iter().take(remove_count) {
-        std::fs::remove_file(expired)?;
+    // `Storage::create_snapshot` writes `<path>.partial` and atomically links
+    // it to `path` via `std::fs::hard_link`, failing with `AlreadyExists` if
+    // `path` is already present (e.g. two requests in the same millisecond or
+    // clock rollback) without replacing an existing verified backup.
+    if path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("backup already exists at {}", path.display()),
+        ));
     }
+    if let Err(error) = storage.create_snapshot(&path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    // A backup that fails verification must not survive under a backup name:
+    // a later restore could trust the name and not the bytes. Remove it with
+    // the same cleanup as a failed write.
+    if let Err(error) = Storage::verify_snapshot(&path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+
+    prune_database_backups(backup_dir, &path, retention_count)?;
     Ok(path)
 }
 
-#[tokio::main]
-async fn main() {
+// Only files bearing our exact numeric timestamp naming scheme are managed.
+// Always retain the just-verified backup, even if the system clock moved back.
+fn prune_database_backups(
+    backup_dir: &Path,
+    current: &Path,
+    retention_count: usize,
+) -> std::io::Result<()> {
+    let mut backups = Vec::new();
+    for entry in std::fs::read_dir(backup_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path == current || !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(timestamp) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("budlum-"))
+            .and_then(|name| name.strip_suffix(".budbak"))
+            .filter(|timestamp| {
+                !timestamp.is_empty() && timestamp.bytes().all(|b| b.is_ascii_digit())
+            })
+            .and_then(|timestamp| timestamp.parse::<u128>().ok())
+        else {
+            continue;
+        };
+        backups.push((timestamp, path));
+    }
+    backups.sort();
+    let remove_count = backups
+        .len()
+        .saturating_sub(retention_count.saturating_sub(1));
+    for (_, expired) in backups.into_iter().take(remove_count) {
+        std::fs::remove_file(expired)?;
+    }
+    Ok(())
+}
+
+/// Minimum worker thread stack size (8 MiB) enforced on both the Tokio async
+/// runtime and the global Rayon pool so recursive Plonky3 STARK/FRI/Merkle
+/// verification never overflows small platform defaults such as Alpine `musl`
+/// (128 KiB default `pthread` stack).
+const WORKER_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+fn build_tokio_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_THREAD_STACK_BYTES)
+        .build()
+}
+
+fn main() {
+    // Configure the global Rayon pool with an explicit 8 MiB stack before any
+    // parallel proof or erasure-coding task spawns worker threads.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .stack_size(WORKER_THREAD_STACK_BYTES)
+        .build_global();
+
+    let runtime = match build_tokio_runtime() {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("Fatal: failed to initialize Tokio runtime: {err}");
+            std::process::exit(1);
+        }
+    };
+    runtime.block_on(async_main());
+}
+
+async fn async_main() {
     // The Semgrep rule `rust.lang.security.args.args` targets using argv[0] -
     // the executable path, which an attacker can set freely - as the basis of a
     // security decision. argv[0] is never read here: subcommand parsing starts
@@ -166,12 +321,11 @@ async fn main() {
                 }
                 "--chain-id" | "-c" => {
                     if i + 1 < args.len() {
-                        chain_id = match args[i + 1].parse() {
-                            Ok(v) => v,
-                            Err(_) => {
-                                eprintln!("Invalid --chain-id: {}", args[i + 1]);
-                                std::process::exit(1);
-                            }
+                        chain_id = if let Ok(v) = args[i + 1].parse() {
+                            v
+                        } else {
+                            eprintln!("Invalid --chain-id: {}", args[i + 1]);
+                            std::process::exit(1);
                         };
                         i += 2;
                     } else {
@@ -202,22 +356,17 @@ async fn main() {
                         for item in allocs_str.split(',') {
                             let parts: Vec<&str> = item.split(':').collect();
                             if parts.len() == 2 {
-                                let addr = match Address::from_hex(parts[0].trim()) {
-                                    Ok(a) => a,
-                                    Err(_) => {
-                                        eprintln!(
-                                            "Invalid allocation address: {}",
-                                            parts[0].trim()
-                                        );
-                                        std::process::exit(1);
-                                    }
+                                let addr = if let Ok(a) = Address::from_hex(parts[0].trim()) {
+                                    a
+                                } else {
+                                    eprintln!("Invalid allocation address: {}", parts[0].trim());
+                                    std::process::exit(1);
                                 };
-                                let amount: u64 = match parts[1].trim().parse() {
-                                    Ok(v) => v,
-                                    Err(_) => {
-                                        eprintln!("Invalid allocation amount: {}", parts[1].trim());
-                                        std::process::exit(1);
-                                    }
+                                let amount: u64 = if let Ok(v) = parts[1].trim().parse() {
+                                    v
+                                } else {
+                                    eprintln!("Invalid allocation amount: {}", parts[1].trim());
+                                    std::process::exit(1);
                                 };
                                 allocations.push((addr, amount));
                             } else {
@@ -233,12 +382,11 @@ async fn main() {
                 }
                 "--block-reward" => {
                     if i + 1 < args.len() {
-                        block_reward = match args[i + 1].parse() {
-                            Ok(v) => v,
-                            Err(_) => {
-                                eprintln!("Invalid --block-reward: {}", args[i + 1]);
-                                std::process::exit(1);
-                            }
+                        block_reward = if let Ok(v) = args[i + 1].parse() {
+                            v
+                        } else {
+                            eprintln!("Invalid --block-reward: {}", args[i + 1]);
+                            std::process::exit(1);
                         };
                         i += 2;
                     } else {
@@ -248,12 +396,11 @@ async fn main() {
                 }
                 "--base-fee" => {
                     if i + 1 < args.len() {
-                        base_fee = match args[i + 1].parse() {
-                            Ok(v) => v,
-                            Err(_) => {
-                                eprintln!("Invalid --base-fee: {}", args[i + 1]);
-                                std::process::exit(1);
-                            }
+                        base_fee = if let Ok(v) = args[i + 1].parse() {
+                            v
+                        } else {
+                            eprintln!("Invalid --base-fee: {}", args[i + 1]);
+                            std::process::exit(1);
                         };
                         i += 2;
                     } else {
@@ -361,6 +508,9 @@ async fn main() {
             // the template, so what the chain pays is readable in the file it
             // was launched from (testnet item 8).
             reward_pool: network_defaults.reward_pool,
+            aggregation: network_defaults.aggregation,
+            bns_primary_sellers: network_defaults.bns_primary_sellers,
+            bns_reserved_labels: network_defaults.bns_reserved_labels,
         };
 
         let data = match serde_json::to_string_pretty(&genesis_config) {
@@ -798,12 +948,11 @@ async fn main() {
         // pinned as the announced identity.
         let decode_expected = |raw: Option<&str>, what: &str| -> Option<Vec<u8>> {
             let raw = raw?.trim().trim_start_matches("0x").to_string();
-            match hex::decode(&raw) {
-                Ok(bytes) => Some(bytes),
-                Err(_) => {
-                    eprintln!("CRITICAL: --{what} is not valid hex; refusing to start");
-                    std::process::exit(1);
-                }
+            if let Ok(bytes) = hex::decode(&raw) {
+                Some(bytes)
+            } else {
+                eprintln!("CRITICAL: --{what} is not valid hex; refusing to start");
+                std::process::exit(1);
             }
         };
         let expected_bls_key = decode_expected(
@@ -821,6 +970,20 @@ async fn main() {
                     eprintln!("CRITICAL: consensus public key cross-check failed: {e}");
                     std::process::exit(1);
                 }
+            };
+            // the label the vendor BLS mechanism signs through is
+            // the operator's, not the compiled-in default, so the object the
+            // startup binding test proves a pairing for is the object that
+            // signs.
+            let s = match config.pkcs11_bls_key_label.clone() {
+                Some(label) => match s.with_bls_key_label(label) {
+                    Ok(signer) => signer,
+                    Err(e) => {
+                        eprintln!("CRITICAL: invalid PKCS#11 BLS key label: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                None => s,
             };
             let signer = s.with_vendor_mechanisms(
                 config.pkcs11_bls_mechanism.clone(),
@@ -1321,21 +1484,52 @@ async fn main() {
                     ))
                 }
             }
+            ConsensusKind::Dag => Arc::new(DagEngine::new(DAGConfig::default())),
+            ConsensusKind::Poh => Arc::new(PohEngine::new(PohConfig::default())),
+            ConsensusKind::Pospace => Arc::new(PoSpaceEngine::new(PoSpaceConfig::default())),
             _ => continue,
         };
 
-        let plugin: std::sync::Arc<dyn budlum_core::domain::ConsensusDomainPlugin> =
-            match &domain.kind {
-                ConsensusKind::PoW => std::sync::Arc::new(PoWDomainPlugin::new(plugin_engine)),
-                ConsensusKind::PoS => std::sync::Arc::new(PoSDomainPlugin::new(plugin_engine)),
-                ConsensusKind::PoA => std::sync::Arc::new(PoADomainPlugin::new(plugin_engine)),
-                ConsensusKind::Bft => std::sync::Arc::new(BftDomainPlugin::new(plugin_engine)),
-                _ => continue,
-            };
+        let plugin: std::sync::Arc<dyn budlum_core::domain::ConsensusDomainPlugin> = match &domain
+            .kind
+        {
+            ConsensusKind::PoW => {
+                // A PoW domain registered under the Bitcoin SPV adapter must
+                // get a plugin that verifies Bitcoin's chainwork, not the
+                // bounded header-chain client; the fork of the two is per
+                // `domain.finality_adapter`, the same field the settlement
+                // dispatch checks.
+                if domain.finality_adapter == budlum_core::domain::BITCOIN_SPV_ADAPTER {
+                    std::sync::Arc::new(PoWDomainPlugin::new_bitcoin_spv(plugin_engine))
+                } else {
+                    std::sync::Arc::new(PoWDomainPlugin::new(plugin_engine))
+                }
+            }
+            ConsensusKind::PoS => std::sync::Arc::new(PoSDomainPlugin::new(plugin_engine)),
+            ConsensusKind::PoA => std::sync::Arc::new(PoADomainPlugin::new(plugin_engine)),
+            ConsensusKind::Bft => std::sync::Arc::new(BftDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Dag => std::sync::Arc::new(DagDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Poh => std::sync::Arc::new(PohDomainPlugin::new(plugin_engine)),
+            ConsensusKind::Pospace => std::sync::Arc::new(PospaceDomainPlugin::new(plugin_engine)),
+            _ => continue,
+        };
         if let Err(e) = blockchain.plugin_registry.register(domain.id, plugin) {
-            println!("Plugin registration failed (domain {}): {}", domain.id, e);
+            // A domain with no plugin is a domain whose block rules nothing
+            // enforces; continuing to serve it plugin-less is never the
+            // safer option. Registration failure is fatal at bootstrap, not
+            // a log line someone has to notice.
+            eprintln!(
+                "Fatal: plugin registration failed for domain {}: {e}; refusing to start a \
+                 node that cannot validate a registered domain",
+                domain.id
+            );
+            std::process::exit(1);
         }
     }
+    tracing::info!(
+        registered_plugins = blockchain.plugin_registry.domain_ids().len(),
+        "Domain consensus plugin registry initialized"
+    );
 
     for validator in &poa_validators {
         // A restart must not reset a stored authority to stake 1, active and
@@ -1514,12 +1708,19 @@ async fn main() {
         });
     }
 
+    let sentry_policy = config.sentry_policy().unwrap_or_else(|e| {
+        eprintln!("CRITICAL SECURITY FAILURE: {e}");
+        std::process::exit(1);
+    });
+    let mdns_enabled = !sentry_policy.is_discovery_disabled()
+        && config
+            .mdns_enabled
+            .unwrap_or(network.security_config().mdns_enabled);
+
     let mut node = Node::with_key(
         chain.clone(),
         identity_key,
-        config
-            .mdns_enabled
-            .unwrap_or(network.security_config().mdns_enabled),
+        mdns_enabled,
         storage_node,
         sharding_config,
     )
@@ -1527,16 +1728,44 @@ async fn main() {
         eprintln!("Error: could not build the P2P node: {e}");
         std::process::exit(1);
     })
+    .with_sentry_policy(sentry_policy.clone())
     .with_identity(config.p2p_identity_file.clone())
-    .with_dns_seeds(config.dns_seeds.clone(), network.default_port())
+    .with_dns_seeds(
+        if sentry_policy.is_discovery_disabled() {
+            Vec::new()
+        } else {
+            config.dns_seeds.clone()
+        },
+        network.default_port(),
+    )
     .with_banned_peer_db(config.banned_peer_db.clone())
     .with_vote_history_db(config.vote_history_db.clone())
-    .with_bootstrap_peers(bootstraps.clone())
+    .with_bootstrap_peers(if sentry_policy.is_discovery_disabled() {
+        Vec::new()
+    } else {
+        bootstraps.clone()
+    })
     .with_metrics(metrics.clone());
     node.apply_network_security(network);
+    match sentry_policy.role() {
+        budlum_core::network::sentry::SentryRole::ShieldedValidator => {
+            println!(
+                "Sentry architecture: SHIELDED VALIDATOR mode active (discovery disabled, {} sentry peer(s))",
+                sentry_policy.sentry_addrs().len()
+            );
+        }
+        budlum_core::network::sentry::SentryRole::Sentry => {
+            println!(
+                "Sentry architecture: SENTRY SHIELD mode active (protecting {} private validator peer(s))",
+                config.private_peers.len()
+            );
+        }
+        budlum_core::network::sentry::SentryRole::Standard => {}
+    }
     let profile_peer_cap = node.max_peers;
     let effective_max_peers = config.effective_max_peers();
     node.max_peers = effective_max_peers;
+    node.sync_connection_caps();
     if let Some(requested) = config.max_peers {
         if requested > profile_peer_cap {
             tracing::warn!(
@@ -1553,16 +1782,73 @@ async fn main() {
         }
     }
 
-    for addr in &bootstraps {
-        if let Err(e) = node.bootstrap(addr) {
-            eprintln!("Failed to bootstrap from {addr}: {e}");
+    let mut combined_validator_peers = config.validator_peers.clone();
+    for pp in &config.private_peers {
+        if !combined_validator_peers.contains(pp) {
+            combined_validator_peers.push(pp.clone());
+        }
+    }
+    let sentry_shield = budlum_core::network::sentry::SentryShieldConfig::from_role_and_peers(
+        &config.role,
+        &config.sentry_peers,
+        &combined_validator_peers,
+        Some(&node.peer_id),
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("CRITICAL SECURITY ERROR: invalid sentry shield topology: {e}");
+        std::process::exit(1);
+    });
+    node.configure_sentry_shield(sentry_shield)
+        .unwrap_or_else(|e| {
+            eprintln!("CRITICAL SECURITY ERROR: failed to configure sentry shield: {e}");
+            std::process::exit(1);
+        });
+
+    if node.sentry_shield().is_validator_shielded() || sentry_policy.is_discovery_disabled() {
+        tracing::info!(
+            sentry_count = config.sentry_peers.len(),
+            "Validator sentry shield enabled: public bootnodes, DNS seeds, mDNS, and Kademlia DHT server mode disabled; speaking only with configured sentry peers"
+        );
+    } else {
+        if config.role == "validator" && network != budlum_core::core::chain_config::Network::Devnet
+        {
+            tracing::warn!(
+                "Validator is starting on a public network without --sentry-peers / [p2p] sentry_peers; configure sentry shield nodes to hide validator P2P endpoints from direct public exposure"
+            );
+        }
+        if node.sentry_shield().is_sentry_protecting_validators() {
+            tracing::info!(
+                protected_validators = combined_validator_peers.len(),
+                "Sentry shield node active: protecting upstream validator identities and withholding their listen addresses from Kademlia"
+            );
+        }
+        for addr in &bootstraps {
+            if let Err(e) = node.bootstrap(addr) {
+                eprintln!("Failed to bootstrap from {addr}: {e}");
+            }
         }
     }
 
-    if let Err(e) = node.listen(port) {
+    if let Some(ref listen_ip_str) = config.p2p_listen_addr {
+        let listen_ip: std::net::IpAddr = listen_ip_str.trim().parse().unwrap_or_else(|e| {
+            eprintln!("Error: invalid p2p.listen_addr '{listen_ip_str}': {e}");
+            std::process::exit(1);
+        });
+        if let Err(e) = node.listen_on(listen_ip, port) {
+            eprintln!("Error: could not listen on {listen_ip}:{port}: {e}");
+            std::process::exit(1);
+        }
+    } else if let Err(e) = node.listen(port) {
         eprintln!("Error: could not listen on port {port}: {e}");
         std::process::exit(1);
     }
+    if let Some(ref priv_addr) = config.p2p_private_listen_addr {
+        if let Err(e) = node.listen_multiaddr(priv_addr.trim()) {
+            eprintln!("Error: could not listen on private interface {priv_addr}: {e}");
+            std::process::exit(1);
+        }
+    }
+    node.maintain_sentry_shield_links();
     if let Some(ref addr) = config.dial {
         if let Err(e) = node.dial(addr) {
             eprintln!("Error: could not dial {addr}: {e}");
@@ -1695,13 +1981,45 @@ async fn main() {
             );
             std::process::exit(1);
         };
-        let pub_server = RpcServer::with_security_and_mode(
+        // One Garden per node, shared by both listeners. Its content lives
+        // under the node's database directory.
+        let garden = Arc::new(budlum_core::garden::GardenService::new(
+            Some(chain.clone()),
+            Some(std::path::PathBuf::from(&config.db_path)),
+        ));
+        let compat_listener = |env_name: &str, default: &str| -> Option<String> {
+            match std::env::var(env_name) {
+                Ok(value) if value.eq_ignore_ascii_case("none") || value.is_empty() => None,
+                Ok(value) => Some(value),
+                Err(std::env::VarError::NotPresent) => Some(default.to_string()),
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    eprintln!("{env_name} must be valid UTF-8");
+                    std::process::exit(1);
+                }
+            }
+        };
+        let mut pub_server = RpcServer::with_security_and_mode(
             chain.clone(),
             node.get_client(),
-            rpc_security.clone(),
+            rpc_security,
             RpcMode::Public,
         )
+        .with_garden(garden.clone())
         .with_metrics(metrics.clone());
+        if let Some(addr) = compat_listener("BUDLUM_APTOS_LISTENER", "127.0.0.1:18549") {
+            pub_server = pub_server.with_aptos_listener(addr);
+        }
+        if let Some(addr) = compat_listener("BUDLUM_SOLANA_LISTENER", "127.0.0.1:18548") {
+            pub_server = pub_server.with_solana_listener(addr);
+        }
+        let pub_server = match std::env::var("BUDLUM_APTOS_UPSTREAM_URL") {
+            Ok(upstream) => pub_server.with_aptos_upstream(upstream),
+            Err(std::env::VarError::NotPresent) => pub_server,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                eprintln!("BUDLUM_APTOS_UPSTREAM_URL must be valid UTF-8");
+                std::process::exit(1);
+            }
+        };
         // In-process TLS: TLS 1.3 with X25519MLKEM768 only. A
         // certificate without its key, or an unusable pair, stops the node
         // here instead of falling back to plain HTTP.
@@ -1763,13 +2081,35 @@ async fn main() {
                 );
                 std::process::exit(1);
             }
-            let op_security = RpcSecurityConfig::operator_default();
+            let op_security = if config.rpc_operator_auth_required {
+                match RpcSecurityConfig::from_env(
+                    true,
+                    config.rpc_api_key_env.as_deref(),
+                    vec!["127.0.0.1".to_string(), "::1".to_string()],
+                    Vec::new(),
+                    config.rpc_rate_limit_per_minute,
+                ) {
+                    Ok(mut security) => {
+                        security.trusted_proxies = config.rpc_trusted_proxies.clone();
+                        security.max_request_body_size = Some(10 * 1024 * 1024);
+                        security.max_connections = Some(128);
+                        security
+                    }
+                    Err(e) => {
+                        eprintln!("Operator RPC configuration error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                RpcSecurityConfig::operator_default()
+            };
             let op_server = RpcServer::with_security_and_mode(
                 chain.clone(),
                 node.get_client(),
                 op_security,
                 RpcMode::Operator,
             )
+            .with_garden(garden.clone())
             .with_metrics(metrics.clone());
             let op_addr = operator_addr.clone();
             tokio::spawn(async move {
@@ -1826,12 +2166,16 @@ async fn main() {
                         .serve_connection(
                             io,
                             service_fn(move |req: Request<hyper::body::Incoming>| {
-                                let body = m.encode();
+                                let metrics = m.clone();
                                 async move {
                                     if req.uri().path() != "/metrics" {
                                         return Ok::<_, std::convert::Infallible>(
                                             Response::builder()
                                                 .status(404)
+                                                .header(
+                                                    hyper::header::CONTENT_TYPE,
+                                                    "text/plain; charset=utf-8",
+                                                )
                                                 .body(Full::new(Bytes::from("404 Not Found\n")))
                                                 .unwrap_or_else(|_| Response::new(Full::new(Bytes::from("404")))),
                                         );
@@ -1849,25 +2193,34 @@ async fn main() {
                                                 .and_then(|v| v.to_str().ok())
                                                 .unwrap_or("");
                                             let bearer = format!("Bearer {key}");
-                                            // F-0003: constant-time comparison, closing a timing side
-                                            // channel. A short-circuiting `!=` leaks both the length and
-                                            // the content of the secret into timing, so
-                                            // `subtle::ConstantTimeEq` is used instead.
+ // Constant-time comparison. A short-circuiting `!=` leaks
+ // both the length and the content of the secret into timing, so
+ // `subtle::ConstantTimeEq` is used instead.
                                             if !budlum_core::rpc::server::constant_time_eq_str(auth_hdr, &bearer)
                                                 && !budlum_core::rpc::server::constant_time_eq_str(api_key_hdr, &key)
                                             {
                                                 return Ok(
                                                     Response::builder()
                                                         .status(401)
+                                                        .header(
+                                                            hyper::header::CONTENT_TYPE,
+                                                            "text/plain; charset=utf-8",
+                                                        )
                                                         .body(Full::new(Bytes::from("401 Unauthorized: metrics require valid BUDLUM_METRICS_API_KEY\n")))
                                                         .unwrap_or_else(|_| Response::new(Full::new(Bytes::from("401")))),
                                                 );
                                             }
                                         }
                                     }
-                                    Ok::<_, std::convert::Infallible>(Response::new(Full::new(
-                                        Bytes::from(body),
-                                    )))
+                                    let body = metrics.encode();
+                                    let mut resp = Response::new(Full::new(Bytes::from(body)));
+                                    resp.headers_mut().insert(
+                                        hyper::header::CONTENT_TYPE,
+                                        hyper::header::HeaderValue::from_static(
+                                            "text/plain; version=0.0.4; charset=utf-8",
+                                        ),
+                                    );
+                                    Ok::<_, std::convert::Infallible>(resp)
                                 }
                             }),
                         )
@@ -1900,7 +2253,11 @@ async fn main() {
         // Production.
         let cursor_path = std::path::Path::new(&config.db_path).join("relayer-cursor");
         let relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr)
-            .with_cursor_path(Some(cursor_path));
+            .with_cursor_path(Some(cursor_path))
+            // The reservation gauges are the only live view of the pending
+            // store: without them an operator learns that results are piling
+            // up one file read at a time, on the node they happen to be on.
+            .with_metrics(metrics.clone());
 
         // The `--evm-bridge-address`
         // registration is removed. The EVM bridge leg has no live end-to-end
@@ -1932,6 +2289,45 @@ async fn main() {
     // backlog), and `mine` under PoW (difficulty from the CLI flag; smoke runs
     // difficulty=0). Broadcast goes over the gossipsub "blocks" channel, and
     // peers run the same deterministic commit path.
+    // The aggregation side of the node. It runs when the genesis turned the
+    // layer on and the operator supplied an owner-only `--aggregator-key-file`
+    // seed so every tick segment carries a cryptographic ownership attestation
+    // for the derived aggregator address. No zeroed or fallback seed is ever
+    // synthesized here.
+    if let Some(ref agg_key_path) = config.aggregator_key_file {
+        let seed = read_aggregator_seed(agg_key_path).unwrap_or_else(|e| {
+            eprintln!("CRITICAL: {e}");
+            std::process::exit(1);
+        });
+        let aggregator = budlum_core::aggregation::frame::aggregator_address_from_seed(&seed)
+            .unwrap_or_else(|e| {
+                eprintln!("CRITICAL: invalid aggregator seed: {e}");
+                std::process::exit(1);
+            });
+        if let Some(tick_ms) = chain.enable_aggregator(seed).await {
+            client.enable_aggregation().await;
+            let chain_a = chain.clone();
+            let client_a = client.clone();
+            let tick_ms = tick_ms.max(100);
+            tracing::info!("Aggregator active for {aggregator}, tick {tick_ms} ms");
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    for frame in chain_a.aggregation_tick().await {
+                        client_a
+                            .broadcast(
+                                budlum_core::network::protocol::TOPIC_AGG_FRAME.to_string(),
+                                NetworkMessage::AggFrame(frame),
+                            )
+                            .await;
+                    }
+                }
+            });
+        }
+    }
+
     if daemon_producer_loop_runs(consensus_type) {
         if let Some(producer) = cli_producer_address {
             let chain_p = chain.clone();
@@ -1997,103 +2393,168 @@ async fn main() {
     }
 
     tokio::select! {
-        _ = node.run() => {},
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("Shutdown signal received");
-            match chain.flush_storage().await {
-                Ok(bytes) => tracing::info!("Storage flushed: {bytes} bytes"),
-                Err(e) => tracing::error!("Storage flush failed during shutdown: {e}"),
-            }
-        },
-        _ = async {
-            let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
-            let mut line = String::new();
-            client.subscribe("blocks".to_string()).await;
-            client.subscribe("transactions".to_string()).await;
-            loop {
-                line.clear();
-                use tokio::io::AsyncBufReadExt;
-                // `Ok(0)` is end of file: a daemon with stdin closed or
-                // redirected from `/dev/null` gets it on every call, and a
-                // loop that treats it as an empty command spins on one
-                // core for the life of the process. The console is over;
-                // this branch parks so the other `select!` arms keep the
-                // node running.
-                match stdin.read_line(&mut line).await {
-                    Ok(0) => {
-                        tracing::info!("stdin closed; the interactive console is off");
-                        std::future::pending::<()>().await;
-                    }
-                    Err(e) => {
-                        tracing::warn!("stdin read failed: {e}; the interactive console is off");
-                        std::future::pending::<()>().await;
-                    }
-                    Ok(_) => {}
-                }
-                {
-                    let cmd = line.trim();
-                    match cmd {
-                        "tx" => {
-                            // Fixed literals for the interactive devnet `tx` command.
-                            let alice = Address::from([0x01u8; 32]);
-                            let bob = Address::from([0x02u8; 32]);
-                            let tx = Transaction::new(
-                                alice,
-                                bob,
-                                10,
-                                b"demo tx".to_vec(),
-                            );
-                            client.broadcast("transactions".to_string(), NetworkMessage::Transaction(tx)).await;
-                        }
-                        "block" | "mine" => {
-                            let producer = match console_producer(cli_producer_address) {
-                                Ok(producer) => producer,
-                                Err(reason) => {
-                                    println!("{reason}");
-                                    continue;
-                                }
-                            };
-                            if let Some((block, pruned_cids)) = chain.produce_block(producer).await {
-                                println!("Produced block #{} with {} txs", block.index, block.transactions.len());
-                                for cid in pruned_cids {
-                                    client.storage_prune_sync(cid);
-                                }
-                            }
-                        }
-                        "chain" => {
-                            let info = chain.get_chain_info().await;
-                            println!("{info}");
-                        }
-                        "peers" => {
-                            client.list_peers().await;
-                        }
-                        "sync" => {
-                            client.request_sync().await;
-                        }
-                        "help" => {
-                            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                            println!("Commands:");
-                            println!("tx    - Send demo transaction");
-                            println!("mine  - Produce new block");
-                            println!("chain - Show blockchain info");
-                            println!("peers - List connected peers");
-                            println!("sync  - Request chain sync");
-                            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        } => {}
-    }
+           _ = node.run() => {},
+           _ = tokio::signal::ctrl_c() => {
+               tracing::info!("Shutdown signal received");
+               match chain.flush_storage().await {
+                   Ok(bytes) => tracing::info!("Storage flushed: {bytes} bytes"),
+                   Err(e) => tracing::error!("Storage flush failed during shutdown: {e}"),
+               }
+           },
+           _ = async {
+               let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+               let mut line = String::new();
+               client.subscribe("blocks".to_string()).await;
+               client.subscribe("transactions".to_string()).await;
+               loop {
+                   line.clear();
+                   use tokio::io::AsyncBufReadExt;
+    // `Ok(0)` is end of file: a daemon with stdin closed or
+    // redirected from `/dev/null` gets it on every call, and a
+    // loop that treats it as an empty command spins on one
+    // core for the life of the process. The console is over;
+    // this branch parks so the other `select!` arms keep the
+    // node running.
+                   match stdin.read_line(&mut line).await {
+                       Ok(0) => {
+                           tracing::info!("stdin closed; the interactive console is off");
+                           std::future::pending::<()>().await;
+                       }
+                       Err(e) => {
+                           tracing::warn!("stdin read failed: {e}; the interactive console is off");
+                           std::future::pending::<()>().await;
+                       }
+                       Ok(_) => {}
+                   }
+                   {
+                       let cmd = line.trim();
+                       match cmd {
+                           "tx" => {
+    // Fixed literals for the interactive devnet `tx` command.
+                               let alice = Address::from([0x01u8; 32]);
+                               let bob = Address::from([0x02u8; 32]);
+                               let tx = Transaction::new(
+                                   alice,
+                                   bob,
+                                   10,
+                                   b"demo tx".to_vec(),
+                               );
+                               client.broadcast("transactions".to_string(), NetworkMessage::Transaction(tx)).await;
+                           }
+                           "block" | "mine" => {
+                               let producer = match console_producer(cli_producer_address) {
+                                   Ok(producer) => producer,
+                                   Err(reason) => {
+                                       println!("{reason}");
+                                       continue;
+                                   }
+                               };
+                               if let Some((block, pruned_cids)) = chain.produce_block(producer).await {
+                                   println!("Produced block #{} with {} txs", block.index, block.transactions.len());
+                                   for cid in pruned_cids {
+                                       client.storage_prune_sync(cid);
+                                   }
+                               }
+                           }
+                           "chain" => {
+                               let info = chain.get_chain_info().await;
+                               println!("{info}");
+                           }
+                           "peers" => {
+                               client.list_peers().await;
+                           }
+                           "sync" => {
+                               client.request_sync().await;
+                           }
+                           "help" => {
+                               println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                               println!("Commands:");
+                               println!("tx    - Send demo transaction");
+                               println!("mine  - Produce new block");
+                               println!("chain - Show blockchain info");
+                               println!("peers - List connected peers");
+                               println!("sync  - Request chain sync");
+                               println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                           }
+                           _ => {}
+                       }
+                   }
+               }
+           } => {}
+       }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_new_key_file, console_producer, daemon_producer_loop_runs, try_load_signing_key,
+        claim_new_key_file, console_producer, daemon_producer_loop_runs, prune_database_backups,
+        try_load_signing_key, write_database_backup,
     };
     use budlum_core::cli::ConsensusType;
+
+    #[test]
+    fn zero_retention_refuses_backup_without_deleting_existing_files() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let db_path = dir.path().join("db");
+        let storage = budlum_core::persistence::db::Storage::new(db_path.to_str().unwrap())
+            .expect("open database");
+        let backups = dir.path().join("backups");
+        std::fs::create_dir(&backups).unwrap();
+        let existing = backups.join("budlum-9.budbak");
+        std::fs::write(&existing, b"existing").unwrap();
+        let error = write_database_backup(&storage, &backups, 0).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(existing).unwrap(), b"existing");
+        assert_eq!(std::fs::read_dir(backups).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn retention_uses_numeric_timestamps_and_preserves_current_and_unknown_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "budlum-2.budbak",
+            "budlum-10.budbak",
+            "budlum-1.budbak",
+            "budlum-manual.budbak",
+        ] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+        }
+        let current = dir.path().join("budlum-1.budbak");
+        prune_database_backups(dir.path(), &current, 2).unwrap();
+        assert!(current.exists());
+        assert!(!dir.path().join("budlum-2.budbak").exists());
+        assert!(dir.path().join("budlum-10.budbak").exists());
+        assert!(dir.path().join("budlum-manual.budbak").exists());
+    }
+
+    #[test]
+    fn backup_refuses_concurrent_writer_without_pruning() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            budlum_core::persistence::db::Storage::new(dir.path().join("db").to_str().unwrap())
+                .expect("open database");
+        let backups = dir.path().join("backups");
+        std::fs::create_dir(&backups).unwrap();
+        let existing = backups.join("budlum-1.budbak");
+        std::fs::write(&existing, b"existing").unwrap();
+        let lock = std::fs::File::create(backups.join(".budlum-backup.lock")).unwrap();
+        lock.lock().unwrap();
+        let error = write_database_backup(&storage, &backups, 1).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(std::fs::read(existing).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn backup_returns_a_verified_existing_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            budlum_core::persistence::db::Storage::new(dir.path().join("db").to_str().unwrap())
+                .expect("open database");
+        let path =
+            write_database_backup(&storage, &dir.path().join("backups"), 1).expect("write backup");
+        assert!(path.is_file());
+        budlum_core::persistence::db::Storage::verify_snapshot(path).expect("verify backup");
+    }
 
     #[test]
     fn key_claim_refuses_to_overwrite_an_existing_file() {
@@ -2138,5 +2599,20 @@ mod tests {
         assert!(reason.contains(path_str));
         assert!(reason.contains("as validator keys"));
         assert!(reason.contains("as key pair"));
+    }
+
+    #[test]
+    fn worker_runtime_enforces_eight_mib_thread_stack() {
+        assert_eq!(super::WORKER_THREAD_STACK_BYTES, 8 * 1024 * 1024);
+        let rt = super::build_tokio_runtime().expect("tokio runtime builds with 8 MiB stack");
+        let out = rt.block_on(async {
+            tokio::spawn(async {
+                let buf = std::hint::black_box([0xA5u8; 512 * 1024]);
+                buf[0]
+            })
+            .await
+            .expect("worker task completes without stack overflow")
+        });
+        assert_eq!(out, 0xA5);
     }
 }

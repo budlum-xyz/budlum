@@ -34,7 +34,7 @@ impl Default for PoSConfig {
     /// Production paths (`main.rs`) already build the config explicitly from
     /// `network_params.epoch_len`; this only fixes the fallback.
     fn default() -> Self {
-        PoSConfig {
+        Self {
             min_stake: 1000,
             // The reward/penalty/unbonding knobs were never read by
             // any code path and are gone; slashing ratios come from
@@ -60,13 +60,14 @@ pub struct SlashingEvidence {
 }
 
 impl SlashingEvidence {
+    #[must_use]
     pub fn new(
         header1: BlockHeader,
         header2: BlockHeader,
         signature1: Vec<u8>,
         signature2: Vec<u8>,
     ) -> Self {
-        SlashingEvidence {
+        Self {
             header1,
             header2,
             signature1,
@@ -124,8 +125,9 @@ impl PoSEngine {
         Ok(self.config.epoch_length)
     }
 
+    #[must_use]
     pub fn new(config: PoSConfig, validator_keys: Option<ValidatorKeys>) -> Self {
-        PoSEngine {
+        Self {
             config,
             seen_blocks: RwLock::new(HashMap::new()),
             signed_rounds: RwLock::new(HashMap::new()),
@@ -145,7 +147,7 @@ impl PoSEngine {
         validator_keys: Option<ValidatorKeys>,
         signer: Arc<dyn ConsensusSigner>,
     ) -> Self {
-        PoSEngine {
+        Self {
             config,
             seen_blocks: RwLock::new(HashMap::new()),
             signed_rounds: RwLock::new(HashMap::new()),
@@ -203,6 +205,10 @@ impl PoSEngine {
 
     /// Prune old slashing evidence to prevent unbounded growth.
     /// Keeps only evidence with header1.index >= `min_height`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn prune_slashing_evidence(&self, min_height: u64) -> Result<usize, ConsensusError> {
         let mut guard = self.slashing_evidence.write().map_err(|_| {
             ConsensusError("Failed to acquire write lock on slashing evidence".into())
@@ -222,10 +228,15 @@ impl PoSEngine {
             .map_err(|_| ConsensusError("Failed to acquire read lock on checkpoints".into()))
     }
 
+    /// Record `block` as a committed `PoS` checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError`] when persisting the checkpoint fails.
     pub fn add_checkpoint(
         &self,
         block: &Block,
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         let checkpoint = Checkpoint {
             block_index: block.index,
@@ -240,7 +251,7 @@ impl PoSEngine {
     fn commit_checkpoint(
         &self,
         checkpoint: &Checkpoint,
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         if let Some(store) = storage {
             // Not `let _ =`: a checkpoint that fails to persist is not a
@@ -320,11 +331,15 @@ impl PoSEngine {
     }
 
     /// Derive epoch randomness from a canonical, already-established VRF
-    /// Transcript. Epoch `E` consumes epoch ` `, giving the source transcript
+    /// Transcript. Epoch `E` consumes epoch `E - 2`, giving the source transcript
     /// A full epoch to settle before it controls leader selection. Only verified
     /// VRF outputs and producer identities enter the transcript: block hashes,
     /// Timestamps and transaction ordering are deliberately excluded so a
     /// Proposer cannot grind future leadership by changing header fields.
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError`] when the epoch length is zero, the chain has no genesis
+    /// anchor, or the anchor is not height 0 on `chain_id`.
     pub fn epoch_randomness_from_chain(
         &self,
         chain_id: u64,
@@ -414,6 +429,11 @@ impl PoSEngine {
     /// rounds `0..MAX_LEADER_ROUNDS`, and each round draws a different VRF
     /// seed, so a slot with no eligible leader in round 0 re-rolls instead of
     /// stalling forever. Validation recovers the round from `block.nonce`.
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError`] when the epoch length is zero, the slot/epoch pair is
+    /// non-canonical, the round exceeds `MAX_LEADER_ROUNDS`, or the epoch randomness cannot
+    /// be derived (see [`Self::epoch_randomness_from_chain`]).
     pub fn calculate_seed_with_chain(
         &self,
         chain_id: u64,
@@ -527,9 +547,9 @@ impl PoSEngine {
             .is_some_and(|v| v.active && !v.slashed && v.stake >= self.config.min_stake)
     }
 
-    /// Lock-order fixture: the POS_STATE writer is gone; this
+    /// Lock-order fixture: the `POS_STATE` writer is gone; this
     /// stays only so `consensus_lock_order_loom` can pin the checkpoints ->
-    /// slashing_evidence lock order.
+    /// `slashing_evidence` lock order.
     #[cfg(test)]
     pub fn serialize_state(&self) -> Result<Vec<u8>, String> {
         let epoch_seed = self
@@ -572,7 +592,7 @@ impl PoSEngine {
         // Now we require at least one active, consensus-ready validator.
         if active_validators.is_empty() {
             return Err(ConsensusError(
-                "No active validators - PoS block production requires at least one                  consensus-ready validator. Bootstrap via genesis validator set or                  RegisterConsensusKeys transaction."
+                "No active validators - PoS block production requires at least one consensus-ready validator. Bootstrap via genesis validator set or RegisterConsensusKeys transaction."
                     .into(),
             ));
         }
@@ -719,8 +739,7 @@ impl PoSEngine {
                             let mut used = 0usize;
                             for evidence in evidences.iter() {
                                 let encoded = serde_json::to_vec(evidence)
-                                    .map(|bytes| bytes.len())
-                                    .unwrap_or(usize::MAX);
+                                    .map_or(usize::MAX, |bytes| bytes.len());
                                 if encoded <= crate::consensus::MAX_SLASHING_EVIDENCE_BYTES
                                     && used.saturating_add(encoded)
                                         <= crate::consensus::MAX_SLASHING_EVIDENCE_BYTES
@@ -752,6 +771,7 @@ impl PoSEngine {
 /// `Blockchain::verify_slashing_evidence` and `PoSEngine::verify_evidence`
 /// used to restate this independently. Two copies of a consensus check drift,
 /// and the drift is invisible until the two disagree about an equivocation.
+#[must_use]
 pub fn slashing_evidence_is_valid(evidence: &SlashingEvidence) -> bool {
     if evidence.header1.index != evidence.header2.index {
         return false;
@@ -1272,7 +1292,7 @@ impl ConsensusEngine for PoSEngine {
     fn record_block(
         &self,
         block: &Block,
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         let epoch_length = self.epoch_length_checked()?;
         let producer = block
@@ -1365,6 +1385,9 @@ impl ConsensusEngine for PoSEngine {
             let before = seen_blocks.len();
             seen_blocks.retain(|(_, slot), _| *slot >= min_slot);
             let pruned = before - seen_blocks.len();
+            if let Ok(mut signed) = self.signed_rounds.write() {
+                signed.retain(|(height, _, _, _, _), _| *height >= min_slot);
+            }
             if pruned > 0 {
                 if let Some(store) = storage {
                     if let Err(error) = store.prune_seen_blocks_below(min_slot) {
@@ -1390,7 +1413,7 @@ impl ConsensusEngine for PoSEngine {
         &self,
         height: u64,
         chain: &[Block],
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) {
         let promoted: Vec<Checkpoint> = {
             let Ok(mut pending) = self.pending_checkpoints.write() else {
@@ -1481,7 +1504,7 @@ impl ConsensusEngine for PoSEngine {
         &self,
         block: &Block,
         chain: &[Block],
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) {
         // The block is committed: the evidence it carried has now done its
         // job and leaves the pool. Everything the pool still holds is
@@ -1499,17 +1522,20 @@ impl ConsensusEngine for PoSEngine {
         let next_slot = block.index.saturating_add(1);
         let next_epoch = next_slot / self.config.epoch_length;
         match self.epoch_randomness_from_chain(block.chain_id, next_epoch, chain) {
-            Ok(randomness) => match self.epoch_seed.write() {
-                Ok(mut cached) => *cached = randomness,
-                Err(_) => tracing::error!("PoS replay-derived randomness cache lock is poisoned"),
-            },
+            Ok(randomness) => {
+                if let Ok(mut cached) = self.epoch_seed.write() {
+                    *cached = randomness;
+                } else {
+                    tracing::error!("PoS replay-derived randomness cache lock is poisoned");
+                }
+            }
             Err(error) => {
-                tracing::error!("Failed to refresh replay-derived PoS randomness cache: {error}")
+                tracing::error!("Failed to refresh replay-derived PoS randomness cache: {error}");
             }
         }
     }
 
-    fn load_state(&self, storage: &crate::storage::db::Storage) -> Result<(), ConsensusError> {
+    fn load_state(&self, storage: &crate::persistence::db::Storage) -> Result<(), ConsensusError> {
         let seen = storage
             .load_all_seen_blocks()
             .map_err(|error| ConsensusError(format!("Failed to load seen PoS blocks: {error}")))?;
@@ -1621,7 +1647,7 @@ impl ConsensusEngine for PoSEngine {
 #[cfg(test)]
 mod tests {
 
-    /// C-12 regression: the PoS engine validates `block.epoch == block.index /
+    /// C-12 regression: the `PoS` engine validates `block.epoch == block.index /
     /// Config.epoch_length`, while the chain layer derives epoch boundaries
     /// From `chain_config::epoch_len_for_chain_id`. If the default drifts away
     /// From every real network, a caller that forgets to override it silently
@@ -1798,7 +1824,7 @@ mod tests {
         };
         let engine = PoSEngine::new(config, None);
         let dir = tempfile::tempdir().unwrap();
-        let storage = crate::storage::db::Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let storage = crate::persistence::db::Storage::new(dir.path().to_str().unwrap()).unwrap();
         let alice = KeyPair::generate().unwrap();
 
         let mut old = Block::new(1, "prev".into(), vec![]);
@@ -1840,6 +1866,21 @@ mod tests {
             1,
             "a dropped block must not consume the evidence pool"
         );
+    }
+
+    #[test]
+    fn empty_validator_error_message_has_no_extra_spaces() {
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        let genesis = Block::genesis();
+        let mut candidate = Block::new(1, genesis.hash.clone(), vec![]);
+        let error = engine
+            .preview_block_with_chain(&mut candidate, &AccountState::new(), &[genesis])
+            .unwrap_err();
+        assert_eq!(
+            error.0,
+            "No active validators - PoS block production requires at least one consensus-ready validator. Bootstrap via genesis validator set or RegisterConsensusKeys transaction."
+        );
+        assert!(!error.0.contains("  "), "message has extra spaces");
     }
 
     /// A block below the local checkpoint is part of every candidate

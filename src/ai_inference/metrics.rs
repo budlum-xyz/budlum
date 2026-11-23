@@ -21,6 +21,18 @@ pub struct AiMetrics {
     pub total_fee_volume: AtomicU64,
 }
 
+fn saturating_atomic_add(counter: &AtomicU64, delta: u64) {
+    let mut cur = counter.load(Ordering::Relaxed);
+    while let Err(actual) = counter.compare_exchange_weak(
+        cur,
+        cur.saturating_add(delta),
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    ) {
+        cur = actual;
+    }
+}
+
 impl AiMetrics {
     #[must_use]
     pub fn new() -> Self {
@@ -28,15 +40,15 @@ impl AiMetrics {
     }
 
     pub fn record_query(&self) {
-        self.total_queries.fetch_add(1, Ordering::Relaxed);
+        saturating_atomic_add(&self.total_queries, 1);
     }
 
     pub fn record_verified(&self) {
-        self.verified_inferences.fetch_add(1, Ordering::Relaxed);
+        saturating_atomic_add(&self.verified_inferences, 1);
     }
 
     pub fn record_slash(&self) {
-        self.slashed_operators.fetch_add(1, Ordering::Relaxed);
+        saturating_atomic_add(&self.slashed_operators, 1);
     }
 
     pub fn set_active_models(&self, count: u64) {
@@ -44,7 +56,7 @@ impl AiMetrics {
     }
 
     pub fn record_fee(&self, fee: u64) {
-        self.total_fee_volume.fetch_add(fee, Ordering::Relaxed);
+        saturating_atomic_add(&self.total_fee_volume, fee);
     }
 
     /// A summary of the metrics, for debugging and monitoring.
@@ -103,5 +115,36 @@ mod tests {
         assert_eq!(s.active_models, 3);
         assert_eq!(s.total_fee_volume, 150);
         assert!(s.to_string().contains("queries=2"));
+    }
+
+    #[test]
+    fn ai_metrics_counters_saturate_instead_of_wrapping() {
+        let m = AiMetrics::new();
+        m.record_fee(u64::MAX - 10);
+        m.record_fee(100);
+        m.total_queries.store(u64::MAX, Ordering::Relaxed);
+        m.record_query();
+        let s = m.summary();
+        assert_eq!(s.total_fee_volume, u64::MAX);
+        assert_eq!(s.total_queries, u64::MAX);
+    }
+
+    #[test]
+    fn concurrent_queries_all_count() {
+        let m = std::sync::Arc::new(AiMetrics::new());
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let m = std::sync::Arc::clone(&m);
+                std::thread::spawn(move || {
+                    for _ in 0..250 {
+                        m.record_query();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("worker thread must not panic");
+        }
+        assert_eq!(m.summary().total_queries, 2000);
     }
 }

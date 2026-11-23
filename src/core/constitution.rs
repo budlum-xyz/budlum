@@ -3,7 +3,7 @@
 //! The constitution layer binds governance to user-sovereignty guardrails. DAO
 //! Proposals may tune bounded operational parameters, but they must not weaken
 //! Hard rules such as AI default-deny, no decrypt override, permissionless core
-//! Operation, or PoA island isolation.
+//! Operation, or `PoA` island isolation.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,28 +30,29 @@ pub enum ConstitutionParameterKey {
 }
 
 impl ConstitutionParameterKey {
+    #[must_use]
     pub fn is_hard_guardrail(self) -> bool {
         matches!(
             self,
-            ConstitutionParameterKey::AiReadRequiresPollenGrant
-                | ConstitutionParameterKey::NoGovernanceReadOverride
-                | ConstitutionParameterKey::PermissionlessCoreNoAdminWhitelist
-                | ConstitutionParameterKey::PoaIslandIsolation
-                | ConstitutionParameterKey::NoPrivateKeyCustody
-                | ConstitutionParameterKey::EvidenceApisNoPlaintext
+            Self::AiReadRequiresPollenGrant
+                | Self::NoGovernanceReadOverride
+                | Self::PermissionlessCoreNoAdminWhitelist
+                | Self::PoaIslandIsolation
+                | Self::NoPrivateKeyCustody
+                | Self::EvidenceApisNoPlaintext
         )
     }
 
     fn tag(self) -> u8 {
         match self {
-            ConstitutionParameterKey::AiReadRequiresPollenGrant => 1,
-            ConstitutionParameterKey::NoGovernanceReadOverride => 2,
-            ConstitutionParameterKey::PermissionlessCoreNoAdminWhitelist => 3,
-            ConstitutionParameterKey::PoaIslandIsolation => 4,
-            ConstitutionParameterKey::NoPrivateKeyCustody => 5,
-            ConstitutionParameterKey::EvidenceApisNoPlaintext => 6,
-            ConstitutionParameterKey::MaxEmergencyHaltEpochs => 7,
-            ConstitutionParameterKey::MinConstitutionProposalEpochs => 8,
+            Self::AiReadRequiresPollenGrant => 1,
+            Self::NoGovernanceReadOverride => 2,
+            Self::PermissionlessCoreNoAdminWhitelist => 3,
+            Self::PoaIslandIsolation => 4,
+            Self::NoPrivateKeyCustody => 5,
+            Self::EvidenceApisNoPlaintext => 6,
+            Self::MaxEmergencyHaltEpochs => 7,
+            Self::MinConstitutionProposalEpochs => 8,
         }
     }
 }
@@ -72,6 +73,7 @@ pub struct ConstitutionParameter {
 }
 
 impl ConstitutionParameter {
+    #[must_use]
     pub fn new(
         key: ConstitutionParameterKey,
         value: ConstitutionValue,
@@ -125,6 +127,11 @@ impl ConstitutionParameter {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_update(&self) -> Result<(), String> {
         self.validate_value()?;
         if self.key.is_hard_guardrail() {
@@ -171,6 +178,7 @@ impl ConstitutionRegistry {
         self.parameters.len()
     }
 
+    #[must_use]
     pub fn new() -> Self {
         let mut parameters = BTreeMap::new();
         for key in [
@@ -204,12 +212,18 @@ impl ConstitutionRegistry {
         Self { parameters }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn set_parameter(&mut self, parameter: ConstitutionParameter) -> Result<(), String> {
         parameter.validate_update()?;
         self.parameters.insert(parameter.key, parameter);
         self.assert_hard_guardrails()
     }
 
+    #[must_use]
     pub fn get(&self, key: ConstitutionParameterKey) -> Option<&ConstitutionParameter> {
         self.parameters.get(&key)
     }
@@ -217,6 +231,7 @@ impl ConstitutionRegistry {
     /// Minimum voting duration for a constitution amendment, in epochs.
     /// Falls back to the default of 10 when the entry is missing or not a
     /// `U64` (a tampered snapshot), which is never lower than the default.
+    #[must_use]
     pub fn min_proposal_epochs(&self) -> u64 {
         match self
             .parameters
@@ -228,6 +243,11 @@ impl ConstitutionRegistry {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn assert_hard_guardrails(&self) -> Result<(), String> {
         for key in [
             ConstitutionParameterKey::AiReadRequiresPollenGrant,
@@ -252,10 +272,12 @@ impl ConstitutionRegistry {
         Ok(())
     }
 
+    #[must_use]
     pub fn has_non_default_updates(&self) -> bool {
         self != &Self::new()
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_CONSTITUTION_REGISTRY_V1");
@@ -304,7 +326,7 @@ mod tests {
 
     /// A guardrail slot must hold the parameter of its own key.
     #[test]
-    fn p20_f08_guardrail_slot_with_foreign_parameter_is_rejected() {
+    fn guardrail_slot_with_foreign_parameter_is_rejected() {
         let mut registry = ConstitutionRegistry::new();
         registry.parameters.insert(
             ConstitutionParameterKey::PoaIslandIsolation,

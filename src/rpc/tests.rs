@@ -6,22 +6,17 @@ mod rpc_tests {
     use crate::core::address::Address;
     use crate::core::transaction::Transaction;
     use crate::network::node::Node;
+    use crate::pollen::DataAsset;
     use crate::rpc::api::BudlumApiServer;
     use crate::rpc::server::{RpcMode, RpcSecurityConfig, RpcServer};
     use std::sync::Arc;
 
-    /// A format-valid test envelope, with an honest marker.
-    fn valid_merkle_proof() -> Vec<u8> {
-        let envelope = bud_proof::ProofEnvelope {
-            proof_format_version: 1,
-            backend: "test-backend".to_string(),
-            p3_version: "0.6".to_string(),
-            fri_params_id: "test-fri".to_string(),
-            public_inputs_hash: [0x42u8; 32],
-            proof_bytes: vec![0xABu8; 96],
-            degree_bits: 8,
-        };
-        bincode::serialize(&envelope).expect("test envelope serialize")
+    /// The shape a record endpoint keeps: its object or list, or the null that
+    /// means "there is no such thing yet". A bare `false` or a number from an
+    /// endpoint documented to answer with a record is a node that stopped
+    /// answering, and a caller cannot tell that from an empty result.
+    fn record_answered(value: &serde_json::Value) -> bool {
+        value.is_object() || value.is_array() || value.is_null()
     }
 
     async fn setup() -> (RpcServer, ChainHandle) {
@@ -46,6 +41,36 @@ mod rpc_tests {
             ),
             chain,
         )
+    }
+
+    async fn free_loopback() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral loopback port");
+        listener.local_addr().expect("the bound socket address")
+    }
+
+    async fn request(addr: std::net::SocketAddr, path: &str, headers: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("the server accepted a connection");
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n{headers}Connection: close\r\n\r\n");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("the request was written");
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read_to_end(&mut response),
+        )
+        .await
+        .expect("the server closed the response")
+        .expect("the response was read");
+        String::from_utf8(response).expect("the test response is UTF-8")
     }
 
     /// The whole identity read surface runs against this one fixture: a
@@ -149,6 +174,37 @@ mod rpc_tests {
     }
 
     #[tokio::test]
+    async fn object_layer_reads_answer_absent_and_refuse_malformed_ids() {
+        let (server, _chain) = setup().await;
+
+        let charter = server
+            .get_charter(u32::MAX)
+            .await
+            .expect("every u32 is a valid charter lookup");
+        assert!(charter.is_null());
+
+        let valid_id = format!("0x{}", hex::encode([0xEEu8; 32]));
+        let class = server
+            .get_asset_class(valid_id.clone())
+            .await
+            .expect("a well-formed unknown class id answers null");
+        assert!(class.is_null());
+        let class_error = server
+            .get_asset_class("not-hex".to_owned())
+            .await
+            .unwrap_err();
+        assert_eq!(class_error.code(), -32602);
+
+        let asset = server
+            .get_asset(valid_id)
+            .await
+            .expect("a well-formed unknown asset id answers null");
+        assert!(asset.is_null());
+        let asset_error = server.get_asset("0x00".to_owned()).await.unwrap_err();
+        assert_eq!(asset_error.code(), -32602);
+    }
+
+    #[tokio::test]
     async fn bud_identity_resolve_refuses_malformed_and_answers_null_for_absent() {
         let (server, _chain) = setup().await;
         let malformed = server.identity_resolve("did:bud:zz".to_string()).await;
@@ -241,6 +297,38 @@ mod rpc_tests {
             .await
             .expect("a good presentation is an answer, not an error");
         assert_eq!(ok["valid"], true);
+
+        // A real subject signature does not make a zero-disclosure receipt
+        // credential evidence. This traverses the public RPC -> chain actor ->
+        // registry verifier path, not only the helper's unit test.
+        let empty_subject_key = crate::crypto::primitives::KeyPair::from_seed(&[41; 32])
+            .expect("deterministic empty-receipt subject key");
+        let empty_document = "No identity fields";
+        let mut empty_receipt = crate::registry::PresentationReceipt {
+            requester,
+            subject: Address::from(empty_subject_key.public_key_bytes()),
+            document_digest: crate::registry::document_digest_of(empty_document),
+            epoch: 0,
+            entries: Vec::new(),
+            subject_public_key: Vec::new(),
+            signature: Vec::new(),
+        };
+        empty_receipt.sign(&empty_subject_key);
+        let empty = server
+            .identity_verify_presentation(
+                empty_receipt,
+                requester_hex.clone(),
+                empty_document.to_string(),
+            )
+            .await
+            .expect("an empty receipt is a validity=false answer, not an RPC error");
+        assert_eq!(empty["valid"], false);
+        assert!(
+            empty["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("opens no credential fields")),
+            "the API must refuse a signed receipt without disclosure entries: {empty}"
+        );
 
         let repurposed = server
             .identity_verify_presentation(
@@ -337,59 +425,9 @@ mod rpc_tests {
         );
     }
 
-    /// Regression for the failed chain-45261 rehearsal: the faucet
-    /// sends 100 BUD, but the RPC quoted only the 1-atom base fee while live
-    /// admission required 20001 (base plus the governed 200 ppm). Keep the
-    /// quote tied to the live registry parameters, not a hard-coded RPC rate.
-    #[tokio::test]
-    async fn estimate_gas_includes_testnet_transfer_rate_for_faucet_grant() {
-        use crate::core::transaction::TransactionType;
-        let consensus = Arc::new(PoWEngine::new(0));
-        let mut blockchain = Blockchain::new(consensus, None, 45261, None);
-        blockchain.state.base_fee = 1;
-        blockchain
-            .state
-            .registry
-            .set_params(crate::registry::RegistryParams::testnet_defaults());
-        let (server, _) = setup_with_blockchain(blockchain).await;
-        let mut tx = Transaction::new_with_chain_id(
-            Address::from([21u8; 32]),
-            Address::from([22u8; 32]),
-            100 * crate::tokenomics::BUD_UNIT,
-            0,
-            0,
-            vec![],
-            45261,
-            TransactionType::Transfer,
-        );
-        tx.hash = tx.calculate_hash();
-        let transfer = server.estimate_gas(tx.clone()).await.unwrap();
-        let transfer = u64::from_str_radix(transfer.trim_start_matches("0x"), 16).unwrap();
-        assert_eq!(transfer, 20_001, "base 1 plus 200 ppm of 100 BUD");
-
-        tx.tx_type = TransactionType::Stake;
-        tx.hash = tx.calculate_hash();
-        let stake = server.estimate_gas(tx.clone()).await.unwrap();
-        assert_eq!(
-            u64::from_str_radix(stake.trim_start_matches("0x"), 16).unwrap(),
-            1
-        );
-
-        tx.tx_type = TransactionType::Transfer;
-        tx.fee = 30_000;
-        tx.max_fee = tx.fee;
-        tx.hash = tx.calculate_hash();
-        let chosen = server.estimate_gas(tx).await.unwrap();
-        assert_eq!(
-            u64::from_str_radix(chosen.trim_start_matches("0x"), 16).unwrap(),
-            30_000,
-            "a caller's higher offered fee still takes precedence"
-        );
-    }
-
     /// The actor must see sender and payload, not only type and amount:
     /// subsequent governance proposals in one epoch require a higher fee.
-    /// Quoting base_fee alone would leave a wallet signing a rejected vote.
+    /// Quoting `base_fee` alone would leave a wallet signing a rejected vote.
     #[tokio::test]
     async fn estimate_gas_includes_escalating_governance_proposal_fee() {
         use crate::core::governance::ProposalType;
@@ -440,7 +478,7 @@ mod rpc_tests {
     /// Own fee back - that is what will be charged, since the flat-fee protocol
     /// Takes `tx.fee` verbatim once it clears `base_fee`.
     #[tokio::test]
-    async fn estimate_gas_reflects_a_fee_the_caller_already_set() {
+    async fn estimate_gas_ok_reflects_a_fee_the_caller_already_set() {
         let (server, chain) = setup().await;
         let base_fee = chain.get_base_fee().await;
         let chosen = base_fee + 500;
@@ -503,7 +541,7 @@ mod rpc_tests {
     /// The two numbers a wallet combines, and they were sourced from different
     /// Places - one from the live chain, one from a constant.
     #[tokio::test]
-    async fn gas_price_and_estimate_gas_agree_on_the_floor() {
+    async fn gas_price_ok_agrees_with_estimate_gas() {
         let (server, _) = setup().await;
 
         let price = server.gas_price().await.unwrap();
@@ -1123,205 +1161,6 @@ mod rpc_tests {
         assert_eq!(domains["domains"], serde_json::json!([]));
     }
 
-    /// the five storage writes are `StorageTx` transactions applied in
-    /// block (covered in `src/domain/storage_tx.rs`). Their operator RPCs
-    /// refuse every call, name the transaction door, and change nothing:
-    /// the manifest stays unregistered and no balance moves.
-    #[tokio::test]
-    async fn the_storage_write_rpcs_refuse_and_name_their_transaction_doors() {
-        let (server, bc) = setup().await;
-        let manifest = crate::storage::ContentManifest::from_bytes_sliced(
-            b"hello storage rpc lifecycle test",
-            16,
-        )
-        .unwrap();
-        let s_id = manifest.shards[0].shard_id;
-        let op = Address::from([31u8; 32]);
-        let payer = Address::from([32u8; 32]);
-        bc.credit_development_account(&payer, 100_000_000)
-            .await
-            .expect("devnet credit");
-        let payer_before = bc.get_balance(&payer).await;
-        let economics = crate::domain::storage_deal::StorageEconomicsParams {
-            operator_bond: 2_000_000,
-            fee_per_byte_epoch: 10,
-        };
-
-        let refusals = [
-            (
-                server
-                    .storage_register_manifest(manifest.clone())
-                    .await
-                    .expect_err("manifest registration is a transaction"),
-                "StorageTx::RegisterManifest",
-            ),
-            (
-                server
-                    .storage_open_deal(
-                        1,
-                        manifest.clone(),
-                        format!("0x{}", hex::encode(s_id.0)),
-                        format!("0x{}", op.to_hex()),
-                        format!("0x{}", payer.to_hex()),
-                        0,
-                        10,
-                        100,
-                        economics.clone(),
-                        crate::domain::storage_params::StorageDomainParams::default(),
-                        Some(valid_merkle_proof()),
-                        Some([0x42u8; 32]),
-                        7,
-                        String::new(),
-                        String::new(),
-                    )
-                    .await
-                    .expect_err("deal opening is a transaction"),
-                "StorageTx::OpenDeal",
-            ),
-            (
-                server
-                    .storage_accept_reallocation(
-                        0,
-                        format!("0x{}", op.to_hex()),
-                        format!("0x{}", payer.to_hex()),
-                        0,
-                        10,
-                        economics,
-                        crate::domain::storage_params::StorageDomainParams::default(),
-                        None,
-                        None,
-                        7,
-                        String::new(),
-                        String::new(),
-                    )
-                    .await
-                    .expect_err("repair acceptance is a transaction"),
-                "StorageTx::AcceptReallocation",
-            ),
-            (
-                server
-                    .storage_open_challenge(
-                        crate::domain::storage_deal::RetrievalChallengeRequest {
-                            deal_id: 0,
-                            byte_start: 0,
-                            byte_end: 15,
-                            challenge_epoch: 0,
-                            deadline_epoch: 25,
-                            opener_bond: 50,
-                            opener: Some(payer),
-                            opener_signature: None,
-                        },
-                    )
-                    .await
-                    .expect_err("challenge opening is a transaction"),
-                "StorageTx::OpenChallenge",
-            ),
-            (
-                server
-                    .storage_answer_challenge(crate::domain::storage_deal::RetrievalResponse {
-                        challenge_id: 0,
-                        _range_hash: crate::storage::content_id::ContentId([0xAA; 32]),
-                        responder: op,
-                        response_epoch: 18,
-                        responder_signature: None,
-                        proof_bytes: None,
-                    })
-                    .await
-                    .expect_err("challenge answers are transactions"),
-                "StorageTx::AnswerChallenge",
-            ),
-        ];
-        for (err, door) in refusals {
-            assert!(
-                err.message().contains(door) && err.message().contains("bud_sendRawTransaction"),
-                "the refusal names {door}: {}",
-                err.message()
-            );
-        }
-
-        let get_man = server
-            .storage_get_manifest(format!("0x{}", hex::encode(manifest.manifest_id.0)))
-            .await
-            .unwrap();
-        assert_eq!(get_man["found"], false, "a refused call registers nothing");
-        assert_eq!(bc.get_balance(&payer).await, payer_before);
-    }
-
-    #[tokio::test]
-    async fn test_storage_economics_rpc_reports_chain_actor_state() {
-        let (server, _) = setup().await;
-
-        let summary = server.storage_get_economics_summary().await.unwrap();
-        assert_eq!(summary["slashedBondTotal"], serde_json::json!(0));
-        assert_eq!(summary["burnedBondTotal"], serde_json::json!(0));
-        assert_eq!(summary["eventCount"], serde_json::json!(0));
-
-        let events = server.storage_get_economics_events().await.unwrap();
-        assert_eq!(events["count"], serde_json::json!(0));
-        assert!(events["events"].as_array().unwrap().is_empty());
-    }
-
-    /// Empty registry → count 0, empty operators list.
-    #[tokio::test]
-    async fn storage_active_operators_empty() {
-        let (server, _) = setup().await;
-        let res = server.storage_active_operators().await.unwrap();
-        assert_eq!(res["roleId"], serde_json::json!(5));
-        assert_eq!(res["role"], "storage_operator");
-        assert_eq!(res["count"], serde_json::json!(0));
-        assert!(res["operators"].as_array().unwrap().is_empty());
-    }
-
-    /// Registered STORAGE_OPERATOR appears in RPC listing.
-    #[tokio::test]
-    async fn storage_active_operators_lists_registered() {
-        let operator = Address::from_hex(&"0a".repeat(32)).unwrap();
-        let min_stake = 1_000u64; // PermissionlessRegistry default floor
-                                  // a bond is a `RoleBond` transaction applied in block; the
-                                  // fixture writes the registry before the actor starts.
-        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
-        blockchain.state.add_balance(&operator, min_stake * 2);
-        blockchain
-            .state
-            .bond_storage_operator(&operator, min_stake)
-            .expect("bond_storage_operator must succeed with sufficient balance");
-        let (server, _) = setup_with_blockchain(blockchain).await;
-
-        let res = server.storage_active_operators().await.unwrap();
-        assert_eq!(res["roleId"], serde_json::json!(5));
-        assert_eq!(res["role"], "storage_operator");
-        assert_eq!(res["count"], serde_json::json!(1));
-        let ops = res["operators"].as_array().unwrap();
-        assert_eq!(ops.len(), 1);
-        assert_eq!(ops[0]["role"], "storage_operator");
-        assert_eq!(ops[0]["stake"], serde_json::json!(min_stake));
-        let listed = ops[0]["address"].as_str().unwrap().to_lowercase();
-        assert!(
-            listed.contains(&operator.to_hex().to_lowercase())
-                || listed.contains(&format!("0x{}", operator.to_hex()).to_lowercase()),
-            "listed address {listed} must match operator"
-        );
-    }
-
-    #[tokio::test]
-    async fn storage_operator_economics_is_permissionless_and_explicit_about_slashes() {
-        let (server, _) = setup().await;
-        let operator = Address::from_hex(&"0b".repeat(32)).unwrap();
-
-        let economics = server
-            .storage_get_operator_economics(operator)
-            .await
-            .expect("read-only operator economics query must succeed");
-        assert_eq!(economics["accruedRewards"], serde_json::json!(0));
-        assert_eq!(economics["activeDealCount"], serde_json::json!(0));
-        assert_eq!(economics["slashedBondTotal"], serde_json::json!(0));
-        assert!(economics["slashHistory"].as_array().unwrap().is_empty());
-        assert_eq!(
-            economics["slashedBondDisposition"],
-            "burn_from_operator_liquid_balance_best_effort"
-        );
-    }
-
     /// The operator-only admin surface refuses on a public listener: the
     /// mode gate runs before any peer-state work and answers with the
     /// static -32004 string shared by every admin endpoint, so clients do
@@ -1347,6 +1186,16 @@ mod rpc_tests {
             .await
             .expect_err("public listener must refuse the operator-only method");
         assert_eq!(refused.code(), -32004);
+        let refused_rotate = public_server
+            .admin_update_sentries(vec![])
+            .await
+            .expect_err("public listener must refuse bud_adminUpdateSentries");
+        assert_eq!(refused_rotate.code(), -32004);
+        let refused_status = public_server
+            .admin_sentry_status()
+            .await
+            .expect_err("public listener must refuse bud_adminSentryStatus");
+        assert_eq!(refused_status.code(), -32004);
     }
 
     /// Every operator-gated mutating method answers -32004 on a public
@@ -1412,58 +1261,6 @@ mod rpc_tests {
         assert_eq!(empty.code(), -32602);
     }
 
-    /// Zero bytes are content too: the sealed RPC path emits a feed for them.
-    #[tokio::test]
-    async fn rpc_tests_qr_feed_accepts_empty_content_when_sealed() {
-        let (server, _chain) = setup().await;
-        let seed = "ab".repeat(32);
-        let preview = server
-            .storage_qr_feed_preview(String::new(), 64, None, Some(seed.clone()))
-            .await
-            .expect("sealed empty preview");
-        let key = crate::storage::payload_crypt::PayloadKey::derive(&[0xabu8; 32]);
-        let total = u32::try_from(preview["k"].as_u64().expect("k")).unwrap();
-        let burst = server
-            .storage_qr_feed_frames(String::new(), 64, 0, total, Some(seed))
-            .await
-            .expect("sealed empty frames");
-        assert_eq!(burst["count"], total);
-        let mut dec = crate::storage::qr_carousel::CarouselDecoder::new();
-        for f in burst["frames"].as_array().expect("frames array") {
-            let frame = hex::decode(f.as_str().expect("hex frame")).expect("frame hex");
-            let wire = &frame[crate::storage::qr_frame::THREE_FRAME_HEADER_LEN..];
-            let d = crate::storage::qr_carousel::Drop::from_bytes(wire).expect("drop");
-            dec.push(&d).expect("push");
-        }
-        let packed = dec.finish().expect("carousel finish");
-        let (kind, sealed) = crate::storage::qr_payload::unpack_payload(&packed).expect("unpack");
-        assert_eq!(
-            kind,
-            crate::storage::qr_payload::PayloadKind::EncryptedContent
-        );
-        let clear = crate::storage::payload_crypt::open_payload(&key, &sealed).expect("open");
-        assert!(clear.is_empty());
-    }
-
-    /// Without a seed the gated preview of empty content is still refused as a
-    /// bad request, as it is for any other body.
-    #[tokio::test]
-    async fn rpc_tests_qr_feed_empty_content_without_seed_is_refused() {
-        let (server, _chain) = setup().await;
-        let refused = server
-            .storage_qr_feed_preview(String::new(), 200, None, None)
-            .await
-            .expect_err("unsealed gated preview must be refused");
-        assert_eq!(refused.code(), -32602);
-        assert!(
-            refused
-                .message()
-                .contains("neither sealed nor declared ciphertext"),
-            "unexpected message: {}",
-            refused.message()
-        );
-    }
-
     /// The external evidence intake carries an unsigned submitter, so the
     /// public listener must refuse it before the payload is even parsed.
     #[tokio::test]
@@ -1489,63 +1286,3772 @@ mod rpc_tests {
         assert_eq!(refused.code(), -32004);
     }
 
-    /// Storage calls that change node-local state outside a block are
-    /// operator-only: the public listener refuses them with -32004.
+    /// The re-encode check refuses a body over the shared 1 MiB cap before
+    /// it decodes or encodes anything.
+    /// The estimate for a transfer of `amount` whose own fee is unset.
+    async fn estimate_for_transfer(server: &RpcServer, amount: u64) -> u64 {
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([21u8; 32]),
+            Address::from([22u8; 32]),
+            amount,
+            0,
+            0,
+            vec![],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+        let estimate = server.estimate_gas(tx).await.unwrap();
+        u64::from_str_radix(estimate.trim_start_matches("0x"), 16).unwrap()
+    }
+
+    ///  lock. `bud_estimateGas` has to answer with the fee the chain
+    /// will charge, which for a transfer is the floor PLUS the proportional
+    /// cut. Quoting the floor alone under-priced every large transfer, and the
+    /// wallet then sent a transaction the admission rule refused.
     #[tokio::test]
-    async fn rpc_tests_storage_mutations_refused_on_public_listener() {
+    async fn estimate_gas_carries_the_proportional_cut() {
+        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        blockchain
+            .state
+            .registry
+            .set_params(crate::registry::RegistryParams::testnet_defaults());
+        let (server, chain) = setup_with_blockchain(blockchain).await;
+        let base_fee = chain.get_base_fee().await;
+        let amount = 1_000_000_000;
+
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([21u8; 32]),
+            Address::from([22u8; 32]),
+            amount,
+            0,
+            0,
+            vec![],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+        let required = chain
+            .get_required_fee(tx.clone())
+            .await
+            .expect("the chain actor answers");
+        let estimate = u64::from_str_radix(
+            server
+                .estimate_gas(tx)
+                .await
+                .unwrap()
+                .trim_start_matches("0x"),
+            16,
+        )
+        .unwrap();
+
+        assert!(
+            required > base_fee,
+            "a transfer of {amount} carries a proportional cut above the floor of {base_fee}"
+        );
+        assert_eq!(
+            estimate, required,
+            "the estimate is the fee the admission rule enforces, not the bare floor"
+        );
+        assert!(
+            estimate_for_transfer(&server, amount).await > estimate_for_transfer(&server, 1).await,
+            "the estimate must grow with the transferred amount"
+        );
+    }
+
+    ///  lock, grant rows. The three grant writes change state-root
+    /// bearing rows, so every call is refused and the refusal names the
+    /// transaction door. Nothing is written, and the read side still answers.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[tokio::test]
+    async fn view_grant_writes_refuse_and_name_their_transaction_door() {
+        let (server, _chain) = setup().await;
+        let key = crate::crypto::primitives::WalletKeyPair::generate().public_key_bytes();
+        let auth = serde_json::json!({
+            "ownerPublicKey": format!("0x{}", hex::encode(key)),
+            "signature": "0x",
+        });
+        let content_id = format!("0x{}", "11".repeat(32));
+        let key_id = format!("0x{}", "22".repeat(32));
+
+        let issued = server
+            .storage_issue_view_grant(
+                content_id.clone(),
+                Some(auth.clone()),
+                None,
+                key_id.clone(),
+                "public".to_string(),
+                1,
+            )
+            .await
+            .expect_err("issuing a grant is a block transaction");
+        assert_eq!(issued.code(), -32602);
+        let revoked = server
+            .storage_revoke_view_grant(0, Some(auth.clone()), 1)
+            .await
+            .expect_err("revoking a grant is a block transaction");
+        let deleted = server
+            .storage_social_delete(content_id.clone(), Some(auth), 1)
+            .await
+            .expect_err("a social delete is a block transaction");
+
+        for (err, door) in [
+            (issued, "StorageTx::IssueViewGrant"),
+            (revoked, "StorageTx::RevokeViewGrant"),
+            (deleted, "StorageTx::SocialDelete"),
+        ] {
+            assert!(
+                err.message().contains(door) && err.message().contains("bud_sendRawTransaction"),
+                "the refusal must name {door} and the door that carries it, got: {}",
+                err.message()
+            );
+        }
+
+        let listing = server
+            .storage_list_view_grants(content_id, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            listing["count"],
+            serde_json::json!(0),
+            "a refused write registers nothing"
+        );
+        assert_eq!(
+            server
+                .storage_list_view_grants("0xshort".to_string(), true)
+                .await
+                .unwrap_err()
+                .code(),
+            -32602,
+            "a malformed content id is a client error"
+        );
+        let viewer = format!("0x{}", hex::encode([7u8; 32]));
+        let owner = format!("0x{}", hex::encode([8u8; 32]));
+        let answer = server
+            .storage_may_view(
+                format!("0x{}", "11".repeat(32)),
+                viewer,
+                key_id.clone(),
+                owner.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            answer.get("allowed").is_some(),
+            "a read that cannot answer is an error, not a silent default: {answer}"
+        );
+        assert_eq!(
+            server
+                .storage_may_view(
+                    format!("0x{}", "11".repeat(32)),
+                    "not-an-address".to_string(),
+                    key_id,
+                    owner,
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32602,
+            "a viewer that cannot be parsed is refused by name"
+        );
+    }
+
+    /// . The bridge and relayer reads answer on an empty chain and
+    /// refuse a malformed id instead of answering `null`: absence is a claim,
+    /// and a caller cannot tell it from a typo it should fix.
+    #[tokio::test]
+    async fn bridge_and_relayer_reads_answer_and_refuse_a_malformed_id() {
+        let (server, _chain) = setup().await;
+        let id = format!("0x{}", "aa".repeat(32));
+        assert!(
+            server
+                .get_bridge_transfer(id.clone())
+                .await
+                .unwrap()
+                .is_null(),
+            "an unknown message id is answered with null"
+        );
+        assert_eq!(
+            server
+                .get_bridge_transfer("0xnothex".to_string())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602,
+            "a malformed id is a client error"
+        );
+        assert_eq!(
+            server
+                .get_bridge_transfer(format!("0x{}", "aa".repeat(31)))
+                .await
+                .unwrap_err()
+                .code(),
+            -32602,
+            "a short id is refused, not padded"
+        );
+        let summary = server.get_relayer_status(None).await.unwrap();
+        assert!(!summary.is_null(), "the queue summary always answers");
+        assert_eq!(
+            server
+                .get_relayer_status(Some("0xnothex".to_string()))
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+    }
+
+    /// first descent: the registry and validator reads. Each row
+    /// answers on a fresh chain, and each read that parses an address refuses a
+    /// malformed one by naming the field. An empty object for a typo would read
+    /// to a caller as "no such validator", which is a different answer than the
+    /// one the node is able to give.
+    #[tokio::test]
+    async fn rpc_registry_and_validator_reads_answer_and_refuse_a_malformed_address() {
+        let (server, _chain) = setup().await;
+        let owner = Address([7u8; 32]);
+        let owner_hex = owner.to_hex();
+
+        assert_eq!(
+            server.registry_query(owner_hex.clone(), 0).await.unwrap()["registered"],
+            serde_json::json!(false),
+            "an address with no registry row answers with the shape, not an error"
+        );
+        assert!(
+            server
+                .registry_query("0xzz".to_string(), 0)
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid address"),
+            "a malformed address is invalid params, naming the field that failed"
+        );
+        assert_eq!(
+            server.registry_active_members(0).await.unwrap()["count"],
+            serde_json::json!(0),
+            "an empty role answers with a zero count"
+        );
+        let validator_view = server.get_validator(owner_hex.clone()).await.unwrap();
+        assert!(
+            validator_view.is_object() || validator_view.is_null(),
+            "one validator lookup is an object or null, never a list"
+        );
+        assert!(
+            server
+                .get_validator("0xzz".to_string())
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid address"),
+            "the validator read refuses a malformed owner like its siblings"
+        );
+        assert_eq!(
+            server.validator_list().await.unwrap()["total"],
+            serde_json::json!(1),
+            "a fresh devnet chain lists its genesis bootstrap validator"
+        );
+        assert!(
+            server.validator_profile(owner).await.unwrap()["found"].is_boolean(),
+            "a profile lookup for an unknown validator says so in the record"
+        );
+        assert!(
+            server
+                .get_validator_delegations(owner)
+                .await
+                .unwrap()
+                .is_object(),
+            "delegations answer with the totals object even when empty"
+        );
+    }
+
+    /// second descent: the name reads. An unregistered name is a
+    /// null answer, never an error: absence is what the caller asked about. The
+    /// prepare half keeps its refusal, because a template built over a broken
+    /// owner address would be signed and broadcast as is.
+    #[tokio::test]
+    async fn rpc_bns_reads_answer_null_and_the_prepare_refuses_a_malformed_owner() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let blockchain = Blockchain::new(consensus, None, 45266, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let seller = crate::bns::BNS_PRIMARY_SELLERS[0];
+        let buyer = Address([9u8; 32]);
+        let seeded_offer_id = blockchain
+            .state
+            .marketplace
+            .create_name_offer(
+                seller,
+                crate::bns::CreateNameOffer {
+                    name: "bids.bud".to_string(),
+                    price_atoms: 25_000,
+                    duration: 365,
+                    kind: crate::bns::OfferKind::Primary,
+                    expires_at_epoch: 100,
+                },
+                0,
+            )
+            .expect("seed offer");
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+
+        assert!(
+            server
+                .bns_resolve("nothing-here".to_string())
+                .await
+                .unwrap()
+                .is_none(),
+            "an unregistered name resolves to nothing, not to an error"
+        );
+        assert!(
+            server
+                .bns_resolve_full("nothing-here".to_string())
+                .await
+                .unwrap()
+                .is_null(),
+            "the full record of an absent name is JSON null"
+        );
+        assert!(
+            server
+                .bns_resolve_content("nothing.bud".to_string())
+                .await
+                .unwrap()
+                .is_null(),
+            "an absent name carries no content"
+        );
+        assert!(
+            server
+                .bns_resolve_subdomain("nothing-here".to_string(), "shop".to_string())
+                .await
+                .unwrap()
+                .is_none(),
+            "a subdomain of an absent parent is absent too"
+        );
+        assert!(
+            server.bns_get_offer(999_999).await.unwrap().is_null(),
+            "an unknown offer id answers null"
+        );
+        let got_offer = server.bns_get_offer(seeded_offer_id).await.unwrap();
+        assert_eq!(got_offer["name"], "bids.bud");
+        let listed = server
+            .bns_list_offers(Some("Primary".to_string()), None, None)
+            .await
+            .unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert!(
+            server
+                .bns_list_offers(Some("InvalidKind".to_string()), None, None)
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid BNS offer kind"),
+            "unknown offer kind filter must be refused"
+        );
+        assert!(
+            server
+                .bns_prepare_create_offer(
+                    seller.to_hex(),
+                    "bids".to_string(),
+                    25_000,
+                    365,
+                    "Primary".to_string(),
+                    100,
+                )
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid BNS name"),
+            "missing .bud suffix must be refused at RPC prepare"
+        );
+        assert!(
+            server
+                .bns_prepare_create_offer(
+                    seller.to_hex(),
+                    "ab.bud".to_string(),
+                    25_000,
+                    365,
+                    "Primary".to_string(),
+                    100,
+                )
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid BNS name"),
+            "label shorter than 3 chars must be refused at RPC prepare"
+        );
+        let prepared_offer = server
+            .bns_prepare_create_offer(
+                seller.to_hex(),
+                "fresh.bud".to_string(),
+                25_000,
+                365,
+                "Primary".to_string(),
+                100,
+            )
+            .await
+            .unwrap();
+        assert!(prepared_offer["tx_template"].is_object());
+        assert!(
+            server
+                .bns_prepare_create_offer(
+                    "0xzz".to_string(),
+                    "fresh.bud".to_string(),
+                    25_000,
+                    365,
+                    "Primary".to_string(),
+                    100,
+                )
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid seller address"),
+            "the template door names the seller field it could not parse"
+        );
+        let prepared_buy = server
+            .bns_prepare_buy_name(buyer.to_hex(), seeded_offer_id)
+            .await
+            .unwrap();
+        assert_eq!(prepared_buy["price_atoms"], 25_000);
+        assert!(server
+            .bns_prepare_buy_name(buyer.to_hex(), 999_999)
+            .await
+            .unwrap_err()
+            .message()
+            .contains("not found"));
+        let prepared_cancel = server
+            .bns_prepare_cancel_offer(seller.to_hex(), seeded_offer_id)
+            .await
+            .unwrap();
+        assert!(prepared_cancel["tx_template"].is_object());
+        assert!(server
+            .bns_prepare_cancel_offer(buyer.to_hex(), seeded_offer_id)
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Only the offer seller"));
+        assert_eq!(
+            server.bns_reverse_resolve(buyer.to_hex()).await.unwrap(),
+            None
+        );
+        assert!(server
+            .bns_reverse_resolve("0xnot-hex".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid address"));
+        let prepared_addr = server
+            .bns_prepare_set_address(
+                "bids.bud".to_string(),
+                seller.to_hex(),
+                Some(buyer.to_hex()),
+                Some(2),
+            )
+            .await
+            .unwrap();
+        assert!(prepared_addr["tx_template"].is_object());
+        assert!(server
+            .bns_prepare_set_address(
+                "bids".to_string(),
+                seller.to_hex(),
+                Some(buyer.to_hex()),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
+        let prepared_storage = server
+            .bns_prepare_set_storage(
+                "bids.bud".to_string(),
+                seller.to_hex(),
+                hex::encode([0x33u8; 32]),
+                7,
+            )
+            .await
+            .unwrap();
+        assert!(prepared_storage["tx_template"].is_object());
+        assert_eq!(prepared_storage["storage_domain_id"], 7);
+        assert!(server
+            .bns_prepare_set_storage("bids.bud".to_string(), seller.to_hex(), "33".to_string(), 7)
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Storage root must be 32 bytes"));
+        let prepared_primary = server
+            .bns_prepare_set_primary_name(seller.to_hex(), Some("bids.bud".to_string()))
+            .await
+            .unwrap();
+        assert!(prepared_primary["tx_template"].is_object());
+        assert!(server
+            .bns_prepare_set_primary_name(seller.to_hex(), Some("ab.bud".to_string()))
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
+        assert!(server
+            .bns_get_records("bids.bud".to_string())
+            .await
+            .unwrap()
+            .is_null());
+        assert!(server
+            .bns_get_records("bids".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
+        let mut updates = std::collections::BTreeMap::new();
+        updates.insert(
+            "com.github".to_string(),
+            Some("https://github.com/budlum-xyz".to_string()),
+        );
+        let prepared_records = server
+            .bns_prepare_set_records("bids.bud".to_string(), seller.to_hex(), updates)
+            .await
+            .unwrap();
+        assert!(prepared_records["tx_template"].is_object());
+        let mut bad_updates = std::collections::BTreeMap::new();
+        bad_updates.insert("url".to_string(), Some("javascript:alert(1)".to_string()));
+        assert!(server
+            .bns_prepare_set_records("bids.bud".to_string(), seller.to_hex(), bad_updates)
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Unsafe or oversized"));
+        assert!(server
+            .bns_list_subdomains("bids.bud".to_string())
+            .await
+            .unwrap()
+            .is_null());
+        assert!(server
+            .bns_list_subdomains("bids".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
+        let prepared_rm = server
+            .bns_prepare_remove_subdomain(
+                "bids.bud".to_string(),
+                "pay".to_string(),
+                seller.to_hex(),
+            )
+            .await
+            .unwrap();
+        assert!(prepared_rm["tx_template"].is_object());
+        assert!(server
+            .bns_prepare_remove_subdomain(
+                "bids.bud".to_string(),
+                "-bad-".to_string(),
+                seller.to_hex(),
+            )
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid subdomain label"));
+        assert!(server
+            .bns_resolve_content("bids.bud".to_string())
+            .await
+            .unwrap()
+            .is_null());
+        assert!(server
+            .bns_resolve_content("bids".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
+        let hex32 = format!("0x{}", "11".repeat(32));
+        let reference = |kind: &str| {
+            serde_json::json!({
+                "kind": kind,
+                "digest": hex32,
+                "len": 1024,
+                "object_commitment": hex32,
+                "nft_id": null,
+            })
+        };
+        let prepared_content = server
+            .bns_prepare_set_content(
+                "bids.bud".to_string(),
+                seller.to_hex(),
+                Some(reference("public")),
+            )
+            .await
+            .unwrap();
+        assert!(prepared_content["tx_template"].is_object());
+        assert_eq!(prepared_content["content"]["len"], 1024);
+        // `null` clears, and is a template too.
+        let cleared = server
+            .bns_prepare_set_content("bids.bud".to_string(), seller.to_hex(), None)
+            .await
+            .unwrap();
+        assert!(cleared["content"].is_null());
+        assert!(server
+            .bns_prepare_set_content(
+                "bids.bud".to_string(),
+                seller.to_hex(),
+                Some(reference("sealed")),
+            )
+            .await
+            .unwrap_err()
+            .message()
+            .contains("requires nft_id"));
+        assert!(server
+            .bns_prepare_set_content(
+                "bids.bud".to_string(),
+                seller.to_hex(),
+                Some(serde_json::json!({"kind": "public", "digest": "0x11"})),
+            )
+            .await
+            .unwrap_err()
+            .message()
+            .contains("content digest"));
+        assert!(server
+            .bns_prepare_set_subdomain_content(
+                "bids.bud".to_string(),
+                "shop".to_string(),
+                seller.to_hex(),
+                Some(reference("sealed")),
+            )
+            .await
+            .unwrap_err()
+            .message()
+            .contains("requires nft_id"));
+        let listed_names = server
+            .bns_list_names_by_owner(seller.to_hex())
+            .await
+            .unwrap();
+        assert!(listed_names["names"].is_array());
+        assert!(server
+            .bns_list_names_by_owner("0xnot-hex".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid owner address"));
+        let proof_val = server.bns_get_proof("bids.bud".to_string()).await.unwrap();
+        assert_eq!(proof_val["included"], false);
+        // The short names answer exactly as the long ones do.
+        let short_proof = server.bns_proof("bids.bud".to_string()).await.unwrap();
+        assert_eq!(short_proof, proof_val);
+        assert!(server
+            .bns_proof("bids".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
+        assert_eq!(server.bns_reverse(buyer.to_hex()).await.unwrap(), None);
+        assert!(server
+            .bns_reverse("0xnot-hex".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid address"));
+        let short_primary = server
+            .bns_prepare_set_primary(seller.to_hex(), Some("bids.bud".to_string()))
+            .await
+            .unwrap();
+        assert!(short_primary["tx_template"].is_object());
+        assert!(server
+            .bns_prepare_set_primary(seller.to_hex(), Some("ab.bud".to_string()))
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
+        assert!(server
+            .bns_get_proof("bids".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
+    }
+
+    #[tokio::test]
+    async fn compatibility_network_identity_matches_native_chain_reads() {
+        let (server, _chain) = setup().await;
+        assert_eq!(
+            server.compat_net_version().await.unwrap(),
+            server.net_version().await.unwrap()
+        );
+        assert_eq!(
+            server.eth_chain_id().await.unwrap(),
+            server.chain_id().await.unwrap()
+        );
+        assert_eq!(
+            server.eth_block_number().await.unwrap(),
+            server.block_number().await.unwrap()
+        );
+        assert_eq!(
+            server.compat_net_listening().await.unwrap(),
+            server.net_listening().await.unwrap()
+        );
+        assert!(server
+            .web3_client_version()
+            .await
+            .unwrap()
+            .starts_with("budlum-core/v"));
+        assert_eq!(server.eth_accounts().await.unwrap(), serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn rpc_validator_directory_reads_live_consensus_state() {
+        let (server, _chain) = setup().await;
+        let address = format!("0x{}", hex::encode([7u8; 32]));
+        assert!(server.get_validator(address).await.unwrap().is_null());
+        assert_eq!(server.list_relays().await.unwrap()["count"], 0);
+        assert_eq!(server.list_gateways().await.unwrap()["count"], 0);
+        assert_eq!(
+            server
+                .get_validator("0x1234".into())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_validator_read_does_not_hide_unmigrated_genesis_directory() {
+        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let mut blockchain = blockchain;
+        let owner = Address::from([0x71; 32]);
+        blockchain.state.add_validator(owner, 1_000);
+        assert!(blockchain.state.validator_directory.is_empty());
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+        let err = server
+            .get_validator(format!("0x{}", owner.to_hex()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), -32603);
+        assert!(err.message().contains("not initialized"));
+    }
+
+    #[tokio::test]
+    async fn rpc_object_layer_reads_refuse_until_state_proofs_are_activated() {
+        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45260, None);
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+        let id = format!("0x{}", hex::encode([9u8; 32]));
+        for err in [
+            server.get_charter(9).await.unwrap_err(),
+            server.get_asset_class(id.clone()).await.unwrap_err(),
+            server.get_asset(id).await.unwrap_err(),
+        ] {
+            assert_eq!(err.code(), -32004);
+            assert!(err.message().contains("object_layer_closed"));
+        }
+        assert_eq!(
+            server
+                .get_asset_class("0x1234".into())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+    }
+
+    /// Public B.U.D. 3.0 reads consult the actor's state-rooted registry;
+    /// an empty ledger is not an unavailable actor or fabricated custody.
+    #[tokio::test]
+    async fn rpc_bud3_reads_consensus_state_and_validate_identifiers() {
+        let (server, _chain) = setup().await;
+        let id = format!("0x{}", hex::encode([3u8; 32]));
+        let custody = server.storage_get_custody(id.clone()).await.unwrap();
+        assert_eq!(custody["validator"], hex::encode([3u8; 32]));
+        assert_eq!(custody["count"], 0);
+        assert!(custody["shares"].as_array().is_some_and(Vec::is_empty));
+        assert!(server.storage_get_object(id).await.unwrap().is_null());
+        for err in [
+            server
+                .storage_get_custody("0x1234".to_string())
+                .await
+                .unwrap_err(),
+            server
+                .storage_get_object("0x1234".to_string())
+                .await
+                .unwrap_err(),
+        ] {
+            assert_eq!(err.code(), -32602);
+            assert!(err.message().contains("must be 32 bytes"));
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_bud3_live_symbols_content_placement_nft_and_bns_end_to_end() {
+        use crate::consensus::pow::PoWEngine;
+        use crate::socialfi::nft_folders::derive_bud3_nft_id;
+        use crate::storage::bud3::content_id::ContentKey;
+        use crate::storage::bud3::content_ref::ContentRef;
+        use crate::storage::bud3::custody::symbol_leaf;
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::{prepare_public_upload, prepare_sealed_upload};
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::seal::SEAL_SALT_LEN;
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, verify_symbol_range_response, SymbolRangeRequest,
+            VerifiedSymbolItem,
+        };
+        use crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS;
+        use crate::storage::content_id::ContentId;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let payload =
+            b"B.U.D. 3.0 live node retrieval, NFT binding, and verifiable symbols".repeat(4);
+        let pub_up = prepare_public_upload(&payload, &profile, &Bud3Limits::default(), 8).unwrap();
+        let pub_key = pub_up.record.commitment;
+
+        let sealed_up = prepare_sealed_upload(
+            b"sealed object must reject paid fallback decode",
+            &ContentKey([0x55u8; 32]),
+            [0x66u8; SEAL_SALT_LEN],
+            &profile,
+            &Bud3Limits::default(),
+            8,
+        )
+        .unwrap();
+        let sealed_key = sealed_up.record.commitment;
+
+        let alice = Address::from([0xA1u8; 32]);
+        let payer = Address::from([0xB2u8; 32]);
+        let holder_full = [0x10u8; 32];
+        let holder_mobile = [0x11u8; 32];
+        let receipt_id = [0x77u8; 32];
+
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: holder_full,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: holder_mobile,
+                    class: Class::Mobile,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+        ];
+        bc.state
+            .bud3_registry
+            .register_object(alice.0, pub_up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        bc.state
+            .bud3_registry
+            .register_object(alice.0, sealed_up.record.clone(), shares, 0, 50)
+            .unwrap();
+
+        let social_id = bc
+            .state
+            .nft_registry
+            .mint(
+                alice,
+                ContentId(pub_up.record.content_id.digest),
+                0,
+                Some("Alice".to_string()),
+            )
+            .unwrap();
+        let bud3_nft = derive_bud3_nft_id(social_id);
+        bc.state
+            .bud3_registry
+            .bind_nft(bud3_nft, alice.0, Some(alice.0), &pub_key)
+            .unwrap();
+
+        bc.state
+            .bns_registry
+            .register("livebud3.bud".to_string(), alice, 0, 50)
+            .unwrap();
+        let cref = ContentRef::new(pub_up.record.content_id, pub_key, Some(bud3_nft)).unwrap();
+        bc.state
+            .bns_registry
+            .set_content(
+                "livebud3.bud",
+                &alice,
+                &bc.state.bud3_registry,
+                Some(cref),
+                0,
+            )
+            .unwrap();
+        bc.state
+            .bud3_registry
+            .record_paid_view(payer.0, pub_key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 0)
+            .unwrap();
+
+        // A market-bound commitment: the paid view door must refuse it
+        // before touching storage, receipts, or symbols.
+        let listed_owner = alice;
+        let listed_asset = DataAsset::new(
+            listed_owner,
+            crate::storage::ContentId([0x77u8; 32]),
+            [0x66; 32],
+            false,
+        );
+        let listed_asset_id = listed_asset.asset_id;
+        bc.state
+            .marketplace
+            .register_data_asset(listed_asset)
+            .unwrap();
+        bc.state
+            .marketplace
+            .protected_content
+            .bind(
+                crate::storage::ContentId([0x77u8; 32]),
+                listed_asset_id,
+                listed_owner,
+                listed_owner,
+            )
+            .unwrap();
+
+        let (op_server, chain) = setup_with_blockchain(bc).await;
+        let pub_node = Node::new(chain.clone()).unwrap();
+        let pub_server = RpcServer::with_security_and_mode(
+            chain,
+            pub_node.get_client(),
+            RpcSecurityConfig::default(),
+            RpcMode::Public,
+        );
+
+        let full_hex = format!("0x{}", hex::encode(holder_full));
+        let mob_hex = format!("0x{}", hex::encode(holder_mobile));
+        let pub_hex = format!("0x{}", hex::encode(pub_key));
+        let sealed_hex = format!("0x{}", hex::encode(sealed_key));
+        let payer_hex = format!("0x{}", hex::encode(payer.0));
+        let receipt_hex = format!("0x{}", hex::encode(receipt_id));
+
+        let leaves: Vec<(u32, [u8; 32])> = pub_up.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let full_items = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: pub_key,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves,
+            &pub_up.segments[0][0..4],
+        )
+        .unwrap()
+        .items;
+        let mob_items = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: pub_key,
+                segment: 0,
+                first_esi: 4,
+                count: 4,
+            },
+            &leaves,
+            &pub_up.segments[0][4..8],
+        )
+        .unwrap()
+        .items;
+        let full_json: Vec<_> = full_items
+            .iter()
+            .map(|item| serde_json::to_value(item).unwrap())
+            .collect();
+        let mob_json: Vec<_> = mob_items
+            .iter()
+            .map(|item| serde_json::to_value(item).unwrap())
+            .collect();
+
+        // Public listener refuses operator-only symbol admission (`require_operator` -> -32004).
+        let denied_pub = pub_server
+            .storage_store_verified_symbols(full_hex.clone(), pub_hex.clone(), 0, full_json.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(denied_pub.code(), -32004);
+
+        // Tampered symbol fails Merkle proof check on operator admission.
+        let mut tampered = full_items.clone();
+        tampered[0].symbol.data[70] ^= 0xFF;
+        let tampered_json = vec![serde_json::to_value(&tampered[0]).unwrap()];
+        assert_eq!(
+            op_server
+                .storage_store_verified_symbols(full_hex.clone(), pub_hex.clone(), 0, tampered_json)
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Before symbols are admitted, G8 paid decode fails without burning the receipt.
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    payer_hex.clone(),
+                    pub_hex.clone(),
+                    receipt_hex.clone(),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32000
+        );
+
+        // Admit both verified shares via Operator listener.
+        let stored_full = op_server
+            .storage_store_verified_symbols(full_hex.clone(), pub_hex.clone(), 0, full_json)
+            .await
+            .unwrap();
+        assert_eq!(stored_full["stored"], 4);
+        assert_eq!(
+            op_server
+                .storage_store_verified_symbols(mob_hex, pub_hex.clone(), 0, mob_json)
+                .await
+                .unwrap()["stored"],
+            4
+        );
+
+        // Read verified symbols via Public RPC and authenticate Merkle paths client-side.
+        let syms_page = pub_server
+            .storage_get_symbols(full_hex.clone(), pub_hex.clone(), 0, 0, 4)
+            .await
+            .unwrap();
+        let page_items: Vec<VerifiedSymbolItem> = syms_page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                serde_json::from_value(serde_json::json!({
+                    "symbol": entry["symbol"].clone(),
+                    "proof": entry["proof"].clone(),
+                }))
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(page_items.len(), 4);
+        let root_hex = syms_page["symbol_roots"][0]["root"].as_str().unwrap();
+        let mut root_arr = [0u8; 32];
+        root_arr.copy_from_slice(&hex::decode(root_hex).unwrap());
+        verify_symbol_range_response(
+            0,
+            root_arr,
+            syms_page["symbol_roots"][0]["count"].as_u64().unwrap(),
+            profile.symbol_size,
+            &crate::storage::bud3::symbol_protocol::SymbolRangeResponse { items: page_items },
+        )
+        .unwrap();
+        assert_eq!(
+            pub_server
+                .storage_get_symbols(full_hex, pub_hex.clone(), 0, 0, 65)
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Placement telemetry reflects live Full + Mobile split.
+        let placement = pub_server
+            .storage_get_placement(pub_hex.clone())
+            .await
+            .unwrap();
+        assert_eq!(placement["status"], "live");
+        assert_eq!(placement["n_full"], 1);
+        assert_eq!(placement["n_mobile"], 1);
+        assert_eq!(
+            pub_server
+                .storage_get_placement("0x1234".to_string())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Paid fallback decodes public payload once, refuses replay, and refuses sealed objects.
+        let decoded = pub_server
+            .storage_get_content(
+                payer_hex.clone(),
+                pub_hex.clone(),
+                receipt_hex.clone(),
+                MIN_PAID_VIEW_FEE_ATOMS,
+            )
+            .await
+            .unwrap();
+        assert_eq!(decoded["content_hex"], hex::encode(&payload));
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    payer_hex.clone(),
+                    pub_hex.clone(),
+                    receipt_hex.clone(),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    payer_hex.clone(),
+                    sealed_hex,
+                    format!("0x{}", hex::encode([0x88u8; 32])),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Market-listed bytes never leave through the paid storage view: the
+        // commitment-bound refusal fires before any decode or receipt burn.
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    payer_hex,
+                    format!("0x{}", hex::encode([0x77u8; 32])),
+                    format!("0x{}", hex::encode([0x99u8; 32])),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32004
+        );
+
+        // Live BNS content resolves through BlockchainSymbolSource.
+        let bns_res = pub_server
+            .bns_resolve_content("livebud3.bud".to_string())
+            .await
+            .unwrap();
+        assert_eq!(bns_res["bytes"], format!("0x{}", hex::encode(&payload)));
+
+        // NFT object query accepts both SocialFi u64 id and 32-byte hex NftId, refuses malformed.
+        let by_id = pub_server
+            .storage_get_nft_object(social_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(by_id["commitment"], hex::encode(pub_key));
+        assert_eq!(by_id["socialfi_id"], social_id);
+        let by_hex = pub_server
+            .storage_get_nft_object(format!("0x{}", hex::encode(bud3_nft)))
+            .await
+            .unwrap();
+        assert_eq!(by_hex["commitment"], hex::encode(pub_key));
+        assert_eq!(
+            pub_server
+                .storage_get_nft_object("not-an-nft".to_string())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // SocialFi endpoints include canonical `bud3_nft_id` and live `bud3` object binding.
+        let post = pub_server.social_get_post(social_id).await.unwrap();
+        assert_eq!(post["bud3"]["commitment"], hex::encode(pub_key));
+        let profile_res = pub_server
+            .social_get_profile(format!("0x{}", alice.to_hex()), None, None)
+            .await
+            .unwrap();
+        assert_eq!(profile_res[0]["bud3"]["commitment"], hex::encode(pub_key));
+        let feed_res = pub_server.social_get_feed(10).await.unwrap();
+        assert_eq!(feed_res[0]["bud3"]["commitment"], hex::encode(pub_key));
+    }
+
+    #[tokio::test]
+    async fn rpc_bud3_sealed_nft_grant_unwrap_and_verifiable_decrypt_end_to_end() {
+        use crate::consensus::pow::PoWEngine;
+        use crate::crypto::hpke::HpkeKeyPair;
+        use crate::socialfi::nft_folders::derive_bud3_nft_id;
+        use crate::storage::bud3::content_id::ContentKey;
+        use crate::storage::bud3::custody::symbol_leaf;
+        use crate::storage::bud3::grants::build_grant_row;
+        use crate::storage::bud3::keys::{
+            derive_grant_one_time_keypair, open_key_package, seal_key_package,
+        };
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::{prepare_sealed_upload, view_sealed};
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::seal::SEAL_SALT_LEN;
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, verify_symbol_range_response, SymbolRangeRequest,
+            VerifiedSymbolItem,
+        };
+        use crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS;
+        use crate::storage::content_id::ContentId;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let secret_payload =
+            b"Confidential sealed NFT payload decrypted solely by HPKE X-Wing grant".repeat(4);
+        let owner_key = ContentKey([0xC7u8; 32]);
+        let sealed_up = prepare_sealed_upload(
+            &secret_payload,
+            &owner_key,
+            [0x42u8; SEAL_SALT_LEN],
+            &profile,
+            &Bud3Limits::default(),
+            8,
+        )
+        .unwrap();
+        let sealed_key = sealed_up.record.commitment;
+
+        let alice = Address::from([0xA3u8; 32]);
+        let payer = Address::from([0xB4u8; 32]);
+        let holder_a = [0x21u8; 32];
+        let holder_b = [0x22u8; 32];
+        let grant_nonce = [0x31u8; 32];
+        let bob_kp = HpkeKeyPair::from_seed(&[0x51u8; 32]).unwrap();
+        let charlie_kp = HpkeKeyPair::from_seed(&[0x52u8; 32]).unwrap();
+
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        bc.state.epoch_index = 10;
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: holder_a,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: holder_b,
+                    class: Class::Mobile,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+        ];
+        bc.state
+            .bud3_registry
+            .register_object(alice.0, sealed_up.record.clone(), shares, 10, 50)
+            .unwrap();
+        let social_id = bc
+            .state
+            .nft_registry
+            .mint(
+                alice,
+                ContentId(sealed_up.record.content_id.digest),
+                10,
+                Some("AliceSealed".to_string()),
+            )
+            .unwrap();
+        let bud3_nft = derive_bud3_nft_id(social_id);
+        bc.state
+            .bud3_registry
+            .bind_nft(bud3_nft, alice.0, Some(alice.0), &sealed_key)
+            .unwrap();
+
+        let (_otk_seed, otk_pk) =
+            derive_grant_one_time_keypair(&[0x71u8; 32], &bud3_nft, &grant_nonce).unwrap();
+        let grant_tag = crate::storage::bud3::grants::compute_grant_tag(&bud3_nft, &grant_nonce);
+        let sealed_pkg =
+            seal_key_package(bob_kp.public_key(), &grant_tag, &sealed_key, &owner_key).unwrap();
+        let grant_row =
+            build_grant_row(&bud3_nft, &grant_nonce, otk_pk, sealed_pkg, 25, 10).unwrap();
+        bc.state
+            .bud3_registry
+            .issue_view_grant(&bud3_nft, &grant_nonce, &alice.0, grant_row.clone(), 10)
+            .unwrap();
+
+        let (op_server, chain) = setup_with_blockchain(bc).await;
+        let pub_node = Node::new(chain.clone()).unwrap();
+        let pub_server = RpcServer::with_security_and_mode(
+            chain,
+            pub_node.get_client(),
+            RpcSecurityConfig::default(),
+            RpcMode::Public,
+        );
+
+        let leaves: Vec<(u32, [u8; 32])> = sealed_up.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let items_a = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: sealed_key,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves,
+            &sealed_up.segments[0][0..4],
+        )
+        .unwrap()
+        .items;
+        let items_b = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: sealed_key,
+                segment: 0,
+                first_esi: 4,
+                count: 4,
+            },
+            &leaves,
+            &sealed_up.segments[0][4..8],
+        )
+        .unwrap()
+        .items;
+        let holder_a_hex = format!("0x{}", hex::encode(holder_a));
+        let holder_b_hex = format!("0x{}", hex::encode(holder_b));
+        let obj_hex = format!("0x{}", hex::encode(sealed_key));
+        let grant_hex = format!("0x{}", hex::encode(grant_tag));
+
+        op_server
+            .storage_store_verified_symbols(
+                holder_a_hex.clone(),
+                obj_hex.clone(),
+                0,
+                items_a
+                    .iter()
+                    .map(|i| serde_json::to_value(i).unwrap())
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        op_server
+            .storage_store_verified_symbols(
+                holder_b_hex.clone(),
+                obj_hex.clone(),
+                0,
+                items_b
+                    .iter()
+                    .map(|i| serde_json::to_value(i).unwrap())
+                    .collect(),
+            )
+            .await
+            .unwrap();
+
+        // Bob resolves the NFT metadata and fetches his unlinkable HPKE grant capsule over RPC.
+        let nft_obj = pub_server
+            .storage_get_nft_object(social_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(nft_obj["sealed"], true);
+        assert_eq!(nft_obj["commitment"], hex::encode(sealed_key));
+
+        let grant_res = pub_server
+            .storage_get_grant(grant_hex.clone())
+            .await
+            .unwrap();
+        assert_eq!(grant_res["status"], "active");
+        assert_eq!(grant_res["expires_at_epoch"], 25);
+        assert_eq!(
+            pub_server
+                .storage_get_grant("0x12".to_string())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        let pkg_bytes = hex::decode(grant_res["sealed_key_package"].as_str().unwrap()).unwrap();
+        assert!(open_key_package(&charlie_kp, &grant_tag, &pkg_bytes).is_err());
+        let (opened_obj, opened_key) = open_key_package(&bob_kp, &grant_tag, &pkg_bytes).unwrap();
+        assert_eq!(opened_obj, sealed_key);
+        assert_eq!(opened_key, owner_key);
+
+        // Fetch Merkle-verified symbols from both holders, verify proofs client-side, and decrypt.
+        let mut all_syms = Vec::new();
+        for holder_hex in [holder_a_hex, holder_b_hex] {
+            let page = pub_server
+                .storage_get_symbols(holder_hex, obj_hex.clone(), 0, 0, 8)
+                .await
+                .unwrap();
+            let page_items: Vec<VerifiedSymbolItem> = page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| {
+                    serde_json::from_value(serde_json::json!({
+                        "symbol": entry["symbol"].clone(),
+                        "proof": entry["proof"].clone(),
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            let root_hex = page["symbol_roots"][0]["root"].as_str().unwrap();
+            let mut root_arr = [0u8; 32];
+            root_arr.copy_from_slice(&hex::decode(root_hex).unwrap());
+            verify_symbol_range_response(
+                0,
+                root_arr,
+                page["symbol_roots"][0]["count"].as_u64().unwrap(),
+                profile.symbol_size,
+                &crate::storage::bud3::symbol_protocol::SymbolRangeResponse {
+                    items: page_items.clone(),
+                },
+            )
+            .unwrap();
+            all_syms.extend(page_items.into_iter().map(|i| i.symbol));
+        }
+        assert_eq!(
+            view_sealed(&sealed_up.record, &opened_key, all_syms).unwrap(),
+            secret_payload
+        );
+
+        // G8 paid fallback decode must refuse sealed objects unconditionally.
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    format!("0x{}", hex::encode(payer.0)),
+                    obj_hex,
+                    format!("0x{}", hex::encode([0x99u8; 32])),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Once consensus epoch reaches expires_at_epoch, `bud_storageGetGrant` reports `expired`.
+        let mut expired_bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        expired_bc.state.epoch_index = 25;
+        expired_bc
+            .state
+            .bud3_registry
+            .register_object(
+                alice.0,
+                sealed_up.record,
+                vec![
+                    (
+                        0,
+                        Share {
+                            validator: holder_a,
+                            class: Class::Full,
+                            first_esi: 0,
+                            symbols: 4,
+                        },
+                    ),
+                    (
+                        0,
+                        Share {
+                            validator: holder_b,
+                            class: Class::Mobile,
+                            first_esi: 4,
+                            symbols: 4,
+                        },
+                    ),
+                ],
+                10,
+                50,
+            )
+            .unwrap();
+        expired_bc
+            .state
+            .bud3_registry
+            .bind_nft(bud3_nft, alice.0, Some(alice.0), &sealed_key)
+            .unwrap();
+        expired_bc
+            .state
+            .bud3_registry
+            .issue_view_grant(&bud3_nft, &grant_nonce, &alice.0, grant_row, 10)
+            .unwrap();
+        let (exp_server, _) = setup_with_blockchain(expired_bc).await;
+        let expired_grant = exp_server.storage_get_grant(grant_hex).await.unwrap();
+        assert_eq!(expired_grant["status"], "expired");
+    }
+
+    /// second descent: the node reads. A fresh node has a height of
+    /// zero, no peers and nothing to sync, and every one of these reads says so
+    /// in its own shape rather than failing. The address reads keep their
+    /// refusal: an unparsable address is a client mistake, and it is answered
+    /// with the field that failed, never with the zero that would look like an
+    /// empty account.
+    #[tokio::test]
+    async fn rpc_node_reads_answer_zero_and_the_address_reads_name_their_field() {
+        let (server, _chain) = setup().await;
+
+        let health = server.health().await.unwrap();
+        assert_eq!(
+            health["status"],
+            serde_json::json!("healthy"),
+            "a node that is not syncing is healthy, not merely not red"
+        );
+        assert_eq!(
+            health["blockHeight"],
+            serde_json::json!("0x0"),
+            "a fresh chain has no blocks to report"
+        );
+        assert!(
+            record_answered(&server.node_info().await.unwrap()),
+            "bud_nodeInfo"
+        );
+        assert!(
+            record_answered(&server.get_status().await.unwrap()),
+            "bud_getStatus"
+        );
+        assert!(
+            record_answered(&server.get_validator_set().await.unwrap()),
+            "bud_getValidatorSet"
+        );
+        assert!(
+            record_answered(&server.get_slashing_history(None, None).await.unwrap()),
+            "bud_getSlashingHistory"
+        );
+        assert!(
+            server.get_slashing_history(None, Some(0)).await.is_err(),
+            "bud_getSlashingHistory limit=0 must be refused"
+        );
+        assert!(
+            record_answered(&server.get_restaked_validators().await.unwrap()),
+            "bud_getRestakedValidators"
+        );
+        assert!(
+            record_answered(&server.get_quantum_alarm().await.unwrap()),
+            "bud_getQuantumAlarm"
+        );
+        assert!(
+            record_answered(&server.get_external_intake_digest().await.unwrap()),
+            "bud_getExternalIntakeDigest"
+        );
+        assert!(
+            !server.syncing().await.unwrap(),
+            "{name} is false before any peer has handed a block",
+            name = "bud_syncing"
+        );
+        assert!(
+            server.net_listening().await.unwrap(),
+            "{name} reports the listener the caller is talking to",
+            name = "bud_netListening"
+        );
+        assert_eq!(
+            server.net_version().await.unwrap(),
+            "45262",
+            "{name} is the chain id, spelled as the test chain carries it",
+            name = "bud_netVersion"
+        );
+        assert_eq!(
+            server.net_peer_count().await.unwrap(),
+            "0x0",
+            "{name} counts peers, and a lone node has none",
+            name = "bud_netPeerCount"
+        );
+
+        let stranger = Address([11u8; 32]);
+        assert_eq!(
+            server.get_nonce(stranger.to_hex()).await.unwrap(),
+            "0x0",
+            "{name} of an unseen account is zero, not absent",
+            name = "bud_getNonce"
+        );
+        assert!(
+            server
+                .get_nonce("0xzz".to_string())
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid address"),
+            "bud_getNonce names the field a caller mistyped"
+        );
+        assert!(
+            server
+                .get_account_proof("0xzz".to_string())
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid address"),
+            "bud_getAccountProof refuses an address it cannot parse"
+        );
+    }
+
+    /// third descent: the marketplace, data market, AI and directory
+    /// listings. Every one of them is a delegation to the chain actor, so on a
+    /// fresh chain each answers with an empty collection. The lock worth keeping
+    /// is that none of them errors and none of them collapses to a flag: a
+    /// wallet that reads `false` where a list belongs renders an outage as an
+    /// empty market.
+    #[tokio::test]
+    async fn rpc_listing_reads_answer_with_their_records() {
+        let (server, _chain) = setup().await;
+
+        assert!(
+            record_answered(&server.list_relays().await.unwrap()),
+            "bud_listRelays"
+        );
+        assert!(
+            record_answered(&server.list_gateways().await.unwrap()),
+            "bud_listGateways"
+        );
+        assert!(
+            record_answered(&server.market_get_offers(None, None).await.unwrap()),
+            "bud_marketGetOffers"
+        );
+        assert!(server.market_get_offers(None, Some(0)).await.is_err());
+        assert!(
+            record_answered(&server.pollen_get_access_grants(None, None).await.unwrap()),
+            "bud_dataMarketGetAccessGrants"
+        );
+        assert!(server
+            .pollen_get_access_grants(None, Some(0))
+            .await
+            .is_err());
+        assert!(
+            record_answered(&server.pollen_get_data_assets(None, None).await.unwrap()),
+            "bud_dataMarketGetDataAssets"
+        );
+        assert!(server.pollen_get_data_assets(None, Some(0)).await.is_err());
+        assert!(
+            record_answered(
+                &server
+                    .pollen_get_purchase_receipts(None, None)
+                    .await
+                    .unwrap()
+            ),
+            "bud_dataMarketGetPurchaseReceipts"
+        );
+        assert!(server
+            .pollen_get_purchase_receipts(None, Some(0))
+            .await
+            .is_err());
+        assert!(
+            record_answered(
+                &server
+                    .pollen_get_sale_authorizations(None, None)
+                    .await
+                    .unwrap()
+            ),
+            "bud_dataMarketGetSaleAuthorizations"
+        );
+        assert!(server
+            .pollen_get_sale_authorizations(None, Some(0))
+            .await
+            .is_err());
+        assert!(
+            record_answered(&server.ai_agent_ranking().await.unwrap()),
+            "bud_aiAgentRanking"
+        );
+        assert!(
+            record_answered(&server.ai_get_active_verifiers().await.unwrap()),
+            "bud_aiGetActiveVerifiers"
+        );
+        assert!(
+            record_answered(&server.ai_open_requests().await.unwrap()),
+            "bud_aiOpenRequests"
+        );
+        assert!(
+            record_answered(&server.ai_verifier_ranking().await.unwrap()),
+            "bud_aiVerifierRanking"
+        );
+        assert!(
+            record_answered(&server.ai_verifier_whitelist().await.unwrap()),
+            "bud_aiVerifierWhitelist"
+        );
+        assert!(
+            record_answered(&server.ai_stats().await.unwrap()),
+            "bud_aiInferenceStats"
+        );
+        assert!(
+            record_answered(&server.budlumxyz_get_apps(None, None).await.unwrap()),
+            "bud_hubGetApps"
+        );
+        assert!(server.budlumxyz_get_apps(None, Some(0)).await.is_err());
+        assert!(
+            record_answered(
+                &server
+                    .budlumxyz_get_app_binding_apps(None, None)
+                    .await
+                    .unwrap()
+            ),
+            "bud_hubGetAppBindingApps"
+        );
+        assert!(server
+            .budlumxyz_get_app_binding_apps(None, Some(0))
+            .await
+            .is_err());
+    }
+
+    /// the estimate is the fee the chain will actually enforce for
+    /// this transaction, not the base fee. Invariant:
+    /// `bud_estimateGas` must not quote `base_fee` alone while admission charges
+    /// `required_fee`, which bills the proportional cut on a transfer
+    /// (`transfer_fee_ppm` of the amount, on top of the base fee) and a
+    /// multiplied base fee for a governance proposal. A wallet sized its
+    /// transaction from the quote and was previously refused for the fee the RPC had
+    /// suggested without proportional accounting.
+    ///
+    /// Canary: restore `Ok(Self::to_hex(base_fee))` in `estimate_gas` and this
+    /// fails: the proportional cut alone is 1% of the amount.
+    #[tokio::test]
+    async fn estimate_gas_quotes_the_proportional_transfer_fee() {
+        use crate::chain::fee_market::PPM_DENOMINATOR;
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let mut params = *blockchain.state.registry.params();
+        params.transfer_fee_ppm = 10_000; // 1% of the amount
+        blockchain.state.registry.set_params(params);
+        let base_fee = blockchain.state.base_fee;
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+
+        let amount = 1_000_000u64;
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([1u8; 32]),
+            Address::from([2u8; 32]),
+            amount,
+            0, // the caller is asking what to pay
+            0,
+            vec![],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+
+        let estimate = server.estimate_gas(tx).await.expect("estimate");
+        let estimate = u64::from_str_radix(estimate.trim_start_matches("0x"), 16).expect("hex");
+
+        // The charge the admission rule computes: `required_transfer_fee` is
+        // the function `bud_estimateGas` must agree with.
+        let proportional = amount * params.transfer_fee_ppm / PPM_DENOMINATOR;
+        assert!(
+            proportional > 0,
+            "the fixture must charge a proportional cut"
+        );
+        let charged = params.required_transfer_fee(amount, base_fee);
+        assert_eq!(charged, base_fee + proportional);
+        assert_eq!(
+            estimate, charged,
+            "the estimate must be what the chain charges, not the base fee alone"
+        );
+        assert_ne!(
+            estimate, base_fee,
+            "estimate must include proportional fee in addition to base fee"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Method coverage.
+    //
+    // Each pair below observes an answer and the refusal the handler names.
+    // The behavioural completeness rule in `src/rpc/method_class.rs` checks
+    // the actual call and its success/refusal assertion, not just these names.
+    // Methods whose trait declaration has no argument require only an answer.
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn data_market_build_ai_input_ref_ok_and_refused() {
+        let (server, _chain) = setup().await;
+        let asset = "11".repeat(32);
+        let grant = "22".repeat(32);
+        let answer = server
+            .pollen_build_ai_input_ref(asset.clone(), grant)
+            .await
+            .unwrap();
+        assert_eq!(answer["assetId"], asset);
+        assert!(answer["inputRefHex"].as_str().unwrap().starts_with("0x"));
+        let error = server
+            .pollen_build_ai_input_ref("not-hex".to_string(), "22".repeat(32))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), -32602);
+    }
+
+    #[tokio::test]
+    async fn data_market_prepare_sale_authorization_ok_and_refused() {
+        let (server, _chain) = setup().await;
+        let seller = test_address(0x41);
+        let asset = "11".repeat(32);
+        let terms = "33".repeat(32);
+        let answer = server
+            .pollen_prepare_sale_authorization(
+                seller.clone(),
+                asset.clone(),
+                7,
+                1_000,
+                2,
+                terms.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer["assetId"], asset);
+        assert!(answer["signingHash"].as_str().unwrap().starts_with("0x"));
+        let error = server
+            .pollen_prepare_sale_authorization(seller, asset, 0, 1_000, 2, terms)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), -32602);
+    }
+
+    #[tokio::test]
+    async fn data_market_prepare_purchase_ok_and_refused() {
+        use crate::crypto::primitives::KeyPair;
+        use crate::pollen::{MarketplaceRegistry, SaleAuthorization, Signature64};
+        use crate::storage::ContentId;
+
+        let seller_keys = KeyPair::from_seed(&[0x41; 32]).unwrap();
+        let seller = Address::from(seller_keys.public_key_bytes());
+        let buyer_keys = KeyPair::from_seed(&[0x42; 32]).unwrap();
+        let buyer = Address::from(buyer_keys.public_key_bytes());
+        let asset = DataAsset::new(seller, ContentId::of(b"rpc sale"), [0x51; 32], true);
+        let mut authorization =
+            SaleAuthorization::new_unsigned(asset.asset_id, seller, 7, 0, 1_000, 2, [0x52; 32]);
+        authorization.seller_signature =
+            Signature64::from(seller_keys.sign(&authorization.signing_hash()));
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45267, None);
+        blockchain
+            .state
+            .marketplace
+            .register_data_asset(asset)
+            .unwrap();
+        blockchain
+            .state
+            .marketplace
+            .create_sale_authorization(authorization.clone())
+            .unwrap();
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+        let payment = [0x53; 32];
+        let signing_hash = MarketplaceRegistry::purchase_signing_hash(
+            &authorization,
+            buyer,
+            buyer,
+            0,
+            10,
+            5,
+            payment,
+        )
+        .unwrap();
+        let aid = authorization.authorization_id.to_hex();
+        let buyer_hex = buyer.to_hex();
+        let pc = hex::encode(payment);
+        let signature = hex::encode(buyer_keys.sign(&signing_hash));
+        let answer = server
+            .pollen_prepare_purchase(
+                aid.clone(),
+                buyer_hex.clone(),
+                buyer_hex.clone(),
+                10,
+                5,
+                pc.clone(),
+                signature,
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer["authorizationId"], aid);
+        assert!(answer["note"].as_str().unwrap().contains("prepare-only"));
+        let error = server
+            .pollen_prepare_purchase(
+                aid,
+                buyer_hex.clone(),
+                buyer_hex,
+                10,
+                5,
+                pc,
+                "00".to_string(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), -32602);
+    }
+
+    /// A well-formed 32-byte address whose bytes are readable in a failure:
+    /// `test_address(7)` is `0x0707..07`.
+    fn test_address(seed: u8) -> String {
+        let byte = format!("{seed:02x}");
+        format!("0x{}", byte.repeat(32))
+    }
+
+    #[tokio::test]
+    async fn chain_id_ok_reports_the_configured_chain() {
+        let (server, _chain) = setup().await;
+        let answer = server.chain_id().await.expect("chain id");
+        assert_eq!(
+            answer,
+            format!("0x{:x}", crate::core::transaction::DEFAULT_CHAIN_ID)
+        );
+    }
+
+    #[tokio::test]
+    async fn block_number_ok_is_the_chain_height() {
+        let (server, chain) = setup().await;
+        let answer = server.block_number().await.expect("block number");
+        let height = u64::from_str_radix(answer.trim_start_matches("0x"), 16).expect("hex");
+        assert_eq!(height, chain.get_height().await);
+    }
+
+    #[tokio::test]
+    async fn get_block_by_number_ok_answers_genesis() {
+        let (server, _chain) = setup().await;
+        let block = server.get_block_by_number(0).await.expect("genesis");
+        assert!(!block.is_null(), "height 0 is the genesis block");
+        assert_eq!(block["number"], serde_json::json!("0x0"));
+    }
+
+    /// A height this node does not hold is `null`, not an error: absence is a
+    /// positive answer and the client must be able to tell it from a failure.
+    #[tokio::test]
+    async fn get_block_by_number_refused_to_invent_a_block_it_does_not_hold() {
+        let (server, _chain) = setup().await;
+        let answer = server
+            .get_block_by_number(u64::MAX)
+            .await
+            .expect("an absent block is not an error");
+        assert!(answer.is_null());
+        assert!(!answer.is_object());
+    }
+
+    #[tokio::test]
+    async fn get_block_by_hash_ok_looks_up_the_genesis_hash() {
+        let (server, chain) = setup().await;
+        let genesis = chain.get_block(0).await.expect("genesis");
+        // The chain stores the hash without the `0x` prefix and the handler
+        // strips one if it is there, so both spellings must find the block.
+        let bare = genesis.hash.clone();
+        let prefixed = format!("0x{bare}");
+        assert!(!bare.is_empty(), "the genesis block must carry a hash");
+        for hash in [prefixed, bare] {
+            let block = server.get_block_by_hash(hash).await.expect("lookup");
+            assert_eq!(block["number"], serde_json::json!("0x0"));
+        }
+    }
+
+    #[tokio::test]
+    async fn get_block_by_hash_refused_to_invent_a_block_for_an_unknown_hash() {
+        let (server, _chain) = setup().await;
+        let answer = server
+            .get_block_by_hash(format!("0x{}", "ab".repeat(32)))
+            .await
+            .expect("absent hash is a null answer");
+        assert!(answer.is_null());
+        assert!(!answer.is_object());
+    }
+
+    #[tokio::test]
+    async fn get_balance_ok_reports_a_hex_amount() {
+        let (server, _chain) = setup().await;
+        let balance = server
+            .get_balance(test_address(7))
+            .await
+            .expect("balance read");
+        assert!(balance.starts_with("0x"));
+        u64::from_str_radix(balance.trim_start_matches("0x"), 16).expect("hex amount");
+    }
+
+    #[tokio::test]
+    async fn get_balance_refused_for_a_malformed_address() {
+        let (server, _chain) = setup().await;
+        let refused = server
+            .get_balance("0xnot-an-address".into())
+            .await
+            .expect_err("a malformed address must be refused");
+        assert_eq!(refused.code(), -32602);
+        assert!(refused.message().contains("Invalid address"));
+    }
+
+    #[tokio::test]
+    async fn get_nonce_ok_reports_a_hex_nonce() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let holder = Address::from([8u8; 32]);
+        blockchain.state.get_or_create(&holder).nonce = 5;
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+
+        let nonce = server
+            .get_nonce(format!("0x{}", "08".repeat(32)))
+            .await
+            .expect("nonce read");
+        assert_eq!(
+            u64::from_str_radix(nonce.trim_start_matches("0x"), 16).expect("hex nonce"),
+            5,
+            "the answer must be the account's nonce, not a constant"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_nonce_refused_for_a_short_address() {
+        let (server, _chain) = setup().await;
+        let refused = server
+            .get_nonce("0x1234".into())
+            .await
+            .expect_err("a short address must be refused");
+        assert_eq!(refused.code(), -32602);
+    }
+
+    #[tokio::test]
+    async fn gas_price_ok_reports_the_base_fee() {
+        let (server, chain) = setup().await;
+        let price = server.gas_price().await.expect("gas price");
+        assert_eq!(
+            u64::from_str_radix(price.trim_start_matches("0x"), 16).expect("hex"),
+            chain.get_base_fee().await
+        );
+    }
+
+    /// A transaction whose wire encoding exceeds the transport ceiling is
+    /// refused before any fee arithmetic happens.
+    #[tokio::test]
+    async fn estimate_gas_refused_for_an_oversized_transaction() {
+        let (server, _chain) = setup().await;
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([1u8; 32]),
+            Address::zero(),
+            1,
+            0,
+            0,
+            vec![0u8; crate::consensus::budget::MAX_TX_BYTES + 1],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+        let refused = server
+            .estimate_gas(tx)
+            .await
+            .expect_err("an oversized transaction must be refused");
+        assert_eq!(refused.code(), -32602);
+        assert!(refused.message().contains("Transaction too large"));
+    }
+
+    /// The success arm: a funded sender signs a V4 transfer over the chain id
+    /// and the pool admits it, answering with the hash it was admitted under.
+    #[tokio::test]
+    async fn send_raw_transaction_ok_returns_the_admitted_hash() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let keypair = crate::crypto::primitives::KeyPair::generate().expect("ed25519 key");
+        let sender = Address::from(keypair.public_key_bytes());
+        blockchain.state.add_balance(&sender, 1_000);
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+
+        let mut tx = Transaction::new_with_chain_id(
+            sender,
+            Address::from([9u8; 32]),
+            1,
+            1,
+            0,
+            vec![],
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.sign(&keypair);
+        let hash = server
+            .send_raw_transaction(tx)
+            .await
+            .expect("a funded, signed transfer is admitted");
+        assert!(hash.starts_with("0x"));
+        assert_eq!(hash.trim_start_matches("0x").len(), 64);
+    }
+
+    /// A signed, well-formed transaction from an account with no funds is
+    /// refused by the pool, and the refusal names the pool's reason rather than
+    /// a generic failure.
+    #[tokio::test]
+    async fn send_raw_transaction_refused_for_an_unfunded_sender() {
+        let (server, _chain) = setup().await;
+        let keypair = crate::crypto::primitives::KeyPair::generate().expect("ed25519 key");
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from(keypair.public_key_bytes()),
+            Address::from([9u8; 32]),
+            1,
+            1,
+            0,
+            vec![],
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.sign(&keypair);
+        let refused = server
+            .send_raw_transaction(tx)
+            .await
+            .expect_err("an unfunded sender cannot pay the amount and the fee");
+        assert_eq!(refused.code(), -32602);
+        let message = refused.message();
+        assert!(
+            message.contains("Invalid params") || message.contains("Mempool error"),
+            "the refusal must name the pool's reason, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_raw_transaction_refused_without_a_signature() {
+        let (server, _chain) = setup().await;
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([2u8; 32]),
+            Address::from([3u8; 32]),
+            10,
+            10,
+            0,
+            vec![],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+        let refused = server
+            .send_raw_transaction(tx)
+            .await
+            .expect_err("an unsigned transaction must be refused");
+        assert_eq!(refused.code(), -32602);
+        assert!(refused.message().contains("Invalid transaction signature"));
+    }
+
+    #[tokio::test]
+    async fn send_raw_transaction_refused_for_an_oversized_transaction() {
+        let (server, _chain) = setup().await;
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([2u8; 32]),
+            Address::from([3u8; 32]),
+            10,
+            10,
+            0,
+            vec![0u8; crate::consensus::budget::MAX_TX_BYTES + 1],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+        let refused = server
+            .send_raw_transaction(tx)
+            .await
+            .expect_err("oversized transaction must be refused");
+        assert!(refused.message().contains("Transaction too large"));
+    }
+
+    #[tokio::test]
+    async fn net_version_ok_is_the_chain_id_in_decimal() {
+        let (server, chain) = setup().await;
+        let version = server.net_version().await.expect("net version");
+        assert_eq!(version, chain.get_chain_id().await.to_string());
+    }
+
+    /// `net_listening` answers for a listener that is serving. The server
+    /// object here is built but not bound to a socket, so the honest assertion
+    /// is that the flag is a decision this process makes and not a constant
+    /// copied from a comment: it is `true` only while the node handle is alive.
+    #[tokio::test]
+    async fn net_listening_ok_is_true_for_a_live_node_handle() {
+        let (server, _chain) = setup().await;
+        assert!(server.net_listening().await.expect("listening"));
+    }
+
+    #[tokio::test]
+    async fn net_peer_count_ok_is_a_hex_count() {
+        let (server, _chain) = setup().await;
+        let count = server.net_peer_count().await.expect("peer count");
+        assert_eq!(count, "0x0", "a fresh test node has no peers");
+    }
+
+    #[tokio::test]
+    async fn health_ok_reports_a_status_and_height() {
+        let (server, _chain) = setup().await;
+        let health = server.health().await.expect("health");
+        assert!(health["status"].is_string());
+        assert!(health["blockHeight"]
+            .as_str()
+            .is_some_and(|h| h.starts_with("0x")));
+    }
+
+    #[tokio::test]
+    async fn node_info_ok_reports_the_listener_and_chain() {
+        let (server, chain) = setup().await;
+        let info = server.node_info().await.expect("node info");
+        assert_eq!(
+            info["chainId"],
+            serde_json::json!(format!("0x{:x}", chain.get_chain_id().await))
+        );
+        // The listener column is part of the answer: a client must be able to
+        // tell an operator surface from a public one.
+        assert_eq!(info["rpcMode"], serde_json::json!("operator"));
+    }
+
+    fn assert_ethereum_opening_refusal(
+        error: &jsonrpsee::types::error::ErrorObjectOwned,
+        method: &str,
+        native_door: &str,
+    ) {
+        assert_eq!(error.code(), -32004, "unexpected code for {method}");
+        assert!(
+            error.message().contains(method),
+            "the refusal must name {method}: {}",
+            error.message()
+        );
+        let data = error.data().map(ToString::to_string).unwrap_or_default();
+        assert!(
+            data.contains(native_door),
+            "{method} must name its native door {native_door}: {data}"
+        );
+    }
+
+    fn assert_ethereum_filter_error(
+        error: &jsonrpsee::types::error::ErrorObjectOwned,
+        code: i32,
+        reason: &str,
+    ) {
+        assert_eq!(error.code(), code);
+        let data = error.data().map(ToString::to_string).unwrap_or_default();
+        assert!(
+            data.contains(&format!("\"reason\":\"{reason}\"")),
+            "missing machine-readable {reason}: {data}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ethereum_opening_chain_reads_match_native_chain_state() {
+        let (server, chain) = setup().await;
+
+        let version = server.web3_client_version().await.unwrap();
+        assert!(version.starts_with("budlum-core/v"));
+        assert!(version.ends_with(&format!("chain-{}", chain.get_chain_id().await)));
+
+        // These are deliberately the compat handlers, not the similarly named
+        // native `bud_netVersion` and `bud_netListening` methods.
+        assert_eq!(
+            server.compat_net_version().await.unwrap(),
+            chain.get_chain_id().await.to_string()
+        );
+        assert!(server.compat_net_listening().await.unwrap());
+        assert_eq!(
+            server.eth_chain_id().await.unwrap(),
+            format!("0x{:x}", chain.get_chain_id().await)
+        );
+        assert_eq!(
+            server.eth_syncing().await.unwrap(),
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            server.eth_block_number().await.unwrap(),
+            format!("0x{:x}", chain.get_height().await)
+        );
+        assert_eq!(
+            server.eth_gas_price().await.unwrap(),
+            format!("0x{:x}", chain.get_base_fee().await)
+        );
+        assert_eq!(server.eth_max_priority_fee_per_gas().await.unwrap(), "0x0");
+        assert_eq!(server.eth_accounts().await.unwrap(), serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn ethereum_opening_unsupported_methods_refuse_with_named_native_doors() {
+        let (server, _chain) = setup().await;
+        let address = format!("0x{}", "11".repeat(20));
+        let hash = format!("0x{}", "22".repeat(32));
+        let call = serde_json::json!({"to": address, "data": "0x"});
+
+        let error = server
+            .eth_get_balance(address.clone(), None)
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(&error, "eth_getBalance", "bud_getBalance");
+        let error = server
+            .eth_get_code(address.clone(), None)
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(&error, "eth_getCode", "bud_getAccountProof");
+        let error = server
+            .eth_get_storage_at(address.clone(), "0x0".into(), None)
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(&error, "eth_getStorageAt", "bud_getAccountProof");
+        let error = server
+            .eth_get_transaction_count(address.clone(), None)
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(&error, "eth_getTransactionCount", "bud_getNonce");
+        let error = server.eth_call(call.clone(), None).await.unwrap_err();
+        assert_ethereum_opening_refusal(&error, "eth_call", "bud_txPrecheck");
+        let error = server
+            .eth_estimate_gas(call.clone(), None)
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(&error, "eth_estimateGas", "bud_estimateGas");
+        let error = server
+            .eth_create_access_list(call.clone(), None)
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(&error, "eth_createAccessList", "bud_txPrecheck");
+        let error = server
+            .eth_fee_history("0x1".into(), "latest".into(), None)
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(&error, "eth_feeHistory", "bud_gasPrice");
+        let error = server
+            .eth_send_raw_transaction("0x00".into())
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(&error, "eth_sendRawTransaction", "bud_sendRawTransaction");
+        let error = server
+            .eth_get_block_by_number("latest".into(), None)
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(&error, "eth_getBlockByNumber", "bud_getBlockByNumber");
+        let error = server
+            .eth_get_block_by_hash(hash.clone(), None)
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(&error, "eth_getBlockByHash", "bud_getBlockByHash");
+        let error = server
+            .eth_get_block_transaction_count_by_number("latest".into())
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(
+            &error,
+            "eth_getBlockTransactionCountByNumber",
+            "bud_getBlockByNumber",
+        );
+        let error = server
+            .eth_get_block_transaction_count_by_hash(hash.clone())
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(
+            &error,
+            "eth_getBlockTransactionCountByHash",
+            "bud_getBlockByHash",
+        );
+        let error = server
+            .eth_get_transaction_by_hash(hash.clone())
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(
+            &error,
+            "eth_getTransactionByHash",
+            "bud_getTransactionByHash",
+        );
+        let error = server
+            .eth_get_transaction_by_block_number_and_index("latest".into(), "0x0".into())
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(
+            &error,
+            "eth_getTransactionByBlockNumberAndIndex",
+            "bud_getBlockByNumber",
+        );
+        let error = server
+            .eth_get_transaction_receipt(hash.clone())
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(
+            &error,
+            "eth_getTransactionReceipt",
+            "bud_getTransactionReceipt",
+        );
+        let error = server
+            .eth_get_block_receipts("latest".into())
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(&error, "eth_getBlockReceipts", "bud_getBlockByNumber");
+        let error = server
+            .eth_get_logs(serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(&error, "eth_getLogs", "bud_getTransactionReceipt");
+        let error = server
+            .debug_trace_transaction(hash, None)
+            .await
+            .unwrap_err();
+        assert_ethereum_opening_refusal(
+            &error,
+            "debug_traceTransaction",
+            "bud_getTransactionReceipt",
+        );
+        let error = server.debug_trace_call(call, None, None).await.unwrap_err();
+        assert_ethereum_opening_refusal(&error, "debug_traceCall", "bud_txPrecheck");
+
+        let error = server
+            .eth_get_proof(address, serde_json::json!([]), None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), -32601);
+        assert!(error.message().contains("eth_getProof"));
+        assert!(error.message().contains("bud_getAccountProof"));
+    }
+
+    #[tokio::test]
+    async fn ethereum_bounded_filters_use_hex_ids_connection_ownership_and_honest_refusals() {
+        let (server, _chain) = setup().await;
+        let mut owner = jsonrpsee::Extensions::new();
+        owner.insert(jsonrpsee::ConnectionId(7));
+
+        let filter_id = server
+            .eth_new_filter(&owner, serde_json::json!({"topics": []}))
+            .await
+            .unwrap();
+        assert_eq!(filter_id, serde_json::json!("0x0"));
+        let filter_id = filter_id.as_str().unwrap().to_string();
+        let block_id = server.eth_new_block_filter(&owner).await.unwrap();
+        assert_eq!(block_id, serde_json::json!("0x1"));
+        let block_id = block_id.as_str().unwrap().to_string();
+
+        let error = server
+            .eth_get_filter_changes(&owner, filter_id.clone())
+            .await
+            .unwrap_err();
+        assert_ethereum_filter_error(&error, -32004, "no_execution_environment");
+        let error = server
+            .eth_get_filter_logs(&owner, filter_id.clone())
+            .await
+            .unwrap_err();
+        assert_ethereum_filter_error(&error, -32004, "no_execution_environment");
+
+        assert_eq!(
+            server
+                .eth_uninstall_filter(&owner, "0xdead".into())
+                .await
+                .unwrap(),
+            serde_json::json!(false),
+            "an unknown id is an ordinary uninstall miss"
+        );
+        let error = server
+            .eth_uninstall_filter(&owner, "not-hex".into())
+            .await
+            .unwrap_err();
+        assert_ethereum_filter_error(&error, -32602, "invalid_filter_id");
+
+        let mut foreign = jsonrpsee::Extensions::new();
+        foreign.insert(jsonrpsee::ConnectionId(9));
+        let error = server
+            .eth_get_filter_changes(&foreign, filter_id.clone())
+            .await
+            .unwrap_err();
+        assert_ethereum_filter_error(&error, -32602, "unknown_filter");
+        let error = server
+            .eth_get_filter_logs(&foreign, filter_id.clone())
+            .await
+            .unwrap_err();
+        assert_ethereum_filter_error(&error, -32602, "unknown_filter");
+        assert_eq!(
+            server
+                .eth_uninstall_filter(&foreign, filter_id.clone())
+                .await
+                .unwrap(),
+            serde_json::json!(false),
+            "a foreign uninstall neither reveals nor removes the filter"
+        );
+
+        let anonymous = jsonrpsee::Extensions::new();
+        let error = server.eth_new_block_filter(&anonymous).await.unwrap_err();
+        assert_ethereum_filter_error(&error, -32603, "connection_identity_unavailable");
+
+        assert_eq!(
+            server.eth_uninstall_filter(&owner, block_id).await.unwrap(),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            server
+                .eth_uninstall_filter(&owner, filter_id)
+                .await
+                .unwrap(),
+            serde_json::json!(true),
+            "the foreign uninstall left the owner's filter live"
+        );
+
+        let oversized = serde_json::json!({
+            "data": "x".repeat(
+                crate::rpc::compat::ethereum::filters::MAX_FILTER_SPEC_BYTES + 1
+            )
+        });
+        let error = server.eth_new_filter(&owner, oversized).await.unwrap_err();
+        assert_ethereum_filter_error(&error, -32602, "spec_too_large");
+    }
+
+    #[tokio::test]
+    async fn aptos_dedicated_listener_serves_rest_without_json_rpc() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45267, None);
         let (chain_actor, chain) = ChainActor::new(blockchain);
         tokio::spawn(async move {
             chain_actor.run().await;
         });
         let node_struct = Node::new(chain.clone()).unwrap();
-        let node_client = node_struct.get_client();
-        let public_server = RpcServer::with_security_and_mode(
-            chain.clone(),
-            node_client,
+        let server = RpcServer::with_security_and_mode(
+            chain,
+            node_struct.get_client(),
             RpcSecurityConfig::operator_default(),
             RpcMode::Public,
         );
-        let response = crate::domain::storage_deal::RetrievalResponse {
-            challenge_id: 1,
-            _range_hash: crate::storage::content_id::ContentId([0xAA; 32]),
-            responder: Address::from([9u8; 32]),
-            response_epoch: 1,
-            responder_signature: None,
-            proof_bytes: None,
-        };
-        let refused = public_server
-            .storage_answer_challenge(response)
+        let rpc_addr = free_loopback().await;
+        let aptos_addr = free_loopback().await;
+        server
+            .with_aptos_listener(aptos_addr.to_string())
+            .run(rpc_addr.to_string())
             .await
-            .expect_err("public listener must refuse storage_answer_challenge");
-        assert_eq!(refused.code(), -32004);
-        let refused_commit = public_server
-            .storage_register_confidential_commit(
-                "aa".repeat(32),
-                "xchacha20poly1305".to_string(),
-                "bb".repeat(32),
-                "hash_only".to_string(),
-                None,
-            )
-            .await
-            .expect_err("public listener must refuse confidential commit mutation");
-        assert_eq!(refused_commit.code(), -32004);
+            .expect("both listeners bind");
+
+        let health = request(aptos_addr, "/v1/-/healthy", "").await;
+        assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+        assert!(health.ends_with("aptos-node:ok"), "{health}");
+        let not_json_rpc = request(aptos_addr, "/", "").await;
+        assert!(not_json_rpc.starts_with("HTTP/1.1 404"), "{not_json_rpc}");
+        assert!(not_json_rpc.contains("No Aptos REST route"));
     }
 
-    /// The re-encode check refuses a body over the shared 1 MiB cap before
-    /// it decodes or encodes anything.
     #[tokio::test]
-    async fn rpc_tests_verify_encoding_refuses_oversized_body() {
-        let (server, _chain) = setup().await;
-        let manifest =
-            crate::storage::ContentManifest::from_bytes_sliced(b"small body", 16).unwrap();
-        let big = "00".repeat(crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES + 1);
-        let refused = server
-            .storage_verify_encoding(big, manifest)
+    async fn aptos_shared_listener_uses_rpc_admission() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45267, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node_struct = Node::new(chain.clone()).unwrap();
+        let security = RpcSecurityConfig {
+            auth_required: true,
+            api_key: Some("aptos-test-key".to_string()),
+            ..RpcSecurityConfig::default()
+        };
+        let server = RpcServer::with_security_and_mode(
+            chain,
+            node_struct.get_client(),
+            security,
+            RpcMode::Public,
+        );
+        let addr = free_loopback().await;
+        server
+            .run(addr.to_string())
             .await
-            .expect_err("oversized body must be refused");
-        assert!(refused.message().contains("verify cap"));
-        assert_eq!(refused.code(), -32602);
+            .expect("the shared listener binds");
+
+        let refused = request(addr, "/v1/-/healthy", "").await;
+        assert!(refused.starts_with("HTTP/1.1 401"), "{refused}");
+        let accepted = request(addr, "/v1/-/healthy", "x-api-key: aptos-test-key\r\n").await;
+        assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
+        assert!(accepted.ends_with("aptos-node:ok"), "{accepted}");
+    }
+
+    #[tokio::test]
+    async fn solana_handlers_honor_commitment_and_refuse_submission() {
+        let (server, _chain) = setup().await;
+        let processed = crate::rpc::compat::solana::subscriptions::SlotConfig {
+            commitment: Some(crate::rpc::compat::solana::subscriptions::Commitment::Processed),
+        };
+        let finalized = crate::rpc::compat::solana::subscriptions::SlotConfig {
+            commitment: Some(crate::rpc::compat::solana::subscriptions::Commitment::Finalized),
+        };
+        assert_eq!(
+            server
+                .solana_get_slot(Some(processed))
+                .await
+                .expect("processed slot"),
+            0,
+        );
+        let expected_finalized = _chain.get_finalized_height().await;
+        assert_eq!(
+            server
+                .solana_get_block_height(Some(finalized))
+                .await
+                .expect("finalized height"),
+            expected_finalized,
+        );
+        let refusal = server
+            .solana_send_transaction(String::from("AA=="), None)
+            .await
+            .expect_err("an unwired submission cannot return a signature");
+        assert_eq!(refusal.code(), -32004);
+        assert!(refusal.message().contains("bud_sendRawTransaction"));
+    }
+
+    #[tokio::test]
+    async fn solana_dedicated_listener_enforces_admission_and_method_filter() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn rpc(addr: std::net::SocketAddr, method: &str, api_key: Option<&str>) -> String {
+            let body = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":[]}}"#);
+            let key = api_key
+                .map(|key| format!("x-api-key: {key}\r\n"))
+                .unwrap_or_default();
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("connect Solana RPC");
+            let request = format!(
+                "POST / HTTP/1.1\r\nHost: {addr}\r\n{key}content-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            stream
+                .write_all(request.as_bytes())
+                .await
+                .expect("write RPC");
+            let mut response = Vec::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                stream.read_to_end(&mut response),
+            )
+            .await
+            .expect("RPC response timeout")
+            .expect("read RPC");
+            String::from_utf8(response).expect("UTF-8 RPC response")
+        }
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45268, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node = Node::new(chain.clone()).expect("node");
+        let security = RpcSecurityConfig {
+            auth_required: true,
+            api_key: Some(String::from("solana-test-key")),
+            ..RpcSecurityConfig::default()
+        };
+        let server =
+            RpcServer::with_security_and_mode(chain, node.get_client(), security, RpcMode::Public);
+        let primary = free_loopback().await;
+        let solana = free_loopback().await;
+        server
+            .with_solana_listener(solana.to_string())
+            .run(primary.to_string())
+            .await
+            .expect("primary and Solana listeners bind");
+
+        let refused = rpc(solana, "getHealth", None).await;
+        assert!(refused.starts_with("HTTP/1.1 401"), "{refused}");
+        let health = rpc(solana, "getHealth", Some("solana-test-key")).await;
+        assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+        assert!(health.contains(r#""result":"ok""#), "{health}");
+        let filtered = rpc(solana, "bud_chainId", Some("solana-test-key")).await;
+        assert!(filtered.starts_with("HTTP/1.1 200"), "{filtered}");
+        assert!(filtered.contains("-32601"), "{filtered}");
+        assert!(!filtered.contains(r#""result":"#), "{filtered}");
+    }
+
+    #[tokio::test]
+    async fn social_get_profile_paginates_and_validates_inputs() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45268, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node = Node::new(chain.clone()).expect("node");
+        let server = RpcServer::new(chain, node.get_client());
+
+        let page = server
+            .social_get_profile(Address([0xAB; 32]).to_hex(), Some(0), Some(5))
+            .await
+            .unwrap();
+        assert!(page.is_array());
+        assert!(server
+            .social_get_profile("not-hex".to_string(), None, None)
+            .await
+            .is_err());
+        assert!(server
+            .social_get_profile(Address([0xAB; 32]).to_hex(), None, Some(0))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn garden_rpc_methods_are_operator_only_and_serve_lifecycle() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45268, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node = Node::new(chain.clone()).expect("node");
+        let garden = Arc::new(crate::garden::GardenService::new(Some(chain.clone()), None));
+        let public = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node.get_client(),
+            RpcSecurityConfig::default(),
+            RpcMode::Public,
+        )
+        .with_garden(garden.clone());
+        let operator = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node.get_client(),
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Operator,
+        )
+        .with_garden(garden);
+
+        // Public listener refuses every bud_garden* method.
+        assert!(public
+            .garden_create("Room".into(), "host".into(), None)
+            .await
+            .is_err());
+        assert!(public.garden_invite().await.is_err());
+        assert!(public
+            .garden_join("bad".into(), "guest".into(), None)
+            .await
+            .is_err());
+        assert!(public.garden_admit("00".repeat(32), true).await.is_err());
+        assert!(public.garden_leave().await.is_err());
+        assert!(public.garden_return().await.is_err());
+        assert!(public.garden_status().await.is_err());
+        assert!(public
+            .garden_publish("message".into(), "hi".into(), None, None, None)
+            .await
+            .is_err());
+        assert!(public.garden_resolve("00".repeat(32)).await.is_err());
+        assert!(public.garden_trace("00".repeat(32)).await.is_err());
+        assert!(public.garden_feed(Some(5)).await.is_err());
+
+        // Operator listener refuses invalid inputs and answers valid calls across
+        // every Garden method, including host_approval admission and leave/return.
+        let status_empty = operator.garden_status().await.unwrap();
+        assert!(status_empty.get("garden").is_some_and(|v| v.is_null()));
+        assert!(operator
+            .garden_create("".into(), "host".into(), None)
+            .await
+            .is_err());
+        let created = operator
+            .garden_create(
+                "Rpc Room".into(),
+                "host".into(),
+                Some(crate::garden::GardenOptions {
+                    listen: Some("/ip4/127.0.0.1/tcp/0".into()),
+                    round_ms: Some(150),
+                    admission: Some("host_approval".into()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let invite = created["invite"].as_str().expect("invite").to_string();
+        assert!(operator.garden_invite().await.is_ok());
+
+        // A second operator node joins using the invite, is admitted, and then
+        // exercises leave/return on a separate single-node Garden.
+        let joiner_node = Node::new(chain.clone()).expect("joiner node");
+        let joiner = RpcServer::with_security_and_mode(
+            chain.clone(),
+            joiner_node.get_client(),
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Operator,
+        )
+        .with_garden(Arc::new(crate::garden::GardenService::new(
+            Some(chain.clone()),
+            None,
+        )));
+        assert!(joiner
+            .garden_join("not-a-valid-invite".into(), "guest".into(), None)
+            .await
+            .is_err());
+        let joined = joiner
+            .garden_join(
+                invite,
+                "guest".into(),
+                Some(crate::garden::GardenOptions {
+                    listen: Some("/ip4/127.0.0.1/tcp/0".into()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let guest_key = joined["garden"]["me"]["key"]
+            .as_str()
+            .expect("guest key")
+            .to_string();
+
+        // Wait until the host sees the waiting guest, then test refusal + accept.
+        assert!(operator.garden_admit("bad-key".into(), true).await.is_err());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let status = operator.garden_status().await.unwrap();
+            let waiting = status["garden"]["validators"]
+                .as_array()
+                .is_some_and(|rows| {
+                    rows.iter()
+                        .any(|r| r["key"] == guest_key && r["status"] == "Waiting")
+                });
+            if waiting {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "guest did not appear as Waiting: {status}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(operator.garden_admit(guest_key, true).await.is_ok());
+
+        // Publish, feed, resolve, trace (plus refusal paths on each).
+        assert!(operator
+            .garden_publish("unknown".into(), "hi".into(), None, None, None)
+            .await
+            .is_err());
+        let published = operator
+            .garden_publish("message".into(), "hello".into(), None, None, None)
+            .await
+            .unwrap();
+        let content_id = published["content_id"]
+            .as_str()
+            .expect("content_id")
+            .to_string();
+        let tx_id = published["tx_id"].as_str().expect("tx_id").to_string();
+        assert!(operator.garden_resolve("not-hex".into()).await.is_err());
+        assert!(operator.garden_trace("not-hex".into()).await.is_err());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(trace) = operator.garden_trace(tx_id.clone()).await {
+                if trace["stage"] == "final" {
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "published tx {tx_id} did not finalize"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(operator.garden_resolve(content_id).await.is_ok());
+        assert!(operator.garden_trace(tx_id).await.is_ok());
+        assert!(operator.garden_feed(Some(5)).await.is_ok());
+
+        // Joiner leaves and returns via RPC.
+        assert!(joiner.garden_leave().await.is_ok());
+        assert!(joiner.garden_return().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn universal_unification_rpc_methods_answer_and_refuse_malformed_inputs() {
+        use crate::unification::{
+            CanonicalValue, DomainTokenBalance, LiquidityQuote, NormalizedMachineOutput,
+            OutputBinding, OutputCompositionPlan, OutputSelector, PaymentRail, StorageNetworkKind,
+            StorageReplica, UnifiedContentRecord, UniversalPaymentIntent, VerificationStrength,
+        };
+        use std::collections::BTreeMap;
+
+        let (server, _) = setup().await;
+
+        // 1. bud_getUniversalDomains (0-arg live chain-state view, never leaks unregistered templates)
+        let domains = server.get_universal_domains().await.unwrap();
+        assert_eq!(domains["source"], "chain_state");
+        assert!(domains["template_count"].as_u64().unwrap_or(0) >= 19);
+        assert_eq!(
+            domains["count"].as_u64().unwrap_or(u64::MAX) as usize,
+            domains["domains"].as_array().map_or(0, Vec::len)
+        );
+        assert!(domains["catalog_root"].as_str().unwrap().starts_with("0x"));
+
+        // 2. bud_quoteUniversalPayment (refusal + answer)
+        assert!(server
+            .quote_universal_payment(serde_json::json!({"bad": true}))
+            .await
+            .is_err());
+        let pay_req = serde_json::json!({
+            "intent": UniversalPaymentIntent {
+                payer_id: [0x11; 32],
+                merchant_id: [0x22; 32],
+                nonce: 1,
+                target_domain: 3,
+                target_asset_id: [0xAA; 32],
+                target_amount: 100,
+                max_slippage_bps: 100,
+                deadline_unix_secs: 2_000,
+                invoice_hash: [0x33; 32],
+                rail: PaymentRail::OnChain,
+            },
+            "balances": [DomainTokenBalance {
+                domain_id: 1,
+                asset_id: [0xBB; 32],
+                symbol: String::from("BUD"),
+                available_amount: 120,
+            }],
+            "quotes": [LiquidityQuote {
+                quote_id: [0x44; 32],
+                source_domain: 1,
+                source_asset_id: [0xBB; 32],
+                target_domain: 3,
+                target_asset_id: [0xAA; 32],
+                rate_scaled: 1_000_000_000_000_000_000,
+                max_target_liquidity: 500,
+                fee_bps: 10,
+                valid_until_unix_secs: 2_500,
+            }],
+            "now_unix_secs": 1_500,
+        });
+        let quote_res = server.quote_universal_payment(pay_req).await.unwrap();
+        assert_eq!(quote_res["target_amount_delivered"].as_u64(), Some(100));
+
+        // 3. bud_composeExecutionOutputs (refusal + answer)
+        assert!(server
+            .compose_execution_outputs(
+                serde_json::json!({"plan_id": "", "steps": [], "bindings": []})
+            )
+            .await
+            .is_err());
+        let evm = NormalizedMachineOutput::from_evm(
+            "evm_step",
+            3,
+            true,
+            50_000,
+            vec![1, 2],
+            &[],
+            [(String::from("amount"), CanonicalValue::U64(42))]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+        let wasm = NormalizedMachineOutput::from_wasm(
+            "wasm_step",
+            5,
+            true,
+            25_000,
+            vec![3],
+            Vec::new(),
+            [(String::from("received"), CanonicalValue::U64(42))]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+        let plan = OutputCompositionPlan {
+            plan_id: String::from("rpc-compose"),
+            steps: vec![evm, wasm],
+            bindings: vec![OutputBinding {
+                from_step: String::from("evm_step"),
+                selector: OutputSelector::TypedField {
+                    key: String::from("amount"),
+                },
+                to_step: String::from("wasm_step"),
+                target_input: String::from("received"),
+                enforce_match: true,
+            }],
+        };
+        let composed = server
+            .compose_execution_outputs(serde_json::to_value(plan).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(composed["total_gas_bgu"].as_u64(), Some(75_000));
+
+        // 4. bud_resolveUnifiedStorage (refusal + answer)
+        assert!(server
+            .resolve_unified_storage(serde_json::json!({"uri": "http://bad", "objects": []}))
+            .await
+            .is_err());
+        let mut obj = UnifiedContentRecord::from_bytes(b"hello web3", "text/plain");
+        let digest = obj.sha3_256_digest;
+        obj.replicas.push(StorageReplica {
+            network: StorageNetworkKind::Ipfs,
+            domain_id: StorageNetworkKind::Ipfs.default_domain_id(),
+            native_locator: String::from(
+                "bafybeihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
+            ),
+            verification: VerificationStrength::CryptographicHash,
+            available: true,
+            latency_ms: 20,
+        });
+        let mut bns = BTreeMap::new();
+        bns.insert(String::from("site.bud"), digest);
+        let storage_res = server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [&obj],
+                "bns_bindings": &bns,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(storage_res["primary"]["network"].as_str(), Some("ipfs"));
+        let asset_res = server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [&obj],
+                "bns_bindings": &bns,
+                "asset_path": "/app/main.wasm",
+            }))
+            .await
+            .unwrap();
+        assert_eq!(asset_res["mime_type"].as_str(), Some("application/wasm"));
+        assert!(server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [&obj],
+                "bns_bindings": &bns,
+                "asset_path": "/../secret",
+            }))
+            .await
+            .is_err());
+        // Verified replica attachment via RPC: forged preimage must fail closed; valid preimage upgrades primary replica.
+        let verified_replica = StorageReplica {
+            network: StorageNetworkKind::Ipfs,
+            domain_id: StorageNetworkKind::Ipfs.default_domain_id(),
+            native_locator: String::from(
+                "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            ),
+            verification: VerificationStrength::CryptographicHash,
+            available: true,
+            latency_ms: 5,
+        };
+        assert!(server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [&obj],
+                "bns_bindings": &bns,
+                "verified_replicas": [{
+                    "digest": digest,
+                    "replica": &verified_replica,
+                    "proof": crate::unification::storage_fabric::StorageReplicaProof::ContentHashPreimage {
+                        payload: b"tampered bytes".to_vec(),
+                    },
+                }],
+            }))
+            .await
+            .is_err());
+        let verified_res = server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [&obj],
+                "bns_bindings": &bns,
+                "verified_replicas": [{
+                    "digest": digest,
+                    "replica": &verified_replica,
+                    "proof": crate::unification::storage_fabric::StorageReplicaProof::ContentHashPreimage {
+                        payload: b"hello web3".to_vec(),
+                    },
+                }],
+            }))
+            .await
+            .expect("valid content hash preimage must attach replica via RPC");
+        assert_eq!(
+            verified_res["primary"]["native_locator"].as_str(),
+            Some("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+        );
+
+        // 5. bud_encodeCrossVmCall (refusal + answer)
+        assert!(server
+            .encode_cross_vm_call(serde_json::json!({
+                "source_domain": 3,
+                "target_domain": 99999,
+                "source_language": "solidity",
+                "target_language": "move",
+                "method": "swap",
+                "args": [],
+                "nonce": 1,
+            }))
+            .await
+            .is_err());
+        let envelope = server
+            .encode_cross_vm_call(serde_json::json!({
+                "source_domain": 3,
+                "target_domain": 7,
+                "source_language": "solidity",
+                "target_language": "move",
+                "method": "dex::settle",
+                "args": [
+                    {"name": "amount", "value": {"kind": "u128", "value": 4200}}
+                ],
+                "nonce": 11,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(envelope["target_encoding"].as_str(), Some("bcs_le"));
+        assert!(envelope["encoded_payload"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()));
+
+        // 6. bud_verifyUniversalBundle (answer + refusal on tampered root)
+        let verified = server
+            .verify_universal_bundle(composed.clone())
+            .await
+            .unwrap();
+        assert_eq!(verified["valid"].as_bool(), Some(true));
+        assert_eq!(verified["stepCount"].as_u64(), Some(2));
+        let mut tampered_bundle = composed;
+        tampered_bundle["bundle_root"][0] =
+            serde_json::json!(tampered_bundle["bundle_root"][0].as_u64().unwrap() ^ 0xFF);
+        assert!(server
+            .verify_universal_bundle(tampered_bundle)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn storage_get_content_hydrates_verified_symbols_from_remote_peer_and_survives_replacement(
+    ) {
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+        use crate::storage::bud3::bof1::Object;
+        use crate::storage::bud3::custody::{symbol_leaf, symbol_root};
+        use crate::storage::bud3::fountain::SegmentEncoder;
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::{prepare_public_upload, ObjectRecord};
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::replace::sign_replace_attestation;
+        use crate::storage::bud3::segment::commit_object;
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, SymbolRangeRequest,
+        };
+        use crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS;
+        use crate::validators::{
+            LeaderCommitment, SeatFields, ValidatorClass, ValidatorRegistration,
+        };
+        use ed25519_dalek::SigningKey;
+        use std::collections::BTreeMap;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let payload = b"p2p hydrated paid fallback content surviving replace ".repeat(4);
+        let old_up = prepare_public_upload(&payload, &profile, &Bud3Limits::default(), 12).unwrap();
+        let old_key = old_up.record.commitment;
+
+        let holder_a = [0x41u8; 32];
+        let holder_b = [0x42u8; 32];
+        let holder_c = [0x43u8; 32];
+        let owner = [0x15u8; 32];
+        let payer = [0x16u8; 32];
+        let receipt_id = [0x77u8; 32];
+
+        let remote_seed = [0x61u8; 32];
+        let remote_peer_bytes = SigningKey::from_bytes(&remote_seed)
+            .verifying_key()
+            .to_bytes();
+        let remote_kp = libp2p::identity::Keypair::ed25519_from_bytes(remote_seed).unwrap();
+        let remote_peer_id = remote_kp.public().to_peer_id();
+
+        let register_vals = |bc: &mut Blockchain| {
+            bc.state.epoch_index = 10;
+            for (idx, v) in [holder_a, holder_b, holder_c].into_iter().enumerate() {
+                let v_addr = Address::from(v);
+                let pk = ml_dsa_public_key(SchemeId::ML_DSA_65, &v).unwrap();
+                bc.state.add_validator(v_addr, 100_000);
+                bc.state.get_validator_mut(&v_addr).unwrap().pq_public_key = pk.clone();
+                let peer_bytes = if v == holder_a {
+                    remote_peer_bytes
+                } else {
+                    [0x70u8 + u8::try_from(idx).unwrap_or(0); 32]
+                };
+                let reg = ValidatorRegistration {
+                    owner: v_addr,
+                    class: ValidatorClass::Full,
+                    operator_key: pk.clone(),
+                    bls_key: vec![v[0]; crate::validators::BLS_KEY_LEN],
+                    bls_pop: vec![v[0]; crate::validators::BLS_POP_LEN],
+                    seat: Some(SeatFields {
+                        vrf_key: v.to_vec(),
+                        pq_vote_key: pk,
+                        leader_commitment: LeaderCommitment {
+                            commitment: v,
+                            length: 16,
+                        },
+                    }),
+                    custody_quota_bytes: 1_000_000,
+                    relay_offer: None,
+                    gateway_offer: None,
+                    peer_id: peer_bytes,
+                };
+                bc.state
+                    .validator_directory
+                    .register(&reg, 100_000, 1, 0)
+                    .unwrap();
+            }
+        };
+
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: holder_a,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: holder_b,
+                    class: Class::Full,
+                    first_esi: 6,
+                    symbols: 3,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: holder_c,
+                    class: Class::Full,
+                    first_esi: 9,
+                    symbols: 3,
+                },
+            ),
+        ];
+
+        let raw_obj = Object::raw_public(&payload);
+        let raw_bytes = raw_obj.encode();
+        let new_commit = commit_object(&raw_bytes, &profile).unwrap();
+        let enc_raw = SegmentEncoder::new(0, &raw_bytes, &profile).unwrap();
+        let k_raw = enc_raw.k();
+        let mut syms_new = enc_raw.source_symbols();
+        syms_new.extend(enc_raw.repair_symbols(0, 12 - k_raw).unwrap());
+        let leaves_new: Vec<(u32, [u8; 32])> = syms_new
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let new_rec = ObjectRecord {
+            content_id: old_up.record.content_id,
+            object_len: u64::try_from(raw_bytes.len()).unwrap(),
+            commitment: new_commit,
+            profile,
+            codec: 0,
+            symbols_per_segment: 12,
+            symbol_roots: vec![symbol_root(&leaves_new)],
+        };
+        let vkeys: BTreeMap<[u8; 32], Vec<u8>> = [holder_a, holder_b, holder_c]
+            .into_iter()
+            .map(|v| (v, ml_dsa_public_key(SchemeId::ML_DSA_65, &v).unwrap()))
+            .collect();
+        let atts: Vec<_> = [holder_a, holder_b, holder_c]
+            .into_iter()
+            .map(|v| sign_replace_attestation(v, &v, &old_key, &new_rec, &shares).unwrap())
+            .collect();
+
+        let setup_chain = |bc: &mut Blockchain| -> [u8; 32] {
+            register_vals(bc);
+            bc.state
+                .bud3_registry
+                .register_object(owner, old_up.record.clone(), shares.clone(), 1, 50)
+                .unwrap();
+            for v in [holder_a, holder_b, holder_c] {
+                bc.state.bud3_registry.ack(&old_key, &v).unwrap();
+            }
+            bc.state
+                .bud3_registry
+                .record_paid_view(payer, old_key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 10)
+                .unwrap();
+            let new_key = bc
+                .state
+                .bud3_registry
+                .replace_object(
+                    (holder_a, 100_000),
+                    &old_key,
+                    new_rec.clone(),
+                    shares.clone(),
+                    &atts,
+                    (crate::core::transaction::DEFAULT_CHAIN_ID, 10, &vkeys),
+                )
+                .unwrap();
+            for v in [holder_a, holder_b, holder_c] {
+                bc.state.bud3_registry.ack(&new_key, &v).unwrap();
+            }
+            new_key
+        };
+
+        let mut local_bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let new_key = setup_chain(&mut local_bc);
+        let mut remote_bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        assert_eq!(setup_chain(&mut remote_bc), new_key);
+
+        let items_a = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: new_key,
+                segment: 0,
+                first_esi: 0,
+                count: 6,
+            },
+            &leaves_new,
+            &syms_new[0..6],
+        )
+        .unwrap()
+        .items;
+        remote_bc
+            .store_verified_bud3_symbols(&holder_a, &new_key, 0, &items_a)
+            .unwrap();
+
+        let (local_actor, local_chain) = ChainActor::new(local_bc);
+        tokio::spawn(async move { local_actor.run().await });
+        let (remote_actor, remote_chain) = ChainActor::new(remote_bc);
+        tokio::spawn(async move { remote_actor.run().await });
+
+        let port = free_loopback().await.port();
+        let mut remote_node = Node::with_key(remote_chain, remote_kp, false, None, None).unwrap();
+        let remote_pm = remote_node.peer_manager.clone();
+        remote_node
+            .listen_multiaddr(&format!("/ip4/127.0.0.1/tcp/{port}"))
+            .unwrap();
+        let remote_task = tokio::spawn(async move { remote_node.run().await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let remote_addr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{remote_peer_id}");
+        let mut local_node = Node::new(local_chain.clone()).unwrap();
+        let local_peer_id = local_node.peer_id;
+        let local_pm = local_node.peer_manager.clone();
+        let local_client = local_node.get_client();
+        local_node.bootstrap_peers = vec![remote_addr.clone()];
+        let _ = local_node.dial(&remote_addr);
+        let local_task = tokio::spawn(async move { local_node.run().await });
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !(local_pm.lock().unwrap().is_handshaked(&remote_peer_id)
+            && remote_pm.lock().unwrap().is_handshaked(&local_peer_id))
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for peer handshake"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let server = RpcServer::with_security_and_mode(
+            local_chain,
+            local_client,
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Operator,
+        );
+        let res = server
+            .storage_get_content(
+                format!("0x{}", hex::encode(payer)),
+                format!("0x{}", hex::encode(old_key)),
+                format!("0x{}", hex::encode(receipt_id)),
+                MIN_PAID_VIEW_FEE_ATOMS,
+            )
+            .await
+            .expect("storage_get_content must hydrate verified symbols from remote peer");
+        assert_eq!(res["content_hex"], hex::encode(&payload));
+        assert_eq!(res["content_len"], payload.len());
+
+        local_task.abort();
+        remote_task.abort();
+    }
+
+    #[tokio::test]
+    async fn bns_resolve_content_hydrates_verified_symbols_from_remote_peer() {
+        use crate::bns::bud3::{checked_content_ref, Bud3BnsResolver};
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+        use crate::storage::bud3::content_ref::ContentRef;
+        use crate::storage::bud3::custody::symbol_leaf;
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::prepare_public_upload;
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, SymbolRangeRequest,
+        };
+        use crate::validators::{
+            LeaderCommitment, SeatFields, ValidatorClass, ValidatorRegistration,
+        };
+        use ed25519_dalek::SigningKey;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let payload = b"bns peer hydrated public content payload";
+        let up = prepare_public_upload(payload, &profile, &Bud3Limits::default(), 8).unwrap();
+        let obj_key = up.record.commitment;
+        let owner = [0x17u8; 32];
+        let holder_a = [0x44u8; 32];
+        let holder_b = [0x45u8; 32];
+
+        let remote_seed = [0x65u8; 32];
+        let remote_peer_bytes = SigningKey::from_bytes(&remote_seed)
+            .verifying_key()
+            .to_bytes();
+        let remote_kp = libp2p::identity::Keypair::ed25519_from_bytes(remote_seed).unwrap();
+        let remote_peer_id = remote_kp.public().to_peer_id();
+
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: holder_a,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 5,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: holder_b,
+                    class: Class::Mobile,
+                    first_esi: 5,
+                    symbols: 3,
+                },
+            ),
+        ];
+
+        let init_bc = |bc: &mut Blockchain| {
+            bc.state.epoch_index = 10;
+            for (idx, v) in [holder_a, holder_b].into_iter().enumerate() {
+                let v_addr = Address::from(v);
+                let pk = ml_dsa_public_key(SchemeId::ML_DSA_65, &v).unwrap();
+                bc.state.add_validator(v_addr, 100_000);
+                bc.state.get_validator_mut(&v_addr).unwrap().pq_public_key = pk.clone();
+                let peer_bytes = if v == holder_a {
+                    remote_peer_bytes
+                } else {
+                    [0x78u8 + u8::try_from(idx).unwrap_or(0); 32]
+                };
+                let reg = ValidatorRegistration {
+                    owner: v_addr,
+                    class: ValidatorClass::Full,
+                    operator_key: pk.clone(),
+                    bls_key: vec![v[0]; crate::validators::BLS_KEY_LEN],
+                    bls_pop: vec![v[0]; crate::validators::BLS_POP_LEN],
+                    seat: Some(SeatFields {
+                        vrf_key: v.to_vec(),
+                        pq_vote_key: pk,
+                        leader_commitment: LeaderCommitment {
+                            commitment: v,
+                            length: 16,
+                        },
+                    }),
+                    custody_quota_bytes: 1_000_000,
+                    relay_offer: None,
+                    gateway_offer: None,
+                    peer_id: peer_bytes,
+                };
+                bc.state
+                    .validator_directory
+                    .register(&reg, 100_000, 1, 0)
+                    .unwrap();
+            }
+            bc.state
+                .bud3_registry
+                .register_object(owner, up.record.clone(), shares.clone(), 1, 50)
+                .unwrap();
+            bc.state
+                .bns_registry
+                .register("hydra.bud".to_string(), Address(owner), 1, 100)
+                .unwrap();
+            let cref = checked_content_ref(
+                &bc.state.bud3_registry,
+                ContentRef::new(up.record.content_id, obj_key, None).unwrap(),
+            )
+            .unwrap();
+            Bud3BnsResolver::set_bud3_content(
+                &mut bc.state.bns_registry,
+                &bc.state.bud3_registry,
+                ("hydra.bud", &Address(owner)),
+                Some(cref),
+                2,
+            )
+            .unwrap();
+        };
+
+        let mut local_bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        init_bc(&mut local_bc);
+        let mut remote_bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        init_bc(&mut remote_bc);
+
+        let leaves: Vec<(u32, [u8; 32])> = up.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let items_a = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: obj_key,
+                segment: 0,
+                first_esi: 0,
+                count: 5,
+            },
+            &leaves,
+            &up.segments[0][0..5],
+        )
+        .unwrap()
+        .items;
+        remote_bc
+            .store_verified_bud3_symbols(&holder_a, &obj_key, 0, &items_a)
+            .unwrap();
+
+        let (local_actor, local_chain) = ChainActor::new(local_bc);
+        tokio::spawn(async move { local_actor.run().await });
+        let (remote_actor, remote_chain) = ChainActor::new(remote_bc);
+        tokio::spawn(async move { remote_actor.run().await });
+
+        let port = free_loopback().await.port();
+        let mut remote_node = Node::with_key(remote_chain, remote_kp, false, None, None).unwrap();
+        let remote_pm = remote_node.peer_manager.clone();
+        remote_node
+            .listen_multiaddr(&format!("/ip4/127.0.0.1/tcp/{port}"))
+            .unwrap();
+        let remote_task = tokio::spawn(async move { remote_node.run().await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let remote_addr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{remote_peer_id}");
+        let mut local_node = Node::new(local_chain.clone()).unwrap();
+        let local_peer_id = local_node.peer_id;
+        let local_pm = local_node.peer_manager.clone();
+        let local_client = local_node.get_client();
+        local_node.bootstrap_peers = vec![remote_addr.clone()];
+        let _ = local_node.dial(&remote_addr);
+        let local_task = tokio::spawn(async move { local_node.run().await });
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !(local_pm.lock().unwrap().is_handshaked(&remote_peer_id)
+            && remote_pm.lock().unwrap().is_handshaked(&local_peer_id))
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for peer handshake"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let server = RpcServer::with_security_and_mode(
+            local_chain,
+            local_client,
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Operator,
+        );
+        let res = server
+            .bns_resolve_content("hydra.bud".to_string())
+            .await
+            .expect("bns_resolve_content must succeed");
+        assert_eq!(res["bytes"], format!("0x{}", hex::encode(payload)));
+        assert_eq!(res["view_error"], serde_json::Value::Null);
+
+        local_task.abort();
+        remote_task.abort();
+    }
+
+    #[tokio::test]
+    async fn finality_certificate_domain_and_route_rpc_verify_and_refuse() {
+        use crate::domain::types::{
+            ConsensusDomain, ConsensusKind, DomainCommitment, DomainStatus, PoWDomainParameters,
+            RootScheme, POW_HEADER_CHAIN_ADAPTER,
+        };
+        use crate::settlement::{
+            DomainFinalityInclusionProof, FinalityBucket, GlobalFinalityCertificate,
+        };
+
+        // 1. Empty chain: every finality read endpoint refuses fail-closed.
+        let (empty_server, _empty_chain) = setup().await;
+        assert!(
+            empty_server
+                .get_finality_certificate(None)
+                .await
+                .expect_err("empty registry has no finality certificate")
+                .code()
+                != 0
+        );
+        assert!(
+            empty_server
+                .get_domain_finality(1, None)
+                .await
+                .expect_err("empty registry has no domain finality")
+                .code()
+                != 0
+        );
+        assert!(
+            empty_server
+                .get_route_finality(1, 2)
+                .await
+                .expect_err("empty registry has no route finality")
+                .code()
+                != 0
+        );
+
+        // 2. Populated settlement state:
+        //    - domain 1 & 2: PoW with 6 confirmations (Established + admits cross-domain value)
+        //    - domain 3: Active BFT with no commitment yet (Pending)
+        //    - domain 4: Active AiInference committed (Established, non-slashable -> no value transfer)
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+
+        // Header-chain depth is read only by the PoW header-chain adapter, so
+        // the registry refuses a depth above 1 anywhere else; the PoW domains
+        // carry it together with the bounded verifier parameters it needs.
+        let make_domain = |id: u32, kind: ConsensusKind, adapter: &str, last_h: u64| {
+            let header_chain = adapter == POW_HEADER_CHAIN_ADAPTER;
+            ConsensusDomain {
+                id,
+                kind,
+                status: DomainStatus::Active,
+                domain_chain_id: 45_000 + u64::from(id),
+                operator: Some(Address::from([u8::try_from(id).unwrap_or(1); 32])),
+                operator_bond: crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND,
+                config_hash: [0xA0; 32],
+                validator_set_hash: [0xB0; 32],
+                finality_adapter: adapter.to_owned(),
+                min_confirmations: if header_chain { 6 } else { 1 },
+                bridge_enabled: true,
+                block_hash_scheme: RootScheme::Sha256,
+                state_root_scheme: RootScheme::Sha256,
+                tx_root_scheme: RootScheme::Sha256,
+                last_committed_height: last_h,
+                last_committed_hash: if last_h > 0 { [0x21; 32] } else { [0u8; 32] },
+                pow_parameters: header_chain.then_some(PoWDomainParameters {
+                    min_difficulty_bits: 1,
+                    max_difficulty_bits: 120,
+                    min_cumulative_work: 1,
+                    max_headers: 64,
+                }),
+                zk_program_allowlist: Vec::new(),
+                plugin_code_hash: None,
+                genesis_state_root: [0u8; 32],
+            }
+        };
+
+        for (id, kind, adapter, last_h) in [
+            (1u32, ConsensusKind::PoW, POW_HEADER_CHAIN_ADAPTER, 12u64),
+            (2u32, ConsensusKind::PoW, POW_HEADER_CHAIN_ADAPTER, 14u64),
+            (3u32, ConsensusKind::Bft, "tendermint-v1", 0u64),
+            (4u32, ConsensusKind::AiInference, "ai-attest-v1", 16u64),
+        ] {
+            blockchain
+                .state
+                .settlement
+                .domains
+                .restore_persisted(make_domain(id, kind.clone(), adapter, last_h))
+                .expect("register consensus domain");
+            if last_h > 0 {
+                blockchain
+                    .state
+                    .settlement
+                    .commitments
+                    .insert(DomainCommitment {
+                        domain_id: id,
+                        domain_height: last_h,
+                        domain_block_hash: [0x21; 32],
+                        parent_domain_block_hash: [0x20; 32],
+                        state_root: [u8::try_from(0x30 + id).unwrap_or(0x30); 32],
+                        tx_root: [0x41; 32],
+                        event_root: [0x42; 32],
+                        finality_proof_hash: [0x43; 32],
+                        consensus_kind: kind,
+                        validator_set_hash: [0xB0; 32],
+                        timestamp_ms: 1_000,
+                        sequence: 1,
+                        producer: None,
+                        state_updates: std::collections::BTreeMap::new(),
+                    })
+                    .expect("insert domain commitment");
+            }
+        }
+
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+
+        // Future checkpoint refuses fail-closed.
+        let future_err = server
+            .get_finality_certificate(Some(999_999))
+            .await
+            .expect_err("future checkpoint must refuse");
+        assert_eq!(future_err.code(), -32004);
+
+        // Current tip certificate succeeds and passes full cryptographic integrity verification.
+        let cert_json = server
+            .get_finality_certificate(None)
+            .await
+            .expect("bud_getFinalityCertificate succeeds for registered domains");
+        assert_eq!(cert_json["establishedCount"], 3);
+        assert_eq!(cert_json["pendingCount"], 1);
+        assert_eq!(cert_json["refutedCount"], 0);
+        let cert: GlobalFinalityCertificate =
+            serde_json::from_value(cert_json["certificate"].clone())
+                .expect("deserialize GlobalFinalityCertificate");
+        assert_eq!(cert.verify_integrity(), Ok(()));
+        assert_eq!(
+            cert_json["certificateDigest"].as_str(),
+            Some(format!("0x{}", hex::encode(cert.certificate_digest)).as_str())
+        );
+
+        // Domain finality returns verifiable O(log N) Merkle inclusion proof.
+        let dom1_json = server
+            .get_domain_finality(1, None)
+            .await
+            .expect("bud_getDomainFinality succeeds for domain 1");
+        let proof1: DomainFinalityInclusionProof =
+            serde_json::from_value(dom1_json["proof"].clone())
+                .expect("deserialize DomainFinalityInclusionProof");
+        assert_eq!(proof1.bucket, FinalityBucket::Established);
+        assert!(proof1.verify(&cert.established_root));
+        assert_eq!(dom1_json["admitsCrossDomainValue"], true);
+        assert!(dom1_json["guaranteeLabel"]
+            .as_str()
+            .expect("guaranteeLabel")
+            .starts_with("probabilistic-work(6)|"));
+
+        // Unknown domain refuses fail-closed.
+        let missing_dom = server
+            .get_domain_finality(999, None)
+            .await
+            .expect_err("unknown domain must refuse");
+        assert_eq!(missing_dom.code(), -32004);
+
+        // Route between two established value-admitting domains (1 -> 2) succeeds with positive ceiling.
+        let route_ok = server
+            .get_route_finality(1, 2)
+            .await
+            .expect("bud_getRouteFinality succeeds for established pair");
+        assert_eq!(route_ok["admitsCrossDomainValue"], true);
+        assert_eq!(route_ok["refusalReason"], serde_json::Value::Null);
+        let ceiling: u128 = route_ok["safeValueOutflowCeilingAtoms"]
+            .as_str()
+            .expect("ceiling string")
+            .parse()
+            .expect("u128 ceiling");
+        assert!(ceiling > 0);
+        let src_proof: DomainFinalityInclusionProof =
+            serde_json::from_value(route_ok["sourceProof"].clone()).expect("sourceProof");
+        let dst_proof: DomainFinalityInclusionProof =
+            serde_json::from_value(route_ok["targetProof"].clone()).expect("targetProof");
+        assert!(src_proof.verify(&cert.established_root));
+        assert!(dst_proof.verify(&cert.established_root));
+
+        // Route involving a Pending domain (1 -> 3) must refuse value transfer with zero ceiling.
+        let route_pending = server
+            .get_route_finality(1, 3)
+            .await
+            .expect("bud_getRouteFinality reports non-admitted route for pending target");
+        assert_eq!(route_pending["admitsCrossDomainValue"], false);
+        assert_eq!(route_pending["safeValueOutflowCeilingAtoms"], "0");
+        assert!(route_pending["refusalReason"].is_string());
+
+        // Route from non-slashable DeterministicQuorum domain (4 -> 2) must refuse value transfer.
+        let route_non_slash = server
+            .get_route_finality(4, 2)
+            .await
+            .expect("bud_getRouteFinality reports non-admitted route for non-slashable source");
+        assert_eq!(route_non_slash["admitsCrossDomainValue"], false);
+        assert_eq!(route_non_slash["safeValueOutflowCeilingAtoms"], "0");
+
+        // Self-route and unknown domain route refuse fail-closed.
+        assert_eq!(
+            server
+                .get_route_finality(1, 1)
+                .await
+                .expect_err("self-route must refuse")
+                .code(),
+            -32602
+        );
+        assert_eq!(
+            server
+                .get_route_finality(1, 999)
+                .await
+                .expect_err("unknown target domain must refuse")
+                .code(),
+            -32004
+        );
+    }
+
+    #[tokio::test]
+    async fn domain_health_rpc_reports_sentry_circuit_state_and_refuses_reserved_domain() {
+        let (server, _chain) = setup().await;
+
+        // Summary query succeeds even before any external domain is registered.
+        let summary = server
+            .get_domain_health(None)
+            .await
+            .expect("bud_getDomainHealth summary must succeed");
+        assert_eq!(summary["watchedDomainCount"], 0);
+        assert_eq!(summary["frozenDomainCount"], 0);
+        assert_eq!(summary["crqcAlarmActive"], false);
+        assert!(summary["sentryAuditRoot"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("0x") && s.len() == 66));
+
+        // Reserved domain 0 refuses with -32602; unknown domain refuses with -32004.
+        assert_eq!(
+            server
+                .get_domain_health(Some(0))
+                .await
+                .expect_err("bud_getDomainHealth must refuse reserved domain 0")
+                .code(),
+            -32602
+        );
+        assert_eq!(
+            server
+                .get_domain_health(Some(999_999))
+                .await
+                .expect_err("bud_getDomainHealth must refuse unknown domain")
+                .code(),
+            -32004
+        );
     }
 }

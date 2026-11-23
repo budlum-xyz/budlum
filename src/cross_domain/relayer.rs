@@ -1,7 +1,7 @@
 //! Universal Relayer - permissionless cross-domain relay orchestrator.
 //!
 //! Architecture:
-//! - Any account with the RELAYER role (staked via PermissionlessRegistry) can
+//! - Any account with the RELAYER role (staked via `PermissionlessRegistry`) can
 //!   relay cross-domain messages. That check is the chain's
 //!   (`Blockchain::submit_relayed_cross_domain_message` calls `ensure_active_relayer` before this
 //!   module sees the submission); `process_relay` itself does not know the
@@ -44,13 +44,13 @@ pub enum RelayerError {
 impl std::fmt::Display for RelayerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RelayerError::AlreadyRelayed(id) => {
+            Self::AlreadyRelayed(id) => {
                 write!(f, "message {} already relayed", hex::encode(id))
             }
-            RelayerError::InvalidProof(reason) => {
+            Self::InvalidProof(reason) => {
                 write!(f, "invalid relay proof: {reason}")
             }
-            RelayerError::Expired {
+            Self::Expired {
                 message_id,
                 expiry,
                 current_height,
@@ -63,10 +63,10 @@ impl std::fmt::Display for RelayerError {
                     current_height
                 )
             }
-            RelayerError::SourceDomainMismatch { expected, got } => {
+            Self::SourceDomainMismatch { expected, got } => {
                 write!(f, "source domain mismatch: expected {expected}, got {got}")
             }
-            RelayerError::Other(msg) => write!(f, "relay error: {msg}"),
+            Self::Other(msg) => write!(f, "relay error: {msg}"),
         }
     }
 }
@@ -77,7 +77,7 @@ impl std::error::Error for RelayerError {}
 /// Used for replay protection and slashing evidence.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RelayLedger {
-    /// Message_id → (relayer_address, relay_height, proof_hash)
+    /// `Message_id` -> (`relayer_address`, `relay_height`, `proof_hash`)
     #[serde(with = "crate::core::map_keys")]
     relayed: BTreeMap<MessageId, RelayRecord>,
 }
@@ -90,11 +90,16 @@ pub struct RelayRecord {
 }
 
 impl RelayLedger {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Record a relay. Returns Err if already relayed (replay).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record(
         &mut self,
         message_id: MessageId,
@@ -116,10 +121,12 @@ impl RelayLedger {
         Ok(())
     }
 
+    #[must_use]
     pub fn is_relayed(&self, message_id: &MessageId) -> bool {
         self.relayed.contains_key(message_id)
     }
 
+    #[must_use]
     pub fn get_record(&self, message_id: &MessageId) -> Option<&RelayRecord> {
         self.relayed.get(message_id)
     }
@@ -150,6 +157,7 @@ impl RelayLedger {
     }
 
     /// Merkle root of all relay records (for on-chain commitment).
+    #[must_use]
     pub fn root(&self) -> Hash32 {
         let leaves: Vec<Hash32> = self
             .relayed
@@ -175,7 +183,7 @@ const RELAY_RETENTION_BLOCKS: u64 = 10 * crate::cross_domain::nonce::FINALITY_PR
 
 /// Configuration for the Universal Relayer.
 ///
-/// (karar B): the `relay_window_blocks`, `min_relayer_stake`
+/// (design option B): the `relay_window_blocks`, `min_relayer_stake`
 /// and `slash_ratio_*` fields are gone - nothing outside this file ever read
 /// them, and a config field nobody reads is a promise nobody keeps. Serde
 /// ignores them if an old config still carries them.
@@ -195,7 +203,7 @@ pub struct RelayerConfig {}
 pub struct UniversalRelayer {
     pub config: RelayerConfig,
     pub ledger: RelayLedger,
-    /// Pending relay requests: message_id → (source_event, target_domain).
+    /// Pending relay requests: `message_id` -> (`source_event`, `target_domain`).
     /// Populated when a bridge lock/burn creates a cross-domain message.
     #[serde(with = "crate::core::map_keys")]
     pending: BTreeMap<MessageId, PendingRelay>,
@@ -222,6 +230,7 @@ impl Default for UniversalRelayer {
 }
 
 impl UniversalRelayer {
+    #[must_use]
     pub fn new(config: RelayerConfig) -> Self {
         Self {
             config,
@@ -232,6 +241,10 @@ impl UniversalRelayer {
 
     /// Register a new relay request from a bridge lock event.
     /// Called by the bridge state machine when a lock creates a cross-domain message.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn enqueue_relay(
         &mut self,
         source_event: DomainEvent,
@@ -274,6 +287,10 @@ impl UniversalRelayer {
     /// The caller's identity is not checked here; see the module docs. On
     /// success the relay is recorded and the verified cross-domain message is
     /// returned for the target domain's bridge to process (mint/unlock).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn process_relay(
         &mut self,
         message_id: MessageId,
@@ -367,16 +384,19 @@ impl UniversalRelayer {
     }
 
     /// Get a pending relay by message ID.
+    #[must_use]
     pub fn pending_relay(&self, message_id: &MessageId) -> Option<&PendingRelay> {
         self.pending.get(message_id)
     }
 
     /// Check if a message has been relayed.
+    #[must_use]
     pub fn is_relayed(&self, message_id: &MessageId) -> bool {
         self.ledger.is_relayed(message_id)
     }
 
     /// Get the number of pending relays.
+    #[must_use]
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -388,6 +408,7 @@ impl UniversalRelayer {
     }
 
     /// Get expired relays that should be slashed.
+    #[must_use]
     pub fn expired_relays(&self, current_height: u64) -> Vec<&PendingRelay> {
         self.pending
             .values()
@@ -429,11 +450,13 @@ impl UniversalRelayer {
     }
 
     /// Merkle root of the relay ledger (for on-chain commitment).
+    #[must_use]
     pub fn ledger_root(&self) -> Hash32 {
         self.ledger.root()
     }
 
     /// True when no relay is pending and the ledger holds no record.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.pending.is_empty() && self.ledger.relayed.is_empty()
     }
@@ -442,6 +465,7 @@ impl UniversalRelayer {
     /// the ledger root and every pending relay in key order. The relayer is
     /// consensus state, so two nodes that disagree
     /// on the queue must disagree on the root.
+    #[must_use]
     pub fn state_root(&self) -> Hash32 {
         let mut pending = Vec::new();
         for relay in self.pending.values() {

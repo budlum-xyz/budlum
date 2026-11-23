@@ -31,7 +31,7 @@ mod settlement_prod_tests {
         ConsensusKind, DomainCommitment, DomainStatus, PoWDomainParameters,
         POW_HEADER_CHAIN_ADAPTER,
     };
-    use crate::storage::db::Storage;
+    use crate::persistence::db::Storage;
     use std::sync::Arc;
 
     fn test_chain() -> Blockchain {
@@ -45,7 +45,7 @@ mod settlement_prod_tests {
             ConsensusKind::PoA => "poa-authority-quorum",
             _ => "custom",
         };
-        default_domain(id, kind, 45262 + id as u64, adapter, 0)
+        default_domain(id, kind, 45262 + u64::from(id), adapter, 0)
     }
 
     fn commitment_for(
@@ -109,7 +109,7 @@ mod settlement_prod_tests {
         let mut validators = Vec::new();
         let mut sks = Vec::new();
         for i in 0..3u8 {
-            let sk = Scalar::from(1000 + i as u64);
+            let sk = Scalar::from(1000 + u64::from(i));
             let pk = G2Affine::from(G2Affine::generator() * sk)
                 .to_compressed()
                 .to_vec();
@@ -154,6 +154,7 @@ mod settlement_prod_tests {
             agg_sig_bls: vec![],
             bitmap: vec![0u8],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         let msg = cert.signing_message();
         let mut agg = G1Projective::identity();
@@ -856,7 +857,7 @@ mod settlement_prod_tests {
                 target_domain: 2,
                 source_height: 44,
                 event_index: index,
-                nonce: index as u64,
+                nonce: u64::from(index),
                 sender: test_addr_from_byte(1u8),
                 recipient: test_addr_from_byte(2u8),
                 payload_hash,
@@ -1191,7 +1192,7 @@ mod settlement_prod_tests {
         let mut d = default_domain(
             id,
             ConsensusKind::Bft,
-            45262 + id as u64,
+            45262 + u64::from(id),
             "bft-quorum-commit",
             0,
         );
@@ -1203,7 +1204,7 @@ mod settlement_prod_tests {
         default_domain(
             id,
             ConsensusKind::Zk,
-            45262 + id as u64,
+            45262 + u64::from(id),
             "zk-proof-verification",
             0,
         )
@@ -1300,6 +1301,7 @@ mod settlement_prod_tests {
                 agg_sig_bls: vec![0u8; 48],
                 bitmap: vec![0u8],
                 set_hash: ValidatorSetSnapshot::new(1, vec![]).set_hash,
+                seat_table_version: 0,
             },
             validator_snapshot: ValidatorSetSnapshot::new(1, vec![]),
         };
@@ -1653,7 +1655,7 @@ mod settlement_prod_tests {
                 target_domain: 2,
                 source_height: 10,
                 event_index: i,
-                nonce: i as u64,
+                nonce: u64::from(i),
                 sender: test_addr_from_byte(1u8),
                 recipient: test_addr_from_byte(2u8),
                 payload_hash: ph,
@@ -1782,10 +1784,10 @@ mod settlement_prod_tests {
         assert_ne!(baseline.calculate_hash(), after.calculate_hash());
     }
 
-    /// F-7 closed the dead `settlement_finality_hashes` input by replacing
+    /// The dead `settlement_finality_hashes` input was closed by replacing
     /// the stored field with a derived window (see the twin test in
     /// `chain/blockchain.rs`). This module is still disabled pending the
-    /// devnet FinalityProof rewrite, so the derivation is pinned here only
+    /// devnet `FinalityProof` rewrite, so the derivation is pinned here only
     /// through the pure helper.
     #[test]
     fn settlement_finality_window_is_derived_not_stored() {
@@ -2101,7 +2103,7 @@ mod settlement_prod_tests {
     }
 }
 
-/// (Step 3) ZK finality now flows through the ProofClaimRegistry using a
+/// (Step 3) ZK finality now flows through the `ProofClaimRegistry` using a
 /// REAL STARK proof (produced by `execution::zkvm::prove_bytecode`) - replacing
 /// The deleted fake-hash acceptance test.
 #[cfg(test)]
@@ -2141,7 +2143,7 @@ mod zk_finality_real_proof {
         default_domain(
             DOMAIN_ID,
             ConsensusKind::Zk,
-            45262 + DOMAIN_ID as u64,
+            45262 + u64::from(DOMAIN_ID),
             "zk-proof-verification",
             0,
         )
@@ -2219,7 +2221,7 @@ mod zk_finality_real_proof {
         }
     }
 
-    /// Build a ZK commitment whose state_root matches `root`.
+    /// Build a ZK commitment whose `state_root` matches `root`.
     fn zk_commitment(dom: &crate::domain::ConsensusDomain, root: [u8; 32]) -> DomainCommitment {
         // Start from a block-derived commitment, then bind its state_root to the
         // Proven final_state_root and its consensus kind to Zk.
@@ -2341,8 +2343,8 @@ mod zk_finality_real_proof {
     }
 
     // The root folds are pure and deterministic, and the
-    // empty fold is domain-separated. Pinned so the finding's "roots are pure
-    // and deterministic" claim stays true under later refactors.
+    // empty fold is domain-separated, ensuring root folding determinism
+    // stays true under all conditions.
     #[test]
     fn root_folds_are_pure_and_deterministic() {
         use crate::settlement::merkle_root;

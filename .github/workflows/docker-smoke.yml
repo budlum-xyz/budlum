@@ -1,10 +1,19 @@
 name: Docker Smoke
 
 on:
+  pull_request:
+    # Pull requests into the product branch still pay the full battery; the
+    # daily integration pull request into `main` does not - that path is
+    # budgeted by `ci-pull-request-fanout-is-budgeted` and the evidence-window
+    # owner dispatches this workflow on the wave head instead.
+    branches: [consensus-of-consensuses]
   push:
     branches: [ main ]
-  pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+  # Heavy battery. It runs on demand (the evidence-window
+  # owner dispatches it on the wave head) and on pushes to `main`. It is out
+  # of the pull-request path on purpose: one push was queueing more work than
+  # the shared runner pool could finish, and the budget gate
+  # `ci-pull-request-fanout-is-budgeted` pins that path's size.
   workflow_dispatch:
 
 # Minimal permissions - this workflow only reads (build+scan+smoke).
@@ -17,7 +26,10 @@ permissions:
 
 jobs:
   docker-smoke:
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # security-events: write is required for Trivy IMAGE findings to be uploaded
     # to the Security tab as SARIF. The workflow default is `contents: read`.
     permissions:
@@ -69,7 +81,7 @@ jobs:
           ignore-unfixed: false
       - name: Trivy IMAGE SARIF yukle (Security sekmesi)
         if: always()
-        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
@@ -101,9 +113,11 @@ jobs:
           cargo run --release --manifest-path xtask/tools/Cargo.toml -- docker-smoke-mainnet
 
   devnet-multinode-smoke:
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
     name: Devnet Multi-Node Smoke (4x PoS mesh + metrics + operator-RPC izolasyon)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -1,4 +1,4 @@
-//! BudZKVM Proof Verification Integration.
+//! `BudZKVM` Proof Verification Integration.
 //!
 //! This module bridges the STARK proof system (`bud-proof`) with the
 //! Executor layer. When a ZKVM execution proof is submitted:
@@ -14,15 +14,15 @@
 //! - Failed verification is a validation error, NOT a panic, the network
 //!   Continues operating even with garbage proofs.
 //! - The verification gas cost is bounded by `proof.degree_bits` - larger
-//!   Proofs cost more gas, preventing DoS via huge proofs.
+//!   Proofs cost more gas, preventing `DoS` via huge proofs.
 
 use bud_proof::ProverAdapter;
 use sha3::{Digest, Keccak256};
 
-/// Maximum proof size in bytes (prevents DoS via oversized proofs).
+/// Maximum proof size in bytes (prevents `DoS` via oversized proofs).
 pub const MAX_PROOF_BYTES: usize = 1 << 20; // 1 MB
 
-/// Maximum degree bits (prevents DoS via huge trace).
+/// Maximum degree bits (prevents `DoS` via huge trace).
 pub const MAX_DEGREE_BITS: u32 = 24; // 2^24 = 16M rows
 
 /// Gas cost per degree bit (linear scaling).
@@ -55,16 +55,16 @@ pub enum ProofVerifyError {
 impl std::fmt::Display for ProofVerifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProofVerifyError::ProofTooLarge { size, max } => {
+            Self::ProofTooLarge { size, max } => {
                 write!(f, "proof too large: {size} bytes (max {max})")
             }
-            ProofVerifyError::DegreeTooLarge { degree_bits, max } => {
+            Self::DegreeTooLarge { degree_bits, max } => {
                 write!(f, "degree bits too large: {degree_bits} (max {max})")
             }
-            ProofVerifyError::FormatVersionTooOld { version, min } => {
+            Self::FormatVersionTooOld { version, min } => {
                 write!(f, "proof format version {version} too old (min {min})")
             }
-            ProofVerifyError::PublicInputsMismatch { expected, got } => {
+            Self::PublicInputsMismatch { expected, got } => {
                 write!(
                     f,
                     "public inputs hash mismatch: expected {}, got {}",
@@ -72,16 +72,16 @@ impl std::fmt::Display for ProofVerifyError {
                     hex::encode(got)
                 )
             }
-            ProofVerifyError::InvalidProof(msg) => {
+            Self::InvalidProof(msg) => {
                 write!(f, "invalid STARK proof: {msg}")
             }
-            ProofVerifyError::DeserializationError(msg) => {
+            Self::DeserializationError(msg) => {
                 write!(f, "proof deserialization error: {msg}")
             }
-            ProofVerifyError::UnsupportedBackend(backend) => {
+            Self::UnsupportedBackend(backend) => {
                 write!(f, "unsupported proof backend: {backend}")
             }
-            ProofVerifyError::GasExceeded { required, limit } => {
+            Self::GasExceeded { required, limit } => {
                 write!(f, "proof verification gas exceeded: {required} > {limit}")
             }
         }
@@ -137,6 +137,7 @@ pub struct ExecutionPublicInputs {
 
 impl ExecutionPublicInputs {
     /// Canonical serialization for hashing.
+    #[must_use]
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(176);
         bytes.extend_from_slice(&self.chain_id.to_le_bytes());
@@ -156,6 +157,7 @@ impl ExecutionPublicInputs {
     }
 
     /// Keccak-256 hash of canonical bytes, aligned with `bud_proof`.
+    #[must_use]
     pub fn hash(&self) -> [u8; 32] {
         let bytes = self.to_canonical_bytes();
         let mut hasher = Keccak256::new();
@@ -205,9 +207,13 @@ impl ProofVerifier {
     /// Steps:
     /// 1. Validate the envelope structure (the one shared check: size,
     ///    degree, format version, backend allowlist, metadata presence)
-    /// 2. Verify public_inputs_hash matches
+    /// 2. Verify `public_inputs_hash` matches
     /// 3. Verify the STARK proof (when STARK backend is linked)
     /// 4. Return verified proof with state transition info
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify(
         envelope: &ProofEnvelope,
         expected_inputs: &ExecutionPublicInputs,
@@ -230,7 +236,25 @@ impl ProofVerifier {
             });
         }
 
-        // 5. Public inputs hash verification
+        // 5. Public inputs hash and execution-bound consistency
+        if expected_inputs.trace_len == 0 {
+            return Err(ProofVerifyError::InvalidProof(
+                "public inputs trace_len must be non-zero".into(),
+            ));
+        }
+        if expected_inputs.gas_used > expected_inputs.gas_limit {
+            return Err(ProofVerifyError::InvalidProof(
+                "public inputs gas_used exceeds gas_limit".into(),
+            ));
+        }
+        if !1u64
+            .checked_shl(envelope.degree_bits)
+            .is_some_and(|rows| rows >= expected_inputs.trace_len)
+        {
+            return Err(ProofVerifyError::InvalidProof(
+                "envelope degree_bits underprices expected trace_len".into(),
+            ));
+        }
         let computed_hash = expected_inputs.hash();
         if computed_hash != envelope.public_inputs_hash {
             return Err(ProofVerifyError::PublicInputsMismatch {
@@ -256,6 +280,10 @@ impl ProofVerifier {
 
     /// Quick structural validation without full STARK verification.
     /// Used for pre-flight checks before committing gas.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_envelope_structure(envelope: &ProofEnvelope) -> Result<(), ProofVerifyError> {
         if envelope.proof_bytes.len() > MAX_PROOF_BYTES {
             return Err(ProofVerifyError::ProofTooLarge {
@@ -633,5 +661,33 @@ mod tests {
                  omission is invisible at the copy site"
             );
         }
+    }
+
+    #[test]
+    fn underpriced_degree_bits_below_trace_len_rejected() {
+        let mut inputs = make_inputs();
+        inputs.trace_len = 2048;
+        let mut envelope = make_envelope(&inputs);
+        // 2^10 = 1024 < 2048: caller underprices verification gas by spoofing degree_bits.
+        envelope.degree_bits = 10;
+        envelope.public_inputs_hash = inputs.hash();
+
+        let err = ProofVerifier::verify(&envelope, &inputs, &[], 1_000_000).unwrap_err();
+        assert!(matches!(err, ProofVerifyError::InvalidProof(_)));
+    }
+
+    #[test]
+    fn zero_trace_or_gas_overrun_in_public_inputs_rejected() {
+        let mut zero_trace = make_inputs();
+        zero_trace.trace_len = 0;
+        let env_zero = make_envelope(&zero_trace);
+        let err_zero = ProofVerifier::verify(&env_zero, &zero_trace, &[], 1_000_000).unwrap_err();
+        assert!(matches!(err_zero, ProofVerifyError::InvalidProof(_)));
+
+        let mut overrun = make_inputs();
+        overrun.gas_used = overrun.gas_limit + 1;
+        let env_over = make_envelope(&overrun);
+        let err_over = ProofVerifier::verify(&env_over, &overrun, &[], 1_000_000).unwrap_err();
+        assert!(matches!(err_over, ProofVerifyError::InvalidProof(_)));
     }
 }

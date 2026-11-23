@@ -1,4 +1,4 @@
-//! F10.5, the Bud-to-Ethereum direction: a Budlum burn event plus a finality
+//! Bud-to-Ethereum bridge direction: a Budlum burn event plus a finality
 //! proof turned into an Ethereum claim.
 //!
 //! There are two sides:
@@ -63,23 +63,33 @@ pub enum BudToEthError {
     BurnDebitNotRecorded,
     /// The burn's refund expiry height has already passed at `finalized_height`.
     BurnExpired,
+    /// An external claim or delivery was already recorded for this burn.
+    ClaimAlreadyIssued,
+    /// The finalized Budlum height is zero (genesis cannot hold a burn).
+    InvalidFinalizedHeight,
 }
 
 impl std::fmt::Display for BudToEthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BudToEthError::BurnEventNotFound => write!(f, "bud-to-eth: burn event not found"),
-            BudToEthError::NotBurned => write!(f, "bud-to-eth: transfer not in Burned status"),
-            BudToEthError::InvalidRecipient => {
+            Self::BurnEventNotFound => write!(f, "bud-to-eth: burn event not found"),
+            Self::NotBurned => write!(f, "bud-to-eth: transfer not in Burned status"),
+            Self::InvalidRecipient => {
                 write!(f, "bud-to-eth: invalid Ethereum recipient (20 bytes)")
             }
-            BudToEthError::FinalityProofMissing => write!(f, "bud-to-eth: finality proof missing"),
-            BudToEthError::AmountExceedsCap => write!(f, "bud-to-eth: amount exceeds bridge cap"),
-            BudToEthError::BurnDebitNotRecorded => {
+            Self::FinalityProofMissing => write!(f, "bud-to-eth: finality proof missing"),
+            Self::AmountExceedsCap => write!(f, "bud-to-eth: amount exceeds bridge cap"),
+            Self::BurnDebitNotRecorded => {
                 write!(f, "bud-to-eth: the burn recorded no net debit")
             }
-            BudToEthError::BurnExpired => {
+            Self::BurnExpired => {
                 write!(f, "bud-to-eth: burn expired before finalized claim height")
+            }
+            Self::ClaimAlreadyIssued => {
+                write!(f, "bud-to-eth: claim or delivery already recorded for burn")
+            }
+            Self::InvalidFinalizedHeight => {
+                write!(f, "bud-to-eth: finalized height must be non-zero")
             }
         }
     }
@@ -97,6 +107,10 @@ pub const DEFAULT_BRIDGE_CAP: u128 = 1_000_000_000_000; // 1T $BUD (6 decimals)
 /// from a Budlum node and produces a `BudToEthClaim`, the calldata to be sent to
 /// the Ethereum bridge contract. The Ethereum contract verifies Budlum finality
 /// and unlocks.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn build_bud_to_eth_claim(
     bridge: &mut BridgeState,
     message_id: &MessageId,
@@ -114,6 +128,12 @@ pub fn build_bud_to_eth_claim(
             .ok_or(BudToEthError::BurnEventNotFound)?;
         if !matches!(transfer.status, BridgeStatus::Burned { .. }) {
             return Err(BudToEthError::NotBurned);
+        }
+        if finalized_height == 0 {
+            return Err(BudToEthError::InvalidFinalizedHeight);
+        }
+        if transfer.claim_issued_height.is_some() || transfer.delivered_height.is_some() {
+            return Err(BudToEthError::ClaimAlreadyIssued);
         }
         if transfer.expiry_height > 0 && finalized_height >= transfer.expiry_height {
             return Err(BudToEthError::BurnExpired);
@@ -148,12 +168,15 @@ pub fn build_bud_to_eth_claim(
             }
         }
 
-        // BLG-0116 (P05-F09): the recipient is the one the burn committed,
+        // The recipient is the one the burn committed,
         // not a free parameter the caller picks here.
         let recipient_eth = transfer
             .recipient_eth
             .filter(|eth| *eth != [0u8; 20])
             .ok_or(BudToEthError::InvalidRecipient)?;
+        if burn_event_proof.is_empty() || finalized_header_hash == [0u8; 32] {
+            return Err(BudToEthError::FinalityProofMissing);
+        }
         (amount, asset_id, recipient_eth)
     };
 
@@ -284,18 +307,80 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, BudToEthError::AmountExceedsCap);
 
-        // Burned past its expiry height: BurnExpired.
+        // Empty burn_event_proof or zero finalized_header_hash is refused.
         let err = build_bud_to_eth_claim(
             &mut bridge,
             &id,
-            500,
-            [0u8; 32],
+            100,
+            [0x11; 32],
             vec![1],
             vec![],
             DEFAULT_BRIDGE_CAP,
         )
         .unwrap_err();
+        assert_eq!(err, BudToEthError::FinalityProofMissing);
+
+        let err = build_bud_to_eth_claim(
+            &mut bridge,
+            &id,
+            100,
+            [0u8; 32],
+            vec![1],
+            vec![2],
+            DEFAULT_BRIDGE_CAP,
+        )
+        .unwrap_err();
+        assert_eq!(err, BudToEthError::FinalityProofMissing);
+
+        // Burned past its expiry height: BurnExpired.
+        let err = build_bud_to_eth_claim(
+            &mut bridge,
+            &id,
+            500,
+            [0x11; 32],
+            vec![1],
+            vec![2],
+            DEFAULT_BRIDGE_CAP,
+        )
+        .unwrap_err();
         assert_eq!(err, BudToEthError::BurnExpired);
+
+        let ok = build_bud_to_eth_claim(
+            &mut bridge,
+            &id,
+            100,
+            [0x11; 32],
+            vec![1],
+            vec![2],
+            DEFAULT_BRIDGE_CAP,
+        )
+        .unwrap();
+        assert_eq!(ok.recipient_eth, [9u8; 20]);
+
+        // Zero Ethereum recipient ([0u8; 20]) is refused so funds never unlock to 0x0.
+        let a2 = AssetId(hash_fields_bytes(&[b"bte-neg-2"]));
+        bridge.register_asset(a2, 1).unwrap();
+        let (t2, ev2) = bridge
+            .lock(1, 2, 30, 1, a2, owner, recipient, 100, 500)
+            .unwrap();
+        let id2 = t2.message_id;
+        bridge.mint(&ev2.message.unwrap(), 31).unwrap();
+        if bridge
+            .burn_with_event(id2, 2, 32, 0, 500, [0u8; 20])
+            .is_ok()
+        {
+            let err = build_bud_to_eth_claim(
+                &mut bridge,
+                &id2,
+                100,
+                [0x11; 32],
+                vec![1],
+                vec![2],
+                DEFAULT_BRIDGE_CAP,
+            )
+            .unwrap_err();
+            assert_eq!(err, BudToEthError::InvalidRecipient);
+        }
     }
 
     #[test]
@@ -341,6 +426,67 @@ mod tests {
         assert!(
             bridge.sweep_expired_locks(200).is_empty(),
             "a burn with an issued external claim must never be refunded on expiry"
+        );
+    }
+
+    #[test]
+    fn duplicate_or_genesis_height_bud_to_eth_claim_is_refused() {
+        use crate::core::address::Address;
+        use crate::core::hash::hash_fields_bytes;
+        use crate::cross_domain::bridge::AssetId;
+
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"bte-single-claim"]));
+        bridge.register_asset(asset, 1).unwrap();
+        let owner = Address::from([5u8; 32]);
+        let recipient = Address::from([6u8; 32]);
+        let (transfer, event) = bridge
+            .lock(1, 2, 10, 0, asset, owner, recipient, 100, 500)
+            .unwrap();
+        let id = transfer.message_id;
+        bridge.mint(&event.message.unwrap(), 11).unwrap();
+        bridge
+            .burn_with_event(id, 2, 25, 0, 500, [8u8; 20])
+            .unwrap();
+
+        assert!(
+            build_bud_to_eth_claim(
+                &mut bridge,
+                &id,
+                0,
+                [0xCD; 32],
+                vec![1, 2],
+                vec![3, 4],
+                DEFAULT_BRIDGE_CAP,
+            )
+            .is_err(),
+            "genesis finalized_height 0 must be refused"
+        );
+
+        let first = build_bud_to_eth_claim(
+            &mut bridge,
+            &id,
+            120,
+            [0xCD; 32],
+            vec![1, 2],
+            vec![3, 4],
+            DEFAULT_BRIDGE_CAP,
+        )
+        .expect("first claim succeeds");
+        assert_eq!(first.finalized_height, 120);
+
+        assert!(
+            build_bud_to_eth_claim(
+                &mut bridge,
+                &id,
+                130,
+                [0xEF; 32],
+                vec![1, 2],
+                vec![3, 4],
+                DEFAULT_BRIDGE_CAP,
+            )
+            .is_err(),
+            "second outbound claim for an already-claimed burn must be refused"
         );
     }
 }

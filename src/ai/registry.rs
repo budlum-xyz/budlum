@@ -2,6 +2,7 @@
 //!
 //! Tracks active models, pending inference requests, accumulated verifier attestations,
 //! And finalized consensus outcomes. Provides deterministic `state_root` calculation.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::ai::types::{
     AiAgentPayment, AiAgentPaymentReceipt, AiAgentPaymentSettlement, AiAgentReputation,
@@ -32,6 +33,7 @@ pub const DISPUTE_WINDOW_BLOCKS: u64 = 10_080;
 pub const MAX_DEADLINE_HORIZON_BLOCKS: u64 = 5_256_000;
 pub const EQUIVOCATION_ERROR_PREFIX: &str = "EQUIVOCATION:";
 
+#[must_use]
 pub fn is_equivocation_error(error: &str) -> bool {
     error.starts_with(EQUIVOCATION_ERROR_PREFIX)
 }
@@ -63,6 +65,11 @@ pub const DEFAULT_OPERATOR_CEILING: EffortTier = EffortTier::BASELINE;
 /// Going to be.
 pub const MAX_CALLBACK_EVENTS_PER_ADDRESS: usize = 256;
 
+/// Maximum distinct verifier result submissions stored per pending request (`DoS` bound).
+///
+/// Convenience: exposed for AI registry capacity checks.
+pub const MAX_RESULTS_PER_REQUEST: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiRegistry {
     #[serde(with = "crate::core::map_keys")]
@@ -73,11 +80,11 @@ pub struct AiRegistry {
     pub results: BTreeMap<AiRequestId, Vec<AiInferenceResult>>,
     #[serde(with = "crate::core::map_keys")]
     pub outcomes: BTreeMap<AiRequestId, AiInferenceOutcome>,
-    /// Set of request IDs whose max_fee has been reclaimed
+    /// Set of request IDs whose `max_fee` has been reclaimed
     /// After deadline expiry without finalization. Prevents double-reclaim.
     pub reclaimed_fees: BTreeSet<AiRequestId>,
     /// Equivocation event record with block timestamp.
-    /// Maps (request_id, verifier_bytes) → block_number when detected.
+    /// Maps (`request_id`, `verifier_bytes`) → `block_number` when detected.
     /// Dispute window enforcement - equivocation events
     /// Expire after `DISPUTE_WINDOW_BLOCKS` blocks, preventing stale slashing.
     #[serde(with = "crate::core::map_keys")]
@@ -112,7 +119,7 @@ pub struct AiRegistry {
     /// Results to registered callback addresses.
     pub callback_queue: BTreeMap<Address, Vec<AiCallbackEvent>>,
     /// Execution proof registry.
-    /// Maps (request_id, verifier) → AiExecutionProof. When a verifier
+    /// Maps (`request_id`, verifier) → `AiExecutionProof`. When a verifier
     /// Submits a ZKVM-verified inference result, the proof is stored here.
     /// This enables trustless verification - the paradigm shift from
     /// "verifier says so" to "mathematics prove it."
@@ -124,15 +131,15 @@ pub struct AiRegistry {
     /// `execution_proofs` alone and never unlock a proof-gated payment.
     pub fully_verified_proofs: BTreeSet<(AiRequestId, [u8; 32])>,
     /// Verifier Quality of Service registry.
-    /// Maps verifier address → QoS metrics. Enables QoS-aware verifier
+    /// Maps verifier address → `QoS` metrics. Enables `QoS`-aware verifier
     /// Selection for the Agentic Economy.
     pub verifier_qos: BTreeMap<Address, AiVerifierQos>,
     /// Agent-to-Agent payment registry.
-    /// Maps payment_id → AiAgentPayment. Enables trustless value transfer
+    /// Maps `payment_id` → `AiAgentPayment`. Enables trustless value transfer
     /// Between AI agents in the Agentic Economy.
     #[serde(with = "crate::core::map_keys")]
     pub agent_payments: BTreeMap<[u8; 32], AiAgentPayment>,
-    /// Finalized payment receipts (payment_id never reusable).
+    /// Finalized payment receipts (`payment_id` never reusable).
     #[serde(with = "crate::core::map_keys")]
     pub settled_agent_payments: BTreeMap<[u8; 32], AiAgentPaymentSettlement>,
     /// Verifier whitelist - only whitelisted verifiers
@@ -142,12 +149,13 @@ pub struct AiRegistry {
     /// Verifier onboarding for the Agentic Economy.
     pub verifier_whitelist: BTreeSet<Address>,
     /// Agent reputation registry.
-    /// Maps agent address → AiAgentReputation. Tracks payment reliability,
+    /// Maps agent address → `AiAgentReputation`. Tracks payment reliability,
     /// Inference quality, and uptime for trust scoring in the Agentic Economy.
     pub agent_reputations: BTreeMap<Address, AiAgentReputation>,
 }
 
 impl AiRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             models: BTreeMap::new(),
@@ -200,6 +208,7 @@ impl AiRegistry {
         self.callback_queue.values().map(Vec::len).sum()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.models.is_empty()
             && self.requests.is_empty()
@@ -220,6 +229,11 @@ impl AiRegistry {
             && self.agent_reputations.is_empty()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_model(&mut self, spec: AiModelSpec) -> Result<AiModelId, String> {
         spec.validate()?;
         // A proof-required model cannot be satisfied while the
@@ -288,6 +302,10 @@ impl AiRegistry {
     /// or a non-canonical `input_commitment`. Every caller of this method
     /// passes the same gate as the transaction path, so there is no second
     /// door into the request table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn submit_request(
         &mut self,
         request: AiInferenceRequest,
@@ -370,6 +388,10 @@ impl AiRegistry {
 
     /// Submit an inference result with deadline + dispute enforcement.
     /// `current_block` is provided by the executor layer (defense-in-depth).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn submit_result(
         &mut self,
         result: AiInferenceResult,
@@ -410,6 +432,18 @@ impl AiRegistry {
             Some(s) => s.clone(),
             None => return Err("Associated model for request not found".into()),
         };
+        // Enforce per-verifier effort ceiling so an operator whose hardware only
+        // reaches a shallow tier cannot answer and finalize a deep-effort request
+        // merely because another operator registered a higher ceiling.
+        let verifier_ceiling = self.effort_ceiling(&result.verifier);
+        if verifier_ceiling < request.effort {
+            return Err(format!(
+                "Verifier {} effort ceiling {} is below requested effort tier {}",
+                result.verifier.to_hex(),
+                verifier_ceiling,
+                request.effort
+            ));
+        }
         if result.output_ref.len() as u64 > spec.max_output_ref_bytes {
             return Err("output_ref exceeds model specification limits".into());
         }
@@ -417,7 +451,7 @@ impl AiRegistry {
         // which is the check request admission already makes on
         // `input_commitment`. Without it a verifier can group on the honest
         // commitment and ship different bytes: the outcome serves
-        // `output_ref`, the output NFT and Pollen `DataAsset` are minted from
+        // `output_ref`, the output NFT and Data Market `DataAsset` are minted from
         // it, and no dispute path covers the mismatch.
         let canonical = crate::ai::types::canonical_output_commitment(result.output_ref.as_slice());
         if result.output_commitment != canonical {
@@ -500,6 +534,19 @@ impl AiRegistry {
                 result.request_id.to_hex()
             ));
         }
+        // Once an outcome is finalized (and after equivocation check above has
+        // caught any conflicting re-submission by an earlier participant), ignore
+        // new late submissions without bloating result storage or inflating QoS.
+        if self.outcomes.contains_key(&result.request_id) {
+            return Ok(None);
+        }
+        let existing_len = self.results.get(&result.request_id).map_or(0, Vec::len);
+        if existing_len >= MAX_RESULTS_PER_REQUEST {
+            return Err(format!(
+                "Request {} reached MAX_RESULTS_PER_REQUEST ({MAX_RESULTS_PER_REQUEST})",
+                result.request_id.to_hex()
+            ));
+        }
         let entries = self.results.entry(result.request_id).or_default();
         entries.push(result.clone());
 
@@ -516,10 +563,9 @@ impl AiRegistry {
 
         // Check if we reached agreement threshold for this commitment.
         // Hardening: when model.require_execution_proof, only verifiers that
-        // Already attached a structurally-valid execution proof count toward
-        // Agreement - attestation alone cannot finalize execution-class models.
-        // The stored output reference is the earliest one for the agreed
-        // commitment, the same choice `try_finalize_with_proofs` makes.
+        // already attached a verified execution proof count toward agreement,
+        // and any verifier flagged for equivocation on this request is excluded
+        // from quorum, fee sharing, and finalization QoS credit.
         let first_output_ref = entries
             .iter()
             .find(|r| r.output_commitment == result.output_commitment)
@@ -533,6 +579,9 @@ impl AiRegistry {
         let request_id_for_proof = result.request_id;
         let mut agreeing_verifiers = Vec::new();
         for (verifier, _) in candidates {
+            if self.has_equivocated(&request_id_for_proof, &verifier) {
+                continue;
+            }
             if spec.require_execution_proof
                 && !self.has_verified_execution_proof(&request_id_for_proof, &verifier)
             {
@@ -584,11 +633,13 @@ impl AiRegistry {
         Ok(None)
     }
 
+    #[must_use]
     pub fn get_outcome(&self, request_id: &AiRequestId) -> Option<&AiInferenceOutcome> {
         self.outcomes.get(request_id)
     }
 
     /// Accessor: get a pending (non-finalized) request by ID.
+    #[must_use]
     pub fn get_request(&self, request_id: &AiRequestId) -> Option<&AiInferenceRequest> {
         self.requests.get(request_id)
     }
@@ -596,6 +647,10 @@ impl AiRegistry {
     /// Deactivate a model. Only the model owner can deactivate.
     /// An inactive model rejects new inference requests, but existing pending
     /// Requests/results continue to be processed normally.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn deactivate_model(
         &mut self,
         model_id: &AiModelId,
@@ -622,6 +677,10 @@ impl AiRegistry {
     }
 
     /// Reactivate a previously deactivated model. Only the model owner can reactivate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn reactivate_model(
         &mut self,
         model_id: &AiModelId,
@@ -648,8 +707,12 @@ impl AiRegistry {
     }
 
     /// Update mutable model specification fields.
-    /// Only the model owner can update. Immutable fields (model_id, model_hash,
+    /// Only the model owner can update. Immutable fields (`model_id`, `model_hash`,
     /// Owner, version) cannot be changed - those require registering a new model.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     #[allow(clippy::too_many_arguments)]
     pub fn update_model_spec(
         &mut self,
@@ -741,6 +804,10 @@ impl AiRegistry {
     /// Transfer model ownership to a new address.
     /// Only the current owner can transfer. The new owner gains full control
     /// (deactivation, reactivation, spec updates, further transfers).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn transfer_model_ownership(
         &mut self,
         model_id: &AiModelId,
@@ -773,10 +840,10 @@ impl AiRegistry {
     /// Recently-expired data for a configurable retention window.
     ///
     /// Prunable items:
-    /// - Requests whose effective deadline has passed + retention_blocks,
+    /// - Requests whose effective deadline has passed + `retention_blocks`,
     ///   reclaimed and cancelled ones included
     /// - Results associated with pruned requests
-    /// - Outcomes that have been finalized + retention_blocks
+    /// - Outcomes that have been finalized + `retention_blocks`
     /// - Reclaimed and cancelled markers whose request row is gone
     ///
     /// Returns `(pruned, refunds)`. `refunds` holds one `(requester, max_fee)`
@@ -902,13 +969,17 @@ impl AiRegistry {
     }
     ///
     /// After a request's deadline has passed without reaching agreement threshold,
-    /// The requester can reclaim their escrowed max_fee. This prevents fee leaks
-    /// Where max_fee is deducted but never distributed (no verifiers, insufficient
+    /// The requester can reclaim their escrowed `max_fee`. This prevents fee leaks
+    /// Where `max_fee` is deducted but never distributed (no verifiers, insufficient
     /// Agreement, or deadline expiry before threshold reached).
     ///
     /// Returns `(requester_address, max_fee)` on success.
     /// Errors if: request not found, already finalized, not yet expired,
     /// already reclaimed, or already cancelled (the refund went out then).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn reclaim_fee(
         &mut self,
         request_id: &AiRequestId,
@@ -921,6 +992,10 @@ impl AiRegistry {
 
     /// Read-only form of [`Self::reclaim_fee`]: applies every rule and changes nothing.
     /// The status query uses it, so no registry copy is needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn check_reclaimable(
         &self,
         request_id: &AiRequestId,
@@ -979,12 +1054,16 @@ impl AiRegistry {
     /// Cancel a pending inference request.
     /// Only the original requester can cancel, at any point before the
     /// request is finalised. A cancelled request cannot receive further
-    /// results and its max_fee is refunded exactly once, here; `reclaim_fee`
+    /// results and its `max_fee` is refunded exactly once, here; `reclaim_fee`
     /// refuses a cancelled request afterwards. Cancellation is irreversible.
     ///
     /// Returns `(requester, max_fee)` on success for the executor to process refund.
     /// Errors if: request not found, not the requester, already finalized,
     /// already reclaimed, or already cancelled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn cancel_request(
         &mut self,
         request_id: &AiRequestId,
@@ -1038,8 +1117,9 @@ impl AiRegistry {
     }
 
     /// Check if a verifier has equivocated on a request.
-    /// Returns true if the (request_id, verifier) pair is in the equivocation record
+    /// Returns true if the (`request_id`, verifier) pair is in the equivocation record
     /// AND the dispute window has not expired.
+    #[must_use]
     pub fn has_equivocated(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
         self.equivocation_events
             .contains_key(&(*request_id, verifier.0))
@@ -1049,6 +1129,7 @@ impl AiRegistry {
     /// Scheduler assignments will extend this predicate when their state is
     /// Introduced; today it covers submitted results and live equivocation
     /// Windows so a participant cannot unbond while its work is unresolved.
+    #[must_use]
     pub fn operator_has_open_obligations(&self, operator: &Address, current_block: u64) -> bool {
         let has_open_result = self.results.iter().any(|(request_id, results)| {
             if !results.iter().any(|result| &result.verifier == operator) {
@@ -1099,6 +1180,7 @@ impl AiRegistry {
 
     /// Check if an equivocation event is still within
     /// The dispute window. Returns false if the event expired.
+    #[must_use]
     pub fn is_disputable(
         &self,
         request_id: &AiRequestId,
@@ -1115,6 +1197,7 @@ impl AiRegistry {
 
     /// Get the total count of equivocation events
     /// For a specific verifier across all requests.
+    #[must_use]
     pub fn equivocation_count_for_verifier(&self, verifier: &Address) -> usize {
         self.equivocation_events
             .iter()
@@ -1123,13 +1206,18 @@ impl AiRegistry {
     }
 
     /// Check if a request has been cancelled.
+    #[must_use]
     pub fn is_cancelled(&self, request_id: &AiRequestId) -> bool {
         self.cancelled_requests.contains(request_id)
     }
 
     /// Slash a verifier for equivocation.
-    /// Now enforces dispute window - cannot slash after DISPUTE_WINDOW_BLOCKS
+    /// Now enforces dispute window - cannot slash after `DISPUTE_WINDOW_BLOCKS`
     /// Have passed since the equivocation was detected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn slash_equivocator(
         &mut self,
         request_id: &AiRequestId,
@@ -1162,10 +1250,10 @@ impl AiRegistry {
         // Slash verifier stake if present.
         // Return the staked amount that was seized.
         let seized_stake = self.verifier_stakes.remove(verifier).unwrap_or(0);
-        // The ceiling hangs off the stake: when the stake goes, the declaration
-        // goes with it, or the ceiling of an address that is no longer
-        // authorized stays dangling in `state_root`.
+        // The ceiling and any explicit whitelist seat are revoked alongside the
+        // slashed stake so an equivocating verifier loses privileged status.
         self.verifier_effort_ceilings.remove(verifier);
+        self.verifier_whitelist.remove(verifier);
 
         Ok((*verifier, seized_stake))
     }
@@ -1175,12 +1263,18 @@ impl AiRegistry {
     /// Lock stake for an AI verifier.
     /// Verifiers must stake to participate in AI inference.
     /// This stake is slashable on equivocation, economic skin-in-the-game.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn lock_verifier_stake(&mut self, verifier: &Address, amount: u64) -> Result<u64, String> {
         if amount == 0 {
             return Err("Verifier stake must be > 0".into());
         }
         let current = self.verifier_stakes.get(verifier).copied().unwrap_or(0);
-        let new_stake = current.saturating_add(amount);
+        let new_stake = current
+            .checked_add(amount)
+            .ok_or_else(|| "Verifier stake overflow".to_string())?;
         self.verifier_stakes.insert(*verifier, new_stake);
         Ok(new_stake)
     }
@@ -1193,6 +1287,10 @@ impl AiRegistry {
     /// Only an authorized operator, one that meets the stake threshold, may
     /// declare: otherwise an address with no stake could write a ceiling and
     /// pollute what `unservable_reason` reports.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn declare_effort_ceiling(
         &mut self,
         verifier: &Address,
@@ -1256,12 +1354,19 @@ impl AiRegistry {
     }
 
     /// Withdraw verifier stake (only if no pending equivocation).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn withdraw_verifier_stake(
         &mut self,
         verifier: &Address,
         amount: u64,
         current_block: u64,
     ) -> Result<u64, String> {
+        if amount == 0 {
+            return Err("Withdrawal amount must be > 0".into());
+        }
         // Cannot withdraw if there are active equivocation events
         let has_pending = self
             .equivocation_events
@@ -1273,6 +1378,16 @@ impl AiRegistry {
         if has_pending {
             return Err(format!(
                 "Cannot withdraw stake: verifier {} has pending equivocation disputes",
+                verifier.to_hex()
+            ));
+        }
+        // Refuse unbonding while any submitted result is still inside its live
+        // request or post-submission dispute window; otherwise a Byzantine
+        // verifier submits a result and drains its slashable stake in the very
+        // same block before a conflicting submission or fraud challenge lands.
+        if self.operator_has_open_obligations(verifier, current_block) {
+            return Err(format!(
+                "Cannot withdraw stake: verifier {} has open inference or dispute obligations",
                 verifier.to_hex()
             ));
         }
@@ -1292,16 +1407,21 @@ impl AiRegistry {
             self.verifier_effort_ceilings.remove(verifier);
         } else {
             self.verifier_stakes.insert(*verifier, remaining);
+            if !self.is_verifier_authorized(verifier) {
+                self.verifier_effort_ceilings.remove(verifier);
+            }
         }
         Ok(amount)
     }
 
     /// Check if a verifier has staked.
+    #[must_use]
     pub fn is_staked_verifier(&self, verifier: &Address) -> bool {
         self.verifier_stakes.contains_key(verifier)
     }
 
     /// Get verifier's staked amount.
+    #[must_use]
     pub fn verifier_stake(&self, verifier: &Address) -> u64 {
         self.verifier_stakes.get(verifier).copied().unwrap_or(0)
     }
@@ -1329,6 +1449,7 @@ impl AiRegistry {
     /// Get comprehensive dispute status for a (request, verifier) pair.
     /// Returns whether the verifier equivocated, whether the dispute window is
     /// Still open, and verifier stake information. Used by `bud_aiSlashingStatus` RPC.
+    #[must_use]
     pub fn get_dispute_status(
         &self,
         request_id: &AiRequestId,
@@ -1360,6 +1481,7 @@ impl AiRegistry {
     /// Get verifier stake information.
     /// Returns stake amount, staking status, and total equivocation count.
     /// Used by `bud_aiVerifierStake` RPC.
+    #[must_use]
     pub fn get_verifier_stake_info(&self, verifier: &Address) -> AiVerifierStakeInfo {
         AiVerifierStakeInfo {
             verifier: *verifier,
@@ -1374,6 +1496,7 @@ impl AiRegistry {
     /// Get pending callback events for a callback address.
     /// Returns all events queued for the address since the last consumption.
     /// Off-chain systems poll this to deliver inference results.
+    #[must_use]
     pub fn get_callback_queue(&self, callback_address: &Address) -> Vec<AiCallbackEvent> {
         self.callback_queue
             .get(callback_address)
@@ -1415,6 +1538,10 @@ impl AiRegistry {
     /// Returns Ok if the proof commitments match the existing result.
     /// Returns Err if no result exists for this (request, verifier) pair,
     /// Or if commitments don't match.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn attach_execution_proof(
         &mut self,
         request_id: &AiRequestId,
@@ -1437,6 +1564,27 @@ impl AiRegistry {
         if self.reclaimed_fees.contains(request_id) {
             return Err(format!(
                 "Request {} fee was reclaimed - proofs not accepted",
+                request_id.to_hex()
+            ));
+        }
+        if self.has_equivocated(request_id, verifier) {
+            return Err(format!(
+                "Verifier {} has equivocated on request {} - proofs not accepted",
+                verifier.to_hex(),
+                request_id.to_hex()
+            ));
+        }
+        // Verification status only rises: once a (request, verifier) pair holds
+        // a cryptographically verified STARK proof, a structural-only re-attach
+        // cannot overwrite or downgrade it.
+        if !fully_verified
+            && self
+                .fully_verified_proofs
+                .contains(&(*request_id, verifier.0))
+        {
+            return Err(format!(
+                "Cannot downgrade already fully verified execution proof for verifier {} on request {}",
+                verifier.to_hex(),
                 request_id.to_hex()
             ));
         }
@@ -1492,6 +1640,7 @@ impl AiRegistry {
     }
 
     /// Get the execution proof for a (request, verifier) pair.
+    #[must_use]
     pub fn get_execution_proof(
         &self,
         request_id: &AiRequestId,
@@ -1522,9 +1671,9 @@ impl AiRegistry {
         use std::collections::BTreeMap;
         let mut by_commit: BTreeMap<[u8; 32], Vec<Address>> = BTreeMap::new();
         for r in entries {
-            // A model that requires an execution proof settles only on a proof
-            // that cleared full STARK verification (`fully_verified_proofs`),
-            // never on structural-only envelope bytes (CWE-345).
+            if self.has_equivocated(request_id, &r.verifier) {
+                continue;
+            }
             if spec.require_execution_proof
                 && !self.has_verified_execution_proof(request_id, &r.verifier)
             {
@@ -1536,22 +1685,43 @@ impl AiRegistry {
                 .push(r.verifier);
         }
         let mut best: Option<([u8; 32], Vec<Address>)> = None;
+        let mut tied = false;
         for (c, vs) in by_commit {
             if vs.len() as u32 >= spec.agreement_threshold {
                 match &best {
-                    Some((_, bvs)) if bvs.len() >= vs.len() => {}
-                    _ => best = Some((c, vs)),
+                    Some((_, bvs)) if vs.len() > bvs.len() => {
+                        best = Some((c, vs));
+                        tied = false;
+                    }
+                    Some((_, bvs)) if vs.len() == bvs.len() => {
+                        tied = true;
+                    }
+                    Some(_) => {}
+                    None => {
+                        best = Some((c, vs));
+                        tied = false;
+                    }
                 }
             }
+        }
+        if tied {
+            return None;
         }
         let (output_commitment, mut agreeing_verifiers) = best?;
         agreeing_verifiers.sort();
         let output_ref = entries
             .iter()
-            .find(|r| r.output_commitment == output_commitment)
+            .find(|r| {
+                r.output_commitment == output_commitment
+                    && agreeing_verifiers.binary_search(&r.verifier).is_ok()
+            })
             .map_or_else(BoundedBytes::empty, |r| r.output_ref.clone());
         let finalized_at_block = entries
             .iter()
+            .filter(|r| {
+                r.output_commitment == output_commitment
+                    && agreeing_verifiers.binary_search(&r.verifier).is_ok()
+            })
             .map(|r| r.submitted_at_block)
             .max()
             .unwrap_or(0);
@@ -1584,6 +1754,7 @@ impl AiRegistry {
     /// Check if a result has an execution proof.
     /// Results with execution proofs are "trustless", verified by
     /// Mathematics rather than by verifier reputation.
+    #[must_use]
     pub fn has_execution_proof(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
         self.execution_proofs
             .contains_key(&(*request_id, verifier.0))
@@ -1593,7 +1764,12 @@ impl AiRegistry {
     /// verification. `require_proof` escrow release gates on this, not on
     /// the structural-only `has_execution_proof`: a payer that asked for a
     /// verified proof must not be settled against envelope-shaped bytes.
-    fn has_verified_execution_proof(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
+    #[must_use]
+    pub fn has_verified_execution_proof(
+        &self,
+        request_id: &AiRequestId,
+        verifier: &Address,
+    ) -> bool {
         self.execution_proofs
             .contains_key(&(*request_id, verifier.0))
             && self
@@ -1603,19 +1779,26 @@ impl AiRegistry {
 
     // ===================== Verifier QoS =====================
 
-    /// Get QoS metrics for a verifier.
+    /// Get `QoS` metrics for a verifier.
+    #[must_use]
     pub fn get_verifier_qos(&self, verifier: &Address) -> Option<&AiVerifierQos> {
         self.verifier_qos.get(verifier)
     }
 
     /// Get all verifiers ordered by reliability score (descending).
     /// Used for QoS-aware verifier selection in the Agentic Economy.
+    ///
+    /// The sort key is the integer permyriad score, not the `f64` display
+    /// score ( / ): a float key rounds differently between
+    /// builds and `partial_cmp` hides a `NaN` as `Equal`. Ties break on the
+    /// address, so the order is total and identical on every node.
+    #[must_use]
     pub fn verifiers_by_reliability(&self) -> Vec<AiVerifierQos> {
         let mut qos_list: Vec<_> = self.verifier_qos.values().cloned().collect();
         qos_list.sort_by(|a, b| {
-            b.reliability_score()
-                .partial_cmp(&a.reliability_score())
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.reliability_score_permyriad()
+                .cmp(&a.reliability_score_permyriad())
+                .then_with(|| a.verifier.cmp(&b.verifier))
         });
         qos_list
     }
@@ -1623,6 +1806,10 @@ impl AiRegistry {
     // ===================== Agent-to-Agent Payment =====================
 
     /// Submit an agent-to-agent payment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn submit_agent_payment(
         &mut self,
         payment: AiAgentPayment,
@@ -1680,6 +1867,10 @@ impl AiRegistry {
     }
 
     /// Release an escrowed payment to the recipient.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn release_agent_payment(
         &mut self,
         payment_id: &[u8; 32],
@@ -1729,6 +1920,10 @@ impl AiRegistry {
     }
 
     /// Reclaim an expired escrowed payment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn reclaim_agent_payment(
         &mut self,
         payment_id: &[u8; 32],
@@ -1776,6 +1971,10 @@ impl AiRegistry {
 
     /// Record immediate (non-escrowed) settlement without dropping audit trail.
     /// Removes live escrow entry if present and inserts an immutable settlement receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn settle_agent_payment_immediate(
         &mut self,
         payment_id: &[u8; 32],
@@ -1831,6 +2030,7 @@ impl AiRegistry {
         self.settled_agent_payments.insert(id, receipt);
     }
 
+    #[must_use]
     pub fn get_settled_agent_payment(
         &self,
         payment_id: &[u8; 32],
@@ -1852,17 +2052,20 @@ impl AiRegistry {
             .map(AiAgentPaymentSettlement::accountability_receipt)
     }
 
+    #[must_use]
     pub fn is_payment_id_consumed(&self, payment_id: &[u8; 32]) -> bool {
         self.agent_payments.contains_key(payment_id)
             || self.settled_agent_payments.contains_key(payment_id)
     }
 
     /// Get a payment by ID.
+    #[must_use]
     pub fn get_agent_payment(&self, payment_id: &[u8; 32]) -> Option<&AiAgentPayment> {
         self.agent_payments.get(payment_id)
     }
 
     /// Get escrow status of a payment.
+    #[must_use]
     pub fn get_payment_escrow_status(
         &self,
         payment_id: &[u8; 32],
@@ -1880,6 +2083,7 @@ impl AiRegistry {
     }
 
     /// Get all payments from a specific agent.
+    #[must_use]
     pub fn payments_from_agent(&self, agent: &Address) -> Vec<&AiAgentPayment> {
         self.agent_payments
             .values()
@@ -1888,6 +2092,7 @@ impl AiRegistry {
     }
 
     /// Get all payments to a specific agent.
+    #[must_use]
     pub fn payments_to_agent(&self, agent: &Address) -> Vec<&AiAgentPayment> {
         self.agent_payments
             .values()
@@ -1912,6 +2117,7 @@ impl AiRegistry {
     /// Verifiers must satisfy the minimum stake requirement in all modes.
     /// If whitelist is empty (permissionless mode), any sufficiently staked verifier is allowed.
     /// If whitelist is non-empty (permissioned mode), only whitelisted verifiers.
+    #[must_use]
     pub fn is_verifier_authorized(&self, verifier: &Address) -> bool {
         // Security review (HIGH): the stake threshold is mandatory in every
         // mode. "Staked" only means an entry exists, and an entry below
@@ -1929,11 +2135,13 @@ impl AiRegistry {
     }
 
     /// Check if whitelist mode is active.
+    #[must_use]
     pub fn is_whitelist_mode(&self) -> bool {
         !self.verifier_whitelist.is_empty()
     }
 
     /// Get all whitelisted verifiers.
+    #[must_use]
     pub fn get_whitelisted_verifiers(&self) -> &BTreeSet<Address> {
         &self.verifier_whitelist
     }
@@ -1999,23 +2207,50 @@ impl AiRegistry {
     }
 
     /// Get an agent's reputation record.
+    #[must_use]
     pub fn get_agent_reputation(&self, agent: &Address) -> Option<&AiAgentReputation> {
         self.agent_reputations.get(agent)
     }
 
     /// Get all agents sorted by trust score (descending - highest trust first).
-    /// Returns Vec of (agent_address, trust_score) tuples.
+    /// Returns Vec of (`agent_address`, `trust_score`) tuples.
+    ///
+    /// The returned score is the `f64` display column, but the *ordering*
+    /// comes from the integer permyriad score ( / ), with the
+    /// address breaking ties. Keeping the float in the signature keeps the
+    /// RPC's display column stable while removing it from the decision.
     ///
     /// WIRING: the read model for ranking agents by trust; the operator
     /// surface that lists agents this way does not call it yet, so the
     /// ordering is pinned by this module's tests.
+    #[must_use]
     pub fn agents_by_trust_score(&self) -> Vec<(Address, f64)> {
-        let mut scored: Vec<(Address, f64)> = self
+        let mut scored: Vec<(Address, u64, f64)> = self
             .agent_reputations
             .iter()
-            .map(|(addr, rep)| (*addr, rep.trust_score()))
+            .map(|(addr, rep)| (*addr, rep.trust_score_permyriad(), rep.trust_score()))
             .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scored
+            .into_iter()
+            .map(|(addr, _, score)| (addr, score))
+            .collect()
+    }
+
+    /// The agent ranking as integers: `(address, permyriad score)`, ordered
+    /// exactly as [`Self::agents_by_trust_score`] orders ( / ).
+    ///
+    /// This is the form a consensus or cross-process consumer should use.
+    /// One permyriad is `1/10_000` of a unit of trust; the range is
+    /// `0..=10_000`.
+    #[must_use]
+    pub fn agents_by_trust_score_permyriad(&self) -> Vec<(Address, u64)> {
+        let mut scored: Vec<(Address, u64)> = self
+            .agent_reputations
+            .iter()
+            .map(|(addr, rep)| (*addr, rep.trust_score_permyriad()))
+            .collect();
+        scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         scored
     }
 
@@ -2023,25 +2258,27 @@ impl AiRegistry {
     ///
     /// WIRING: the bounded cut of the ranking above, for the same
     /// unwired operator surface; pinned by tests beside it.
+    #[must_use]
     pub fn top_agents(&self, n: usize) -> Vec<(Address, f64)> {
         self.agents_by_trust_score().into_iter().take(n).collect()
     }
 
-    /// The ranking in fixed-point permyriad scores (1/10_000 of a unit
+    /// The ranking in fixed-point permyriad scores (`1/10_000` of a unit
     /// trust), ordered as `agents_by_trust_score` orders.
     /// The actor and RPC boundary carries this, not the raw
-    /// `f64` - a float crossing process boundaries is the Z8 rule, and
-    /// quantizing once, here, keeps every consumer's ordering identical
-    /// without re-deriving a sort key from a float.
+    /// `f64` - a float crossing process boundaries is the Z8 rule.
+    ///
+    ///  / : this used to re-quantize the display float
+    /// (`(score * 10_000.0).round() as u64`), which put a float back on the
+    /// boundary it was meant to keep off, and rounded where the ranking
+    /// truncates. It now returns the integer score itself, so the value the
+    /// boundary carries and the value the sort used are the same number.
+    /// The name is kept because the actor command and the RPC reply are
+    /// wired to it; the unit is permyriad, as the `trust_score_basis: 10_000`
+    /// field already advertised.
     #[must_use]
     pub fn agents_by_trust_score_permille(&self) -> Vec<(Address, u64)> {
-        self.agents_by_trust_score()
-            .into_iter()
-            .map(|(addr, score)| {
-                let q = (score * 10_000.0).round().clamp(0.0, u64::MAX as f64) as u64;
-                (addr, q)
-            })
-            .collect()
+        self.agents_by_trust_score_permyriad()
     }
 
     /// Calculate deterministic Merkle/SHA256 root of all AI registry maps.
@@ -2049,6 +2286,7 @@ impl AiRegistry {
     /// Collision attacks. Each map gets a unique domain prefix
     /// Before its entries are hashed, so identical key+value pairs in
     /// Different maps produce different root contributions.
+    #[must_use]
     pub fn state_root(&self) -> [u8; 32] {
         if self.is_empty() {
             return [0u8; 32];
@@ -2058,6 +2296,7 @@ impl AiRegistry {
 
         // Domain: models
         hasher.update(b"BDLM_AI_MODELS");
+        hasher.update((self.models.len() as u64).to_le_bytes());
         for (id, spec) in &self.models {
             hasher.update(id.0);
             hasher.update(spec.calculate_leaf());
@@ -2065,6 +2304,7 @@ impl AiRegistry {
 
         // Domain: requests
         hasher.update(b"BDLM_AI_REQUESTS");
+        hasher.update((self.requests.len() as u64).to_le_bytes());
         for (id, req) in &self.requests {
             hasher.update(id.0);
             hasher.update(req.calculate_leaf());
@@ -2072,9 +2312,11 @@ impl AiRegistry {
 
         // Domain: results
         hasher.update(b"BDLM_AI_RESULTS");
+        hasher.update((self.results.len() as u64).to_le_bytes());
         for (id, res_list) in &self.results {
             hasher.update(id.0);
             let mut list_hasher = Sha256::new();
+            list_hasher.update((res_list.len() as u64).to_le_bytes());
             for res in res_list {
                 list_hasher.update(res.calculate_leaf());
             }
@@ -2083,6 +2325,7 @@ impl AiRegistry {
 
         // Domain: outcomes
         hasher.update(b"BDLM_AI_OUTCOMES");
+        hasher.update((self.outcomes.len() as u64).to_le_bytes());
         for (id, outcome) in &self.outcomes {
             hasher.update(id.0);
             hasher.update(outcome.calculate_leaf());
@@ -2090,6 +2333,7 @@ impl AiRegistry {
 
         // Domain: reclaimed_fees
         hasher.update(b"BDLM_AI_RECLAIMED");
+        hasher.update((self.reclaimed_fees.len() as u64).to_le_bytes());
         for id in &self.reclaimed_fees {
             hasher.update(id.0);
             hasher.update(b"RECLAIMED");
@@ -2097,6 +2341,7 @@ impl AiRegistry {
 
         // Domain: equivocation_events
         hasher.update(b"BDLM_AI_EQUIVOCATIONS");
+        hasher.update((self.equivocation_events.len() as u64).to_le_bytes());
         for ((req_id, verifier_bytes), detected_block) in &self.equivocation_events {
             hasher.update(req_id.0);
             hasher.update(verifier_bytes);
@@ -2105,12 +2350,14 @@ impl AiRegistry {
 
         // Domain: cancelled_requests
         hasher.update(b"BDLM_AI_CANCELLED");
+        hasher.update((self.cancelled_requests.len() as u64).to_le_bytes());
         for id in &self.cancelled_requests {
             hasher.update(id.0);
         }
 
         // Domain: verifier_stakes
         hasher.update(b"BDLM_AI_VERIFIER_STAKES");
+        hasher.update((self.verifier_stakes.len() as u64).to_le_bytes());
         for (verifier, stake) in &self.verifier_stakes {
             hasher.update(verifier.as_bytes());
             hasher.update(stake.to_le_bytes());
@@ -2122,6 +2369,7 @@ impl AiRegistry {
         // it, so if it stays out of `state_root` two nodes settle the same
         // request differently.
         hasher.update(b"BDLM_AI_VERIFIER_CEILINGS");
+        hasher.update((self.verifier_effort_ceilings.len() as u64).to_le_bytes());
         for (verifier, ceiling) in &self.verifier_effort_ceilings {
             hasher.update(verifier.as_bytes());
             hasher.update(ceiling.as_bytes());
@@ -2129,6 +2377,7 @@ impl AiRegistry {
 
         // Domain: callback_queue
         hasher.update(b"BDLM_AI_CALLBACK_QUEUE_V2");
+        hasher.update((self.callback_queue.len() as u64).to_le_bytes());
         for (addr, events) in &self.callback_queue {
             hasher.update(addr.as_bytes());
             hasher.update((events.len() as u64).to_le_bytes());
@@ -2142,6 +2391,7 @@ impl AiRegistry {
 
         // Domain: execution_proofs
         hasher.update(b"BDLM_AI_EXEC_PROOFS");
+        hasher.update((self.execution_proofs.len() as u64).to_le_bytes());
         for ((req_id, verifier_bytes), proof) in &self.execution_proofs {
             hasher.update(req_id.0);
             hasher.update(verifier_bytes);
@@ -2154,6 +2404,7 @@ impl AiRegistry {
         // `require_proof` escrow release, and cannot be re-derived from
         // `execution_proofs` envelopes alone (CWE-345).
         hasher.update(b"BDLM_AI_FULLY_VERIFIED_PROOFS");
+        hasher.update((self.fully_verified_proofs.len() as u64).to_le_bytes());
         for (req_id, verifier_bytes) in &self.fully_verified_proofs {
             hasher.update(req_id.0);
             hasher.update(verifier_bytes);
@@ -2161,6 +2412,7 @@ impl AiRegistry {
 
         // Domain: verifier_qos
         hasher.update(b"BDLM_AI_VERIFIER_QOS");
+        hasher.update((self.verifier_qos.len() as u64).to_le_bytes());
         for (verifier, qos) in &self.verifier_qos {
             hasher.update(verifier.as_bytes());
             hasher.update(qos.calculate_leaf());
@@ -2168,23 +2420,27 @@ impl AiRegistry {
 
         // Domain: agent_payments
         hasher.update(b"BDLM_AI_AGENT_PAYMENTS");
+        hasher.update((self.agent_payments.len() as u64).to_le_bytes());
         for (pid, payment) in &self.agent_payments {
             hasher.update(pid);
             hasher.update(payment.calculate_leaf());
         }
         // Domain: settled agent payments (audit trail)
         hasher.update(b"BDLM_AI_AGENT_PAYMENT_SETTLEMENTS_V1");
+        hasher.update((self.settled_agent_payments.len() as u64).to_le_bytes());
         for (pid, settlement) in &self.settled_agent_payments {
             hasher.update(pid);
             hasher.update(settlement.calculate_leaf());
         }
         hasher.update(b"BDLM_AI_VERIFIER_WHITELIST");
+        hasher.update((self.verifier_whitelist.len() as u64).to_le_bytes());
         for verifier in &self.verifier_whitelist {
             hasher.update(verifier.as_bytes());
         }
 
         // Domain: agent_reputations
         hasher.update(b"BDLM_AI_AGENT_REPUTATIONS");
+        hasher.update((self.agent_reputations.len() as u64).to_le_bytes());
         for (addr, rep) in &self.agent_reputations {
             hasher.update(addr.as_bytes());
             hasher.update(rep.calculate_leaf());
@@ -2197,5 +2453,411 @@ impl AiRegistry {
 impl Default for AiRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //!  / : the ranking read models must order on integers.
+    //!
+    //! A float sort key is not a consensus-safe ordering: two nodes built
+    //! with different optimization settings may round the last bit of a
+    //! `f64` differently, and `partial_cmp` on a `NaN` silently degrades to
+    //! `Equal`. The scores stay available as `f64` for display, but the
+    //! *order* and the value that crosses the actor/RPC boundary come from
+    //! the fixed-point permyriad functions.
+    use super::AiRegistry;
+    use crate::ai::types::{AiAgentReputation, AiVerifierQos};
+    use crate::core::address::Address;
+
+    fn addr(byte: u8) -> Address {
+        Address::from([byte; 32])
+    }
+
+    /// The card's named lock: both rankings are ordered by their integer
+    /// score, and the integer score is what the boundary carries.
+    #[test]
+    fn ai_ranking_uses_integers() {
+        let mut registry = AiRegistry::new();
+
+        // Verifier QoS: 3/4 finalized with one equivocation beats 1/1 with
+        // two equivocations, and the integer score pins both values.
+        let mut strong = AiVerifierQos::new(addr(1));
+        strong.total_results_submitted = 4;
+        strong.successful_finalizations = 3;
+        strong.equivocation_count = 1;
+        let mut weak = AiVerifierQos::new(addr(2));
+        weak.total_results_submitted = 4;
+        weak.successful_finalizations = 4;
+        weak.equivocation_count = 3;
+        assert_eq!(strong.reliability_score_permyriad(), 6_750);
+        assert_eq!(weak.reliability_score_permyriad(), 7_000);
+        registry.verifier_qos.insert(addr(1), strong);
+        registry.verifier_qos.insert(addr(2), weak);
+
+        let by_reliability = registry.verifiers_by_reliability();
+        let expected: Vec<u64> = {
+            let mut scores: Vec<u64> = registry
+                .verifier_qos
+                .values()
+                .map(AiVerifierQos::reliability_score_permyriad)
+                .collect();
+            scores.sort_by(|a, b| b.cmp(a));
+            scores
+        };
+        let actual: Vec<u64> = by_reliability
+            .iter()
+            .map(AiVerifierQos::reliability_score_permyriad)
+            .collect();
+        assert_eq!(actual, expected, "QoS order must follow the integer score");
+        assert_eq!(actual, vec![7_000, 6_750]);
+
+        // Agent trust: the permille-named boundary accessor carries the
+        // permyriad integer, never a re-quantized float.
+        registry.record_reputation_payment_completed(&addr(3), 10);
+        registry.record_reputation_payment_completed(&addr(3), 11);
+        registry.record_reputation_payment_defaulted(&addr(4), 12);
+
+        let integer_ranking = registry.agents_by_trust_score_permyriad();
+        let displayed = registry.agents_by_trust_score();
+        assert_eq!(integer_ranking.len(), displayed.len());
+        for pair in integer_ranking.windows(2) {
+            assert!(pair[0].1 >= pair[1].1, "descending integer order");
+        }
+        for (i, (address, score)) in displayed.iter().enumerate() {
+            assert_eq!(*address, integer_ranking[i].0, "same order as integers");
+            let rep = registry.get_agent_reputation(address).unwrap();
+            assert_eq!(integer_ranking[i].1, rep.trust_score_permyriad());
+            assert!(
+                (*score - f64::from(u32::try_from(integer_ranking[i].1).unwrap()) / 10_000.0).abs()
+                    < 0.01
+            );
+        }
+        assert_eq!(
+            registry.agents_by_trust_score_permille(),
+            integer_ranking,
+            "the actor/RPC boundary must carry the integer score itself"
+        );
+        let top: Vec<Address> = registry.top_agents(1).into_iter().map(|(a, _)| a).collect();
+        assert_eq!(
+            top,
+            vec![integer_ranking[0].0],
+            "top-N is the same ordering, cut"
+        );
+    }
+
+    /// Equal integer scores keep the map's address order: no float compare,
+    /// no `unwrap_or(Equal)` hiding a `NaN`, no platform-dependent tie order.
+    #[test]
+    fn ai_ranking_breaks_ties_by_address() {
+        let mut registry = AiRegistry::new();
+        for byte in [9u8, 3, 7] {
+            let mut qos = AiVerifierQos::new(addr(byte));
+            qos.total_results_submitted = 2;
+            qos.successful_finalizations = 1;
+            registry.verifier_qos.insert(addr(byte), qos);
+            registry.record_reputation_payment_completed(&addr(byte), 1);
+        }
+        let qos_order: Vec<Address> = registry
+            .verifiers_by_reliability()
+            .into_iter()
+            .map(|q| q.verifier)
+            .collect();
+        assert_eq!(qos_order, vec![addr(3), addr(7), addr(9)]);
+
+        let agent_order: Vec<Address> = registry
+            .agents_by_trust_score_permyriad()
+            .into_iter()
+            .map(|(a, _)| a)
+            .collect();
+        assert_eq!(agent_order, vec![addr(3), addr(7), addr(9)]);
+    }
+
+    ///  overflow leg: the score arithmetic widens before it
+    /// multiplies. Counters at `u64::MAX` must produce a bounded score
+    /// instead of wrapping (debug panic / release wrap).
+    #[test]
+    fn ai_ranking_saturates_instead_of_overflowing() {
+        let mut qos = AiVerifierQos::new(addr(1));
+        qos.total_results_submitted = u64::MAX;
+        qos.successful_finalizations = u64::MAX;
+        qos.equivocation_count = u64::MAX;
+        assert_eq!(qos.reliability_score_permyriad(), 0);
+
+        let mut rep = AiAgentReputation::new(addr(1));
+        rep.payments_completed = u64::MAX;
+        rep.payments_defaulted = u64::MAX;
+        rep.results_submitted = u64::MAX;
+        rep.results_finalized = u64::MAX;
+        rep.equivocations = u64::MAX;
+        let score = rep.trust_score_permyriad();
+        assert!(score <= 10_000, "score must stay in basis points: {score}");
+    }
+
+    /// The display score and the ranking score are the same number to
+    /// within one basis point, so the RPC's float column and the integer
+    /// column can never tell two different stories about one agent.
+    #[test]
+    fn ai_ranking_integer_matches_display_within_one_basis_point() {
+        for (completed, defaulted, submitted, finalized, equivocations) in [
+            (0u64, 0u64, 0u64, 0u64, 0u64),
+            (1, 1, 2, 1, 1),
+            (7, 3, 11, 5, 2),
+            (100, 0, 100, 99, 0),
+            (0, 5, 0, 0, 0),
+        ] {
+            let mut rep = AiAgentReputation::new(addr(1));
+            rep.payments_completed = completed;
+            rep.payments_defaulted = defaulted;
+            rep.results_submitted = submitted;
+            rep.results_finalized = finalized;
+            rep.equivocations = equivocations;
+            let integer = f64::from(u32::try_from(rep.trust_score_permyriad()).unwrap()) / 10_000.0;
+            assert!(
+                (integer - rep.trust_score()).abs() <= 0.0002,
+                "integer {integer} vs display {} for {rep:?}",
+                rep.trust_score()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod registry_security_regression_tests {
+    use super::*;
+    use crate::ai::types::{
+        AiExecutionProof, AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec,
+        AiRequestId, BoundedBytes,
+    };
+    use crate::ai_inference::effort::EffortTier;
+
+    fn addr(b: u8) -> Address {
+        Address::from([b; 32])
+    }
+
+    fn build_spec(owner: Address, threshold: u32) -> AiModelSpec {
+        let model_id = AiModelId::of(&owner, &[0xAB; 32], 1);
+        AiModelSpec {
+            model_id,
+            model_hash: [0xAB; 32],
+            owner,
+            min_verifier_count: threshold.max(2),
+            agreement_threshold: threshold,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 1024,
+            request_deadline_blocks: 200,
+            result_deadline_blocks: 200,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_dims: None,
+            execution_weights_digest: None,
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        }
+    }
+
+    fn build_req(
+        requester: Address,
+        model_id: AiModelId,
+        effort: EffortTier,
+        block: u64,
+    ) -> AiInferenceRequest {
+        let payload = b"prompt".to_vec();
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId([0; 32]),
+            requester,
+            model_id,
+            input_commitment: crate::ai::types::canonical_input_commitment(&payload),
+            input_ref: BoundedBytes::try_new(payload).unwrap(),
+            max_fee: 500,
+            callback: None,
+            submitted_at_block: block,
+            deadline_block: block + 150,
+            perception: Some(crate::ai_inference::perception::PerceptionRequest {
+                asset_id: Default::default(),
+                content_id: crate::storage::content_id::ContentId([2; 32]),
+                kind: crate::ai_inference::perception::PerceptionKind::Text,
+                declared_units: 6,
+            }),
+            effort,
+        };
+        req.request_id = req.calculate_id();
+        req
+    }
+
+    fn build_res(
+        request_id: AiRequestId,
+        verifier: Address,
+        body: &[u8],
+        nonce: u64,
+        block: u64,
+    ) -> AiInferenceResult {
+        AiInferenceResult {
+            request_id,
+            verifier,
+            output_commitment: crate::ai::types::canonical_output_commitment(body),
+            output_ref: BoundedBytes::try_new(body.to_vec()).unwrap(),
+            result_nonce: nonce,
+            signature: Vec::new(),
+            submitted_at_block: block,
+        }
+    }
+
+    #[test]
+    fn withdraw_stake_is_blocked_until_result_dispute_window_closes() {
+        let mut reg = AiRegistry::new();
+        let owner = addr(0x50);
+        let v1 = addr(0x51);
+        let spec = build_spec(owner, 2);
+        let model_id = reg.register_model(spec).unwrap();
+        reg.lock_verifier_stake(&v1, MIN_VERIFIER_STAKE * 2)
+            .unwrap();
+        let req_id = reg
+            .submit_request(build_req(owner, model_id, EffortTier::BASELINE, 10), 10)
+            .unwrap();
+        reg.submit_result(build_res(req_id, v1, b"out-a", 1, 20), 20)
+            .unwrap();
+
+        // Immediate same-block and in-window stake escape must fail closed.
+        let err_now = reg
+            .withdraw_verifier_stake(&v1, MIN_VERIFIER_STAKE, 20)
+            .expect_err("same-block stake withdrawal after submit_result must fail");
+        assert!(err_now.contains("open inference or dispute obligations"));
+        let last_locked = 20 + DISPUTE_WINDOW_BLOCKS;
+        assert!(reg
+            .withdraw_verifier_stake(&v1, MIN_VERIFIER_STAKE, last_locked)
+            .is_err());
+        assert_eq!(reg.verifier_stake(&v1), MIN_VERIFIER_STAKE * 2);
+
+        // Once both the dispute window and request deadline have passed, unbonding works.
+        let free_block = (20 + DISPUTE_WINDOW_BLOCKS + 1).max(220);
+        let withdrawn = reg
+            .withdraw_verifier_stake(&v1, MIN_VERIFIER_STAKE, free_block)
+            .expect("withdrawal after all obligations close succeeds");
+        assert_eq!(withdrawn, MIN_VERIFIER_STAKE);
+    }
+
+    #[test]
+    fn shallow_ceiling_verifier_cannot_answer_deep_effort_request() {
+        let mut reg = AiRegistry::new();
+        let owner = addr(0x60);
+        let deep_op = addr(0x61);
+        let shallow_op = addr(0x62);
+        let spec = build_spec(owner, 1);
+        let model_id = reg.register_model(spec).unwrap();
+
+        reg.lock_verifier_stake(&deep_op, MIN_VERIFIER_STAKE)
+            .unwrap();
+        reg.declare_effort_ceiling(&deep_op, EffortTier::DEEPEST)
+            .unwrap();
+        reg.lock_verifier_stake(&shallow_op, MIN_VERIFIER_STAKE)
+            .unwrap();
+        // `shallow_op` stays at `DEFAULT_OPERATOR_CEILING` (1.0x).
+
+        let deep = EffortTier::from_tenths(50).unwrap();
+        let req_id = reg
+            .submit_request(build_req(owner, model_id, deep, 5), 5)
+            .unwrap();
+
+        let err = reg
+            .submit_result(build_res(req_id, shallow_op, b"cheap", 1, 6), 6)
+            .expect_err("shallow operator must not finalize a deep request");
+        assert!(err.contains("effort ceiling"), "{err}");
+        assert!(reg.get_outcome(&req_id).is_none());
+
+        let ok = reg
+            .submit_result(build_res(req_id, deep_op, b"deep-ok", 1, 6), 6)
+            .unwrap();
+        assert!(ok.is_some());
+    }
+
+    #[test]
+    fn equivocator_is_excluded_from_quorum_proofs_and_whitelist_and_no_proof_downgrade() {
+        let mut reg = AiRegistry::new();
+        let owner = addr(0x70);
+        let v_byz = addr(0x71);
+        let v_honest1 = addr(0x72);
+        let v_honest2 = addr(0x73);
+        let v_late = addr(0x74);
+        let model_id = reg.register_model(build_spec(owner, 2)).unwrap();
+
+        for v in [v_byz, v_honest1, v_honest2, v_late] {
+            reg.lock_verifier_stake(&v, MIN_VERIFIER_STAKE).unwrap();
+            reg.verifier_whitelist.insert(v);
+        }
+
+        let req = build_req(owner, model_id, EffortTier::BASELINE, 10);
+        let in_c = req.input_commitment;
+        let req_id = reg.submit_request(req, 10).unwrap();
+
+        // Byzantine verifier submits "yes", then equivocates with "no".
+        reg.submit_result(build_res(req_id, v_byz, b"yes", 1, 11), 11)
+            .unwrap();
+        assert!(reg
+            .submit_result(build_res(req_id, v_byz, b"no", 2, 12), 12)
+            .is_err());
+
+        // First honest verifier submits "yes": must NOT reach quorum=2 with v_byz.
+        let not_yet = reg
+            .submit_result(build_res(req_id, v_honest1, b"yes", 1, 13), 13)
+            .unwrap();
+        assert!(
+            not_yet.is_none(),
+            "equivocator must not count toward quorum"
+        );
+
+        // Second honest verifier submits "yes": finalizes with ONLY honest verifiers.
+        let outcome = reg
+            .submit_result(build_res(req_id, v_honest2, b"yes", 1, 14), 14)
+            .unwrap()
+            .expect("two honest verifiers reach quorum");
+        assert_eq!(outcome.agreeing_verifiers, vec![v_honest1, v_honest2]);
+
+        // Late verifier after finalization neither appends state nor farms QoS.
+        let stored_before = reg.results.get(&req_id).unwrap().len();
+        assert!(reg
+            .submit_result(build_res(req_id, v_late, b"yes", 1, 15), 15)
+            .unwrap()
+            .is_none());
+        assert_eq!(reg.results.get(&req_id).unwrap().len(), stored_before);
+        assert!(!reg.verifier_qos.contains_key(&v_late));
+
+        // Proof attach from equivocator is refused; verified proof cannot be downgraded.
+        let out_c = crate::ai::types::canonical_output_commitment(b"yes");
+        let proof_a = AiExecutionProof {
+            model_id,
+            input_commitment: in_c,
+            output_commitment: out_c,
+            program_hash: [0x11; 32],
+            proof_bytes: vec![1, 2, 3, 4],
+            steps: 8,
+            gas_used: 16,
+            weights_digest: None,
+            public_inputs: None,
+        };
+        let mut proof_b = proof_a.clone();
+        proof_b.proof_bytes = vec![9, 9, 9, 9];
+        assert_ne!(
+            proof_a.calculate_leaf(),
+            proof_b.calculate_leaf(),
+            "proof leaf must commit to proof_bytes"
+        );
+        assert!(reg
+            .attach_execution_proof(&req_id, &v_byz, proof_a.clone(), true)
+            .is_err());
+        reg.attach_execution_proof(&req_id, &v_honest1, proof_a.clone(), true)
+            .unwrap();
+        let downgrade = reg
+            .attach_execution_proof(&req_id, &v_honest1, proof_a, false)
+            .expect_err("verified proof must not be downgraded");
+        assert!(downgrade.contains("downgrade"), "{downgrade}");
+        assert!(reg.has_verified_execution_proof(&req_id, &v_honest1));
+
+        // Slashing revokes stake and removes the equivocator from the whitelist.
+        let (_, seized) = reg.slash_equivocator(&req_id, &v_byz, 16).unwrap();
+        assert_eq!(seized, MIN_VERIFIER_STAKE);
+        assert!(!reg.verifier_whitelist.contains(&v_byz));
     }
 }

@@ -15,7 +15,7 @@ mod tests {
         Address::from([b; 32])
     }
 
-    /// REGRESSION: finalize before end_epoch is a no-op.
+    /// REGRESSION: finalize before `end_epoch` is a no-op.
     #[test]
     fn finalize_before_end_epoch_noop() {
         let proposer = addr(1);
@@ -87,7 +87,7 @@ mod tests {
     fn subnet_eclipse_bound() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(2);
-        let s = crate::network::peer_manager::SubnetKey::Ipv4([203, 0, 113]);
+        let s: [u8; 3] = [203, 0, 113];
         let p1 = libp2p::identity::Keypair::generate_ed25519()
             .public()
             .to_peer_id();
@@ -104,14 +104,14 @@ mod tests {
     /// REGRESSION: chain account Merkle trie uses 256-bit keys.
     #[test]
     fn l1_merkle_trie_is_256bit_keys() {
-        let mut trie = crate::storage::merkle_trie::MerkleTrie::new();
+        let mut trie = crate::persistence::state_trie::MerkleTrie::new();
         let key = [0xABu8; 32];
         trie.insert(&key, 1, 0);
         assert_ne!(trie.root(), [0u8; 32]);
         // Two keys that differ only in the lowest bit stay distinct leaves.
         let mut near = key;
         near[31] ^= 1;
-        let mut near_trie = crate::storage::merkle_trie::MerkleTrie::new();
+        let mut near_trie = crate::persistence::state_trie::MerkleTrie::new();
         near_trie.insert(&near, 1, 0);
         assert_ne!(trie.root(), near_trie.root());
         let single_root = trie.root();
@@ -119,7 +119,7 @@ mod tests {
         assert_ne!(trie.root(), single_root);
     }
 
-    /// REGRESSION: burn_from clips and returns burned amount (no panic).
+    /// REGRESSION: `burn_from` clips and returns burned amount (no panic).
     #[test]
     fn burn_from_clips_to_balance() {
         let mut state = crate::core::account::AccountState::new();

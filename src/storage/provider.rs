@@ -1,7 +1,7 @@
 //! `StorageProvider` trait and deterministic mock implementation.
 //!
 //! This is the off-chain/on-chain boundary described in
-//! `docs/BUD_STORAGE_ROADMAP.md`: provider implementations move bytes and
+//! the single-storage model in `docs/STORAGE.md`: provider implementations move bytes and
 //! Proofs off-chain, while consensus code keeps the on-chain deal/challenge
 //! Accounting in `domain::storage_deal`.
 //!
@@ -299,7 +299,7 @@ impl StorageProvider for InMemoryStorageProvider {
         // Bound to this deal, not just to the bytes. A plain content hash is
         // identical for every operator holding a replica of the same shard,
         // so one of them could answer for all of them, the outsourcing and
-        // Sybil cases in docs/BUD_STORAGE_ROADMAP.md Gap 2.
+        // Sybil cases are covered by the single-storage model in `docs/STORAGE.md`.
         let range_hash = ContentId::of_subrange_for_deal(
             bytes,
             challenge.byte_start,
@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(result.outcome, ChallengeOutcome::Answered);
     }
 
-    /// The finding: `put` handed out a receipt binding any bytes to any
+    /// Manifest shard invariant: `put` requires bytes to belong to the
     /// manifest. Bytes that are not a shard of the manifest are refused, and
     /// nothing is stored for them.
     #[test]
@@ -616,10 +616,9 @@ mod tests {
         assert_eq!(err, StorageProviderError::ProofRangeMismatch);
     }
 
-    /// The finding this binding exists for: a plain content hash is the same
-    /// for every operator holding the same bytes, so any of them can answer a
-    /// challenge addressed to another. Two operators, one shard, one copy
-    /// between them, N payments.
+    /// Operator binding invariant: a plain content hash alone could be identical
+    /// for every operator holding the same bytes. The proof binding ensures that
+    /// challenges are strictly tied to operator-specific storage custody.
     #[test]
     fn two_operators_holding_the_same_bytes_produce_different_answers() {
         let bytes = b"the same shard, stored twice";

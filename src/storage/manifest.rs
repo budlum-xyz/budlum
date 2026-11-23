@@ -11,6 +11,7 @@
 //! Per the data-sovereignty rule: the manifest is
 //! Fully reconstructable from public on-chain state by any independent
 //! Node. No "Budlum Inc. indexer" service is required.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::content_id::ContentId;
@@ -49,6 +50,7 @@ impl ShardRef {
     /// Construct a `ShardRef` from a chunk's bytes. The `ContentId` is
     /// Computed deterministically; `index` is assigned by the caller
     /// (e.g. the off-chain chunker).
+    #[must_use]
     pub fn from_bytes(index: u32, chunk: &[u8]) -> Self {
         Self {
             kind: ShardKind::Data,
@@ -198,7 +200,7 @@ impl std::fmt::Display for ContentEncryption {
 /// Replication is the degenerate case `k = n = shard_count`, where losing one
 /// shard loses part of the object and durability has to come from storing the
 /// whole thing again. Erasure coding reaches the same durability at a fraction
-/// of the stored bytes, which is the point of `docs/BUD_STORAGE_ROADMAP.md`
+/// of the stored bytes, which is the point of the single-storage model in `docs/STORAGE.md`
 /// Gap 3 - and it is what makes Gap 4 expressible at all, because a repair
 /// trigger needs something to reconstruct *from*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,6 +213,7 @@ pub struct ErasureScheme {
 
 impl ErasureScheme {
     /// Plain replication: every shard is data, nothing reconstructs anything.
+    #[must_use]
     pub const fn replication(shard_count: u32) -> Self {
         Self {
             k: shard_count,
@@ -218,11 +221,13 @@ impl ErasureScheme {
         }
     }
 
+    #[must_use]
     pub const fn parity_count(&self) -> u32 {
         self.n.saturating_sub(self.k)
     }
 
     /// How many shards may be lost before the object is unrecoverable.
+    #[must_use]
     pub fn loss_tolerance(&self) -> u32 {
         self.parity_count()
     }
@@ -267,6 +272,7 @@ impl ErasureScheme {
     /// Replication (`n == k`) has no parity to spend and returns 0; for those
     /// `needs_repair` still fires at `live == k`, which is every copy but one
     /// being gone, and there is nothing better available.
+    #[must_use]
     pub fn repair_margin(&self) -> u32 {
         let parity = self.parity_count();
         if parity == 0 {
@@ -279,6 +285,7 @@ impl ErasureScheme {
 
     /// Bytes stored per byte of content, as a ratio scaled by 1000 to stay in
     /// integer arithmetic. Replication of 3 is 3000; a (4,6) code is 1500.
+    #[must_use]
     pub const fn overhead_per_mille(&self) -> u32 {
         if self.k == 0 {
             return u32::MAX;
@@ -328,7 +335,7 @@ impl Default for ErasureScheme {
 /// `owner` among them. What each remaining field is or is not inside the
 /// commitment is recorded on the field itself.
 ///
-/// The `owner` field arrived with F01, so that data ownership is provable on
+/// The `owner` field was introduced for on-chain ownership proofs, so that data ownership is provable on
 /// chain, as a data owner identity. `#[serde(default)]` keeps older snapshots
 /// and JSON backward compatible, where a zero owner means "unspecified".
 ///
@@ -339,8 +346,8 @@ impl Default for ErasureScheme {
 #[serde(from = "ContentManifestWire")]
 pub struct ContentManifest {
     pub manifest_id: ContentId,
-    /// F01: the address of the content owner. A zero address marks an older,
-    /// pre-F01 manifest, kept for backward compatibility; new manifests carry a
+    /// Address of the content owner. A zero address marks a legacy
+    /// ownerless manifest, kept for backward compatibility; new manifests carry a
     /// real owner.
     ///
     /// IDENTITY: excluded - the id is content-addressed on purpose. Two
@@ -563,7 +570,7 @@ impl ContentManifest {
     ///
     /// Propagates `String` from the step that failed; its variants name the refused conditions.
     ///
-    /// `owner` defaults to the zero address, for F01 backward compatibility; a
+    /// `owner` defaults to the zero address, for legacy manifest backward compatibility; a
     /// caller can set the real owner with `with_owner`.
     pub fn from_shards(shards: Vec<ShardRef>) -> Result<Self, String> {
         if shards.is_empty() {
@@ -704,6 +711,7 @@ impl ContentManifest {
     /// `content_size` existed. Those were replication-only, where the two are
     /// the same number, so the fallback is their actual meaning rather than a
     /// guess.
+    #[must_use]
     pub const fn content_size(&self) -> u64 {
         if self.content_size == 0 {
             self.total_size
@@ -792,6 +800,45 @@ impl ContentManifest {
                 self.shards.len()
             ));
         }
+        self.erasure.validate()?;
+        if self.erasure.n != self.shard_count {
+            return Err(format!(
+                "erasure n {} does not match shard_count {}",
+                self.erasure.n, self.shard_count
+            ));
+        }
+        let data = self
+            .shards
+            .iter()
+            .filter(|s| s.kind == ShardKind::Data)
+            .count() as u32;
+        if data != self.erasure.k {
+            return Err(format!(
+                "erasure k {} does not match the {data} data shards present",
+                self.erasure.k
+            ));
+        }
+        self.validate_with_options(true)
+    }
+
+    /// Structural validation used during local erasure reconstruction, where
+    /// legitimate periodic data can repeat a stripe digest across shards even
+    /// under `n > k` parity coding. Untrusted admission still calls
+    /// [`Self::validate_untrusted`].
+    pub(crate) fn validate_structural_for_reconstruct(&self) -> Result<(), String> {
+        self.validate_with_options(false)
+    }
+
+    fn validate_with_options(&self, reject_duplicate_parity_ids: bool) -> Result<(), String> {
+        if self.shards.is_empty() {
+            return Err("ContentManifest must have at least one shard".into());
+        }
+        if self.shards.len() > MAX_MANIFEST_SHARDS {
+            return Err(format!(
+                "ContentManifest lists {} shards, above the {MAX_MANIFEST_SHARDS} allowed",
+                self.shards.len()
+            ));
+        }
         if self.shards.len() as u32 != self.shard_count {
             return Err(format!(
                 "shard_count {} does not match the {} shards present",
@@ -822,7 +869,10 @@ impl ContentManifest {
                     s.index, self.shard_count
                 ));
             }
-            if self.erasure.n > self.erasure.k && !seen_ids.insert(s.shard_id) {
+            if reject_duplicate_parity_ids
+                && self.erasure.n > self.erasure.k
+                && !seen_ids.insert(s.shard_id)
+            {
                 return Err(format!(
                     "Shard {} repeats the content id of another shard in the same code word",
                     s.index
@@ -1029,6 +1079,7 @@ impl ContentManifest {
     }
 
     /// Whether an object is still reconstructible with `live` shards left.
+    #[must_use]
     pub const fn is_recoverable(&self, live: u32) -> bool {
         live >= self.erasure.k
     }
@@ -1043,6 +1094,7 @@ impl ContentManifest {
     /// Returns false once the object is already unrecoverable: there is
     /// nothing to reconstruct from, and a repair deal opened then would just
     /// burn an operator bond.
+    #[must_use]
     pub const fn needs_repair(&self, live: u32, margin: u32) -> bool {
         if live < self.erasure.k {
             return false;
@@ -1057,6 +1109,7 @@ impl ContentManifest {
     /// `erasure` at every call site would let one of them quietly substitute
     /// a different number. Named here so a caller cannot ask the question
     /// any way but the right one.
+    #[must_use]
     pub fn repair_margin(&self) -> u32 {
         self.erasure.repair_margin()
     }
@@ -1087,9 +1140,10 @@ impl ContentManifest {
         self.encryption.is_encrypted()
     }
 
-    /// F01: set the real owner, after `from_shards`. If `manifest_id` were bound
+    /// Set the content owner, after `from_shards`. If `manifest_id` were bound
     /// to the owner it would have to be recomputed; for now `manifest_id` is
-    /// shards-only, which is F01 task 2.
+    /// shards-only, preserving shard-only content addressing.
+    #[must_use]
     pub const fn with_owner(mut self, owner: crate::core::address::Address) -> Self {
         self.owner = owner;
         self
@@ -1124,8 +1178,9 @@ impl ContentManifest {
     }
 
     /// Look up a shard by `ContentId`. Returns `None` if the shard is not
-    /// In this manifest - used by the `bud_storageGetDealsByShard` query
+    /// In this manifest - used by the removed legacy per-shard deal query
     /// Path and the E2E test (`src/tests/bud_e2e.rs`).
+    #[must_use]
     pub fn shard(&self, shard_id: &ContentId) -> Option<&ShardRef> {
         self.shards.iter().find(|s| &s.shard_id == shard_id)
     }
@@ -1138,6 +1193,7 @@ impl ContentManifest {
 /// Kept for manifests that predate erasure coding, where every shard was
 /// data and the scheme was replication. New code should call
 /// [`manifest_id_from_parts_stored`], which also binds the redundancy claim.
+#[must_use]
 pub fn manifest_id_from_shards(shards: &[ShardRef]) -> ContentId {
     let mut buf = Vec::with_capacity(8 + shards.len() * (4 + 32 + 4));
     buf.extend_from_slice(b"BDLM_MANIFEST_V1");
@@ -1221,8 +1277,8 @@ fn manifest_id_from_parts(
     buf.push(encryption.commitment_tag());
     // The object length is part of the identity: two manifests with the same
     // shard set but different content lengths (e.g. different padding in the
-    // final stripe) must not share an id (MEDIUM, CWE-345; BUDLUM
-    // finding #107). `ContentManifest::content_size()` returns the committed
+    // final stripe) must not share an id (CWE-345).
+    // `ContentManifest::content_size()` returns the committed
     // length, falling back to the shard total for pre-V4 manifests.
     buf.extend_from_slice(&content_size.to_le_bytes());
     buf.extend_from_slice(&total_size.to_le_bytes());
@@ -1303,7 +1359,7 @@ mod tests {
         assert_eq!(m1.shard_count, m2.shard_count);
     }
 
-    /// The browser core (`crates/budscan`, `BudManifest::manifest_id`) keeps a
+    /// The browser core (`crates/budlum-explorer`, `BudManifest::manifest_id`) keeps a
     /// copy of this preimage; the vector is pinned there with the same bytes.
     /// If this changes, the browser verifies against a stale formula.
     #[test]
@@ -1315,7 +1371,7 @@ mod tests {
         );
     }
 
-    /// Same vector as the browser copy (`crates/budscan/src/fetch.rs`,
+    /// Same vector as the browser copy (`crates/budlum-explorer/src/fetch.rs`,
     /// `a_dictionary_bound_manifest_id_matches_the_chain_vector`).
     ///
     /// The single-shard vector above is dictionary-free, so it cannot see a

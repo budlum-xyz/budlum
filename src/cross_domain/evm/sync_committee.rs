@@ -1,5 +1,5 @@
-//! WIRING: unwired - verify_execution_block_finality is reached in this tree only through the adapter modules that declare themselves unwired; the relayer path wires it.
-//! F10.3 Ethereum PoS sync committee light client, Altair-and-later finality.
+//! WIRING: unwired - `verify_execution_block_finality` is reached in this tree only through the adapter modules that declare themselves unwired; the relayer path wires it.
+//! Ethereum `PoS` sync committee light client, Altair-and-later finality.
 //!
 //! **BLS variant.** This module follows the Altair *structure* - 512 keys,
 //! sync periods, two-thirds threshold, fork-domain signing root - with
@@ -11,7 +11,7 @@
 //! `SyncCommitteeState` or sync aggregate verifies here. The module
 //! previously ran an internal minimal-signature-size variant (G2 keys,
 //! G1 signatures) that no Ethereum aggregate could satisfy; the groups
-//! were swapped under the approved work package ARGE-SYNC-ETH-INTEROP
+//! were swapped under the sync-committee interop change
 //! (workspace AR-GE queue, P1, approved 2026-09-07).
 //!
 //! **Serialization note.** `SyncCommitteeState` key material is now 48
@@ -22,7 +22,7 @@
 //! verified here as a BLS12-381 aggregate over the caller-supplied state.
 //! That state is NOT yet authenticated to a finalized beacon state
 //! The rotation refuses without the
-//! finality branch, and this module makes no PoS finality claim beyond what
+//! finality branch, and this module makes no `PoS` finality claim beyond what
 //! the supplied state and aggregate prove.
 //!
 //! # The model, Ethereum Altair `BeaconSyncCommittee`
@@ -89,41 +89,86 @@ pub enum SyncCommitteeError {
     /// Period rotation without the branch that proves `next_sync_committee`
     /// to the finalized state.
     RotationBranchRequired,
+    /// The finality branch does not place the finalized header's root at
+    /// `finalized_checkpoint.root` inside the attested header's state
+    /// The committee signed a head, not a finalized block.
+    NotFinalized,
+    /// Invalid Deneb/Electra `ExecutionPayloadHeader` shape or SSZ field value.
+    InvalidExecutionPayload(&'static str),
+    /// Generalized index does not match the configured beacon fork parameters.
+    ForkGindexMismatch { expected: u64, found: u64 },
+    /// Incoming finalized slot or execution block regresses or contradicts state.
+    NonMonotonicFinality(&'static str),
+    /// Light client is permanently frozen after verified sync-committee equivocation.
+    LightClientFrozen([u8; 32]),
+    /// Submitted pair of updates does not constitute slashable equivocation.
+    InvalidEquivocationEvidence(&'static str),
+    /// RLP execution header, MPT receipt proof, or MPT account/storage proof failed.
+    ExecutionProofFailed(String),
 }
 
 impl std::fmt::Display for SyncCommitteeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SyncCommitteeError::InvalidPubkey => write!(f, "sync: invalid pubkey"),
-            SyncCommitteeError::InvalidSignature => write!(f, "sync: invalid signature"),
-            SyncCommitteeError::InsufficientParticipation {
+            Self::NotFinalized => write!(
+                f,
+                "sync: the finality branch does not prove the header finalized"
+            ),
+            Self::InvalidPubkey => write!(f, "sync: invalid pubkey"),
+            Self::InvalidSignature => write!(f, "sync: invalid signature"),
+            Self::InsufficientParticipation {
                 participating,
                 threshold,
             } => write!(
                 f,
                 "sync: participation {participating} < threshold {threshold} (2/3)"
             ),
-            SyncCommitteeError::SignatureVerificationFailed => {
+            Self::SignatureVerificationFailed => {
                 write!(f, "sync: BLS signature verification failed")
             }
-            SyncCommitteeError::StateMismatch => write!(f, "sync: light-client state mismatch"),
-            SyncCommitteeError::HeaderMismatch => write!(f, "sync: header mismatch"),
-            SyncCommitteeError::ExecutionBlockNotInBeaconBody => write!(
+            Self::StateMismatch => write!(f, "sync: light-client state mismatch"),
+            Self::HeaderMismatch => write!(f, "sync: header mismatch"),
+            Self::ExecutionBlockNotInBeaconBody => write!(
                 f,
                 "sync: the signed beacon header does not commit to the execution block"
             ),
-            SyncCommitteeError::PeriodMismatch {
+            Self::PeriodMismatch {
                 slot_period,
                 state_period,
             } => write!(
                 f,
                 "sync: beacon slot is in period {slot_period}, committee state is for period {state_period}"
             ),
-            SyncCommitteeError::RotationBranchRequired => write!(
+            Self::RotationBranchRequired => write!(
                 f,
                 "sync: period rotation refused - no branch proving next_sync_committee \
                  to the finalized state ( interim)"
             ),
+            Self::InvalidExecutionPayload(why) => {
+                write!(f, "sync: invalid execution payload header: {why}")
+            }
+            Self::ForkGindexMismatch { expected, found } => {
+                write!(
+                    f,
+                    "sync: fork generalized index mismatch: expected {expected}, found {found}"
+                )
+            }
+            Self::NonMonotonicFinality(why) => {
+                write!(f, "sync: non-monotonic finality update: {why}")
+            }
+            Self::LightClientFrozen(digest) => {
+                write!(
+                    f,
+                    "sync: light client permanently frozen after equivocation {:02x}{:02x}{:02x}{:02x}",
+                    digest[0], digest[1], digest[2], digest[3]
+                )
+            }
+            Self::InvalidEquivocationEvidence(why) => {
+                write!(f, "sync: invalid equivocation evidence: {why}")
+            }
+            Self::ExecutionProofFailed(why) => {
+                write!(f, "sync: execution proof failed: {why}")
+            }
         }
     }
 }
@@ -300,6 +345,177 @@ pub struct BeaconChainParams {
     pub fork_version: [u8; 4],
     /// `genesis_validators_root` of the beacon chain.
     pub genesis_validators_root: [u8; 32],
+    /// Generalized index of `BeaconState.finalized_checkpoint.root` in the
+    /// fork's state: [`FINALIZED_ROOT_GINDEX_DENEB`] (105) before Electra,
+    /// [`FINALIZED_ROOT_GINDEX_ELECTRA`] (169) from Electra on.
+    pub finalized_root_gindex: u64,
+}
+
+/// `FINALIZED_ROOT_GINDEX` from Altair to Deneb: state field 20
+/// (`finalized_checkpoint`, of a 32-leaf state), then `root` (field 1 of
+/// the two-field checkpoint): `52 * 2 + 1 = 105`, six levels.
+pub const FINALIZED_ROOT_GINDEX_DENEB: u64 = 105;
+
+/// `FINALIZED_ROOT_GINDEX_ELECTRA`: the Electra state has more than 32
+/// fields, so the state tree is one level deeper: `84 * 2 + 1 = 169`.
+pub const FINALIZED_ROOT_GINDEX_ELECTRA: u64 = 169;
+
+/// `CURRENT_SYNC_COMMITTEE_GINDEX_DENEB`: `BeaconState.current_sync_committee`
+/// is field index 22 in a 32-leaf state container (`32 + 22 = 54`, depth 5).
+/// Convenience: exposed for Ethereum light-client checkpoint bootstrap.
+pub const CURRENT_SYNC_COMMITTEE_GINDEX_DENEB: u64 = 54;
+
+/// `CURRENT_SYNC_COMMITTEE_GINDEX_ELECTRA`: Electra `BeaconState` container
+/// depth is 6 (`64 + 22 = 86`, depth 6).
+/// Convenience: exposed for Ethereum Electra checkpoint bootstrap.
+pub const CURRENT_SYNC_COMMITTEE_GINDEX_ELECTRA: u64 = 86;
+
+/// `NEXT_SYNC_COMMITTEE_GINDEX_DENEB`: `next_sync_committee` is `BeaconState`
+/// field index 23 in a 32-leaf container (`32 + 23 = 55`).
+pub const NEXT_SYNC_COMMITTEE_GINDEX_DENEB: u64 = 55;
+
+/// `NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA`: Electra `BeaconState` container depth
+/// is 6 (`64 + 23 = 87`).
+pub const NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA: u64 = 87;
+
+/// Generalized index of `BeaconBlockBody.execution_payload` in Deneb and
+/// Electra (field index 9 of a 16-leaf body container: `16 + 9 = 25`, depth 4).
+/// Convenience: exposed for SSZ `ExecutionPayloadHeader` inclusion proofs.
+pub const EXECUTION_PAYLOAD_GINDEX: u64 = 25;
+
+/// Maximum length of `ExecutionPayloadHeader.extra_data` (`MAX_EXTRA_DATA_BYTES`).
+/// Convenience: exposed for Ethereum execution payload encoding and validation.
+pub const MAX_EXTRA_DATA_BYTES: usize = 32;
+
+/// Fixed length of `ExecutionPayloadHeader.logs_bloom` (`BYTES_PER_LOGS_BLOOM`).
+/// Convenience: exposed for Ethereum execution payload encoding and validation.
+pub const LOGS_BLOOM_BYTES: usize = 256;
+
+/// Direct body generalized index of `execution_payload.parent_hash` (`25 * 32 + 0`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_PARENT_HASH_GINDEX: u64 = 800;
+/// Direct body generalized index of `execution_payload.fee_recipient` (`25 * 32 + 1`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_FEE_RECIPIENT_GINDEX: u64 = 801;
+/// Direct body generalized index of `execution_payload.state_root` (`25 * 32 + 2`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_STATE_ROOT_GINDEX: u64 = 802;
+/// Direct body generalized index of `execution_payload.receipts_root` (`25 * 32 + 3`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_RECEIPTS_ROOT_GINDEX: u64 = 803;
+/// Direct body generalized index of `execution_payload.logs_bloom` (`25 * 32 + 4`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_LOGS_BLOOM_GINDEX: u64 = 804;
+/// Direct body generalized index of `execution_payload.prev_randao` (`25 * 32 + 5`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_PREV_RANDAO_GINDEX: u64 = 805;
+/// Direct body generalized index of `execution_payload.block_number` (`25 * 32 + 6`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_BLOCK_NUMBER_GINDEX: u64 = 806;
+/// Direct body generalized index of `execution_payload.gas_limit` (`25 * 32 + 7`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_GAS_LIMIT_GINDEX: u64 = 807;
+/// Direct body generalized index of `execution_payload.gas_used` (`25 * 32 + 8`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_GAS_USED_GINDEX: u64 = 808;
+/// Direct body generalized index of `execution_payload.timestamp` (`25 * 32 + 9`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_TIMESTAMP_GINDEX: u64 = 809;
+/// Direct body generalized index of `execution_payload.extra_data` (`25 * 32 + 10`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_EXTRA_DATA_GINDEX: u64 = 810;
+/// Direct body generalized index of `execution_payload.base_fee_per_gas` (`25 * 32 + 11`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_BASE_FEE_GINDEX: u64 = 811;
+/// Direct body generalized index of `execution_payload.transactions_root` (`25 * 32 + 13`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_TRANSACTIONS_ROOT_GINDEX: u64 = 813;
+/// Direct body generalized index of `execution_payload.withdrawals_root` (`25 * 32 + 14`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_WITHDRAWALS_ROOT_GINDEX: u64 = 814;
+/// Direct body generalized index of `execution_payload.blob_gas_used` (`25 * 32 + 15`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_BLOB_GAS_USED_GINDEX: u64 = 815;
+/// Direct body generalized index of `execution_payload.excess_blob_gas` (`25 * 32 + 16`).
+/// Convenience: exposed for single-field SSZ execution proofs.
+pub const EXECUTION_EXCESS_BLOB_GAS_GINDEX: u64 = 816;
+
+/// Minimum overlapping committee signers guaranteed when two supermajority
+/// (`>= 342` of `512`) sync-committee updates conflict (`2 * 342 - 512 = 172`).
+/// Convenience: exposed for sync-committee equivocation auditing.
+pub const MIN_EQUIVOCATION_OVERLAP: usize = 2 * PARTICIPATION_THRESHOLD - SYNC_COMMITTEE_SIZE;
+
+impl BeaconChainParams {
+    /// Fork-matched generalized index of `BeaconState.current_sync_committee`.
+    ///
+    /// Convenience: exposed for Ethereum light-client bootstrap verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError::StateMismatch`] if `finalized_root_gindex`
+    /// is neither Deneb (`105`) nor Electra (`169`).
+    pub const fn current_sync_committee_gindex(&self) -> Result<u64, SyncCommitteeError> {
+        match self.finalized_root_gindex {
+            FINALIZED_ROOT_GINDEX_DENEB => Ok(CURRENT_SYNC_COMMITTEE_GINDEX_DENEB),
+            FINALIZED_ROOT_GINDEX_ELECTRA => Ok(CURRENT_SYNC_COMMITTEE_GINDEX_ELECTRA),
+            _ => Err(SyncCommitteeError::StateMismatch),
+        }
+    }
+
+    /// Fork-matched generalized index of `BeaconState.next_sync_committee`.
+    ///
+    /// Convenience: exposed for fork-safe sync-committee period rotation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError::StateMismatch`] if `finalized_root_gindex`
+    /// is neither Deneb (`105`) nor Electra (`169`).
+    pub const fn next_sync_committee_gindex(&self) -> Result<u64, SyncCommitteeError> {
+        match self.finalized_root_gindex {
+            FINALIZED_ROOT_GINDEX_DENEB => Ok(NEXT_SYNC_COMMITTEE_GINDEX_DENEB),
+            FINALIZED_ROOT_GINDEX_ELECTRA => Ok(NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA),
+            _ => Err(SyncCommitteeError::StateMismatch),
+        }
+    }
+}
+
+/// The proof that the header a deposit is about is final.
+///
+/// A sync committee signs a recent *attested* header, which is the chain's
+/// head, not a finalized block. Finality is a fact inside the attested
+/// header's state: `finalized_checkpoint.root`. The Altair light-client
+/// update carries a Merkle branch from that root up to the attested
+/// header's `state_root`; this is that branch. Counting two thirds of the
+/// committee on the head and calling the head final was the defect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalityUpdate {
+    /// The header the committee signed. Its `execution_block_hash_branch`
+    /// is not read.
+    pub attested: BeaconBinding,
+    /// Siblings from `hash_tree_root(finalized header)` up to
+    /// `attested.state_root`, leaf's sibling first.
+    pub finality_branch: Vec<[u8; 32]>,
+}
+
+/// Walk an SSZ Merkle branch for generalized index `gindex`.
+pub(crate) fn walk_branch(leaf: [u8; 32], branch: &[[u8; 32]], gindex: u64) -> Option<[u8; 32]> {
+    if gindex < 2 {
+        return None;
+    }
+    let depth = gindex.ilog2() as usize;
+    if branch.len() != depth {
+        return None;
+    }
+    let index = gindex - (1u64 << depth);
+    let mut node = leaf;
+    for (level, sibling) in branch.iter().enumerate() {
+        node = if (index >> level) & 1 == 1 {
+            sha256_pair(sibling, &node)
+        } else {
+            sha256_pair(&node, sibling)
+        };
+    }
+    Some(node)
 }
 
 /// What ties a sync-committee signature to one execution block.
@@ -331,22 +547,105 @@ pub struct BeaconBinding {
     pub execution_block_hash_branch: Vec<[u8; 32]>,
 }
 
-fn sha256_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn sha256_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(left);
     hasher.update(right);
     hasher.finalize().into()
 }
 
-fn u64_chunk(value: u64) -> [u8; 32] {
+pub(crate) fn u64_chunk(value: u64) -> [u8; 32] {
     let mut chunk = [0u8; 32];
     chunk[..8].copy_from_slice(&value.to_le_bytes());
     chunk
 }
 
+/// SSZ `hash_tree_root` of a `BeaconBlockHeader`: five fields padded to eight.
+pub(crate) fn beacon_header_hash_tree_root(
+    slot: u64,
+    proposer_index: u64,
+    parent_root: [u8; 32],
+    state_root: [u8; 32],
+    body_root: [u8; 32],
+) -> [u8; 32] {
+    merkleize_chunks(&[
+        u64_chunk(slot),
+        u64_chunk(proposer_index),
+        parent_root,
+        state_root,
+        body_root,
+    ])
+}
+
+/// SSZ `hash_tree_root` of a 48-byte BLS pubkey (padded to 64 bytes -> 2 chunks).
+fn pubkey_hash_tree_root(pubkey: &[u8; BLS_PUBKEY_LEN]) -> [u8; 32] {
+    let mut c0 = [0u8; 32];
+    let mut c1 = [0u8; 32];
+    c0.copy_from_slice(&pubkey[..32]);
+    c1[..16].copy_from_slice(&pubkey[32..48]);
+    sha256_pair(&c0, &c1)
+}
+
+/// SSZ `hash_tree_root(SyncCommittee)` for Altair-and-later committees.
+#[must_use]
+pub fn sync_committee_hash_tree_root(
+    pubkeys: &[[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+    aggregate_pubkey: &[u8; BLS_PUBKEY_LEN],
+) -> [u8; 32] {
+    let pk_roots: Vec<[u8; 32]> = pubkeys.iter().map(pubkey_hash_tree_root).collect();
+    let pubkeys_root = merkleize_chunks(&pk_roots);
+    let agg_root = pubkey_hash_tree_root(aggregate_pubkey);
+    sha256_pair(&pubkeys_root, &agg_root)
+}
+
+/// Sum the compressed BLS12-381 G1 member public keys selected by a 512-bit
+/// sync-committee participation bitvector, validating prime-order subgroup
+/// membership and non-identity on every member key and on the resulting sum.
+pub(crate) fn aggregate_sync_committee_subset_g1(
+    member_pubkeys: &[[u8; BLS_PUBKEY_LEN]],
+    participation_bits: &[u8],
+) -> Result<([u8; BLS_PUBKEY_LEN], u64), String> {
+    use bls12_381::G1Projective;
+
+    if member_pubkeys.len() != SYNC_COMMITTEE_SIZE {
+        return Err(format!(
+            "sync committee roster must hold {SYNC_COMMITTEE_SIZE} pubkeys, found {}",
+            member_pubkeys.len()
+        ));
+    }
+    if participation_bits.len() != SYNC_COMMITTEE_SIZE / 8 {
+        return Err(format!(
+            "sync committee participation_bits must be {} bytes, found {}",
+            SYNC_COMMITTEE_SIZE / 8,
+            participation_bits.len()
+        ));
+    }
+    let mut acc = G1Projective::identity();
+    let mut signers = 0u64;
+    for (idx, pk_bytes) in member_pubkeys.iter().enumerate() {
+        let pk = G1Affine::from_compressed(pk_bytes)
+            .into_option()
+            .ok_or_else(|| format!("sync committee member {idx} pubkey is not a valid G1 point"))?;
+        if !bool::from(pk.is_torsion_free()) || bool::from(pk.is_identity()) {
+            return Err(format!(
+                "sync committee member {idx} pubkey is identity or outside prime subgroup"
+            ));
+        }
+        let byte = participation_bits.get(idx / 8).copied().unwrap_or(0);
+        if (byte >> (idx % 8)) & 1 == 1 {
+            acc += G1Projective::from(pk);
+            signers += 1;
+        }
+    }
+    if signers == 0 || bool::from(acc.is_identity()) {
+        return Err("participating sync-committee aggregate key cancels to identity".into());
+    }
+    Ok((G1Affine::from(acc).to_compressed(), signers))
+}
+
 /// SSZ `hash_tree_root` of a fixed list of 32-byte chunks, padded with zero
 /// chunks to the next power of two.
-fn merkleize_chunks(chunks: &[[u8; 32]]) -> [u8; 32] {
+pub(crate) fn merkleize_chunks(chunks: &[[u8; 32]]) -> [u8; 32] {
     let mut width = 1usize;
     while width < chunks.len() {
         width *= 2;
@@ -369,6 +668,11 @@ impl BeaconBinding {
     /// SIGNATURE slot, which is the block after the signed header. For the
     /// last slot of a period `slot / N` named the previous period and refused
     /// a genuine aggregate; the signature slot is `slot + 1`.
+    ///
+    /// Test-only: production reads the same number from `verify_finality` at
+    /// the signature slot, so a second copy here would be a second thing to
+    /// keep correct.
+    #[cfg(test)]
     fn period(&self) -> u64 {
         self.slot.saturating_add(1) / SLOTS_PER_SYNC_COMMITTEE_PERIOD
     }
@@ -425,6 +729,12 @@ impl BeaconBinding {
 
 /// Verify that a sync-committee aggregate finalizes one execution block.
 ///
+/// `binding` is the finalized header and the branch placing the execution
+/// block in its body. `finality` is the header the committee signed and the
+/// branch proving `binding` is that header's finalized checkpoint. The
+/// committee's signature is checked over `finality.attested`, never over
+/// `binding` itself.
+///
 /// This is the entry point a deposit proof uses; `verify_sync_aggregate`
 /// alone checks a signature over whatever bytes it is handed, and a caller
 /// that hands it the relayer's bytes has verified that the relayer can sign
@@ -433,40 +743,1343 @@ impl BeaconBinding {
 /// parameters, and before any curve arithmetic the binding must place
 /// `execution_block_hash` inside the header's body and the header's slot
 /// inside the committee state's period.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_execution_block_finality(
     state: &SyncCommitteeState,
     aggregate: &SyncAggregate,
     binding: &BeaconBinding,
+    finality: &FinalityUpdate,
     params: &BeaconChainParams,
     execution_block_hash: &[u8; 32],
 ) -> Result<(), SyncCommitteeError> {
     if !binding.commits_to_execution_block(execution_block_hash) {
         return Err(SyncCommitteeError::ExecutionBlockNotInBeaconBody);
     }
-    let slot_period = binding.period();
+    // The finalized header is the attested header's finalized checkpoint.
+    let proven_state_root = walk_branch(
+        binding.beacon_header_root(),
+        &finality.finality_branch,
+        params.finalized_root_gindex,
+    );
+    if proven_state_root != Some(finality.attested.state_root)
+        || binding.slot > finality.attested.slot
+    {
+        return Err(SyncCommitteeError::NotFinalized);
+    }
+    // The committee in force is the one at the attested header's
+    // signature slot (`attested.slot + 1`); refuse u64::MAX slot saturation.
+    let sig_slot = finality
+        .attested
+        .slot
+        .checked_add(1)
+        .ok_or(SyncCommitteeError::HeaderMismatch)?;
+    let slot_period = sig_slot / SLOTS_PER_SYNC_COMMITTEE_PERIOD;
     if slot_period != state.current_period {
         return Err(SyncCommitteeError::PeriodMismatch {
             slot_period,
             state_period: state.current_period,
         });
     }
-    let signing_root = binding.signing_root(params);
+    let signing_root = finality.attested.signing_root(params);
     verify_sync_aggregate(state, aggregate, &signing_root)
+}
+
+/// Validate all 512 compressed BLS12-381 G1 member public keys (prime-order
+/// subgroup, non-identity) and verify in constant time that their full sum
+/// equals `aggregate_pubkey`.
+///
+/// Convenience: exposed for Ethereum sync-committee bootstrap and rotation.
+///
+/// # Errors
+///
+/// Returns [`SyncCommitteeError::InvalidPubkey`] if any member key is off-curve,
+/// identity, outside the prime subgroup, cancels to identity, or mismatches
+/// `aggregate_pubkey`.
+pub fn validate_sync_committee_pubkeys(
+    pubkeys: &[[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+    aggregate_pubkey: &[u8; BLS_PUBKEY_LEN],
+) -> Result<(), SyncCommitteeError> {
+    use subtle::ConstantTimeEq;
+
+    let all_bits = [0xffu8; SYNC_COMMITTEE_SIZE / 8];
+    let (computed_agg, count) = aggregate_sync_committee_subset_g1(pubkeys, &all_bits)
+        .map_err(|_| SyncCommitteeError::InvalidPubkey)?;
+    if count != SYNC_COMMITTEE_SIZE as u64
+        || !bool::from(computed_agg.as_slice().ct_eq(aggregate_pubkey.as_slice()))
+    {
+        return Err(SyncCommitteeError::InvalidPubkey);
+    }
+    Ok(())
 }
 
 /// The period rotation: on a finalized header, `next_sync_committee` becomes
 /// the current one.
 ///
-/// A rotation without the branch
-/// that proves `next_sync_committee` to the finalized state is REFUSED. The
-/// previous unconditional swap let any holder of a `SyncCommitteeState`
-/// inject a chosen committee on the next period - the finding's "controlled
-/// committee: always possible". The branch format (decision A) lands with
-/// the committee work; until then no rotation runs. `state` is taken so the
-/// signature does not pretend rotation is possible without evidence.
+/// A rotation without the branch that proves `next_sync_committee` to the
+/// finalized state is REFUSED.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn rotate_period(state: &mut SyncCommitteeState) -> Result<(), SyncCommitteeError> {
     let _never_rotates_without_the_branch = state.current_period;
     Err(SyncCommitteeError::RotationBranchRequired)
+}
+
+/// WIRING: exposed for external EVM light-client integrations that supply the
+/// finalized `BeaconState` branch and next committee.
+///
+/// Rotate the sync committee using a finalized `BeaconState` SSZ branch proving
+/// the incoming `next_sync_committee` against `finalized_state_root`.
+///
+/// Enforces non-saturating sequential period advance (`current_period + 1`),
+/// full 512-member BLS12-381 G1 prime-subgroup + non-identity validation,
+/// constant-time aggregate pubkey verification, and exact-depth SSZ Merkle
+/// branch reconstruction.
+///
+/// # Errors
+///
+/// Returns [`SyncCommitteeError`] when the period overflows or skips, the
+/// generalized index is unsupported, any incoming G1 key or aggregate key is
+/// invalid, or the SSZ Merkle branch does not match `finalized_state_root`.
+pub fn rotate_period_with_branch(
+    state: &mut SyncCommitteeState,
+    new_period: u64,
+    finalized_state_root: &[u8; 32],
+    new_next_committee: [[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+    new_next_aggregate_pubkey: &[u8; BLS_PUBKEY_LEN],
+    next_sync_committee_branch: &[[u8; 32]],
+    gindex: u64,
+) -> Result<(), SyncCommitteeError> {
+    let expected_period =
+        state
+            .current_period
+            .checked_add(1)
+            .ok_or(SyncCommitteeError::PeriodMismatch {
+                slot_period: new_period,
+                state_period: state.current_period,
+            })?;
+    if new_period != expected_period {
+        return Err(SyncCommitteeError::PeriodMismatch {
+            slot_period: new_period,
+            state_period: state.current_period,
+        });
+    }
+    if gindex != NEXT_SYNC_COMMITTEE_GINDEX_DENEB && gindex != NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA {
+        return Err(SyncCommitteeError::RotationBranchRequired);
+    }
+    let leaf = sync_committee_hash_tree_root(&new_next_committee, new_next_aggregate_pubkey);
+    let proven_root = walk_branch(leaf, next_sync_committee_branch, gindex)
+        .ok_or(SyncCommitteeError::RotationBranchRequired)?;
+    if &proven_root != finalized_state_root {
+        return Err(SyncCommitteeError::NotFinalized);
+    }
+    validate_sync_committee_pubkeys(&new_next_committee, new_next_aggregate_pubkey)?;
+    state.current_sync_committee = state.next_sync_committee;
+    state.next_sync_committee = new_next_committee;
+    state.current_period = new_period;
+    Ok(())
+}
+
+/// Fork-bound variant of [`rotate_period_with_branch`] rejecting cross-fork
+/// `next_sync_committee` generalized-index substitution (Deneb requires `55`,
+/// Electra requires `87`).
+///
+/// Convenience: exposed for fork-aware Ethereum sync-committee rotation.
+///
+/// The eight arguments are one rotation: the state and params, the new
+/// period, the committee material (keys, aggregate, branch) and the fork's
+/// generalized index. They are passed straight through to
+/// [`rotate_period_with_branch`] after the index check, so bundling them
+/// would add a type that exists only to satisfy the arity lint.
+///
+/// # Errors
+///
+/// Returns [`SyncCommitteeError::ForkGindexMismatch`] if `branch_and_gindex.1`
+/// does not match `params`, or forwards any error from
+/// [`rotate_period_with_branch`].
+pub fn rotate_period_for_fork(
+    state: &mut SyncCommitteeState,
+    params: &BeaconChainParams,
+    new_period: u64,
+    finalized_state_root: &[u8; 32],
+    new_next_committee: [[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+    new_next_aggregate_pubkey: &[u8; BLS_PUBKEY_LEN],
+    branch_and_gindex: (&[[u8; 32]], u64),
+) -> Result<(), SyncCommitteeError> {
+    let (next_sync_committee_branch, gindex) = branch_and_gindex;
+    let expected = params.next_sync_committee_gindex()?;
+    if gindex != expected {
+        return Err(SyncCommitteeError::ForkGindexMismatch {
+            expected,
+            found: gindex,
+        });
+    }
+    rotate_period_with_branch(
+        state,
+        new_period,
+        finalized_state_root,
+        new_next_committee,
+        new_next_aggregate_pubkey,
+        next_sync_committee_branch,
+        gindex,
+    )
+}
+
+/// Deneb and Electra 17-field SSZ `ExecutionPayloadHeader` container.
+///
+/// Every field is serialized into its exact Ethereum Consensus Specifications
+/// SSZ chunk representation (`ByteVector[20]` right-padded to 32 bytes,
+/// `ByteVector[256]` merkleized across 8 chunks, `uint64` little-endian
+/// zero-padded chunks, `ByteList[MAX_EXTRA_DATA_BYTES]` mixed with length, and
+/// `uint256` little-endian 32-byte word) and merkleized over a 32-leaf binary
+/// SHA-256 tree rooted at `BeaconBlockBody` generalized index `25`.
+///
+/// Convenience: exposed for Ethereum execution light-client proofs and adapters.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExecutionPayloadHeader {
+    pub parent_hash: [u8; 32],
+    pub fee_recipient: [u8; 20],
+    pub state_root: [u8; 32],
+    pub receipts_root: [u8; 32],
+    pub logs_bloom: Vec<u8>,
+    pub prev_randao: [u8; 32],
+    pub block_number: u64,
+    pub gas_limit: u64,
+    pub gas_used: u64,
+    pub timestamp: u64,
+    pub extra_data: Vec<u8>,
+    /// Little-endian 256-bit SSZ `uint256` encoding of `base_fee_per_gas`.
+    pub base_fee_per_gas: [u8; 32],
+    pub block_hash: [u8; 32],
+    pub transactions_root: [u8; 32],
+    pub withdrawals_root: [u8; 32],
+    pub blob_gas_used: u64,
+    pub excess_blob_gas: u64,
+}
+
+/// SSZ `hash_tree_root(ByteVector[20])`: right-zero-padded into one 32-byte chunk.
+#[must_use]
+fn address20_chunk(address: &[u8; 20]) -> [u8; 32] {
+    let mut chunk = [0u8; 32];
+    chunk[..20].copy_from_slice(address);
+    chunk
+}
+
+/// SSZ `hash_tree_root(ByteVector[256])`: 8 chunks of 32 bytes merkleized.
+fn logs_bloom_hash_tree_root(logs_bloom: &[u8]) -> Result<[u8; 32], SyncCommitteeError> {
+    if logs_bloom.len() != LOGS_BLOOM_BYTES {
+        return Err(SyncCommitteeError::InvalidExecutionPayload(
+            "logs_bloom must be exactly 256 bytes",
+        ));
+    }
+    let mut chunks = [[0u8; 32]; 8];
+    for (dst, src) in chunks.iter_mut().zip(logs_bloom.as_chunks::<32>().0) {
+        dst.copy_from_slice(src);
+    }
+    Ok(merkleize_chunks(&chunks))
+}
+
+/// SSZ `hash_tree_root(ByteList[MAX_EXTRA_DATA_BYTES])`: `mix_in_length` over a
+/// single 32-byte chunk (`MAX_EXTRA_DATA_BYTES == 32` => chunk limit `1`).
+fn extra_data_hash_tree_root(extra_data: &[u8]) -> Result<[u8; 32], SyncCommitteeError> {
+    if extra_data.len() > MAX_EXTRA_DATA_BYTES {
+        return Err(SyncCommitteeError::InvalidExecutionPayload(
+            "extra_data exceeds MAX_EXTRA_DATA_BYTES (32)",
+        ));
+    }
+    let mut data_chunk = [0u8; 32];
+    if let Some(dst) = data_chunk.get_mut(..extra_data.len()) {
+        dst.copy_from_slice(extra_data);
+    }
+    let len_u64 = u64::try_from(extra_data.len()).map_err(|_| {
+        SyncCommitteeError::InvalidExecutionPayload("extra_data length overflows u64")
+    })?;
+    Ok(sha256_pair(&data_chunk, &u64_chunk(len_u64)))
+}
+
+impl ExecutionPayloadHeader {
+    /// Validate consensus shape invariants before hashing or accepting proofs.
+    ///
+    /// Convenience: exposed for Ethereum execution payload validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError::InvalidExecutionPayload`] if `logs_bloom`
+    /// is not 256 bytes, `extra_data` exceeds 32 bytes, `gas_used > gas_limit`,
+    /// or any primary execution commitment (`block_hash`, `state_root`,
+    /// `receipts_root`) is all zeros.
+    pub fn validate(&self) -> Result<(), SyncCommitteeError> {
+        if self.logs_bloom.len() != LOGS_BLOOM_BYTES {
+            return Err(SyncCommitteeError::InvalidExecutionPayload(
+                "logs_bloom must be exactly 256 bytes",
+            ));
+        }
+        if self.extra_data.len() > MAX_EXTRA_DATA_BYTES {
+            return Err(SyncCommitteeError::InvalidExecutionPayload(
+                "extra_data exceeds MAX_EXTRA_DATA_BYTES (32)",
+            ));
+        }
+        if self.gas_used > self.gas_limit {
+            return Err(SyncCommitteeError::InvalidExecutionPayload(
+                "gas_used exceeds gas_limit",
+            ));
+        }
+        if self.block_hash == [0u8; 32] {
+            return Err(SyncCommitteeError::InvalidExecutionPayload(
+                "block_hash cannot be all zeros",
+            ));
+        }
+        if self.state_root == [0u8; 32] {
+            return Err(SyncCommitteeError::InvalidExecutionPayload(
+                "state_root cannot be all zeros",
+            ));
+        }
+        if self.receipts_root == [0u8; 32] {
+            return Err(SyncCommitteeError::InvalidExecutionPayload(
+                "receipts_root cannot be all zeros",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Compute the 17 SSZ field roots of `ExecutionPayloadHeader` in exact
+    /// Deneb/Electra container order.
+    ///
+    /// Convenience: exposed for SSZ generalized-index proof construction and verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError::InvalidExecutionPayload`] if structural validation fails.
+    pub fn field_roots(&self) -> Result<[[u8; 32]; 17], SyncCommitteeError> {
+        self.validate()?;
+        Ok([
+            self.parent_hash,
+            address20_chunk(&self.fee_recipient),
+            self.state_root,
+            self.receipts_root,
+            logs_bloom_hash_tree_root(&self.logs_bloom)?,
+            self.prev_randao,
+            u64_chunk(self.block_number),
+            u64_chunk(self.gas_limit),
+            u64_chunk(self.gas_used),
+            u64_chunk(self.timestamp),
+            extra_data_hash_tree_root(&self.extra_data)?,
+            self.base_fee_per_gas,
+            self.block_hash,
+            self.transactions_root,
+            self.withdrawals_root,
+            u64_chunk(self.blob_gas_used),
+            u64_chunk(self.excess_blob_gas),
+        ])
+    }
+
+    /// Compute spec-exact SSZ `hash_tree_root(ExecutionPayloadHeader)` across
+    /// all 17 Deneb/Electra fields (padded to 32 leaves, depth 5).
+    ///
+    /// Convenience: exposed for Beacon body SSZ Merkle verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError::InvalidExecutionPayload`] if validation fails.
+    pub fn hash_tree_root(&self) -> Result<[u8; 32], SyncCommitteeError> {
+        let fields = self.field_roots()?;
+        Ok(merkleize_chunks(&fields))
+    }
+
+    /// Build the 5-sibling intra-container SSZ Merkle branch for `field_index`
+    /// (`0..17`), returning `(leaf_chunk, intra_payload_branch)`. Combined with
+    /// the 4-sibling `execution_branch` (`EXECUTION_PAYLOAD_GINDEX = 25`), this
+    /// yields the 9-sibling `BeaconBlockBody` proof at `gindex = 800 + field_index`.
+    ///
+    /// Convenience: exposed for single-field execution proof derivation and checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError::InvalidExecutionPayload`] if `field_index >= 17`
+    /// or header validation fails.
+    pub fn field_branch(
+        &self,
+        field_index: usize,
+    ) -> Result<([u8; 32], [[u8; 32]; 5]), SyncCommitteeError> {
+        if field_index >= 17 {
+            return Err(SyncCommitteeError::InvalidExecutionPayload(
+                "execution payload field index out of range (0..17)",
+            ));
+        }
+        let fields = self.field_roots()?;
+        let mut layer = vec![[0u8; 32]; 32];
+        for (dst, src) in layer.iter_mut().zip(fields.iter()) {
+            *dst = *src;
+        }
+        let leaf = *layer
+            .get(field_index)
+            .ok_or(SyncCommitteeError::InvalidExecutionPayload(
+                "field index out of bounds",
+            ))?;
+        let mut siblings = [[0u8; 32]; 5];
+        let mut idx = field_index;
+        for sib_out in &mut siblings {
+            let sib_idx = idx ^ 1;
+            *sib_out = *layer
+                .get(sib_idx)
+                .ok_or(SyncCommitteeError::InvalidExecutionPayload(
+                    "sibling index out of bounds",
+                ))?;
+            layer = layer
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| sha256_pair(&pair[0], &pair[1]))
+                .collect();
+            idx >>= 1;
+        }
+        Ok((leaf, siblings))
+    }
+
+    /// Verify that this 17-field `ExecutionPayloadHeader` is committed inside
+    /// `beacon_body_root` at [`EXECUTION_PAYLOAD_GINDEX`] (`25`, exact 4 siblings),
+    /// returning the verified SSZ `hash_tree_root(ExecutionPayloadHeader)`.
+    ///
+    /// Convenience: exposed for Ethereum execution finality verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError`] if validation fails, `execution_branch`
+    /// is not 4 siblings, or the reconstructed root disagrees with `beacon_body_root`.
+    pub fn verify_in_beacon_body(
+        &self,
+        beacon_body_root: &[u8; 32],
+        execution_branch: &[[u8; 32]],
+    ) -> Result<[u8; 32], SyncCommitteeError> {
+        let payload_root = self.hash_tree_root()?;
+        let proven = walk_branch(payload_root, execution_branch, EXECUTION_PAYLOAD_GINDEX)
+            .ok_or(SyncCommitteeError::ExecutionBlockNotInBeaconBody)?;
+        if &proven != beacon_body_root {
+            return Err(SyncCommitteeError::ExecutionBlockNotInBeaconBody);
+        }
+        Ok(payload_root)
+    }
+}
+
+/// Verify a direct 9-sibling generalized-index SSZ Merkle proof of any single
+/// `ExecutionPayloadHeader` field (`gindex` in `800..=816`) against `beacon_body_root`.
+///
+/// Convenience: exposed for compact single-field `state_root` (`802`),
+/// `receipts_root` (`803`), `block_number` (`806`), `timestamp` (`809`),
+/// `block_hash` (`812`), and `transactions_root` (`813`) proofs.
+///
+/// # Errors
+///
+/// Returns [`SyncCommitteeError::ExecutionBlockNotInBeaconBody`] if `gindex` is
+/// outside `800..=816`, `branch.len() != 9`, or the root mismatches `beacon_body_root`.
+pub fn verify_execution_field_branch(
+    beacon_body_root: &[u8; 32],
+    leaf_chunk: [u8; 32],
+    branch: &[[u8; 32]],
+    gindex: u64,
+) -> Result<(), SyncCommitteeError> {
+    if !(EXECUTION_PARENT_HASH_GINDEX..=EXECUTION_EXCESS_BLOB_GAS_GINDEX).contains(&gindex) {
+        return Err(SyncCommitteeError::ExecutionBlockNotInBeaconBody);
+    }
+    let proven = walk_branch(leaf_chunk, branch, gindex)
+        .ok_or(SyncCommitteeError::ExecutionBlockNotInBeaconBody)?;
+    if &proven != beacon_body_root {
+        return Err(SyncCommitteeError::ExecutionBlockNotInBeaconBody);
+    }
+    Ok(())
+}
+
+/// Beacon header metadata without requiring a pre-attached `block_hash` branch.
+///
+/// Convenience: exposed for Ethereum Deneb/Electra light-client updates and bootstrap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BeaconHeaderSummary {
+    pub slot: u64,
+    pub proposer_index: u64,
+    pub parent_root: [u8; 32],
+    pub state_root: [u8; 32],
+    pub body_root: [u8; 32],
+}
+
+impl BeaconHeaderSummary {
+    /// Spec-exact SSZ `hash_tree_root(BeaconBlockHeader)`.
+    ///
+    /// Convenience: exposed for Ethereum beacon finality and bootstrap checks.
+    #[must_use]
+    pub fn hash_tree_root(&self) -> [u8; 32] {
+        beacon_header_hash_tree_root(
+            self.slot,
+            self.proposer_index,
+            self.parent_root,
+            self.state_root,
+            self.body_root,
+        )
+    }
+
+    /// Sync-committee period of the header itself (`slot / 8192`).
+    #[must_use]
+    pub const fn header_period(&self) -> u64 {
+        self.slot / SLOTS_PER_SYNC_COMMITTEE_PERIOD
+    }
+
+    /// Checked Altair signature slot (`slot + 1`) and its sync-committee period.
+    #[must_use]
+    pub fn signature_slot_and_period(&self) -> Option<(u64, u64)> {
+        let sig_slot = self.slot.checked_add(1)?;
+        Some((sig_slot, sig_slot / SLOTS_PER_SYNC_COMMITTEE_PERIOD))
+    }
+
+    /// Domain-separated `DOMAIN_SYNC_COMMITTEE` SSZ signing root under `params`.
+    ///
+    /// Convenience: exposed for Ethereum sync-committee signing and verification.
+    #[must_use]
+    pub fn signing_root(&self, params: &BeaconChainParams) -> [u8; 32] {
+        let mut fork_version_chunk = [0u8; 32];
+        fork_version_chunk[..4].copy_from_slice(&params.fork_version);
+        let fork_data_root = sha256_pair(&fork_version_chunk, &params.genesis_validators_root);
+        let mut domain = [0u8; 32];
+        domain[..4].copy_from_slice(&DOMAIN_SYNC_COMMITTEE);
+        domain[4..].copy_from_slice(&fork_data_root[..28]);
+        sha256_pair(&self.hash_tree_root(), &domain)
+    }
+}
+
+/// Deneb-to-Electra beacon fork schedule resolved deterministically by signature epoch.
+///
+/// Convenience: exposed for multi-period Ethereum light-client verification across forks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BeaconForkSchedule {
+    pub genesis_validators_root: [u8; 32],
+    pub deneb_fork_version: [u8; 4],
+    pub electra_fork_version: [u8; 4],
+    /// Epoch at which Electra activates (`u64::MAX` keeps Deneb active).
+    pub electra_fork_epoch: u64,
+}
+
+impl BeaconForkSchedule {
+    /// Resolve exact [`BeaconChainParams`] (`fork_version` + `finalized_root_gindex`)
+    /// active at `signature_slot`.
+    ///
+    /// Convenience: exposed for fork-boundary light-client verification.
+    #[must_use]
+    pub const fn params_for_signature_slot(&self, signature_slot: u64) -> BeaconChainParams {
+        let epoch = signature_slot / 32;
+        if epoch >= self.electra_fork_epoch {
+            BeaconChainParams {
+                fork_version: self.electra_fork_version,
+                genesis_validators_root: self.genesis_validators_root,
+                finalized_root_gindex: FINALIZED_ROOT_GINDEX_ELECTRA,
+            }
+        } else {
+            BeaconChainParams {
+                fork_version: self.deneb_fork_version,
+                genesis_validators_root: self.genesis_validators_root,
+                finalized_root_gindex: FINALIZED_ROOT_GINDEX_DENEB,
+            }
+        }
+    }
+
+    /// Resolve [`BeaconChainParams`] active at a finalized header's own `slot`
+    /// (for branches rooted in `finalized_header.state_root`, such as
+    /// `next_sync_committee`).
+    ///
+    /// Convenience: exposed for cross-fork period rotation checks.
+    #[must_use]
+    pub const fn params_for_state_slot(&self, state_slot: u64) -> BeaconChainParams {
+        self.params_for_signature_slot(state_slot)
+    }
+}
+
+/// Complete Deneb/Electra light-client finality update binding an execution payload.
+///
+/// Convenience: exposed for [`EthereumExecutionLightClient`] updates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionLightClientUpdate {
+    pub attested_header: BeaconHeaderSummary,
+    pub finalized_header: BeaconHeaderSummary,
+    pub finality_branch: Vec<[u8; 32]>,
+    pub execution_payload: ExecutionPayloadHeader,
+    /// 4-sibling SSZ Merkle branch proving `execution_payload` in
+    /// `finalized_header.body_root` at [`EXECUTION_PAYLOAD_GINDEX`] (`25`).
+    pub execution_branch: Vec<[u8; 32]>,
+    pub sync_aggregate: SyncAggregate,
+}
+
+/// Complete authenticated period-rotation update advancing `P -> P + 1`.
+///
+/// Convenience: exposed for single-step and multi-period sync-committee rotation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeriodRotationUpdate {
+    pub attested_header: BeaconHeaderSummary,
+    pub finalized_header: BeaconHeaderSummary,
+    pub finality_branch: Vec<[u8; 32]>,
+    pub next_sync_committee: [[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+    pub next_sync_committee_aggregate: [u8; BLS_PUBKEY_LEN],
+    /// Fork-matched SSZ branch (`55` Deneb / `87` Electra) proving
+    /// `next_sync_committee` inside `finalized_header.state_root`.
+    pub next_sync_committee_branch: Vec<[u8; 32]>,
+    pub next_sync_committee_gindex: u64,
+    /// Optional execution payload proven inside `finalized_header.body_root`.
+    pub execution: Option<(ExecutionPayloadHeader, Vec<[u8; 32]>)>,
+    pub sync_aggregate: SyncAggregate,
+}
+
+/// Proven execution commitment produced after full Beacon + SSZ verification.
+///
+/// Convenience: exposed for RLP header and direct MPT receipt/account/storage checks.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VerifiedExecutionPayload {
+    pub beacon_slot: u64,
+    pub beacon_header_root: [u8; 32],
+    pub beacon_state_root: [u8; 32],
+    pub beacon_body_root: [u8; 32],
+    pub execution_payload_root: [u8; 32],
+    pub payload: ExecutionPayloadHeader,
+    pub signers: usize,
+}
+
+impl VerifiedExecutionPayload {
+    /// Anchor a raw RLP post-Merge Cancun/Deneb or Prague/Electra execution
+    /// header to this finalized payload, verifying `keccak256(raw) == block_hash`
+    /// and exact field-by-field agreement across all 15 shared execution fields.
+    ///
+    /// Convenience: exposed for Ethereum execution block header authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError::ExecutionProofFailed`] if RLP decoding or
+    /// any consensus field match fails.
+    pub fn verify_rlp_header(
+        &self,
+        raw_rlp_header: &[u8],
+    ) -> Result<crate::cross_domain::evm::header::PostMergeExecutionHeader, SyncCommitteeError>
+    {
+        let decoded =
+            crate::cross_domain::evm::header::decode_post_merge_execution_header(raw_rlp_header)
+                .map_err(|e| SyncCommitteeError::ExecutionProofFailed(e.to_string()))?;
+        let p = &self.payload;
+        if decoded.block_hash != p.block_hash
+            || decoded.parent_hash != p.parent_hash
+            || decoded.fee_recipient != p.fee_recipient
+            || decoded.state_root != p.state_root
+            || decoded.transactions_root != p.transactions_root
+            || decoded.receipts_root != p.receipts_root
+            || decoded.logs_bloom.as_slice() != p.logs_bloom.as_slice()
+            || decoded.number != p.block_number
+            || decoded.gas_limit != p.gas_limit
+            || decoded.gas_used != p.gas_used
+            || decoded.timestamp != p.timestamp
+            || decoded.extra_data != p.extra_data
+            || decoded.prev_randao != p.prev_randao
+            || decoded.base_fee_per_gas_le != p.base_fee_per_gas
+            || decoded.withdrawals_root != p.withdrawals_root
+            || decoded.blob_gas_used != p.blob_gas_used
+            || decoded.excess_blob_gas != p.excess_blob_gas
+        {
+            return Err(SyncCommitteeError::ExecutionProofFailed(
+                "RLP execution header contradicts Beacon-finalized ExecutionPayloadHeader".into(),
+            ));
+        }
+        Ok(decoded)
+    }
+
+    /// Verify a transaction receipt inclusion proof at canonical key
+    /// `RLP(tx_index)` directly against the finalized `receipts_root` under
+    /// strict Yellow Paper Appendix D rules.
+    ///
+    /// Convenience: exposed for trustless Ethereum receipt and event log proofs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError::ExecutionProofFailed`] if the MPT proof or
+    /// receipt envelope is invalid.
+    pub fn verify_receipt_inclusion(
+        &self,
+        tx_index: u64,
+        proof_nodes: &[Vec<u8>],
+    ) -> Result<crate::cross_domain::evm::receipt::EthReceipt, SyncCommitteeError> {
+        use crate::cross_domain::evm::mpt::{
+            encode_tx_index_key, verify_yellow_paper, MAX_MPT_NODE_BYTES, MAX_MPT_PROOF_NODES,
+        };
+        if proof_nodes.len() > MAX_MPT_PROOF_NODES
+            || proof_nodes.iter().any(|n| n.len() > MAX_MPT_NODE_BYTES)
+        {
+            return Err(SyncCommitteeError::ExecutionProofFailed(
+                "receipt MPT proof exceeds node budget".to_string(),
+            ));
+        }
+        let key = encode_tx_index_key(tx_index);
+        let raw_receipt = verify_yellow_paper(proof_nodes, &self.payload.receipts_root, &key)
+            .map_err(|e| SyncCommitteeError::ExecutionProofFailed(e.to_string()))?;
+        crate::cross_domain::evm::receipt::decode_receipt(&raw_receipt)
+            .map_err(|e| SyncCommitteeError::ExecutionProofFailed(e.to_string()))
+    }
+
+    /// Verify an Ethereum account inclusion proof at `keccak256(address)`
+    /// directly against the finalized execution `state_root` under strict
+    /// Yellow Paper Appendix D rules.
+    ///
+    /// Convenience: exposed for trustless Ethereum account state verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError::ExecutionProofFailed`] if the MPT proof or
+    /// RLP account tuple is invalid.
+    pub fn verify_account_inclusion(
+        &self,
+        address: &[u8; 20],
+        proof_nodes: &[Vec<u8>],
+    ) -> Result<crate::cross_domain::evm::account_proof::EvmAccount, SyncCommitteeError> {
+        // Enforce strict Yellow Paper canonical node references first, then decode.
+        let addr_hash = crate::cross_domain::evm::mpt::keccak256(address);
+        let _ = crate::cross_domain::evm::mpt::verify_yellow_paper(
+            proof_nodes,
+            &self.payload.state_root,
+            &addr_hash,
+        )
+        .map_err(|e| SyncCommitteeError::ExecutionProofFailed(e.to_string()))?;
+        crate::cross_domain::evm::account_proof::verify_account(
+            proof_nodes,
+            &self.payload.state_root,
+            address,
+        )
+        .map_err(|e| SyncCommitteeError::ExecutionProofFailed(e.to_string()))
+    }
+
+    /// Verify both an Ethereum contract account against finalized `state_root`
+    /// and a 32-byte contract storage slot at `keccak256(slot)` against that
+    /// account's proven `storage_root`.
+    ///
+    /// Convenience: exposed for trustless Ethereum contract storage proofs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError::ExecutionProofFailed`] if either MPT proof fails.
+    pub fn verify_storage_inclusion(
+        &self,
+        address: &[u8; 20],
+        account_proof: &[Vec<u8>],
+        slot: &[u8; 32],
+        storage_proof: &[Vec<u8>],
+    ) -> Result<
+        (
+            crate::cross_domain::evm::account_proof::EvmAccount,
+            [u8; 32],
+        ),
+        SyncCommitteeError,
+    > {
+        let account = self.verify_account_inclusion(address, account_proof)?;
+        let slot_hash = crate::cross_domain::evm::mpt::keccak256(slot);
+        let _ = crate::cross_domain::evm::mpt::verify_yellow_paper(
+            storage_proof,
+            &account.storage_root,
+            &slot_hash,
+        )
+        .map_err(|e| SyncCommitteeError::ExecutionProofFailed(e.to_string()))?;
+        let value = crate::cross_domain::evm::account_proof::verify_storage(
+            storage_proof,
+            &account.storage_root,
+            slot,
+        )
+        .map_err(|e| SyncCommitteeError::ExecutionProofFailed(e.to_string()))?;
+        let present = value.ok_or_else(|| {
+            SyncCommitteeError::ExecutionProofFailed("storage slot not present in trie".to_string())
+        })?;
+        Ok((account, present))
+    }
+}
+
+/// Verified finality-only proof bundle used to report conflicting sync-committee
+/// attestations or conflicting finalized checkpoints in the same period.
+///
+/// Convenience: exposed for [`EthereumExecutionLightClient::submit_equivocation`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedFinalityStatement {
+    pub attested_header: BeaconHeaderSummary,
+    pub finalized_header: BeaconHeaderSummary,
+    pub finality_branch: Vec<[u8; 32]>,
+    pub sync_aggregate: SyncAggregate,
+}
+
+/// Deterministic slashable/freeze record produced when a sync committee signs
+/// two conflicting `>= 2/3` statements in the same period.
+///
+/// Convenience: exposed for bridge circuit-breakers and restaking slashers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncCommitteeEquivocationRecord {
+    pub period: u64,
+    pub attested_root_a: [u8; 32],
+    pub attested_root_b: [u8; 32],
+    pub finalized_slot_a: u64,
+    pub finalized_root_a: [u8; 32],
+    pub finalized_slot_b: u64,
+    pub finalized_root_b: [u8; 32],
+    /// Exact 512-bit intersection of committee members who signed BOTH conflicting updates.
+    pub overlapping_bits: [u8; SYNC_COMMITTEE_SIZE / 8],
+    pub overlap_count: usize,
+    /// Domain-separated `BDLM_ETH_SYNC_EQUIVOCATION_V1` commitment.
+    pub evidence_digest: [u8; 32],
+}
+
+/// Weak-subjectivity checkpoint bundle bootstrapping [`SyncCommitteeState`].
+///
+/// Convenience: exposed for [`bootstrap_sync_committee_state`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncCommitteeBootstrap {
+    pub trusted_header_root: [u8; 32],
+    pub header: BeaconHeaderSummary,
+    pub current_committee: [[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+    pub current_aggregate: [u8; BLS_PUBKEY_LEN],
+    pub current_branch: Vec<[u8; 32]>,
+    pub next_committee: [[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+    pub next_aggregate: [u8; BLS_PUBKEY_LEN],
+    pub next_branch: Vec<[u8; 32]>,
+}
+
+/// Bootstrap a verified [`SyncCommitteeState`] from a trusted weak-subjectivity
+/// checkpoint, proving both `current_sync_committee` (gindex `54` Deneb / `86`
+/// Electra) and `next_sync_committee` (gindex `55` Deneb / `87` Electra) against
+/// `header.state_root` and validating all 1,024 BLS12-381 G1 keys.
+///
+/// Convenience: exposed for Ethereum execution light-client initialization.
+///
+/// # Errors
+///
+/// Returns [`SyncCommitteeError`] if `header` mismatches `trusted_header_root`,
+/// either SSZ Merkle branch fails against `header.state_root`, or any G1 key or
+/// aggregate pubkey is invalid.
+pub fn bootstrap_sync_committee_state(
+    bootstrap: &SyncCommitteeBootstrap,
+    params: &BeaconChainParams,
+) -> Result<SyncCommitteeState, SyncCommitteeError> {
+    if bootstrap.header.hash_tree_root() != bootstrap.trusted_header_root {
+        return Err(SyncCommitteeError::HeaderMismatch);
+    }
+    let current_gindex = params.current_sync_committee_gindex()?;
+    let next_gindex = params.next_sync_committee_gindex()?;
+
+    let current_leaf =
+        sync_committee_hash_tree_root(&bootstrap.current_committee, &bootstrap.current_aggregate);
+    if walk_branch(current_leaf, &bootstrap.current_branch, current_gindex)
+        != Some(bootstrap.header.state_root)
+    {
+        return Err(SyncCommitteeError::NotFinalized);
+    }
+    let next_leaf =
+        sync_committee_hash_tree_root(&bootstrap.next_committee, &bootstrap.next_aggregate);
+    if walk_branch(next_leaf, &bootstrap.next_branch, next_gindex)
+        != Some(bootstrap.header.state_root)
+    {
+        return Err(SyncCommitteeError::NotFinalized);
+    }
+    validate_sync_committee_pubkeys(&bootstrap.current_committee, &bootstrap.current_aggregate)?;
+    validate_sync_committee_pubkeys(&bootstrap.next_committee, &bootstrap.next_aggregate)?;
+
+    Ok(SyncCommitteeState {
+        current_period: bootstrap.header.header_period(),
+        current_sync_committee: bootstrap.current_committee,
+        next_sync_committee: bootstrap.next_committee,
+    })
+}
+
+/// Verify a finalized Deneb/Electra [`ExecutionLightClientUpdate`] statelessly
+/// against `state` and `schedule`.
+///
+/// Convenience: exposed for stateless and stateful Ethereum finality checks.
+///
+/// # Errors
+///
+/// Returns [`SyncCommitteeError`] if period, finality branch, execution payload
+/// SSZ branch, or `>= 2/3` BLS12-381 sync-committee pairing fails.
+pub fn verify_execution_payload_update(
+    state: &SyncCommitteeState,
+    schedule: &BeaconForkSchedule,
+    update: &ExecutionLightClientUpdate,
+) -> Result<VerifiedExecutionPayload, SyncCommitteeError> {
+    if update.finalized_header.slot > update.attested_header.slot {
+        return Err(SyncCommitteeError::NotFinalized);
+    }
+    let (sig_slot, sig_period) = update
+        .attested_header
+        .signature_slot_and_period()
+        .ok_or(SyncCommitteeError::HeaderMismatch)?;
+    if sig_period != state.current_period {
+        return Err(SyncCommitteeError::PeriodMismatch {
+            slot_period: sig_period,
+            state_period: state.current_period,
+        });
+    }
+    // Resolve fork at `attested_header.slot` for state layout and `sig_slot` for signing domain.
+    let attested_state_params = schedule.params_for_state_slot(update.attested_header.slot);
+    let signing_params = schedule.params_for_signature_slot(sig_slot);
+
+    let finalized_root = update.finalized_header.hash_tree_root();
+    let proven_attested_state = walk_branch(
+        finalized_root,
+        &update.finality_branch,
+        attested_state_params.finalized_root_gindex,
+    )
+    .ok_or(SyncCommitteeError::NotFinalized)?;
+    if proven_attested_state != update.attested_header.state_root {
+        return Err(SyncCommitteeError::NotFinalized);
+    }
+
+    let payload_root = update
+        .execution_payload
+        .verify_in_beacon_body(&update.finalized_header.body_root, &update.execution_branch)?;
+
+    let signing_root = update.attested_header.signing_root(&signing_params);
+    verify_sync_aggregate(state, &update.sync_aggregate, &signing_root)?;
+
+    Ok(VerifiedExecutionPayload {
+        beacon_slot: update.finalized_header.slot,
+        beacon_header_root: finalized_root,
+        beacon_state_root: update.finalized_header.state_root,
+        beacon_body_root: update.finalized_header.body_root,
+        execution_payload_root: payload_root,
+        payload: update.execution_payload.clone(),
+        signers: update.sync_aggregate.participation_count(),
+    })
+}
+
+/// Stateful, monotonic, fail-closed Ethereum Deneb/Electra full execution light client.
+///
+/// Tracks finalized Beacon + 17-field `ExecutionPayloadHeader` commitments across
+/// multi-period `next_sync_committee` rotations and Deneb-to-Electra fork upgrades,
+/// verifies RLP execution headers and Yellow-Paper MPT receipt/account/storage
+/// inclusion proofs, and permanently freezes upon verified sync-committee
+/// equivocation with zero administrative override.
+///
+/// Convenience: exposed for cross-domain bridge and settlement verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EthereumExecutionLightClient {
+    committee_state: SyncCommitteeState,
+    schedule: BeaconForkSchedule,
+    latest_finalized: Option<VerifiedExecutionPayload>,
+    frozen: Option<SyncCommitteeEquivocationRecord>,
+}
+
+impl EthereumExecutionLightClient {
+    /// Construct a new light client from a verified [`SyncCommitteeState`] and
+    /// [`BeaconForkSchedule`].
+    ///
+    /// Convenience: exposed for Ethereum execution light-client instantiation.
+    #[must_use]
+    pub const fn new(committee_state: SyncCommitteeState, schedule: BeaconForkSchedule) -> Self {
+        Self {
+            committee_state,
+            schedule,
+            latest_finalized: None,
+            frozen: None,
+        }
+    }
+
+    /// Active sync-committee period.
+    ///
+    /// Convenience: exposed for light-client state inspection.
+    #[must_use]
+    pub const fn current_period(&self) -> u64 {
+        self.committee_state.current_period
+    }
+
+    /// Latest finalized execution payload commitment, if not frozen.
+    ///
+    /// Convenience: exposed for execution proof consumers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError::LightClientFrozen`] if equivocation froze the client.
+    pub fn latest_finalized(
+        &self,
+    ) -> Result<Option<&VerifiedExecutionPayload>, SyncCommitteeError> {
+        self.ensure_not_frozen()?;
+        Ok(self.latest_finalized.as_ref())
+    }
+
+    /// Equivocation record that froze this light client, if any.
+    ///
+    /// Convenience: exposed for slasher and circuit-breaker inspection.
+    #[must_use]
+    pub const fn equivocation_record(&self) -> Option<&SyncCommitteeEquivocationRecord> {
+        self.frozen.as_ref()
+    }
+
+    fn ensure_not_frozen(&self) -> Result<(), SyncCommitteeError> {
+        if let Some(ref rec) = self.frozen {
+            return Err(SyncCommitteeError::LightClientFrozen(rec.evidence_digest));
+        }
+        Ok(())
+    }
+
+    fn check_monotonic_advance(
+        latest: Option<&VerifiedExecutionPayload>,
+        candidate: &VerifiedExecutionPayload,
+    ) -> Result<(), SyncCommitteeError> {
+        let Some(prev) = latest else {
+            return Ok(());
+        };
+        if candidate.beacon_slot < prev.beacon_slot {
+            return Err(SyncCommitteeError::NonMonotonicFinality(
+                "finalized beacon slot regressed",
+            ));
+        }
+        if candidate.beacon_slot == prev.beacon_slot {
+            if candidate.beacon_header_root != prev.beacon_header_root
+                || candidate.execution_payload_root != prev.execution_payload_root
+            {
+                return Err(SyncCommitteeError::NonMonotonicFinality(
+                    "conflicting finalized root at already-finalized slot",
+                ));
+            }
+            return Ok(());
+        }
+        if candidate.payload.block_number <= prev.payload.block_number {
+            return Err(SyncCommitteeError::NonMonotonicFinality(
+                "execution block_number did not advance with finalized beacon slot",
+            ));
+        }
+        if candidate.payload.timestamp <= prev.payload.timestamp {
+            return Err(SyncCommitteeError::NonMonotonicFinality(
+                "execution timestamp did not advance with finalized block",
+            ));
+        }
+        if prev.payload.block_number.checked_add(1) == Some(candidate.payload.block_number)
+            && candidate.payload.parent_hash != prev.payload.block_hash
+        {
+            return Err(SyncCommitteeError::NonMonotonicFinality(
+                "consecutive execution block parent_hash mismatches previous block_hash",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Verify and apply a finalized Deneb/Electra execution update monotonically.
+    ///
+    /// Convenience: exposed for Ethereum light-client state progression.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError`] if frozen, cryptographic verification fails,
+    /// or the update violates slot/block/timestamp/parent monotonicity.
+    pub fn apply_execution_update(
+        &mut self,
+        update: &ExecutionLightClientUpdate,
+    ) -> Result<VerifiedExecutionPayload, SyncCommitteeError> {
+        self.ensure_not_frozen()?;
+        let verified =
+            verify_execution_payload_update(&self.committee_state, &self.schedule, update)?;
+        Self::check_monotonic_advance(self.latest_finalized.as_ref(), &verified)?;
+        self.latest_finalized = Some(verified.clone());
+        Ok(verified)
+    }
+
+    /// Authenticate and execute a single sequential sync-committee rotation
+    /// `current_period -> current_period + 1`.
+    ///
+    /// Enforces:
+    /// 1. `attested_header` signature slot belongs to `current_period` and carries
+    ///    a valid `>= 342/512` BLS12-381 G1/G2 signature from `current_sync_committee`;
+    /// 2. `finalized_header` is proven against `attested_header.state_root` at the
+    ///    fork-matched `finalized_root_gindex` (`105` Deneb / `169` Electra);
+    /// 3. `finalized_header.header_period() == current_period` so a stale finalized
+    ///    state from period `P - 1` can NEVER be replayed to install period `P`'s
+    ///    committee into period `P + 2`;
+    /// 4. `next_sync_committee` is proven against `finalized_header.state_root` at
+    ///    the exact fork-matched generalized index (`55` Deneb / `87` Electra), with
+    ///    all 512 BLS12-381 G1 keys subgroup-checked and matching `next_sync_committee_aggregate`;
+    /// 5. If an execution payload is attached, it is SSZ-proven at gindex `25` and
+    ///    monotonically committed before state transitions.
+    ///
+    /// Convenience: exposed for Ethereum sync-committee period rotation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError`] on any failed check without mutating state.
+    pub fn apply_period_rotation(
+        &mut self,
+        rotation: &PeriodRotationUpdate,
+    ) -> Result<u64, SyncCommitteeError> {
+        self.ensure_not_frozen()?;
+        if rotation.finalized_header.slot > rotation.attested_header.slot {
+            return Err(SyncCommitteeError::NotFinalized);
+        }
+        let current_period = self.committee_state.current_period;
+        let next_period =
+            current_period
+                .checked_add(1)
+                .ok_or(SyncCommitteeError::PeriodMismatch {
+                    slot_period: current_period,
+                    state_period: current_period,
+                })?;
+
+        let (sig_slot, sig_period) = rotation
+            .attested_header
+            .signature_slot_and_period()
+            .ok_or(SyncCommitteeError::HeaderMismatch)?;
+        if sig_period != current_period {
+            return Err(SyncCommitteeError::PeriodMismatch {
+                slot_period: sig_period,
+                state_period: current_period,
+            });
+        }
+        // Finalized state carrying `next_sync_committee` (for `P + 2`) MUST live
+        // in `current_period` (`P`), never an older period (`<= P - 1`).
+        let finalized_period = rotation.finalized_header.header_period();
+        if finalized_period != current_period {
+            return Err(SyncCommitteeError::PeriodMismatch {
+                slot_period: finalized_period,
+                state_period: current_period,
+            });
+        }
+        if let Some(ref prev) = self.latest_finalized {
+            if rotation.finalized_header.slot < prev.beacon_slot {
+                return Err(SyncCommitteeError::NonMonotonicFinality(
+                    "rotation finalized_header slot regressed behind finalized head",
+                ));
+            }
+        }
+
+        let attested_params = self
+            .schedule
+            .params_for_state_slot(rotation.attested_header.slot);
+        let finalized_params = self
+            .schedule
+            .params_for_state_slot(rotation.finalized_header.slot);
+        let signing_params = self.schedule.params_for_signature_slot(sig_slot);
+
+        let finalized_root = rotation.finalized_header.hash_tree_root();
+        let proven_attested_state = walk_branch(
+            finalized_root,
+            &rotation.finality_branch,
+            attested_params.finalized_root_gindex,
+        )
+        .ok_or(SyncCommitteeError::NotFinalized)?;
+        if proven_attested_state != rotation.attested_header.state_root {
+            return Err(SyncCommitteeError::NotFinalized);
+        }
+
+        let maybe_verified_exec = if let Some((ref payload, ref exec_branch)) = rotation.execution {
+            let payload_root =
+                payload.verify_in_beacon_body(&rotation.finalized_header.body_root, exec_branch)?;
+            let candidate = VerifiedExecutionPayload {
+                beacon_slot: rotation.finalized_header.slot,
+                beacon_header_root: finalized_root,
+                beacon_state_root: rotation.finalized_header.state_root,
+                beacon_body_root: rotation.finalized_header.body_root,
+                execution_payload_root: payload_root,
+                payload: payload.clone(),
+                signers: rotation.sync_aggregate.participation_count(),
+            };
+            Self::check_monotonic_advance(self.latest_finalized.as_ref(), &candidate)?;
+            Some(candidate)
+        } else {
+            None
+        };
+
+        let signing_root = rotation.attested_header.signing_root(&signing_params);
+        verify_sync_aggregate(
+            &self.committee_state,
+            &rotation.sync_aggregate,
+            &signing_root,
+        )?;
+
+        let mut staged = self.committee_state.clone();
+        rotate_period_for_fork(
+            &mut staged,
+            &finalized_params,
+            next_period,
+            &rotation.finalized_header.state_root,
+            rotation.next_sync_committee,
+            &rotation.next_sync_committee_aggregate,
+            (
+                &rotation.next_sync_committee_branch,
+                rotation.next_sync_committee_gindex,
+            ),
+        )?;
+
+        self.committee_state = staged;
+        if let Some(verified_exec) = maybe_verified_exec {
+            self.latest_finalized = Some(verified_exec);
+        }
+        Ok(next_period)
+    }
+
+    /// Atomically verify and apply a non-empty chain of consecutive period
+    /// rotations `P -> P + 1 -> ... -> P + rotations.len()`, leaving client
+    /// state completely unchanged if any link fails.
+    ///
+    /// Convenience: exposed for multi-period light-client catch-up sync.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError`] if `rotations` is empty, the client is
+    /// frozen, or any step fails verification.
+    pub fn apply_rotation_chain(
+        &mut self,
+        rotations: &[PeriodRotationUpdate],
+    ) -> Result<u64, SyncCommitteeError> {
+        self.ensure_not_frozen()?;
+        if rotations.is_empty() {
+            return Err(SyncCommitteeError::RotationBranchRequired);
+        }
+        let mut clone = self.clone();
+        for step in rotations {
+            clone.apply_period_rotation(step)?;
+        }
+        let final_period = clone.committee_state.current_period;
+        *self = clone;
+        Ok(final_period)
+    }
+
+    fn verify_statement_in_current_period(
+        &self,
+        stmt: &SignedFinalityStatement,
+    ) -> Result<([u8; 32], [u8; 32]), SyncCommitteeError> {
+        if stmt.finalized_header.slot > stmt.attested_header.slot {
+            return Err(SyncCommitteeError::NotFinalized);
+        }
+        let (sig_slot, sig_period) = stmt
+            .attested_header
+            .signature_slot_and_period()
+            .ok_or(SyncCommitteeError::HeaderMismatch)?;
+        if sig_period != self.committee_state.current_period {
+            return Err(SyncCommitteeError::PeriodMismatch {
+                slot_period: sig_period,
+                state_period: self.committee_state.current_period,
+            });
+        }
+        let attested_params = self
+            .schedule
+            .params_for_state_slot(stmt.attested_header.slot);
+        let signing_params = self.schedule.params_for_signature_slot(sig_slot);
+        let finalized_root = stmt.finalized_header.hash_tree_root();
+        let proven_state = walk_branch(
+            finalized_root,
+            &stmt.finality_branch,
+            attested_params.finalized_root_gindex,
+        )
+        .ok_or(SyncCommitteeError::NotFinalized)?;
+        if proven_state != stmt.attested_header.state_root {
+            return Err(SyncCommitteeError::NotFinalized);
+        }
+        let signing_root = stmt.attested_header.signing_root(&signing_params);
+        verify_sync_aggregate(&self.committee_state, &stmt.sync_aggregate, &signing_root)?;
+        Ok((stmt.attested_header.hash_tree_root(), finalized_root))
+    }
+
+    /// Verify two conflicting `>= 2/3` sync-committee statements in the active
+    /// period, compute the exact double-signing member bitmap (`>= 172` overlap),
+    /// and permanently freeze this light client fail-closed.
+    ///
+    /// Recognized conflicts:
+    /// - same `finalized_header.slot` with distinct `finalized_header` roots;
+    /// - same `attested_header.slot` with distinct `attested_header` roots;
+    /// - Casper FFG finality regression (`attested_b.slot > attested_a.slot`
+    ///   while `finalized_b.slot < finalized_a.slot`).
+    ///
+    /// Convenience: exposed for fault-proof watchers and bridge circuit-breakers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError`] if already frozen, either statement fails
+    /// cryptographic verification, or the pair is consistent (non-equivocating).
+    pub fn submit_equivocation(
+        &mut self,
+        a: &SignedFinalityStatement,
+        b: &SignedFinalityStatement,
+    ) -> Result<SyncCommitteeEquivocationRecord, SyncCommitteeError> {
+        self.ensure_not_frozen()?;
+        let (att_root_a, fin_root_a) = self.verify_statement_in_current_period(a)?;
+        let (att_root_b, fin_root_b) = self.verify_statement_in_current_period(b)?;
+
+        let conflicting_finalized_same_slot =
+            a.finalized_header.slot == b.finalized_header.slot && fin_root_a != fin_root_b;
+        let conflicting_attested_same_slot =
+            a.attested_header.slot == b.attested_header.slot && att_root_a != att_root_b;
+        let finality_regression = (a.attested_header.slot < b.attested_header.slot
+            && b.finalized_header.slot < a.finalized_header.slot)
+            || (b.attested_header.slot < a.attested_header.slot
+                && a.finalized_header.slot < b.finalized_header.slot);
+
+        if !conflicting_finalized_same_slot
+            && !conflicting_attested_same_slot
+            && !finality_regression
+        {
+            return Err(SyncCommitteeError::InvalidEquivocationEvidence(
+                "statements are mutually consistent and do not conflict",
+            ));
+        }
+
+        let mut overlapping_bits = [0u8; SYNC_COMMITTEE_SIZE / 8];
+        let mut overlap_count = 0usize;
+        for ((dst, &lhs), &rhs) in overlapping_bits
+            .iter_mut()
+            .zip(a.sync_aggregate.sync_committee_bits.iter())
+            .zip(b.sync_aggregate.sync_committee_bits.iter())
+        {
+            let both = lhs & rhs;
+            *dst = both;
+            overlap_count =
+                overlap_count.saturating_add(usize::try_from(both.count_ones()).unwrap_or(0));
+        }
+        if overlap_count < MIN_EQUIVOCATION_OVERLAP {
+            return Err(SyncCommitteeError::InvalidEquivocationEvidence(
+                "quorum intersection below 1/3 sync-committee overlap bound",
+            ));
+        }
+
+        // Canonicalize ordering `(low, high)` so `(a, b)` and `(b, a)` yield the
+        // exact same deterministic freeze digest.
+        let ((ar0, fs0, fr0), (ar1, fs1, fr1)) =
+            if (att_root_a, a.finalized_header.slot, fin_root_a)
+                <= (att_root_b, b.finalized_header.slot, fin_root_b)
+            {
+                (
+                    (att_root_a, a.finalized_header.slot, fin_root_a),
+                    (att_root_b, b.finalized_header.slot, fin_root_b),
+                )
+            } else {
+                (
+                    (att_root_b, b.finalized_header.slot, fin_root_b),
+                    (att_root_a, a.finalized_header.slot, fin_root_a),
+                )
+            };
+
+        let period = self.committee_state.current_period;
+        let overlap_u64 = u64::try_from(overlap_count).unwrap_or(u64::MAX);
+        let evidence_digest = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_ETH_SYNC_EQUIVOCATION_V1",
+            &self.schedule.genesis_validators_root,
+            &period.to_le_bytes(),
+            &ar0,
+            &fs0.to_le_bytes(),
+            &fr0,
+            &ar1,
+            &fs1.to_le_bytes(),
+            &fr1,
+            &overlapping_bits,
+            &overlap_u64.to_le_bytes(),
+        ]);
+
+        let record = SyncCommitteeEquivocationRecord {
+            period,
+            attested_root_a: ar0,
+            attested_root_b: ar1,
+            finalized_slot_a: fs0,
+            finalized_root_a: fr0,
+            finalized_slot_b: fs1,
+            finalized_root_b: fr1,
+            overlapping_bits,
+            overlap_count,
+            evidence_digest,
+        };
+        self.frozen = Some(record.clone());
+        Ok(record)
+    }
 }
 
 /// Test-only builders shared with `verify.rs`.
@@ -498,6 +2111,30 @@ pub(crate) mod fixtures {
             state_root: [0xA1; 32],
             body_root: node,
             execution_block_hash_branch: branch,
+        }
+    }
+
+    /// An attested header `distance` slots after `finalized`, whose state
+    /// commits to `finalized` as its finalized checkpoint at `gindex`.
+    pub(crate) fn finality_for(
+        finalized: &BeaconBinding,
+        gindex: u64,
+        distance: u64,
+    ) -> super::FinalityUpdate {
+        let depth = gindex.ilog2() as usize;
+        let branch: Vec<[u8; 32]> = (0..depth).map(|i| [0xF0 + i as u8; 32]).collect();
+        let state_root = super::walk_branch(finalized.beacon_header_root(), &branch, gindex)
+            .expect("the branch has the gindex's depth");
+        super::FinalityUpdate {
+            attested: BeaconBinding {
+                slot: finalized.slot + distance,
+                proposer_index: 2,
+                parent_root: [0xB0; 32],
+                state_root,
+                body_root: [0xB2; 32],
+                execution_block_hash_branch: Vec::new(),
+            },
+            finality_branch: branch,
         }
     }
 
@@ -647,7 +2284,7 @@ mod tests {
 
     /// Known answer: a genuine aggregate of exactly the threshold count
     /// verifies. This is the case both earlier versions of the function
-    /// got wrong, and it is the case that makes F10.3 a control at all.
+    /// got wrong, and it is the case that makes sync-committee verification a real control.
     #[test]
     fn a_genuine_aggregate_at_the_threshold_verifies() {
         let msg = b"altair-signing-root";
@@ -715,7 +2352,7 @@ mod tests {
 
     /// The header, domain and signing-root construction against values
     /// computed independently (Python `hashlib`, SSZ by hand): mainnet
-    /// Deneb fork version and genesis validators root, slot 8_800_000
+    /// Deneb fork version and genesis validators root, slot `8_800_000`
     /// (period 1074), proposer 12345, parent `0x33..`, state `0x44..`, and
     /// a body root produced by walking a nine-node branch from leaf
     /// `0x11..` at gindex 812 with siblings `0x01..` to `0x09..`.
@@ -747,6 +2384,7 @@ mod tests {
             genesis_validators_root: hex_32(
                 "4b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe95",
             ),
+            finalized_root_gindex: FINALIZED_ROOT_GINDEX_DENEB,
         };
         assert_eq!(
             binding.signing_root(&mainnet_deneb),
@@ -774,28 +2412,22 @@ mod tests {
         let params = BeaconChainParams {
             fork_version: [0x04, 0, 0, 0],
             genesis_validators_root: [0x42; 32],
+            finalized_root_gindex:
+                crate::cross_domain::evm::sync_committee::FINALIZED_ROOT_GINDEX_DENEB,
         };
         let execution_block = [0xE1; 32];
         let (state, secrets) = signing_committee(PARTICIPATION_THRESHOLD);
 
+        let gindex = params.finalized_root_gindex;
         let bound = binding_committing_to(execution_block, 5);
-        let agg = aggregate_over(&secrets, &bound.signing_root(&params));
-        verify_execution_block_finality(&state, &agg, &bound, &params, &execution_block)
-            .expect("a genuine attestation over the block finalizes it");
+        let finality = finality_for(&bound, gindex, 64);
+        let agg = aggregate_over(&secrets, &finality.attested.signing_root(&params));
+        verify_execution_block_finality(&state, &agg, &bound, &finality, &params, &execution_block)
+            .expect("a genuine attestation over a header finalizing the block finalizes it");
 
         // The very same aggregate does not finalize another execution block.
         assert_eq!(
-            verify_execution_block_finality(&state, &agg, &bound, &params, &[0xE2; 32]),
-            Err(SyncCommitteeError::ExecutionBlockNotInBeaconBody)
-        );
-
-        // A header for another block, signed by the same committee, is a
-        // valid signature over a different message: the branch refuses it
-        // before the pairing would.
-        let other = binding_committing_to([0xE2; 32], 5);
-        let other_agg = aggregate_over(&secrets, &other.signing_root(&params));
-        assert_eq!(
-            verify_execution_block_finality(&state, &other_agg, &other, &params, &execution_block),
+            verify_execution_block_finality(&state, &agg, &bound, &finality, &params, &[0xE2; 32]),
             Err(SyncCommitteeError::ExecutionBlockNotInBeaconBody)
         );
 
@@ -806,7 +2438,14 @@ mod tests {
             ..params
         };
         assert_eq!(
-            verify_execution_block_finality(&state, &agg, &bound, &other_fork, &execution_block),
+            verify_execution_block_finality(
+                &state,
+                &agg,
+                &bound,
+                &finality,
+                &other_fork,
+                &execution_block
+            ),
             Err(SyncCommitteeError::SignatureVerificationFailed)
         );
 
@@ -815,7 +2454,14 @@ mod tests {
         let mut later = state.clone();
         later.current_period = 9;
         assert_eq!(
-            verify_execution_block_finality(&later, &agg, &bound, &params, &execution_block),
+            verify_execution_block_finality(
+                &later,
+                &agg,
+                &bound,
+                &finality,
+                &params,
+                &execution_block
+            ),
             Err(SyncCommitteeError::PeriodMismatch {
                 slot_period: 0,
                 state_period: 9,
@@ -823,7 +2469,99 @@ mod tests {
         );
     }
 
-    use super::fixtures::binding_committing_to;
+    /// Two thirds of the committee signing a header makes that
+    /// header the attested head, not a finalized block. A genuine aggregate
+    /// over the very header the deposit names, with no finality branch to
+    /// an attested state, is refused.
+    #[test]
+    fn a_signed_head_is_not_finality() {
+        let params = BeaconChainParams {
+            fork_version: [0x04, 0, 0, 0],
+            genesis_validators_root: [0x42; 32],
+            finalized_root_gindex: FINALIZED_ROOT_GINDEX_DENEB,
+        };
+        let execution_block = [0xE1; 32];
+        let (state, secrets) = signing_committee(PARTICIPATION_THRESHOLD);
+        let bound = binding_committing_to(execution_block, 5);
+
+        // The old shape: the committee signs the deposit's own header.
+        let head_only = FinalityUpdate {
+            attested: bound.clone(),
+            finality_branch: Vec::new(),
+        };
+        let agg = aggregate_over(&secrets, &bound.signing_root(&params));
+        assert_eq!(
+            verify_execution_block_finality(
+                &state,
+                &agg,
+                &bound,
+                &head_only,
+                &params,
+                &execution_block
+            ),
+            Err(SyncCommitteeError::NotFinalized)
+        );
+
+        // A branch with one sibling tampered does not reach the attested
+        // state root.
+        let mut tampered = finality_for(&bound, params.finalized_root_gindex, 64);
+        let agg = aggregate_over(&secrets, &tampered.attested.signing_root(&params));
+        tampered.finality_branch[3][0] ^= 1;
+        assert_eq!(
+            verify_execution_block_finality(
+                &state,
+                &agg,
+                &bound,
+                &tampered,
+                &params,
+                &execution_block
+            ),
+            Err(SyncCommitteeError::NotFinalized)
+        );
+
+        // A branch built for the Electra index does not pass under Deneb.
+        let electra = finality_for(&bound, FINALIZED_ROOT_GINDEX_ELECTRA, 64);
+        let agg = aggregate_over(&secrets, &electra.attested.signing_root(&params));
+        assert_eq!(
+            verify_execution_block_finality(
+                &state,
+                &agg,
+                &bound,
+                &electra,
+                &params,
+                &execution_block
+            ),
+            Err(SyncCommitteeError::NotFinalized)
+        );
+
+        // A "finalized" header later than the attested one is refused.
+        let mut backwards = finality_for(&bound, params.finalized_root_gindex, 0);
+        backwards.attested.slot = bound.slot - 1;
+        let agg = aggregate_over(&secrets, &backwards.attested.signing_root(&params));
+        assert_eq!(
+            verify_execution_block_finality(
+                &state,
+                &agg,
+                &bound,
+                &backwards,
+                &params,
+                &execution_block
+            ),
+            Err(SyncCommitteeError::NotFinalized)
+        );
+    }
+
+    #[test]
+    fn finalized_root_gindices_match_the_spec_depths() {
+        assert_eq!(FINALIZED_ROOT_GINDEX_DENEB.ilog2(), 6);
+        assert_eq!(FINALIZED_ROOT_GINDEX_ELECTRA.ilog2(), 7);
+        // Both name field index 41 at their depth: the root of
+        // finalized_checkpoint.
+        assert_eq!(FINALIZED_ROOT_GINDEX_DENEB - 64, 41);
+        assert_eq!(FINALIZED_ROOT_GINDEX_ELECTRA - 128, 41);
+    }
+
+    use super::fixtures::{binding_committing_to, finality_for};
 
     #[test]
     fn garbage_aggregate_does_not_panic() {
@@ -1426,6 +3164,7 @@ mod tests {
             genesis_validators_root: hex_32(
                 "4b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe95",
             ),
+            finalized_root_gindex: FINALIZED_ROOT_GINDEX_DENEB,
         };
         (binding, params)
     }
@@ -1468,5 +3207,914 @@ mod tests {
         let err = verify_sync_aggregate(&state, &agg, &binding.signing_root(&params))
             .expect_err("a bitmap that drops a real signer must not verify");
         assert_eq!(err, SyncCommitteeError::SignatureVerificationFailed);
+    }
+
+    #[test]
+    fn rotate_period_with_branch_refuses_ceiling_saturation_and_invalid_pubkeys() {
+        // 1. Period u64::MAX must never re-rotate in place via saturating_add(1).
+        let mut ceiling = dummy_state();
+        ceiling.current_period = u64::MAX;
+        let zero_committee = [[0u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE];
+        let zero_agg = [0u8; BLS_PUBKEY_LEN];
+        let branch: Vec<[u8; 32]> = (0..5).map(|i| [0x30 + i as u8; 32]).collect();
+        let leaf = sync_committee_hash_tree_root(&zero_committee, &zero_agg);
+        let root = walk_branch(leaf, &branch, NEXT_SYNC_COMMITTEE_GINDEX_DENEB).unwrap();
+        assert!(
+            rotate_period_with_branch(
+                &mut ceiling,
+                u64::MAX,
+                &root,
+                zero_committee,
+                &zero_agg,
+                &branch,
+                NEXT_SYNC_COMMITTEE_GINDEX_DENEB,
+            )
+            .is_err(),
+            "u64::MAX period must not saturate and accept same-period re-rotation"
+        );
+
+        // 2. All-zero / identity / mismatched-aggregate pubkey roster must be
+        // refused even when the SSZ Merkle branch matches finalized_state_root.
+        let mut s = dummy_state();
+        assert_eq!(
+            rotate_period_with_branch(
+                &mut s,
+                1,
+                &root,
+                zero_committee,
+                &zero_agg,
+                &branch,
+                NEXT_SYNC_COMMITTEE_GINDEX_DENEB,
+            ),
+            Err(SyncCommitteeError::InvalidPubkey),
+            "rotation must validate every incoming G1 committee key and aggregate key"
+        );
+    }
+
+    fn deterministic_committee(
+        period_tag: u64,
+    ) -> (
+        Vec<bls12_381::Scalar>,
+        [[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+        [u8; BLS_PUBKEY_LEN],
+    ) {
+        use bls12_381::Scalar;
+        let g1 = G1Projective::generator();
+        let mut sks = Vec::with_capacity(SYNC_COMMITTEE_SIZE);
+        let mut pks = [[0u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE];
+        let mut agg = G1Projective::identity();
+        for (i, pk_slot) in pks.iter_mut().enumerate() {
+            let mut wide = [0u8; 64];
+            let d0 = Sha256::digest(
+                [
+                    b"eth-lc-test-sk-0".as_slice(),
+                    &period_tag.to_le_bytes(),
+                    &(i as u64).to_le_bytes(),
+                ]
+                .concat(),
+            );
+            let d1 = Sha256::digest(
+                [
+                    b"eth-lc-test-sk-1".as_slice(),
+                    &period_tag.to_le_bytes(),
+                    &(i as u64).to_le_bytes(),
+                ]
+                .concat(),
+            );
+            wide[..32].copy_from_slice(&d0);
+            wide[32..].copy_from_slice(&d1);
+            let sk = Scalar::from_bytes_wide(&wide);
+            let pt = g1 * sk;
+            *pk_slot = G1Affine::from(pt).to_compressed();
+            agg += pt;
+            sks.push(sk);
+        }
+        (sks, pks, G1Affine::from(agg).to_compressed())
+    }
+
+    fn sign_header_with_range(
+        sks: &[bls12_381::Scalar],
+        header: &BeaconHeaderSummary,
+        params: &BeaconChainParams,
+        range: std::ops::Range<usize>,
+    ) -> SyncAggregate {
+        use bls12_381::G2Projective;
+        let msg = header.signing_root(params);
+        let h = G2Projective::from(hash_to_g2(&msg));
+        let mut bits = [0u8; SYNC_COMMITTEE_SIZE / 8];
+        let mut acc = G2Projective::identity();
+        for idx in range {
+            bits[idx / 8] |= 1u8 << (idx % 8);
+            acc += h * sks[idx];
+        }
+        SyncAggregate {
+            sync_committee_bits: bits,
+            sync_committee_signature: G2Affine::from(acc).to_compressed(),
+        }
+    }
+
+    /// Build a synthetic 64-leaf state Merkle tree containing specified `(leaf_index, value)`
+    /// entries so multiple disjoint gindices (e.g. `current_sync_committee` 54/86 and
+    /// `next_sync_committee` 55/87) prove against the exact same `BeaconState` root.
+    fn build_state_tree_and_branches(
+        depth: usize,
+        entries: &[(usize, [u8; 32])],
+    ) -> ([u8; 32], Vec<Vec<[u8; 32]>>) {
+        let width = 1usize << depth;
+        let mut leaves: Vec<[u8; 32]> = (0..width)
+            .map(|i| Sha256::digest((i as u64).to_le_bytes()).into())
+            .collect();
+        for &(idx, val) in entries {
+            leaves[idx] = val;
+        }
+        let mut layers = vec![leaves];
+        while layers.last().unwrap().len() > 1 {
+            let prev = layers.last().unwrap();
+            let next: Vec<[u8; 32]> = prev
+                .chunks_exact(2)
+                .map(|p| sha256_pair(&p[0], &p[1]))
+                .collect();
+            layers.push(next);
+        }
+        let root = layers.last().unwrap()[0];
+        let mut branches = Vec::with_capacity(entries.len());
+        for &(mut idx, _) in entries {
+            let mut branch = Vec::with_capacity(depth);
+            for layer in layers.iter().take(depth) {
+                branch.push(layer[idx ^ 1]);
+                idx >>= 1;
+            }
+            branches.push(branch);
+        }
+        (root, branches)
+    }
+
+    fn sample_execution_payload(
+        block_number: u64,
+        parent_hash: [u8; 32],
+        state_root: [u8; 32],
+        receipts_root: [u8; 32],
+        timestamp: u64,
+    ) -> ExecutionPayloadHeader {
+        let mut base_fee = [0u8; 32];
+        base_fee[..8].copy_from_slice(&15_000_000_000u64.to_le_bytes());
+        let mut bloom = vec![0u8; LOGS_BLOOM_BYTES];
+        bloom[7] = 0xA5;
+        bloom[250] = 0x5A;
+        let mut p = ExecutionPayloadHeader {
+            parent_hash,
+            fee_recipient: [0xFE; 20],
+            state_root,
+            receipts_root,
+            logs_bloom: bloom,
+            prev_randao: [0x55; 32],
+            block_number,
+            gas_limit: 30_000_000,
+            gas_used: 12_345_678,
+            timestamp,
+            extra_data: b"budlum-cancun".to_vec(),
+            base_fee_per_gas: base_fee,
+            block_hash: [0x99; 32],
+            transactions_root: [0x77; 32],
+            withdrawals_root: [0x88; 32],
+            blob_gas_used: 393_216,
+            excess_blob_gas: 131_072,
+        };
+        p.block_hash = Sha256::digest(block_number.to_le_bytes()).into();
+        p
+    }
+
+    #[test]
+    fn execution_payload_header_binds_all_17_fields_and_direct_gindices_800_to_816() {
+        let payload = sample_execution_payload(
+            21_000_000,
+            [0x11; 32],
+            [0x22; 32],
+            [0x33; 32],
+            1_730_000_000,
+        );
+        let payload_root = payload.hash_tree_root().expect("valid 17-field payload");
+        let exec_branch = [[0xD1; 32], [0xD2; 32], [0xD3; 32], [0xD4; 32]];
+        let body_root = walk_branch(payload_root, &exec_branch, EXECUTION_PAYLOAD_GINDEX).unwrap();
+
+        assert_eq!(
+            payload
+                .verify_in_beacon_body(&body_root, &exec_branch)
+                .unwrap(),
+            payload_root
+        );
+
+        // Every single field index 0..17 must verify against `body_root` at exact
+        // generalized index `800 + field_index` via its 9-sibling combined SSZ branch,
+        // and reject a 1-bit flip in either the leaf chunk or any sibling node.
+        let expected_gindices = [
+            EXECUTION_PARENT_HASH_GINDEX,
+            EXECUTION_FEE_RECIPIENT_GINDEX,
+            EXECUTION_STATE_ROOT_GINDEX,
+            EXECUTION_RECEIPTS_ROOT_GINDEX,
+            EXECUTION_LOGS_BLOOM_GINDEX,
+            EXECUTION_PREV_RANDAO_GINDEX,
+            EXECUTION_BLOCK_NUMBER_GINDEX,
+            EXECUTION_GAS_LIMIT_GINDEX,
+            EXECUTION_GAS_USED_GINDEX,
+            EXECUTION_TIMESTAMP_GINDEX,
+            EXECUTION_EXTRA_DATA_GINDEX,
+            EXECUTION_BASE_FEE_GINDEX,
+            EXECUTION_BLOCK_HASH_GINDEX,
+            EXECUTION_TRANSACTIONS_ROOT_GINDEX,
+            EXECUTION_WITHDRAWALS_ROOT_GINDEX,
+            EXECUTION_BLOB_GAS_USED_GINDEX,
+            EXECUTION_EXCESS_BLOB_GAS_GINDEX,
+        ];
+        for (field_idx, &gindex) in expected_gindices.iter().enumerate() {
+            assert_eq!(gindex, 800 + field_idx as u64);
+            let (leaf, intra) = payload.field_branch(field_idx).unwrap();
+            let mut full_branch = Vec::with_capacity(9);
+            full_branch.extend_from_slice(&intra);
+            full_branch.extend_from_slice(&exec_branch);
+            verify_execution_field_branch(&body_root, leaf, &full_branch, gindex)
+                .expect("direct 9-sibling field proof must match body_root");
+
+            let mut flipped_leaf = leaf;
+            flipped_leaf[0] ^= 0x01;
+            assert_eq!(
+                verify_execution_field_branch(&body_root, flipped_leaf, &full_branch, gindex),
+                Err(SyncCommitteeError::ExecutionBlockNotInBeaconBody)
+            );
+            for lvl in 0..9 {
+                let mut bad_branch = full_branch.clone();
+                bad_branch[lvl][31] ^= 0x80;
+                assert_eq!(
+                    verify_execution_field_branch(&body_root, leaf, &bad_branch, gindex),
+                    Err(SyncCommitteeError::ExecutionBlockNotInBeaconBody)
+                );
+            }
+        }
+
+        // Out-of-range gindices and wrong branch lengths fail closed.
+        let (state_leaf, state_intra) = payload.field_branch(2).unwrap();
+        let mut state_branch = state_intra.to_vec();
+        state_branch.extend_from_slice(&exec_branch);
+        assert!(verify_execution_field_branch(&body_root, state_leaf, &state_branch, 799).is_err());
+        assert!(verify_execution_field_branch(&body_root, state_leaf, &state_branch, 817).is_err());
+        assert!(
+            verify_execution_field_branch(&body_root, state_leaf, &state_branch[..8], 802).is_err()
+        );
+        assert!(payload
+            .verify_in_beacon_body(&body_root, &exec_branch[..3])
+            .is_err());
+
+        // Mutating any of the 17 fields (including SSZ ByteList mix_in_length
+        // trailing-zero extension on `extra_data`) MUST fail verification.
+        let mut mutations: Vec<ExecutionPayloadHeader> = Vec::new();
+        {
+            let mut m = payload.clone();
+            m.parent_hash[0] ^= 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.fee_recipient[19] ^= 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.state_root[15] ^= 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.receipts_root[0] ^= 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.logs_bloom[128] ^= 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.prev_randao[31] ^= 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.block_number += 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.gas_limit += 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.gas_used += 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.timestamp += 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.extra_data[0] ^= 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.extra_data.push(0x00);
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.base_fee_per_gas[31] ^= 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.block_hash[0] ^= 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.transactions_root[0] ^= 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.withdrawals_root[0] ^= 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.blob_gas_used += 1;
+            mutations.push(m);
+        }
+        {
+            let mut m = payload.clone();
+            m.excess_blob_gas += 1;
+            mutations.push(m);
+        }
+        for m in &mutations {
+            assert_eq!(
+                m.verify_in_beacon_body(&body_root, &exec_branch),
+                Err(SyncCommitteeError::ExecutionBlockNotInBeaconBody),
+            );
+        }
+
+        // Structural consensus violations are rejected before accepting roots.
+        let mut overlong_extra = payload.clone();
+        overlong_extra.extra_data = vec![0xAA; 33];
+        assert!(matches!(
+            overlong_extra.hash_tree_root(),
+            Err(SyncCommitteeError::InvalidExecutionPayload(_))
+        ));
+        let mut bad_gas = payload.clone();
+        bad_gas.gas_used = bad_gas.gas_limit + 1;
+        assert!(matches!(
+            bad_gas.hash_tree_root(),
+            Err(SyncCommitteeError::InvalidExecutionPayload(_))
+        ));
+        let mut bad_bloom = payload.clone();
+        bad_bloom.logs_bloom = vec![0u8; 255];
+        assert!(matches!(
+            bad_bloom.hash_tree_root(),
+            Err(SyncCommitteeError::InvalidExecutionPayload(_))
+        ));
+        let mut zero_state = payload;
+        zero_state.state_root = [0u8; 32];
+        assert!(matches!(
+            zero_state.hash_tree_root(),
+            Err(SyncCommitteeError::InvalidExecutionPayload(_))
+        ));
+    }
+
+    #[test]
+    fn full_execution_light_client_bootstrap_deneb_electra_multiperiod_rlp_mpt_and_equivocation_freeze(
+    ) {
+        use crate::cross_domain::evm::header::EMPTY_OMMERS_HASH;
+        use crate::cross_domain::evm::mpt::{
+            encode_tx_index_key, hp_encode, keccak256, to_nibbles,
+        };
+        use crate::cross_domain::evm::rlp::{encode as rlp_encode, Item};
+
+        // Four real 512-member BLS12-381 G1/G2 sync committees across periods 0..=3.
+        let (sk0, pk0, agg0) = deterministic_committee(0);
+        let (sk1, pk1, agg1) = deterministic_committee(1);
+        let (sk2, pk2, agg2) = deterministic_committee(2);
+        let (_sk3, pk3, agg3) = deterministic_committee(3);
+
+        // Electra activates exactly at the start of period 2 (epoch 512, slot 16_384).
+        let schedule = BeaconForkSchedule {
+            genesis_validators_root: [0x4B; 32],
+            deneb_fork_version: [0x04, 0x00, 0x00, 0x00],
+            electra_fork_version: [0x05, 0x00, 0x00, 0x00],
+            electra_fork_epoch: 512,
+        };
+        let deneb_params = schedule.params_for_signature_slot(100);
+        let electra_params = schedule.params_for_signature_slot(16_400);
+
+        // 1. Bootstrap at period 0 (Deneb: current gindex 54 = field 22, next gindex 55 = field 23).
+        let c0_root = sync_committee_hash_tree_root(&pk0, &agg0);
+        let c1_root = sync_committee_hash_tree_root(&pk1, &agg1);
+        let (boot_state_root, boot_branches) =
+            build_state_tree_and_branches(5, &[(22, c0_root), (23, c1_root)]);
+        let boot_header = BeaconHeaderSummary {
+            slot: 64,
+            proposer_index: 7,
+            parent_root: [0xA1; 32],
+            state_root: boot_state_root,
+            body_root: [0xA2; 32],
+        };
+        let bootstrap = SyncCommitteeBootstrap {
+            trusted_header_root: boot_header.hash_tree_root(),
+            header: boot_header,
+            current_committee: pk0,
+            current_aggregate: agg0,
+            current_branch: boot_branches[0].clone(),
+            next_committee: pk1,
+            next_aggregate: agg1,
+            next_branch: boot_branches[1].clone(),
+        };
+        // Forged aggregate pubkey or wrong-fork params must fail bootstrap closed.
+        assert!(bootstrap_sync_committee_state(&bootstrap, &electra_params).is_err());
+        let mut bad_boot = bootstrap.clone();
+        bad_boot.trusted_header_root[0] ^= 0xFF;
+        assert_eq!(
+            bootstrap_sync_committee_state(&bad_boot, &deneb_params),
+            Err(SyncCommitteeError::HeaderMismatch)
+        );
+
+        let init_state = bootstrap_sync_committee_state(&bootstrap, &deneb_params)
+            .expect("valid Deneb bootstrap");
+        let mut client = EthereumExecutionLightClient::new(init_state, schedule);
+        assert_eq!(client.current_period(), 0);
+
+        // Helper building a signed period rotation P -> P + 1.
+        let make_rotation = |fin_slot: u64,
+                             att_slot: u64,
+                             signer_sks: &[bls12_381::Scalar],
+                             next_pks: [[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+                             next_agg: [u8; BLS_PUBKEY_LEN],
+                             exec: Option<(ExecutionPayloadHeader, Vec<[u8; 32]>)>|
+         -> PeriodRotationUpdate {
+            let fin_params = schedule.params_for_state_slot(fin_slot);
+            let att_params = schedule.params_for_state_slot(att_slot);
+            let sig_params = schedule.params_for_signature_slot(att_slot + 1);
+            let next_gindex = fin_params.next_sync_committee_gindex().unwrap();
+            let state_depth = next_gindex.ilog2() as usize;
+            let field_idx = (next_gindex - (1u64 << state_depth)) as usize;
+            let next_leaf = sync_committee_hash_tree_root(&next_pks, &next_agg);
+            let (fin_state_root, next_branches) =
+                build_state_tree_and_branches(state_depth, &[(field_idx, next_leaf)]);
+            let fin_body_root = if let Some((ref p, ref eb)) = exec {
+                walk_branch(p.hash_tree_root().unwrap(), eb, EXECUTION_PAYLOAD_GINDEX).unwrap()
+            } else {
+                [0xB1; 32]
+            };
+            let finalized_header = BeaconHeaderSummary {
+                slot: fin_slot,
+                proposer_index: 11,
+                parent_root: [0xB2; 32],
+                state_root: fin_state_root,
+                body_root: fin_body_root,
+            };
+            let fin_gindex = att_params.finalized_root_gindex;
+            let fin_depth = fin_gindex.ilog2() as usize;
+            let finality_branch: Vec<[u8; 32]> =
+                (0..fin_depth).map(|i| [0xC0 + i as u8; 32]).collect();
+            let att_state_root = walk_branch(
+                finalized_header.hash_tree_root(),
+                &finality_branch,
+                fin_gindex,
+            )
+            .unwrap();
+            let attested_header = BeaconHeaderSummary {
+                slot: att_slot,
+                proposer_index: 12,
+                parent_root: [0xB3; 32],
+                state_root: att_state_root,
+                body_root: [0xB4; 32],
+            };
+            let sync_aggregate =
+                sign_header_with_range(signer_sks, &attested_header, &sig_params, 0..342);
+            PeriodRotationUpdate {
+                attested_header,
+                finalized_header,
+                finality_branch,
+                next_sync_committee: next_pks,
+                next_sync_committee_aggregate: next_agg,
+                next_sync_committee_branch: next_branches[0].clone(),
+                next_sync_committee_gindex: next_gindex,
+                execution: exec,
+                sync_aggregate,
+            }
+        };
+
+        let exec_branch = vec![[0xE1; 32], [0xE2; 32], [0xE3; 32], [0xE4; 32]];
+        let exec_p0 =
+            sample_execution_payload(100, [0x01; 32], [0x21; 32], [0x31; 32], 1_700_000_100);
+        let exec_p1 =
+            sample_execution_payload(200, [0x02; 32], [0x22; 32], [0x32; 32], 1_700_100_200);
+
+        // Rotation 0 -> 1 (Deneb -> Deneb, gindex 55/105) and 1 -> 2 (crossing into Electra!).
+        let rot_0_to_1 = make_rotation(
+            1_000,
+            1_064,
+            &sk0,
+            pk2,
+            agg2,
+            Some((exec_p0, exec_branch.clone())),
+        );
+        let rot_1_to_2 = make_rotation(
+            9_000,
+            9_064,
+            &sk1,
+            pk3,
+            agg3,
+            Some((exec_p1, exec_branch.clone())),
+        );
+
+        // Period-skip (applying period 1's update directly onto period 0) must fail.
+        assert!(matches!(
+            client.apply_period_rotation(&rot_1_to_2),
+            Err(SyncCommitteeError::PeriodMismatch {
+                slot_period: 1,
+                state_period: 0
+            })
+        ));
+        // Cross-fork gindex swap (declaring Electra gindex 87 on Deneb finalized state) must fail.
+        let mut wrong_gindex = rot_0_to_1.clone();
+        wrong_gindex.next_sync_committee_gindex = NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA;
+        assert_eq!(
+            client.apply_period_rotation(&wrong_gindex),
+            Err(SyncCommitteeError::ForkGindexMismatch {
+                expected: NEXT_SYNC_COMMITTEE_GINDEX_DENEB,
+                found: NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA,
+            })
+        );
+        // Atomic multi-period rollback: corrupting step 2 leaves client untouched at period 0.
+        let mut bad_step2 = rot_1_to_2.clone();
+        bad_step2.next_sync_committee_branch[0][0] ^= 0x01;
+        assert!(client
+            .apply_rotation_chain(&[rot_0_to_1.clone(), bad_step2])
+            .is_err());
+        assert_eq!(client.current_period(), 0);
+        assert!(client.latest_finalized().unwrap().is_none());
+
+        // Stale finalized-header replay (attested in period 1, finalized back in period 0) must fail.
+        let mut client_tmp = client.clone();
+        assert_eq!(client_tmp.apply_period_rotation(&rot_0_to_1).unwrap(), 1);
+        let stale_fin_rot = make_rotation(8_000, 9_000, &sk1, pk3, agg3, None);
+        assert_eq!(
+            client_tmp.apply_period_rotation(&stale_fin_rot),
+            Err(SyncCommitteeError::PeriodMismatch {
+                slot_period: 0,
+                state_period: 1
+            }),
+            "finalized header from period P - 1 must never satisfy period P rotation"
+        );
+
+        // Valid atomic multi-period rotation 0 -> 1 -> 2 succeeds cleanly!
+        assert_eq!(
+            client
+                .apply_rotation_chain(&[rot_0_to_1, rot_1_to_2])
+                .unwrap(),
+            2
+        );
+        assert_eq!(client.current_period(), 2);
+
+        // 2. Build real Yellow-Paper MPT state, storage, and receipt tries + real
+        // 21-field Prague/Electra RLP execution header, finalize it under Electra
+        // (`gindex = 169` + `gindex = 25`) with period-2 committee `sk2`, and verify
+        // direct RLP header + EIP-1559/EIP-7702 receipt + account + storage proofs!
+        let bridge_addr = [0xABu8; 20];
+        let slot_key = [0x07u8; 32];
+        let slot_value = [0xDEu8; 32];
+        let slot_rlp_val = rlp_encode(&Item::String(slot_value.to_vec()));
+        let storage_leaf = rlp_encode(&Item::List(vec![
+            Item::String(hp_encode(&to_nibbles(&keccak256(&slot_key)), true)),
+            Item::String(slot_rlp_val),
+        ]));
+        let storage_root = keccak256(&storage_leaf);
+
+        let code_bytes = b"\x60\x80\x60\x40\x52";
+        let code_hash = keccak256(code_bytes);
+        let balance_bytes = 5_000_000_000_000_000_000u128.to_be_bytes(); // 5 ETH
+        let first_nz = balance_bytes.iter().position(|&b| b != 0).unwrap();
+        let account_rlp = rlp_encode(&Item::List(vec![
+            Item::String(vec![0x2a]), // nonce = 42
+            Item::String(balance_bytes[first_nz..].to_vec()),
+            Item::String(storage_root.to_vec()),
+            Item::String(code_hash.to_vec()),
+        ]));
+        let account_leaf = rlp_encode(&Item::List(vec![
+            Item::String(hp_encode(&to_nibbles(&keccak256(&bridge_addr)), true)),
+            Item::String(account_rlp),
+        ]));
+        let exec_state_root = keccak256(&account_leaf);
+
+        // Two typed receipts in a real Yellow-Paper receipts trie: tx 0 (EIP-1559 0x02)
+        // and tx 1 (EIP-7702 Electra SetCode 0x04), both > 32B so branch children hash-link.
+        let make_typed_receipt = |tx_type: u8, topic: [u8; 32], data: &[u8]| -> Vec<u8> {
+            let log = Item::List(vec![
+                Item::String(bridge_addr.to_vec()),
+                Item::List(vec![Item::String(topic.to_vec())]),
+                Item::String(data.to_vec()),
+            ]);
+            let body = rlp_encode(&Item::List(vec![
+                Item::String(vec![0x01]),
+                Item::String(vec![0x52, 0x08]), // 21_000 gas
+                Item::String(vec![0u8; 256]),
+                Item::List(vec![log]),
+            ]));
+            let mut out = vec![tx_type];
+            out.extend_from_slice(&body);
+            out
+        };
+        let rcpt0 = make_typed_receipt(0x02, [0xC1; 32], b"deposit-1559");
+        let rcpt1 = make_typed_receipt(0x04, [0xC2; 32], b"deposit-7702");
+        let n0 = to_nibbles(&encode_tx_index_key(0)); // [8, 0]
+        let n1 = to_nibbles(&encode_tx_index_key(1)); // [0, 1]
+        let rleaf0 = rlp_encode(&Item::List(vec![
+            Item::String(hp_encode(&n0[1..], true)),
+            Item::String(rcpt0),
+        ]));
+        let rleaf1 = rlp_encode(&Item::List(vec![
+            Item::String(hp_encode(&n1[1..], true)),
+            Item::String(rcpt1),
+        ]));
+        let mut rbranch_items: Vec<Item> = (0..17).map(|_| Item::String(Vec::new())).collect();
+        rbranch_items[n0[0] as usize] = Item::String(keccak256(&rleaf0).to_vec());
+        rbranch_items[n1[0] as usize] = Item::String(keccak256(&rleaf1).to_vec());
+        let rbranch = rlp_encode(&Item::List(rbranch_items));
+        let exec_receipts_root = keccak256(&rbranch);
+
+        // Canonical 21-field Prague/Electra RLP execution block header (number = 201).
+        let trim_be = |v: u64| -> Vec<u8> {
+            if v == 0 {
+                return Vec::new();
+            }
+            let b = v.to_be_bytes();
+            b[b.iter().position(|&x| x != 0).unwrap()..].to_vec()
+        };
+        let parent_hash_201 = client
+            .latest_finalized()
+            .unwrap()
+            .unwrap()
+            .payload
+            .block_hash;
+        let fee_recipient = [0xFEu8; 20];
+        let tx_root = [0x71u8; 32];
+        let bloom = [0u8; 256];
+        let block_num = 201u64;
+        let gas_limit = 36_000_000u64;
+        let gas_used = 42_000u64;
+        let timestamp = 1_700_200_300u64;
+        let extra = b"electra-pectra".to_vec();
+        let prev_randao = [0x59u8; 32];
+        let base_fee_u64 = 1_500_000_000u64;
+        let withdrawals_root = [0x82u8; 32];
+        let blob_gas_used = 262_144u64;
+        let excess_blob_gas = 65_536u64;
+        let parent_beacon_root = [0x93u8; 32];
+        let requests_hash = [0xA4u8; 32];
+
+        let rlp_header = rlp_encode(&Item::List(vec![
+            Item::String(parent_hash_201.to_vec()),
+            Item::String(EMPTY_OMMERS_HASH.to_vec()),
+            Item::String(fee_recipient.to_vec()),
+            Item::String(exec_state_root.to_vec()),
+            Item::String(tx_root.to_vec()),
+            Item::String(exec_receipts_root.to_vec()),
+            Item::String(bloom.to_vec()),
+            Item::String(Vec::new()), // difficulty = 0
+            Item::String(trim_be(block_num)),
+            Item::String(trim_be(gas_limit)),
+            Item::String(trim_be(gas_used)),
+            Item::String(trim_be(timestamp)),
+            Item::String(extra.clone()),
+            Item::String(prev_randao.to_vec()),
+            Item::String(vec![0u8; 8]), // nonce = 0x0000000000000000
+            Item::String(trim_be(base_fee_u64)),
+            Item::String(withdrawals_root.to_vec()),
+            Item::String(trim_be(blob_gas_used)),
+            Item::String(trim_be(excess_blob_gas)),
+            Item::String(parent_beacon_root.to_vec()),
+            Item::String(requests_hash.to_vec()),
+        ]));
+        let exec_block_hash = keccak256(&rlp_header);
+        let mut base_fee_le = [0u8; 32];
+        base_fee_le[..8].copy_from_slice(&base_fee_u64.to_le_bytes());
+        let electra_payload = ExecutionPayloadHeader {
+            parent_hash: parent_hash_201,
+            fee_recipient,
+            state_root: exec_state_root,
+            receipts_root: exec_receipts_root,
+            logs_bloom: bloom.to_vec(),
+            prev_randao,
+            block_number: block_num,
+            gas_limit,
+            gas_used,
+            timestamp,
+            extra_data: extra,
+            base_fee_per_gas: base_fee_le,
+            block_hash: exec_block_hash,
+            transactions_root: tx_root,
+            withdrawals_root,
+            blob_gas_used,
+            excess_blob_gas,
+        };
+
+        let electra_fin_body = walk_branch(
+            electra_payload.hash_tree_root().unwrap(),
+            &exec_branch,
+            EXECUTION_PAYLOAD_GINDEX,
+        )
+        .unwrap();
+        let electra_fin_hdr = BeaconHeaderSummary {
+            slot: 16_500, // period 2 (Electra!)
+            proposer_index: 33,
+            parent_root: [0xD1; 32],
+            state_root: [0xD2; 32],
+            body_root: electra_fin_body,
+        };
+        let electra_fin_branch: Vec<[u8; 32]> = (0..7).map(|i| [0xE8 + i as u8; 32]).collect();
+        let electra_att_state = walk_branch(
+            electra_fin_hdr.hash_tree_root(),
+            &electra_fin_branch,
+            FINALIZED_ROOT_GINDEX_ELECTRA,
+        )
+        .unwrap();
+        let electra_att_hdr = BeaconHeaderSummary {
+            slot: 16_564,
+            proposer_index: 34,
+            parent_root: [0xD3; 32],
+            state_root: electra_att_state,
+            body_root: [0xD4; 32],
+        };
+        let electra_agg = sign_header_with_range(&sk2, &electra_att_hdr, &electra_params, 10..360);
+        let electra_update = ExecutionLightClientUpdate {
+            attested_header: electra_att_hdr,
+            finalized_header: electra_fin_hdr,
+            finality_branch: electra_fin_branch.clone(),
+            execution_payload: electra_payload.clone(),
+            execution_branch: exec_branch.clone(),
+            sync_aggregate: electra_agg.clone(),
+        };
+
+        // Consecutive parent_hash mismatch must be rejected as NonMonotonicFinality.
+        let mut bad_parent_payload = electra_payload;
+        bad_parent_payload.parent_hash[0] ^= 0xFF;
+        let bad_parent_body = walk_branch(
+            bad_parent_payload.hash_tree_root().unwrap(),
+            &exec_branch,
+            EXECUTION_PAYLOAD_GINDEX,
+        )
+        .unwrap();
+        let bad_fin_hdr = BeaconHeaderSummary {
+            body_root: bad_parent_body,
+            ..electra_fin_hdr
+        };
+        let bad_att_hdr = BeaconHeaderSummary {
+            state_root: walk_branch(
+                bad_fin_hdr.hash_tree_root(),
+                &electra_fin_branch,
+                FINALIZED_ROOT_GINDEX_ELECTRA,
+            )
+            .unwrap(),
+            ..electra_att_hdr
+        };
+        let bad_parent_update = ExecutionLightClientUpdate {
+            attested_header: bad_att_hdr,
+            finalized_header: bad_fin_hdr,
+            finality_branch: electra_fin_branch.clone(),
+            execution_payload: bad_parent_payload,
+            execution_branch: exec_branch,
+            sync_aggregate: sign_header_with_range(&sk2, &bad_att_hdr, &electra_params, 0..350),
+        };
+        assert!(matches!(
+            client.apply_execution_update(&bad_parent_update),
+            Err(SyncCommitteeError::NonMonotonicFinality(_))
+        ));
+
+        // Authentic Electra execution update verifies and anchors RLP + MPT proofs!
+        let verified = client
+            .apply_execution_update(&electra_update)
+            .expect("Electra execution update verifies under rotated period-2 committee");
+        assert_eq!(verified.signers, 350);
+        assert_eq!(verified.payload.block_hash, exec_block_hash);
+
+        let anchored_rlp = verified
+            .verify_rlp_header(&rlp_header)
+            .expect("Prague/Electra 21-field RLP execution header anchors to Beacon payload");
+        assert_eq!(anchored_rlp.requests_hash, Some(requests_hash));
+        let mut tampered_rlp = rlp_header;
+        let last = tampered_rlp.len() - 1;
+        tampered_rlp[last] ^= 0x01;
+        assert!(verified.verify_rlp_header(&tampered_rlp).is_err());
+
+        // Verify both EIP-1559 (tx 0) and EIP-7702 (tx 1) receipt inclusion proofs!
+        let proven_r0 = verified
+            .verify_receipt_inclusion(0, &[rbranch.clone(), rleaf0])
+            .expect("EIP-1559 receipt inclusion verifies against finalized receipts_root");
+        assert!(proven_r0.status);
+        assert_eq!(proven_r0.logs[0].data, b"deposit-1559");
+
+        let proven_r1 = verified
+            .verify_receipt_inclusion(1, &[rbranch.clone(), rleaf1.clone()])
+            .expect("EIP-7702 receipt inclusion verifies against finalized receipts_root");
+        assert!(proven_r1.status);
+        assert_eq!(proven_r1.logs[0].data, b"deposit-7702");
+        assert!(verified
+            .verify_receipt_inclusion(2, &[rbranch, rleaf1])
+            .is_err());
+
+        // Verify contract account + storage slot inclusion directly against finalized state_root!
+        let (proven_acct, proven_slot) = verified
+            .verify_storage_inclusion(
+                &bridge_addr,
+                std::slice::from_ref(&account_leaf),
+                &slot_key,
+                std::slice::from_ref(&storage_leaf),
+            )
+            .expect("account + storage MPT proofs verify against finalized state_root");
+        assert_eq!(proven_acct.nonce, 42);
+        assert_eq!(proven_acct.balance_u128(), Some(5_000_000_000_000_000_000));
+        assert_eq!(proven_acct.code_hash, code_hash);
+        assert_eq!(proven_slot, slot_value);
+        assert!(verified
+            .verify_storage_inclusion(&bridge_addr, &[account_leaf], &[0xFF; 32], &[storage_leaf])
+            .is_err());
+
+        // 3. Cryptographic sync-committee equivocation detection & permanent fail-closed freeze!
+        let stmt_a = SignedFinalityStatement {
+            attested_header: electra_att_hdr,
+            finalized_header: electra_fin_hdr,
+            finality_branch: electra_fin_branch.clone(),
+            sync_aggregate: electra_agg, // signers 10..360 (350 signers)
+        };
+        // Non-conflicting duplicate statement must NOT freeze the client.
+        assert!(matches!(
+            client.submit_equivocation(&stmt_a, &stmt_a),
+            Err(SyncCommitteeError::InvalidEquivocationEvidence(_))
+        ));
+        assert!(client.equivocation_record().is_none());
+
+        // Conflicting finalized checkpoint at the exact same slot 16_500 signed by
+        // signers 160..510 (350 signers; exact intersection 160..360 = 200 >= 172!).
+        let fork_fin_hdr = BeaconHeaderSummary {
+            state_root: [0xFA; 32],
+            ..electra_fin_hdr
+        };
+        let fork_att_hdr = BeaconHeaderSummary {
+            slot: 16_565,
+            state_root: walk_branch(
+                fork_fin_hdr.hash_tree_root(),
+                &electra_fin_branch,
+                FINALIZED_ROOT_GINDEX_ELECTRA,
+            )
+            .unwrap(),
+            ..electra_att_hdr
+        };
+        let stmt_b = SignedFinalityStatement {
+            attested_header: fork_att_hdr,
+            finalized_header: fork_fin_hdr,
+            finality_branch: electra_fin_branch,
+            sync_aggregate: sign_header_with_range(&sk2, &fork_att_hdr, &electra_params, 160..510),
+        };
+
+        let mut mirror_client = client.clone();
+        let rec_ab = client
+            .submit_equivocation(&stmt_a, &stmt_b)
+            .expect("conflicting finalized checkpoints must trigger equivocation freeze");
+        let rec_ba = mirror_client
+            .submit_equivocation(&stmt_b, &stmt_a)
+            .expect("reversed submission order must produce identical freeze record");
+        assert_eq!(rec_ab, rec_ba);
+        assert_eq!(rec_ab.overlap_count, 200);
+        assert!(rec_ab.overlap_count >= MIN_EQUIVOCATION_OVERLAP);
+
+        // Once frozen, EVERY read and state transition refuses permanently.
+        assert_eq!(
+            client.latest_finalized(),
+            Err(SyncCommitteeError::LightClientFrozen(
+                rec_ab.evidence_digest
+            ))
+        );
+        assert_eq!(
+            client.apply_execution_update(&electra_update),
+            Err(SyncCommitteeError::LightClientFrozen(
+                rec_ab.evidence_digest
+            ))
+        );
+        assert_eq!(
+            client.submit_equivocation(&stmt_a, &stmt_b),
+            Err(SyncCommitteeError::LightClientFrozen(
+                rec_ab.evidence_digest
+            ))
+        );
     }
 }

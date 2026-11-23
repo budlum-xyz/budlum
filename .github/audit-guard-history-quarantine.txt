@@ -1,0 +1,15 @@
+# Frozen commit subjects that already carried the review identity.
+#
+# Each line is one full commit id whose subject carries the identity and cannot
+# be rewritten, because rewriting pushed history is forbidden outright. The
+# list is a ratchet: the ceiling lives in `xtask/tools/src/audit_guard.rs`
+# (`MAX_QUARANTINED_SUBJECTS`) and a third entry fails the gate. A stale entry
+# (a commit whose subject no longer carries the identity) also fails, so the
+# file only shrinks. Subjects are deliberately not copied here: they carried
+# internal tracker ids and this repository does not hold those.
+#
+# Both commits below are the pair that replaced two production modules with
+# placeholder text on 2026-11-20. The modules were restored byte-for-byte from
+# their parents; the commit ids are what remains.
+78e333882acb52f489d1773e45b6627febda75aa
+e52fcb23211b2f12630b7ad85580ea7aa74f2c78

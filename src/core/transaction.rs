@@ -88,7 +88,7 @@ pub const MAX_V8_SIGNERS: usize = 16;
 /// admission instead of being guessed from key length.
 ///
 /// WIRING: consumed cross-file by the identity verification-method encoding
-/// (`registry::identity`, MethodKind::MlDsa87) when the identity transaction
+/// (`registry::identity`, `MethodKind::MlDsa87`) when the identity transaction
 /// door lands; until then the account-identity absorb in this file pins it.
 pub const ML_DSA_87_SCHEME_ID: &str = "ml-dsa-87-fips204-v1";
 
@@ -150,9 +150,10 @@ pub struct GasSchedule {
 const TX_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/transaction";
 
 impl crate::core::chain_config::Network {
+    #[must_use]
     pub fn gas_schedule(&self) -> GasSchedule {
         match self {
-            crate::core::chain_config::Network::Mainnet => GasSchedule {
+            Self::Mainnet => GasSchedule {
                 base_fee: 10,
                 gas_per_byte: 2,
                 gas_per_signature: 1_000,
@@ -161,7 +162,7 @@ impl crate::core::chain_config::Network {
                 vote_gas: 35_000,
                 contract_call_gas: 50_000,
             },
-            crate::core::chain_config::Network::Testnet => GasSchedule {
+            Self::Testnet => GasSchedule {
                 base_fee: 1,
                 gas_per_byte: 1,
                 gas_per_signature: 500,
@@ -170,7 +171,7 @@ impl crate::core::chain_config::Network {
                 vote_gas: 25_000,
                 contract_call_gas: 35_000,
             },
-            crate::core::chain_config::Network::Devnet => GasSchedule {
+            Self::Devnet => GasSchedule {
                 base_fee: 1,
                 gas_per_byte: 1,
                 gas_per_signature: 100,
@@ -183,7 +184,7 @@ impl crate::core::chain_config::Network {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExternalChain {
     Ethereum,
     Solana,
@@ -199,6 +200,7 @@ impl ExternalChain {
     /// Canonical domain id used by the consensus-owned external-root anchor
     /// Registry. These ids are part of the bridge wire contract and must not
     /// Be derived from an untrusted relayer payload.
+    #[must_use]
     pub const fn domain_id(self) -> u32 {
         match self {
             Self::Ethereum => 1,
@@ -321,6 +323,7 @@ impl BridgeBurnTx {
     /// `holder_signature` itself is not in here (it is the result of signing
     /// this value), and neither is an amount: the amount comes from the
     /// transfer row, which the row's own id pins.
+    #[must_use]
     pub fn authorization_hash(&self, chain_id: u64) -> [u8; 32] {
         crate::core::hash::hash_fields_bytes(&[
             BRIDGE_BURN_AUTHORIZATION_TAG,
@@ -504,6 +507,9 @@ impl ConsensusKeyRegistration {
                 self.scheme_id
             ));
         }
+        if self.vrf_public_key.iter().all(|&b| b == 0) {
+            return Err("VRF public key must not be the identity element".into());
+        }
         schnorrkel::PublicKey::from_bytes(&self.vrf_public_key)
             .map_err(|_| "VRF public key must be a valid 32-byte Ristretto key".to_string())?;
         let entry = crate::chain::finality::ValidatorEntry {
@@ -545,9 +551,16 @@ pub enum TransactionType {
     },
     Vote,
     ContractCall,
-    BnsRegister,
+    BnsCreateOffer,
+    BnsCancelOffer,
+    BnsBuyName,
+    BnsSetAddress,
+    BnsSetPrimary,
+    BnsSetRecords,
     BnsSetContent,
     BnsRegisterSubdomain,
+    BnsRemoveSubdomain,
+    BnsSetSubdomainContent,
     BnsSetStorage,
     NftMint,
     NftTransfer,
@@ -598,24 +611,24 @@ pub enum TransactionType {
     AiInferenceRequest(crate::ai::types::AiInferenceRequest),
     /// Submit an AI inference layer inference result by an active bonded RoleId(8) operator.
     AiInferenceResult(crate::ai::types::AiInferenceResult),
-    /// Reclaim escrowed max_fee for expired unfinalized AI request.
+    /// Reclaim escrowed `max_fee` for expired unfinalized AI request.
     AiFeeReclaim(crate::ai::types::AiRequestId),
     /// Deactivate an AI model (owner-only, prevents new requests).
     AiModelDeactivate(crate::ai::types::AiModelId),
     /// Reactivate a previously deactivated AI model.
     AiModelReactivate(crate::ai::types::AiModelId),
     /// Cancel a pending AI inference request (requester-only).
-    /// Returns escrowed max_fee for refund by the executor layer.
+    /// Returns escrowed `max_fee` for refund by the executor layer.
     AiRequestCancel(crate::ai::types::AiRequestId),
-    /// Register a Pollen DataAsset (owner-submitted).
+    /// Register a Pollen `DataAsset` (owner-submitted).
     PollenRegisterDataAsset(crate::pollen::DataAsset),
-    /// Register a seller/owner sale authorization for DataAsset pollen.
+    /// Register a seller/owner sale authorization for `DataAsset` pollen.
     PollenAuthorizeSale(crate::pollen::SaleAuthorization),
-    /// Register an owner-submitted AccessGrant.
+    /// Register an owner-submitted `AccessGrant`.
     PollenGrantAccess(crate::pollen::AccessGrant),
-    /// Revoke a Pollen AccessGrant by id (owner-only in executor).
+    /// Revoke a Pollen `AccessGrant` by id (owner-only in executor).
     PollenRevokeGrant(crate::pollen::GrantId),
-    /// Revoke a Pollen DataAsset by id (owner-only in executor).
+    /// Revoke a Pollen `DataAsset` by id (owner-only in executor).
     PollenRevokeDataAsset(crate::pollen::AssetId),
     /// Slash a verifier for equivocation.
     AiDisputeSlash {
@@ -636,20 +649,20 @@ pub enum TransactionType {
     PrivateTransferSubmit(crate::privacy::PrivateTransferSubmit),
     /// Faucet/test helper - insert a live note commitment (governance/tests).
     PrivacyNoteInsert([u8; 32]),
-    /// AI execution layer: attach BudZKVM execution proof to a result
+    /// AI execution layer: attach `BudZKVM` execution proof to a result
     /// (active RoleId(8) operator-submitted; structural verify on the chain).
     AiAttachExecutionProof {
         request_id: crate::ai::types::AiRequestId,
         proof: crate::ai::types::AiExecutionProof,
     },
     /// AI inference layer production onboarding: bond `amount` from the signed sender into
-    /// The permissionless AI_OPERATOR role (RoleId 8).
+    /// The permissionless `AI_OPERATOR` role (`RoleId` 8).
     AiOperatorBond,
     /// Begin RoleId(8) unbonding after all observable tasks/disputes close.
     AiOperatorUnbond,
     /// Withdraw the complete RoleId(8) principal after the unbonding epoch.
     AiOperatorWithdraw,
-    /// Register the validator's consensus public keys and RFC 9380 BLS PoP.
+    /// Register the validator's consensus public keys and RFC 9380 BLS `PoP`.
     /// The outer Ed25519 transaction signature binds these keys to `from`.
     RegisterConsensusKeys(ConsensusKeyRegistration),
     /// Domain settlement: apply the nonce writes a verified domain commitment
@@ -666,7 +679,7 @@ pub enum TransactionType {
     ///
     /// Carries the registry's own `IdentityTx` and nothing else. No domain
     /// field is defined here: the executor's single arm supplies the kind
-    /// read from state, because a caller-declared "this is PoA" is authority
+    /// read from state, because a caller-declared "this is `PoA`" is authority
     /// fabrication - the same refusal the domain-freeze path applies in
     /// `chain/blockchain.rs`, applied at the identity door.
     Identity(crate::registry::IdentityTx),
@@ -687,7 +700,7 @@ pub enum TransactionType {
     /// naming types: the signing gate reads the enum
     /// body's identifiers to resolve carried payload types.)
     Storage(crate::domain::storage_tx::StorageTx),
-    /// PoA admission door: a candidate applies for themselves, an admin of
+    /// `PoA` admission door: a candidate applies for themselves, an admin of
     /// the target domain decides, and the admin set changes only through
     /// admins or governance. Ids, a dossier commitment and reasons - no
     /// authority fields, because the sender IS the claimed actor at the one
@@ -695,7 +708,7 @@ pub enum TransactionType {
     /// the enum body's identifiers to resolve carried payload types.)
     PoaOnboarding(crate::registry::poa_onboarding::PoAOnboardingTx),
     /// Bond into a permissionless role (testnet
-    ///): the role id and the bond amount in the signed
+    /// The role id and the bond amount in the signed
     /// header, nothing else. The verifier family registers at the floor;
     /// the relayer, prover and storage operator roles also take a top-up of
     /// an active bond. The relayer, prover and storage operator seats were
@@ -704,8 +717,8 @@ pub enum TransactionType {
     RoleBond {
         role: u32,
     },
-    /// A bonded relayer registers a cross-domain message, applied in block
-    ///. The sender is `tx.from`, and the message's
+    /// A bonded relayer registers a cross-domain message, applied in block.
+    /// The sender is `tx.from`, and the message's
     /// own sender field must name the same account, so the transaction
     /// signature is the authentication; the message's separate signature
     /// envelope must be empty. Replaces the out-of-block registration the
@@ -728,8 +741,8 @@ pub enum TransactionType {
     RoleWithdraw {
         role: u32,
     },
-    /// An external-domain write, applied in block (,
-    ///): registration, evidence, a prover bond, readmission, a version
+    /// An external-domain write, applied in block:
+    /// Registration, evidence, a prover bond, readmission, a version
     /// fork or a quorum policy. The sender is `tx.from`, and a payload that
     /// names an account (the poster, the submitter) must name the sender.
     /// The signing preimage commits every field. Replaces the operator RPCs
@@ -737,8 +750,8 @@ pub enum TransactionType {
     /// types: the signing gate reads the enum body's identifiers to resolve
     /// carried payload types.)
     ExternalDomain(crate::cross_domain::external::ExternalDomainTx),
-    /// A domain settlement write, applied in block (,
-    ///): a domain registration, a commitment with its finality proof,
+    /// A domain settlement write, applied in block:
+    /// A domain registration, a commitment with its finality proof,
     /// a sovereign template, a ZK program allowlist change or a ZK proof.
     /// The sender is `tx.from`; a payload that names an account (the
     /// operator, the proof submitter) must name the sender. Replaces the
@@ -809,6 +822,21 @@ pub enum TransactionType {
     /// root, so a node that served the call and one that did not must not
     /// disagree).
     CrossDomainMessage(crate::cross_domain::message::CrossDomainMessage),
+    /// The validator door: registration, class change, operator key
+    /// rotation and the operator-signed custody quota increase. Appended last
+    /// because `bincode` encodes the variant index. The owner is `tx.from`
+    /// except for the quota update, whose payload names the owner and carries
+    /// the operator key's signature.
+    Validator(crate::validators::ValidatorTx),
+    /// The B.U.D. 3.0 storage door (`StorageTx` v3). The signer is
+    /// `tx.from`. Appended last because `bincode` encodes the variant index.
+    StorageV3(Box<crate::storage::bud3::tx::StorageTxV3>),
+    /// Phase 5 split-STARK verification transaction. Carries commitments,
+    /// public values, and out-of-domain opened values (zero FRI proof bytes);
+    /// the corresponding `Claim::Poly` digest travels in `tx.claim_refs` and
+    /// the chain executes Stage 2 (`verify_algebra`) against `AirRegistry`.
+    /// Appended last because `bincode` encodes the variant index.
+    VerifyStark(Box<crate::aggregation::programs::pcs_claim::VerifyStarkTx>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -845,6 +873,31 @@ pub struct Transaction {
     #[serde(default)]
     pub signature_version: u32,
     pub tx_type: TransactionType,
+    /// `TxAuth::Claimed(d)`: the digest of the claim that stands for the
+    /// signature of this transaction. `None` is `TxAuth::Inline`, the
+    /// signature travels with the transaction.
+    ///
+    /// A claimed transaction carries no signature and no key; the block
+    /// frame proves that the signature was verified once. The digest is a
+    /// function of the signing hash, so it stays outside it; the witness
+    /// bytes carry it, and through them the witness root of the block.
+    #[serde(default)]
+    pub auth_claim: Option<[u8; 32]>,
+    /// The digests of the other claims this transaction uses. Inside the
+    /// signing hash: a relay cannot add or drop one.
+    #[serde(default, deserialize_with = "deserialize_bounded_claim_refs")]
+    pub claim_refs: Vec<[u8; 32]>,
+}
+
+/// Most claims one transaction refers to. A reference is 32 bytes and every
+/// one is looked up in the block frame.
+pub const MAX_CLAIM_REFS_PER_TX: usize = 16;
+
+fn deserialize_bounded_claim_refs<'de, D>(deserializer: D) -> Result<Vec<[u8; 32]>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, [u8; 32], MAX_CLAIM_REFS_PER_TX>(deserializer)
 }
 
 fn deserialize_bounded_vec<'de, D, T: Deserialize<'de>, const MAX: usize>(
@@ -946,6 +999,14 @@ pub struct TxWitness {
     pub authorization_signatures: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
+/// Follows the serialized witness of a claimed transaction, before its claim
+/// digest.
+const CLAIMED_WITNESS_MARKER: u8 = 0x01;
+
+/// The domain tag that binds the claim references of a transaction into its
+/// signing hash.
+const TX_CLAIM_REFS_TAG: &[u8] = b"BDLM_TX_CLAIM_REFS_V1";
+
 /// The domain tag of a witness hash.
 /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const TX_WITNESS_TAG: &[u8] = b"BDLM_TX_WITNESS_V1";
@@ -1009,6 +1070,7 @@ pub fn decode_v7_signer_key(
 }
 
 impl Transaction {
+    #[must_use]
     pub fn new(from: Address, to: Address, amount: u64, data: Vec<u8>) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1022,6 +1084,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_stake(from: Address, amount: u64, nonce: u64) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1036,6 +1099,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_delegate(
         from: Address,
         validator: Address,
@@ -1057,6 +1121,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_undelegate(
         from: Address,
         validator: Address,
@@ -1078,6 +1143,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_withdraw_delegation(
         from: Address,
         validator: Address,
@@ -1098,6 +1164,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_validator_commission(
         from: Address,
         commission_ppm: u32,
@@ -1117,6 +1184,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_consensus_key_registration(
         from: Address,
         fee: u64,
@@ -1136,6 +1204,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_ai_operator_bond(
         from: Address,
         amount: u64,
@@ -1155,6 +1224,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_ai_operator_unbond(from: Address, fee: u64, nonce: u64, chain_id: u64) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1168,6 +1238,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_ai_operator_withdraw(from: Address, fee: u64, nonce: u64, chain_id: u64) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1181,6 +1252,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_proposal(from: Address, p_type: ProposalType, duration: u64, nonce: u64) -> Self {
         let mut data = Vec::new();
         data.extend_from_slice(&duration.to_le_bytes());
@@ -1200,6 +1272,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_vote(from: Address, proposal_id: u64, vote_for: bool, nonce: u64) -> Self {
         let mut data = Vec::new();
         data.push(if vote_for { 1 } else { 0 });
@@ -1217,6 +1290,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_contract_call(from: Address, fee: u64, nonce: u64, bytecode: Vec<u8>) -> Self {
         Self::new_contract_call_to(from, Address::zero(), fee, nonce, bytecode)
     }
@@ -1227,6 +1301,7 @@ impl Transaction {
     /// bytecode-only calls. A non-zero `to` is an explicit application identity
     /// and enables the testnet application revenue split at block settlement.
     /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    #[must_use]
     pub fn new_contract_call_to(
         from: Address,
         to: Address,
@@ -1247,6 +1322,7 @@ impl Transaction {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new_with_chain_id(
         from: Address,
         to: Address,
@@ -1260,7 +1336,7 @@ impl Transaction {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
-        let mut tx = Transaction {
+        let mut tx = Self {
             from,
             to,
             amount,
@@ -1277,10 +1353,13 @@ impl Transaction {
             chain_id,
             signature_version: SIGNATURE_VERSION_V5,
             tx_type,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         tx.hash = tx.calculate_hash();
         tx
     }
+    #[must_use]
     pub fn new_with_fee(
         from: Address,
         to: Address,
@@ -1300,8 +1379,9 @@ impl Transaction {
             TransactionType::Transfer,
         )
     }
+    #[must_use]
     pub fn genesis() -> Self {
-        let mut tx = Transaction {
+        let mut tx = Self {
             from: Address::zero(),
             to: Address::zero(),
             amount: 0,
@@ -1318,6 +1398,8 @@ impl Transaction {
             chain_id: DEFAULT_CHAIN_ID,
             signature_version: SIGNATURE_VERSION_V5,
             tx_type: TransactionType::Transfer,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         tx.hash = tx.calculate_hash();
         tx
@@ -1325,6 +1407,7 @@ impl Transaction {
     /// Canonical V4 signing preimage. Every execution-relevant variant
     /// Field is committed explicitly; serde/bincode/JSON are never used as a
     /// Consensus signing encoding.
+    #[must_use]
     pub fn signing_hash(&self) -> [u8; 32] {
         let mut preimage = Vec::new();
         put_u8(&mut preimage, transaction_type_tag(&self.tx_type));
@@ -1372,8 +1455,29 @@ impl Transaction {
         };
         hasher.update(domain);
         hasher.update(preimage);
-        hasher.finalize().into()
+        let base: [u8; 32] = hasher.finalize().into();
+        if self.claim_refs.is_empty() {
+            // A transaction that uses no claim hashes exactly as it did
+            // before the field existed.
+            return base;
+        }
+        // The references wrap the base hash under a tag of their own. The
+        // base is 32 bytes, the count is fixed-width and every reference is
+        // 32 bytes, so the preimage has one reading.
+        let mut wrapped = Sha3_256::new();
+        wrapped.update(TX_CLAIM_REFS_TAG);
+        wrapped.update(base);
+        wrapped.update(
+            u32::try_from(self.claim_refs.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        for reference in &self.claim_refs {
+            wrapped.update(reference);
+        }
+        wrapped.finalize().into()
     }
+    #[must_use]
     pub fn calculate_hash(&self) -> String {
         hex::encode(self.signing_hash())
     }
@@ -1939,8 +2043,44 @@ impl Transaction {
         // root identical on every node if it ever did. Never
         // `unwrap_or_default`: an empty Vec would commit two different
         // witnesses to one digest (tests/hash_input_serialize_locks).
-        bincode::serialize(&self.witness())
-            .unwrap_or_else(|_| b"budlum/serialize-failed/witness".to_vec())
+        let mut bytes = bincode::serialize(&self.witness())
+            .unwrap_or_else(|_| b"budlum/serialize-failed/witness".to_vec());
+        // A claimed transaction has an empty witness; what authorizes it is
+        // the claim digest. The serialized witness delimits itself, so the
+        // marker and the 32 bytes after it have one reading, and an inline
+        // transaction keeps the bytes it always had.
+        if let Some(claim) = &self.auth_claim {
+            bytes.push(CLAIMED_WITNESS_MARKER);
+            bytes.extend_from_slice(claim);
+        }
+        bytes
+    }
+
+    /// Whether a claim stands for the signature of this transaction
+    /// (`TxAuth::Claimed`).
+    #[must_use]
+    pub const fn is_claimed(&self) -> bool {
+        self.auth_claim.is_some()
+    }
+
+    /// Whether this transaction uses the aggregation layer at all.
+    #[must_use]
+    pub fn uses_claims(&self) -> bool {
+        self.auth_claim.is_some() || !self.claim_refs.is_empty()
+    }
+
+    /// Whether a claimed transaction has the one shape it may have: no
+    /// signature, no key and no multi-signature authorization. A claimed
+    /// transaction that still carried a signature would have two sources of
+    /// authority, and only one of them would be checked.
+    #[must_use]
+    pub fn claimed_shape_is_canonical(&self) -> bool {
+        self.auth_claim.is_some()
+            && self.signature.is_none()
+            && self.signer_public_key.is_empty()
+            && self.authorization.is_none()
+            && self.signature_version == SIGNATURE_VERSION_V5
+            && self.hash == self.calculate_hash()
     }
 
     /// The witness of this transaction: the material that authorizes it and
@@ -1988,6 +2128,7 @@ impl Transaction {
     /// Verify under the scheme statuses of a fresh genesis. Every path that
     /// decides on behalf of a chain calls [`Self::verify_in`] with the
     /// chain-state registry.
+    #[must_use]
     pub fn verify(&self) -> bool {
         self.verify_in(&crate::crypto::scheme::SchemeStatusRegistry::genesis())
     }
@@ -2018,10 +2159,17 @@ impl Transaction {
         if canonical_genesis {
             return true;
         }
+        // A claimed transaction carries no signature: nothing here can
+        // verify it. Its authority is the claim in the frame of its block,
+        // and only block validation, which checked that frame, may accept it.
+        if self.auth_claim.is_some() {
+            debug!("a claimed transaction cannot be verified on its own");
+            return false;
+        }
         // a mainnet genesis accepts the composite formats alone. V4
         // (Ed25519 only), V5 (ML-DSA-87 only) and V6 (ML-DSA-87 multisig) have
-        // no Ed25519 half or no PQ half, so none of them may stand on mainnet
-        //. They stay valid on devnet and testnet.
+        // no Ed25519 half or no PQ half, so none of them may stand on mainnet.
+        // They stay valid on devnet and testnet.
         if self.signature_version != SIGNATURE_VERSION_V7
             && self.signature_version != SIGNATURE_VERSION_V8
             && crate::core::chain_config::Network::from_chain_id(self.chain_id)
@@ -2052,12 +2200,11 @@ impl Transaction {
             debug!("only a V6 transaction may carry a multisig authorization");
             return false;
         }
-        let signature = match &self.signature {
-            Some(s) => s,
-            None => {
-                debug!("TX has no signature");
-                return false;
-            }
+        let signature = if let Some(s) = &self.signature {
+            s
+        } else {
+            debug!("TX has no signature");
+            return false;
         };
         let signing_hash = self.signing_hash();
         if self.signature_version == SIGNATURE_VERSION_V5 {
@@ -2420,9 +2567,11 @@ impl Transaction {
         }
         true
     }
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).unwrap_or_else(|_| TX_SERIALIZE_FAILED.to_vec())
     }
+    #[must_use]
     pub fn fee_bid(&self) -> crate::chain::fee_market::FeeBid {
         crate::chain::fee_market::FeeBid {
             max_fee: if self.max_fee == 0 {
@@ -2438,12 +2587,47 @@ impl Transaction {
     ///
     /// `max_fee` and `priority_fee` remain signed wire-compatibility fields;
     /// State validation rejects any value that diverges from this flat fee.
+    #[must_use]
     pub fn fee_limit(&self) -> u64 {
         self.fee
     }
 
+    /// The liquid debit this transaction actually charges.
+    ///
+    /// Fee-only doors move bonded, delegated or reward value inside the state
+    /// machine; their signed `amount` is not a second debit from the sender's
+    /// liquid balance. The AI-operator withdrawal exit preserves its existing
+    /// zero liquid cost. Admission, pending-balance projection and execution
+    /// share this classification; `None` is a refusal, never a saturated cost.
+    #[must_use]
+    pub fn checked_liquid_cost(&self) -> Option<u64> {
+        match self.tx_type {
+            TransactionType::AiOperatorWithdraw => Some(0),
+            TransactionType::Unstake
+            | TransactionType::Vote
+            | TransactionType::Undelegate { .. }
+            | TransactionType::WithdrawDelegation { .. }
+            | TransactionType::SetValidatorCommission { .. }
+            | TransactionType::Redelegate { .. }
+            | TransactionType::ClaimRewards { .. } => Some(self.fee),
+            _ => self.checked_total_cost(),
+        }
+    }
+
+    /// Return a compatibility estimate of the transaction debit.
+    ///
+    /// Do not use this helper for admission or state transitions. Those paths
+    /// must use `checked_liquid_cost` and reject overflow.
+    #[must_use]
     pub fn total_cost(&self) -> u64 {
-        self.amount.saturating_add(self.fee)
+        self.checked_total_cost().unwrap_or(u64::MAX)
+    }
+
+    /// Convenience: checked sum of `amount + fee` for consensus debit paths so
+    /// an overflowing pair is rejected instead of saturating to `u64::MAX`.
+    #[must_use]
+    pub const fn checked_total_cost(&self) -> Option<u64> {
+        self.amount.checked_add(self.fee)
     }
 
     /// Per-type gas cost under a `GasSchedule`.
@@ -2460,6 +2644,7 @@ impl Transaction {
     /// Caller reaching for this to size a transaction will get a number the
     /// Chain has never charged. `bud_estimateGas` deliberately does not use it;
     /// It returns the flat fee floor instead.
+    #[must_use]
     pub fn estimate_gas_with_schedule(&self, schedule: GasSchedule) -> u64 {
         let intrinsic = match &self.tx_type {
             TransactionType::Transfer => schedule.transfer_gas,
@@ -2475,9 +2660,16 @@ impl Transaction {
             | TransactionType::RegisterFiliz { .. } => schedule.stake_gas,
             TransactionType::Vote => schedule.vote_gas,
             TransactionType::ContractCall => schedule.contract_call_gas,
-            TransactionType::BnsRegister
+            TransactionType::BnsCreateOffer
+            | TransactionType::BnsCancelOffer
+            | TransactionType::BnsBuyName
+            | TransactionType::BnsSetAddress
+            | TransactionType::BnsSetPrimary
+            | TransactionType::BnsSetRecords
             | TransactionType::BnsSetContent
             | TransactionType::BnsRegisterSubdomain
+            | TransactionType::BnsRemoveSubdomain
+            | TransactionType::BnsSetSubdomainContent
             | TransactionType::BnsSetStorage
             | TransactionType::BnsRenew
             | TransactionType::BnsTransfer => schedule.contract_call_gas,
@@ -2538,6 +2730,15 @@ impl Transaction {
             // registry arms already price.
             TransactionType::Vault(_) => schedule.contract_call_gas * 2,
             TransactionType::PoaOnboarding(_) => schedule.contract_call_gas * 2,
+            // A registry write; registration and a quota update also verify a
+            // BLS proof of possession or an ML-DSA-65 operator signature.
+            TransactionType::Validator(_) => {
+                schedule.contract_call_gas * 2 + schedule.gas_per_signature * 2
+            }
+            // A registry write; a proof batch also hashes Merkle paths.
+            TransactionType::StorageV3(_) => schedule.contract_call_gas * 2,
+            // Stage 2 (`verify_algebra`) constraint evaluation without FRI.
+            TransactionType::VerifyStark(_) => schedule.contract_call_gas,
             TransactionType::RoleBond { .. } => schedule.contract_call_gas,
             // A registry write that re-derives the manifest id over every
             // shard: priced like the registry arms beside it. Opening a deal
@@ -2570,8 +2771,14 @@ impl Transaction {
                 | crate::cross_domain::external::ExternalDomainTx::Readmit { .. },
             ) => schedule.contract_call_gas * 4 + schedule.gas_per_signature * 8,
             TransactionType::ExternalDomain(
-                crate::cross_domain::external::ExternalDomainTx::SubmitEvidence(_),
+                crate::cross_domain::external::ExternalDomainTx::SubmitEvidence(_)
+                | crate::cross_domain::external::ExternalDomainTx::ChallengeContradiction(_)
+                | crate::cross_domain::external::ExternalDomainTx::ChallengeAncestry(_),
             ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature,
+            TransactionType::ExternalDomain(
+                crate::cross_domain::external::ExternalDomainTx::SubmitFaultProof { .. }
+                | crate::cross_domain::external::ExternalDomainTx::RotateCommittee { .. },
+            ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature * 2,
             TransactionType::ExternalDomain(_) => schedule.contract_call_gas * 2,
             // Registration validates the domain record and escrows a bond; a
             // ZK proof runs the STARK verifier: both are verification work on
@@ -2601,18 +2808,18 @@ impl Transaction {
                 }
                 _ => schedule.contract_call_gas * 2,
             },
-            TransactionType::Settlement(crate::settlement::domains::SettlementTx::Graft(graft)) => {
-                match graft.as_ref() {
-                    crate::settlement::graft::GraftTx::Claim { .. }
-                    | crate::settlement::graft::GraftTx::ClaimBySignature { .. }
-                    | crate::settlement::graft::GraftTx::Fulfill { .. } => {
-                        schedule.contract_call_gas * 4 + schedule.gas_per_signature * 8
-                    }
-                    _ => schedule.contract_call_gas * 2,
+            TransactionType::Settlement(crate::settlement::domains::SettlementTx::AppBinding(
+                app_binding,
+            )) => match app_binding.as_ref() {
+                crate::settlement::app_binding::AppBindingTx::Claim { .. }
+                | crate::settlement::app_binding::AppBindingTx::ClaimBySignature { .. }
+                | crate::settlement::app_binding::AppBindingTx::Fulfill { .. } => {
+                    schedule.contract_call_gas * 4 + schedule.gas_per_signature * 8
                 }
-            }
+                _ => schedule.contract_call_gas * 2,
+            },
             // An allocation verifies an anchored external result, like a
-            // Graft claim.
+            // AppBinding claim.
             TransactionType::Settlement(
                 crate::settlement::domains::SettlementTx::SharedSecurity(shared),
             ) => match shared.as_ref() {
@@ -2676,6 +2883,27 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(a, c);
     }
+
+    #[test]
+    fn object_layer_and_relayer_intent_have_distinct_signed_tags() {
+        use crate::settlement::domains::SettlementTx;
+        let intent =
+            SettlementTx::RelayerIntent(Box::new(crate::relayer::policy::RelayerIntentTx::Award {
+                intent_id: [3; 32],
+                solver: Address::from([9; 32]),
+            }));
+        let object = SettlementTx::ObjectLayer(Box::new(
+            crate::object_layer::ObjectLayerTx::SetTentativeConsent { consent: false },
+        ));
+        let mut intent_preimage = Vec::new();
+        let mut object_preimage = Vec::new();
+        encode_settlement_tx(&intent, &mut intent_preimage);
+        encode_settlement_tx(&object, &mut object_preimage);
+        assert_eq!(intent_preimage.first(), Some(&9));
+        assert_eq!(object_preimage.first(), Some(&10));
+        assert_ne!(intent_preimage, object_preimage);
+    }
+
     #[test]
     fn redelegation_and_claim_carry_their_addresses_and_pass_validation() {
         let delegator = test_addr_from_byte(7u8);
@@ -2742,7 +2970,60 @@ mod tests {
         assert_eq!(tx.fee, 5);
         assert_eq!(tx.nonce, 1);
         assert_eq!(tx.total_cost(), 105);
+        assert_eq!(tx.checked_total_cost(), Some(105));
     }
+
+    #[test]
+    fn checked_total_cost_rejects_overflow() {
+        let recipient = test_addr_from_byte(1u8);
+        let tx = Transaction::new_with_fee(Address::zero(), recipient, u64::MAX, 1, 1, vec![]);
+        assert_eq!(tx.checked_total_cost(), None);
+        assert_eq!(tx.total_cost(), u64::MAX);
+    }
+
+    #[test]
+    fn checked_liquid_cost_matches_fee_only_and_amount_bearing_doors() {
+        let validator = test_addr_from_byte(2u8);
+        let fee_only = [
+            TransactionType::Unstake,
+            TransactionType::Vote,
+            TransactionType::Undelegate { validator },
+            TransactionType::WithdrawDelegation { validator },
+            TransactionType::SetValidatorCommission {
+                commission_ppm: 100_000,
+            },
+            TransactionType::Redelegate {
+                from_validator: validator,
+                to_validator: test_addr_from_byte(3u8),
+            },
+            TransactionType::ClaimRewards { validator },
+        ];
+        for tx_type in fee_only {
+            let mut tx = Transaction::new_with_fee(
+                test_addr_from_byte(1u8),
+                Address::zero(),
+                100,
+                5,
+                1,
+                vec![],
+            );
+            tx.tx_type = tx_type;
+            assert_eq!(tx.checked_liquid_cost(), Some(5));
+            // A signed amount that is not a liquid debit cannot overflow the fee.
+            tx.amount = u64::MAX;
+            assert_eq!(tx.checked_liquid_cost(), Some(5));
+        }
+
+        let mut transfer =
+            Transaction::new_with_fee(test_addr_from_byte(1u8), validator, u64::MAX, 1, 1, vec![]);
+        transfer.tx_type = TransactionType::Transfer;
+        assert_eq!(transfer.checked_liquid_cost(), None);
+
+        let mut withdrawal = transfer;
+        withdrawal.tx_type = TransactionType::AiOperatorWithdraw;
+        assert_eq!(withdrawal.checked_liquid_cost(), Some(0));
+    }
+
     #[test]
     fn test_genesis_transaction() {
         let genesis = Transaction::genesis();
@@ -2899,7 +3180,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::Unstake => 2,
         TransactionType::Vote => 3,
         TransactionType::ContractCall => 4,
-        TransactionType::BnsRegister => 5,
+        // Tag 5 retired with BnsRegister removal; never reuse.
         TransactionType::BnsSetContent => 6,
         TransactionType::BnsRegisterSubdomain => 7,
         TransactionType::BnsSetStorage => 8,
@@ -2966,6 +3247,17 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::ClaimRewards { .. } => 66,
         TransactionType::RoleUnbond { .. } => 67,
         TransactionType::RoleWithdraw { .. } => 68,
+        TransactionType::Validator(_) => 69,
+        TransactionType::StorageV3(_) => 70,
+        TransactionType::BnsCreateOffer => 71,
+        TransactionType::BnsCancelOffer => 72,
+        TransactionType::BnsBuyName => 73,
+        TransactionType::BnsSetAddress => 74,
+        TransactionType::BnsSetPrimary => 75,
+        TransactionType::BnsSetRecords => 76,
+        TransactionType::BnsRemoveSubdomain => 77,
+        TransactionType::BnsSetSubdomainContent => 79,
+        TransactionType::VerifyStark(_) => 80,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -3014,7 +3306,7 @@ fn encode_message(message: &crate::cross_domain::message::CrossDomainMessage, ou
         crate::cross_domain::message::quantum_class_code(message.source_quantum_class),
     );
 }
-/// Canonical preimage of a PoA admission transaction.
+/// Canonical preimage of a `PoA` admission transaction.
 ///
 /// Operation tag, domain id, and the addresses/commitments/reasons each arm
 /// carries - every field the execution body reads is under the signature, so
@@ -3363,6 +3655,81 @@ fn encode_manifest_body(manifest: &crate::storage::ContentManifest, out: &mut Ve
     }
 }
 
+/// Canonical preimage of a validator transaction: every field of every carried
+/// struct, written explicitly (the signature preimage is the consensus
+/// commitment; bincode is only the wire format).
+fn encode_validator_tx(tx: &crate::validators::ValidatorTx, out: &mut Vec<u8>) {
+    use crate::validators::ValidatorTx;
+    match tx {
+        ValidatorTx::Register(registration) => {
+            put_u8(out, 0);
+            put_fixed(out, registration.owner.as_bytes());
+            put_u8(out, registration.class.tag());
+            put_bytes(out, &registration.operator_key);
+            put_bytes(out, &registration.bls_key);
+            put_bytes(out, &registration.bls_pop);
+            encode_validator_seat(registration.seat.as_ref(), out);
+            put_u64(out, registration.custody_quota_bytes);
+            match &registration.relay_offer {
+                Some(relay) => {
+                    put_u8(out, 1);
+                    put_u64(out, relay.multiaddrs.len() as u64);
+                    for addr in &relay.multiaddrs {
+                        put_string(out, addr);
+                    }
+                    put_u64(out, relay.capacity_kbps);
+                }
+                None => put_u8(out, 0),
+            }
+            match &registration.gateway_offer {
+                Some(gateway) => {
+                    put_u8(out, 1);
+                    put_string(out, &gateway.address);
+                }
+                None => put_u8(out, 0),
+            }
+            put_fixed(out, &registration.peer_id);
+        }
+        ValidatorTx::ChangeClass { new_class, seat } => {
+            put_u8(out, 1);
+            put_u8(out, new_class.tag());
+            encode_validator_seat(seat.as_ref(), out);
+        }
+        ValidatorTx::RotateOperatorKey { new_operator_key } => {
+            put_u8(out, 2);
+            put_bytes(out, new_operator_key);
+        }
+        ValidatorTx::UpdateCustodyQuota {
+            owner,
+            new_quota_bytes,
+            seq,
+            operator_signature,
+        } => {
+            put_u8(out, 3);
+            put_fixed(out, owner.as_bytes());
+            put_u64(out, *new_quota_bytes);
+            put_u64(out, *seq);
+            put_bytes(out, operator_signature);
+        }
+        ValidatorTx::Resume => {
+            put_u8(out, 4);
+        }
+    }
+}
+
+fn encode_validator_seat(seat: Option<&crate::validators::SeatFields>, out: &mut Vec<u8>) {
+    match seat {
+        Some(seat) => {
+            put_u8(out, 1);
+            put_bytes(out, &seat.vrf_key);
+            put_bytes(out, &seat.pq_vote_key);
+            put_fixed(out, &seat.leader_commitment.commitment);
+            put_u64(out, seat.leader_commitment.length);
+        }
+        None => put_u8(out, 0),
+    }
+}
+
 /// Canonical preimage of an identity transaction. Every pub field of every
 /// carried struct is written explicitly - nothing is bincode-ed here: bincode
 /// is the wire format, and the signature preimage is the consensus commitment
@@ -3446,6 +3813,13 @@ fn encode_identity_record(record: &crate::registry::IdentityRecord, out: &mut Ve
         put_fixed(out, guardian.as_bytes());
     }
     put_u64(out, record.recovery_threshold as u64);
+    // The per-subject credential ceiling reads `issued_credentials`, and the
+    // recovery digest reads `recovery_nonce` to refuse a replayed guardian
+    // quorum. Both ride on the wire, so both are inside the signed preimage:
+    // otherwise a relay could lower the counter or rewind the nonce on a
+    // record whose signature still verifies.
+    put_u64(out, record.issued_credentials);
+    put_u64(out, record.recovery_nonce);
 }
 fn encode_credential_commitment(
     credential: &crate::registry::CredentialCommitment,
@@ -3592,9 +3966,16 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         | TransactionType::Unstake
         | TransactionType::Vote
         | TransactionType::ContractCall
-        | TransactionType::BnsRegister
+        | TransactionType::BnsCreateOffer
+        | TransactionType::BnsCancelOffer
+        | TransactionType::BnsBuyName
+        | TransactionType::BnsSetAddress
+        | TransactionType::BnsSetPrimary
+        | TransactionType::BnsSetRecords
         | TransactionType::BnsSetContent
         | TransactionType::BnsRegisterSubdomain
+        | TransactionType::BnsRemoveSubdomain
+        | TransactionType::BnsSetSubdomainContent
         | TransactionType::BnsSetStorage
         | TransactionType::BnsRenew
         | TransactionType::BnsTransfer
@@ -3850,6 +4231,17 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         TransactionType::RoleWithdraw { role } => {
             put_u8(out, 52);
             put_u32(out, *role);
+        }
+        TransactionType::Validator(validator_tx) => encode_validator_tx(validator_tx, out),
+        // The whole payload is signed: its canonical bincode bytes,
+        // length-prefixed.
+        TransactionType::StorageV3(storage_tx) => {
+            put_u8(out, 70);
+            encode_storage_v3_tx(storage_tx, out);
+        }
+        TransactionType::VerifyStark(verify_tx) => {
+            put_u8(out, 80);
+            encode_verify_stark_tx(verify_tx, out);
         }
         TransactionType::ExternalDomain(external_tx) => {
             put_u8(out, 53);
@@ -4134,18 +4526,18 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
             put_u8(out, 9);
             encode_relayer_intent_tx(intent_tx, out);
         }
-        SettlementTx::Graft(graft_tx) => {
+        SettlementTx::AppBinding(app_binding_tx) => {
             put_u8(out, 6);
-            // Graft carries several bounded byte fields and an external proof.
+            // AppBinding carries several bounded byte fields and an external proof.
             // Bincode here is only the canonical signed payload; the door
             // performs the semantic and size checks before writing state.
-            let bytes = bincode::serialize(graft_tx)
-                .unwrap_or_else(|_| b"budlum/graft/serialize-failed".to_vec());
+            let bytes = bincode::serialize(app_binding_tx)
+                .unwrap_or_else(|_| b"budlum/app_binding/serialize-failed".to_vec());
             put_bytes(out, &bytes);
         }
         SettlementTx::SharedSecurity(shared_tx) => {
             put_u8(out, 7);
-            // Same convention as Graft: the bincode encoding of the whole
+            // Same convention as AppBinding: the bincode encoding of the whole
             // variant is the signed payload; the door bounds every field.
             let bytes = bincode::serialize(shared_tx)
                 .unwrap_or_else(|_| b"budlum/mikoriza/serialize-failed".to_vec());
@@ -4169,6 +4561,14 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
             for sibling in &delivery.proof.siblings {
                 put_fixed(out, sibling);
             }
+        }
+        SettlementTx::ObjectLayer(uol_tx) => {
+            // Keep this tag distinct from RelayerIntent (9): a signed
+            // settlement preimage must not cross transaction variants.
+            put_u8(out, 10);
+            let bytes = postcard::to_allocvec(uol_tx.as_ref())
+                .unwrap_or_else(|_| b"budlum/object-layer/serialize-failed".to_vec());
+            put_bytes(out, &bytes);
         }
     }
 }
@@ -4274,6 +4674,325 @@ fn encode_proof_market_tx(tx: &crate::settlement::proof_market::ProofMarketTx, o
             put_u8(out, 5);
             put_fixed(out, task_id);
         }
+        ProofMarketTx::WithdrawEscrow { amount } => {
+            // Appended after every existing canonical tag so adding the
+            // recovery door cannot change any already-signed preimage.
+            put_u8(out, 7);
+            put_u64(out, *amount);
+        }
+    }
+}
+
+/// Canonical preimage of a B.U.D. 3.0 storage transaction. Every pub field of
+/// every carried variant and struct is written explicitly; nothing is bincode-ed
+/// (enforced by `wire-fields-are-signed`).
+fn encode_storage_v3_content_id(
+    content_id: &crate::storage::bud3::content_id::ContentId,
+    out: &mut Vec<u8>,
+) {
+    use crate::storage::bud3::content_id::ContentIdKind;
+    match content_id.kind {
+        ContentIdKind::Public => put_u8(out, 0),
+        ContentIdKind::Sealed => put_u8(out, 1),
+    }
+    put_fixed(out, &content_id.digest);
+    put_u64(out, content_id.len);
+}
+
+fn encode_storage_v3_profile(profile: &crate::storage::bud3::limits::Profile, out: &mut Vec<u8>) {
+    out.extend_from_slice(&profile.id.to_le_bytes());
+    put_u8(out, profile.qr_version);
+    out.extend_from_slice(&profile.symbol_size.to_le_bytes());
+    out.extend_from_slice(&profile.fps.to_le_bytes());
+    put_u32(out, profile.k_max);
+}
+
+fn encode_storage_v3_record(
+    record: &crate::storage::bud3::pipeline::ObjectRecord,
+    out: &mut Vec<u8>,
+) {
+    encode_storage_v3_content_id(&record.content_id, out);
+    put_u64(out, record.object_len);
+    put_fixed(out, &record.commitment);
+    encode_storage_v3_profile(&record.profile, out);
+    out.extend_from_slice(&record.codec.to_le_bytes());
+    put_u32(out, record.symbols_per_segment);
+    put_u64(out, record.symbol_roots.len() as u64);
+    for root in &record.symbol_roots {
+        put_fixed(out, root);
+    }
+}
+
+fn encode_storage_v3_share(share: &crate::storage::bud3::placement::Share, out: &mut Vec<u8>) {
+    use crate::storage::bud3::placement::Class;
+    put_fixed(out, &share.validator);
+    match share.class {
+        Class::Full => put_u8(out, 0),
+        Class::Mobile => put_u8(out, 1),
+    }
+    put_u32(out, share.first_esi);
+    put_u32(out, share.symbols);
+}
+
+fn encode_storage_v3_proof(proof: &crate::storage::bud3::custody::CustodyProof, out: &mut Vec<u8>) {
+    put_u64(out, proof.segment);
+    put_u32(out, proof.esi);
+    put_u64(out, proof.position);
+    put_u64(out, proof.sub_block);
+    put_fixed(out, &proof.bytes);
+    put_u64(out, proof.symbol_path.len() as u64);
+    for step in &proof.symbol_path {
+        put_option_fixed32(out, *step);
+    }
+    put_u64(out, proof.root_path.len() as u64);
+    for step in &proof.root_path {
+        put_option_fixed32(out, *step);
+    }
+}
+
+fn encode_storage_v3_grant_row(row: &crate::storage::bud3::grants::GrantRow, out: &mut Vec<u8>) {
+    put_fixed(out, &row.grant_tag);
+    put_bytes(out, &row.one_time_pk);
+    put_bytes(out, &row.sealed_key_package);
+    put_u64(out, row.expires_at_epoch);
+}
+
+fn encode_storage_v3_shred_auth(
+    auth: &crate::storage::bud3::delete::GrantShredAuth,
+    out: &mut Vec<u8>,
+) {
+    put_fixed(out, &auth.grant_tag);
+    put_bytes(out, &auth.one_time_signature);
+}
+
+fn encode_verify_stark_tx(
+    tx: &crate::aggregation::programs::pcs_claim::VerifyStarkTx,
+    out: &mut Vec<u8>,
+) {
+    put_fixed(out, &tx.air_id);
+    put_u8(out, tx.degree_bits);
+    put_u64(out, tx.public_values.len() as u64);
+    for &pv in &tx.public_values {
+        put_u64(out, pv);
+    }
+    put_bytes(out, &tx.air_aux_data);
+    put_fixed(out, &tx.commitments.trace);
+    put_option_fixed32(out, tx.commitments.aux_trace);
+    put_fixed(out, &tx.commitments.quotient_chunks);
+    put_option_fixed32(out, tx.commitments.random);
+
+    let put_ext_slice = |out: &mut Vec<u8>, slice: &[[u64; 3]]| {
+        put_u64(out, slice.len() as u64);
+        for limbs in slice {
+            for &limb in limbs {
+                put_u64(out, limb);
+            }
+        }
+    };
+    let put_opt_ext_slice = |out: &mut Vec<u8>, opt: Option<&Vec<[u64; 3]>>| match opt {
+        Some(v) => {
+            put_u8(out, 1);
+            put_ext_slice(out, v);
+        }
+        None => put_u8(out, 0),
+    };
+    put_ext_slice(out, &tx.opened_values.trace_local);
+    put_opt_ext_slice(out, tx.opened_values.trace_next.as_ref());
+    put_opt_ext_slice(out, tx.opened_values.aux_trace_local.as_ref());
+    put_opt_ext_slice(out, tx.opened_values.aux_trace_next.as_ref());
+    put_opt_ext_slice(out, tx.opened_values.preprocessed_local.as_ref());
+    put_opt_ext_slice(out, tx.opened_values.preprocessed_next.as_ref());
+    put_u64(out, tx.opened_values.quotient_chunks.len() as u64);
+    for chunk in &tx.opened_values.quotient_chunks {
+        put_ext_slice(out, chunk);
+    }
+    put_opt_ext_slice(out, tx.opened_values.random.as_ref());
+}
+
+fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Vec<u8>) {
+    use crate::storage::bud3::tx::StorageTxV3;
+    match tx {
+        StorageTxV3::RegisterObject {
+            record,
+            shares,
+            lifetime_epochs,
+        } => {
+            put_u8(out, 0);
+            encode_storage_v3_record(record, out);
+            put_u64(out, shares.len() as u64);
+            for (seg, share) in shares {
+                put_u64(out, *seg);
+                encode_storage_v3_share(share, out);
+            }
+            put_u64(out, *lifetime_epochs);
+        }
+        StorageTxV3::CustodyAck { object } => {
+            put_u8(out, 1);
+            put_fixed(out, object);
+        }
+        StorageTxV3::CustodyProofBatch { proofs } => {
+            put_u8(out, 2);
+            put_u64(out, proofs.len() as u64);
+            for (object, proof) in proofs {
+                put_fixed(out, object);
+                encode_storage_v3_proof(proof, out);
+            }
+        }
+        StorageTxV3::RecordRepair {
+            object,
+            segment,
+            new_shares,
+            new_symbols,
+            new_root,
+            witness,
+        } => {
+            put_u8(out, 3);
+            put_fixed(out, object);
+            put_u64(out, *segment);
+            put_u64(out, new_shares.len() as u64);
+            for share in new_shares {
+                encode_storage_v3_share(share, out);
+            }
+            put_u64(out, new_symbols.len() as u64);
+            for sym in new_symbols {
+                put_u64(out, sym.segment);
+                put_u32(out, sym.esi);
+                put_bytes(out, &sym.data);
+            }
+            put_fixed(out, new_root);
+            match witness {
+                crate::storage::bud3::repair::RepairWitness::ProvenSymbols(proofs) => {
+                    put_u8(out, 0);
+                    put_u64(out, u64::try_from(proofs.len()).unwrap_or(u64::MAX));
+                    for p in proofs {
+                        put_u32(out, p.root_index);
+                        put_u64(out, p.position);
+                        put_u64(out, u64::try_from(p.root_path.len()).unwrap_or(u64::MAX));
+                        for step in &p.root_path {
+                            match step {
+                                None => put_u8(out, 0),
+                                Some(h) => {
+                                    put_u8(out, 1);
+                                    put_fixed(out, h);
+                                }
+                            }
+                        }
+                        put_u64(out, p.symbol.segment);
+                        put_u32(out, p.symbol.esi);
+                        put_bytes(out, &p.symbol.data);
+                    }
+                }
+                crate::storage::bud3::repair::RepairWitness::ValidatorAttestations(atts) => {
+                    put_u8(out, 1);
+                    put_u64(out, u64::try_from(atts.len()).unwrap_or(u64::MAX));
+                    for att in atts {
+                        put_fixed(out, &att.validator);
+                        put_bytes(out, &att.signature);
+                    }
+                }
+            }
+        }
+        StorageTxV3::BindNft { nft, object } => {
+            put_u8(out, 4);
+            put_fixed(out, nft);
+            put_fixed(out, object);
+        }
+        StorageTxV3::BurnReference { nft } => {
+            put_u8(out, 5);
+            put_fixed(out, nft);
+        }
+        StorageTxV3::DeleteObject { object } => {
+            put_u8(out, 14);
+            put_fixed(out, object);
+        }
+        StorageTxV3::RenewObject {
+            object,
+            extra_epochs,
+        } => {
+            put_u8(out, 6);
+            put_fixed(out, object);
+            put_u64(out, *extra_epochs);
+        }
+        StorageTxV3::DeclineContent { content } => {
+            put_u8(out, 7);
+            encode_storage_v3_content_id(content, out);
+        }
+        StorageTxV3::IssueViewGrant {
+            nft,
+            grant_nonce,
+            row,
+        } => {
+            put_u8(out, 8);
+            put_fixed(out, nft);
+            put_fixed(out, grant_nonce);
+            encode_storage_v3_grant_row(row, out);
+        }
+        StorageTxV3::RevokeViewGrant {
+            grant_tag,
+            one_time_signature,
+        } => {
+            put_u8(out, 9);
+            put_fixed(out, grant_tag);
+            put_bytes(out, one_time_signature);
+        }
+        StorageTxV3::SocialDelete { nft, grant_shreds } => {
+            put_u8(out, 10);
+            put_fixed(out, nft);
+            put_u64(out, grant_shreds.len() as u64);
+            for auth in grant_shreds {
+                encode_storage_v3_shred_auth(auth, out);
+            }
+        }
+        StorageTxV3::ReleaseShares {
+            object,
+            segment,
+            lower_quota_bytes,
+        } => {
+            put_u8(out, 11);
+            put_fixed(out, object);
+            match segment {
+                Some(seg) => {
+                    put_u8(out, 1);
+                    put_u64(out, *seg);
+                }
+                None => put_u8(out, 0),
+            }
+            put_u64(out, *lower_quota_bytes);
+        }
+        StorageTxV3::ReplaceObject {
+            old_object,
+            new_record,
+            new_shares,
+            attestations,
+            proposer_stake,
+        } => {
+            put_u8(out, 12);
+            put_fixed(out, old_object);
+            encode_storage_v3_record(new_record, out);
+            put_u64(out, new_shares.len() as u64);
+            for (seg, share) in new_shares {
+                put_u64(out, *seg);
+                encode_storage_v3_share(share, out);
+            }
+            put_u64(out, attestations.len() as u64);
+            for att in attestations {
+                put_fixed(out, &att.validator);
+                encode_storage_v3_content_id(&att.verified_content_id, out);
+                put_fixed(out, &att.new_commitment);
+                put_bytes(out, &att.signature);
+            }
+            put_u64(out, *proposer_stake);
+        }
+        StorageTxV3::PayFallbackView {
+            object,
+            receipt_id,
+            amount_atoms,
+        } => {
+            put_u8(out, 13);
+            put_fixed(out, object);
+            put_fixed(out, receipt_id);
+            put_u64(out, *amount_atoms);
+        }
     }
 }
 
@@ -4351,6 +5070,299 @@ fn encode_external_domain_tx(
                 },
             );
         }
+        // Tag 6: cryptographic contradiction challenge, appended first.
+        ExternalDomainTx::ChallengeContradiction(evidence) => {
+            put_u8(out, 6);
+            encode_raw_evidence(evidence, out);
+        }
+        // Tag 7: cross-slot ancestry challenge.
+        ExternalDomainTx::ChallengeAncestry(evidence) => {
+            put_u8(out, 7);
+            encode_raw_evidence(evidence, out);
+        }
+        // Tag 8: objective protocol equivocation or BitVM2 single-step fault proof.
+        ExternalDomainTx::SubmitFaultProof { domain, proof } => {
+            put_u8(out, 8);
+            put_fixed(out, &domain.0);
+            encode_objective_fault_proof(proof, out);
+        }
+        // Tag 9: permissionless committee or validator-set rotation proof, appended last.
+        ExternalDomainTx::RotateCommittee { domain, proof } => {
+            put_u8(out, 9);
+            put_fixed(out, &domain.0);
+            encode_committee_rotation_proof(proof, out);
+        }
+    }
+}
+
+fn encode_committee_rotation_proof(
+    proof: &crate::cross_domain::external::CommitteeRotationProof,
+    out: &mut Vec<u8>,
+) {
+    use crate::cross_domain::external::CommitteeRotationProof;
+    match proof {
+        CommitteeRotationProof::EthereumSyncSsz(eth) => {
+            put_u8(out, 0);
+            put_u64(out, eth.next_period);
+            put_u64(out, eth.next_member_pubkeys.len() as u64);
+            for pk in &eth.next_member_pubkeys {
+                put_bytes(out, pk);
+            }
+            put_bytes(out, &eth.next_aggregate_pubkey);
+            put_fixed(out, &eth.finalized_state_root);
+            put_u64(out, eth.next_sync_committee_gindex);
+            put_u64(out, eth.next_sync_committee_branch.len() as u64);
+            for node in &eth.next_sync_committee_branch {
+                put_fixed(out, node);
+            }
+            put_u64(out, eth.finalized_root_gindex);
+            put_fixed(out, &eth.subsequent_committee_root);
+        }
+        CommitteeRotationProof::TendermintSkip {
+            anchor_commit,
+            update,
+            next_validators_proof,
+            trusting_period_secs,
+        } => {
+            put_u8(out, 1);
+            encode_tendermint_commit_evidence(anchor_commit, out);
+            encode_tendermint_commit_evidence(update, out);
+            match next_validators_proof {
+                Some((root, merkle)) => {
+                    put_u8(out, 1);
+                    put_fixed(out, root);
+                    put_u64(out, merkle.index as u64);
+                    put_u64(out, merkle.total as u64);
+                    put_u64(out, merkle.aunts.len() as u64);
+                    for aunt in &merkle.aunts {
+                        put_fixed(out, aunt);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+            put_u64(out, *trusting_period_secs);
+        }
+        CommitteeRotationProof::TendermintBisection {
+            trusted,
+            light_params,
+            steps,
+        } => {
+            put_u8(out, 2);
+            put_string(out, &trusted.chain_id);
+            put_u64(out, trusted.height);
+            put_u64(out, trusted.time_secs);
+            put_u64(out, trusted.trusting_period_secs);
+            put_u64(out, trusted.validators.len() as u64);
+            for v in &trusted.validators {
+                put_fixed(out, &v.address);
+                put_fixed(out, &v.public_key);
+                put_u64(out, v.voting_power);
+            }
+            put_fixed(out, &trusted.next_validators_hash);
+            put_u64(out, light_params.trusting_period_secs);
+            put_u64(out, light_params.unbonding_period_secs);
+            put_u64(out, light_params.max_clock_drift_secs);
+            put_u64(out, light_params.max_height_drift);
+            put_u64(out, steps.len() as u64);
+            for step in steps {
+                encode_tendermint_commit_evidence(step, out);
+            }
+        }
+    }
+}
+
+fn encode_objective_fault_proof(
+    proof: &crate::cross_domain::external::ObjectiveFaultProof,
+    out: &mut Vec<u8>,
+) {
+    use crate::cross_domain::external::ObjectiveFaultProof;
+    match proof {
+        ObjectiveFaultProof::HotStuffEquivocation(hs) => {
+            put_u8(out, 0);
+            put_u64(out, hs.epoch);
+            put_u64(out, hs.view);
+            put_fixed(out, &hs.block_hash_a);
+            put_fixed(out, &hs.block_hash_b);
+            for vote in [&hs.vote_a, &hs.vote_b] {
+                put_fixed(out, &vote.signer_pubkey);
+                put_bytes(out, &vote.ed25519_sig);
+                put_bytes(out, &vote.pq_sig);
+            }
+        }
+        ObjectiveFaultProof::CasperFfgEquivocation(ffg) => {
+            put_u8(out, 1);
+            for vote in [&ffg.vote_a, &ffg.vote_b] {
+                put_fixed(out, &vote.signer);
+                put_u64(out, vote.source_epoch);
+                put_fixed(out, &vote.source_root);
+                put_u64(out, vote.target_epoch);
+                put_fixed(out, &vote.target_root);
+                put_bytes(out, &vote.signature);
+                put_bytes(out, &vote.pq_signature);
+            }
+        }
+        ObjectiveFaultProof::MysticetiEquivocation(my) => {
+            put_u8(out, 2);
+            for vertex in [&my.vertex_a, &my.vertex_b] {
+                put_fixed(out, &vertex.author);
+                put_u64(out, vertex.epoch);
+                put_u64(out, vertex.round);
+                put_fixed(out, &vertex.payload_digest);
+                put_u64(out, vertex.parents.len() as u64);
+                for parent in &vertex.parents {
+                    put_fixed(out, parent);
+                }
+                put_bytes(out, &vertex.ed25519_sig);
+                put_bytes(out, &vertex.pq_sig);
+            }
+        }
+        ObjectiveFaultProof::BitVmDisprove(bv) => {
+            put_u8(out, 3);
+            put_fixed(out, &bv.claim.state_root);
+            put_fixed(out, &bv.claim.tx_root);
+            put_fixed(out, &bv.claim.event_root);
+            put_fixed(out, &bv.claim.program_hash);
+            put_fixed(out, &bv.claim.trace_merkle_root);
+            put_u32(out, bv.claim.trace_chunk_count);
+            put_u64(out, bv.claim.claim_pow_height);
+            put_bytes(out, &bv.claim.operator_ed25519_sig);
+            put_bytes(out, &bv.claim.operator_pq_sig);
+            put_u32(out, bv.disputed_chunk.chunk_index);
+            put_fixed(out, &bv.disputed_chunk.pre_state);
+            put_fixed(out, &bv.disputed_chunk.claimed_post_state);
+            put_u8(out, bv.disputed_chunk.step_opcode);
+            put_fixed(out, &bv.disputed_chunk.step_witness);
+            put_u64(out, bv.trace_merkle_proof.len() as u64);
+            for step in &bv.trace_merkle_proof {
+                put_fixed(out, &step.sibling);
+                put_u8(out, u8::from(step.sibling_is_left));
+            }
+        }
+        ObjectiveFaultProof::DagEquivocation(dag) => {
+            use crate::cross_domain::external::dag_bft::DagEquivocationProof;
+            put_u8(out, 4);
+            match dag.as_ref() {
+                DagEquivocationProof::AnchorCertificate {
+                    round,
+                    first_anchor_digest,
+                    first_sigs,
+                    second_anchor_digest,
+                    second_sigs,
+                } => {
+                    put_u8(out, 0);
+                    put_u64(out, *round);
+                    put_fixed(out, first_anchor_digest);
+                    put_u64(out, first_sigs.len() as u64);
+                    for s in first_sigs {
+                        put_fixed(out, &s.signer_pubkey);
+                        put_bytes(out, &s.ed25519_sig);
+                        put_bytes(out, &s.pq_sig);
+                    }
+                    put_fixed(out, second_anchor_digest);
+                    put_u64(out, second_sigs.len() as u64);
+                    for s in second_sigs {
+                        put_fixed(out, &s.signer_pubkey);
+                        put_bytes(out, &s.ed25519_sig);
+                        put_bytes(out, &s.pq_sig);
+                    }
+                }
+                DagEquivocationProof::CausalParent { first, second } => {
+                    put_u8(out, 1);
+                    for cp in [first, second] {
+                        put_u64(out, cp.round);
+                        put_fixed(out, &cp.author);
+                        put_fixed(out, &cp.payload_root);
+                        put_fixed(out, &cp.digest);
+                        put_bytes(out, &cp.author_ed25519_sig);
+                        put_bytes(out, &cp.author_pq_sig);
+                    }
+                }
+                DagEquivocationProof::VoterVertex { first, second } => {
+                    put_u8(out, 2);
+                    for vv in [first, second] {
+                        put_u64(out, vv.round);
+                        put_fixed(out, &vv.author);
+                        put_u64(out, vv.parent_digests.len() as u64);
+                        for pd in &vv.parent_digests {
+                            put_fixed(out, pd);
+                        }
+                        put_fixed(out, &vv.digest);
+                        put_bytes(out, &vv.ed25519_sig);
+                        put_bytes(out, &vv.pq_sig);
+                    }
+                }
+            }
+        }
+        ObjectiveFaultProof::TendermintMisbehaviour {
+            trusted,
+            params: light_params,
+            evidence: misbehaviour,
+        } => {
+            put_u8(out, 5);
+            put_string(out, &trusted.chain_id);
+            put_u64(out, trusted.height);
+            put_u64(out, trusted.time_secs);
+            put_u64(out, trusted.trusting_period_secs);
+            put_u64(out, trusted.validators.len() as u64);
+            for v in &trusted.validators {
+                put_fixed(out, &v.address);
+                put_fixed(out, &v.public_key);
+                put_u64(out, v.voting_power);
+            }
+            put_fixed(out, &trusted.next_validators_hash);
+            put_u64(out, light_params.trusting_period_secs);
+            put_u64(out, light_params.unbonding_period_secs);
+            put_u64(out, light_params.max_clock_drift_secs);
+            put_u64(out, light_params.max_height_drift);
+            encode_tendermint_commit_evidence(&misbehaviour.header_1, out);
+            match &misbehaviour.header_2 {
+                Some(h2) => {
+                    put_u8(out, 1);
+                    encode_tendermint_commit_evidence(h2, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+    }
+}
+
+fn encode_tendermint_commit_evidence(
+    c: &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
+    out: &mut Vec<u8>,
+) {
+    put_string(out, &c.chain_id);
+    put_u64(out, c.height);
+    put_u64(out, c.round.cast_unsigned());
+    put_fixed(out, &c.block_hash);
+    put_u32(out, c.parts_total);
+    put_fixed(out, &c.parts_hash);
+    put_u64(out, c.version_block);
+    put_fixed(out, &c.last_block_hash);
+    put_u32(out, c.last_parts_total);
+    put_fixed(out, &c.last_parts_hash);
+    put_fixed(out, &c.last_commit_hash);
+    put_fixed(out, &c.data_hash);
+    put_fixed(out, &c.validators_hash);
+    put_fixed(out, &c.next_validators_hash);
+    put_fixed(out, &c.consensus_hash);
+    put_fixed(out, &c.app_hash);
+    put_fixed(out, &c.last_results_hash);
+    put_fixed(out, &c.evidence_hash);
+    put_fixed(out, &c.proposer_address);
+    put_u64(out, c.commit_time);
+    put_u32(out, c.commit_time_nanos);
+    put_u64(out, c.validators.len() as u64);
+    for v in &c.validators {
+        put_fixed(out, &v.address);
+        put_fixed(out, &v.public_key);
+        put_u64(out, v.voting_power);
+    }
+    put_u64(out, c.signatures.len() as u64);
+    for sig in &c.signatures {
+        put_fixed(out, &sig.address);
+        put_u64(out, sig.timestamp_seconds.cast_unsigned());
+        put_u32(out, sig.timestamp_nanos);
+        put_bytes(out, &sig.signature);
     }
 }
 
@@ -4382,6 +5394,175 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 Some(id) => {
                     put_u8(out, 1);
                     put_u64(out, *id);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 2: appended, never inserted. Tags 0 and 1 keep their bytes so
+        // every registration already signed under them stays verifiable.
+        AdapterSpec::BitcoinSpv { network, anchor } => {
+            put_u8(out, 2);
+            put_string(out, network);
+            match anchor {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.height);
+                    put_fixed(out, &pin.block_hash);
+                    put_u32(out, pin.bits);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 3: appended, never inserted. Tags 0, 1 and 2 keep their bytes so
+        // every registration already signed under them stays verifiable.
+        AdapterSpec::TendermintCommit {
+            network,
+            chain_id,
+            validator_set_hash,
+        } => {
+            put_u8(out, 3);
+            put_string(out, network);
+            put_string(out, chain_id);
+            match validator_set_hash {
+                Some(hash) => {
+                    put_u8(out, 1);
+                    put_fixed(out, hash);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 4: modular 2D DAS + NMT data-availability adapter, appended last.
+        AdapterSpec::DataAvailability { network, committee } => {
+            put_u8(out, 4);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.namespace_id);
+                    put_u64(out, u64::from(pin.min_samples));
+                    put_u64(out, u64::from(pin.min_square_size));
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::da_sampling::DaCommitteeMember {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 5: linear chained BFT (HotStuff 3-chain QC) adapter, appended last.
+        AdapterSpec::HotStuffQc { network, committee } => {
+            put_u8(out, 5);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::hotstuff::HotStuffValidator {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 6: stake-weighted round-DAG BFT (Bullshark) adapter, appended last.
+        AdapterSpec::DagCertificate { network, committee } => {
+            put_u8(out, 6);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::dag_bft::DagBftValidator {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 7: dual-quorum Casper-FFG checkpoint adapter, appended last.
+        AdapterSpec::CasperFfg { network, committee } => {
+            put_u8(out, 7);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.validators.len() as u64);
+                    for member in &pin.validators {
+                        let crate::cross_domain::external::casper_ffg::FfgValidator {
+                            pubkey,
+                            stake,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, pubkey);
+                        put_u64(out, *stake);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 8: uncertified 3-round Mysticeti DAG adapter, appended last.
+        AdapterSpec::MysticetiDag { network, committee } => {
+            put_u8(out, 8);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::mysticeti_dag::MysticetiMember {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 9: BitVM2 / DisproveScript PoW covenant adapter, appended last.
+        AdapterSpec::BitVmCovenant { network, anchor } => {
+            put_u8(out, 9);
+            put_string(out, network);
+            match anchor {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.height);
+                    put_fixed(out, &pin.block_hash);
+                    put_u32(out, pin.bits);
+                    put_fixed(out, &pin.program_hash);
+                    put_u64(out, pin.min_pow_confirmations);
+                    put_u64(out, pin.challenge_blocks);
+                    put_fixed(out, &pin.operator_ed25519_pubkey);
+                    put_bytes(out, &pin.operator_pq_pubkey);
                 }
                 None => put_u8(out, 0),
             }
@@ -4460,6 +5641,37 @@ mod v29_signing_tests {
         tx.sign(&keypair);
         assert!(tx.verify());
         tx
+    }
+
+    #[test]
+    fn proof_market_withdrawal_amount_and_operation_are_signed() {
+        use crate::settlement::domains::SettlementTx;
+        use crate::settlement::proof_market::ProofMarketTx;
+
+        let withdraw = |amount| {
+            TransactionType::Settlement(SettlementTx::ProofMarket(Box::new(
+                ProofMarketTx::WithdrawEscrow { amount },
+            )))
+        };
+        let base = signed_variant(withdraw(10));
+        let base_hash = base.signing_hash();
+
+        let mut changed = base.clone();
+        changed.tx_type = withdraw(11);
+        assert_ne!(
+            changed.signing_hash(),
+            base_hash,
+            "a relay cannot raise a signed withdrawal"
+        );
+
+        changed.tx_type = TransactionType::Settlement(SettlementTx::ProofMarket(Box::new(
+            ProofMarketTx::FundEscrow { amount: 10 },
+        )));
+        assert_ne!(
+            changed.signing_hash(),
+            base_hash,
+            "funding and withdrawal have distinct signed operation tags"
+        );
     }
 
     /// Every field an external-domain transaction carries reaches the
@@ -4550,6 +5762,185 @@ mod v29_signing_tests {
             ..QuorumPolicy::strict(2, 3)
         });
         assert_ne!(strict.signing_hash(), loose.signing_hash());
+
+        assert_bft_fault_proof_preimages();
+        assert_dag_and_bitvm_fault_proof_preimages();
+    }
+
+    fn assert_bft_fault_proof_preimages() {
+        use crate::cross_domain::external::casper_ffg::{FfgEquivocationProof, FfgVote};
+        use crate::cross_domain::external::hotstuff::{HotStuffEquivocationProof, HotStuffVoteSig};
+        use crate::cross_domain::external::{DomainKey, ExternalDomainTx, ObjectiveFaultProof};
+
+        let submit_fault = |domain: DomainKey, proof: ObjectiveFaultProof| {
+            TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof { domain, proof })
+        };
+        let hs_base = HotStuffEquivocationProof {
+            epoch: 7,
+            view: 12,
+            block_hash_a: [0x11; 32],
+            block_hash_b: [0x22; 32],
+            vote_a: HotStuffVoteSig {
+                signer_pubkey: [0x33; 32],
+                ed25519_sig: vec![1, 2],
+                pq_sig: vec![3, 4],
+            },
+            vote_b: HotStuffVoteSig {
+                signer_pubkey: [0x33; 32],
+                ed25519_sig: vec![5, 6],
+                pq_sig: vec![7, 8],
+            },
+        };
+        let hs_h0 = signed_variant(submit_fault(
+            DomainKey([1u8; 32]),
+            ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_base.clone())),
+        ))
+        .signing_hash();
+        let mut hs_mut = hs_base.clone();
+        hs_mut.vote_b.pq_sig.push(9);
+        assert_ne!(
+            hs_h0,
+            signed_variant(submit_fault(
+                DomainKey([1u8; 32]),
+                ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_mut)),
+            ))
+            .signing_hash()
+        );
+        assert_ne!(
+            hs_h0,
+            signed_variant(submit_fault(
+                DomainKey([2u8; 32]),
+                ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_base)),
+            ))
+            .signing_hash()
+        );
+
+        let ffg_base = FfgEquivocationProof {
+            vote_a: FfgVote {
+                signer: [0x41; 32],
+                source_epoch: 1,
+                source_root: [0x42; 32],
+                target_epoch: 3,
+                target_root: [0x43; 32],
+                signature: vec![1],
+                pq_signature: vec![2],
+            },
+            vote_b: FfgVote {
+                signer: [0x41; 32],
+                source_epoch: 2,
+                source_root: [0x44; 32],
+                target_epoch: 4,
+                target_root: [0x45; 32],
+                signature: vec![3],
+                pq_signature: vec![4],
+            },
+        };
+        let ffg_h0 = signed_variant(submit_fault(
+            DomainKey([3u8; 32]),
+            ObjectiveFaultProof::CasperFfgEquivocation(Box::new(ffg_base.clone())),
+        ))
+        .signing_hash();
+        let mut ffg_mut = ffg_base;
+        ffg_mut.vote_b.pq_signature.push(5);
+        assert_ne!(
+            ffg_h0,
+            signed_variant(submit_fault(
+                DomainKey([3u8; 32]),
+                ObjectiveFaultProof::CasperFfgEquivocation(Box::new(ffg_mut)),
+            ))
+            .signing_hash()
+        );
+    }
+
+    fn assert_dag_and_bitvm_fault_proof_preimages() {
+        use crate::cross_domain::external::bitvm_covenant::{
+            BitVmPegClaim, DisproveScriptProof, MerkleStep, TraceChunkStep,
+        };
+        use crate::cross_domain::external::mysticeti_dag::{
+            MysticetiEquivocationProof, MysticetiVertex,
+        };
+        use crate::cross_domain::external::{DomainKey, ExternalDomainTx, ObjectiveFaultProof};
+
+        let submit_fault = |domain: DomainKey, proof: ObjectiveFaultProof| {
+            TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof { domain, proof })
+        };
+        let my_base = MysticetiEquivocationProof {
+            vertex_a: MysticetiVertex {
+                author: [0x51; 32],
+                epoch: 2,
+                round: 10,
+                payload_digest: [0x52; 32],
+                parents: vec![[0x53; 32]],
+                ed25519_sig: vec![1],
+                pq_sig: vec![2],
+            },
+            vertex_b: MysticetiVertex {
+                author: [0x51; 32],
+                epoch: 2,
+                round: 10,
+                payload_digest: [0x54; 32],
+                parents: vec![[0x55; 32]],
+                ed25519_sig: vec![3],
+                pq_sig: vec![4],
+            },
+        };
+        let my_h0 = signed_variant(submit_fault(
+            DomainKey([4u8; 32]),
+            ObjectiveFaultProof::MysticetiEquivocation(Box::new(my_base.clone())),
+        ))
+        .signing_hash();
+        let mut my_mut = my_base;
+        my_mut.vertex_b.parents.push([0x56; 32]);
+        assert_ne!(
+            my_h0,
+            signed_variant(submit_fault(
+                DomainKey([4u8; 32]),
+                ObjectiveFaultProof::MysticetiEquivocation(Box::new(my_mut)),
+            ))
+            .signing_hash()
+        );
+
+        let bv_base = DisproveScriptProof {
+            claim: BitVmPegClaim {
+                state_root: [0x61; 32],
+                tx_root: [0x62; 32],
+                event_root: [0x63; 32],
+                program_hash: [0x64; 32],
+                trace_merkle_root: [0x65; 32],
+                trace_chunk_count: 2,
+                claim_pow_height: 51,
+                operator_ed25519_sig: vec![1],
+                operator_pq_sig: vec![2],
+            },
+            disputed_chunk: TraceChunkStep {
+                chunk_index: 0,
+                pre_state: [0x66; 32],
+                claimed_post_state: [0x67; 32],
+                step_opcode: 3,
+                step_witness: [0x68; 32],
+            },
+            trace_merkle_proof: vec![MerkleStep {
+                sibling: [0x69; 32],
+                sibling_is_left: false,
+            }],
+        };
+        let bv_h0 = signed_variant(submit_fault(
+            DomainKey([5u8; 32]),
+            ObjectiveFaultProof::BitVmDisprove(Box::new(bv_base.clone())),
+        ))
+        .signing_hash();
+        let mut bv_mut = bv_base;
+        if let Some(step) = bv_mut.trace_merkle_proof.first_mut() {
+            step.sibling_is_left = true;
+        }
+        assert_ne!(
+            bv_h0,
+            signed_variant(submit_fault(
+                DomainKey([5u8; 32]),
+                ObjectiveFaultProof::BitVmDisprove(Box::new(bv_mut)),
+            ))
+            .signing_hash()
+        );
     }
 
     /// Every field a settlement transaction carries reaches the signing
@@ -4995,6 +6386,8 @@ mod v29_signing_tests {
             credential_roots: Default::default(),
             guardians: vec![],
             recovery_threshold: 0,
+            issued_credentials: 0,
+            recovery_nonce: 0,
         };
         let base_credential = CredentialCommitment {
             issuer: test_addr_from_byte(2u8),
@@ -5069,6 +6462,26 @@ mod v29_signing_tests {
         let mut r = base_record.clone();
         r.recovery_threshold = 1;
         assert_ne!(base_register, hash_of(register(r)), "recovery_threshold");
+        // `issued_credentials` is the per-subject ceiling the credential door
+        // reads, and `recovery_nonce` is what stops an applied guardian quorum
+        // from being replayed into the same epoch. A record carries both on the
+        // wire, so a relay that lowered the counter or rewound the nonce would
+        // otherwise be editing an authorization outcome behind a signature that
+        // still verifies.
+        let mut r = base_record.clone();
+        r.issued_credentials = 7;
+        assert_ne!(
+            base_register,
+            hash_of(register(r)),
+            "issued_credentials must be in the signed preimage"
+        );
+        let mut r = base_record.clone();
+        r.recovery_nonce = 3;
+        assert_ne!(
+            base_register,
+            hash_of(register(r)),
+            "recovery_nonce must be in the signed preimage"
+        );
 
         let base_issue = hash_of(issue(base_credential.clone()));
         let mut c = base_credential.clone();
@@ -6106,5 +7519,195 @@ mod recovery_tests {
         kind.tx_type = TransactionType::Stake;
         kind.hash = kind.calculate_hash();
         assert!(!kind.verify_in(&registry));
+    }
+
+    #[test]
+    fn objective_fault_proof_preimage_covers_dag_and_tendermint_fields() {
+        use crate::cross_domain::external::dag_bft::{
+            DagBftSig, DagCausalParent, DagEquivocationProof, DagVoterVertex,
+        };
+        use crate::cross_domain::external::tendermint::{
+            TendermintCommitEvidence, TendermintLightParams, TendermintMisbehaviour,
+            TendermintSignature, TendermintValidator, TrustedTendermintState,
+        };
+        use crate::cross_domain::external::{DomainKey, ExternalDomainTx, ObjectiveFaultProof};
+
+        let domain = DomainKey([0x44; 32]);
+        let base_tx = Transaction::new_with_chain_id(
+            Address::from([1u8; 32]),
+            Address::from([2u8; 32]),
+            0,
+            1,
+            0,
+            Vec::new(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::Transfer,
+        );
+        let hash_of = |proof: ObjectiveFaultProof| {
+            let mut tx = base_tx.clone();
+            tx.tx_type = TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof {
+                domain,
+                proof,
+            });
+            tx.signing_hash()
+        };
+
+        let base_sig = DagBftSig {
+            signer_pubkey: [1u8; 32],
+            ed25519_sig: vec![2u8; 64],
+            pq_sig: vec![3u8; 8],
+        };
+        let anchor_base = DagEquivocationProof::AnchorCertificate {
+            round: 4,
+            first_anchor_digest: [0xA1; 32],
+            first_sigs: vec![base_sig.clone()],
+            second_anchor_digest: [0xA2; 32],
+            second_sigs: vec![base_sig],
+        };
+        let mut anchor_round = anchor_base.clone();
+        if let DagEquivocationProof::AnchorCertificate { round, .. } = &mut anchor_round {
+            *round = 6;
+        }
+        let mut anchor_pq = anchor_base.clone();
+        if let DagEquivocationProof::AnchorCertificate { second_sigs, .. } = &mut anchor_pq {
+            second_sigs[0].pq_sig.push(9);
+        }
+
+        let parent_base = DagCausalParent {
+            round: 3,
+            author: [0xB1; 32],
+            payload_root: [0xB2; 32],
+            digest: [0xB3; 32],
+            author_ed25519_sig: vec![4u8; 64],
+            author_pq_sig: vec![5u8; 8],
+        };
+        let mut parent_alt = parent_base.clone();
+        parent_alt.payload_root[0] ^= 1;
+
+        let voter_base = DagVoterVertex {
+            round: 5,
+            author: [0xC1; 32],
+            parent_digests: vec![[0xC2; 32]],
+            digest: [0xC3; 32],
+            ed25519_sig: vec![6u8; 64],
+            pq_sig: vec![7u8; 8],
+        };
+        let mut voter_alt = voter_base.clone();
+        voter_alt.parent_digests.push([0xC4; 32]);
+
+        let tm_val = TendermintValidator {
+            address: [0x11; 20],
+            public_key: [0x22; 32],
+            voting_power: 100,
+        };
+        let tm_header = TendermintCommitEvidence {
+            chain_id: "cosmoshub-4".to_string(),
+            height: 50,
+            round: 0,
+            block_hash: [0x31; 32],
+            parts_total: 1,
+            parts_hash: [0x32; 32],
+            version_block: 11,
+            last_block_hash: [0x33; 32],
+            last_parts_total: 1,
+            last_parts_hash: [0x34; 32],
+            last_commit_hash: [0x35; 32],
+            data_hash: [0x36; 32],
+            validators_hash: [0x37; 32],
+            next_validators_hash: [0x38; 32],
+            consensus_hash: [0x39; 32],
+            app_hash: [0x3A; 32],
+            last_results_hash: [0x3B; 32],
+            evidence_hash: [0x3C; 32],
+            proposer_address: [0x3D; 20],
+            commit_time: 1_700_000_000,
+            commit_time_nanos: 42,
+            validators: vec![tm_val],
+            signatures: vec![TendermintSignature {
+                address: [0x11; 20],
+                timestamp_seconds: 1_700_000_000,
+                timestamp_nanos: 42,
+                signature: vec![8u8; 64],
+            }],
+        };
+        let tm_trusted = TrustedTendermintState {
+            chain_id: "cosmoshub-4".to_string(),
+            height: 49,
+            time_secs: 1_699_999_990,
+            trusting_period_secs: 1_209_600,
+            validators: vec![tm_val],
+            next_validators_hash: [0x37; 32],
+        };
+        let tm_params = TendermintLightParams {
+            trusting_period_secs: 1_209_600,
+            unbonding_period_secs: 1_814_400,
+            max_clock_drift_secs: 10,
+            max_height_drift: 10_000,
+        };
+        let mut tm_header_2 = tm_header.clone();
+        tm_header_2.block_hash[0] ^= 0xFF;
+
+        let mut tm_params_alt = tm_params;
+        tm_params_alt.max_height_drift += 1;
+
+        let hashes = [
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(anchor_base))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(anchor_round))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(anchor_pq))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::CausalParent {
+                    first: parent_base.clone(),
+                    second: parent_base,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::CausalParent {
+                    first: parent_alt.clone(),
+                    second: parent_alt,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::VoterVertex {
+                    first: voter_base.clone(),
+                    second: voter_base,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::VoterVertex {
+                    first: voter_alt.clone(),
+                    second: voter_alt,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::TendermintMisbehaviour {
+                trusted: Box::new(tm_trusted.clone()),
+                params: tm_params,
+                evidence: Box::new(TendermintMisbehaviour {
+                    header_1: tm_header.clone(),
+                    header_2: None,
+                }),
+            }),
+            hash_of(ObjectiveFaultProof::TendermintMisbehaviour {
+                trusted: Box::new(tm_trusted.clone()),
+                params: tm_params,
+                evidence: Box::new(TendermintMisbehaviour {
+                    header_1: tm_header.clone(),
+                    header_2: Some(tm_header_2),
+                }),
+            }),
+            hash_of(ObjectiveFaultProof::TendermintMisbehaviour {
+                trusted: Box::new(tm_trusted),
+                params: tm_params_alt,
+                evidence: Box::new(TendermintMisbehaviour {
+                    header_1: tm_header,
+                    header_2: None,
+                }),
+            }),
+        ];
+        let unique: std::collections::BTreeSet<[u8; 32]> = hashes.into_iter().collect();
+        assert_eq!(
+            unique.len(),
+            hashes.len(),
+            "every DagEquivocation and TendermintMisbehaviour field must move signing_hash"
+        );
     }
 }

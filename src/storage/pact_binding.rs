@@ -1,24 +1,31 @@
-//! Storage PACT binding: recipe + residual commitment and the registry root.
+//! Storage PACT binding: generator + residual commitment and the registry root.
 //!
 //! # Where it is called from
 //!
 //! `QuantumAccountRegistry::register_with_pacts` compares an account's
 //! `pact_root` field against the root of the registry defined here
-//! (`src/account_abstraction/registry.rs`). For a long time it did not: an
-//! account carried a `pact_root`, but nothing checked that the root named a
-//! real set of pacts, so the field was a claim rather than a binding.
+//! (`src/account_abstraction/registry.rs`). The plain `register` entry point
+//! rejects non-zero pact roots, so callers cannot bypass that evidence check.
+//! This is an in-memory registry API boundary: no block transaction writes the
+//! quantum-account registry and its root is not part of `AccountState` yet.
 //!
 //! # What is verified
 //!
 //! A pact's commitment must be the hash of its own payload
 //! (`verify_commitment`), and the registry root must be recomputable from the
 //! pacts it contains (`verify_root`). Without the second one a root could also
-//! match a set that contains no pacts at all.
+//! match a set that contains no pacts at all. The root commits to the set, not
+//! to the delivery order: pacts are stored in canonical id order, and a
+//! registry that is not in that order is refused (V3 label).
 
 use sha3::{Digest, Sha3_256};
 
+/// Storage pact entry verified inside [`PactRegistry::verify_root`].
+///
+/// Convenience: exposed for quantum-account pact-root commitment tests and
+/// `PactRegistry` verification in `src/account_abstraction/registry.rs`.
 #[derive(Debug, Clone)]
-pub struct Pact {
+pub(crate) struct Pact {
     pub id: [u8; 32],
     pub recipe_hash: [u8; 32],
     pub seed: [u8; 32],
@@ -35,6 +42,7 @@ impl Pact {
     /// outside the `0..=2` range.
     // Not const: the nightly jobs (udeps, determinism) reject trait calls in
     // const fns with E0658; this fn was reverted from const in c72b911.
+    #[cfg(test)]
     #[allow(clippy::missing_const_for_fn)]
     pub fn new(
         id: [u8; 32],
@@ -67,10 +75,38 @@ impl Pact {
         })
     }
 
+    /// Validate all structural invariants of a pact (used by both [`Self::new`]
+    /// and [`PactRegistry::verify_root`] so directly constructed or deserialized
+    /// pacts cannot bypass bounds).
+    ///
     /// # Errors
     ///
-    /// Returns an error when the payload does not hash to the committed value.
-    pub fn verify_commitment(&self, payload: &[u8]) -> Result<(), &'static str> {
+    /// Returns an error when any field violates the pact invariants.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.byte_budget > 128 {
+            return Err("storage pact: byte_budget >128");
+        }
+        if self.mode_flag > 2 {
+            return Err("storage pact: mode_flag >2");
+        }
+        if (self.mode_flag == 0) != (self.residual_commitment == [0u8; 32]) {
+            return Err("storage pact: mode_flag does not match residual_commitment");
+        }
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the payload exceeds `byte_budget` or does not hash
+    /// to the committed value.
+    #[cfg(test)]
+    pub(crate) fn verify_commitment(&self, payload: &[u8]) -> Result<(), &'static str> {
+        self.validate()?;
+        let payload_len = u64::try_from(payload.len())
+            .map_err(|_| "storage pact: payload exceeds byte_budget")?;
+        if payload_len > self.byte_budget {
+            return Err("storage pact: payload exceeds byte_budget");
+        }
         let mut h = Sha3_256::new();
         h.update(payload);
         let calc: [u8; 32] = h.finalize().into();
@@ -80,10 +116,12 @@ impl Pact {
         Ok(())
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn is_pure_production(&self) -> bool {
         self.mode_flag == 0 && self.residual_commitment == [0u8; 32]
     }
+    #[cfg(test)]
     #[must_use]
     // Not const: the nightly jobs (udeps, determinism) reject trait calls in
     // const fns with E0658; this fn was reverted from const in c72b911.
@@ -95,7 +133,7 @@ impl Pact {
 
 #[derive(Debug, Clone)]
 pub struct PactRegistry {
-    pub pacts: Vec<Pact>,
+    pub(crate) pacts: Vec<Pact>,
     pub root: [u8; 32],
 }
 
@@ -126,19 +164,26 @@ impl PactRegistry {
     /// # Errors
     ///
     /// Returns an error when the id is already registered or the registry is full.
-    pub fn add_pact(&mut self, pact: Pact) -> Result<(), &'static str> {
+    #[cfg(test)]
+    pub(crate) fn add_pact(&mut self, pact: Pact) -> Result<(), &'static str> {
         if self.pacts.len() >= MAX_PACTS {
             return Err("storage pact: registry is full");
         }
         if self.pacts.iter().any(|existing| existing.id == pact.id) {
             return Err("storage pact: duplicate pact id");
         }
-        self.pacts.push(pact);
+        // The root must describe the set, not the delivery order: insert in
+        // id order so `[A, B]` and `[B, A]` cannot commit to different roots.
+        let at = self
+            .pacts
+            .partition_point(|existing| existing.id <= pact.id);
+        self.pacts.insert(at, pact);
         self.recompute_root();
         Ok(())
     }
 
-    pub fn recompute_root(&mut self) {
+    #[cfg(test)]
+    pub(crate) fn recompute_root(&mut self) {
         self.root = self.computed_root();
     }
 
@@ -163,8 +208,13 @@ impl PactRegistry {
         // same id and commitment were one root. The count in front of the
         // pacts and the fixed width of every field keep the encoding
         // injective.
+        //
+        // V3 hashes the pacts in canonical id order and refuses an unsorted
+        // registry (`verify_root`): under V2 the preimage followed the `Vec`,
+        // so one set delivered two ways committed to two roots. The label
+        // moves with the rule so a V2 root can never be read as a V3 root.
         let mut h = Sha3_256::new();
-        h.update(b"BUDLUM_PACT_REGISTRY_V2");
+        h.update(b"BUDLUM_PACT_REGISTRY_V3");
         h.update((self.pacts.len() as u64).to_le_bytes());
         for p in &self.pacts {
             h.update(p.id);
@@ -180,9 +230,25 @@ impl PactRegistry {
 
     /// # Errors
     ///
-    /// Returns an error when the recomputed root does not match the stored
-    /// root.
+    /// Returns an error when any pact violates structural invariants, ids collide,
+    /// the pacts are not in canonical id order, capacity is exceeded, or the
+    /// recomputed root differs from the stored root.
     pub fn verify_root(&self) -> Result<(), &'static str> {
+        if self.pacts.len() > MAX_PACTS {
+            return Err("storage pact: registry is full");
+        }
+        let mut seen_ids = std::collections::BTreeSet::new();
+        for pact in &self.pacts {
+            pact.validate()?;
+            if !seen_ids.insert(pact.id) {
+                return Err("storage pact: duplicate pact id");
+            }
+        }
+        // A deserialized or directly constructed registry skips `add_pact`;
+        // the root is only order-independent if storage is canonical.
+        if !self.pacts.windows(2).all(|w| w[0].id < w[1].id) {
+            return Err("storage pact: pacts are not in canonical id order");
+        }
         if self.computed_root() != self.root {
             return Err("storage pact: root mismatch");
         }
@@ -196,7 +262,8 @@ impl PactGates {
     /// # Errors
     ///
     /// Returns an error when the pact commitment does not match its payload.
-    pub fn kq_storage_pact(pact: &Pact, payload: &[u8]) -> Result<(), &'static str> {
+    #[cfg(test)]
+    pub(crate) fn kq_storage_pact(pact: &Pact, payload: &[u8]) -> Result<(), &'static str> {
         pact.verify_commitment(payload)
     }
     /// # Errors
@@ -231,6 +298,8 @@ mod tests {
         let comm: [u8; 32] = h.finalize().into();
         let pact = Pact::new([1u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 10, 0).unwrap();
         assert!(pact.verify_commitment(payload).is_ok());
+        assert!(PactGates::kq_storage_pact(&pact, payload).is_ok());
+        assert!(PactGates::kq_storage_pact(&pact, b"tampered").is_err());
         assert!(pact.is_pure_production());
     }
     /// A fresh registry has to agree with its own root.
@@ -304,6 +373,77 @@ mod tests {
         }
     }
 
+    /// The same pact set in either arrival order must commit to one root.
+    ///
+    /// `add_pact` used to append, and the root hashed the `Vec` in insertion
+    /// order: `[A, B]` and `[B, A]` were two different roots for one set, so
+    /// an account's `pact_root` depended on delivery order, not on the pacts.
+    /// The registry now keeps the pacts in id order, so arrival order cannot
+    /// reach the root.
+    #[test]
+    fn pact_roots_are_order_independent() {
+        let make = |id: u8| {
+            Pact::new(
+                [id; 32],
+                [0u8; 32],
+                [0u8; 32],
+                [id.wrapping_add(10); 32],
+                [0u8; 32],
+                10,
+                0,
+            )
+            .expect("valid pact")
+        };
+        let mut forward = PactRegistry::new();
+        forward.add_pact(make(1)).expect("first");
+        forward.add_pact(make(2)).expect("second");
+        let mut backward = PactRegistry::new();
+        backward.add_pact(make(2)).expect("first");
+        backward.add_pact(make(1)).expect("second");
+        assert_eq!(
+            forward.computed_root(),
+            backward.computed_root(),
+            "one pact set must commit to one root regardless of arrival order"
+        );
+        assert!(forward.verify_root().is_ok());
+        assert!(backward.verify_root().is_ok());
+        assert_eq!(
+            forward.pacts.iter().map(|p| p.id).collect::<Vec<_>>(),
+            backward.pacts.iter().map(|p| p.id).collect::<Vec<_>>(),
+            "the stored order must be canonical (id order)"
+        );
+    }
+
+    /// A hand-ordered registry (direct construction) must be refused.
+    ///
+    /// Canonical storage is what makes the root order-independent; a
+    /// deserialized or directly built registry that skips the ordering must
+    /// not pass verification.
+    #[test]
+    fn a_non_canonical_pact_order_is_refused() {
+        let make = |id: u8| {
+            Pact::new(
+                [id; 32],
+                [0u8; 32],
+                [0u8; 32],
+                [id.wrapping_add(10); 32],
+                [0u8; 32],
+                10,
+                0,
+            )
+            .expect("valid pact")
+        };
+        let mut unsorted = PactRegistry {
+            pacts: vec![make(2), make(1)],
+            root: [0u8; 32],
+        };
+        unsorted.recompute_root();
+        assert!(
+            unsorted.verify_root().is_err(),
+            "a registry whose pacts are not in canonical id order must be refused"
+        );
+    }
+
     #[test]
     fn a_pact_id_cannot_be_added_twice() {
         let mut reg = PactRegistry::new();
@@ -338,5 +478,48 @@ mod tests {
         assert!(Pact::new([1u8; 32], z, z, z, z, 10, 0).is_ok());
         assert!(Pact::new([1u8; 32], z, z, z, r, 10, 1).is_ok());
         assert!(Pact::new([1u8; 32], z, z, z, r, 10, 2).is_ok());
+    }
+
+    #[test]
+    fn verify_root_and_verify_commitment_enforce_pact_invariants_against_direct_construction() {
+        let payload = b"over-budget-payload";
+        let mut h = Sha3_256::new();
+        h.update(payload);
+        let comm: [u8; 32] = h.finalize().into();
+        let pact = Pact::new([1u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 4, 0).unwrap();
+        assert!(
+            pact.verify_commitment(payload).is_err(),
+            "payload larger than declared byte_budget must be refused"
+        );
+
+        // Direct struct literal with forged mode_flag / budget / duplicate ids + matching root:
+        let mut forged_mode = PactRegistry {
+            pacts: vec![Pact {
+                id: [2u8; 32],
+                recipe_hash: [0u8; 32],
+                seed: [0u8; 32],
+                commitment: comm,
+                residual_commitment: [9u8; 32], // contradicts mode_flag 0
+                byte_budget: 10,
+                mode_flag: 0,
+            }],
+            root: [0u8; 32],
+        };
+        forged_mode.recompute_root();
+        assert!(
+            forged_mode.verify_root().is_err(),
+            "verify_root must refuse malformed pact even when root matches"
+        );
+
+        let valid = Pact::new([3u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 32, 0).unwrap();
+        let mut dup = PactRegistry {
+            pacts: vec![valid.clone(), valid],
+            root: [0u8; 32],
+        };
+        dup.recompute_root();
+        assert!(
+            dup.verify_root().is_err(),
+            "verify_root must refuse duplicate pact ids"
+        );
     }
 }

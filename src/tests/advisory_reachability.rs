@@ -10,7 +10,7 @@
 //! flip (the muxer picking the patched backend, DNSSEC not being compiled in,
 //! the node never serving DNS). None of that is needed any more: libp2p 0.56
 //! pinned the vulnerable versions, and pinning the 0.57.0 tree moves the graph
-//! to yamux 0.14.0 and hickory 0.26.1, so the findings are **fixed** rather
+//! to yamux 0.14.0 and hickory 0.26.1, so vulnerabilities are **fixed** rather
 //! than argued away.
 //!
 //! These tests now guard the fix instead of the excuse. They fail if the graph
@@ -159,13 +159,60 @@ mod tests {
             );
             let quinn_udp_versions = locked_versions_in(lock, "quinn-udp");
             assert!(
-                quinn_udp_versions.iter().all(|v| version_at_least(v, "0.5.16")),
+                quinn_udp_versions
+                    .iter()
+                    .all(|v| version_at_least(v, "0.5.16")),
                 "{name}: quinn-udp must be >= 0.5.16 (RUSTSEC-2026-0538), got {quinn_udp_versions:?}"
             );
             let gossipsub_versions = locked_versions_in(lock, "libp2p-gossipsub");
             assert!(
-                gossipsub_versions.iter().all(|v| version_at_least(v, "0.50.1")),
+                gossipsub_versions
+                    .iter()
+                    .all(|v| version_at_least(v, "0.50.1")),
                 "{name}: libp2p-gossipsub must be >= 0.50.1 (RUSTSEC-2026-0534), got {gossipsub_versions:?}"
+            );
+        }
+    }
+
+    /// The version floors above are `all` checks, and `all` over nothing is
+    /// true. So the crates they are about must be in the graphs they are
+    /// checked in: a floor on a crate that is not there says nothing, and
+    /// would go on saying nothing if the crate came back under another name
+    /// or the lockfile parser stopped finding it.
+    #[test]
+    fn patched_network_crates_are_in_the_graphs_their_floors_are_checked_in() {
+        for (name, crate_name) in [
+            ("Cargo.lock", "libp2p"),
+            ("Cargo.lock", "quinn-udp"),
+            ("Cargo.lock", "libp2p-gossipsub"),
+            ("budzero/Cargo.lock", "libp2p"),
+            ("budzero/Cargo.lock", "quinn-udp"),
+            ("fuzz/Cargo.lock", "libp2p"),
+            ("fuzz/Cargo.lock", "quinn-udp"),
+            ("fuzz/Cargo.lock", "libp2p-gossipsub"),
+        ] {
+            let lock = LOCKFILES
+                .iter()
+                .find(|(lock_name, _)| *lock_name == name)
+                .map_or_else(
+                    || panic!("{name} is not one of the lockfiles under test"),
+                    |(_, lock)| *lock,
+                );
+            assert!(
+                !locked_versions_in(lock, crate_name).is_empty(),
+                "{name}: {crate_name} is not in the graph, so its version floor checks nothing"
+            );
+        }
+        // No lockfile under test builds a git source: the floors read versions,
+        // and a version says what was built only for a registry package.
+        for (name, lock) in LOCKFILES {
+            assert!(
+                !lock.contains("source = \"git+"),
+                "{name} builds a git source; its version field does not say what was built"
+            );
+            assert!(
+                lock.contains("source = \"registry+"),
+                "{name} names no registry source; the lockfile under test is empty"
             );
         }
     }
@@ -220,7 +267,7 @@ mod tests {
     /// The three advisories must not reappear in any scanner's ignore list.
     ///
     /// This is the canary for the whole change: they are patched, so ignoring
-    /// them would be silencing a finding that is already fixed, and would
+    /// them would silence a vulnerability that is already fixed, and would
     /// hide a regression if the graph ever slid back.
     #[test]
     fn patched_advisories_are_not_ignored_anywhere() {
@@ -249,7 +296,7 @@ mod tests {
             ),
         ];
 
-        // Only lines that actually suppress a finding count; the files explain
+        // Only lines that actually suppress an advisory count; the files explain
         // the history in comments and that has to stay allowed.
         for (name, body) in configs {
             for line in body.lines() {
@@ -466,69 +513,234 @@ mod tests {
             }
         }
     }
-}
 
-/// Inner signature digests must not become load-bearing while they omit
-/// `chain_id`.
-///
-/// `AiInferenceResult::calculate_signing_hash` and
-/// `SaleAuthorization::signing_hash` both build a digest a party would
-/// sign, and neither commits to `chain_id`. `AiInferenceRequest::calculate_id`
-/// does not either, so an identical request on testnet and mainnet derives
-/// the same `request_id` and a signature over the AI digest would verify
-/// on both networks.
-///
-/// Harmless today for one reason: neither digest is verified anywhere.
-/// Both reach consensus inside a `Transaction`, and
-/// `Transaction::signing_hash` does commit to `chain_id` - the envelope
-/// carries the domain separation the payload lacks.
-///
-/// That is the EIP-155 lesson in miniature: a signature is only bound to
-/// the network its preimage names. This fails if either digest gains a
-/// verification call site, so whoever wires one has to add `chain_id` to
-/// the preimage in the same change.
-#[test]
-fn unverified_signing_digests_stay_unverified_while_they_omit_chain_id() {
-    // The transaction envelope really does bind the chain, the property
-    // the two payload digests are relying on.
-    let tx_src = include_str!("../core/transaction.rs");
-    let at = tx_src
-        .find("pub fn signing_hash")
-        .expect("Transaction::signing_hash must exist");
-    let body = &tx_src[at..(at + 1200).min(tx_src.len())];
-    assert!(
-        body.contains("chain_id"),
-        "Transaction::signing_hash stopped committing to chain_id - the \
-             payload digests were relying on the envelope for domain separation"
-    );
+    /// Inner signature digests must not become load-bearing while they omit
+    /// `chain_id`.
+    ///
+    /// `AiInferenceResult::calculate_signing_hash` and
+    /// `SaleAuthorization::signing_hash` both build a digest a party would
+    /// sign, and neither commits to `chain_id`. `AiInferenceRequest::calculate_id`
+    /// does not either, so an identical request on testnet and mainnet derives
+    /// the same `request_id` and a signature over the AI digest would verify
+    /// on both networks.
+    ///
+    /// Harmless today for one reason: neither digest is verified anywhere.
+    /// Both reach consensus inside a `Transaction`, and
+    /// `Transaction::signing_hash` does commit to `chain_id` - the envelope
+    /// carries the domain separation the payload lacks.
+    ///
+    /// That is the EIP-155 lesson in miniature: a signature is only bound to
+    /// the network its preimage names. This fails if either digest gains a
+    /// verification call site, so whoever wires one has to add `chain_id` to
+    /// the preimage in the same change.
+    #[test]
+    fn unverified_signing_digests_stay_unverified_while_they_omit_chain_id() {
+        // The transaction envelope really does bind the chain, the property
+        // the two payload digests are relying on.
+        let tx_src = include_str!("../core/transaction.rs");
+        let at = tx_src
+            .find("pub fn signing_hash")
+            .expect("Transaction::signing_hash must exist");
+        let body = &tx_src[at..(at + 1200).min(tx_src.len())];
+        assert!(
+            body.contains("chain_id"),
+            "Transaction::signing_hash stopped committing to chain_id - the \
+                 payload digests were relying on the envelope for domain separation"
+        );
 
-    // And the payload digests are still not verified against anything.
-    for (module, digest, src) in [
-        (
-            "ai/types.rs",
-            "calculate_signing_hash",
-            include_str!("../ai/types.rs"),
-        ),
-        (
-            "pollen/data_rights.rs",
-            "signing_hash",
-            include_str!("../pollen/data_rights.rs"),
-        ),
-    ] {
-        let definition = format!("fn {digest}");
-        let calls = src.matches(&format!("{digest}(")).count();
-        let definitions = src.matches(&definition).count();
+        // And the payload digests are still not verified against anything.
+        for (module, digest, src) in [
+            (
+                "ai/types.rs",
+                "calculate_signing_hash",
+                include_str!("../ai/types.rs"),
+            ),
+            (
+                "pollen/data_rights.rs",
+                "signing_hash",
+                include_str!("../pollen/data_rights.rs"),
+            ),
+        ] {
+            let definition = format!("fn {digest}");
+            let calls = src.matches(&format!("{digest}(")).count();
+            let definitions = src.matches(&definition).count();
+            assert!(
+                definitions > 0,
+                "{module}: {digest} disappeared; re-read this test"
+            );
+            // Definition plus its own `#[cfg(test)]` uses only. A production
+            // call site would push this past the allowance.
+            assert!(
+                calls <= definitions + 3,
+                "{module}: {digest} now has {calls} references against \
+                     {definitions} definitions - if it is being verified, add \
+                     chain_id to its preimage first, then drop this assertion"
+            );
+        }
+    }
+    /// A waiver is only honest while the thing it waives is still in the graph.
+    ///
+    /// `osv-scanner.toml` (and the two per-workspace copies beside the other
+    /// lockfiles) has to be read as a set: an ignore entry whose advisory can
+    /// never fire, because the crate left every lockfile, is dead policy. OSV
+    /// reports such an entry as `has unused ignores` and exits non-zero, so the
+    /// scan is red for a reason unrelated to a vulnerability. Conversely, a
+    /// waiver that disappears while the crate is still locked silently turns
+    /// the scan green over a real finding.
+    ///
+    /// The rule: an `[[IgnoredVulns]]` id must still match at least one package
+    /// in at least one lockfile. The advisory-to-crate mapping is the part this
+    /// test cannot see (it lives in the advisory database, not in the repo), so
+    /// the pairs are spelled out and grow with each waiver; that file is the
+    /// second place a waiver has to be edited, which is the point.
+    #[test]
+    fn waiver_must_name_a_crate_that_is_still_locked() {
+        // advisory id -> the crate the entry exists for. Update both the toml
+        // and this table when a waiver is added or retired.
+        const WAIVERS: [(&str, &str); 6] = [
+            ("RUSTSEC-2025-0141", "bincode"),
+            ("RUSTSEC-2025-0057", "fxhash"),
+            ("RUSTSEC-2024-0384", "instant"),
+            ("RUSTSEC-2024-0436", "paste"),
+            ("RUSTSEC-2026-0173", "proc-macro-error2"),
+            ("RUSTSEC-2026-0374", "basic-toml"),
+        ];
+        let locks: [(&str, &str); 18] = [
+            ("Cargo.lock", include_str!("../../Cargo.lock")),
+            (
+                "budzero/Cargo.lock",
+                include_str!("../../budzero/Cargo.lock"),
+            ),
+            (
+                "crates/ai-inference/Cargo.lock",
+                include_str!("../../crates/ai-inference/Cargo.lock"),
+            ),
+            (
+                "crates/bpqs/Cargo.lock",
+                include_str!("../../crates/bpqs/Cargo.lock"),
+            ),
+            (
+                "crates/bud-codec/Cargo.lock",
+                include_str!("../../crates/bud-codec/Cargo.lock"),
+            ),
+            (
+                "crates/budlum-explorer/Cargo.lock",
+                include_str!("../../crates/budlum-explorer/Cargo.lock"),
+            ),
+            (
+                "crates/budlum-types/Cargo.lock",
+                include_str!("../../crates/budlum-types/Cargo.lock"),
+            ),
+            (
+                "crates/note-packing/Cargo.lock",
+                include_str!("../../crates/note-packing/Cargo.lock"),
+            ),
+            (
+                "crates/uel-abi/Cargo.lock",
+                include_str!("../../crates/uel-abi/Cargo.lock"),
+            ),
+            (
+                "crates/wallet-core/Cargo.lock",
+                include_str!("../../crates/wallet-core/Cargo.lock"),
+            ),
+            ("fuzz/Cargo.lock", include_str!("../../fuzz/Cargo.lock")),
+            ("kani/Cargo.lock", include_str!("../../kani/Cargo.lock")),
+            (
+                "mobile/core/Cargo.lock",
+                include_str!("../../mobile/core/Cargo.lock"),
+            ),
+            (
+                "mobile/ffi/Cargo.lock",
+                include_str!("../../mobile/ffi/Cargo.lock"),
+            ),
+            (
+                "mobile/tools/log-analyzer/Cargo.lock",
+                include_str!("../../mobile/tools/log-analyzer/Cargo.lock"),
+            ),
+            (
+                "xtask/gates/Cargo.lock",
+                include_str!("../../xtask/gates/Cargo.lock"),
+            ),
+            (
+                "xtask/release/Cargo.lock",
+                include_str!("../../xtask/release/Cargo.lock"),
+            ),
+            (
+                "xtask/tools/Cargo.lock",
+                include_str!("../../xtask/tools/Cargo.lock"),
+            ),
+        ];
+        for (advisory, crate_name) in WAIVERS {
+            let mut seen_in: Vec<&str> = Vec::new();
+            for (lock_name, lock) in locks {
+                if !locked_versions_in(lock, crate_name).is_empty() {
+                    seen_in.push(lock_name);
+                }
+            }
+            assert!(
+                !seen_in.is_empty(),
+                "{advisory} is still ignored in osv-scanner.toml but {crate_name} is \
+                 in no lockfile: OSV reports the entry as an unused ignore and the \
+                 gate is red for a reason that is not a vulnerability. Delete the \
+                 waiver (and its row here)."
+            );
+        }
+    }
+
+    /// The other direction of the lock above: every `[[IgnoredVulns]]` id in any
+    /// of the three `osv-scanner.toml` files must appear in the table of
+    /// `waiver_must_name_a_crate_that_is_still_locked`. A waiver added to a toml
+    /// but forgotten there would otherwise pass unread while OSV still honours it
+    /// at scan time. `[[PackageOverrides]]` rows are deliberately not covered:
+    /// those are name+version pinned and OSV lapses them on their own
+    /// `effectiveUntil`.
+    #[test]
+    fn every_ignored_advisory_in_the_three_tomls_has_a_waiver_row() {
+        const TOMLS: [(&str, &str); 3] = [
+            ("osv-scanner.toml", include_str!("../../osv-scanner.toml")),
+            (
+                "budzero/osv-scanner.toml",
+                include_str!("../../budzero/osv-scanner.toml"),
+            ),
+            (
+                "fuzz/osv-scanner.toml",
+                include_str!("../../fuzz/osv-scanner.toml"),
+            ),
+        ];
+        const KNOWN: [&str; 6] = [
+            "RUSTSEC-2025-0141",
+            "RUSTSEC-2025-0057",
+            "RUSTSEC-2024-0384",
+            "RUSTSEC-2024-0436",
+            "RUSTSEC-2026-0173",
+            "RUSTSEC-2026-0374",
+        ];
+        let mut ignored: Vec<String> = Vec::new();
+        for (_, toml) in TOMLS {
+            for line in toml.lines() {
+                let Some(rest) = line.trim().strip_prefix("id = \"RUSTSEC-") else {
+                    continue;
+                };
+                let Some(tail) = rest.strip_suffix('"') else {
+                    continue;
+                };
+                let id = format!("RUSTSEC-{tail}");
+                if !ignored.contains(&id) {
+                    ignored.push(id);
+                }
+            }
+        }
         assert!(
-            definitions > 0,
-            "{module}: {digest} disappeared; re-read this test"
+            !ignored.is_empty(),
+            "no IgnoredVulns id parsed from the three tomls"
         );
-        // Definition plus its own `#[cfg(test)]` uses only. A production
-        // call site would push this past the allowance.
-        assert!(
-            calls <= definitions + 3,
-            "{module}: {digest} now has {calls} references against \
-                 {definitions} definitions - if it is being verified, add \
-                 chain_id to its preimage first, then drop this assertion"
-        );
+        for id in &ignored {
+            assert!(
+                KNOWN.contains(&id.as_str()),
+                "{id} is ignored in an osv-scanner.toml but has no row in \
+                 waiver_must_name_a_crate_that_is_still_locked: add the crate it \
+                 exists for, or delete the waiver"
+            );
+        }
     }
 }

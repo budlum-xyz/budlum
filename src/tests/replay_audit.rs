@@ -7,7 +7,7 @@ use crate::core::address::Address;
 
 use crate::core::transaction::Transaction;
 use crate::crypto::primitives::KeyPair;
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -97,7 +97,7 @@ async fn test_state_bit_identical_after_reload() {
 /// Sub-registry recovery across a restart.
 ///
 /// This test carried `#[ignore]` with the note "V3 sub-registry persistence is
-/// not implemented: Blockchain::new reloads blocks but rebuilds BNS/NFT
+/// not implemented: `Blockchain::new` reloads blocks but rebuilds BNS/NFT
 /// registries empty". The note is wrong, and the ignore was hiding a broken
 /// test rather than a missing feature.
 ///
@@ -109,16 +109,15 @@ async fn test_state_bit_identical_after_reload() {
 /// that an in-memory mutation survives a restart, which is not a property this
 /// system has or should have.
 ///
-/// BNS state does persist, by both routes that exist: `BnsRegister` is a
-/// transaction the executor applies (`executor.rs:496`, mutating
-/// `state.bns_registry`), so replay reconstructs it; and `bns_registry` is
-/// carried in the schema-4 snapshot and covered by its digest
-/// (`snapshot.rs:661`, `769`).
+/// BNS state does persist, by both routes that exist: a name enters the
+/// registry through `BnsCreateOffer` and `BnsBuyName`, transactions the
+/// executor applies to `state.bns_registry`, so replay reconstructs it; and
+/// `bns_registry` is carried in the snapshot and covered by its digest.
 ///
-/// This version drives the real path: fund an account at genesis, register a
-/// name with a signed `BnsRegister` transaction, produce the block, drop the
-/// chain, reopen it against the same database and ask the rebuilt registry to
-/// resolve the name.
+/// This version drives the real path: fund the accounts at genesis, open a
+/// Primary offer and buy the name with signed transactions, produce the
+/// block, drop the chain, reopen it against the same database and ask the
+/// rebuilt registry to resolve the name.
 #[tokio::test]
 async fn a_bns_name_registered_by_transaction_survives_a_restart() {
     let dir = tempdir().unwrap();
@@ -129,23 +128,26 @@ async fn a_bns_name_registered_by_transaction_survives_a_restart() {
         .unwrap()
         .to_string();
 
+    let seller_kp = KeyPair::generate().unwrap();
+    let seller = Address::from(seller_kp.public_key_bytes());
     let alice_kp = KeyPair::generate().unwrap();
     let alice = Address::from(alice_kp.public_key_bytes());
     let bns_name = "recovery.bud".to_string();
 
-    // Funding has to come from genesis: replay rebuilds state from the
-    // deterministic genesis, so an in-memory `add_balance` would leave the
-    // chain unreplayable.
+    // Funding and primary-seller authorization come from genesis so replay
+    // rebuilds the exact same state from block zero.
     let funded_genesis = || {
-        let mut g = crate::chain::genesis::GenesisConfig::new(45262);
-        g = g.with_allocation(alice, 1_000_000);
+        let mut g = crate::chain::genesis::GenesisConfig::new(45262)
+            .with_allocation(seller, 100_000)
+            .with_allocation(alice, 1_000_000);
+        g.bns_primary_sellers = vec![seller];
         g.base_fee = 0;
         g
     };
 
-    let cost;
+    let price_atoms = 50_000u64;
 
-    // 1. Register the name through a transaction, so it is in the chain.
+    // 1. Open a Primary offer and buy the name through signed transactions.
     {
         let storage = Storage::new(&db_str).unwrap();
         let mut bc = Blockchain::new_with_genesis(
@@ -157,22 +159,43 @@ async fn a_bns_name_registered_by_transaction_survives_a_restart() {
         );
         bc.mempool.set_min_fee(0);
 
-        cost = bc.state.bns_registry.calculate_cost(&bns_name, 1000);
-        let data = bincode::serialize(&(bns_name.clone(), 1000u64)).expect("ser");
+        let offer_data = bincode::serialize(&crate::bns::CreateNameOffer {
+            name: bns_name.clone(),
+            price_atoms,
+            duration: 1000,
+            kind: crate::bns::OfferKind::Primary,
+            expires_at_epoch: 500,
+        })
+        .expect("ser");
+        let mut offer_tx = Transaction::new_with_chain_id(
+            seller,
+            Address::zero(),
+            0,
+            1,
+            0,
+            offer_data,
+            45262,
+            crate::core::transaction::TransactionType::BnsCreateOffer,
+        );
+        offer_tx.sign(&seller_kp);
+        bc.mempool.add_transaction(offer_tx).unwrap();
+        assert!(bc.produce_block(Address::zero()).is_some());
+
+        let buy_data = bincode::serialize(&0u64).expect("ser");
         let mut tx = Transaction::new_with_chain_id(
             alice,
             Address::zero(),
-            cost,
+            price_atoms,
             1,
             0,
-            data,
+            buy_data,
             45262,
-            crate::core::transaction::TransactionType::BnsRegister,
+            crate::core::transaction::TransactionType::BnsBuyName,
         );
         tx.sign(&alice_kp);
         bc.mempool.add_transaction(tx).unwrap();
         let produced = bc.produce_block(Address::zero());
-        assert!(produced.is_some(), "the registering block must be produced");
+        assert!(produced.is_some(), "the purchasing block must be produced");
 
         assert_eq!(
             bc.state.bns_registry.resolve(&bns_name, 10),

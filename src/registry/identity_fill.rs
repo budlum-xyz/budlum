@@ -7,7 +7,7 @@
 //!
 //! The registry (see [`crate::registry::identity`]) answers "what did this
 //! subject commit to". This module answers the question a wallet actually
-//! faces: a document names slots ("legal_name", "birth_date"), the holder's
+//! faces: a document names slots ("`legal_name`", "`birth_date`"), the holder's
 //! wallet holds the salts and preimages, and disclosure happens - or does not
 //! happen - through here. Three rules shape everything below, and each one
 //! refuses rather than warns:
@@ -18,7 +18,7 @@
 //!    slot, or a disclosure for a slot nobody asked for, fails the fill; there
 //!    is no partial document that "looks complete".
 //! 2. **Values bind to the requester.** The receipt carries the requester and
-//!    the document digest, and [`check_receipt`] refuses a receipt presented
+//!    the document digest, and [`check_receipt_at`] refuses a receipt presented
 //!    to anyone else or for any other document. This is the on-chain half of
 //!    "the opened value lands in the requester's wallet, only": a node cannot
 //!    unshow what a wallet displayed, but it can make a re-purposed
@@ -130,6 +130,9 @@ impl std::fmt::Display for FillError {
             Self::EmptySlot => write!(f, "a slot was named nothing"),
             Self::DuplicateSlot { slot } => {
                 write!(f, "slot `{slot}` appears twice in the template")
+            }
+            Self::MissingSlot { slot } if slot.is_empty() => {
+                f.write_str("presentation receipt opens no credential fields")
             }
             Self::MissingSlot { slot } => {
                 write!(f, "no disclosure fills the template's slot `{slot}`")
@@ -257,6 +260,7 @@ fn take_preview(rest: &str) -> String {
 }
 
 /// The slots a template will fill, in document order, duplicates refused.
+///
 /// This is the list a consent screen shows, and the reason it is extracted
 /// before any value is looked at is that the answer must not depend on the
 /// secrets.
@@ -403,13 +407,23 @@ impl PresentationReceipt {
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut acc = hash_fields_bytes(&[
-            b"bud-vc-presentation-v1",
+            b"bud-vc-presentation-v2",
             self.requester.as_bytes(),
             self.subject.as_bytes(),
             &self.document_digest,
             &self.epoch.to_le_bytes(),
+            &(self.entries.len() as u64).to_le_bytes(),
         ]);
         for entry in &self.entries {
+            let mut proof_acc = hash_fields_bytes(&[
+                b"bud-vc-presentation-proof",
+                &(entry.proof.leaf_index as u64).to_le_bytes(),
+                &(entry.proof.leaf_count as u64).to_le_bytes(),
+                &(entry.proof.siblings.len() as u64).to_le_bytes(),
+            ]);
+            for sib in &entry.proof.siblings {
+                proof_acc = hash_fields_bytes(&[&proof_acc, sib]);
+            }
             acc = hash_fields_bytes(&[
                 &acc,
                 entry.slot.as_bytes(),
@@ -417,8 +431,7 @@ impl PresentationReceipt {
                 entry.field.as_bytes(),
                 &entry.salt,
                 &entry.value_digest,
-                &(entry.proof.leaf_index as u64).to_le_bytes(),
-                &(entry.proof.leaf_count as u64).to_le_bytes(),
+                &proof_acc,
             ]);
         }
         acc
@@ -489,6 +502,9 @@ pub fn build_presentation(
     epoch: u64,
 ) -> Result<(String, PresentationReceipt), FillError> {
     let filled = fill_template(template, disclosures)?;
+    if disclosures.is_empty() {
+        return Err(empty_receipt_error());
+    }
     let mut entries = Vec::with_capacity(disclosures.len());
     for disclosure in disclosures {
         let credential = registry
@@ -585,6 +601,89 @@ pub fn credential_proof(
 
 /// The most entries `check_receipt` will verify in one receipt.
 pub const MAX_RECEIPT_ENTRIES: usize = 256;
+/// Upper bound on document bytes certified by a single presentation receipt so
+/// disclosed-value support verification stays strictly bounded.
+pub const MAX_RECEIPT_DOCUMENT_BYTES: usize = 4_096;
+/// Upper bound on a single disclosed credential field value rendered inside a
+/// verified document.
+pub const MAX_DISCLOSED_VALUE_BYTES: usize = 256;
+
+/// Reuse the existing `MissingSlot` error shape to reject a receipt with no
+/// credential disclosures without adding a public `FillError` variant (the
+/// enum is exhaustively matchable by downstream callers). An empty slot name
+/// is unconstructible through the template parser and is reserved for this
+/// receipt-level refusal.
+fn empty_receipt_error() -> FillError {
+    FillError::MissingSlot {
+        slot: String::new(),
+    }
+}
+
+/// Confirm that every disclosed `value_digest` in `entries` matches its own
+/// distinct, non-overlapping, non-empty UTF-8 substring (up to
+/// [`MAX_DISCLOSED_VALUE_BYTES`]) of `document`.
+///
+/// Tracking exact multiplicity and non-overlapping `[start, end)` intervals
+/// prevents both fabricating unsupported claims and recycling a single rendered
+/// occurrence (or overlapping substring such as `"aa"` inside `"aaa"`) to back
+/// multiple slots claiming the same value.
+fn first_unsupported_entry_slot(document: &str, entries: &[ReceiptEntry]) -> Option<String> {
+    let mut needed: std::collections::BTreeMap<[u8; 32], usize> = std::collections::BTreeMap::new();
+    for entry in entries {
+        let count = needed.entry(entry.value_digest).or_insert(0);
+        *count = count.saturating_add(1);
+    }
+    if needed.is_empty() {
+        return None;
+    }
+    let mut last_end: std::collections::BTreeMap<[u8; 32], usize> =
+        std::collections::BTreeMap::new();
+    let boundaries: Vec<usize> = document
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .chain(std::iter::once(document.len()))
+        .collect();
+    'outer: for (start_pos, &start) in boundaries.iter().enumerate() {
+        for &end in boundaries.iter().skip(start_pos + 1) {
+            let span_len = end.saturating_sub(start);
+            if span_len > MAX_DISCLOSED_VALUE_BYTES {
+                break;
+            }
+            if let Some(slice) = document.get(start..end) {
+                let digest = value_digest_of(slice);
+                if let Some(rem) = needed.get_mut(&digest) {
+                    let prev_end = last_end.get(&digest).copied().unwrap_or(0);
+                    if start >= prev_end {
+                        last_end.insert(digest, end);
+                        *rem = rem.saturating_sub(1);
+                        if *rem == 0 {
+                            needed.remove(&digest);
+                            if needed.is_empty() {
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut satisfied: std::collections::BTreeMap<[u8; 32], usize> =
+        std::collections::BTreeMap::new();
+    for entry in entries {
+        let total_for_digest = entries
+            .iter()
+            .filter(|e| e.value_digest == entry.value_digest)
+            .count();
+        let missing = needed.get(&entry.value_digest).copied().unwrap_or(0);
+        let ok_count = total_for_digest.saturating_sub(missing);
+        let seen = satisfied.entry(entry.value_digest).or_insert(0);
+        if *seen >= ok_count {
+            return Some(entry.slot.clone());
+        }
+        *seen = seen.saturating_add(1);
+    }
+    None
+}
 
 /// Re-verify a receipt the way the receiving side must: bound to this
 /// requester, bound to this document, and - through the registry - backed by
@@ -592,20 +691,65 @@ pub const MAX_RECEIPT_ENTRIES: usize = 256;
 /// revoked since then turns yesterday's presentation unverifiable today; that
 /// is the point, not a limitation.
 ///
+/// Callers with access to the chain's live epoch should prefer
+/// [`check_receipt_at`] so credentials that expired after `receipt.epoch` (or
+/// receipts stamped with a future epoch) are also refused.
+///
 /// # Errors
 ///
-/// [`FillError::WrongRequester`], [`FillError::WrongDocument`], or the first
-/// entry whose credential no longer stands.
+/// [`FillError::MissingSlot`] when the receipt opens no credential fields,
+/// [`FillError::TooManyEntries`], [`FillError::WrongRequester`],
+/// [`FillError::WrongDocument`], [`FillError::DisclosureMismatch`], or the
+/// first entry whose credential no longer stands.
+#[cfg(test)]
 pub fn check_receipt(
     registry: &IdentityRegistry,
     receipt: &PresentationReceipt,
     requester: &Address,
     document: &str,
 ) -> Result<(), FillError> {
+    check_receipt_inner(registry, receipt, requester, document, None)
+}
+
+/// Re-verify a receipt against both the epoch it was signed at AND the live
+/// chain epoch `current_epoch`, refusing future-dated receipts, credentials
+/// that have since expired or been revoked, and documents whose rendered text
+/// does not contain every opened credential value.
+///
+/// # Errors
+///
+/// [`FillError::MissingSlot`], [`FillError::TooManyEntries`],
+/// [`FillError::WrongRequester`], [`FillError::WrongDocument`],
+/// [`FillError::DisclosureMismatch`], or [`FillError::CredentialNotValid`] when
+/// `receipt.epoch > current_epoch` or a backing credential is no longer live at
+/// `current_epoch`.
+pub fn check_receipt_at(
+    registry: &IdentityRegistry,
+    receipt: &PresentationReceipt,
+    requester: &Address,
+    document: &str,
+    current_epoch: u64,
+) -> Result<(), FillError> {
+    check_receipt_inner(registry, receipt, requester, document, Some(current_epoch))
+}
+
+fn check_receipt_inner(
+    registry: &IdentityRegistry,
+    receipt: &PresentationReceipt,
+    requester: &Address,
+    document: &str,
+    current_epoch: Option<u64>,
+) -> Result<(), FillError> {
+    if receipt.entries.is_empty() {
+        return Err(empty_receipt_error());
+    }
     if receipt.entries.len() > MAX_RECEIPT_ENTRIES {
         return Err(FillError::TooManyEntries {
             max: MAX_RECEIPT_ENTRIES,
         });
+    }
+    if document.len() > MAX_RECEIPT_DOCUMENT_BYTES {
+        return Err(FillError::WrongDocument);
     }
     // The subject's signature first. Every value read
     // below - requester, document digest, epoch - is inside the signed
@@ -621,7 +765,28 @@ pub fn check_receipt(
     if document_digest_of(document) != receipt.document_digest {
         return Err(FillError::WrongDocument);
     }
+    if let Some(now) = current_epoch {
+        if receipt.epoch > now {
+            let slot = receipt
+                .entries
+                .first()
+                .map_or_else(String::new, |entry| entry.slot.clone());
+            return Err(FillError::CredentialNotValid {
+                slot,
+                reason: format!(
+                    "receipt epoch {} is ahead of current epoch {now}",
+                    receipt.epoch
+                ),
+            });
+        }
+    }
+    let mut seen_slots = std::collections::BTreeSet::new();
     for entry in &receipt.entries {
+        if !seen_slots.insert(entry.slot.as_str()) {
+            return Err(FillError::DuplicateSlot {
+                slot: entry.slot.clone(),
+            });
+        }
         let credential = registry.credential(&entry.credential_id).ok_or_else(|| {
             FillError::CredentialNotValid {
                 slot: entry.slot.clone(),
@@ -647,6 +812,16 @@ pub fn check_receipt(
                 slot: entry.slot.clone(),
                 reason: e.to_string(),
             })?;
+        if let Some(now) = current_epoch {
+            if now != receipt.epoch {
+                registry
+                    .is_credential_valid(&entry.credential_id, now)
+                    .map_err(|e| FillError::CredentialNotValid {
+                        slot: entry.slot.clone(),
+                        reason: e.to_string(),
+                    })?;
+            }
+        }
         let opens = verify_disclosure(
             &credential.root(),
             &credential.schema,
@@ -660,6 +835,9 @@ pub fn check_receipt(
                 slot: entry.slot.clone(),
             });
         }
+    }
+    if let Some(slot) = first_unsupported_entry_slot(document, &receipt.entries) {
+        return Err(FillError::DisclosureMismatch { slot });
     }
     Ok(())
 }
@@ -726,6 +904,53 @@ mod tests {
                 max: MAX_RECEIPT_ENTRIES
             })
         );
+    }
+
+    #[test]
+    fn a_signed_empty_receipt_is_not_a_credential_presentation() {
+        let subject_key = crate::crypto::primitives::KeyPair::from_seed(&[31; 32])
+            .expect("deterministic subject keypair");
+        let subject = Address::from(subject_key.public_key_bytes());
+        let requester = Address([7u8; 32]);
+        let document = "No identity fields";
+        let mut receipt = PresentationReceipt {
+            requester,
+            subject,
+            document_digest: document_digest_of(document),
+            epoch: 5,
+            entries: Vec::new(),
+            subject_public_key: Vec::new(),
+            signature: Vec::new(),
+        };
+        receipt.sign(&subject_key);
+        receipt
+            .verify_binding()
+            .expect("the empty receipt has a valid subject signature");
+
+        let check_error = check_receipt(&IdentityRegistry::new(), &receipt, &requester, document)
+            .expect_err("an empty signed receipt must not count as credential evidence");
+        assert!(matches!(
+            &check_error,
+            FillError::MissingSlot { slot } if slot.is_empty()
+        ));
+        assert_eq!(
+            check_error.to_string(),
+            "presentation receipt opens no credential fields"
+        );
+
+        let build_error = build_presentation(
+            &IdentityRegistry::new(),
+            &requester,
+            &subject,
+            document,
+            &[],
+            5,
+        )
+        .expect_err("the builder must not create a receipt the verifier refuses");
+        assert!(matches!(
+            &build_error,
+            FillError::MissingSlot { slot } if slot.is_empty()
+        ));
     }
 
     #[test]
@@ -1015,6 +1240,261 @@ mod tests {
         assert!(matches!(
             fill_template("{{name}}", &[d]),
             Err(FillError::ValueCarriesBraces { .. })
+        ));
+    }
+
+    #[test]
+    fn check_receipt_refuses_empty_entries() {
+        let registry = IdentityRegistry::new();
+        let key = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let subject = Address::from(key.public_key_bytes());
+        let requester = Address([7u8; 32]);
+        let doc = "Empty presentation";
+        let mut receipt = PresentationReceipt {
+            requester,
+            subject,
+            document_digest: document_digest_of(doc),
+            epoch: 10,
+            entries: Vec::new(),
+            subject_public_key: Vec::new(),
+            signature: Vec::new(),
+        };
+        receipt.sign(&key);
+        assert!(matches!(
+            check_receipt(&registry, &receipt, &requester, doc),
+            Err(FillError::MissingSlot { ref slot }) if slot.is_empty()
+        ));
+    }
+
+    #[test]
+    fn check_receipt_refuses_document_unbacked_by_opened_value() {
+        use crate::registry::{
+            credential_id, field_commitment, CredentialCommitment, FieldCommitment, IdentityOp,
+            IdentityRecord, MethodKind, VerificationMethod,
+        };
+        let mut registry = IdentityRegistry::new();
+        let subject_key = crate::crypto::primitives::KeyPair::from_seed(&[51u8; 32]).unwrap();
+        let subject = Address::from(subject_key.public_key_bytes());
+        let issuer = Address([52u8; 32]);
+        let requester = Address([53u8; 32]);
+        let poa = crate::domain::ConsensusKind::PoA;
+        registry
+            .apply(
+                &poa,
+                IdentityOp::Register {
+                    record: IdentityRecord::new(
+                        subject,
+                        vec![VerificationMethod::new([1u8; 32], MethodKind::MlDsa87)],
+                        vec![],
+                        0,
+                    )
+                    .unwrap(),
+                },
+                0,
+            )
+            .unwrap();
+        registry
+            .apply(
+                &poa,
+                IdentityOp::Register {
+                    record: IdentityRecord::new(
+                        issuer,
+                        vec![VerificationMethod::new([2u8; 32], MethodKind::MlDsa87)],
+                        vec![],
+                        0,
+                    )
+                    .unwrap(),
+                },
+                0,
+            )
+            .unwrap();
+        let salt = [0x33u8; 32];
+        let credential = CredentialCommitment {
+            issuer,
+            subject,
+            schema: "kyc".to_string(),
+            fields: vec![FieldCommitment {
+                name: "age".to_string(),
+                commitment: field_commitment("kyc", "age", &salt, &value_digest_of("forty-two")),
+            }],
+            issued_at: 0,
+            expires_at: Some(10),
+        };
+        let cid = credential_id(&credential);
+        registry
+            .apply(
+                &poa,
+                IdentityOp::Issue {
+                    credential: credential.clone(),
+                },
+                0,
+            )
+            .unwrap();
+        let (honest_doc, mut honest_receipt) = build_presentation(
+            &registry,
+            &requester,
+            &subject,
+            "age: {{age}}",
+            &[SlotDisclosure {
+                slot: "age".to_string(),
+                credential_id: cid,
+                field: "age".to_string(),
+                value: "forty-two".to_string(),
+                salt,
+            }],
+            5,
+        )
+        .unwrap();
+        honest_receipt.sign(&subject_key);
+        check_receipt_at(&registry, &honest_receipt, &requester, &honest_doc, 9).unwrap();
+        // Expired at live epoch 10 even though receipt.epoch == 5 was valid then.
+        assert!(matches!(
+            check_receipt_at(&registry, &honest_receipt, &requester, &honest_doc, 10),
+            Err(FillError::CredentialNotValid { .. })
+        ));
+        // Future-stamped relative to live epoch 4.
+        assert!(matches!(
+            check_receipt_at(&registry, &honest_receipt, &requester, &honest_doc, 4),
+            Err(FillError::CredentialNotValid { .. })
+        ));
+
+        // Subject signs an untrue document while attaching a valid opening of "forty-two".
+        let false_doc = "age: ninety-nine";
+        let mut forged = PresentationReceipt {
+            requester,
+            subject,
+            document_digest: document_digest_of(false_doc),
+            epoch: 5,
+            entries: honest_receipt.entries.clone(),
+            subject_public_key: Vec::new(),
+            signature: Vec::new(),
+        };
+        forged.sign(&subject_key);
+        assert!(matches!(
+            check_receipt_at(&registry, &forged, &requester, false_doc, 5),
+            Err(FillError::DisclosureMismatch { ref slot }) if slot == "age"
+        ));
+    }
+
+    #[test]
+    fn duplicate_disclosed_values_require_distinct_non_overlapping_document_occurrences() {
+        use crate::registry::{
+            credential_id, field_commitment, CredentialCommitment, FieldCommitment, IdentityOp,
+            IdentityRecord, MethodKind, VerificationMethod,
+        };
+        let mut registry = IdentityRegistry::new();
+        let subject_key = crate::crypto::primitives::KeyPair::from_seed(&[61u8; 32]).unwrap();
+        let subject = Address::from(subject_key.public_key_bytes());
+        let issuer = Address([62u8; 32]);
+        let requester = Address([63u8; 32]);
+        let poa = crate::domain::ConsensusKind::PoA;
+        for (addr, mk) in [(subject, [11u8; 32]), (issuer, [12u8; 32])] {
+            registry
+                .apply(
+                    &poa,
+                    IdentityOp::Register {
+                        record: IdentityRecord::new(
+                            addr,
+                            vec![VerificationMethod::new(mk, MethodKind::MlDsa87)],
+                            vec![],
+                            0,
+                        )
+                        .unwrap(),
+                    },
+                    0,
+                )
+                .unwrap();
+        }
+        let salt1 = [0x11u8; 32];
+        let salt2 = [0x22u8; 32];
+        let credential = CredentialCommitment {
+            issuer,
+            subject,
+            schema: "kyc".to_string(),
+            fields: vec![
+                FieldCommitment {
+                    name: "adult".to_string(),
+                    commitment: field_commitment("kyc", "adult", &salt1, &value_digest_of("aa")),
+                },
+                FieldCommitment {
+                    name: "resident".to_string(),
+                    commitment: field_commitment("kyc", "resident", &salt2, &value_digest_of("aa")),
+                },
+            ],
+            issued_at: 0,
+            expires_at: Some(20),
+        };
+        let cid = credential_id(&credential);
+        registry
+            .apply(
+                &poa,
+                IdentityOp::Issue {
+                    credential: credential.clone(),
+                },
+                0,
+            )
+            .unwrap();
+        let (two_doc, mut valid_receipt) = build_presentation(
+            &registry,
+            &requester,
+            &subject,
+            "adult: {{adult}}, resident: {{resident}}",
+            &[
+                SlotDisclosure {
+                    slot: "adult".to_string(),
+                    credential_id: cid,
+                    field: "adult".to_string(),
+                    value: "aa".to_string(),
+                    salt: salt1,
+                },
+                SlotDisclosure {
+                    slot: "resident".to_string(),
+                    credential_id: cid,
+                    field: "resident".to_string(),
+                    value: "aa".to_string(),
+                    salt: salt2,
+                },
+            ],
+            5,
+        )
+        .unwrap();
+        let entries = valid_receipt.entries.clone();
+        valid_receipt.sign(&subject_key);
+        // Two genuinely disjoint occurrences of "aa" succeed cleanly.
+        check_receipt_at(&registry, &valid_receipt, &requester, &two_doc, 5).unwrap();
+
+        // Only one occurrence of "aa" (paired with a false claim on "resident") fails.
+        let single_doc = "adult: aa, resident: no";
+        let mut single_receipt = PresentationReceipt {
+            requester,
+            subject,
+            document_digest: document_digest_of(single_doc),
+            epoch: 5,
+            entries: entries.clone(),
+            subject_public_key: Vec::new(),
+            signature: Vec::new(),
+        };
+        single_receipt.sign(&subject_key);
+        assert!(matches!(
+            check_receipt_at(&registry, &single_receipt, &requester, single_doc, 5),
+            Err(FillError::DisclosureMismatch { ref slot }) if slot == "resident"
+        ));
+
+        // Overlapping "aa" inside "aaa" counts as only one occurrence, not two.
+        let overlap_doc = "code: aaa";
+        let mut overlap_receipt = PresentationReceipt {
+            requester,
+            subject,
+            document_digest: document_digest_of(overlap_doc),
+            epoch: 5,
+            entries,
+            subject_public_key: Vec::new(),
+            signature: Vec::new(),
+        };
+        overlap_receipt.sign(&subject_key);
+        assert!(matches!(
+            check_receipt_at(&registry, &overlap_receipt, &requester, overlap_doc, 5),
+            Err(FillError::DisclosureMismatch { ref slot }) if slot == "resident"
         ));
     }
 }

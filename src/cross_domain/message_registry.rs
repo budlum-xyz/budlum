@@ -13,7 +13,7 @@ const MAX_CUSTOM_KIND_BYTES: usize = 256;
 /// are chosen by whoever built the message, so a row that names `u64::MAX`
 /// would otherwise never be pruned and the registry would grow without bound.
 /// Ten years of six-second blocks.
-const MAX_MESSAGE_LIFETIME_BLOCKS: u64 = 52_560_000;
+pub(crate) const MAX_MESSAGE_LIFETIME_BLOCKS: u64 = 52_560_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CrossDomainMessageRegistry {
@@ -22,6 +22,7 @@ pub struct CrossDomainMessageRegistry {
 }
 
 impl CrossDomainMessageRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             messages: BTreeMap::new(),
@@ -53,9 +54,20 @@ impl CrossDomainMessageRegistry {
         before - self.messages.len()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn insert(&mut self, message: CrossDomainMessage) -> Result<(), String> {
         if !message.verify_id() {
             return Err("Invalid message id".into());
+        }
+        if message.source_domain == message.target_domain {
+            return Err(format!(
+                "Cross-domain message source and target domains must differ (both={})",
+                message.source_domain
+            ));
         }
         if let MessageKind::Custom(tag) = &message.kind {
             if tag.len() > MAX_CUSTOM_KIND_BYTES {
@@ -75,14 +87,21 @@ impl CrossDomainMessageRegistry {
         Ok(())
     }
 
+    #[must_use]
     pub fn get(&self, message_id: &MessageId) -> Option<&CrossDomainMessage> {
         self.messages.get(message_id)
     }
 
+    pub(crate) fn remove(&mut self, message_id: &MessageId) -> Option<CrossDomainMessage> {
+        self.messages.remove(message_id)
+    }
+
+    #[must_use]
     pub fn len(&self) -> usize {
         self.messages.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
     }
@@ -91,19 +110,44 @@ impl CrossDomainMessageRegistry {
         self.messages.values()
     }
 
+    #[must_use]
     pub fn root(&self) -> Hash32 {
         let leaves: Vec<Hash32> = self
             .messages
             .values()
             .map(|msg| {
                 let kind = msg.kind.as_bytes();
+                let mut corr_tag = Vec::with_capacity(33);
+                match msg.correlation_id {
+                    Some(id) => {
+                        corr_tag.push(1);
+                        corr_tag.extend_from_slice(&id);
+                    }
+                    None => corr_tag.push(0),
+                }
+                let qclass_tag: u8 = match msg.source_quantum_class {
+                    None => 0,
+                    Some(crate::crypto::facts::QuantumClass::Classical) => 1,
+                    Some(crate::crypto::facts::QuantumClass::Lattice) => 2,
+                    Some(crate::crypto::facts::QuantumClass::Hash) => 3,
+                };
                 hash_fields_bytes(&[
                     b"BDLM_MESSAGE_LEAF_V1",
                     &msg.message_id,
+                    &corr_tag,
                     &msg.source_domain.to_le_bytes(),
                     &msg.target_domain.to_le_bytes(),
+                    &msg.source_height.to_le_bytes(),
+                    &msg.event_index.to_le_bytes(),
                     &msg.nonce.to_le_bytes(),
+                    &msg.sender.0,
+                    &msg.recipient.0,
+                    &msg.payload_hash,
                     &kind,
+                    &msg.expiry_height.to_le_bytes(),
+                    &msg.sender_public_key,
+                    &msg.sender_signature,
+                    &[qclass_tag],
                 ])
             })
             .collect();
@@ -254,5 +298,43 @@ mod tests {
         registry.insert(far).unwrap();
         assert_eq!(registry.prune_expired(1_000, 1_000), 0);
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn registry_refuses_self_domain_and_root_commits_envelope() {
+        let mut self_msg = CrossDomainMessage::new(CrossDomainMessageParams {
+            source_domain: 7,
+            target_domain: 7,
+            source_height: 10,
+            event_index: 0,
+            nonce: 1,
+            sender: test_addr_from_byte(1),
+            recipient: test_addr_from_byte(2),
+            payload_hash: hash(b"self-domain"),
+            kind: MessageKind::Custom(b"self".to_vec()),
+            expiry_height: 100,
+        });
+        self_msg.message_id = self_msg.calculate_message_id();
+        let mut reg = CrossDomainMessageRegistry::new();
+        let err = reg
+            .insert(self_msg)
+            .expect_err("self-domain message must be refused by registry insert");
+        assert!(err.contains("differ"), "got: {err}");
+
+        let mut msg_a = make_message(11);
+        msg_a.sender_public_key = vec![0xAA; 32];
+        msg_a.sender_signature = vec![0x11; 64];
+        let mut msg_b = msg_a.clone();
+        msg_b.sender_signature = vec![0x22; 64];
+
+        let mut reg_a = CrossDomainMessageRegistry::new();
+        let mut reg_b = CrossDomainMessageRegistry::new();
+        reg_a.insert(msg_a).unwrap();
+        reg_b.insert(msg_b).unwrap();
+        assert_ne!(
+            reg_a.root(),
+            reg_b.root(),
+            "message registry root must bind sender signature envelope"
+        );
     }
 }

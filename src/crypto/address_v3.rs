@@ -24,6 +24,7 @@ use super::scheme::SuiteId;
 use sha3::{Digest, Sha3_256};
 
 /// The domain tag of the account authentication commitment.
+///
 /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const ACCOUNT_AUTH_TAG: &[u8] = b"BDLM_ACCOUNT_AUTH_V3";
 

@@ -1,4 +1,4 @@
-//! The F10 EVM ChainAdapter - the Universal Relayer's real Ethereum bridge.
+//! The EVM `ChainAdapter` - the Universal Relayer's real Ethereum bridge.
 //!
 //! This group of modules gives Budlum the ability to verify the Ethereum
 //! receipt proofs produced by the relayer **independently** and
@@ -8,9 +8,9 @@
 //! - `mpt` - in-tree Merkle-Patricia trie **verifier** (Appendix D, verify-only;
 //!   the proof itself is produced by the relayer).
 //! - `receipt` - Ethereum receipt RLP schema + receiptsRoot proof.
-//! - `sync_committee` - PoS light-client (BLS12-381, `blst` reuse).
+//! - `sync_committee` - `PoS` light-client (BLS12-381, `blst` reuse).
 //! - `header` - the Ethereum header chain and the finality decision.
-//! - `adapter` - `EvmChainAdapter` (ChainAdapter impl).
+//! - `adapter` - `EvmChainAdapter` (`ChainAdapter` impl).
 //!
 //! **Security invariant:** no function here touches the network. All
 //! verification is deterministic and happens on chain, inside Budlum consensus.
@@ -20,6 +20,7 @@
 //! The base layer is RLP, the MPT verifier and the KAT vectors; receipt, header
 //! and sync-committee verification are built on top of it.
 
+pub mod account_proof;
 pub mod adapter;
 pub mod bud_to_eth;
 pub mod header;

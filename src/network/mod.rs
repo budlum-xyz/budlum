@@ -1,3 +1,5 @@
+pub(crate) mod bounded_bincode;
+pub mod bud3_protocol;
 pub mod deferred_votes;
 pub mod fork_rewalk;
 pub mod gossip_dedup;
@@ -8,10 +10,12 @@ pub mod peer_manager;
 pub mod privacy;
 pub mod proto_conversions;
 pub mod protocol;
-pub mod regen_health_tick;
+pub mod sentry;
+pub mod sentry_gate;
 pub mod sync_codec;
 pub mod witness_protocol;
 
 pub use mobile::{MobileNodeProfile, PowerMode};
 pub use node::Node;
 pub use protocol::NetworkMessage;
+pub use sentry::{SentryConfig, SentryPolicy, SentryRole, SentryRotationDiff, SentryStatus};

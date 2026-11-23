@@ -170,7 +170,7 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
 
 /// A full lock/mint/burn/unlock cycle conserves the
 /// total supply. Burn is the debit half of mint: without it, each cycle
-/// mints one transfer amount out of thin air (the F01 inflation bug).
+/// mints one transfer amount out of thin air (preventing unbacked mint inflation).
 #[test]
 fn bridge_lock_mint_burn_unlock_conserves_supply() {
     let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
@@ -345,7 +345,7 @@ fn bridge_sweep_is_height_aware_and_idempotent() {
 
 /// (security audit) bridge mint MUST reject calls that pass
 /// `expected_block_hash = None`. Without an explicit block-hash bound,
-/// A caller could pick ANY commitment matching (domain_id, height,
+/// A caller could pick ANY commitment matching (`domain_id`, height,
 /// Sequence) - including stale or finality-unconfirmed ones, and
 /// Mint against it. The forgery gate forces the caller to bind the
 /// Mint to a specific block.
@@ -604,10 +604,10 @@ fn a_bridge_burn_moves_balance_in_block_and_defers_the_relay_enqueue() {
     refused.get_or_create(&recipient).balance += bc.state.base_fee;
     let err = Executor::apply_transaction(&mut refused, &late_tx).unwrap_err();
     assert!(
-        err.to_string()
+        err.clone()
             .contains("bridge burn domain height is ahead of the executing block")
             && err
-                .to_string()
+                .clone()
                 .contains("refund window must be measured from a height the chain has reached"),
         "an expiry base ahead of the chain must be refused: {err}"
     );
@@ -639,8 +639,8 @@ fn a_bridge_burn_moves_balance_in_block_and_defers_the_relay_enqueue() {
 
 /// A `BridgeBurn` is the holder's own act.
 ///
-/// Review 8's follow-up found the first in-block version of this door: it only
-/// required the sender to pay the fee, so any funded account could name
+/// In-block bridge burn requires strict authorization: it cannot only
+/// require the sender to pay the fee, where any funded account could name
 /// somebody else's `message_id`, destroy their minted balance and choose the
 /// Ethereum address the value left to. The authority is now the holder's
 /// signature over the burn's own preimage, checked by the executor before the
@@ -738,8 +738,8 @@ fn a_bridge_burn_needs_the_holders_own_authorization() {
     let mut state = bc.state.clone();
     let err = Executor::apply_transaction(&mut state, &theft).unwrap_err();
     assert!(
-        err.to_string().contains("not from the transfer's holder")
-            || err.to_string().contains("does not verify"),
+        err.clone().contains("not from the transfer's holder")
+            || err.clone().contains("does not verify"),
         "a third party's burn must be refused: {err}"
     );
     assert_eq!(
@@ -761,7 +761,7 @@ fn a_bridge_burn_needs_the_holders_own_authorization() {
     let mut state = bc.state.clone();
     let err = Executor::apply_transaction(&mut state, &paying(holder, repointed)).unwrap_err();
     assert!(
-        err.to_string().contains("does not verify"),
+        err.clone().contains("does not verify"),
         "a rewritten payout address must not ride the holder's signature: {err}"
     );
 

@@ -112,8 +112,9 @@ impl QrVideo {
         if optical_frames.is_empty() {
             return Err(QrVideoError::Empty);
         }
-        if optical_frames.len() as u32 > MAX_VIDEO_FRAMES {
-            return Err(QrVideoError::TooMany(optical_frames.len() as u32));
+        let frame_count = u32::try_from(optical_frames.len()).unwrap_or(u32::MAX);
+        if frame_count > MAX_VIDEO_FRAMES {
+            return Err(QrVideoError::TooMany(frame_count));
         }
         // Refuse an unrenderable frame before drawing any of them: the
         // carousel wire allows drops larger than one pinned QR symbol (other
@@ -149,11 +150,13 @@ impl QrVideo {
         out.push(VIDEO_VERSION);
         out.push(0);
         out.extend_from_slice(&self.fps.to_le_bytes());
-        out.extend_from_slice(&(self.png_frames.len() as u32).to_le_bytes());
+        let frame_count = u32::try_from(self.png_frames.len()).unwrap_or(u32::MAX);
+        out.extend_from_slice(&frame_count.to_le_bytes());
         out.extend_from_slice(&self.stream_commitment);
         out.extend_from_slice(&self.recipe_commitment);
         for png in &self.png_frames {
-            out.extend_from_slice(&(png.len() as u32).to_le_bytes());
+            let png_len = u32::try_from(png.len()).unwrap_or(u32::MAX);
+            out.extend_from_slice(&png_len.to_le_bytes());
             out.extend_from_slice(png);
         }
         out
@@ -175,10 +178,11 @@ impl QrVideo {
             return Err(QrVideoError::BadBlob);
         }
         let fps = u16_le(blob, 6)?;
-        let n = u32_le(blob, 8)? as usize;
-        if n == 0 || n as u32 > MAX_VIDEO_FRAMES {
+        let n_u32 = u32_le(blob, 8)?;
+        if n_u32 == 0 || n_u32 > MAX_VIDEO_FRAMES {
             return Err(QrVideoError::BadBlob);
         }
+        let n = n_u32 as usize;
         let mut stream = [0u8; 32];
         stream.copy_from_slice(blob.get(12..44).ok_or(QrVideoError::BadBlob)?);
         let mut recipe = [0u8; 32];
@@ -271,12 +275,68 @@ pub fn demux_optical_frames(video: &QrVideo) -> Result<Vec<Vec<u8>>, QrVideoErro
 /// filter types, no interlace. Every chunk CRC is checked. Grey is channel 0
 /// of each pixel (the red channel for RGB and RGBA). 16 bit, palette and
 /// interlaced images are refused with an explicit error.
-fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
-    if png.len() < 8 {
-        return Err("png magic".into());
+fn parse_png_ihdr(chunk_body: &[u8]) -> Result<(u32, u32, usize), String> {
+    if chunk_body.len() != 13 {
+        return Err("ihdr".into());
     }
-    let magic = png.get(0..8).ok_or_else(|| "png magic".to_string())?;
-    if magic != [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a] {
+    let depth = chunk_body.get(8).copied().unwrap_or(0);
+    let color = chunk_body.get(9).copied().unwrap_or(0);
+    if depth != 8 {
+        return Err("png bit depth".into());
+    }
+    let channels = match color {
+        0 => 1,
+        2 => 3,
+        4 => 2,
+        6 => 4,
+        3 => return Err("png palette".into()),
+        _ => return Err("png color type".into()),
+    };
+    if chunk_body.get(10).copied() != Some(0) || chunk_body.get(11).copied() != Some(0) {
+        return Err("png method".into());
+    }
+    if chunk_body.get(12).copied() != Some(0) {
+        return Err("png interlace".into());
+    }
+    let mut wb = [0u8; 4];
+    let mut hb = [0u8; 4];
+    wb.copy_from_slice(chunk_body.get(0..4).ok_or_else(|| "w".to_string())?);
+    hb.copy_from_slice(chunk_body.get(4..8).ok_or_else(|| "h".to_string())?);
+    Ok((u32::from_be_bytes(wb), u32::from_be_bytes(hb), channels))
+}
+
+fn next_png_chunk(png: &[u8], off: usize) -> Result<(&[u8], &[u8], usize), String> {
+    let len_bytes = png.get(off..off + 4).ok_or_else(|| "png len".to_string())?;
+    let mut lb = [0u8; 4];
+    lb.copy_from_slice(len_bytes);
+    let len = u32::from_be_bytes(lb) as usize;
+    let chunk_kind = png
+        .get(off + 4..off + 8)
+        .ok_or_else(|| "png ty".to_string())?;
+    let body_start = off.checked_add(8).ok_or("png chunk")?;
+    let crc_end = body_start
+        .checked_add(len)
+        .and_then(|end| end.checked_add(4))
+        .ok_or_else(|| "png chunk".to_string())?;
+    let chunk_body = png
+        .get(body_start..crc_end - 4)
+        .ok_or_else(|| "png chunk".to_string())?;
+    let crc_bytes = png
+        .get(crc_end - 4..crc_end)
+        .ok_or_else(|| "png chunk".to_string())?;
+    // PNG CRC-32 (spec, ISO 3309) runs over type then data with no length
+    // between them. This is a fixed external format, not a Budlum digest.
+    let mut crc = flate2::Crc::new();
+    crc.update(chunk_kind);
+    crc.update(chunk_body);
+    if crc.sum().to_be_bytes() != crc_bytes {
+        return Err("png crc".into());
+    }
+    Ok((chunk_kind, chunk_body, crc_end))
+}
+
+fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
+    if png.get(0..8) != Some([0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a].as_slice()) {
         return Err("png magic".into());
     }
     let mut off = 8usize;
@@ -290,67 +350,19 @@ fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
     let mut saw_plte = false;
     let mut saw_iend = false;
     while off < png.len() {
-        let len_bytes = png.get(off..off + 4).ok_or_else(|| "png len".to_string())?;
-        let mut lb = [0u8; 4];
-        lb.copy_from_slice(len_bytes);
-        let len = u32::from_be_bytes(lb) as usize;
-        let chunk_kind = png
-            .get(off + 4..off + 8)
-            .ok_or_else(|| "png ty".to_string())?;
-        let body_start = off.checked_add(8).ok_or("png chunk")?;
-        let crc_end = body_start
-            .checked_add(len)
-            .and_then(|end| end.checked_add(4))
-            .ok_or_else(|| "png chunk".to_string())?;
-        let chunk_body = png
-            .get(body_start..crc_end - 4)
-            .ok_or_else(|| "png chunk".to_string())?;
-        let crc_bytes = png
-            .get(crc_end - 4..crc_end)
-            .ok_or_else(|| "png chunk".to_string())?;
-        // PNG CRC-32 (spec, ISO 3309) runs over type then data with no length
-        // between them. This is a fixed external format, not a Budlum digest.
-        let mut crc = flate2::Crc::new();
-        crc.update(chunk_kind);
-        crc.update(chunk_body);
-        if crc.sum().to_be_bytes() != crc_bytes {
-            return Err("png crc".into());
-        }
-        off = crc_end;
+        let (chunk_kind, chunk_body, next_off) = next_png_chunk(png, off)?;
+        let len = chunk_body.len();
+        off = next_off;
         // CRC-valid chunks still need a valid PNG grammar.
         if !saw_ihdr && chunk_kind != b"IHDR" {
             return Err("ihdr must be first".into());
         }
         if chunk_kind == b"IHDR" {
-            if saw_ihdr || chunk_body.len() != 13 {
+            if saw_ihdr {
                 return Err("ihdr".into());
             }
+            (width, height, channels) = parse_png_ihdr(chunk_body)?;
             saw_ihdr = true;
-            let depth = chunk_body.get(8).copied().unwrap_or(0);
-            let color = chunk_body.get(9).copied().unwrap_or(0);
-            if depth != 8 {
-                return Err("png bit depth".into());
-            }
-            channels = match color {
-                0 => 1,
-                2 => 3,
-                4 => 2,
-                6 => 4,
-                3 => return Err("png palette".into()),
-                _ => return Err("png color type".into()),
-            };
-            if chunk_body.get(10).copied() != Some(0) || chunk_body.get(11).copied() != Some(0) {
-                return Err("png method".into());
-            }
-            if chunk_body.get(12).copied() != Some(0) {
-                return Err("png interlace".into());
-            }
-            let mut wb = [0u8; 4];
-            let mut hb = [0u8; 4];
-            wb.copy_from_slice(chunk_body.get(0..4).ok_or_else(|| "w".to_string())?);
-            hb.copy_from_slice(chunk_body.get(4..8).ok_or_else(|| "h".to_string())?);
-            width = u32::from_be_bytes(wb);
-            height = u32::from_be_bytes(hb);
         } else if chunk_kind == b"PLTE" {
             // Optional suggested palette for truecolour PNGs; greyscale must
             // not carry one. This decoder does not support indexed colour.
@@ -441,7 +453,7 @@ fn unfilter(raw: &mut [u8], h: usize, row: usize, bpp: usize) -> Result<(), Stri
                 0 => 0,
                 1 => a,
                 2 => b,
-                3 => ((u16::from(a) + u16::from(b)) / 2) as u8,
+                3 => a.midpoint(b),
                 _ => paeth(a, b, c),
             };
             if let Some(slot) = raw.get_mut(base + i) {
@@ -473,14 +485,18 @@ fn inflate_zlib_stored(z: &[u8], limit: usize) -> Result<Vec<u8>, String> {
     // error instead of a multi-gigabyte allocation.
     use flate2::read::ZlibDecoder;
     use std::io::Read;
-    let d = ZlibDecoder::new(z);
+    let mut d = ZlibDecoder::new(z);
     let mut out = Vec::new();
     let capped = (limit as u64).saturating_add(1);
-    d.take(capped)
+    d.by_ref()
+        .take(capped)
         .read_to_end(&mut out)
         .map_err(|e| e.to_string())?;
     if out.len() > limit {
         return Err("inflate too large".into());
+    }
+    if d.total_in() != z.len() as u64 {
+        return Err("trailing bytes after zlib stream".into());
     }
     Ok(out)
 }
@@ -496,7 +512,7 @@ mod tests {
     }
 
     /// Golden vector: the header of a single-frame BDLV blob and its full sha256.
-    /// Frame modules now come from our deterministic-mask qr_encode, so
+    /// Frame modules now come from our deterministic-mask `qr_encode`, so
     /// this vector pins the byte-level behaviour of the encoder and the mux.
     #[test]
     fn video_wire_matches_the_golden_vectors() {

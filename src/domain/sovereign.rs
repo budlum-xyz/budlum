@@ -1,8 +1,8 @@
 //! Sovereign Domain Kit primitives.
 //!
-//! The kit helps CBDC, public-sector, enterprise PoA and consortium domains
+//! The kit helps CBDC, public-sector, enterprise `PoA` and consortium domains
 //! Describe lifecycle and compliance evidence without leaking private KYC data
-//! Or merging PoA rules into the permissionless core registry.
+//! Or merging `PoA` rules into the permissionless core registry.
 //!
 //! # Where it is called from
 //!
@@ -25,12 +25,25 @@ fn nonzero_hash(value: &Hash32) -> bool {
     *value != [0u8; 32]
 }
 
+const fn is_bidi_or_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
 fn validate_label(field: &str, value: &str) -> Result<(), String> {
     let valid = !value.is_empty()
         && value.len() <= 64
         && !value.contains("..")
         && !value.contains('/')
-        && !value.bytes().any(|b| b == 0 || b.is_ascii_control());
+        && !value
+            .chars()
+            .any(|c| c.is_control() || is_bidi_or_invisible_format(c));
     if valid {
         Ok(())
     } else {
@@ -48,8 +61,13 @@ pub enum SovereignDomainClass {
 }
 
 impl SovereignDomainClass {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
-        if let SovereignDomainClass::Custom(label) = self {
+        if let Self::Custom(label) = self {
             validate_label("SovereignDomainClass::Custom", label)?;
         }
         Ok(())
@@ -65,6 +83,7 @@ pub enum DomainLifecycleState {
 }
 
 impl DomainLifecycleState {
+    #[must_use]
     pub fn can_transition_to(&self, next: &Self) -> bool {
         match (self, next) {
             (Self::Draft, Self::Active | Self::Frozen | Self::Retired) => true,
@@ -105,6 +124,11 @@ pub struct ComplianceEvidence {
 }
 
 impl ComplianceEvidence {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if !nonzero_hash(&self.policy_hash) {
             return Err("ComplianceEvidence policy_hash cannot be zero".into());
@@ -123,6 +147,7 @@ impl ComplianceEvidence {
 
     /// Domain-separated root over public commitments only. No KYC/person data
     /// Is carried here; private compliance data remains off-chain.
+    #[must_use]
     pub fn root(&self) -> Hash32 {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_SOVEREIGN_COMPLIANCE_EVIDENCE_V1");
@@ -147,6 +172,7 @@ pub struct SovereignDomainTemplate {
 }
 
 impl SovereignDomainTemplate {
+    #[must_use]
     pub fn new(
         domain_id: DomainId,
         class: SovereignDomainClass,
@@ -170,23 +196,42 @@ impl SovereignDomainTemplate {
         template
     }
 
+    #[must_use]
     pub fn calculate_id(&self) -> Hash32 {
-        let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_SOVEREIGN_DOMAIN_TEMPLATE_V1");
-        hasher.update(self.domain_id.to_le_bytes());
-        hasher.update(format!("{:?}", self.class).as_bytes());
-        hasher.update(self.consensus_kind.as_bytes());
-        hasher.update(self.operator.as_bytes());
-        hasher.update([u8::from(self.requires_kyc)]);
-        hasher.update(self.compliance.root());
-        hasher.update([self.lifecycle.tag()]);
-        hasher.finalize().into()
+        let (class_tag, class_label): (u8, &[u8]) = match &self.class {
+            SovereignDomainClass::Cbdc => (1, &[]),
+            SovereignDomainClass::PublicSector => (2, &[]),
+            SovereignDomainClass::EnterprisePoa => (3, &[]),
+            SovereignDomainClass::Consortium => (4, &[]),
+            SovereignDomainClass::Custom(label) => (5, label.as_bytes()),
+        };
+        let consensus_bytes = self.consensus_kind.as_bytes();
+        crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_SOVEREIGN_DOMAIN_TEMPLATE_V1",
+            &self.domain_id.to_le_bytes(),
+            &[class_tag],
+            class_label,
+            &consensus_bytes,
+            self.operator.as_bytes(),
+            &[u8::from(self.requires_kyc)],
+            &self.compliance.root(),
+            &[self.lifecycle.tag()],
+        ])
     }
 
+    #[must_use]
     pub fn verify_id(&self) -> bool {
-        self.template_id == self.calculate_id()
+        bool::from(subtle::ConstantTimeEq::ct_eq(
+            self.template_id.as_slice(),
+            self.calculate_id().as_slice(),
+        ))
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.domain_id == 0 {
             return Err("SovereignDomainTemplate domain_id must be non-zero".into());
@@ -213,6 +258,11 @@ impl SovereignDomainTemplate {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn transition_to(&mut self, next: DomainLifecycleState) -> Result<(), String> {
         if !self.lifecycle.can_transition_to(&next) {
             return Err("SovereignDomainTemplate lifecycle transition invalid".into());
@@ -234,6 +284,11 @@ pub struct AuditExportBundle {
 }
 
 impl AuditExportBundle {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_against_template(
         &self,
         template: &SovereignDomainTemplate,
@@ -267,6 +322,7 @@ pub struct SovereignDomainRegistry {
 }
 
 impl SovereignDomainRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -276,7 +332,7 @@ impl SovereignDomainRegistry {
     /// # Why this is a separate entry point
     ///
     /// [`register_template`](Self::register_template) verifies that a template
-    /// is consistent **within itself**: PoA requires KYC, and the identity is
+    /// is consistent **within itself**: `PoA` requires KYC, and the identity is
     /// recomputed from the fields. It does not look at which domain the
     /// `domain_id` actually points to, which left two of the template's claims
     /// unchecked.
@@ -320,6 +376,11 @@ impl SovereignDomainRegistry {
         self.register_template(template)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_template(&mut self, template: SovereignDomainTemplate) -> Result<(), String> {
         template.validate()?;
         if self.templates.len() >= MAX_SOVEREIGN_DOMAIN_TEMPLATES
@@ -357,19 +418,24 @@ impl SovereignDomainRegistry {
         bundle.validate_against_template(template)
     }
 
-    /// The registered template's operator.
+    /// The registered template's domain id and operator.
     ///
-    /// Compliance gates read the identity from here: an identity coming from
-    /// inside the bundle would let a frozen operator write somebody else's
-    /// name.
+    /// Compliance gates read both the domain scope and the operator identity
+    /// from here: reading either from inside the bundle would let a frozen
+    /// operator spoof an un-frozen operator or domain.
     #[must_use]
-    pub fn template_operator(&self, template_id: Hash32) -> Option<Address> {
+    pub fn template_domain_and_operator(&self, template_id: Hash32) -> Option<(DomainId, Address)> {
         self.templates
             .values()
             .find(|t| t.template_id == template_id)
-            .map(|t| t.operator)
+            .map(|t| (t.domain_id, t.operator))
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn transition_lifecycle(
         &mut self,
         domain_id: DomainId,
@@ -382,9 +448,11 @@ impl SovereignDomainRegistry {
         template.transition_to(next)
     }
 
+    #[must_use]
     pub fn root(&self) -> Hash32 {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_SOVEREIGN_DOMAIN_REGISTRY_V1");
+        hasher.update((self.templates.len() as u64).to_le_bytes());
         for (domain_id, template) in &self.templates {
             hasher.update(domain_id.to_le_bytes());
             hasher.update(template.template_id);
@@ -458,9 +526,9 @@ mod tests {
         assert!(sovereign.templates.contains_key(&7));
     }
 
-    /// A template presenting a PoS-registered domain as PoA must be refused.
+    /// A template presenting a PoS-registered domain as `PoA` must be refused.
     ///
-    /// The template is valid on its own (PoA plus KYC) and so is the domain;
+    /// The template is valid on its own (`PoA` plus KYC) and so is the domain;
     /// together they lie. Without the binding, a document telling an auditor
     /// "this domain is permissioned and KYC'd" could be produced.
     #[test]
@@ -671,5 +739,53 @@ mod tests {
             .validate_against_template(&template)
             .unwrap_err()
             .contains("too large"));
+    }
+
+    #[test]
+    fn sovereign_labels_refuse_bidi_overrides_and_template_id_is_length_prefixed() {
+        let ev = evidence();
+        let bad_tpl = SovereignDomainTemplate::new(
+            9,
+            SovereignDomainClass::Custom("bank\u{202E}spoof".into()),
+            ConsensusKind::PoA,
+            addr(1),
+            true,
+            ev.clone(),
+            DomainLifecycleState::Draft,
+        );
+        assert!(bad_tpl.validate().is_err());
+
+        // Distinct Custom class vs Custom consensus_kind boundaries never collide.
+        let t1 = SovereignDomainTemplate::new(
+            11,
+            SovereignDomainClass::Custom("ab".into()),
+            ConsensusKind::Custom("c".into()),
+            addr(2),
+            true,
+            ev.clone(),
+            DomainLifecycleState::Draft,
+        );
+        let t2 = SovereignDomainTemplate::new(
+            11,
+            SovereignDomainClass::Custom("a".into()),
+            ConsensusKind::Custom("bc".into()),
+            addr(2),
+            true,
+            ev,
+            DomainLifecycleState::Draft,
+        );
+        assert!(t1.verify_id() && t2.verify_id());
+        assert_ne!(t1.template_id, t2.template_id);
+
+        let (domains, operator) =
+            domain_registry_with(15, ConsensusKind::PoA, "poa-authority-quorum");
+        let mut reg = SovereignDomainRegistry::new();
+        let empty_root = reg.root();
+        reg.register_template_for_domain(
+            template_for(15, ConsensusKind::PoA, operator, true),
+            &domains,
+        )
+        .expect("register");
+        assert_ne!(reg.root(), empty_root);
     }
 }

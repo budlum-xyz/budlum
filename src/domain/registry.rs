@@ -48,6 +48,16 @@ pub const MAX_ZK_PROGRAMS_PER_DOMAIN: usize = 64;
 /// separate path.
 pub const MAX_REGISTERED_DOMAINS: usize = 4096;
 
+/// Maximum number of non-retired consensus domains a single operator account
+/// may keep registered concurrently. Prevents one funded account from
+/// exhausting the global [`MAX_REGISTERED_DOMAINS`] table.
+pub const MAX_ACTIVE_DOMAINS_PER_OPERATOR: usize = 32;
+
+/// Number of global blocks without any observed commitment progress after
+/// which an inactive domain is eligible to be retired and reclaimed so its
+/// registry slot returns to the shared pool.
+pub const DOMAIN_INACTIVITY_RETIREMENT_BLOCKS: u64 = 100_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConsensusDomainRegistry {
     domains: BTreeMap<DomainId, ConsensusDomain>,
@@ -56,14 +66,191 @@ pub struct ConsensusDomainRegistry {
     /// domain, and folded into [`Self::progress_root`] once non-empty.
     #[serde(default)]
     observed: BTreeMap<DomainId, CryptoFacts>,
+    /// Canonical CAIP-2 chain reference bound to each registered domain.
+    /// Kept as the single source of truth (committed into [`Self::root`]) so
+    /// forward and reverse lookups can never diverge across snapshots.
+    #[serde(default)]
+    caip2_by_domain: BTreeMap<DomainId, String>,
+    /// Global block height at which each registered domain last registered or
+    /// advanced with a verified commitment. Used to retire and reclaim stale
+    /// slots once inactive for [`DOMAIN_INACTIVITY_RETIREMENT_BLOCKS`].
+    #[serde(default)]
+    last_activity_block: BTreeMap<DomainId, u64>,
+}
+
+/// Validates and normalizes a CAIP-2 Final chain identifier (`namespace:reference`).
+///
+/// Enforces the official CAIP-2 Final grammar:
+/// - `namespace`: `[-a-z0-9]{3,8}`
+/// - `reference`: `[-_a-zA-Z0-9]{1,32}`
+fn normalize_caip2(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    let Some((ns, reference)) = trimmed.split_once(':') else {
+        return Err(format!("CAIP-2 reference '{trimmed}' must contain ':'"));
+    };
+    if !(3..=8).contains(&ns.len()) {
+        return Err(format!("CAIP-2 namespace '{ns}' must be 3..=8 characters"));
+    }
+    if !(1..=32).contains(&reference.len()) || reference.contains(':') {
+        return Err(format!(
+            "CAIP-2 reference '{reference}' must be 1..=32 characters without ':'"
+        ));
+    }
+    if !ns
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        || !reference
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(format!(
+            "CAIP-2 reference '{trimmed}' contains disallowed characters"
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 impl ConsensusDomainRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             domains: BTreeMap::new(),
             observed: BTreeMap::new(),
+            caip2_by_domain: BTreeMap::new(),
+            last_activity_block: BTreeMap::new(),
         }
+    }
+
+    /// Binds a unique CAIP-2 chain reference to an already registered domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without mutating state if `domain_id` is unknown, the
+    /// CAIP-2 string is malformed, the CAIP-2 reference is already bound to a
+    /// different domain, or `domain_id` is already bound to a different CAIP-2.
+    /// Validates whether `caip2` can be bound to `domain_id` without mutating
+    /// state (used by callers that must pre-check atomically before applying
+    /// sibling registry writes).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `domain_id` is unknown, `caip2` violates CAIP-2
+    /// Final syntax, `caip2` is claimed by another domain, or `domain_id` is
+    /// already bound to a different CAIP-2 reference.
+    pub fn validate_caip2_binding(
+        &self,
+        domain_id: DomainId,
+        caip2: &str,
+    ) -> Result<String, String> {
+        if !self.domains.contains_key(&domain_id) {
+            return Err(format!("Domain {domain_id} is not registered"));
+        }
+        let normalized = normalize_caip2(caip2)?;
+        if let Some(existing_domain) = self.domain_id_by_caip2(&normalized) {
+            if existing_domain != domain_id {
+                return Err(format!(
+                    "CAIP-2 reference '{normalized}' is already registered to domain {existing_domain}"
+                ));
+            }
+            return Ok(normalized);
+        }
+        if let Some(existing_ref) = self.caip2_by_domain.get(&domain_id) {
+            if existing_ref != &normalized {
+                return Err(format!(
+                    "Domain {domain_id} is already bound to CAIP-2 '{existing_ref}'"
+                ));
+            }
+        }
+        Ok(normalized)
+    }
+
+    pub fn bind_caip2(&mut self, domain_id: DomainId, caip2: &str) -> Result<(), String> {
+        let normalized = self.validate_caip2_binding(domain_id, caip2)?;
+        self.caip2_by_domain.insert(domain_id, normalized);
+        Ok(())
+    }
+
+    /// Atomically registers a new consensus domain together with its unique
+    /// CAIP-2 identity. If the CAIP-2 reference is invalid or already claimed
+    /// by another domain, registration is refused with zero state mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the CAIP-2 is malformed or duplicated, or if domain
+    /// registration validation fails.
+    /// Convenience: kept for atomic domain+CAIP-2 registration callers and CLI.
+    pub fn register_with_caip2(
+        &mut self,
+        domain: ConsensusDomain,
+        caip2: &str,
+    ) -> Result<(), String> {
+        let normalized = normalize_caip2(caip2)?;
+        if let Some(existing_domain) = self.domain_id_by_caip2(&normalized) {
+            return Err(format!(
+                "CAIP-2 reference '{normalized}' is already registered to domain {existing_domain}"
+            ));
+        }
+        let id = domain.id;
+        self.register(domain)?;
+        self.caip2_by_domain.insert(id, normalized);
+        Ok(())
+    }
+
+    /// Resolves a canonical CAIP-2 reference to its unique registered `DomainId`.
+    #[must_use]
+    pub fn domain_id_by_caip2(&self, caip2: &str) -> Option<DomainId> {
+        let trimmed = caip2.trim();
+        self.caip2_by_domain
+            .iter()
+            .find_map(|(&id, existing)| (existing == trimmed).then_some(id))
+    }
+
+    /// Returns the canonical CAIP-2 reference bound to `domain_id`, if any.
+    #[must_use]
+    pub fn caip2_for_domain(&self, domain_id: DomainId) -> Option<&str> {
+        self.caip2_by_domain.get(&domain_id).map(String::as_str)
+    }
+
+    /// Records that `domain_id` registered or delivered a verified commitment
+    /// at global `block_height`, refreshing its liveness lease.
+    pub fn note_activity(&mut self, domain_id: DomainId, block_height: u64) {
+        if self.domains.contains_key(&domain_id) {
+            let entry = self.last_activity_block.entry(domain_id).or_insert(0);
+            if block_height > *entry {
+                *entry = block_height;
+            }
+        }
+    }
+
+    /// Retires and reclaims domains whose recorded activity has been stale for
+    /// at least `inactivity_window` global blocks, freeing their registry slots
+    /// and CAIP-2 bindings for new registrations.
+    pub fn reclaim_inactive_domains(
+        &mut self,
+        current_block_height: u64,
+        inactivity_window: u64,
+    ) -> Vec<DomainId> {
+        if inactivity_window == 0 {
+            return Vec::new();
+        }
+        let stale: Vec<DomainId> = self
+            .last_activity_block
+            .iter()
+            .filter_map(|(&id, &last_seen)| {
+                if current_block_height.saturating_sub(last_seen) >= inactivity_window {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for id in &stale {
+            self.domains.remove(id);
+            self.observed.remove(id);
+            self.last_activity_block.remove(id);
+            self.caip2_by_domain.remove(id);
+        }
+        stale
     }
 
     /// Adds what an adapter checked for a commitment of `id`.
@@ -94,6 +281,11 @@ impl ConsensusDomainRegistry {
         self.register_inner(domain, false)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register(&mut self, domain: ConsensusDomain) -> Result<(), String> {
         self.register_inner(domain, true)
     }
@@ -128,6 +320,25 @@ impl ConsensusDomainRegistry {
                 domain.id
             ));
         }
+        // Registration can provide a pre-populated allowlist; applying the bound only
+        // in `allow_zk_program` lets a newly registered domain bypass that bound.
+        // Duplicate entries are also ambiguous: the leaf hash deduplicates them,
+        // while the live registry retains them and counts them against the cap.
+        if domain.zk_program_allowlist.len() > MAX_ZK_PROGRAMS_PER_DOMAIN {
+            return Err(format!(
+                "Domain {} exceeds the zk program allowlist limit of {MAX_ZK_PROGRAMS_PER_DOMAIN}",
+                domain.id
+            ));
+        }
+        let mut programs = std::collections::BTreeSet::new();
+        for program in &domain.zk_program_allowlist {
+            if !programs.insert(program) {
+                return Err(format!(
+                    "Domain {} has a duplicate zk program in its allowlist",
+                    domain.id
+                ));
+            }
+        }
         if !domain.has_operator_bond(MIN_DOMAIN_OPERATOR_BOND) {
             return Err(format!(
                 "Domain {} requires operator identity and minimum bond {}",
@@ -136,6 +347,21 @@ impl ConsensusDomainRegistry {
         }
         if domain.operator == Some(crate::core::address::Address::zero()) {
             return Err(format!("Domain {} has invalid zero operator", domain.id));
+        }
+        if require_active {
+            if let Some(op) = domain.operator {
+                let held = self
+                    .domains
+                    .values()
+                    .filter(|d| d.operator == Some(op) && d.status != DomainStatus::Retired)
+                    .count();
+                if held >= MAX_ACTIVE_DOMAINS_PER_OPERATOR {
+                    return Err(format!(
+                        "Domain {} rejected: operator already holds {held} active domains                          (quota {MAX_ACTIVE_DOMAINS_PER_OPERATOR}); retire an unused domain first",
+                        domain.id
+                    ));
+                }
+            }
         }
         // A new registration starts Active. Frozen and Retired are reached
         // only through `transition_status_checked`; registering straight into
@@ -149,7 +375,10 @@ impl ConsensusDomainRegistry {
             ));
         }
 
-        if domain.finality_adapter == crate::domain::types::POW_HEADER_CHAIN_ADAPTER {
+        let pow_family_adapter = domain.finality_adapter
+            == crate::domain::types::POW_HEADER_CHAIN_ADAPTER
+            || domain.finality_adapter == crate::domain::types::BITCOIN_SPV_ADAPTER;
+        if pow_family_adapter {
             if domain.kind != crate::domain::types::ConsensusKind::PoW {
                 return Err(format!(
                     "Domain {} uses the PoW header adapter with a non-PoW consensus kind",
@@ -190,11 +419,12 @@ impl ConsensusDomainRegistry {
             // requirement" for an adapter that finalises on a quorum.
             return Err(format!(
                 "Domain {} sets min_confirmations={} but its adapter {} never reads it; \
-                 header-chain depth only applies to {}",
+                 header-chain depth only applies to {} and {}",
                 domain.id,
                 domain.min_confirmations,
                 domain.finality_adapter,
-                crate::domain::types::POW_HEADER_CHAIN_ADAPTER
+                crate::domain::types::POW_HEADER_CHAIN_ADAPTER,
+                crate::domain::types::BITCOIN_SPV_ADAPTER
             ));
         }
 
@@ -232,6 +462,7 @@ impl ConsensusDomainRegistry {
         Ok(())
     }
 
+    #[must_use]
     pub fn get(&self, id: DomainId) -> Option<&ConsensusDomain> {
         self.domains.get(&id)
     }
@@ -240,6 +471,11 @@ impl ConsensusDomainRegistry {
         self.domains.get_mut(&id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn set_status(&mut self, id: DomainId, status: DomainStatus) -> Result<(), String> {
         let domain = self
             .domains
@@ -252,6 +488,10 @@ impl ConsensusDomainRegistry {
     /// Lifecycle guard: use this for governance/operator-driven
     /// Transitions. `set_status` remains for migration/tests, while this helper
     /// Prevents accidental Active→Retired jumps and makes Retired terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn transition_status_checked(
         &mut self,
         id: DomainId,
@@ -348,7 +588,7 @@ impl ConsensusDomainRegistry {
         Ok(())
     }
 
-    /// Freeze every active native domain whose class is classical (,
+    /// Freeze every active native domain whose class is classical (
     /// the quantum alarm at Isolate). The class is the observed one, or the
     /// one the consensus kind implies when nothing was observed yet. Returns
     /// the ids that moved, in id order.
@@ -382,12 +622,25 @@ impl ConsensusDomainRegistry {
             .filter(|domain| domain.status == DomainStatus::Active)
     }
 
+    #[must_use]
     pub fn domains(&self) -> Vec<ConsensusDomain> {
         self.domains.values().cloned().collect()
     }
 
     pub fn root(&self) -> Hash32 {
-        let leaves: Vec<Hash32> = self.domains.values().map(domain_leaf_hash).collect();
+        let leaves: Vec<Hash32> = self
+            .domains
+            .values()
+            .map(|domain| {
+                let leaf = domain_leaf_hash(domain);
+                match self.caip2_by_domain.get(&domain.id) {
+                    Some(caip2) => {
+                        hash_fields_bytes(&[b"BDLM_DOMAIN_CAIP2_LEAF_V1", &leaf, caip2.as_bytes()])
+                    }
+                    None => leaf,
+                }
+            })
+            .collect();
         crate::settlement::commitment_tree::merkle_root(&leaves)
     }
 
@@ -427,6 +680,7 @@ impl ConsensusDomainRegistry {
 
 /// A domain with a zk program allowlist or a committed plugin code hash gets a V4 leaf that
 /// mixes both in. Other domains keep their earlier leaf byte for byte.
+#[must_use]
 pub fn domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {
     let base = base_domain_leaf_hash(domain);
     let leaf = if domain.zk_program_allowlist.is_empty() && domain.plugin_code_hash.is_none() {
@@ -563,6 +817,31 @@ mod tests {
                 .expect("under the cap");
         }
         assert!(registry.allow_zk_program(2, [200u8; 32]).is_err());
+    }
+
+    #[test]
+    fn registration_cannot_bypass_the_zk_allowlist_limit_or_commit_a_duplicate() {
+        let mut registry = ConsensusDomainRegistry::new();
+        let mut oversized = default_domain(2, ConsensusKind::Zk, 1338, "zk-proof-verification", 0);
+        oversized.zk_program_allowlist = (0..=MAX_ZK_PROGRAMS_PER_DOMAIN)
+            .map(|n| [u8::try_from(n).unwrap_or(0); 32])
+            .collect();
+        let error = registry.register(oversized).unwrap_err();
+        assert!(error.contains("allowlist limit"), "{error}");
+        assert!(registry.is_empty());
+
+        let mut duplicate = default_domain(3, ConsensusKind::Zk, 1338, "zk-proof-verification", 0);
+        duplicate.zk_program_allowlist = vec![[7; 32], [7; 32]];
+        let error = registry.register(duplicate).unwrap_err();
+        assert!(error.contains("duplicate zk program"), "{error}");
+        assert!(registry.is_empty());
+
+        let mut valid = default_domain(4, ConsensusKind::Zk, 1338, "zk-proof-verification", 0);
+        valid.zk_program_allowlist = vec![[7; 32], [8; 32]];
+        registry
+            .register(valid)
+            .expect("distinct programs within the bound");
+        assert_eq!(registry.get(4).unwrap().zk_program_allowlist.len(), 2);
     }
 
     #[test]
@@ -863,5 +1142,118 @@ mod tests {
                 6,
             ))
             .expect("a PoW header-chain domain is exactly where depth applies");
+    }
+
+    #[test]
+    fn duplicate_caip2_registration_is_refused_without_mutating_state() {
+        let mut reg = ConsensusDomainRegistry::new();
+        let d1 = default_domain(101, ConsensusKind::Bft, 1, "bft-quorum-commit", 1);
+        let d2 = default_domain(102, ConsensusKind::Bft, 11_155_111, "bft-quorum-commit", 1);
+
+        // First registration with CAIP-2 succeeds and binds caip2 -> DomainId.
+        reg.register_with_caip2(d1, "eip155:1")
+            .expect("first CAIP-2 registration must succeed");
+        assert_eq!(reg.domain_id_by_caip2("eip155:1"), Some(101));
+        assert_eq!(reg.caip2_for_domain(101), Some("eip155:1"));
+        let root_after_first = reg.root();
+
+        // Second registration claiming the exact same CAIP-2 must fail atomically
+        // without adding d2 or mutating the registry root.
+        let dup_err = reg.register_with_caip2(d2.clone(), "eip155:1").unwrap_err();
+        assert!(dup_err.contains("already registered"));
+        assert_eq!(reg.len(), 1);
+        assert!(reg.get(102).is_none());
+        assert_eq!(reg.root(), root_after_first);
+
+        // Malformed CAIP-2 references are also rejected without state mutation.
+        assert!(reg.register_with_caip2(d2.clone(), "").is_err());
+        assert!(reg
+            .register_with_caip2(d2.clone(), "missing-colon")
+            .is_err());
+        assert!(reg.register_with_caip2(d2.clone(), "a:b:c").is_err());
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg.root(), root_after_first);
+
+        // Distinct CAIP-2 succeeds and updates the root deterministically.
+        reg.register_with_caip2(d2, "eip155:11155111")
+            .expect("distinct CAIP-2 must succeed");
+        assert_eq!(reg.domain_id_by_caip2("eip155:11155111"), Some(102));
+        assert_ne!(reg.root(), root_after_first);
+    }
+
+    #[test]
+    fn single_operator_cannot_exhaust_domain_registry_and_inactive_domain_reclaims_slot() {
+        let mut reg = ConsensusDomainRegistry::new();
+        let single_operator = crate::core::address::Address([0x5A; 32]);
+
+        // Under-bonded registration is rejected (deposit required for every slot).
+        let mut underfunded = default_domain(1, ConsensusKind::PoS, 1001, "pos", 0);
+        underfunded.operator = Some(single_operator);
+        underfunded.operator_bond = MIN_DOMAIN_OPERATOR_BOND.saturating_sub(1);
+        assert!(reg.register(underfunded).is_err());
+
+        // A single operator can fill at most MAX_ACTIVE_DOMAINS_PER_OPERATOR slots.
+        for idx in 0..MAX_ACTIVE_DOMAINS_PER_OPERATOR {
+            let id = u32::try_from(idx + 10).expect("fits u32");
+            let mut dom = default_domain(id, ConsensusKind::PoS, u64::from(id), "pos", 0);
+            dom.operator = Some(single_operator);
+            reg.register(dom)
+                .expect("registrations within operator quota must succeed");
+            reg.note_activity(id, 100);
+        }
+
+        // The next registration by the same operator must be rejected without
+        // mutating the table.
+        let mut overflow = default_domain(999, ConsensusKind::PoS, 999, "pos", 0);
+        overflow.operator = Some(single_operator);
+        let err = reg
+            .register(overflow.clone())
+            .expect_err("single operator must not exceed fair-share quota");
+        assert!(err.contains("quota"), "{err}");
+        assert_eq!(reg.len(), MAX_ACTIVE_DOMAINS_PER_OPERATOR);
+
+        // Keep domain 10 active with fresh proof progress while the rest stay idle.
+        reg.note_activity(10, 100 + DOMAIN_INACTIVITY_RETIREMENT_BLOCKS - 1);
+
+        // Once the inactivity window passes, idle domains are reclaimed and
+        // their slots open up while the active domain stays registered.
+        let reclaimed = reg.reclaim_inactive_domains(
+            100 + DOMAIN_INACTIVITY_RETIREMENT_BLOCKS,
+            DOMAIN_INACTIVITY_RETIREMENT_BLOCKS,
+        );
+        assert_eq!(reclaimed.len(), MAX_ACTIVE_DOMAINS_PER_OPERATOR - 1);
+        assert!(reg.get(10).is_some(), "active domain must remain");
+        assert!(reg.get(11).is_none(), "stale domain must be reclaimed");
+        assert_eq!(reg.len(), 1);
+
+        // Freed slot accepts a new registration cleanly.
+        reg.register(overflow)
+            .expect("registration must succeed once inactive slots are reclaimed");
+        assert!(reg.get(999).is_some());
+    }
+    #[test]
+    fn normalize_caip2_conforms_to_official_caip2_final_grammar() {
+        for valid in [
+            "eip155:1",
+            "cosmos:cosmoshub-3",
+            "starknet:SN_GOERLI",
+            "chainstd:8c3444cf8970a9e41a706fab93e7a6c4",
+        ] {
+            assert_eq!(normalize_caip2(valid).as_deref(), Ok(valid), "{valid}");
+        }
+        assert!(normalize_caip2("a:b").is_err(), "namespace < 3 must fail");
+        assert!(
+            normalize_caip2("namespace:1").is_err(),
+            "namespace > 8 must fail"
+        );
+        let over_ref = format!("eip155:{}", "1".repeat(33));
+        assert!(
+            normalize_caip2(&over_ref).is_err(),
+            "reference > 32 must fail"
+        );
+        assert!(
+            normalize_caip2("eip155:1.2").is_err(),
+            "dot is disallowed in CAIP-2 reference"
+        );
     }
 }

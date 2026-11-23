@@ -35,9 +35,18 @@ pub(crate) fn self_checked_observation<A: ChainAdapter + ?Sized>(
     adapter: &A,
     result: &RelayerExternalResult,
 ) -> Result<(), AdapterError> {
+    if result.chain != adapter.chain_type() {
+        return Err(AdapterError::UnsupportedChain(result.chain));
+    }
+    if !result.success {
+        return Err(AdapterError::ProofVerificationFailed(
+            "external transaction execution reported failure".into(),
+        ));
+    }
     let proof: MerkleProof = bincode::options()
         .with_fixint_encoding()
         .with_limit(MAX_RECEIPT_PROOF_BYTES)
+        .reject_trailing_bytes()
         .deserialize(&result.receipt_proof)
         .map_err(|e| {
             AdapterError::ProofVerificationFailed(format!(
@@ -74,29 +83,29 @@ pub enum AdapterError {
 impl std::fmt::Display for AdapterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AdapterError::UnsupportedChain(chain) => {
+            Self::UnsupportedChain(chain) => {
                 write!(f, "unsupported chain: {chain:?}")
             }
-            AdapterError::ConnectionFailed(msg) => {
+            Self::ConnectionFailed(msg) => {
                 write!(f, "connection failed: {msg}")
             }
-            AdapterError::TransactionNotFound(hash) => {
+            Self::TransactionNotFound(hash) => {
                 write!(f, "transaction not found: {hash}")
             }
-            AdapterError::ProofGenerationFailed(msg) => {
+            Self::ProofGenerationFailed(msg) => {
                 write!(f, "proof generation failed: {msg}")
             }
-            AdapterError::ProofVerificationFailed(msg) => {
+            Self::ProofVerificationFailed(msg) => {
                 write!(f, "proof verification failed: {msg}")
             }
-            AdapterError::SubmissionFailed(msg) => {
+            Self::SubmissionFailed(msg) => {
                 write!(f, "submission failed: {msg}")
             }
-            AdapterError::ConfirmationTimeout => {
+            Self::ConfirmationTimeout => {
                 write!(f, "confirmation timeout")
             }
-            AdapterError::Other(msg) => write!(f, "adapter error: {msg}"),
-            AdapterError::DuplicateChainAdapter(chain) => {
+            Self::Other(msg) => write!(f, "adapter error: {msg}"),
+            Self::DuplicateChainAdapter(chain) => {
                 write!(f, "duplicate adapter for chain: {chain:?}")
             }
         }
@@ -126,7 +135,7 @@ pub trait ChainAdapter: Send + Sync {
     /// Verify a receipt proof against the external chain's state root.
     ///
     /// This is used for on-chain verification when the relayer submits
-    /// A RelayerResult back to Budlum.
+    /// A `RelayerResult` back to Budlum.
     fn verify_receipt_proof(
         &self,
         proof: &MerkleProof,
@@ -160,6 +169,14 @@ pub trait ChainAdapter: Send + Sync {
     }
 
     fn verify_observation(&self, result: &RelayerExternalResult) -> Result<(), AdapterError> {
+        if result.chain != self.chain_type() {
+            return Err(AdapterError::UnsupportedChain(result.chain));
+        }
+        if !result.success {
+            return Err(AdapterError::ProofVerificationFailed(
+                "external transaction execution reported failure".into(),
+            ));
+        }
         // The root must NOT come from the same result
         // being verified - that only proved the result is self-consistent.
         // The default fails closed: an adapter without a trusted anchor
@@ -181,6 +198,7 @@ pub trait ChainAdapter: Send + Sync {
         let proof: MerkleProof = bincode::options()
             .with_fixint_encoding()
             .with_limit(MAX_RECEIPT_PROOF_BYTES)
+            .reject_trailing_bytes()
             .deserialize(&result.receipt_proof)
             .map_err(|e| {
                 AdapterError::ProofVerificationFailed(format!(
@@ -234,6 +252,7 @@ pub struct AdapterRegistry {
 }
 
 impl AdapterRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             adapters: Vec::new(),
@@ -273,11 +292,13 @@ impl AdapterRegistry {
     }
 
     /// Check if a chain is supported.
+    #[must_use]
     pub fn supports(&self, chain: &ExternalChain) -> bool {
         self.get(chain).is_some()
     }
 
     /// List all supported chains.
+    #[must_use]
     pub fn supported_chains(&self) -> Vec<ExternalChain> {
         self.adapters.iter().map(|a| a.chain_type()).collect()
     }
@@ -301,6 +322,7 @@ pub mod test_adapter {
     }
 
     impl StubAdapter {
+        #[must_use]
         pub fn new(chain: ExternalChain) -> Self {
             Self { chain }
         }
@@ -344,9 +366,18 @@ pub mod test_adapter {
         // The default now fails closed, and the stub has no
         // anchor to give.
         fn verify_observation(&self, result: &RelayerExternalResult) -> Result<(), AdapterError> {
+            if result.chain != self.chain {
+                return Err(AdapterError::UnsupportedChain(result.chain));
+            }
+            if !result.success {
+                return Err(AdapterError::ProofVerificationFailed(
+                    "observation indicates failure".into(),
+                ));
+            }
             let proof: MerkleProof = bincode::options()
                 .with_fixint_encoding()
                 .with_limit(MAX_RECEIPT_PROOF_BYTES)
+                .reject_trailing_bytes()
                 .deserialize(&result.receipt_proof)
                 .map_err(|e| {
                     AdapterError::ProofVerificationFailed(format!(
@@ -466,6 +497,27 @@ pub mod test_adapter {
         );
         assert_eq!(registry.supported_chains().len(), 1);
     }
+
+    #[tokio::test]
+    async fn verify_observation_refuses_failed_and_cross_chain_results() {
+        let adapter = StubAdapter::new(ExternalChain::Ethereum);
+        let valid = adapter.wait_for_confirmation("0xabc123", 1).await.unwrap();
+        assert!(adapter.verify_observation(&valid).is_ok());
+
+        let mut failed = valid.clone();
+        failed.success = false;
+        assert!(matches!(
+            adapter.verify_observation(&failed),
+            Err(AdapterError::ProofVerificationFailed(_))
+        ));
+
+        let mut wrong_chain = valid;
+        wrong_chain.chain = ExternalChain::Solana;
+        assert_eq!(
+            adapter.verify_observation(&wrong_chain),
+            Err(AdapterError::UnsupportedChain(ExternalChain::Solana))
+        );
+    }
 }
 
 #[test]
@@ -506,4 +558,22 @@ fn adapter_error_display() {
 
     let err = AdapterError::ConfirmationTimeout;
     assert!(err.to_string().contains("timeout"));
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn verify_observation_refuses_trailing_bytes_after_valid_proof() {
+    use self::test_adapter::StubAdapter;
+    let adapter = StubAdapter::new(ExternalChain::Ethereum);
+    let mut result = adapter.wait_for_confirmation("0xabc123", 1).await.unwrap();
+    adapter
+        .verify_observation(&result)
+        .expect("canonical receipt proof verifies");
+    result
+        .receipt_proof
+        .extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    let err = adapter
+        .verify_observation(&result)
+        .expect_err("trailing garbage after canonical receipt proof must be refused");
+    assert!(err.to_string().contains("decode"), "got: {err}");
 }

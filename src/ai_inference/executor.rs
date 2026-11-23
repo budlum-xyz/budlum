@@ -3,7 +3,7 @@
 //! An AI inference layer inference request is carried to the executor as a
 //! `TransactionType::AiInferenceRequest`. The executor
 //! (src/execution/executor.rs:723) already handles the whole flow: Pollen
-//! grant verification, the balance check, ai_registry.submit_request, grant
+//! grant verification, the balance check, `ai_registry`.`submit_request`, grant
 //! consumption and the fee deduction. This module builds the transaction the
 //! user has to send.
 
@@ -24,7 +24,7 @@ pub struct AiExecutorRequest {
 }
 
 impl AiExecutorRequest {
-    /// Build the executor-ready form from an AiInferenceRequest.
+    /// Build the executor-ready form from an `AiInferenceRequest`.
     #[must_use]
     pub fn from_inference_request(req: &AiInferenceRequest) -> Self {
         Self {
@@ -40,8 +40,8 @@ impl AiExecutorRequest {
 ///
 /// The executor handles this transaction as a
 /// `TransactionType::AiInferenceRequest`: (1) Pollen grant verification
-/// (closed-circuit), (2) the balance check, (3) the ai_registry submit,
-/// (4) grant consumption, (5) the fee plus max_fee deduction.
+/// (closed-circuit), (2) the balance check, (3) the `ai_registry` submit,
+/// (4) grant consumption, (5) the fee plus `max_fee` deduction.
 ///
 /// The first item now holds here as well: `grant` is a mandatory argument and
 /// it is verified before the request is built. Previously this sentence only

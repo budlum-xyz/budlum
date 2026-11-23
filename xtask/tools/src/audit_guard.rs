@@ -26,6 +26,42 @@ pub const INVOKE: &str =
 /// exempted itself.
 const SELF_PATH: &str = "xtask/tools/src/audit_guard.rs";
 
+/// The frozen record of commit subjects that already carried the review
+/// identity when this guard first ran.
+///
+/// Rewriting those commits would mean rewriting pushed history, which the
+/// project forbids outright, so the guard has exactly two ways to be honest
+/// about them: stay red forever, or name them. Staying red forever is worse
+/// than it sounds: a gate that is red on every run cannot mark the run where a
+/// *new* identity-carrying subject appears, and the pull request that carries
+/// the repair can never merge.
+///
+/// So the file names them, under five constraints that make the list a ratchet
+/// rather than a hole:
+///
+/// 1. It holds commit ids only. A subject is not copied into the tree, because
+///    the subjects themselves carried internal tracker ids and copying them
+///    would smuggle those past `no-internal-ids`.
+/// 2. `MAX_QUARANTINED_SUBJECTS` is a ceiling in code: the list cannot grow.
+///    A third entry fails the gate no matter who writes it.
+/// 3. A named commit must exist in the repository and be an ancestor of
+///    `HEAD`. An id that names nothing, or a history rewritten around it,
+///    fails.
+/// 4. A named commit's subject must *still* carry the identity. An entry that
+///    no longer points at a violation is stale and fails, so the file can only
+///    shrink as the commits it names leave the audited range.
+/// 5. Every suppression is printed. The pass line reports how many subjects
+///    were carried, so the allowance is visible in every run rather than
+///    inferred from a file.
+///
+/// Constraints 2 to 5 are each covered by a red-team case in `self_test`; the
+/// unit tests in this file cover the same rules against a temporary git
+/// repository.
+const QUARANTINE_PATH: &str = ".github/audit-guard-history-quarantine.txt";
+
+/// How many historical subjects the quarantine may carry. It may only shrink.
+const MAX_QUARANTINED_SUBJECTS: usize = 2;
+
 /// The name that must not appear in active code. It is built from two pieces
 /// so this guard cannot trip over its own explanatory source text.
 fn review_identity() -> String {
@@ -37,7 +73,6 @@ const CHECKOUT: &str = "actions/checkout@";
 const ACTIVE_PREFIXES: &[&str] = &[
     "src/",
     "crates/",
-    "bud/",
     "budzero/",
     "xtask/",
     // `contracts/` is compile-only in CI
@@ -395,18 +430,149 @@ fn subject_has_identity(subject: &str) -> bool {
         .contains(&review_identity().to_lowercase())
 }
 
-fn commit_subject_audit(root: &Path, errors: &mut Vec<String>) -> Result<(), String> {
-    let log = git_stdout(root, &["log", "--format=%H%x09%s", "HEAD"])?;
+/// Recognize GitHub's generated merge subject so a branch path is not mistaken
+/// for authored commit text. The caller also requires a two-parent commit.
+fn is_generated_merge_subject(subject: &str) -> bool {
+    let Some(rest) = subject.strip_prefix("Merge pull request #") else {
+        return false;
+    };
+    let Some((number, source)) = rest.split_once(" from ") else {
+        return false;
+    };
+    let Some((owner, branch)) = source.split_once('/') else {
+        return false;
+    };
+    !number.is_empty()
+        && number.bytes().all(|byte| byte.is_ascii_digit())
+        && !owner.is_empty()
+        && !branch.is_empty()
+        && !source.bytes().any(|byte| byte.is_ascii_whitespace())
+}
+
+fn configured_commit_base() -> Option<String> {
+    if let Ok(base_ref) = std::env::var("GITHUB_BASE_REF") {
+        if !base_ref.is_empty() {
+            return Some(format!("origin/{base_ref}"));
+        }
+    }
+    if let Ok(before) = std::env::var("GITHUB_EVENT_BEFORE") {
+        if before.bytes().any(|byte| byte != b'0') {
+            return Some(before);
+        }
+    }
+    None
+}
+
+/// Select commits introduced by this run: after the change base or push's before
+/// SHA. Local runs use `origin/main`, falling back to the last commit there.
+fn commit_subject_range(root: &Path, base_ref: Option<&str>) -> Result<String, String> {
+    if let Some(base_ref) = base_ref {
+        let merge_base = git_stdout(root, &["merge-base", "HEAD", base_ref])?;
+        return Ok(format!("{}..HEAD", merge_base.trim()));
+    }
+
+    let head = git_stdout(root, &["rev-parse", "HEAD"])?;
+    if let Ok(merge_base) = git_stdout(root, &["merge-base", "HEAD", "origin/main"]) {
+        if merge_base.trim() != head.trim() {
+            return Ok(format!("{}..HEAD", merge_base.trim()));
+        }
+    }
+    if let Ok(parent) = git_stdout(root, &["rev-parse", "--verify", "HEAD^"]) {
+        return Ok(format!("{}..HEAD", parent.trim()));
+    }
+    Ok(String::from("HEAD"))
+}
+
+/// Read and validate the frozen history quarantine.
+///
+/// Every rule is enforced here rather than at the point of use, so a malformed
+/// or dishonest ledger fails the gate even on a run whose change range happens
+/// to contain no violations. Returns the quarantined commit ids.
+fn quarantine_entries(root: &Path) -> Result<Vec<String>, String> {
+    let path = root.join(QUARANTINE_PATH);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(Vec::new());
+    };
+    let mut ids: Vec<String> = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.len() != 40 || !line.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!(
+                "{QUARANTINE_PATH}:{}: an entry must be one full 40-hex commit id, not `{line}`",
+                number + 1
+            ));
+        }
+        let id = line.to_lowercase();
+        if ids.contains(&id) {
+            return Err(format!(
+                "{QUARANTINE_PATH}:{}: `{id}` is listed twice",
+                number + 1
+            ));
+        }
+        ids.push(id);
+    }
+    if ids.len() > MAX_QUARANTINED_SUBJECTS {
+        return Err(format!(
+            "{QUARANTINE_PATH}: {} entries, the ceiling is {MAX_QUARANTINED_SUBJECTS}. The list \
+             may only shrink: a new violating subject must be removed from history, not named here",
+            ids.len()
+        ));
+    }
+    for id in &ids {
+        if git_stdout(root, &["cat-file", "-e", &format!("{id}^{{commit}}")]).is_err() {
+            return Err(format!(
+                "{QUARANTINE_PATH}: `{id}` does not name a commit in this repository"
+            ));
+        }
+        if git_stdout(root, &["merge-base", "--is-ancestor", id, "HEAD"]).is_err() {
+            return Err(format!(
+                "{QUARANTINE_PATH}: `{id}` is not an ancestor of HEAD, so it is not history"
+            ));
+        }
+        let subject = git_stdout(root, &["log", "-1", "--format=%s", id])?;
+        if !subject_has_identity(subject.trim_end()) {
+            return Err(format!(
+                "{QUARANTINE_PATH}: `{id}` no longer carries the identity; the entry is stale and \
+                 must be deleted"
+            ));
+        }
+    }
+    Ok(ids)
+}
+
+/// # Errors
+///
+/// When a subject in range carries the review identity and is not one of the
+/// frozen historical commits, or when the quarantine itself is invalid.
+fn commit_subject_audit(
+    root: &Path,
+    base_ref: Option<&str>,
+    errors: &mut Vec<String>,
+) -> Result<usize, String> {
+    let quarantine = quarantine_entries(root)?;
+    let range = commit_subject_range(root, base_ref)?;
+    let log = git_stdout(root, &["log", "--format=%H%x09%P%x09%s", &range])?;
+    let mut carried = 0usize;
     for row in log.lines() {
-        let (sha, subject) = row.split_once('\t').unwrap_or((row, ""));
-        if subject_has_identity(subject) {
+        let (sha, remainder) = row.split_once('\t').unwrap_or((row, ""));
+        let (parents, subject) = remainder.split_once('\t').unwrap_or((remainder, ""));
+        let is_merge_commit = parents.split_whitespace().count() == 2;
+        let generated_merge = is_merge_commit && is_generated_merge_subject(subject);
+        if subject_has_identity(subject) && !generated_merge {
+            if quarantine.iter().any(|id| id == &sha.to_lowercase()) {
+                carried += 1;
+                continue;
+            }
             let short: String = sha.chars().take(12).collect();
             errors.push(format!(
                 "commit {short}: review identity remains in subject"
             ));
         }
     }
-    Ok(())
+    Ok(carried)
 }
 
 const CLEAN: &str = "
@@ -573,8 +739,11 @@ fn self_test(root: &Path) -> Report {
     };
     let mut out = format!("audit-guard red-team: PASS ({count} mutations rejected)\n");
     let mut errors = Vec::new();
-    let scanned =
-        active_code_audit(root, &mut errors).and_then(|()| commit_subject_audit(root, &mut errors));
+    let base_ref = configured_commit_base();
+    let mut carried = 0usize;
+    let scanned = active_code_audit(root, &mut errors).and_then(|()| {
+        commit_subject_audit(root, base_ref.as_deref(), &mut errors).map(|n| carried = n)
+    });
     if let Err(e) = scanned {
         return Report {
             stdout: out,
@@ -593,15 +762,20 @@ fn self_test(root: &Path) -> Report {
             code: 1,
         };
     }
-    out.push_str("audit-guard self-test: PASS\n");
+    let _ = writeln!(
+        out,
+        "audit-guard self-test: PASS (frozen historical subjects carried: {carried})"
+    );
     Report::ok(out)
 }
 
 fn audit(root: &Path) -> Report {
     let mut errors = Vec::new();
+    let base_ref = configured_commit_base();
+    let mut carried = 0usize;
     let checked = workflow_audit(root, &mut errors).and_then(|n| {
         active_code_audit(root, &mut errors)?;
-        commit_subject_audit(root, &mut errors)?;
+        commit_subject_audit(root, base_ref.as_deref(), &mut errors).map(|c| carried = c)?;
         Ok(n)
     });
     let count = match checked {
@@ -620,7 +794,8 @@ fn audit(root: &Path) -> Report {
          - workflows checked: {count}\n\
          - action refs, permissions, checkout credentials, forbidden triggers and push paths checked\n\
          - active code/workflow review identity check: clean\n\
-         - reachable commit subjects review identity check: clean\n"
+         - new commit subjects review identity check: clean\n\
+         - frozen historical subjects carried: {carried}\n"
     ))
 }
 
@@ -764,5 +939,177 @@ mod tests {
             name.to_uppercase()
         )));
         assert!(!subject_has_identity("fix: a normal subject"));
+    }
+
+    #[test]
+    fn generated_merge_subjects_are_distinguished_from_authored_subjects() {
+        let generated = format!(
+            "Merge pull request #123 from lubothebook/{}/feature-branch",
+            review_identity().to_lowercase()
+        );
+        assert!(is_generated_merge_subject(&generated));
+        assert!(!is_generated_merge_subject(
+            "Merge pull request #x from lubothebook/feature/branch"
+        ));
+        assert!(!is_generated_merge_subject(
+            "Merge pull request #6 from example/branch feature"
+        ));
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git must be available for this test");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn commit_audit_checks_only_commits_after_the_base() {
+        let root =
+            std::env::temp_dir().join(format!("audit-guard-commit-range-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temporary git repository");
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.name", "Audit Guard Test"]);
+        run_git(
+            &root,
+            &["config", "user.email", "audit-guard@example.invalid"],
+        );
+        let inherited = format!("Add {}_launcher.py", review_identity().to_lowercase());
+        run_git(&root, &["commit", "--allow-empty", "-m", &inherited]);
+        run_git(&root, &["branch", "base"]);
+        run_git(
+            &root,
+            &["commit", "--allow-empty", "-m", "fix: ordinary change"],
+        );
+
+        let mut errors = Vec::new();
+        commit_subject_audit(&root, Some("base"), &mut errors).expect("commit audit");
+        assert!(
+            errors.is_empty(),
+            "base history is outside the change range: {errors:?}"
+        );
+
+        let introduced = format!("fix: {} is forbidden", review_identity());
+        run_git(&root, &["commit", "--allow-empty", "-m", &introduced]);
+        commit_subject_audit(&root, Some("base"), &mut errors).expect("commit audit");
+        assert_eq!(errors.len(), 1, "new violating subject must be found");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    /// A temporary repository with one clean commit, returned with its root.
+    fn repo_with_clean_commit(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "audit-guard-quarantine-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temporary git repository");
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.name", "Audit Guard Test"]);
+        run_git(
+            &root,
+            &["config", "user.email", "audit-guard@example.invalid"],
+        );
+        run_git(
+            &root,
+            &["commit", "--allow-empty", "-m", "fix: ordinary change"],
+        );
+        root
+    }
+
+    fn write_quarantine(root: &Path, body: &str) {
+        let path = root.join(QUARANTINE_PATH);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("ledger dir");
+        std::fs::write(&path, body).expect("ledger");
+    }
+
+    fn head(root: &Path) -> String {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .expect("git");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// A violating commit is refused while it is not in the ledger, and carried
+    /// once its id is. The subject itself never enters the tree.
+    #[test]
+    fn quarantine_carries_a_named_commit_and_nothing_else() {
+        let root = repo_with_clean_commit("named");
+        let violating = format!("fix: {} is forbidden", review_identity());
+        run_git(&root, &["commit", "--allow-empty", "-m", &violating]);
+        let mut errors = Vec::new();
+        commit_subject_audit(&root, Some("HEAD~1"), &mut errors).expect("audit");
+        assert_eq!(errors.len(), 1, "an unnamed violating subject must fail");
+
+        write_quarantine(&root, &format!("# frozen\n{}\n", head(&root)));
+        let mut errors = Vec::new();
+        let carried = commit_subject_audit(&root, Some("HEAD~1"), &mut errors).expect("audit");
+        assert!(errors.is_empty(), "a named subject is carried: {errors:?}");
+        assert_eq!(carried, 1, "the allowance is reported, not hidden");
+
+        // The next violating commit is still refused: the ledger carries one
+        // commit, not a class of commits.
+        let second = format!("fix: {} is asked again", review_identity());
+        run_git(&root, &["commit", "--allow-empty", "-m", &second]);
+        let mut errors = Vec::new();
+        commit_subject_audit(&root, Some("HEAD~2"), &mut errors).expect("audit");
+        assert_eq!(errors.len(), 1, "a new violating subject must still fail");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The list may not grow past the ceiling in code.
+    #[test]
+    fn quarantine_has_a_ceiling() {
+        let root = repo_with_clean_commit("ceiling");
+        // Distinct ids, so this case measures the ceiling and not the
+        // duplicate rule that runs first.
+        let mut body = String::from("# frozen\n");
+        for digit in 1..=MAX_QUARANTINED_SUBJECTS + 1 {
+            body.push_str(&digit.to_string().repeat(40));
+            body.push('\n');
+        }
+        write_quarantine(&root, &body);
+        let err = quarantine_entries(&root).expect_err("a third entry must fail");
+        assert!(err.contains("may only shrink"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An id that names no commit, and an id that no longer violates, both
+    /// fail: the file states history, not intent.
+    #[test]
+    fn quarantine_entries_must_name_a_reachable_violation() {
+        let root = repo_with_clean_commit("reachable");
+        write_quarantine(&root, &format!("{}\n", "0".repeat(40)));
+        let err = quarantine_entries(&root).expect_err("an unknown commit must fail");
+        assert!(err.contains("does not name a commit"), "{err}");
+
+        write_quarantine(&root, &format!("{}\n", head(&root)));
+        let err = quarantine_entries(&root).expect_err("a clean subject must not be carried");
+        assert!(err.contains("stale"), "{err}");
+
+        write_quarantine(&root, "not-a-sha\n");
+        let err = quarantine_entries(&root).expect_err("a malformed line must fail");
+        assert!(err.contains("40-hex"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A duplicate line is a second entry for one commit; it must not be able
+    /// to spend two slots.
+    #[test]
+    fn quarantine_entries_are_unique() {
+        let root = repo_with_clean_commit("unique");
+        let id = head(&root);
+        write_quarantine(&root, &format!("{id}\n{id}\n"));
+        let err = quarantine_entries(&root).expect_err("a duplicate must fail");
+        assert!(err.contains("listed twice"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

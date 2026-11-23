@@ -1,12 +1,12 @@
 //! PoA/permissionless isolation test suite - CI expansion item 9.
 //!
-//! This file verifies that the PoA domain does not leak into the permissionless side.
+//! This file verifies that the `PoA` domain does not leak into the permissionless side.
 //! Five distinct leak scenarios are tested:
-//! 1. RPC leak - PoA data must not appear in the permissionless RPC
-//! 2. Event leak - PoA membership events must not leak into the permissionless domain
-//! 3. Cross-domain message leak - PoA KYC metadata must not travel in a cross-domain message
-//! 4. Log leak - PoA information must not be leaked in chain data
-//! 5. Error message leak - error messages must not disclose PoA details
+//! 1. RPC leak - `PoA` data must not appear in the permissionless RPC
+//! 2. Event leak - `PoA` membership events must not leak into the permissionless domain
+//! 3. Cross-domain message leak - `PoA` KYC metadata must not travel in a cross-domain message
+//! 4. Log leak - `PoA` information must not be leaked in chain data
+//! 5. Error message leak - error messages must not disclose `PoA` details
 
 #[cfg(test)]
 mod poa_isolation_tests {
@@ -18,9 +18,9 @@ mod poa_isolation_tests {
 
     const POA_DOMAIN: u32 = 3;
 
-    /// Scenario 1: RPC leak - PoA membership data must not appear in the permissionless registry.
+    /// Scenario 1: RPC leak - `PoA` membership data must not appear in the permissionless registry.
     ///
-    /// A PoA member must not enter the permissionless registry without staking.
+    /// A `PoA` member must not enter the permissionless registry without staking.
     #[test]
     fn poa_member_cannot_register_in_permissionless_registry_without_stake() {
         let perm_state = AccountState::new();
@@ -54,9 +54,9 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Scenario 2: event leak - PoA membership events must not appear in the permissionless domain.
+    /// Scenario 2: event leak - `PoA` membership events must not appear in the permissionless domain.
     ///
-    /// PoA membership must not be reflected in the permissionless validator set.
+    /// `PoA` membership must not be reflected in the permissionless validator set.
     #[test]
     fn poa_membership_does_not_affect_permissionless_validator_set() {
         let mut perm_state = AccountState::new();
@@ -92,9 +92,9 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Scenario 3: cross-domain message leak - PoA KYC metadata must not travel in a cross-domain message.
+    /// Scenario 3: cross-domain message leak - `PoA` KYC metadata must not travel in a cross-domain message.
     ///
-    /// A CrossDomainMessage contains no KYC commitment; it carries only payload_hash.
+    /// A `CrossDomainMessage` contains no KYC commitment; it carries only `payload_hash`.
     #[test]
     fn cross_domain_message_does_not_carry_kyc_metadata() {
         use crate::cross_domain::message::{
@@ -131,9 +131,9 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Scenario 4: log leak - PoA information must not be leaked in chain data.
+    /// Scenario 4: log leak - `PoA` information must not be leaked in chain data.
     ///
-    /// The PoA registry is entirely separate from the permissionless registry.
+    /// The `PoA` registry is entirely separate from the permissionless registry.
     #[test]
     fn poa_membership_isolated_from_permissionless_registry() {
         let perm_state = AccountState::new();
@@ -161,9 +161,9 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Scenario 5: error message leak - error messages must not disclose PoA details.
+    /// Scenario 5: error message leak - error messages must not disclose `PoA` details.
     ///
-    /// The PoA and permissionless registries are entirely separate data structures.
+    /// The `PoA` and permissionless registries are entirely separate data structures.
     #[test]
     fn poa_and_permissionless_registries_share_no_state() {
         let mut perm_state = AccountState::new();
@@ -201,7 +201,7 @@ mod poa_isolation_tests {
         assert!(perm_params.min_stake > 0);
     }
 
-    /// Extra: the PoA domain id must differ from the permissionless domain id.
+    /// Extra: the `PoA` domain id must differ from the permissionless domain id.
     #[test]
     fn poa_domain_id_isolated_from_permissionless() {
         use crate::domain::types::DomainId;
@@ -215,7 +215,7 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Extra: PoA admin authority must not affect the permissionless side.
+    /// Extra: `PoA` admin authority must not affect the permissionless side.
     #[test]
     fn poa_admin_authority_does_not_grant_permissionless_power() {
         let perm_state = AccountState::new();
@@ -234,10 +234,10 @@ mod poa_isolation_tests {
         );
     }
 
-    /// An additional isolation seal: the PoA whitelist is entirely independent of
+    /// An additional isolation seal: the `PoA` whitelist is entirely independent of
     /// permissionless stake. An account that became a permissionless validator through stake is
-    /// NOT in the PoA whitelist; PoA whitelist membership does NOT grant permissionless active
-    /// status. This test is part of the PoA isolation CI gate (7 or more).
+    /// NOT in the `PoA` whitelist; `PoA` whitelist membership does NOT grant permissionless active
+    /// status. This test is part of the `PoA` isolation CI gate (7 or more).
     #[test]
     fn poa_whitelist_independent_of_permissionless_stake() {
         let mut perm_state = AccountState::new();
@@ -295,7 +295,7 @@ mod poa_isolation_tests {
     }
 }
 
-/// The PoA compliance ledger is now a GATE: a freeze record has consequences.
+/// The `PoA` compliance ledger is now a GATE: a freeze record has consequences.
 ///
 /// For a long time the module only kept records - freezing could be called but
 /// being frozen had no effect. These tests lock the binding.
@@ -317,7 +317,7 @@ mod poa_compliance_gate {
         Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None)
     }
 
-    /// A PoA domain whose registered operator is `addr(id)` - the operator
+    /// A `PoA` domain whose registered operator is `addr(id)` - the operator
     /// holds compliance authority while the domain has no admins yet.
     fn poa_domain(id: u32) -> ConsensusDomain {
         let mut d = default_domain(
@@ -336,7 +336,7 @@ mod poa_compliance_gate {
     /// On a network that claims sovereignty, a central administrator must not be
     /// able to freeze the account of a permissionless domain. The kind of the
     /// domain is read **from its record**;
-    /// a caller cannot declare their own domain to be PoA and manufacture this authority.
+    /// a caller cannot declare their own domain to be `PoA` and manufacture this authority.
     #[test]
     fn a_permissionless_domain_account_cannot_be_frozen() {
         let mut bc = chain();
@@ -355,7 +355,7 @@ mod poa_compliance_gate {
         assert!(!bc
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &addr(0x42)));
+            .is_frozen(ComplianceDomainKind::PoA, 7, &addr(0x42)));
     }
 
     /// An unauthorized caller cannot freeze.
@@ -370,7 +370,7 @@ mod poa_compliance_gate {
         assert!(!bc
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &addr(0x43)));
+            .is_frozen(ComplianceDomainKind::PoA, 8, &addr(0x43)));
     }
 
     /// The reason digest cannot be zero: a freeze without evidence cannot be audited.
@@ -385,7 +385,7 @@ mod poa_compliance_gate {
         assert!(!bc
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &addr(0x44)));
+            .is_frozen(ComplianceDomainKind::PoA, 9, &addr(0x44)));
     }
 
     /// No freeze for an unknown domain.
@@ -482,7 +482,7 @@ mod poa_compliance_gate {
         assert!(bc
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &target));
+            .is_frozen(ComplianceDomainKind::PoA, 10, &target));
         assert!(
             !bc.state.poa_compliance.audit_events().is_empty(),
             "the freeze must enter the audit trail"
@@ -506,7 +506,7 @@ mod poa_compliance_gate {
         assert!(!bc
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &target));
+            .is_frozen(ComplianceDomainKind::PoA, 12, &target));
 
         // The governance queue lands through the same verified path.
         bc.state.pending_poa_freezes.push(PendingPoaCompliance {
@@ -519,7 +519,7 @@ mod poa_compliance_gate {
         assert!(bc
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &target));
+            .is_frozen(ComplianceDomainKind::PoA, 12, &target));
     }
 
     #[test]
@@ -530,6 +530,8 @@ mod poa_compliance_gate {
         let admin = addr(12);
         let target = addr(0x52);
         for node in [&mut live, &mut follower] {
+            node.register_consensus_domain(poa_domain(12))
+                .expect("PoA domain 12 registers");
             node.state
                 .poa_onboarding
                 .registry_mut()
@@ -550,15 +552,154 @@ mod poa_compliance_gate {
         assert!(live
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &target));
+            .is_frozen(ComplianceDomainKind::PoA, 12, &target));
         assert!(follower
             .state
             .poa_compliance
-            .is_frozen(ComplianceDomainKind::PoA, &target));
+            .is_frozen(ComplianceDomainKind::PoA, 12, &target));
         assert_eq!(
             live.state.calculate_state_root(),
             follower.state.calculate_state_root()
         );
         assert_eq!(block.state_root, follower.state.calculate_state_root());
+    }
+
+    #[test]
+    fn drain_pending_poa_compliance_refuses_permissionless_and_unknown_domains_and_honors_poa_operator(
+    ) {
+        use crate::core::account::PendingPoaCompliance;
+        let mut bc = chain();
+        let pos_id = 31;
+        let poa_id = 32;
+        let unknown_id = 33;
+        let pos_domain = default_domain(pos_id, ConsensusKind::PoW, 931, "pow-header-chain-v1", 0);
+        bc.register_consensus_domain(pos_domain)
+            .expect("permissionless domain registers");
+        bc.register_consensus_domain(poa_domain(poa_id))
+            .expect("poa domain registers");
+
+        let spoofed_admin = addr(0x71);
+        let target = addr(0x72);
+        // Even if poa_onboarding records an admin entry under a permissionless or
+        // unregistered domain id, block-close drain must refuse to freeze on it.
+        bc.state
+            .poa_onboarding
+            .registry_mut()
+            .add_admin(pos_id, spoofed_admin);
+        bc.state
+            .poa_onboarding
+            .registry_mut()
+            .add_admin(unknown_id, spoofed_admin);
+        bc.state.pending_poa_freezes.push(PendingPoaCompliance {
+            domain_id: pos_id,
+            admin: spoofed_admin,
+            target,
+            reason_hash: [0x11; 32],
+        });
+        bc.state.pending_poa_freezes.push(PendingPoaCompliance {
+            domain_id: unknown_id,
+            admin: spoofed_admin,
+            target,
+            reason_hash: [0x22; 32],
+        });
+        // Meanwhile the registered operator of a genuine PoA domain must succeed
+        // through drain_pending_poa_compliance just as through freeze_poa_account.
+        bc.state.pending_poa_freezes.push(PendingPoaCompliance {
+            domain_id: poa_id,
+            admin: addr(poa_id as u8),
+            target,
+            reason_hash: [0x33; 32],
+        });
+
+        let applied = bc.state.drain_pending_poa_compliance(5);
+        assert_eq!(applied, 1, "only the genuine PoA domain freeze may apply");
+        assert!(!bc
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, pos_id, &target));
+        assert!(!bc
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, unknown_id, &target));
+        assert!(bc
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, poa_id, &target));
+    }
+
+    #[test]
+    fn a_poa_freeze_in_one_domain_does_not_freeze_another_domain_or_block_its_audit() {
+        use crate::domain::sovereign::{
+            AuditExportBundle, ComplianceEvidence, DomainLifecycleState, SovereignDomainClass,
+            SovereignDomainTemplate,
+        };
+
+        let mut bc = chain();
+        bc.register_consensus_domain(poa_domain(21))
+            .expect("domain 21");
+        bc.register_consensus_domain(poa_domain(22))
+            .expect("domain 22");
+
+        let op21 = bc
+            .state
+            .settlement
+            .domains
+            .get(21)
+            .unwrap()
+            .operator
+            .unwrap();
+        let op22 = bc
+            .state
+            .settlement
+            .domains
+            .get(22)
+            .unwrap()
+            .operator
+            .unwrap();
+
+        let compliance = ComplianceEvidence {
+            policy_hash: [3u8; 32],
+            authority_set_hash: [4u8; 32],
+            jurisdiction_hash: [5u8; 32],
+            audit_commitment: [6u8; 32],
+        };
+        let t22 = SovereignDomainTemplate::new(
+            22,
+            SovereignDomainClass::EnterprisePoa,
+            ConsensusKind::PoA,
+            op22,
+            true,
+            compliance,
+            DomainLifecycleState::Active,
+        );
+        let bundle22 = AuditExportBundle {
+            template_id: t22.template_id,
+            from_height: 0,
+            to_height: 5,
+            global_header_root: [6u8; 32],
+            commitment_root: [7u8; 32],
+            compliance_root: t22.compliance.root(),
+        };
+        bc.register_sovereign_template(t22).unwrap();
+
+        // Domain 21's admin freezes domain 22's operator address in domain 21.
+        bc.freeze_poa_account(21, op21, op22, [8u8; 32]).unwrap();
+        assert!(bc
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, 21, &op22));
+        assert!(!bc
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, 22, &op22));
+        // Domain 22's operator is NOT frozen in domain 22, so its audit passes.
+        bc.validate_sovereign_audit_export(&bundle22).unwrap();
+
+        // An unfreeze in domain 22 does not erase domain 21's freeze.
+        bc.unfreeze_poa_account(22, op22, op22, [9u8; 32]).unwrap();
+        assert!(bc
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, 21, &op22));
     }
 }

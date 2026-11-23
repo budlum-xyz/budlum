@@ -1,4 +1,4 @@
-//! F10.4 plus the Budlum relayer binary: the permissionless cross-chain relay
+//! Budlum relayer binary: the permissionless cross-chain relay
 //! service.
 //!
 //! ## Design, permissionless
@@ -13,7 +13,7 @@
 //!   `MaliciousBehaviour` and a 100 percent slash.
 //!   - The report is produced by the `consensus_invalid_relay_proof` helper.
 //!   - The bridge keeps an open relayer set plus a challenge window; see RFC
-//!     F10, sections 4 and 5.
+//!     the EVM bridge specification.
 //!
 //! ## Flows
 //!
@@ -57,6 +57,10 @@ use std::time::Duration;
 /// exposed for: public surface of this module - production readers land with the wiring change.
 pub struct RelayerConfig {
     pub eth_rpc_url: String,
+    /// Additional independent Ethereum RPC endpoints for multi-source
+    /// cross-checking: if any source disagrees on block height or deposit logs,
+    /// the relayer refuses to submit a potentially invalid transaction.
+    pub eth_rpc_secondary_urls: Vec<String>,
     pub budlum_rpc_url: String,
     pub bridge_address: String,
     pub direction: RelayDirection,
@@ -101,6 +105,7 @@ impl Default for RelayerConfig {
     fn default() -> Self {
         Self {
             eth_rpc_url: "http://localhost:8546".to_string(),
+            eth_rpc_secondary_urls: Vec::new(),
             budlum_rpc_url: "http://localhost:8545".to_string(),
             bridge_address: "0x0".to_string(),
             direction: RelayDirection::EthToBud,
@@ -163,8 +168,74 @@ fn scan_window(last_block: u64, latest: u64) -> (u64, u64) {
     (from, to)
 }
 
+/// Maximum head-height skew allowed across independent RPC sources before
+/// refusing to advance and flagging a liveness/dishonest-source disagreement.
+const MAX_MULTI_SOURCE_HEIGHT_SKEW: u64 = 16;
+
+/// Reconcile head heights reported by one or more independent RPC sources.
+/// Returns the conservative minimum height when all sources agree within
+/// `MAX_MULTI_SOURCE_HEIGHT_SKEW`, or an error if any source diverges wildly.
+fn reconcile_block_numbers(heights: &[u64]) -> Result<u64, String> {
+    let min_h = heights
+        .iter()
+        .copied()
+        .min()
+        .ok_or_else(|| "no RPC height samples provided".to_string())?;
+    let max_h = heights
+        .iter()
+        .copied()
+        .max()
+        .ok_or_else(|| "no RPC height samples provided".to_string())?;
+    if max_h.saturating_sub(min_h) > MAX_MULTI_SOURCE_HEIGHT_SKEW {
+        return Err(format!(
+            "multi-source RPC height disagreement: min={min_h}, max={max_h} (skew > {MAX_MULTI_SOURCE_HEIGHT_SKEW})"
+        ));
+    }
+    Ok(min_h)
+}
+
+fn canonical_sorted_deposits(events: &[EthDepositEvent]) -> Vec<EthDepositEvent> {
+    let mut sorted = events.to_vec();
+    sorted.sort_by(|a, b| {
+        a.block_number
+            .cmp(&b.block_number)
+            .then(a.log_index.cmp(&b.log_index))
+            .then(a.tx_hash.cmp(&b.tx_hash))
+            .then(a.depositor.cmp(&b.depositor))
+            .then(a.amount.cmp(&b.amount))
+            .then(a.budlum_recipient.cmp(&b.budlum_recipient))
+            .then(a.nonce.cmp(&b.nonce))
+    });
+    sorted
+}
+
+/// Cross-check deposit logs retrieved from independent RPC sources.
+/// Every source must return the exact same canonical deposit set; if a
+/// dishonest or diverged source disagrees, returns an error so the relayer
+/// submits no invalid transaction.
+fn reconcile_deposit_logs(
+    source_sets: &[Vec<EthDepositEvent>],
+) -> Result<Vec<EthDepositEvent>, String> {
+    let first = source_sets
+        .first()
+        .ok_or_else(|| "no RPC deposit sets provided".to_string())?;
+    let baseline = canonical_sorted_deposits(first);
+    for (idx, other) in source_sets.iter().enumerate().skip(1) {
+        let candidate = canonical_sorted_deposits(other);
+        if candidate != baseline {
+            return Err(format!(
+                "multi-source RPC deposit disagreement: source 0 returned {} event(s) but source {} returned {} differing event(s); refusing to relay",
+                baseline.len(),
+                idx,
+                candidate.len()
+            ));
+        }
+    }
+    Ok(baseline)
+}
+
 /// Minimal Ethereum deposit event, parsed from `eth_getLogs`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EthDepositEvent {
     pub tx_hash: String,
     pub block_number: u64,
@@ -195,8 +266,16 @@ pub struct BudlumClient {
 impl BudlumClient {
     #[must_use]
     pub fn new(url: String) -> Self {
+        // reqwest is built with the provider-less rustls feature, so it uses the
+        // process-wide provider. `main` installs Budlum's TLS 1.3 hybrid-only
+        // provider before anything runs; doing it here too keeps a client built
+        // anywhere else - a test, a future subcommand - from panicking with "No
+        // provider set". The install is idempotent and the first caller wins.
+        budlum_core::crypto::tls::install_default_provider();
         let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { url, client }
@@ -292,8 +371,16 @@ pub struct EthClient {
 impl EthClient {
     #[must_use]
     pub fn new(url: String, bridge_address: String) -> Self {
+        // reqwest is built with the provider-less rustls feature, so it uses the
+        // process-wide provider. `main` installs Budlum's TLS 1.3 hybrid-only
+        // provider before anything runs; doing it here too keeps a client built
+        // anywhere else - a test, a future subcommand - from panicking with "No
+        // provider set". The install is idempotent and the first caller wins.
+        budlum_core::crypto::tls::install_default_provider();
         let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
@@ -421,7 +508,7 @@ impl EthClient {
         Ok(events)
     }
 
-    /// Builds the F10.1 and F10.2 proof package: the MPT proof, the header chain
+    /// Builds the EVM deposit proof package: the MPT proof, the header chain
     /// and the receipt.
     ///
     /// A real implementation would use `eth_getTransactionReceipt`,
@@ -462,6 +549,13 @@ pub fn parse_args(args: &[String]) -> Result<RelayerConfig, String> {
                 config
                     .eth_rpc_url
                     .clone_from(args.get(i).ok_or("--eth-rpc requires a value")?);
+            }
+            "--eth-rpc-secondary" => {
+                i += 1;
+                let raw = args.get(i).ok_or("--eth-rpc-secondary requires a value")?;
+                for part in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    config.eth_rpc_secondary_urls.push(part.to_string());
+                }
             }
             "--budlum-rpc" => {
                 i += 1;
@@ -544,7 +638,7 @@ const STATUS_NOTICE: &str = "STATUS: not mainnet ready. No direction relays yet:
 cannot build deposit proofs, bud-to-eth only reports burns. Nothing is submitted.";
 
 fn print_usage() {
-    eprintln!("budlum-relayer - F10 Universal Relayer (D1 permissionless + D4 unified registry)");
+    eprintln!("budlum-relayer - Universal Relayer (permissionless + unified registry)");
     eprintln!("{STATUS_NOTICE}");
     eprintln!();
     eprintln!("Usage:");
@@ -555,11 +649,12 @@ fn print_usage() {
     eprintln!("                 [--confirmations N] [--poll-interval S] [--min-stake 1000]");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --eth-rpc <URL>            Ethereum RPC endpoint");
+    eprintln!("  --eth-rpc <URL>            Primary Ethereum RPC endpoint");
+    eprintln!("  --eth-rpc-secondary <URL>  Independent Ethereum RPC endpoint for cross-checking (repeatable/comma-separated)");
     eprintln!("  --budlum-rpc <URL>         Budlum RPC endpoint");
     eprintln!("  --bridge-address <ADDR>    Ethereum bridge contract address");
     eprintln!("  --relayer-address <ADDR>   Relayer's Budlum address (hex, for registry check)");
-    eprintln!("  --direction <DIR>          eth-to-bud (F10.2) | bud-to-eth (F10.5)");
+    eprintln!("  --direction <DIR>          eth-to-bud | bud-to-eth");
     eprintln!("  --confirmations <N>        N-confirmation threshold (default: 64)");
     eprintln!("  --poll-interval <S>        Poll interval seconds (default: 10)");
     eprintln!(
@@ -601,6 +696,35 @@ pub fn run_relayer(config: &RelayerConfig) -> Result<(), String> {
         return Err(
             "bridge-address is placeholder (0x0); set real Ethereum bridge contract".into(),
         );
+    }
+    // reject zero poll interval (infinite tight-spin DoS).
+    if config.poll_interval_secs == 0 {
+        return Err("poll-interval must be at least 1 second; 0 would spin in a tight loop".into());
+    }
+    // reject non-http(s) RPC URLs.
+    for (name, url) in [
+        ("eth-rpc", &config.eth_rpc_url),
+        ("budlum-rpc", &config.budlum_rpc_url),
+    ] {
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err(format!(
+                "{name} URL must start with http:// or https://, got: {url}"
+            ));
+        }
+    }
+    let mut seen_eth_urls = std::collections::BTreeSet::new();
+    seen_eth_urls.insert(config.eth_rpc_url.trim().to_string());
+    for secondary in &config.eth_rpc_secondary_urls {
+        if !secondary.starts_with("http://") && !secondary.starts_with("https://") {
+            return Err(format!(
+                "eth-rpc-secondary URL must start with http:// or https://, got: {secondary}"
+            ));
+        }
+        if !seen_eth_urls.insert(secondary.trim().to_string()) {
+            return Err(format!(
+                "eth-rpc-secondary URL '{secondary}' must be distinct from the primary and other secondary endpoints"
+            ));
+        }
     }
     if let Err(e) = validate_relayer_address(&config.relayer_address) {
         // The submitting direction must name a real relayer. BudToEth submits
@@ -692,8 +816,41 @@ async fn check_relayer_active(budlum_client: &BudlumClient, config: &RelayerConf
 /// begin until the head height is known: with an unknown head the first
 /// `eth_getLogs` would span block 1 to the tip without a topic filter, which
 /// public providers reject, and the relayer would stall on its first poll.
+async fn fetch_reconciled_block_number(eth_clients: &[EthClient]) -> Result<u64, String> {
+    let mut heights = Vec::with_capacity(eth_clients.len());
+    for client in eth_clients {
+        heights.push(client.get_block_number().await?);
+    }
+    reconcile_block_numbers(&heights)
+}
+
+async fn fetch_reconciled_deposit_logs(
+    eth_clients: &[EthClient],
+    from: u64,
+    to: u64,
+) -> Result<Vec<EthDepositEvent>, String> {
+    let mut sets = Vec::with_capacity(eth_clients.len());
+    for client in eth_clients {
+        sets.push(client.get_deposit_logs(from, to).await?);
+    }
+    reconcile_deposit_logs(&sets)
+}
+
 async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
-    let eth_client = EthClient::new(config.eth_rpc_url.clone(), config.bridge_address.clone());
+    let mut eth_clients = Vec::with_capacity(1 + config.eth_rpc_secondary_urls.len());
+    eth_clients.push(EthClient::new(
+        config.eth_rpc_url.clone(),
+        config.bridge_address.clone(),
+    ));
+    for secondary in &config.eth_rpc_secondary_urls {
+        eth_clients.push(EthClient::new(
+            secondary.clone(),
+            config.bridge_address.clone(),
+        ));
+    }
+    let primary_eth_client = eth_clients
+        .first()
+        .ok_or_else(|| "at least one Ethereum RPC endpoint is required".to_string())?;
     let budlum_client = BudlumClient::new(config.budlum_rpc_url.clone());
 
     if !check_relayer_active(&budlum_client, &config).await {
@@ -704,19 +861,24 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
         ));
     }
 
+    eprintln!(
+        "EthToBud: multi-source RPC count = {} (primary + {} secondary)",
+        eth_clients.len(),
+        config.eth_rpc_secondary_urls.len()
+    );
     eprintln!("EthToBud: WARNING {STATUS_NOTICE}");
 
     let mut interval = tokio::time::interval(Duration::from_secs(config.poll_interval_secs));
-    let mut last_block = initial_cursor(&eth_client, &config, &mut interval).await;
+    let mut last_block = initial_cursor(&eth_clients, &config, &mut interval).await;
 
     let mut window_attempts: u32 = 0;
     loop {
         interval.tick().await;
-        // 1. Get latest finalized block (N-conf)
-        let latest = match eth_client.get_block_number().await {
+        // 1. Get latest finalized block (N-conf) across all independent RPC sources
+        let latest = match fetch_reconciled_block_number(&eth_clients).await {
             Ok(bn) => bn.saturating_sub(u64::from(config.required_confirmations)),
             Err(e) => {
-                eprintln!("EthToBud poll: get_block_number failed: {e} - retry");
+                eprintln!("EthToBud poll: multi-source get_block_number failed: {e} - retry");
                 continue;
             }
         };
@@ -726,11 +888,11 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
         let (from, to) = scan_window(last_block, latest);
         eprintln!("EthToBud: scanning deposits from {from} to {to}");
 
-        // 2. Get deposit logs
-        let deposits = match eth_client.get_deposit_logs(from, to).await {
+        // 2. Get and cross-check deposit logs across all independent RPC sources
+        let deposits = match fetch_reconciled_deposit_logs(&eth_clients, from, to).await {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("EthToBud: get_deposit_logs failed: {e}");
+                eprintln!("EthToBud: multi-source get_deposit_logs rejected window: {e}");
                 continue;
             }
         };
@@ -742,7 +904,8 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
         }
         eprintln!("EthToBud: found {} deposit event(s)", deposits.len());
 
-        let window_failed = relay_deposits(&eth_client, &budlum_client, &config, deposits).await;
+        let window_failed =
+            relay_deposits(primary_eth_client, &budlum_client, &config, deposits).await;
         let (next_last, next_attempts) =
             advance_cursor(last_block, to, window_failed, window_attempts);
         if window_failed && next_last == to {
@@ -761,7 +924,7 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
 /// is one, otherwise the confirmed Ethereum head, waited for one tick at a
 /// time until it is known.
 async fn initial_cursor(
-    eth_client: &EthClient,
+    eth_clients: &[EthClient],
     config: &RelayerConfig,
     interval: &mut tokio::time::Interval,
 ) -> u64 {
@@ -771,7 +934,7 @@ async fn initial_cursor(
     }
     loop {
         interval.tick().await;
-        match eth_client.get_block_number().await {
+        match fetch_reconciled_block_number(eth_clients).await {
             Ok(bn) => {
                 let start = bn.saturating_sub(u64::from(config.required_confirmations));
                 eprintln!(
@@ -912,7 +1075,7 @@ const fn advance_cursor(
 ///
 /// It does not submit to Ethereum. The claim needs a Budlum finality proof
 /// (BLS aggregate / QC) and an Ethereum bridge contract to verify it; the
-/// Solidity side does not exist yet (RFC F10.5b). So a discovered burn is
+/// Solidity side does not exist yet (settlement contract pending). So a discovered burn is
 /// reported and counted, and the submit step **refuses loudly** instead of
 /// sending a placeholder. That is the same contract the `EthToBud` direction
 /// keeps: refuse, do not pretend.
@@ -935,7 +1098,7 @@ async fn run_bud_to_eth_loop(config: RelayerConfig) {
 
     eprintln!(
         "BudToEth: scanning for burn events. Submission to Ethereum is NOT available \
-         (no bridge contract, RFC F10.5b) - discovered burns are reported, never \
+         (no bridge contract deployed yet) - discovered burns are reported, never \
          submitted with a placeholder proof."
     );
 
@@ -974,7 +1137,7 @@ async fn run_bud_to_eth_loop(config: RelayerConfig) {
                         eprintln!(
                             "BudToEth: burn found at height {height} (tx {tx_hash}) - \
                              NOT submitted: finality proof + Ethereum bridge contract \
-                             missing (RFC F10.5b). Total seen: {total_burns}"
+                             missing (settlement contract pending). Total seen: {total_burns}"
                         );
                     }
                     next_height = Some(height + 1);
@@ -1023,7 +1186,7 @@ fn block_by_number_params(height: u64) -> serde_json::Value {
 }
 
 /// How a block payload renders a bridge burn transaction (`{:?}` of
-/// `TransactionType::Bridge(BridgeTx::BurnWithEvent(..))`,).
+/// `TransactionType::Bridge(BridgeTx::BurnWithEvent(..))`).
 const BURN_TX_TYPE_PREFIX: &str = "Bridge(BurnWithEvent(";
 
 /// Burn transaction hashes in a block payload.
@@ -1385,5 +1548,117 @@ mod tests {
         };
         let err = client.build_deposit_proof(&event).unwrap_err();
         assert!(err.contains("not implemented"));
+    }
+
+    #[test]
+    fn run_relayer_rejects_zero_poll_interval() {
+        let config = RelayerConfig {
+            poll_interval_secs: 0,
+            bridge_address: "0x1234567890abcdef1234567890abcdef12345678".into(),
+            ..RelayerConfig::default()
+        };
+        let err = run_relayer(&config).unwrap_err();
+        assert!(err.contains("poll-interval"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn run_relayer_rejects_non_http_rpc_url() {
+        let config = RelayerConfig {
+            poll_interval_secs: 10,
+            bridge_address: "0x1234567890abcdef1234567890abcdef12345678".into(),
+            eth_rpc_url: "ftp://not-http".into(),
+            ..RelayerConfig::default()
+        };
+        let err = run_relayer(&config).unwrap_err();
+        assert!(err.contains("http"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn run_relayer_rejects_file_url() {
+        let config = RelayerConfig {
+            poll_interval_secs: 10,
+            bridge_address: "0x1234567890abcdef1234567890abcdef12345678".into(),
+            budlum_rpc_url: "file:///tmp/x".into(),
+            ..RelayerConfig::default()
+        };
+        let err = run_relayer(&config).unwrap_err();
+        assert!(err.contains("http"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn multi_source_reconciliation_accepts_agreeing_sources_and_rejects_dishonest_source() {
+        let ev_a = EthDepositEvent {
+            tx_hash: "0xaaa".into(),
+            block_number: 100,
+            log_index: 1,
+            depositor: "0x111".into(),
+            amount: 500,
+            budlum_recipient: "0x222".into(),
+            nonce: 1,
+        };
+        let ev_b = EthDepositEvent {
+            tx_hash: "0xbbb".into(),
+            block_number: 101,
+            log_index: 0,
+            depositor: "0x333".into(),
+            amount: 900,
+            budlum_recipient: "0x444".into(),
+            nonce: 2,
+        };
+
+        // Two independent sources returning the same events in different order agree.
+        let agreed = reconcile_deposit_logs(&[
+            vec![ev_b.clone(), ev_a.clone()],
+            vec![ev_a.clone(), ev_b.clone()],
+        ])
+        .expect("agreeing sources must reconcile");
+        assert_eq!(agreed, vec![ev_a.clone(), ev_b.clone()]);
+
+        // One dishonest source tampering with an amount or injecting a phantom event is refused.
+        let mut tampered = ev_b.clone();
+        tampered.amount = 999_999;
+        let err = reconcile_deposit_logs(&[vec![ev_a.clone(), ev_b], vec![ev_a, tampered]])
+            .expect_err("dishonest source must be rejected before submission");
+        assert!(err.contains("disagreement"), "unexpected: {err}");
+
+        // Height reconciliation picks conservative minimum within skew and rejects wild drift.
+        assert_eq!(reconcile_block_numbers(&[105, 102, 104]).unwrap(), 102);
+        let skew_err = reconcile_block_numbers(&[100, 150]).unwrap_err();
+        assert!(skew_err.contains("disagreement"), "unexpected: {skew_err}");
+    }
+
+    #[test]
+    fn parse_args_and_run_relayer_validate_secondary_eth_rpcs() {
+        let args: Vec<String> = [
+            "budlum-relayer",
+            "--eth-rpc",
+            "https://rpc-a.example",
+            "--eth-rpc-secondary",
+            "https://rpc-b.example,https://rpc-c.example",
+            "--budlum-rpc",
+            "https://budlum.example",
+            "--bridge-address",
+            "0x1234567890abcdef1234567890abcdef12345678",
+            "--relayer-address",
+            "0x1111111111111111111111111111111111111111111111111111111111111111",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        let cfg = parse_args(&args).expect("valid args");
+        assert_eq!(
+            cfg.eth_rpc_secondary_urls,
+            vec![
+                "https://rpc-b.example".to_string(),
+                "https://rpc-c.example".to_string(),
+            ]
+        );
+        run_relayer(&cfg).expect("distinct secondary URLs must be accepted");
+
+        // Duplicate secondary matching primary must be rejected (not independent).
+        let mut dup = cfg;
+        dup.eth_rpc_secondary_urls = vec!["https://rpc-a.example".to_string()];
+        let err = run_relayer(&dup).unwrap_err();
+        assert!(err.contains("distinct"), "unexpected: {err}");
     }
 }

@@ -35,11 +35,14 @@
 //! in the diff, and that this gate's job is to keep the list in front of a human
 //! rather than to certify the list.
 //!
-//! Two further limits, and they err in opposite directions so neither can be
-//! argued away by pointing at the other: a name taken as a value
-//! (`let hook = registry::seed;`) is not a call and reads as dead, and a
-//! function reached only from another member's `src/` reads as live because the
-//! corpus is cross-directory.
+//! Three further limits, stated explicitly rather than hidden: a
+//! name taken as a value (`let hook = registry::seed;`) is not a call and reads
+//! as dead; a function reached only from another member's `src/` reads as live
+//! because the corpus is cross-directory; and token matching is not
+//! receiver-aware, so a method sharing a ubiquitous identifier (`get`, `len`,
+//! `is_empty`, `new`, `insert`) collides with standard-library calls and still
+//! requires manual call-site review plus explicit `WIRING:`/`Convenience:`
+//! documentation on its declaration.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

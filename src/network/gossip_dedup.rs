@@ -65,10 +65,9 @@ pub const SCORE_TIMELY: f64 = 0.5;
 pub const PROPAGATION_WINDOW_MS: u128 = 5_000; // 5 seconds
 
 /// Maximum number of duplicate messages a single peer may send before it is
-/// Flagged for automatic banning. The gossip-flood finding explicitly requires
-/// That peers producing an excessive message rate be auto-banned, not merely
-/// Scored. This is the duplicate-flood half of that threshold; the score half
-/// Is `MIN_PEER_SCORE`.
+/// Flagged for automatic banning. A peer that produces an excessive message
+/// rate is auto-banned, not merely scored. This is the duplicate-flood half of
+/// that threshold; the score half is `MIN_PEER_SCORE`.
 pub const MAX_DUPLICATE_COUNT: u64 = 1_000;
 
 /// Score the duplicate penalty regains per second. A relay is charged for
@@ -100,6 +99,7 @@ pub struct PeerScore {
 }
 
 impl PeerScore {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             score: 0.0,
@@ -126,6 +126,7 @@ impl PeerScore {
         self.last_duplicate_at = Some(now);
     }
 
+    #[must_use]
     pub fn is_below_threshold(&self) -> bool {
         self.score < MIN_PEER_SCORE
     }
@@ -142,7 +143,7 @@ pub struct GossipDedup {
     /// Set of recently seen message hashes for O(1) membership tests.
     ///
     /// Previously this was a `VecDeque` queried with `contains`, which is an
-    /// O(n) linear scan (up to `window_size` = 10_000 entries) on *every*
+    /// O(n) linear scan (up to `window_size` = `10_000` entries) on *every*
     /// Incoming gossip message - itself a CPU-DoS vector under high load.
     /// Membership is now a `HashSet` lookup.
     seen_set: HashSet<[u8; 32]>,
@@ -171,6 +172,7 @@ pub struct GossipDedup {
 }
 
 impl GossipDedup {
+    #[must_use]
     pub fn new(window_size: usize) -> Self {
         // A zero window would never evict: the set would grow without bound and the
         // utilization ratio would divide by zero.
@@ -260,11 +262,13 @@ impl GossipDedup {
     }
 
     /// Get the score for a peer.
+    #[must_use]
     pub fn peer_score(&self, peer: &libp2p::PeerId) -> f64 {
         self.peer_scores.get(peer).map_or(0.0, |s| s.score)
     }
 
     /// Get all peers below the minimum score threshold.
+    #[must_use]
     pub fn peers_below_threshold(&self) -> Vec<libp2p::PeerId> {
         self.peer_scores
             .iter()
@@ -274,21 +278,35 @@ impl GossipDedup {
     }
 
     /// Get detailed score info for a peer.
+    #[must_use]
     pub fn get_peer_score(&self, peer: &libp2p::PeerId) -> Option<&PeerScore> {
         self.peer_scores.get(peer)
     }
 
-    /// Returns `true` if the peer must be auto-banned: its score has dropped to
-    /// Or below `MIN_PEER_SCORE` **or** it has sent more than
+    /// Returns `true` if an authoring peer must be auto-banned: its score has
+    /// dropped to or below `MIN_PEER_SCORE` **or** it has sent more than
     /// `MAX_DUPLICATE_COUNT` duplicate messages (a replay/duplicate flood).
-    ///
-    /// Per the gossip-flood finding, peers producing an excessive message rate
-    /// Must be auto-banned, not merely scored. This engine only *decides* the
-    /// Ban; the caller (swarm / peer-manager) is responsible for enforcing the
-    /// Disconnect so the DoS primitive stays self-contained and testable.
-    pub fn peer_should_be_banned(&self, peer: &libp2p::PeerId) -> bool {
+    #[cfg(test)]
+    fn peer_should_be_banned(&self, peer: &libp2p::PeerId) -> bool {
+        self.peer_should_be_banned_from(peer, true)
+    }
+
+    /// Returns `true` if `peer` must be auto-banned, accounting for whether
+    /// the duplicate frame was authored by `peer` or forwarded through the
+    /// gossipsub mesh. An honest mesh relayer routinely delivers redundant
+    /// copies of third-party transactions and finality votes before `IDONTWANT`
+    /// converges; only a sustained replay flood (`MAX_DUPLICATE_COUNT`) or
+    /// previously recorded invalid messages may auto-ban a relayer.
+    pub(crate) fn peer_should_be_banned_from(
+        &self,
+        peer: &libp2p::PeerId,
+        authored_by_peer: bool,
+    ) -> bool {
         match self.peer_scores.get(peer) {
-            Some(s) => s.score <= MIN_PEER_SCORE || s.duplicate_count >= MAX_DUPLICATE_COUNT,
+            Some(s) => {
+                s.duplicate_count >= MAX_DUPLICATE_COUNT
+                    || (s.score <= MIN_PEER_SCORE && (authored_by_peer || s.invalid_count > 0))
+            }
             None => false,
         }
     }
@@ -384,16 +402,19 @@ impl GossipDedup {
     }
 
     /// Total messages processed.
+    #[must_use]
     pub fn total_processed(&self) -> u64 {
         self.total_processed
     }
 
     /// Total duplicates rejected.
+    #[must_use]
     pub fn total_duplicates(&self) -> u64 {
         self.total_duplicates
     }
 
     /// Current dedup window utilization.
+    #[must_use]
     pub fn window_utilization(&self) -> f64 {
         self.seen_order.len() as f64 / self.window_size as f64
     }
@@ -756,6 +777,33 @@ mod tests {
         assert!(
             dedup.peer_should_be_banned(&p),
             "peer flooding duplicates must be auto-banned"
+        );
+        assert!(
+            dedup.peer_should_be_banned_from(&p, false),
+            "sustained duplicate flood above MAX_DUPLICATE_COUNT must also ban relayers"
+        );
+    }
+
+    #[test]
+    fn relayed_mesh_duplicates_do_not_ban_honest_relayer() {
+        let mut dedup = GossipDedup::new(10_000);
+        let fast_hop = peer(1);
+        let second_hop = peer(2);
+        for i in 0..40u32 {
+            let msg = i.to_le_bytes();
+            assert_eq!(dedup.check_and_record(&msg, &fast_hop), DedupResult::New);
+            assert_eq!(
+                dedup.check_and_record(&msg, &second_hop),
+                DedupResult::Duplicate
+            );
+        }
+        assert!(
+            !dedup.peer_should_be_banned_from(&second_hop, false),
+            "second-hop mesh relayer forwarding 40 redundant txs must not be auto-banned"
+        );
+        assert!(
+            dedup.peer_should_be_banned_from(&second_hop, true),
+            "self-authored duplicate spam still trips MIN_PEER_SCORE"
         );
     }
 

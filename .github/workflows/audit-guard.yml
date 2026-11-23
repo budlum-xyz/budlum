@@ -7,11 +7,11 @@ name: Audit Guard
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses, agg/phase-5-pcs-claims]
   push:
-    branches: [main, usl]
+    branches: [main]
   schedule:
-    - cron: "17 4 * * 1"
+    - cron: "17 9 * * 1" # Monday 09:17 UTC, after the storage-Miri window
   workflow_dispatch:
 
 permissions:

@@ -37,6 +37,13 @@
 
 # Public JSON-RPC over HTTPS, and WebSocket subscriptions on the same host
 # (Caddy forwards the upgrade unchanged).
+#
+# The per-IP limit is the node's own (`rpc.rate_limit_per_minute`, 600 in
+# config/testnet.toml) and it is the one that counts: Caddy's `rate_limit`
+# directive needs a third-party module this file cannot assume is built in, and
+# a config that does not load is worse than one without the second limit. The
+# body cap below is the edge's own protection, since the node never re-reads a
+# request it has already buffered.
 rpc.{$TESTNET_DOMAIN} {
 	import common
 	reverse_proxy 127.0.0.1:18545 {

@@ -30,19 +30,19 @@ zeroize = { version = "=1.9.1", features = ["derive"] }
 # SHAKE256 of the key derivation, the same crate and pin as the root manifest.
 shake = "=0.1.0"
 # the wallet password is NFKD normalized before the root derivation.
-unicode-normalization = { version = "=0.1.24", default-features = false }
+unicode-normalization = { version = "=0.1.26", default-features = false }
 # The wallet packs the field elements the chain will look up by. That packing
 # is the same rule the node and the zkVM state layer apply, so all three read
 # it from one place rather than each carrying a copy.
 budlum-note-packing = { path = "../note-packing" }
+# The `bud_bnsProof` answer is JSON; `verify_bns_proof` reads it.
+serde_json = "=1.0.154"
 
 # BIP39 mnemonic generation (minimal in-tree impl - no external dep for entropy→mnemonic)
 # Key derivation is ML-DSA-87 seed-based (FIPS 204) hardened only.
 
 # The mounted PQ core tests (`src/crypto/pq_vector_tests.rs`) read the NIST and
 # Wycheproof vector files in `tests/vectors/pq`.
-[dev-dependencies]
-serde_json = "=1.0.154"
 
 [package.metadata.cargo-machete]
 # wasm-bindgen is an optional dependency activated by the `wasm` feature (see

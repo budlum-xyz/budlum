@@ -16,7 +16,7 @@
 //! The recipient's KEM public key lives in the identity record and is signed
 //! with the user suite. This module only encrypts to it and decrypts with the
 //! matching secret. It does not write a KEM: the primitive is the `hpke` crate
-//! over RustCrypto `ml-kem` and `x-wing`.
+//! over `RustCrypto` `ml-kem` and `x-wing`.
 
 use hpke::{
     aead::ChaCha20Poly1305, kdf::HkdfSha256, kem::XWing, Deserializable, Kem as KemTrait, OpModeR,
@@ -35,12 +35,15 @@ pub const HPKE_KDF_ID: u16 = 0x0001;
 pub const HPKE_AEAD_ID: u16 = 0x0003;
 
 /// Length of a KEM public key: ML-KEM-768 (1,184) plus X25519 (32).
+///
 /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const HPKE_PUBLIC_KEY_LEN: usize = 1216;
 /// Length of the encapsulated key: ML-KEM-768 ciphertext (1,088) plus X25519 (32).
+///
 /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const HPKE_ENCAPPED_KEY_LEN: usize = 1120;
 /// Length of the KEM secret key, which is also its derivation seed.
+///
 /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const HPKE_SECRET_KEY_LEN: usize = 32;
 
@@ -103,6 +106,7 @@ pub struct HpkeKeyPair {
 
 impl HpkeKeyPair {
     /// A fresh key pair from the operating system's randomness.
+    #[must_use]
     pub fn generate() -> Self {
         let (sk, pk) = XWing::gen_keypair();
         Self::from_parts(&sk, &pk)
@@ -140,6 +144,7 @@ impl HpkeKeyPair {
     }
 
     /// The KEM public key, [`HPKE_PUBLIC_KEY_LEN`] bytes.
+    #[must_use]
     pub fn public_key(&self) -> &[u8; HPKE_PUBLIC_KEY_LEN] {
         &self.public
     }
@@ -226,17 +231,20 @@ impl HpkeEnvelope {
 
     /// The encapsulated key.
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn encapsulated_key(&self) -> &[u8] {
         &self.enc
     }
 
     /// The AEAD ciphertext, tag included.
+    #[must_use]
     pub fn ciphertext(&self) -> &[u8] {
         &self.ciphertext
     }
 
     /// Canonical encoding: `kem || kdf || aead` as big-endian `u16`, the
     /// encapsulated key, then the ciphertext. The ciphertext runs to the end.
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(SUITE_HEADER_LEN + self.enc.len() + self.ciphertext.len());
         out.extend_from_slice(&HPKE_KEM_ID.to_be_bytes());

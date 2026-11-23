@@ -1,4 +1,4 @@
-//! B.U.D. (Broad Universal Database) - Storage ConsensusDomain parameters.
+//! B.U.D. (Broad Universal Database) - Storage `ConsensusDomain` parameters.
 //!
 //! Vision reference: the B.U.D. decentralised storage vision,
 //! The vision proposes `ConsensusKind::StorageAttestation(StorageDomainParams)`
@@ -10,7 +10,7 @@
 //! The existing `bud_registerConsensusDomain` / `bud_getConsensusDomains`
 //! RPC surface.
 //! No proof, no slashing, no retrieval - those, gated on the
-//! BudZero `VerifyMerkle` gate and BLS/PQ HSM, respectively.
+//! `BudZero` `VerifyMerkle` gate and BLS/PQ HSM, respectively.
 //!
 //! Permissionless / whitelist rule (see README, "Permissionless" section): the
 //! `STORAGE_OPERATOR` role is registered via the **same** permissionless
@@ -32,6 +32,12 @@ pub const MAX_CHUNK_SIZE: u32 = 16 * 1024 * 1024; // 16 MiB
 /// Hard lower bound to prevent nonsense "1 byte" domains.
 pub const MIN_CHUNK_SIZE: u32 = 1024; // 1 KiB
 
+/// Convenience: hard upper bound on committed chunks per operator under a domain.
+pub const MAX_COMMITTED_CHUNKS_PER_OPERATOR: u64 = 1_000_000_000;
+
+/// Convenience: hard upper bound on blocks between storage challenges (~30 days).
+pub const MAX_STORAGE_CHALLENGE_INTERVAL: u64 = 2_592_000;
+
 /// Minimum operator bond for a storage deal opened in a block.
 ///
 /// A block carries no domain parameters, so the in-block path uses this
@@ -40,6 +46,19 @@ pub const MIN_CHUNK_SIZE: u32 = 1024; // 1 KiB
 /// WIRING: the in-block deal-open executor passes this as the bond floor to
 /// `deal_open::open_deal_escrowed`; that step follows this one.
 pub const STORAGE_MIN_OPERATOR_BOND: u64 = 1_000_000;
+
+/// Whether the in-block deal doors demand a `VerifyMerkle` proof envelope
+/// and a `storage_root` at open/accept time.
+///
+/// The gate is the network's activation schedule, stated per domain. Every
+/// checked-in profile ships `require_merkle_proof = false` until the 64-depth
+/// Merkle verifier exists (requiring a blob the node cannot verify protects
+/// nothing), so the in-block doors state the same `false` here - the same
+/// pattern as the bond floor constant above. The flag is threaded through
+/// the doors so the day the schedule flips, this one constant moves and both
+/// doors enforce it. The registry-level gate itself is live and tested under
+/// `storage_deal::tests::deal_open_rejects_missing_merkle_proof`.
+pub const STORAGE_REQUIRE_MERKLE_PROOF: bool = false;
 
 /// Per-domain parameters for a `StorageAttestation` domain.
 ///
@@ -53,23 +72,42 @@ pub struct StorageDomainParams {
     /// Domain. Bounded by [`MIN_CHUNK_SIZE`] / [`MAX_CHUNK_SIZE`].
     pub chunk_size: u32,
     /// Maximum number of committed chunks a single operator can hold under
-    /// This domain. Prevents an operator from DoS'ing on-chain state with
+    /// This domain. Prevents an operator from `DoS`'ing on-chain state with
     /// Millions of trivial commitments.
     pub max_committed_chunks: u64,
     /// Number of blocks between consecutive challenges issued to each
     /// Active operator. `0` is rejected - challenges must be periodic.
     pub challenge_interval: u64,
     /// Minimum operator bond, in the same `u64` units as
-    /// `ConsensusDomain::operator_bond` (1 token = 1_000_000 fixed-point).
+    /// `ConsensusDomain::operator_bond` (1 token = `1_000_000` fixed-point).
     /// This is the **storage-specific** minimum; the domain still has to
     /// Satisfy the protocol-level `MIN_DOMAIN_OPERATOR_BOND` from
     /// `domain::registry`.
     pub min_operator_bond: u64,
+    /// Whether a deal opened under this domain must carry a `VerifyMerkle`
+    /// proof envelope and a `storage_root`.
+    ///
+    /// This is the domain's statement of the network activation schedule, not a
+    /// per-deal choice: `false` (the default, and the value every checked-in
+    /// profile implies) means the gate is closed, so a deal opens without a
+    /// proof and records that it opened without one. `true` means the envelope
+    /// is mandatory.
+    ///
+    /// The flag exists because three places used to disagree: the profiles set
+    /// `[features] verify_merkle = false`, startup printed that the requested
+    /// value was "not applied", and the deal-open path demanded the envelope
+    /// regardless. A deal path that ignores the gate is not closed.
+    #[serde(default)]
+    pub require_merkle_proof: bool,
 }
 
 impl StorageDomainParams {
     /// Validate the parameters at registration time. Returns the first
     /// Violation found (fail-fast, matches `PoWDomainParameters::validate`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.chunk_size < MIN_CHUNK_SIZE || self.chunk_size > MAX_CHUNK_SIZE {
             return Err(format!(
@@ -77,14 +115,29 @@ impl StorageDomainParams {
                 self.chunk_size, MIN_CHUNK_SIZE, MAX_CHUNK_SIZE
             ));
         }
-        if self.max_committed_chunks == 0 {
-            return Err("StorageDomainParams.max_committed_chunks must be > 0".into());
+        if self.max_committed_chunks == 0
+            || self.max_committed_chunks > MAX_COMMITTED_CHUNKS_PER_OPERATOR
+        {
+            return Err(format!(
+                "StorageDomainParams.max_committed_chunks {} out of range [1, {}]",
+                self.max_committed_chunks, MAX_COMMITTED_CHUNKS_PER_OPERATOR
+            ));
         }
-        if self.challenge_interval == 0 {
-            return Err("StorageDomainParams.challenge_interval must be > 0".into());
+        if self.challenge_interval == 0 || self.challenge_interval > MAX_STORAGE_CHALLENGE_INTERVAL
+        {
+            return Err(format!(
+                "StorageDomainParams.challenge_interval {} out of range [1, {}]",
+                self.challenge_interval, MAX_STORAGE_CHALLENGE_INTERVAL
+            ));
         }
-        if self.min_operator_bond == 0 {
-            return Err("StorageDomainParams.min_operator_bond must be > 0".into());
+        if self.min_operator_bond == 0
+            || self.min_operator_bond > crate::tokenomics::BUD_TOTAL_SUPPLY
+        {
+            return Err(format!(
+                "StorageDomainParams.min_operator_bond {} out of range [1, {}]",
+                self.min_operator_bond,
+                crate::tokenomics::BUD_TOTAL_SUPPLY
+            ));
         }
         Ok(())
     }
@@ -97,6 +150,7 @@ impl Default for StorageDomainParams {
             max_committed_chunks: 1_000_000,
             challenge_interval: 100,
             min_operator_bond: 1_000_000,
+            require_merkle_proof: false,
         }
     }
 }
@@ -110,6 +164,7 @@ impl Default for StorageDomainParams {
 ///
 /// Field order is fixed and domain-tagged so it is unambiguous in the
 /// Presence of a future enum-variant addition.
+#[must_use]
 pub fn storage_params_bytes(params: &StorageDomainParams) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + 8 + 8 + 8 + 8);
     out.extend_from_slice(b"BDLM_STORAGE_V1");
@@ -138,6 +193,7 @@ mod tests {
             max_committed_chunks: 1_000_000,
             challenge_interval: 100,
             min_operator_bond: 1_000_000,
+            require_merkle_proof: false,
         }
     }
 
@@ -197,5 +253,20 @@ mod tests {
             storage_params_bytes(&good_params()),
             storage_params_bytes(&p2)
         );
+    }
+
+    #[test]
+    fn storage_domain_params_reject_u64_max_ceilings() {
+        let mut chunks_overflow = good_params();
+        chunks_overflow.max_committed_chunks = u64::MAX;
+        assert!(chunks_overflow.validate().is_err());
+
+        let mut interval_overflow = good_params();
+        interval_overflow.challenge_interval = u64::MAX;
+        assert!(interval_overflow.validate().is_err());
+
+        let mut bond_overflow = good_params();
+        bond_overflow.min_operator_bond = u64::MAX;
+        assert!(bond_overflow.validate().is_err());
     }
 }

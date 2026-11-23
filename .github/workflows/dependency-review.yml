@@ -10,7 +10,20 @@ name: Dependency Review (PR security gate)
 # Enable Dependency graph in repository settings for this check.
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses, agg/phase-5-pcs-claims]
+  # On demand, for manual gate verification: joins the same per-ref
+  # concurrency group as pull_request runs and resolves base_ref/head_ref
+  # from inputs, the open branch review target, or the parent commit.
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Optional base git ref or SHA (auto-detected from open branch review or HEAD^ when omitted)
+        required: false
+        type: string
+      head_ref:
+        description: Optional head git ref or SHA (defaults to current SHA when omitted)
+        required: false
+        type: string
 
 # Salt-okur.
 concurrency:
@@ -25,13 +38,70 @@ jobs:
   dependency-review:
     name: Dependency Review (GH Advisory, PR diff)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 2 || 1 }}
           persist-credentials: false
+      - name: Resolve base/head refs for manual dispatch
+        id: refs
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          INPUT_BASE: ${{ inputs.base_ref }}
+          INPUT_HEAD: ${{ inputs.head_ref }}
+        run: |
+          set -euo pipefail
+          python3 - << 'PY'
+          import json
+          import os
+          import subprocess
+          import urllib.request
+
+          out_path = os.environ["GITHUB_OUTPUT"]
+          base = os.environ.get("INPUT_BASE", "").strip()
+          head = os.environ.get("INPUT_HEAD", "").strip() or os.environ["HEAD_SHA"]
+
+          if not base:
+              repo = os.environ["GH_REPO"]
+              owner = repo.split("/")[0]
+              ref = os.environ["REF_NAME"]
+              url = f"https://api.github.com/repos/{repo}/pulls?state=open&head={owner}:{ref}"
+              req = urllib.request.Request(
+                  url,
+                  headers={
+                      "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                      "Accept": "application/vnd.github+json",
+                  },
+              )
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  prs = json.loads(resp.read().decode("utf-8"))
+              if prs:
+                  base = prs[0]["base"]["sha"]
+              else:
+                  res = subprocess.run(
+                      ["git", "rev-parse", "--verify", "HEAD^"],
+                      capture_output=True,
+                      text=True,
+                      check=False,
+                  )
+                  if res.returncode != 0 or not res.stdout.strip():
+                      raise SystemExit("base_ref is required when no open PR or parent commit exists")
+                  base = res.stdout.strip()
+
+          with open(out_path, "a", encoding="utf-8") as fh:
+              fh.write(f"base_ref={base}\n")
+              fh.write(f"head_ref={head}\n")
+          PY
       - name: Dependency Review
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
+          base-ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || steps.refs.outputs.base_ref }}
+          head-ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || steps.refs.outputs.head_ref }}
           # A moderate+ vulnerable dependency introduced in the PR diff = fail.
           # (low = warning only; high/critical is too late; moderate is the balance.)
           fail-on-severity: moderate

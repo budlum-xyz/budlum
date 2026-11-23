@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 /// Transport block-size ceiling, measured over the **protobuf** encoding.
 ///
-/// Not the same bound as `consensus::MAX_BLOCK_SIZE` (1_000_000 over JSON),
+/// Not the same bound as `consensus::MAX_BLOCK_SIZE` (`1_000_000` over JSON),
 /// which is stricter in both value and encoding. See that constant for the
 /// comparison and for why this one must stay the looser of the two.
 pub const MAX_BLOCK_SIZE: usize = 1024 * 1024;
@@ -125,6 +125,9 @@ pub enum NetworkMessage {
         bitmap: Vec<u8>,
         set_hash: String,
         scheme_id: String,
+        /// The seat table version the seats were counted under (section
+        /// 7.4.4); zero means the epoch's base table.
+        seat_table_version: u64,
     },
 
     GetFinalityCert {
@@ -140,6 +143,7 @@ pub enum NetworkMessage {
         bitmap: Vec<u8>,
         set_hash: String,
         scheme_id: String,
+        seat_table_version: u64,
     },
 
     GetQcBlob {
@@ -170,14 +174,39 @@ pub enum NetworkMessage {
     SlashingEvidence(crate::consensus::pos::SlashingEvidence),
     GlobalHeader(crate::settlement::GlobalBlockHeader),
     CrossDomainMessage(crate::cross_domain::CrossDomainMessage),
+    /// `agg/object`: an object on its way to the aggregators (the encoded
+    /// envelope) with the transaction it authorizes, which carries no
+    /// witness of its own.
+    AggObject {
+        envelope: Vec<u8>,
+        transaction: Transaction,
+    },
+    /// `agg/frame`: a claim frame in its canonical encoding.
+    AggFrame(Vec<u8>),
 }
+
+/// Topic of the heavy objects on their way to the aggregators.
+pub const TOPIC_AGG_OBJECT: &str = "agg/object";
+/// Topic of the claim frames the aggregators publish.
+pub const TOPIC_AGG_FRAME: &str = "agg/frame";
+/// Most bytes of the envelope in an `agg/object` message: the header and
+/// the largest payload the wire decodes.
+pub const MAX_AGG_OBJECT_BYTES: usize = 64 + crate::aggregation::chain::WIRE_OBJECT_BYTES;
+
 impl NetworkMessage {
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         use prost::Message;
         let proto_msg = crate::network::proto_conversions::pb::ProtoNetworkMessage::from(self);
         proto_msg.encode_to_vec()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    #[cfg(test)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         use prost::Message;
         let proto_msg = crate::network::proto_conversions::pb::ProtoNetworkMessage::decode(bytes)
@@ -185,6 +214,72 @@ impl NetworkMessage {
         Self::try_from(proto_msg)
     }
 
+    /// Maximum wire length accepted by [`Self::wire_is_handshake`]. A genuine
+    /// handshake carries two varint versions, chain id, best height, a 64-byte
+    /// hex validator-set hash, and a short list of signature scheme names.
+    const MAX_HANDSHAKE_WIRE_BYTES: usize = 16 * 1024;
+
+    /// Cheap pre-decode wire check: returns `true` iff `bytes` fits within
+    /// `MAX_HANDSHAKE_WIRE_BYTES` and carries a single top-level `Handshake`
+    /// (tag 1) or `HandshakeAck` (tag 2) field with no other top-level fields
+    /// top-level fields (including unknown tags). Used before
+    /// `from_bytes_validated` so unhandshaked peers cannot force full protobuf
+    /// decode, canonical re-encode, or allocation of large payloads.
+    #[must_use]
+    pub fn wire_is_handshake(mut bytes: &[u8]) -> bool {
+        if bytes.is_empty() || bytes.len() > Self::MAX_HANDSHAKE_WIRE_BYTES {
+            return false;
+        }
+        let mut saw_handshake = false;
+        while !bytes.is_empty() {
+            let Ok((tag, wire_type)) = prost::encoding::decode_key(&mut bytes) else {
+                return false;
+            };
+            if matches!(tag, 1 | 2) {
+                if saw_handshake {
+                    return false;
+                }
+                saw_handshake = true;
+            } else {
+                return false;
+            }
+            if skip_wire_field(&mut bytes, wire_type).is_err() {
+                return false;
+            }
+        }
+        saw_handshake
+    }
+
+    /// Count the pre-dispatch native verification units inside a raw
+    /// `AggFrame` header: `claim_count + segment_count`. Each claim and each
+    /// segment attestation triggers signature verification on the aggregation
+    /// actor. Returns `None` when the 16-byte frame header is truncated or
+    /// violates wire bounds (`segment_count > claim_count` or exceeds
+    /// `WIRE_FRAME_LIMITS`).
+    #[must_use]
+    pub fn agg_frame_verification_units(frame: &[u8]) -> Option<usize> {
+        use crate::aggregation::chain::WIRE_FRAME_LIMITS;
+        if frame.len() < 16 {
+            return None;
+        }
+        let claims_raw = <[u8; 4]>::try_from(frame.get(..4)?).ok()?;
+        let segments_raw = <[u8; 4]>::try_from(frame.get(4..8)?).ok()?;
+        let claims = usize::try_from(u32::from_be_bytes(claims_raw)).ok()?;
+        let segments = usize::try_from(u32::from_be_bytes(segments_raw)).ok()?;
+        if claims > WIRE_FRAME_LIMITS.max_claims
+            || segments > WIRE_FRAME_LIMITS.max_claims
+            || segments > claims
+        {
+            return None;
+        }
+        Some(claims.saturating_add(segments))
+    }
+
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_bytes_validated(bytes: &[u8]) -> Result<Self, MessageError> {
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(MessageError::TooLarge(bytes.len()));
@@ -223,6 +318,11 @@ impl NetworkMessage {
         Ok(message)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_block_size(block: &Block) -> Result<(), MessageError> {
         use prost::Message;
         let proto_block = crate::network::proto_conversions::pb::ProtoBlock::from(block);
@@ -233,6 +333,11 @@ impl NetworkMessage {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_tx_size(tx: &Transaction) -> Result<(), MessageError> {
         use prost::Message;
         let proto_tx = crate::network::proto_conversions::pb::ProtoTransaction::from(tx);
@@ -243,6 +348,11 @@ impl NetworkMessage {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_header_request(locator: &[String], limit: u32) -> Result<(), MessageError> {
         if limit == 0 || limit > MAX_HEADERS_PER_REQUEST {
             return Err(MessageError::ParseError(format!(
@@ -262,6 +372,11 @@ impl NetworkMessage {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_header_batch(
         headers: &[BlockHeader],
         expected_chain_id: u64,
@@ -299,8 +414,25 @@ impl NetworkMessage {
     }
 }
 
+/// Whether `hash` is the canonical spelling of a 32-byte digest: exactly 64
+/// lowercase hexadecimal characters.
+///
+/// This is the one definition of the rule in the tree. It used to exist as
+/// three copies, and all three used `u8::is_ascii_hexdigit`, which accepts
+/// `A`-`F` as well, so each one documented a lowercase-only rule and enforced
+/// a mixed-case one. Every hash the tree writes is lowercase, so the looser
+/// predicate only ever admitted strings no honest producer emits: the gossip
+/// message id is a hash of the raw frame, which makes an upper-case copy of a
+/// signed vote a message the dedup table has never seen and a second trip
+/// through the signature check, and a header locator entry that no local hash
+/// can equal costs a sync round without ever naming a block.
+#[must_use]
 pub fn is_canonical_hash(hash: &str) -> bool {
-    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    let bytes = hash.as_bytes();
+    bytes.len() == 64
+        && bytes
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 const MAX_SLASHING_ITEMS_PER_CONTAINER: usize = 64;
@@ -854,6 +986,78 @@ fn validate_wire_frame_caps(mut slice: &[u8]) -> Result<(), MessageError> {
                 }
                 scan_proto_slashing_evidence(evidence_bytes, 1, &mut frame_evidence_total)?;
             }
+            28 => {
+                // `agg/object`: the envelope is bounded by the conversion;
+                // the transaction it carries gets the scan of any other.
+                let mut object = take_len_delimited(&mut slice, wire_type)?;
+                let mut seen_fields = 0u128;
+                while !object.is_empty() {
+                    let (field, field_wire) =
+                        prost::encoding::decode_key(&mut object).map_err(|e| {
+                            MessageError::ParseError(format!("Protobuf key error: {e}"))
+                        })?;
+                    mark_unique_tag(&mut seen_fields, field, "Duplicate object field")?;
+                    if field == 2 {
+                        let tx_bytes = take_len_delimited(&mut object, field_wire)?;
+                        scan_proto_transaction(tx_bytes, &mut frame_item_budget)?;
+                    } else {
+                        skip_wire_field(&mut object, field_wire)?;
+                    }
+                }
+            }
+            29 => {
+                // `agg/frame`: bound the inner frame length and peek the 16-byte
+                // claim-frame header before `ProtoNetworkMessage::decode`
+                // allocates `Vec<u8>`.
+                let mut agg_frame = take_len_delimited(&mut slice, wire_type)?;
+                let mut seen_fields = 0u128;
+                let mut frame_payload: Option<&[u8]> = None;
+                while !agg_frame.is_empty() {
+                    let (field, field_wire) =
+                        prost::encoding::decode_key(&mut agg_frame).map_err(|e| {
+                            MessageError::ParseError(format!("Protobuf key error: {e}"))
+                        })?;
+                    mark_unique_tag(&mut seen_fields, field, "Duplicate agg_frame field")?;
+                    if field == 1 {
+                        let payload = take_len_delimited(&mut agg_frame, field_wire)?;
+                        if payload.is_empty() || payload.len() > MAX_MESSAGE_SIZE {
+                            return Err(MessageError::ParseError(
+                                "agg/frame payload is empty or over MAX_MESSAGE_SIZE".into(),
+                            ));
+                        }
+                        frame_payload = Some(payload);
+                    } else {
+                        skip_wire_field(&mut agg_frame, field_wire)?;
+                    }
+                }
+                let payload = frame_payload
+                    .ok_or_else(|| MessageError::ParseError("agg/frame carries no frame".into()))?;
+                if payload.len() < 16 {
+                    return Err(MessageError::ParseError(
+                        "agg/frame header is truncated".into(),
+                    ));
+                }
+                let claim_count =
+                    u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+                let segment_count =
+                    u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+                let shape_len =
+                    u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]]) as usize;
+                let proof_len =
+                    u32::from_be_bytes([payload[12], payload[13], payload[14], payload[15]])
+                        as usize;
+                if claim_count == 0
+                    || claim_count > crate::aggregation::chain::WIRE_FRAME_LIMITS.max_claims
+                    || segment_count > claim_count
+                    || shape_len > segment_count.saturating_mul(2)
+                    || proof_len > crate::aggregation::chain::WIRE_FRAME_LIMITS.max_proof_bytes
+                {
+                    return Err(MessageError::ParseError(
+                        "agg/frame header exceeds wire limits".into(),
+                    ));
+                }
+                bump_frame_items(&mut frame_item_budget)?;
+            }
             _ => skip_wire_field(&mut slice, wire_type)?,
         }
     }
@@ -948,7 +1152,7 @@ mod tests {
     /// applied. It holds because of the current numbers, not because of
     /// anything in the design, so it is asserted here.
     ///
-    /// Canary: lower this constant below 1_000_000 and the assertion fails.
+    /// Canary: lower this constant below `1_000_000` and the assertion fails.
     #[test]
     fn transport_block_ceiling_is_not_stricter_than_consensus() {
         // Both sides are `const`, so this is decidable at compile time. In a
@@ -987,6 +1191,24 @@ mod tests {
             1,
         )
         .is_err());
+    }
+
+    /// One digest has one canonical spelling. An upper-case copy is a different
+    /// string to the dedup table and to a locator lookup, so it is refused at
+    /// the door instead of being carried as a second name for the same hash.
+    #[test]
+    fn only_lowercase_hex_is_a_canonical_hash() {
+        let canonical = "ab".repeat(32);
+        assert!(is_canonical_hash(&canonical));
+        assert!(!is_canonical_hash(&canonical.to_uppercase()));
+        assert!(!is_canonical_hash(&canonical[1..]));
+        assert!(
+            NetworkMessage::validate_header_request(std::slice::from_ref(&canonical), 1).is_ok()
+        );
+        assert!(
+            NetworkMessage::validate_header_request(&[canonical.to_uppercase()], 1).is_err(),
+            "an upper-case locator entry names no block and must be refused, not answered with an empty batch"
+        );
     }
 
     #[test]
@@ -1160,6 +1382,119 @@ mod tests {
         assert!(matches!(
             NetworkMessage::from_bytes_validated(&dup_envelope),
             Err(MessageError::ParseError(msg)) if msg.contains("Duplicate network message payload")
+        ));
+    }
+
+    #[test]
+    fn wire_is_handshake_identifies_handshake_tags_without_full_decode() {
+        let hs = NetworkMessage::Handshake {
+            version_major: 1,
+            version_minor: 0,
+            chain_id: 45261,
+            best_height: 0,
+            validator_set_hash: String::new(),
+            supported_schemes: vec![],
+        }
+        .to_bytes();
+        let ack = NetworkMessage::HandshakeAck {
+            version_major: 1,
+            version_minor: 0,
+            chain_id: 45261,
+            best_height: 0,
+            validator_set_hash: String::new(),
+            supported_schemes: vec![],
+        }
+        .to_bytes();
+        let frame = NetworkMessage::AggFrame(vec![0u8; 32]).to_bytes();
+        assert!(NetworkMessage::wire_is_handshake(&hs));
+        assert!(NetworkMessage::wire_is_handshake(&ack));
+        assert!(!NetworkMessage::wire_is_handshake(&frame));
+        assert!(!NetworkMessage::wire_is_handshake(&[]));
+        assert!(!NetworkMessage::wire_is_handshake(&[0xff, 0xff]));
+    }
+
+    #[test]
+    fn wire_is_handshake_rejects_unknown_high_tag_padding_and_oversized_frames() {
+        let mut smuggled = NetworkMessage::Handshake {
+            version_major: 1,
+            version_minor: 0,
+            chain_id: 45261,
+            best_height: 0,
+            validator_set_hash: String::new(),
+            supported_schemes: vec![],
+        }
+        .to_bytes();
+        // Append an unknown length-delimited field with tag 64 (> 63) carrying 20 KiB.
+        prost::encoding::encode_key(
+            64,
+            prost::encoding::WireType::LengthDelimited,
+            &mut smuggled,
+        );
+        let padding = vec![0xAB_u8; 20 * 1024];
+        prost::encoding::encode_varint(padding.len() as u64, &mut smuggled);
+        smuggled.extend_from_slice(&padding);
+        assert!(
+            !NetworkMessage::wire_is_handshake(&smuggled),
+            "unknown trailing tag must not pass pre-handshake gate"
+        );
+
+        let oversized_hs = NetworkMessage::Handshake {
+            version_major: 1,
+            version_minor: 0,
+            chain_id: 45261,
+            best_height: 0,
+            validator_set_hash: "a".repeat(20 * 1024),
+            supported_schemes: vec![],
+        }
+        .to_bytes();
+        assert!(
+            !NetworkMessage::wire_is_handshake(&oversized_hs),
+            "oversized handshake must not pass pre-handshake gate"
+        );
+    }
+
+    #[test]
+    fn agg_frame_verification_units_counts_claims_and_segments_and_rejects_malformed() {
+        assert_eq!(NetworkMessage::agg_frame_verification_units(&[]), None);
+        assert_eq!(
+            NetworkMessage::agg_frame_verification_units(&[0u8; 15]),
+            None
+        );
+
+        let mut valid = Vec::with_capacity(16);
+        valid.extend_from_slice(&120u32.to_be_bytes());
+        valid.extend_from_slice(&80u32.to_be_bytes());
+        valid.extend_from_slice(&1u32.to_be_bytes());
+        valid.extend_from_slice(&0u32.to_be_bytes());
+        assert_eq!(
+            NetworkMessage::agg_frame_verification_units(&valid),
+            Some(200)
+        );
+
+        let mut inverted = Vec::with_capacity(16);
+        inverted.extend_from_slice(&4u32.to_be_bytes());
+        inverted.extend_from_slice(&5u32.to_be_bytes());
+        inverted.extend_from_slice(&1u32.to_be_bytes());
+        inverted.extend_from_slice(&0u32.to_be_bytes());
+        assert_eq!(
+            NetworkMessage::agg_frame_verification_units(&inverted),
+            None
+        );
+    }
+
+    #[test]
+    fn wire_frame_caps_rejects_oversized_agg_frame_header() {
+        // Header claims 65_537 claims (> WIRE_FRAME_LIMITS.max_claims).
+        let mut bogus = Vec::with_capacity(20);
+        bogus.extend_from_slice(&65_537u32.to_be_bytes());
+        bogus.extend_from_slice(&1u32.to_be_bytes());
+        bogus.extend_from_slice(&1u32.to_be_bytes());
+        bogus.extend_from_slice(&4u32.to_be_bytes());
+        bogus.extend_from_slice(&[0u8; 4]);
+        let bytes = NetworkMessage::AggFrame(bogus).to_bytes();
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&bytes),
+            Err(MessageError::ParseError(msg)) if msg.contains("agg/frame header exceeds wire limits")
         ));
     }
 }

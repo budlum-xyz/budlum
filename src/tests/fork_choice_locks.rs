@@ -1,15 +1,14 @@
 //! Locks on fork choice for the two engines that score chains numerically.
 //!
-//! Two findings, both measured before the fix:
+//! Numerical score invariants:
 //!
-//! 1. **`PoS` treated its checkpoint as a term in the score**, so chain length
-//!    could buy the difference and a fork branching from an earlier
-//!    checkpoint could win outright.
-//! 2. **`PoW` accumulated work in a `u128` that saturates**, and the retarget
-//!    ceiling sits exactly at the overflow boundary, so at high difficulty
-//!    every candidate scored `u128::MAX` and no reorg was ever accepted.
+//! 1. **`PoS` checkpoints are primary in score**, so chain length cannot
+//!    buy the difference and a fork branching from an earlier
+//!    checkpoint cannot win outright.
+//! 2. **`PoW` accumulated work saturating math**, ensuring the retarget
+//!    ceiling does not cause overflow or reorg freeze at high difficulty.
 //!
-//! Each test below fails if its fix is reverted.
+//! Each test below validates mathematical invariance.
 //!
 //! 3. **`PoW` and `PoA` had no equal-weight tie-break at all**: the strict
 //!    `>` refused the reorg in both directions, so the winner was whichever
@@ -362,7 +361,7 @@ mod equal_weight_resolves_in_every_family {
         })
     }
 
-    /// PoW refused the reorg in both directions on equal work, so the
+    /// `PoW` refused the reorg in both directions on equal work, so the
     /// winner was whichever tip a node adopted first: two honest nodes
     /// diverged permanently. The resolver must pick exactly one side,
     /// stably under repeated evaluation.
@@ -385,7 +384,7 @@ mod equal_weight_resolves_in_every_family {
         assert_eq!(a_beats_b, engine.is_better_chain(&a, &b));
     }
 
-    /// PoA had no override at all: the trait's strict `>` on the length
+    /// `PoA` had no override at all: the trait's strict `>` on the length
     /// score left equal-length competing tails to arrival order.
     #[test]
     fn poa_equal_length_picks_one_side_in_both_directions() {

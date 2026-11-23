@@ -2,7 +2,7 @@
 mod integration_tests {
     use crate::chain::blockchain::Blockchain;
     use crate::chain::finality::{
-        checkpoint_signing_message, is_checkpoint_height, sign_bls, verify_bls_sig,
+        checkpoint_signing_message, is_checkpoint_height_for_chain, sign_bls, verify_bls_sig,
         FinalityAggregator, Precommit, Prevote, ValidatorEntry, ValidatorSetSnapshot,
     };
     use crate::consensus::poa::PoAConfig;
@@ -20,6 +20,7 @@ mod integration_tests {
     use crate::core::block::Block;
     use crate::core::governance::ProposalType;
     use crate::core::transaction::Transaction;
+    use crate::core::transaction::DEFAULT_CHAIN_ID;
     use crate::crypto::primitives::BlsKeypair;
     use crate::crypto::primitives::KeyPair;
     use crate::crypto::primitives::ValidatorKeys;
@@ -45,6 +46,58 @@ mod integration_tests {
         validator.pop_signature = crate::chain::finality::sign_bls_pop(bls_secret, &pop_message);
         validator.pq_public_key = pq_public;
         validator.active = true;
+    }
+
+    /// `bud_estimateGas` answers with `AccountState::required_fee`.
+    /// That number must be exactly the admission floor: the estimate passes,
+    /// one unit less is refused, for a proportionally priced transfer and an
+    /// escalated governance proposal alike.
+    #[test]
+    fn required_fee_is_the_admission_floor() {
+        let mut state = AccountState::new();
+        let sender_kp = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let sender = Address::from(sender_kp.public_key_bytes());
+        state.add_balance(&sender, 10_000_000);
+        let mut params = *state.registry.params();
+        params.transfer_fee_ppm = 200;
+        state.registry.set_params(params);
+
+        let probe = Transaction::new(sender, Address::from([0x6C; 32]), 1_000_000, Vec::new());
+        let floor = state.required_fee(&probe);
+        assert_eq!(
+            floor,
+            state.base_fee + 200,
+            "base plus 200 ppm of 1_000_000"
+        );
+        let signed = |fee: u64| {
+            let mut tx = Transaction::new_with_fee(
+                sender,
+                Address::from([0x6C; 32]),
+                1_000_000,
+                fee,
+                0,
+                vec![],
+            );
+            tx.sign(&sender_kp);
+            tx
+        };
+        let at_floor = state.validate_transaction(&signed(floor));
+        assert!(at_floor.is_ok(), "{at_floor:?}");
+        assert!(state.validate_transaction(&signed(floor - 1)).is_err());
+
+        let proposer = Address::from([0x6A; 32]);
+        state.add_balance(&proposer, 100);
+        state.add_validator(proposer, 1_000);
+        let first = Transaction::new_proposal(proposer, ProposalType::ChangeBaseFee(10), 10, 0);
+        Executor::apply_transaction(&mut state, &first).expect("first proposal at 1x");
+        let mut second =
+            Transaction::new_proposal(proposer, ProposalType::ChangeBaseFee(11), 10, 1);
+        let floor = state.required_fee(&second);
+        assert_eq!(floor, 2, "the second proposal pays the escalated fee");
+        second.fee = floor - 1;
+        assert!(Executor::apply_transaction(&mut state.clone(), &second).is_err());
+        second.fee = floor;
+        assert!(Executor::apply_transaction(&mut state, &second).is_ok());
     }
 
     #[test]
@@ -456,6 +509,7 @@ mod integration_tests {
                 .unwrap()
                 .set_hash
                 .clone(),
+            seat_table_version: 0,
         };
 
         let msg = cert.signing_message();
@@ -706,6 +760,7 @@ mod integration_tests {
                 .unwrap()
                 .set_hash
                 .clone(),
+            seat_table_version: 0,
         };
 
         let msg = cert.signing_message();
@@ -768,7 +823,7 @@ mod integration_tests {
     #[test]
     #[should_panic(expected = "Startup Chain ID mismatch!")]
     fn test_startup_chain_id_verification_fails() {
-        use crate::storage::db::Storage;
+        use crate::persistence::db::Storage;
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
@@ -792,7 +847,6 @@ mod integration_tests {
     #[test]
     fn test_prevote_precommit_full_lifecycle() {
         use crate::chain::finality::sign_bls;
-        use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
         let keypair = KeyPair::generate().unwrap();
         let validator_addr = Address::from(keypair.public_key_bytes());
 
@@ -816,13 +870,13 @@ mod integration_tests {
         let mut bc = Blockchain::new(consensus, None, 45262, None);
         bc.state = state;
 
-        let cp_height = FINALITY_CHECKPOINT_INTERVAL;
+        let cp_height = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
         for _ in 1..cp_height {
             let _ = bc.produce_block(validator_addr);
         }
         let (block, _) = bc.produce_block(validator_addr).unwrap();
         assert_eq!(block.index, cp_height);
-        assert!(is_checkpoint_height(block.index));
+        assert!(is_checkpoint_height_for_chain(block.index, 45262));
 
         bc.start_prevote_task(block.index, block.hash.clone());
         assert!(bc.finality_aggregator.is_some());
@@ -889,7 +943,7 @@ mod integration_tests {
             .to_vec();
         install_finality_keys(&mut bc.state, v_addr, &bls_sk, bls_pk, pq_public);
 
-        let cp_height = crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+        let cp_height = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
         for _ in 1..cp_height {
             let _ = bc.produce_block(v_addr);
         }
@@ -899,7 +953,7 @@ mod integration_tests {
         let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
         // Validly signed over the WRONG hash: passes ingest signature check, then
-        // Is rejected for hash mismatch (: sig verified before hash check).
+        // Is rejected for hash mismatch ( sig verified before hash check).
         let mut wrong_vote = Prevote {
             chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch,
@@ -1020,7 +1074,9 @@ mod integration_tests {
         let voter = Address::from(keys.sig_key.public_key_bytes());
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
-        let bc = Blockchain::new(consensus, None, 45262, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        // Sequential finality (7.4.5): height 10 is voteable once 8 is final.
+        bc.finalized_height = 8;
 
         let prevote = bc.sign_prevote(1, 10, "test_cp_hash", &voter).unwrap();
 
@@ -1042,7 +1098,9 @@ mod integration_tests {
         let voter = Address::from(keys.sig_key.public_key_bytes());
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
-        let bc = Blockchain::new(consensus, None, 45262, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        // Sequential finality (7.4.5): height 10 is voteable once 8 is final.
+        bc.finalized_height = 8;
 
         let precommit = bc.sign_precommit(1, 10, "test_cp_hash", &voter).unwrap();
 
@@ -1073,7 +1131,8 @@ mod integration_tests {
 
         let snapshot = make_validator_snapshot(&addrs, &bls_keys);
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot.clone());
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snapshot.clone());
 
         // 3 out of 4 validators send BLS-signed prevotes (meets 2/3 quorum)
         for i in 0..3 {
@@ -1151,7 +1210,7 @@ mod integration_tests {
 
         let snapshot = make_validator_snapshot(&[(addr, 2000)], std::slice::from_ref(&bls_key));
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot);
+        let mut agg = FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snapshot);
 
         let state = agg.get_state();
         assert!(state.active);
@@ -1196,7 +1255,7 @@ mod integration_tests {
 
         let snapshot = make_validator_snapshot(&[(addr, 1000)], std::slice::from_ref(&bls_key));
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot);
+        let mut agg = FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snapshot);
 
         let vote1 = Prevote {
             chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
@@ -1238,7 +1297,7 @@ mod integration_tests {
 
         let snapshot = make_validator_snapshot(&[(addr, 1000)], std::slice::from_ref(&bls_key));
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot);
+        let mut agg = FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snapshot);
 
         let pc = Precommit {
             chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
@@ -1274,7 +1333,8 @@ mod integration_tests {
         }
         let snapshot = make_validator_snapshot(&addrs, &bls_keys);
 
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot.clone());
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snapshot.clone());
 
         for i in 0..3 {
             let vote = Prevote {
@@ -1348,7 +1408,10 @@ mod integration_tests {
         let consensus = Arc::new(PoWEngine::new(0));
         let bc = Blockchain::new(consensus, None, 45262, None);
 
-        let result = bc.sign_prevote(1, 10, "test", &voter);
+        // Vote at the round the chain is on, so the refusal is about the missing
+        // key and not about sequential finality.
+        let interval = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
+        let result = bc.sign_prevote(0, interval, "test", &voter);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No BLS signing capability"));
     }
@@ -1747,10 +1810,10 @@ mod integration_tests {
             0,
             "no locked bridge inventory at genesis"
         );
-        // finality_lag = height - finalized, from the same scrape.
+        // finality_lag = tip.index - finalized, from the same scrape.
         assert_eq!(
             metrics.finality_lag.get(),
-            metrics.chain_height.get() - metrics.finalized_height.get()
+            metrics.chain_height.get().saturating_sub(1) - metrics.finalized_height.get()
         );
     }
 
@@ -1811,16 +1874,9 @@ mod integration_tests {
     /// The counter has to rise on the real production path, not only when it is
     /// called by hand.
     ///
-    /// FINDING: in the whole tree `emit_tx_processed` was called only from a test
-    /// in this file; `produce_block` and `validate_and_add_block` never called
-    /// it, so `budlum_transactions_processed` stayed at 0 forever on a running
-    /// node. The difference went unnoticed because its neighbour
-    /// `emit_chain_metrics` was called from two real places.
-    ///
-    /// The test below does not call the emitter by hand: it submits a
-    /// transaction, has a block produced and reads the counter. It is the only
-    /// test measuring the metric; the other one measures the emitter itself, and
-    /// it passed while this one failed.
+    /// The counter must advance on the production path, not only when called
+    /// directly. This test submits a transaction, produces a block and reads
+    /// the counter.
     #[test]
     fn transactions_processed_counts_a_block_produced_through_the_normal_path() {
         use crate::chain::blockchain::Blockchain;

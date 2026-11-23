@@ -1,4 +1,4 @@
-//! Permissionless ZK proof submission and the chain ↔ BudZKVM bridge.
+//! Permissionless ZK proof submission and the chain ↔ `BudZKVM` bridge.
 //!
 //! ## Model (decided this turn: "Option B" - fully open submission)
 //! Anyone may submit a proof; registration is NOT required to have a valid proof
@@ -56,7 +56,7 @@ use std::collections::BTreeMap;
 /// Commits to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZkProofSubmission {
-    /// Transport envelope over the shared CrossDomainMessage primitive.
+    /// Transport envelope over the shared `CrossDomainMessage` primitive.
     /// `message.target_domain` is the domain being advanced, `message.source_height`
     /// Is the proven target height, and `message.sender` is the submitter (the
     /// Account charged the fee and, if registered, rewarded).
@@ -100,6 +100,7 @@ pub struct ZkProofSubmission {
 /// same: the allow list must decide over exactly the value the proof is bound
 /// to against the AIR. Using a separate tagged hash would open a gap in which
 /// the listed program and the proven program could differ.
+#[must_use]
 pub fn zk_program_hash(program: &[u64]) -> Hash32 {
     use sha3::{Digest, Keccak256};
     let mut hasher = Keccak256::new();
@@ -107,6 +108,18 @@ pub fn zk_program_hash(program: &[u64]) -> Hash32 {
         hasher.update(word.to_le_bytes());
     }
     hasher.finalize().into()
+}
+
+/// Returns `true` when `program` is empty or consists exclusively of `Halt`
+/// instructions. Such a program performs no state or witness check
+/// and must never attest a domain state root.
+#[must_use]
+pub fn is_empty_or_halt_only_program(program: &[u64]) -> bool {
+    program.is_empty()
+        || program.iter().all(|&word| {
+            bud_isa::Instruction::decode_any(word)
+                .is_ok_and(|inst| inst.opcode == bud_isa::Opcode::Halt)
+        })
 }
 
 /// The acceptance window for `block_height` in the public inputs of a zk proof.
@@ -118,6 +131,10 @@ pub fn zk_program_hash(program: &[u64]) -> Hash32 {
 /// not write the height yet; 0 = "no claim". Once the prover starts writing the
 /// height, the window applies in full.
 pub const MAX_ZK_PROOF_HEIGHT_LAG: u64 = 128;
+
+/// Upper bound on instruction words carried in one [`ZkProofSubmission`],
+/// preventing unbounded heap allocation and hashing before STARK verification.
+pub const MAX_ZK_PROGRAM_WORDS: usize = 65_536;
 
 /// How far one accepted zk claim may carry a domain's tip.
 ///
@@ -151,6 +168,7 @@ impl ZkProofSubmission {
     ///
     /// That is why the domain separator is `V2`: the preimage changed and the
     /// old hashes are deliberately invalid.
+    #[must_use]
     pub fn payload_binding_hash(
         proof: &ProofEnvelope,
         public_inputs: &ExecutionPublicInputs,
@@ -176,7 +194,7 @@ impl ZkProofSubmission {
             fallback
         });
         let pi_bytes = public_inputs.to_canonical_bytes();
-        let mut program_bytes = Vec::with_capacity(program.len() * 8);
+        let mut program_bytes = Vec::with_capacity(program.len().saturating_mul(8));
         for word in program {
             program_bytes.extend_from_slice(&word.to_le_bytes());
         }
@@ -192,6 +210,7 @@ impl ZkProofSubmission {
 
     /// Recompute and return the expected payload binding hash for this
     /// Submission.
+    #[must_use]
     pub fn expected_payload_hash(&self) -> Hash32 {
         Self::payload_binding_hash(
             &self.proof,
@@ -203,16 +222,19 @@ impl ZkProofSubmission {
     }
 
     /// The domain this proof advances.
+    #[must_use]
     pub fn domain(&self) -> DomainId {
         self.message.target_domain
     }
 
     /// The target height this proof claims.
+    #[must_use]
     pub fn target_height(&self) -> u64 {
         self.message.source_height
     }
 
     /// The submitter (fee payer / reward recipient candidate).
+    #[must_use]
     pub fn submitter(&self) -> Address {
         self.message.sender
     }
@@ -284,25 +306,25 @@ pub enum ProofError {
 impl std::fmt::Display for ProofError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProofError::PayloadHashMismatch => {
+            Self::PayloadHashMismatch => {
                 write!(f, "message payload hash does not match proof payload")
             }
-            ProofError::WrongMessageKind => write!(f, "message kind is not a ZK proof"),
-            ProofError::InvalidProof(e) => write!(f, "invalid proof: {e}"),
-            ProofError::ConflictingClaim {
+            Self::WrongMessageKind => write!(f, "message kind is not a ZK proof"),
+            Self::InvalidProof(e) => write!(f, "invalid proof: {e}"),
+            Self::ConflictingClaim {
                 domain_id,
                 target_height,
             } => write!(
                 f,
                 "conflicting proof claim for domain {domain_id} height {target_height}"
             ),
-            ProofError::InsufficientFee { have, need } => {
+            Self::InsufficientFee { have, need } => {
                 write!(
                     f,
                     "insufficient balance for proof fee: have {have}, need {need}"
                 )
             }
-            ProofError::RegistryFull { cap } => {
+            Self::RegistryFull { cap } => {
                 write!(f, "proof claim registry is full ({cap} entries)")
             }
         }
@@ -337,14 +359,17 @@ pub struct ProofClaimRegistry {
 }
 
 impl ProofClaimRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[must_use]
     pub fn get(&self, key: &ProofClaimKey) -> Option<&AcceptedProofClaim> {
         self.claims.get(key)
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.claims.len()
     }
@@ -370,6 +395,7 @@ impl ProofClaimRegistry {
         crate::settlement::commitment_tree::merkle_root(&leaves)
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.claims.is_empty()
     }
@@ -377,6 +403,10 @@ impl ProofClaimRegistry {
     /// Decide how a verified proof claim should be handled under the
     /// "first valid wins" policy. Does NOT mutate on the idempotent/conflict
     /// Paths; call [`Self::record`] to persist an accepted claim.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn classify(
         &self,
         key: ProofClaimKey,
@@ -398,6 +428,10 @@ impl ProofClaimRegistry {
     ///
     /// Refuses at [`MAX_PROOF_CLAIMS`] rather than growing without
     /// bound; the caller maps the refusal onto the submission path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record(&mut self, claim: AcceptedProofClaim) -> Result<(), ProofError> {
         if self.claims.len() >= MAX_PROOF_CLAIMS {
             return Err(ProofError::RegistryFull {
@@ -441,7 +475,7 @@ mod tests {
     /// The cap refuses at the boundary and the refusal is total -
     /// the registry state is untouched, so a full registry still answers
     /// its recorded claims and still classifies duplicates correctly.
-    /// Filling 100k keys is a loop of BTreeMap inserts; keep it cheap by
+    /// Filling 100k keys is a loop of `BTreeMap` inserts; keep it cheap by
     /// testing the boundary: fill exactly to capacity with distinct keys.
     #[test]
     fn registry_refuses_past_the_cap() {

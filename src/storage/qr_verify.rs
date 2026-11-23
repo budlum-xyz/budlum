@@ -10,7 +10,7 @@
 //! fast path and no trusted-content exception.
 //!
 //! WIRING: `storage::emit::qr_feed_preview` calls [`verify_qr_video`] for the
-//! video it has just encoded (RPC `bud_storageQrFeedPreview`).
+//! video it has just encoded. The legacy preview RPC has been removed.
 
 use crate::core::hash::{calculate_hash_bytes, hash_fields_bytes};
 use crate::storage::content_id::ContentId;
@@ -182,6 +182,17 @@ pub fn verify_qr_video(
     outcome
 }
 
+fn check_deadline(started: Instant, deadline: Duration) -> Result<u64, VerifyError> {
+    let elapsed = started.elapsed();
+    if deadline.is_zero() || elapsed > deadline {
+        return Err(VerifyError::TimedOut {
+            limit_micros: micros(deadline),
+            elapsed_micros: micros(elapsed),
+        });
+    }
+    Ok(micros(elapsed))
+}
+
 fn check(
     video_blob: &[u8],
     expected: &ExpectedCommitments,
@@ -189,10 +200,13 @@ fn check(
     started: Instant,
     deadline: Duration,
 ) -> Result<VerifiedVideo, VerifyError> {
+    check_deadline(started, deadline)?;
     // The decoder is `decode_qr_video`. The optical frames are read a second
     // time here because the independent verifier below needs them.
     let (kind, body, video) = decode_qr_video(video_blob)?;
+    check_deadline(started, deadline)?;
     let optical = demux_optical_frames(&video).map_err(PipeError::from)?;
+    check_deadline(started, deadline)?;
     let got = ContentId::of(&body);
     if got != expected.content_id {
         return Err(VerifyError::ContentIdMismatch {
@@ -225,18 +239,12 @@ fn check(
         content_sha256: calculate_hash_bytes(&body),
     };
     confirm(&video.stream_commitment, &optical, &claim).map_err(VerifyError::Independent)?;
-    let elapsed = started.elapsed();
-    if elapsed > deadline {
-        return Err(VerifyError::TimedOut {
-            limit_micros: micros(deadline),
-            elapsed_micros: micros(elapsed),
-        });
-    }
+    let duration_micros = check_deadline(started, deadline)?;
     let record = VerificationRecord {
         input_hash,
         output_hash: *got.as_bytes(),
         path: VERIFY_PATH,
-        duration_micros: micros(elapsed),
+        duration_micros,
     };
     Ok((kind, body, video, record))
 }

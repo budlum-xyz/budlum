@@ -1,11 +1,10 @@
-//! Regression seals for the SocialFi boost distribution (F4 - a report finding,
-//! the SocialFi test seal).
+//! Regression seals for the `SocialFi` boost distribution (the `SocialFi` test seal).
 //!
 //! Constitution section 3: 4 percent of the boost goes to the B.U.D. operators,
 //! 16 percent to the creator and 80 percent to the protocol. The current
 //! combined semantics (5322e00 plus 7f054d7): the executor accumulates
-//! bud_share in `pending_bud_boost_share`; after the block commit
-//! `distribute_bud_boost_share` distributes it by the fee_per_byte_epoch weight
+//! `bud_share` in `pending_bud_boost_share`; after the block commit
+//! `distribute_bud_boost_share` distributes it by the `fee_per_byte_epoch` weight
 //! of the active deals (the rounding dust goes to the operator of the first
 //! deal), and with no active deal it is an honest burn. These tests seal the
 //! weighted distribution, the dust determinism, the pending drain and the
@@ -14,7 +13,7 @@
 //! NOTE: chain-level mempool transaction validation requires a signature
 //! (`Transaction::verify` - an unsigned transaction silently stays out of the
 //! block). So the actors sign with a real `KeyPair`, the nonce is read from the
-//! chain through `bc.get_nonce`, and the nft_id is read from the registry, with
+//! chain through `bc.get_nonce`, and the `nft_id` is read from the registry, with
 //! no assumption about an id counter.
 
 use crate::chain::blockchain::Blockchain;
@@ -25,8 +24,8 @@ use crate::core::transaction::{Transaction, TransactionType};
 use crate::crypto::primitives::KeyPair;
 use crate::domain::storage_deal::{StorageEconomicsParams, FEE_RATE_SCALE};
 use crate::domain::storage_params::StorageDomainParams;
+use crate::persistence::db::Storage;
 use crate::storage::content_id::ContentId;
-use crate::storage::db::Storage;
 use crate::storage::manifest::ContentManifest;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -48,6 +47,7 @@ fn domain_params() -> StorageDomainParams {
         max_committed_chunks: 1000,
         challenge_interval: 10,
         min_operator_bond: 1_000_000,
+        require_merkle_proof: false,
     }
 }
 
@@ -59,8 +59,8 @@ fn deal_econ(fee_per_byte_epoch: u64) -> StorageEconomicsParams {
 }
 
 /// A format-valid test envelope, with an honest marker - it is NOT a real STARK
-/// proof, but exactly the same minimal ProofEnvelope as the test helper in
-/// storage_deal.rs.
+/// proof, but exactly the same minimal `ProofEnvelope` as the test helper in
+/// `storage_deal.rs`.
 fn valid_merkle_proof() -> Vec<u8> {
     let envelope = bud_proof::ProofEnvelope {
         proof_format_version: 1,

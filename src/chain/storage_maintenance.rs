@@ -148,7 +148,7 @@ pub(crate) fn accrue_operator_rewards(state: &mut AccountState, epoch: u64) -> (
 
 /// Open a retrieval challenge for every active deal whose interval elapsed
 /// this epoch. The byte range comes from the block's VRF output, folded with
-/// the deal and shard identity; a block without VRF entropy (a PoW or PoA
+/// the deal and shard identity; a block without VRF entropy (a `PoW` or `PoA`
 /// block) issues none rather than fall back to arithmetic a prover could
 /// precompute. Returns the number of challenges opened.
 pub(crate) fn issue_challenges(
@@ -157,6 +157,10 @@ pub(crate) fn issue_challenges(
     epoch: u64,
     vrf_output: &[u8],
 ) -> u32 {
+    // Sample the full small shard, then one sixty-fourth of a larger one,
+    // between 4 KiB and 64 KiB.
+    const MIN_CHALLENGE_RANGE_BYTES: u64 = 4 * 1024;
+    const MAX_CHALLENGE_RANGE_BYTES: u64 = 64 * 1024;
     if vrf_output.is_empty() {
         return 0;
     }
@@ -184,10 +188,6 @@ pub(crate) fn issue_challenges(
         })
         .collect();
 
-    // Sample the full small shard, then one sixty-fourth of a larger one,
-    // between 4 KiB and 64 KiB.
-    const MIN_CHALLENGE_RANGE_BYTES: u64 = 4 * 1024;
-    const MAX_CHALLENGE_RANGE_BYTES: u64 = 64 * 1024;
     let mut issued = 0u32;
     for (deal_id, start_epoch, end_epoch, deal_shard_bytes, manifest_id, shard_id) in active {
         let elapsed = epoch.saturating_sub(start_epoch);
@@ -308,15 +308,27 @@ pub(crate) fn apply_bond_slash(
     // it, so the confiscation adds it to destroyed supply without taking a
     // second bond from the operator's live balance.
     let burned = slashed_bond;
-    state.burned_total = state.burned_total.saturating_add(burned);
+    let next_slashed_total = state
+        .storage_registry
+        .economics
+        .slashed_bond_total
+        .checked_add(slashed_bond)
+        .ok_or_else(|| String::from("slashed storage-bond accounting overflowed u64"))?;
+    let next_burned_total = state
+        .storage_registry
+        .economics
+        .burned_bond_total
+        .checked_add(burned)
+        .ok_or_else(|| String::from("burned storage-bond accounting overflowed u64"))?;
+    state.record_destroyed(u128::from(burned));
     if burned > 0 {
         tracing::warn!(
             "Confiscated the escrowed bond {burned} of operator {operator} for {reason}"
         );
     }
     let ledger = &mut state.storage_registry.economics;
-    ledger.slashed_bond_total = ledger.slashed_bond_total.saturating_add(slashed_bond);
-    ledger.burned_bond_total = ledger.burned_bond_total.saturating_add(burned);
+    ledger.slashed_bond_total = next_slashed_total;
+    ledger.burned_bond_total = next_burned_total;
     ledger.record(StorageEconomicsEvent {
         epoch,
         deal_id,
@@ -335,20 +347,14 @@ pub(crate) fn apply_bond_slash(
     // delivered, so the unserved fee returns to the account that escrowed
     // it, which turns the escrow back into a balance and keeps the
     // committed total level.
-    let refund = match state.storage_registry.get_deal(deal_id) {
-        Some(deal) => {
-            let duration = deal.duration_epochs();
-            let served = epoch.saturating_sub(deal.deal_start_epoch).min(duration);
-            let unearned = deal
-                .total_fee(duration)
-                .saturating_sub(deal.total_fee(served));
-            match deal.payer {
-                Some(payer) if unearned > 0 => Some((payer, unearned)),
-                _ => None,
-            }
-        }
-        None => None,
-    };
+    let refund = state.storage_registry.get_deal(deal_id).and_then(|deal| {
+        let duration = deal.duration_epochs();
+        let served = epoch.saturating_sub(deal.deal_start_epoch).min(duration);
+        let unearned = deal
+            .total_fee(duration)
+            .saturating_sub(deal.total_fee(served));
+        deal.payer.filter(|_| unearned > 0).map(|p| (p, unearned))
+    });
     if let Some((payer, unearned)) = refund {
         state
             .try_add_balance(&payer, unearned)
@@ -392,9 +398,43 @@ pub(crate) fn finalize_missed_challenges(
         .map(|c| (c.challenge_id, c.deal_id))
         .collect();
 
+    let superseded_deals: std::collections::BTreeSet<u64> =
+        pending.iter().map(|(_, deal_id)| *deal_id).collect();
+    if !superseded_deals.is_empty() {
+        // Preflight every opener bond refund (primary due challenges plus any
+        // open siblings on deals that will be slashed) in one O(C) scan before
+        // mutating balances or registry state.
+        let mut refund_totals: std::collections::BTreeMap<Address, u64> =
+            std::collections::BTreeMap::new();
+        for challenge in state.storage_registry.all_challenges() {
+            if !superseded_deals.contains(&challenge.deal_id)
+                || state
+                    .storage_registry
+                    .get_result(challenge.challenge_id)
+                    .is_some()
+                || challenge.opener == Address::zero()
+                || challenge.opener_bond == 0
+            {
+                continue;
+            }
+            let entry = refund_totals.entry(challenge.opener).or_insert(0);
+            *entry = entry.checked_add(challenge.opener_bond).ok_or_else(|| {
+                format!(
+                    "sibling opener bond refund overflow for {}",
+                    challenge.opener
+                )
+            })?;
+        }
+        for (&opener, &bond) in &refund_totals {
+            if state.get_balance(&opener).checked_add(bond).is_none() {
+                return Err(format!("opener bond refund overflow for {opener}"));
+            }
+        }
+    }
+
     let mut finalized = 0u32;
     let mut total_slashed = 0u64;
-    for (challenge_id, deal_id) in pending {
+    for (challenge_id, deal_id) in pending.iter().copied() {
         let operator = state
             .storage_registry
             .get_deal(deal_id)
@@ -407,11 +447,6 @@ pub(crate) fn finalize_missed_challenges(
             .get_challenge(challenge_id)
             .map(|challenge| (challenge.opener, challenge.opener_bond))
             .filter(|(opener, bond)| *bond > 0 && *opener != Address::zero());
-        if let Some((opener, bond)) = opener_refund {
-            if state.get_balance(&opener).checked_add(bond).is_none() {
-                return Err(format!("opener bond refund overflow for {opener}"));
-            }
-        }
         let Ok(result) = state
             .storage_registry
             .finalize_missed_challenge(challenge_id, epoch)
@@ -430,13 +465,32 @@ pub(crate) fn finalize_missed_challenges(
             )?;
         }
         if let Some((opener, bond)) = opener_refund {
-            state
-                .try_add_balance(&opener, bond)
-                .map_err(|error| format!("opener bond refund overflow for {opener}: {error}"))?;
+            refund_opener_bond(state, opener, bond)?;
         }
         finalized += 1;
     }
+    // A slashed deal leaves its other open challenges unanswerable: they are
+    // closed without a second slash and their opener bonds come back. This is
+    // one walk of the challenge registry for the whole block. Doing it per
+    // collapsed challenge made the block cost the product of the missed and
+    // the stored challenges.
+    let (closed, bond_refunds) = state
+        .storage_registry
+        .close_superseded_challenges_for_slashed_deals(&superseded_deals, epoch);
+    for (opener, bond) in bond_refunds {
+        refund_opener_bond(state, opener, bond)?;
+    }
+    finalized = finalized.saturating_add(closed);
     Ok((finalized, total_slashed))
+}
+
+/// Return to `opener` the bond `open_challenge` debited from it. The one
+/// place a challenge bond comes back in the missed-challenge settlement,
+/// for the challenge that carried the slash and for its closed siblings.
+fn refund_opener_bond(state: &mut AccountState, opener: Address, bond: u64) -> Result<(), String> {
+    state
+        .try_add_balance(&opener, bond)
+        .map_err(|error| format!("opener bond refund overflow for {opener}: {error}"))
 }
 
 /// Return the operator bond of every deal that reached its end epoch
@@ -756,6 +810,101 @@ mod tests {
         assert_eq!(
             issued_valid, 1,
             "valid consented shard_bytes matching manifest must issue a retrieval challenge"
+        );
+    }
+
+    #[test]
+    fn slashing_a_deal_resolves_sibling_challenges_and_refunds_every_opener_bond() {
+        use crate::domain::storage_deal::{ChallengeOutcome, DealStatus};
+        let mut state = AccountState::new();
+        let owner = Address::from([0x10; 32]);
+        let operator = Address::from([0x11; 32]);
+        let opener_a = Address::from([0x21; 32]);
+        let opener_b = Address::from([0x22; 32]);
+        let bond = 500u64;
+        state.add_balance(&operator, 10_000);
+        state.add_balance(&opener_a, bond);
+        state.add_balance(&opener_b, bond);
+
+        let bytes = vec![0x42u8; 8_192];
+        let shard = ShardRef::from_bytes(0, &bytes);
+        let shard_id = shard.shard_id;
+        let manifest = ContentManifest::from_shards(vec![shard])
+            .unwrap()
+            .with_owner(owner);
+        state.storage_registry.register_manifest(&manifest);
+        let envelope = bud_proof::ProofEnvelope {
+            proof_format_version: 1,
+            backend: "test-backend".to_string(),
+            p3_version: "0.6".to_string(),
+            fri_params_id: "test-fri".to_string(),
+            public_inputs_hash: [0x42u8; 32],
+            proof_bytes: vec![0xABu8; 96],
+            degree_bits: 8,
+        };
+        let proof = bincode::serialize(&envelope).expect("envelope");
+        let deal_id = state
+            .storage_registry
+            .open_deal(
+                1,
+                &manifest,
+                shard_id,
+                operator,
+                0,
+                1,
+                500,
+                StorageEconomicsParams {
+                    operator_bond: STORAGE_MIN_OPERATOR_BOND,
+                    fee_per_byte_epoch: 1,
+                },
+                &StorageDomainParams::default(),
+                Some(proof),
+                Some([0x42; 32]),
+            )
+            .expect("open deal");
+        state.storage_registry.set_deal_payer(deal_id, owner);
+        // Debit both openers' bonds to mirror on-chain challenge escrow.
+        state.get_or_create(&opener_a).balance -= bond;
+        state.get_or_create(&opener_b).balance -= bond;
+        let c1 = state
+            .storage_registry
+            .open_challenge(deal_id, 0, 16, 10, 20, opener_a, bond)
+            .expect("open c1");
+        let c2 = state
+            .storage_registry
+            .open_challenge(deal_id, 0, 16, 15, 40, opener_b, bond)
+            .expect("open c2");
+
+        state.epoch_index = 25;
+        let _ = accrue_operator_rewards(&mut state, 25);
+        let total_before = state.total_bud_committed() + u128::from(state.burned_total);
+        let (finalized, slashed) = finalize_missed_challenges(&mut state, 25).expect("finalize");
+        assert_eq!(finalized, 2);
+        assert_eq!(slashed, STORAGE_MIN_OPERATOR_BOND);
+        assert_eq!(
+            state.storage_registry.get_deal(deal_id).unwrap().status,
+            DealStatus::Slashed
+        );
+        assert_eq!(
+            state.storage_registry.get_result(c1).unwrap().outcome,
+            ChallengeOutcome::Missed
+        );
+        let c2_res = state
+            .storage_registry
+            .get_result(c2)
+            .expect("sibling challenge must be resolved on slash");
+        assert_eq!(c2_res.outcome, ChallengeOutcome::Missed);
+        assert_eq!(c2_res.slashed_bond, 0);
+        assert_eq!(state.get_balance(&opener_a), bond);
+        assert_eq!(
+            state.get_balance(&opener_b),
+            bond,
+            "sibling opener bond must be refunded, never stranded"
+        );
+        let total_after = state.total_bud_committed() + u128::from(state.burned_total);
+        assert_eq!(
+            total_after, total_before,
+            "slash + sibling opener refunds must preserve total committed + burned supply"
         );
     }
 }

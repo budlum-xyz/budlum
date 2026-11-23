@@ -421,7 +421,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     // 8. The gateway serves names only after the Pollen guard.
-    let gateway = root.join("src/gateway/service.rs");
+    let gateway = root.join("src/storage/content_gateway.rs");
     let gateway_src = std::fs::read_to_string(&gateway).map_err(|e| {
         format!(
             "FAIL: cannot read {}: {e}; the gateway read path is outside the gate",

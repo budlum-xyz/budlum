@@ -55,16 +55,28 @@ const CALLS: &[(&str, Class)] = &[
     // whole bundle so the all-or-none promise is the pool's and not the RPC
     // layer's.
     ("add_transaction_bundle", NodeLocal),
+    // The aggregation side of a node: the object pool, the frames and the
+    // claimed transactions that wait for a block. None of the four touches
+    // `self.state`; what they hold reaches the state only inside a block,
+    // through `produce_block` and the block rules.
+    ("aggregation_tick", NodeLocal),
     ("apply_state_snapshot", Sync),
+    ("bud3_symbol_source", Read),
     ("build_global_header", Read),
     ("consensus", Read),
+    ("consensus_domains_with_garden", Read),
     ("credit_development_account", DevnetOnly),
+    ("decode_bud3_paid_content", Read),
+    ("domain_commitments_with_garden", Read),
     ("drain_local_slashing_evidence", NodeLocal),
+    ("enable_aggregator", NodeLocal),
     ("external_domain_profile", Read),
     ("external_domain_profiles", Read),
     ("external_domain_registration", Read),
+    ("validate_and_extract_domain_block", Read),
     ("external_quorum_round", Read),
     ("external_quorum_rounds", Read),
+    ("fetch_verified_bud3_symbol_page", Read),
     ("find_common_height", Read),
     ("fund_development_account", DevnetOnly),
     ("get_aggregator_state", Read),
@@ -75,7 +87,7 @@ const CALLS: &[(&str, Class)] = &[
     ("get_state_root", Read),
     ("get_state_snapshot", Read),
     ("get_transaction_by_hash", Read),
-    ("graft_payment_proof", Read),
+    ("app_binding_payment_proof", Read),
     ("import_pruned_segment", Sync),
     ("pq_sealed_heights", Read),
     ("pq_stage_observation", NodeLocal),
@@ -92,10 +104,17 @@ const CALLS: &[(&str, Class)] = &[
     ("import_qc_blob", NodeLocal),
     ("last_block", Read),
     ("produce_block", BlockPath),
+    ("receive_frame", NodeLocal),
+    ("receive_object", NodeLocal),
+    ("register_garden_domain", NodeLocal),
+    ("rotate_bridgeless_poa_authority_set", NodeLocal),
     ("sign_precommit", NodeLocal),
     ("sign_prevote", NodeLocal),
     ("start_pending_finality_round", NodeLocal),
+    ("store_verified_bud3_symbols", NodeLocal),
     ("submit_slashing_evidence", NodeLocal),
+    ("submit_verified_garden_commitment", NodeLocal),
+    ("transition_bridgeless_poa_domain_status", NodeLocal),
     ("try_reorg", BlockPath),
     ("tx_precheck", Read),
     ("validate_and_add_block", BlockPath),
@@ -132,9 +151,9 @@ const READ_PREFIXES: &[&str] = &[
 ];
 
 /// Read methods whose names no prefix above covers, matched exactly: an
-/// identity record and credential lookup, a protected-content lookup, and
-/// the coding-audit answer check (`&self`, it judges an answer and stores
-/// nothing).
+/// identity record and credential lookup, a protected-content lookup, the
+/// coding-audit answer check (`&self`, it judges an answer and stores
+/// nothing), and the admission-fee quote (`&self`, it only computes a fee).
 const READ_NAMES: &[&str] = &[
     "record",
     "credential",
@@ -146,7 +165,31 @@ const READ_NAMES: &[&str] = &[
     "deals_for_manifest",
     "deals_for_shard",
     "under_replicated_shards",
-    "required_transaction_fee",
+    // The fee floor is a pure `&self` calculation shared by admission and
+    // `bud_estimateGas`. `chain_actor` answers `get_required_fee` with it;
+    // reading the quote never writes consensus state.
+    "required_fee",
+    // The BNS lookups below take `&self` and store nothing. `chain_actor`
+    // answers the `bud_bns*` read methods with them.
+    "reverse_resolve",
+    "list_active_name_offers",
+    "prove_name",
+    "list_names_by_owner",
+    "list_subdomains",
+];
+
+/// Read-only queries reached through an explicit sub-registry. The method
+/// name alone is not enough: `query_json` is read-only on these two types,
+/// but that does not make every future `query_json` a state read.
+const READ_CHAINS: &[&str] = &[
+    ".bud3_registry.query_json(",
+    ".validator_directory.query_json(",
+    // Read-only snapshot of owned `ConsensusSentry` fields returned by
+    // `ChainCommand::GetConsensusSentry`; no generic `clone` exemption.
+    ".bridge_state.consensus_sentry.clone(",
+    // Owned certificate derived by the settlement registry's `&self` accessor;
+    // no exemption for the same method name on other receivers.
+    ".settlement.universal_finality_certificate(",
 ];
 
 /// Calls on `self.state` inside a `Blockchain` method body that write it.
@@ -283,7 +326,42 @@ fn check_actor_state_access(actor: &str) -> Result<(), String> {
             );
         }
         if let Some(method) = method {
-            if !READ_PREFIXES.iter().any(|p| method.starts_with(p))
+            let chain = actor[at..].trim_start();
+            let nested_read = matches!(
+                method.as_str(),
+                "query_json" | "clone" | "universal_finality_certificate"
+            ) && READ_CHAINS.iter().any(|allowed| {
+                chain.strip_prefix(allowed).is_some_and(|arguments| {
+                    // Walk this call's balanced parentheses. A following
+                    // method on its result is outside the read exception.
+                    let mut depth = 1usize;
+                    let mut end = None;
+                    for (i, byte) in arguments.bytes().enumerate() {
+                        match byte {
+                            b'(' => depth += 1,
+                            b')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = Some(i + 1);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    end.is_some_and(|end| {
+                        let mut tail = arguments[end..].trim_start();
+                        // `?` propagates an error; it must not hide a method
+                        // chained on the successful result of this read.
+                        while let Some(rest) = tail.strip_prefix('?') {
+                            tail = rest.trim_start();
+                        }
+                        !tail.starts_with('.')
+                    })
+                })
+            });
+            if !nested_read
+                && !READ_PREFIXES.iter().any(|p| method.starts_with(p))
                 && !READ_NAMES.contains(&method.as_str())
             {
                 return Err(format!(
@@ -512,5 +590,126 @@ mod tests {
         assert!(check_actor_state_access("self.blockchain.state.add_balance(&a, 1);").is_err());
         assert!(check_actor_state_access("self.blockchain.state.epoch_index = 3;").is_err());
         assert!(check_actor_state_access("if self.blockchain.state.epoch_index == 3 {}").is_ok());
+    }
+
+    #[test]
+    fn required_fee_quote_is_a_read_without_widening_the_exception() {
+        assert!(
+            check_actor_state_access("let fee = self.blockchain.state.required_fee(&tx);").is_ok()
+        );
+        assert!(
+            check_actor_state_access("let fee = self.blockchain.state.required_fee_override(&tx);")
+                .is_err(),
+            "the exact read exception must not cover similarly named writes"
+        );
+    }
+
+    #[test]
+    fn subregistry_queries_are_reads_only_on_the_named_paths() {
+        for path in [
+            "self.blockchain.state.bud3_registry.query_json(&query);",
+            "self.blockchain.state.validator_directory.query_json(query);",
+        ] {
+            assert!(check_actor_state_access(path).is_ok(), "{path}");
+        }
+        for path in [
+            "self.blockchain.state.query_json(&query);",
+            "self.blockchain.state.accounts.query_json(&query);",
+            "self.blockchain.state.bud3_registry.query_json_mut(&query);",
+            "self.blockchain.state.bud3_registry.query_json(&query).insert(key, value);",
+        ] {
+            assert!(check_actor_state_access(path).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn consensus_sentry_snapshot_clone_is_an_exact_read() {
+        for path in [
+            "let sentry = self.blockchain.state.bridge_state.consensus_sentry.clone();",
+            "let sentry = self\n.blockchain\n.state\n.bridge_state\n.consensus_sentry\n.clone();",
+        ] {
+            assert!(check_actor_state_access(&normalize(path)).is_ok(), "{path}");
+        }
+    }
+
+    #[test]
+    fn consensus_sentry_snapshot_does_not_allow_other_clone_or_write_paths() {
+        for path in [
+            "self.blockchain.state.clone();",
+            "self.blockchain.state.bridge_state.clone();",
+            "self.blockchain.state.accounts.clone();",
+            "self.blockchain.state.bridge_state.consensus_sentry.clone_from(&other);",
+            "self.blockchain.state.bridge_state.consensus_sentry.clone_mut();",
+            "self.blockchain.state.bridge_state.consensus_sentry.clone().insert(key, value);",
+            "self.blockchain.state.bridge_state.consensus_sentry = other;",
+            "let sentry = &mut self.blockchain.state.bridge_state.consensus_sentry;",
+            "self.blockchain.state.add_balance(&addr, 1);",
+            "self.blockchain.state.bridge_state.consensus_sentry.clone(",
+        ] {
+            assert!(
+                check_actor_state_access(&normalize(path)).is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn settlement_finality_certificate_is_an_exact_read() {
+        for path in [
+            "let c = self.blockchain.state.settlement.universal_finality_certificate(height);",
+            "let c = self\n.blockchain\n.state\n.settlement\n.universal_finality_certificate(height.unwrap_or(tip));",
+        ] {
+            assert!(check_actor_state_access(&normalize(path)).is_ok(), "{path}");
+        }
+    }
+
+    #[test]
+    fn settlement_certificate_does_not_allow_other_receivers_or_writes() {
+        for path in [
+            "self.blockchain.state.universal_finality_certificate(height);",
+            "self.blockchain.state.bridge_state.universal_finality_certificate(height);",
+            "self.blockchain.state.settlement.universal_finality_certificate_mut(height);",
+            "self.blockchain.state.settlement.universal_finality_certificate(height).take();",
+            "self.blockchain.state.settlement.universal_finality_certificate(",
+        ] {
+            assert!(
+                check_actor_state_access(&normalize(path)).is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_reads_reject_methods_after_try_postfix() {
+        for receiver in [
+            "bud3_registry.query_json(())",
+            "validator_directory.query_json(())",
+            "bridge_state.consensus_sentry.clone()",
+            "settlement.universal_finality_certificate(height)",
+        ] {
+            for suffix in ["?.take();", "? .verify_integrity();", "? ? .take();"] {
+                let path = format!("self.blockchain.state.{receiver}{suffix}");
+                assert!(
+                    check_actor_state_access(&normalize(&path)).is_err(),
+                    "{path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_reads_allow_standalone_try_postfix() {
+        for receiver in [
+            "bud3_registry.query_json(())",
+            "validator_directory.query_json(())",
+            "bridge_state.consensus_sentry.clone()",
+            "settlement.universal_finality_certificate(height)",
+        ] {
+            let path = format!("let value = self.blockchain.state.{receiver}?;");
+            assert!(
+                check_actor_state_access(&normalize(&path)).is_ok(),
+                "{path}"
+            );
+        }
     }
 }

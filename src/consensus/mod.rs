@@ -1,17 +1,24 @@
 pub mod block_signature;
 pub mod budget;
+pub mod dag;
 pub mod filiz;
 pub mod handoff;
 pub mod merkle_tree;
 pub mod poa;
+pub mod poh;
 pub mod pos;
+pub mod pospace;
 pub mod pow;
 pub mod qc;
 pub mod registration;
 pub mod split_resolver;
+pub mod zk_verifier;
 use crate::core::block::Block;
+pub use dag::DagEngine;
 pub use poa::PoAEngine;
+pub use poh::PohEngine;
 pub use pos::PoSEngine;
+pub use pospace::PoSpaceEngine;
 pub use pow::{PoWConfig, PoWEngine};
 use std::error::Error;
 use std::fmt;
@@ -59,6 +66,7 @@ const PRODUCER_ROUND_CUSHION_MS: u128 = 500;
 /// One definition for the round pricing below: the producer and the verifier
 /// must ask the same question the same way, or the round stops being priced at
 /// all (CWE-807).
+#[must_use]
 pub fn now_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -264,8 +272,8 @@ fn round_affordable_from_anchor(anchor_ms: u128, now_ms: u128) -> u64 {
 ///
 /// | constant | value | measured over | rejects at |
 /// | :-- | :-- | :-- | :-- |
-/// | `consensus::MAX_BLOCK_SIZE` | 1_000_000 | `serde_json::to_vec` | block validation |
-/// | `protocol::MAX_BLOCK_SIZE` | 1_048_576 | `prost` `encoded_len` | gossip ingest |
+/// | `consensus::MAX_BLOCK_SIZE` | `1_000_000` | `serde_json::to_vec` | block validation |
+/// | `protocol::MAX_BLOCK_SIZE` | `1_048_576` | `prost` `encoded_len` | gossip ingest |
 ///
 /// The transport bound is the looser of the two *and* it measures the more
 /// compact encoding, so the consensus check is always the binding one. A block
@@ -340,7 +348,7 @@ pub trait ConsensusEngine: Send + Sync {
     fn record_block(
         &self,
         _block: &Block,
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         Ok(())
     }
@@ -366,7 +374,7 @@ pub trait ConsensusEngine: Send + Sync {
         &self,
         _block: &Block,
         _chain: &[Block],
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) {
     }
 
@@ -389,10 +397,10 @@ pub trait ConsensusEngine: Send + Sync {
         &self,
         _height: u64,
         _chain: &[Block],
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) {
     }
-    fn load_state(&self, _storage: &crate::storage::db::Storage) -> Result<(), ConsensusError> {
+    fn load_state(&self, _storage: &crate::persistence::db::Storage) -> Result<(), ConsensusError> {
         Ok(())
     }
     fn drain_slashing_evidence(
@@ -772,8 +780,8 @@ mod tests {
     ///
     /// `try_reorg_suffix` answers a batch that cannot win before it
     /// materializes the local prefix, and it may only do that on an engine
-    /// where a strictly shorter chain can never win. Length-based PoA
-    /// qualifies; PoW (accumulated work) and PoS (checkpoint score) do not,
+    /// where a strictly shorter chain can never win. Length-based `PoA`
+    /// qualifies; `PoW` (accumulated work) and `PoS` (checkpoint score) do not,
     /// because a shorter chain can be heavier or carry a better checkpoint.
     /// An engine that flips this without updating the shortcut would refuse
     /// honest reorgs, and flipping the shortcut without the engine would let

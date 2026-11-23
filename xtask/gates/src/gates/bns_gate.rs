@@ -19,6 +19,31 @@ pub(crate) const TESTS: &[&str] = &[
     "tests::bns_expanded::test_bns_full_resolve_with_storage",
     "tests::bns_expanded::bns_lifecycle_doors_reject_zero_duration_and_zero_owner",
     "tests::bns_expanded::bns_renew_and_transfer_execute_through_consensus_doors",
+    // B12-B16: the governance price door, the expiry index, the metrics that
+    // observe them, and the root property the Merkle tree rests on.
+    "tests::bns_expanded::bns_base_cost_bounds_and_tenfold_step_are_enforced",
+    "tests::bns_expanded::bns_base_cost_change_does_not_touch_existing_registrations",
+    "tests::bns_expanded::bns_expiry_index_reclaims_the_earliest_expired_name_without_a_scan",
+    "tests::bns_expanded::bns_expiry_index_tracks_renewal_prune_and_rebuild",
+    "tests::bns_expanded::bns_expiry_index_is_not_committed_to_the_root",
+    "chain::blockchain::bns_metrics_export_one_counter_per_type_and_the_named_gauges",
+    "tests::bns_expanded::bns_root_is_independent_of_insertion_order",
+    "tests::bns_expanded::bns_resolve_falls_back_to_the_owner_when_the_address_record_is_empty",
+    "tests::bns_expanded::bns_absence_proof_cannot_hide_a_live_name",
+    "tests::bns_acceptance::bns_buy_is_refused_when_the_buyer_cannot_pay_and_no_name_is_recorded",
+    "tests::bns_acceptance::bns_two_buyers_of_one_offer_only_the_first_gets_the_name",
+    "tests::bns_acceptance::bns_grace_window_holds_until_its_last_epoch_and_ends_on_the_next",
+    "tests::bns_acceptance::bns_every_type_has_a_shape_check_at_admission",
+    "tests::bns_expanded::bns_set_content_refuses_unknown_content_and_binds_a_registered_object",
+    "tests::bns_expanded::bns_set_storage_refuses_an_unknown_root_a_stranger_and_an_expired_name",
+    "tests::bns_expanded::bns_register_subdomain_refuses_a_taken_label",
+    "tests::bns_expanded::bns_set_subdomain_content_belongs_to_the_subdomain_owner",
+    "tests::bns_expanded::bns_every_door_refuses_a_stranger_and_leaves_the_state_untouched",
+    // One content field: the leaf commits to the binding of name, owner and
+    // reference, and the digest is pinned against the off-chain verifiers.
+    "bns::registry::tests::bns_proof_binds_the_content_of_the_name",
+    "bns::bud3::tests::the_binding_digest_matches_the_pinned_vector",
+    "wallet::identity_profile::tests::a_swapped_address_under_a_valid_bns_proof_is_not_verified",
 ];
 
 pub fn run(_root: &Path, log: &Path) -> Result<String, String> {

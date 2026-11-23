@@ -1,9 +1,10 @@
-//! WIRING: unwired - verify_chain is reached in this tree only through adapter.rs and evm/verify.rs, both of which declare themselves unwired; the relayer path wires it.
+//! WIRING: unwired - `verify_chain` is reached only through unwired `adapter.rs` and `evm/verify.rs`.
+//!
 //! Minimal Ethereum block header decode + chain-link + N-confirmation finality.
 //!
-//! Sync-committee light-client finality = **F10.3** (PoS, BLS12-381 sync-aggregate).
+//! Sync-committee light-client finality (`PoS`, BLS12-381 sync-aggregate).
 //! This module provides **bounded k-confirmation** (RFC Q2 = both -> N-conf
-//! fallback; the PoS sync committee is added later as an option).
+//! fallback; the `PoS` sync committee is added later as an option).
 //!
 //! # Fork tolerance
 //!
@@ -40,7 +41,7 @@ pub enum HeaderError {
     Rlp(RlpError),
     /// Invalid header structure (missing field / wrong size).
     InvalidHeader,
-    /// The chain is broken (parent_hash -> child.hash / number+1 mismatch).
+    /// The chain is broken (`parent_hash` -> child.hash / number+1 mismatch).
     ChainBroken,
     /// The chain never touches the trusted checkpoint.
     CheckpointNotReached,
@@ -55,16 +56,16 @@ pub enum HeaderError {
 impl std::fmt::Display for HeaderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HeaderError::Rlp(e) => write!(f, "header rlp error: {e}"),
-            HeaderError::InvalidHeader => write!(f, "header: invalid structure"),
-            HeaderError::ChainBroken => write!(f, "header: chain broken"),
-            HeaderError::CheckpointNotReached => {
+            Self::Rlp(e) => write!(f, "header rlp error: {e}"),
+            Self::InvalidHeader => write!(f, "header: invalid structure"),
+            Self::ChainBroken => write!(f, "header: chain broken"),
+            Self::CheckpointNotReached => {
                 write!(f, "header: chain does not reach the trusted checkpoint")
             }
-            HeaderError::InsufficientConfirmations => {
+            Self::InsufficientConfirmations => {
                 write!(f, "header: insufficient confirmations")
             }
-            HeaderError::ZeroConfirmations => write!(f, "header: zero confirmations demanded"),
+            Self::ZeroConfirmations => write!(f, "header: zero confirmations demanded"),
         }
     }
 }
@@ -73,7 +74,7 @@ impl std::error::Error for HeaderError {}
 
 impl From<RlpError> for HeaderError {
     fn from(e: RlpError) -> Self {
-        HeaderError::Rlp(e)
+        Self::Rlp(e)
     }
 }
 
@@ -87,11 +88,14 @@ pub const DEFAULT_CONFIRMATIONS: u32 = 64;
 /// Yellow Paper field order (front canonical):
 /// `[parentHash(32), ommersHash(32), coinbase(20), stateRoot(32),
 ///   TransactionsRoot(32), receiptsRoot(32), logsBloom(256), difficulty, number, ...]`
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn decode_header(raw: &[u8]) -> Result<EthHeader, HeaderError> {
     let item = rlp::decode(raw)?;
-    let list = match item {
-        Item::List(ref l) => l,
-        _ => return Err(HeaderError::InvalidHeader),
+    let Item::List(ref list) = item else {
+        return Err(HeaderError::InvalidHeader);
     };
     if list.len() < 9 {
         return Err(HeaderError::InvalidHeader);
@@ -111,7 +115,7 @@ pub fn decode_header(raw: &[u8]) -> Result<EthHeader, HeaderError> {
 }
 
 /// Helper for a 32-byte hash field (length check).
-fn arr32(b: &[u8]) -> Result<[u8; 32], HeaderError> {
+const fn arr32(b: &[u8]) -> Result<[u8; 32], HeaderError> {
     if b.len() != 32 {
         return Err(HeaderError::InvalidHeader);
     }
@@ -120,9 +124,154 @@ fn arr32(b: &[u8]) -> Result<[u8; 32], HeaderError> {
     Ok(a)
 }
 
-/// N-confirmation finality: verifies that `required` confirmation headers sit
+/// Canonical `keccak256(RLP([]))` required in `ommersHash` for all post-Merge
+/// (Paris / Shanghai / Cancun / Prague) Ethereum execution headers (EIP-3675).
+pub const EMPTY_OMMERS_HASH: [u8; 32] = [
+    0x1d, 0xcc, 0x4d, 0xe8, 0xde, 0xc7, 0x5d, 0x7a, 0xab, 0x85, 0xb5, 0x67, 0xb6, 0xcc, 0xd4, 0x1a,
+    0xd3, 0x12, 0x45, 0x1b, 0x94, 0x8a, 0x74, 0x13, 0xf0, 0xa1, 0x42, 0xfd, 0x40, 0xd4, 0x93, 0x47,
+];
+
+/// Full post-Merge Cancun (Deneb, 20-field) or Prague (Electra, 21-field) RLP
+/// execution block header decoded and validated under EIP-3675 / EIP-4895 /
+/// EIP-4844 / EIP-4788 / EIP-7685.
+///
+/// Convenience: exposed for Beacon-finalized execution header anchoring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostMergeExecutionHeader {
+    pub parent_hash: [u8; 32],
+    pub fee_recipient: [u8; 20],
+    pub state_root: [u8; 32],
+    pub transactions_root: [u8; 32],
+    pub receipts_root: [u8; 32],
+    pub logs_bloom: [u8; 256],
+    pub number: u64,
+    pub gas_limit: u64,
+    pub gas_used: u64,
+    pub timestamp: u64,
+    pub extra_data: Vec<u8>,
+    pub prev_randao: [u8; 32],
+    /// `baseFeePerGas` encoded as a 32-byte little-endian SSZ `uint256` word.
+    pub base_fee_per_gas_le: [u8; 32],
+    pub withdrawals_root: [u8; 32],
+    pub blob_gas_used: u64,
+    pub excess_blob_gas: u64,
+    pub parent_beacon_block_root: [u8; 32],
+    /// Present on Prague / Electra headers (EIP-7685 `requestsHash`, field 20).
+    pub requests_hash: Option<[u8; 32]>,
+    /// `keccak256(raw_rlp_header)`.
+    pub block_hash: [u8; 32],
+}
+
+/// Decode and validate a post-Merge Cancun (Deneb, 20 fields) or Prague
+/// (Electra, 21 fields) RLP execution header.
+///
+/// Enforces EIP-3675 constants (`ommersHash == EMPTY_OMMERS_HASH`,
+/// `difficulty == 0`, `nonce == [0; 8]`), `gas_used <= gas_limit`,
+/// `extra_data.len() <= 32`, canonical minimal-big-endian `baseFeePerGas`
+/// (`<= 32` bytes, no leading zero), and exact field widths.
+///
+/// Convenience: exposed for Ethereum execution light-client verification.
+///
+/// # Errors
+///
+/// Returns [`HeaderError`] if RLP decoding fails or any post-Merge execution
+/// header consensus invariant is violated.
+pub fn decode_post_merge_execution_header(
+    raw: &[u8],
+) -> Result<PostMergeExecutionHeader, HeaderError> {
+    let item = rlp::decode(raw)?;
+    let Item::List(ref list) = item else {
+        return Err(HeaderError::InvalidHeader);
+    };
+    if list.len() != 20 && list.len() != 21 {
+        return Err(HeaderError::InvalidHeader);
+    }
+    let field = |idx: usize| list.get(idx).ok_or(HeaderError::InvalidHeader);
+
+    let parent_hash = arr32(rlp::as_bytes(field(0)?)?)?;
+    let ommers_hash = arr32(rlp::as_bytes(field(1)?)?)?;
+    if ommers_hash != EMPTY_OMMERS_HASH {
+        return Err(HeaderError::InvalidHeader);
+    }
+    let coinbase_bytes = rlp::as_bytes(field(2)?)?;
+    let fee_recipient: [u8; 20] = coinbase_bytes
+        .try_into()
+        .map_err(|_| HeaderError::InvalidHeader)?;
+    let state_root = arr32(rlp::as_bytes(field(3)?)?)?;
+    let transactions_root = arr32(rlp::as_bytes(field(4)?)?)?;
+    let receipts_root = arr32(rlp::as_bytes(field(5)?)?)?;
+    let bloom_bytes = rlp::as_bytes(field(6)?)?;
+    let logs_bloom: [u8; 256] = bloom_bytes
+        .try_into()
+        .map_err(|_| HeaderError::InvalidHeader)?;
+    let difficulty = rlp::decode_uint(field(7)?)?;
+    if difficulty != 0 {
+        return Err(HeaderError::InvalidHeader);
+    }
+    let number = rlp::decode_uint(field(8)?)?;
+    let gas_limit = rlp::decode_uint(field(9)?)?;
+    let gas_used = rlp::decode_uint(field(10)?)?;
+    if gas_used > gas_limit {
+        return Err(HeaderError::InvalidHeader);
+    }
+    let timestamp = rlp::decode_uint(field(11)?)?;
+    let extra_data = rlp::as_bytes(field(12)?)?.to_vec();
+    if extra_data.len() > 32 {
+        return Err(HeaderError::InvalidHeader);
+    }
+    let prev_randao = arr32(rlp::as_bytes(field(13)?)?)?;
+    let nonce_bytes = rlp::as_bytes(field(14)?)?;
+    if nonce_bytes != [0u8; 8] {
+        return Err(HeaderError::InvalidHeader);
+    }
+    let base_fee_be = rlp::as_bytes(field(15)?)?;
+    if base_fee_be.len() > 32 || base_fee_be.first().copied() == Some(0) {
+        return Err(HeaderError::InvalidHeader);
+    }
+    let mut base_fee_per_gas_le = [0u8; 32];
+    for (idx, byte) in base_fee_be.iter().rev().enumerate() {
+        if let Some(slot) = base_fee_per_gas_le.get_mut(idx) {
+            *slot = *byte;
+        }
+    }
+    let withdrawals_root = arr32(rlp::as_bytes(field(16)?)?)?;
+    let blob_gas_used = rlp::decode_uint(field(17)?)?;
+    let excess_blob_gas = rlp::decode_uint(field(18)?)?;
+    let parent_beacon_block_root = arr32(rlp::as_bytes(field(19)?)?)?;
+    let requests_hash = if list.len() == 21 {
+        Some(arr32(rlp::as_bytes(field(20)?)?)?)
+    } else {
+        None
+    };
+
+    Ok(PostMergeExecutionHeader {
+        parent_hash,
+        fee_recipient,
+        state_root,
+        transactions_root,
+        receipts_root,
+        logs_bloom,
+        number,
+        gas_limit,
+        gas_used,
+        timestamp,
+        extra_data,
+        prev_randao,
+        base_fee_per_gas_le,
+        withdrawals_root,
+        blob_gas_used,
+        excess_blob_gas,
+        parent_beacon_block_root,
+        requests_hash,
+        block_hash: keccak256(raw),
+    })
+}
+
+/// N-confirmation finality over a canonical Ethereum header chain.
+///
+/// Verifies that `required` confirmation headers sit
 /// above the target header and that their chain is canonical
-/// (parent_hash -> child.hash, number+1). Once the reorg window has passed, the
+/// (`parent_hash` -> child.hash, number+1). Once the reorg window has passed, the
 /// target counts as finalized.
 ///
 /// `required` is the caller's demand and it must be at least one: with zero
@@ -144,7 +293,8 @@ pub fn verify_chain(
     if required == 0 {
         return Err(HeaderError::ZeroConfirmations);
     }
-    if (confirmations.len() as u32) < required {
+    let available = u64::try_from(confirmations.len()).unwrap_or(u64::MAX);
+    if available < u64::from(required) {
         return Err(HeaderError::InsufficientConfirmations);
     }
     let mut prev_hash = target.hash;
@@ -172,7 +322,7 @@ pub fn verify_chain(
         prev_hash = hdr.hash;
         prev_number = hdr.number;
     }
-    // (karar B with A interim): the chain must touch the
+    // (design option B with A interim): the chain must touch the
     // trusted checkpoint it claims to descend from. Links alone prove only
     // self-consistency - a relayer can build a perfectly linked fantasy.
     if !anchored {
@@ -228,9 +378,8 @@ mod tests {
         // The EIP-1559 baseFeePerGas extra field -> a 10-item list; the
         // decoder reads the first 9.
         let parent = [3u8; 32];
-        let mut nine = match rlp::decode(&header_bytes(parent, 7, [4u8; 32])).unwrap() {
-            Item::List(l) => l,
-            _ => unreachable!(),
+        let Item::List(mut nine) = rlp::decode(&header_bytes(parent, 7, [4u8; 32])).unwrap() else {
+            unreachable!();
         };
         nine.push(Item::String(vec![0x01; 8])); // baseFeePerGas
         let bytes = encode(&Item::List(nine));
