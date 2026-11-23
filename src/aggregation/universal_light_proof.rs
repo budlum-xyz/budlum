@@ -2173,13 +2173,7 @@ mod input_hash_binding_tests {
         const CHECKPOINT_HEIGHT: u64 = 25;
         let epoch = ulp_expected_settlement_epoch(45_262, CHECKPOINT_HEIGHT);
         let (bundle, _sorted, _metrics) = prove_universal_light_proof(
-            &compiled,
-            epoch,
-            hub_root,
-            &snapshots,
-            &seed,
-            12,
-            &registry,
+            &compiled, epoch, hub_root, &snapshots, &seed, 12, &registry,
         )
         .expect("prove ULP-1");
         (bundle, compiled.program_hash, hub_root, epoch, registry)

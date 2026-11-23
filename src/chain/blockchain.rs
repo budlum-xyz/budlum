@@ -12968,7 +12968,10 @@ mod tests {
         let late_account = Address::from([8u8; 32]);
         bc.state.add_balance(&late_account, 123);
 
-        let snapshot = bc.get_state_snapshot(0).expect("rebuild state").expect("snapshot at 0");
+        let snapshot = bc
+            .get_state_snapshot(0)
+            .expect("rebuild state")
+            .expect("snapshot at 0");
 
         assert_eq!(snapshot.height, 0);
         assert_eq!(snapshot.balances.get(&late_account), None);
@@ -13069,7 +13072,10 @@ mod tests {
                 .value(),
             None,
         );
-        let snapshot = bc.get_state_snapshot(0).expect("rebuild state").expect("snapshot at 0");
+        let snapshot = bc
+            .get_state_snapshot(0)
+            .expect("rebuild state")
+            .expect("snapshot at 0");
         let err = bc
             .apply_state_snapshot(snapshot)
             .expect_err("mainnet remote snapshot must require signed V2 manifest");
@@ -13082,7 +13088,10 @@ mod tests {
         let restored_account = Address::from([7u8; 32]);
         let genesis = GenesisConfig::new(45262).with_allocation(restored_account, 250);
         let mut bc = Blockchain::new_with_genesis(consensus, None, 45262, None, Some(genesis));
-        let snapshot = bc.get_state_snapshot(0).expect("rebuild state").expect("snapshot at 0");
+        let snapshot = bc
+            .get_state_snapshot(0)
+            .expect("rebuild state")
+            .expect("snapshot at 0");
         bc.state.add_balance(&Address::from([9u8; 32]), 500);
 
         bc.apply_state_snapshot(snapshot).unwrap();
@@ -13307,7 +13316,10 @@ mod tests {
                 finality_certificates: vec![],
             },
         );
-        let mut carrier = bc.get_state_snapshot(0).expect("rebuild state").expect("snapshot at 0");
+        let mut carrier = bc
+            .get_state_snapshot(0)
+            .expect("rebuild state")
+            .expect("snapshot at 0");
         carrier.snapshot_hash = format!("__v2__{}", hex::encode(wrong_genesis_v2.to_bytes()));
         let err = bc
             .apply_state_snapshot(carrier)
