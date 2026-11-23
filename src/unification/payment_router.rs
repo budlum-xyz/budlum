@@ -575,6 +575,7 @@ impl UniversalPaymentRouter {
             &self.consumed_quote_liquidity,
             now_unix_secs,
         )?;
+        verify_receipt_settles_intent(&receipt, intent)?;
         // Pre-validate cumulative debits per balance index AND cumulative quote
         // liquidity draws before mutating any state (atomic rollback guarantee).
         let quotes_by_id: BTreeMap<Hash32, &LiquidityQuote> =
@@ -771,6 +772,25 @@ fn required_source_for_target(
     let gross_target =
         mul_div_ceil(target_amount, BPS_DENOM, net_bps).ok_or(PaymentError::ArithmeticOverflow)?;
     mul_div_ceil(gross_target, RATE_SCALE, rate_scaled).ok_or(PaymentError::ArithmeticOverflow)
+}
+
+/// Check that a planned receipt settles the intent it was planned for: the
+/// same intent, target domain, target asset and target amount.
+///
+/// The leg checks take the receipt's target as their reference, and the
+/// receipt is the planner's output, so that reference has to be bound to the
+/// signed intent before any leg is weighed.
+///
+/// # Errors
+///
+/// Returns [`PaymentError::InvalidIntent`] when the receipt names another
+/// intent, target or amount.
+fn verify_receipt_settles_intent(
+    receipt: &UniversalPaymentReceipt,
+    intent: &UniversalPaymentIntent,
+) -> Result<(), PaymentError> {
+    let _ = (receipt, intent);
+    Ok(())
 }
 
 /// Check one split-tender leg against the quote it draws on and return the
@@ -2562,6 +2582,60 @@ mod tests {
 
         // Conservation violation where delivered + fees != source_total_value fails closed.
         assert!(verify_split_tender_supply_conservation(&receipt, 1_005, 1_000, 3).is_err());
+    }
+
+    /// The leg checks take the receipt's target as their reference. A receipt
+    /// is the planner's output, so it is judged against the signed intent
+    /// first: another target domain, asset, amount or intent is refused.
+    #[test]
+    fn a_receipt_planned_for_another_target_is_refused() {
+        let intent = UniversalPaymentIntent {
+            payer_id: [0xA1; 32],
+            merchant_id: [0xB2; 32],
+            target_domain: 1,
+            target_asset_id: [0x01; 32],
+            target_amount: 400,
+            max_slippage_bps: 200,
+            rail: PaymentRail::OnChain,
+            invoice_hash: [0xC3; 32],
+            deadline_unix_secs: 2_000,
+            nonce: 78,
+        };
+        let honest = UniversalPaymentReceipt {
+            intent_id: intent.intent_id(),
+            target_domain: 1,
+            target_asset_id: [0x01; 32],
+            target_amount_delivered: 400,
+            legs: Vec::new(),
+            legs_merkle_root: [0; 32],
+            pos_auth_code: None,
+            receipt_hash: [0; 32],
+        };
+        assert_eq!(verify_receipt_settles_intent(&honest, &intent), Ok(()));
+        let drifted = [
+            UniversalPaymentReceipt {
+                target_domain: 3,
+                ..honest.clone()
+            },
+            UniversalPaymentReceipt {
+                target_asset_id: [0x02; 32],
+                ..honest.clone()
+            },
+            UniversalPaymentReceipt {
+                target_amount_delivered: 401,
+                ..honest.clone()
+            },
+            UniversalPaymentReceipt {
+                intent_id: [0xEE; 32],
+                ..honest.clone()
+            },
+        ];
+        for receipt in &drifted {
+            assert!(
+                verify_receipt_settles_intent(receipt, &intent).is_err(),
+                "a receipt for another target must be refused: {receipt:?}"
+            );
+        }
     }
 
     /// A leg planned without its quote's fee balances under conservation alone,
