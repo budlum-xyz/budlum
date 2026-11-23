@@ -1769,11 +1769,29 @@ pub fn run(root: &Path, args: &[&str]) -> Result<String, String> {
                 &["compose", "-f", COMPOSE_FILE, "config", "--quiet"],
                 root,
             )?;
-            run_checked(
+            let (code, tail) = run_tee(
                 "docker",
                 &["compose", "-f", COMPOSE_FILE, "up", "-d", "--build"],
                 root,
+                IMAGE_PHASE_TAIL_LINES,
             )?;
+            if code != 0 {
+                let phase = classify_image_phase(&tail);
+                return Err(match &phase {
+                    ImagePhase::Upstream { detail } => format!(
+                        "[{}] the image phase failed upstream, not in this tree: {detail} \
+                         (`docker compose up -d --build` exited {code}; no container was \
+                          started, so the rehearsal below never ran)",
+                        phase.label()
+                    ),
+                    ImagePhase::Repository => format!(
+                        "[{}] `docker compose -f {COMPOSE_FILE} up -d --build` exited {code} \
+                         and no upstream outage was proven; read it as this tree's defect \
+                         until the build output says otherwise",
+                        phase.label()
+                    ),
+                });
+            }
             let mut backend = Backend::Compose {
                 root,
                 eight_seat: is_eight_seat_repo(root),
@@ -1850,6 +1868,172 @@ pub fn self_test() -> Result<String, String> {
         "testnet-rehearsal: {} preflight checks passed",
         checks.len()
     ))
+}
+
+/// Which side a failed image phase belongs to.
+///
+/// Measured 2026-11-23 on `testnet@ec9dd141` (run 45238770001, job
+/// 137917443400): `cgr.dev` answered the HEAD request for the pinned
+/// `wolfi-base` digest with `500 Internal Server Error`, so
+/// `docker compose up -d --build` exited 1 before a single container existed.
+/// The step then printed an empty `docker compose ps` table and "no finality
+/// or fork choice line in the container logs" - six hundred lines of rehearsal
+/// diagnostics for a failure that never reached the rehearsal. The verdict was
+/// right and unreadable, which is the same class of defect the live acceptance
+/// gate already closes by replaying an offline fixture in the same run.
+///
+/// Labelling does not soften anything: both classes still fail the job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImagePhase {
+    /// A registry, a proxy or the network refused; this tree is not implicated.
+    Upstream { detail: String },
+    /// The build context, the Dockerfile or the compose file is at fault.
+    Repository,
+}
+
+impl ImagePhase {
+    /// The one word that goes in front of the failure.
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Upstream { .. } => "ARIZA",
+            Self::Repository => "DRIFT",
+        }
+    }
+}
+
+/// Phrases only an upstream registry, a proxy or the network produces.
+const UPSTREAM_MARKERS: &[&str] = &[
+    "failed to resolve source metadata",
+    "unexpected status from head request",
+    "toomanyrequests",
+    "pull rate limit",
+    "tls handshake timeout",
+    "no such host",
+    "connection reset by peer",
+    "i/o timeout",
+    "500 internal server error",
+    "502 bad gateway",
+    "503 service unavailable",
+    "504 gateway timeout",
+];
+
+/// Phrases that put the fault inside this repository.
+///
+/// These win over an upstream marker on purpose. Calling a real defect
+/// "upstream" sends the reader away from the tree that broke; the reverse
+/// mistake only costs a second look.
+const REPOSITORY_MARKERS: &[&str] = &[
+    "copy failed",
+    "add failed",
+    "failed to compute cache key",
+    "not found in build context",
+    "dockerfile parse error",
+    "unknown instruction",
+    "error: could not compile",
+];
+
+/// How many trailing output lines are kept to classify a failed image phase.
+const IMAGE_PHASE_TAIL_LINES: usize = 400;
+
+/// Decide whether a failed image build or pull is upstream's or ours.
+///
+/// Fail-closed: output with no proof of an outage is `Repository`. An outage
+/// is a claim, and an unproven claim is not a defence.
+fn classify_image_phase(output: &str) -> ImagePhase {
+    let haystack = output.to_ascii_lowercase();
+    if REPOSITORY_MARKERS.iter().any(|m| haystack.contains(m)) {
+        return ImagePhase::Repository;
+    }
+    let Some(at) = UPSTREAM_MARKERS
+        .iter()
+        .filter_map(|m| haystack.find(m))
+        .min()
+    else {
+        return ImagePhase::Repository;
+    };
+    ImagePhase::Upstream {
+        detail: decisive_line(output, at).chars().take(400).collect(),
+    }
+}
+
+/// The whole line that carries the byte offset `at`.
+fn decisive_line(output: &str, at: usize) -> &str {
+    let start = output[..at].rfind('\n').map_or(0, |i| i + 1);
+    let end = output[at..]
+        .find('\n')
+        .map_or(output.len(), |i| at.saturating_add(i));
+    output[start..end].trim()
+}
+
+/// Run a command, stream its output as it arrives, and keep the last
+/// `keep_lines` lines.
+///
+/// `run_checked` inherits the child's stdio, so the output reaches the log but
+/// never the caller, and a failure cannot be classified without running the
+/// command again. Capturing everything instead would hold a ninety-minute
+/// image build silent until it ended. This does both: the log is live and the
+/// tail is in memory.
+fn run_tee(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    keep_lines: usize,
+) -> Result<(i32, String), String> {
+    use std::collections::VecDeque;
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("`{program}` could not be run: {e}"))?;
+    let out = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("`{program}` has no stdout pipe"))?;
+    let err = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("`{program}` has no stderr pipe"))?;
+
+    let (tx, rx) = mpsc::channel::<(bool, String)>();
+    let tx_err = tx.clone();
+    let pump_out = std::thread::spawn(move || {
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            println!("{line}");
+            if tx.send((false, line)).is_err() {
+                break;
+            }
+        }
+    });
+    let pump_err = std::thread::spawn(move || {
+        for line in BufReader::new(err).lines().map_while(Result::ok) {
+            eprintln!("{line}");
+            if tx_err.send((true, line)).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(keep_lines);
+    for (_, line) in rx {
+        if tail.len() >= keep_lines {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+    pump_out.join().map_err(|_| "stdout reader panicked")?;
+    pump_err.join().map_err(|_| "stderr reader panicked")?;
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("`{program}` could not be waited for: {e}"))?;
+    let joined: Vec<&str> = tail.iter().map(String::as_str).collect();
+    // 128+signal is the shell's convention; a signal kill is not a zero.
+    Ok((status.code().unwrap_or(-1), joined.join("\n")))
 }
 
 #[cfg(test)]
@@ -2203,5 +2387,138 @@ mod tests {
         }
         assert_eq!(subnets.len(), 5);
         assert!(compose.contains("subnet: 172.28.0.0/16"));
+    }
+
+    /// The verbatim tail of run 45238770001, job 137917443400, step 4.
+    const REGISTRY_500: &str = "\
+ => ERROR [indexer internal] load metadata for cgr.dev/chainguard/wolfi-base\n\
+Dockerfile:97\n\
+  97 | >>> FROM cgr.dev/chainguard/wolfi-base@sha256:580c9ae79c0229cc38147\n\
+target indexer: failed to solve: cgr.dev/chainguard/wolfi-base@sha256:580c9ae7: \
+failed to resolve source metadata for cgr.dev/chainguard/wolfi-base@sha256:580c9ae7: \
+unexpected status from HEAD request to \
+https://cgr.dev/v2/chainguard/wolfi-base/manifests/sha256:580c9ae7: \
+500 Internal Server Error\n";
+
+    #[test]
+    fn a_registry_500_is_upstream_not_a_rehearsal_drift() {
+        // Measured 2026-11-23 on testnet@ec9dd141: the pinned base image
+        // digest could not be resolved, so `up -d --build` exited 1 before a
+        // single container existed. The job then printed an empty
+        // `docker compose ps` table and "no finality or fork choice line in
+        // the container logs" - six hundred lines of rehearsal diagnostics
+        // for a failure that never reached the rehearsal.
+        let phase = classify_image_phase(REGISTRY_500);
+        assert_eq!(phase.label(), "ARIZA");
+        let ImagePhase::Upstream { detail } = phase else {
+            panic!("a 500 from the registry is not this repository's drift");
+        };
+        assert!(detail.contains("500"), "{detail}");
+        assert!(detail.contains("cgr.dev"), "{detail}");
+    }
+
+    /// The verbatim tail of the re-run, job 137935061276, step 4. Same cause,
+    /// different wording: "unexpected status code" instead of "unexpected
+    /// status from HEAD request", and the registry names its own backend
+    /// fault. Kept because a marker set that only matches one phrasing of one
+    /// outage is a marker set that will call the next outage a drift.
+    const REGISTRY_500_SECOND_WORDING: &str = "\
+ => ERROR [indexer internal] load metadata for cgr.dev/chainguard/wolfi-base\n\
+target indexer: failed to solve: cgr.dev/chainguard/wolfi-base@sha256:580c9ae7: \
+failed to resolve source metadata for cgr.dev/chainguard/wolfi-base@sha256:580c9ae7: \
+failed to copy: httpReadSeeker: failed open: unexpected status code \
+https://cgr.dev/v2/chainguard/wolfi-base/manifests/sha256:580c9ae7: \
+500 Internal Server Error - Server message: unknown: rpc error: code = Unknown \
+desc = Error 1040: Too many connections\n\
+#5 ERROR: failed to copy: httpReadSeeker: failed open: unexpected status code\n\
+FAIL: `docker compose -f ops/testnet-local.yml up -d --build` exited with code 1\n";
+
+    #[test]
+    fn the_same_outage_in_different_words_is_still_upstream() {
+        let phase = classify_image_phase(REGISTRY_500_SECOND_WORDING);
+        assert_eq!(phase.label(), "ARIZA");
+        let ImagePhase::Upstream { detail } = phase else {
+            panic!("the registry naming its own backend fault is not our drift");
+        };
+        assert!(detail.contains("Error 1040"), "{detail}");
+    }
+
+    #[test]
+    fn a_pull_rate_limit_is_upstream() {
+        let out = "toomanyrequests: You have reached your pull rate limit.";
+        assert!(matches!(
+            classify_image_phase(out),
+            ImagePhase::Upstream { .. }
+        ));
+    }
+
+    #[test]
+    fn a_dns_or_transport_failure_is_upstream() {
+        for out in [
+            "dial tcp: lookup cgr.dev on 127.0.0.53:53: no such host",
+            "net/http: TLS handshake timeout",
+            "read tcp 10.1.0.4:50318->104.18.0.1:443: connection reset by peer",
+            "received unexpected HTTP status: 503 Service Unavailable",
+        ] {
+            assert!(
+                matches!(classify_image_phase(out), ImagePhase::Upstream { .. }),
+                "{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_broken_dockerfile_is_this_repository() {
+        let out = "failed to solve: failed to compute cache key: \
+                   \"/ops/testnet-local-validator.py\": not found";
+        assert_eq!(classify_image_phase(out), ImagePhase::Repository);
+        assert_eq!(ImagePhase::Repository.label(), "DRIFT");
+    }
+
+    #[test]
+    fn a_repository_fault_wins_over_an_upstream_marker() {
+        // Precedence has a direction: calling a real defect "upstream" sends
+        // the reader away from the tree that broke. The reverse mistake only
+        // costs a second look.
+        let mixed = format!("{REGISTRY_500}\nCOPY failed: file not found in build context\n");
+        assert_eq!(classify_image_phase(&mixed), ImagePhase::Repository);
+    }
+
+    #[test]
+    fn run_tee_bounds_the_tail_it_keeps() {
+        let root = checked_repo_root().expect("repo root");
+        let (code, tail) = run_tee(
+            "sh",
+            &[
+                "-c",
+                "i=1; while [ $i -le 20 ]; do echo line$i; i=$((i+1)); done",
+            ],
+            &root,
+            5,
+        )
+        .expect("sh runs");
+        assert_eq!(code, 0);
+        assert_eq!(tail.lines().count(), 5, "{tail}");
+        assert_eq!(tail.lines().next(), Some("line16"), "{tail}");
+        assert_eq!(tail.lines().last(), Some("line20"), "{tail}");
+    }
+
+    #[test]
+    fn run_tee_keeps_the_exit_code_and_reads_stderr() {
+        // The classifier is only as good as what reaches it, and a registry
+        // refusal arrives on stderr.
+        let root = checked_repo_root().expect("repo root");
+        let (code, tail) =
+            run_tee("sh", &["-c", "echo to-err 1>&2; exit 7"], &root, 50).expect("sh runs");
+        assert_eq!(code, 7);
+        assert!(tail.contains("to-err"), "{tail}");
+    }
+
+    #[test]
+    fn an_unrecognised_failure_is_not_blamed_on_upstream() {
+        // Fail-closed: no evidence of an outage means no outage was proven.
+        for out in ["", "exit status 1", "something nobody has seen before"] {
+            assert_eq!(classify_image_phase(out), ImagePhase::Repository, "{out}");
+        }
     }
 }
