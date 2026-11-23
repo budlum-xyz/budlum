@@ -510,6 +510,15 @@ struct Node {
     seeds: Vec<String>,
     ledger: GardenLedger,
     store: GardenContentStore,
+    /// Work this node has done since it started, for `status`.
+    ///
+    /// Three counters, because a validator that only sits in the list is
+    /// not taking part: it has to hold content, run blocks and answer
+    /// other nodes asking for content. They only ever go up, so "greater
+    /// than zero" means this node did the thing at least once.
+    parts_held: u64,
+    blocks_executed: u64,
+    parts_served: u64,
     net: mpsc::Sender<NetCommand>,
     link: Option<GardenBudlumLink>,
     reported: u64,
@@ -837,6 +846,9 @@ pub async fn spawn(
         outbox: BTreeMap::new(),
         gossip_in_flight: BTreeMap::new(),
         held_elsewhere,
+        parts_held: 0,
+        blocks_executed: 0,
+        parts_served: 0,
         mempool: BTreeMap::new(),
         my_next_nonce,
         proposals: BTreeMap::new(),
@@ -1208,7 +1220,11 @@ impl Node {
         }
         let response = match done.outcome {
             Ok(wrote_new) => {
-                if !wrote_new {
+                if wrote_new {
+                    // A deposit that landed is content this node now holds
+                    // for the Garden, same as one it fetched itself.
+                    self.parts_held = self.parts_held.saturating_add(1);
+                } else {
                     self.store.release_background_charge(done.charged_len);
                 }
                 self.finish_deposit(done.sender, done.content_id, done.already_published_for_me)
@@ -1946,6 +1962,7 @@ impl Node {
                 }
                 budget.1 = budget.1.saturating_add(1);
                 if let Some(bytes) = self.store.get(&content_id) {
+                    self.parts_served = self.parts_served.saturating_add(1);
                     let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                     if let Some(entry) = self.object_budget.get_mut(&peer) {
                         entry.2 = entry.2.saturating_add(len);
@@ -2434,6 +2451,7 @@ impl Node {
                 }
                 self.measured.remove(&content_id);
                 if fetch.keep && self.store.put_verified(&content_id, &bytes).is_ok() {
+                    self.parts_held = self.parts_held.saturating_add(1);
                     self.wanted.remove(&content_id);
                 }
                 for waiter in fetch.waiters {
@@ -3014,6 +3032,7 @@ impl Node {
             tracing::debug!(error = %e, "garden commit refused");
             return false;
         }
+        self.blocks_executed = self.blocks_executed.saturating_add(1);
         self.first_sight(Seen::Commit(commit.block.hash()));
         if from.is_some_and(|peer| {
             self.peers
@@ -3746,6 +3765,7 @@ impl Node {
             return Err("this node has too many pending transactions".into());
         }
         self.store.put(&bytes)?;
+        self.parts_held = self.parts_held.saturating_add(1);
         // Hand the bytes to the validators that will hold them before the
         // chain names them, so a sudden departure of this node loses nothing.
         let holders = self.holders(&content_id);
@@ -3756,6 +3776,10 @@ impl Node {
             .map(|(peer, _)| *peer)
             .collect();
         for peer in targets {
+            // Pushing the bytes to a holder is serving them too: the
+            // other node ends up with content it did not have, which is
+            // the whole point of the counter.
+            self.parts_served = self.parts_served.saturating_add(1);
             self.send(
                 peer,
                 GardenRequest::PutObject {
@@ -3935,6 +3959,11 @@ impl Node {
             "objects": state.objects.len(),
             "objects_wanted_here": self.wanted.len(),
             "stored_object_bytes": self.store.total_bytes(),
+            "work": {
+                "parts_held": self.parts_held,
+                "blocks_executed": self.blocks_executed,
+                "parts_served": self.parts_served,
+            },
             "limits": {
                 "max_validators": limits.max_validators,
                 "max_object_bytes": limits.max_object_bytes,
@@ -4614,6 +4643,75 @@ mod tests {
         latecomer.leave().await.unwrap();
         returned.leave().await.unwrap();
         guest.leave().await.unwrap();
+    }
+
+    /// Every validator carries the Garden, not just the host.
+    ///
+    /// A Garden has no stake and no reward, so nothing but the code makes
+    /// a validator do its share. The three counters are the share: content
+    /// held on this disk, blocks this node ran itself, and content handed
+    /// to somebody else. A node that joined, sat in the validator list and
+    /// did none of those is a passenger, and the list would still call it
+    /// a validator. This test refuses that reading of the word.
+    #[tokio::test]
+    async fn garden_every_validator_works() {
+        let host_handle = host().await;
+        let invite = host_handle.invite().await.unwrap();
+        let first = spawn(
+            GardenEntry::Invite(invite.clone()),
+            config("first", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let second = spawn(
+            GardenEntry::Invite(invite),
+            config("second", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        for handle in [&host_handle, &first, &second] {
+            status_becomes(handle, "/active_validators", json!(3)).await;
+        }
+
+        // Each one publishes, so each one has content of its own to hold
+        // and to hand to the validators that will keep a copy.
+        say(&host_handle, "from the host").await.unwrap();
+        say(&first, "from the first guest").await.unwrap();
+        say(&second, "from the second guest").await.unwrap();
+
+        // The counters are reached by doing the work, which takes a few
+        // rounds: blocks have to be proposed, voted and applied, and the
+        // copies have to arrive. Waiting beats sleeping a fixed time.
+        for (name, handle) in [
+            ("host", &host_handle),
+            ("first", &first),
+            ("second", &second),
+        ] {
+            tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    let work = handle.status().await.unwrap()["work"].clone();
+                    if work["parts_held"].as_u64().unwrap_or(0) > 0
+                        && work["blocks_executed"].as_u64().unwrap_or(0) > 0
+                        && work["parts_served"].as_u64().unwrap_or(0) > 0
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{name} never did all three kinds of work");
+            });
+        }
+
+        second.leave().await.unwrap();
+        first.leave().await.unwrap();
+        host_handle.leave().await.unwrap();
     }
 
     /// A record that is not the Garden's own record opens nothing.
@@ -7228,6 +7326,9 @@ mod tests {
             seeds: Vec::new(),
             ledger,
             store: GardenContentStore::open(None, 1024 * 1024).unwrap(),
+            parts_held: 0,
+            blocks_executed: 0,
+            parts_served: 0,
             net: net_tx,
             link: None,
             reported: 0,
