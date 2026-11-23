@@ -600,7 +600,11 @@ mod tests {
             "both loss models ran every k in the sweep"
         );
         // The directive's bar: at least 99.99 % recovery. Stated as a ratio so
-        // the nightly figure and the default both read the same rule.
+        // the nightly figure and the default both read the same rule. At the
+        // debug default the denominator is `trials * 6`, far below 10 000, so
+        // here the rule degenerates into "no failure at all"; the sweep that
+        // actually resolves 99.99 % is `bud3_fountain_acceptance_suite`, which
+        // carries the same inequality at 10 000+ trials per k.
         assert!(
             failures * 10_000 <= decoded,
             "T6 wants at least 99.99 % recovery; {failures} of {decoded} trials failed"
@@ -905,7 +909,18 @@ mod tests {
             let mut pool = enc.source_symbols();
             pool.extend(enc.repair_symbols(0, repair_budget).unwrap());
 
-            let trials = 3_400u32;
+            let trials = 10_200u32;
+            // A 99.99 % bar is only a *measurement* when the denominator can
+            // absorb one failure. Below 10 000 trials the inequality below is
+            // a strict zero-failure rule wearing a ratio's clothes, so the run
+            // would print a figure it never resolved. At 10 200 trials one
+            // failure still clears the bar and two do not, which is what makes
+            // the ratio a measurement rather than a restatement of "no
+            // failure".
+            assert!(
+                trials >= 10_000,
+                "the 99.99 % bar needs at least 10 000 trials per k; this sweep runs {trials}"
+            );
             let mut successes = 0u32;
             for trial in 0..trials {
                 let mut dec = SegmentDecoder::new(0, data.len() as u64, &prof).unwrap();
