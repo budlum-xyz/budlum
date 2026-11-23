@@ -9,7 +9,7 @@
 # after), not the commit SHA. Copy it from the gate's report; never compute
 # it by hand. A line that does not parse, names a pair that is not a seal and
 # its tree, or carries a reason shorter than 20 characters fails the gate.
-8821aa00b8b57cb148979849e04cdf7c7aa71297d21b5e3a17f1ff9efc2308e6 .github/gate-source-provenance-baseline.txt xtask/gates/ provenance re-measured one commit after the consensus-write gate source changed
+8821aa00b8b57cb148979849e04cdf7c7aa71297d21b5e3a17f1ff9efc2308e6 .github/gate-source-provenance-baseline.txt xtask/gates/ provenance re-measured one commit after the consensus-write gate source changed; re-recorded when the merged window brought the transition back into view
 2716c89847b3cd5f091eea2febe003e9ab1b3fdf7f515d08235ff67dddfc2fbc xtask/gates/pins/budzero-tree.pins budzero/ budzero lock and audit policy re-pinned one commit after the url 2.5.9 bump
 edba8a3c3e4a7861f319ab74e9c6bae4f3aa40229be54c990e720924c273c4b0 .github/gate-source-provenance-baseline.txt xtask/gates/ provenance re-measured one commit after the budzero re-pin moved the pins file
 495c19e6bcd553a57416111c3cfcda22c39db7191f7d3a9ea3d136550f4f7c58 xtask/gates/pins/budzero-tree.pins budzero/ budzero lock carried through the url 2.5.9 bump one commit after the lock changed
