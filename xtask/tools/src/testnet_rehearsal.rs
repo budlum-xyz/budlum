@@ -1776,12 +1776,19 @@ pub fn run(root: &Path, args: &[&str]) -> Result<String, String> {
                 IMAGE_PHASE_TAIL_LINES,
             )?;
             if code != 0 {
+                if !options.keep_running {
+                    let _ = run_checked(
+                        "docker",
+                        &["compose", "-f", COMPOSE_FILE, "down", "-v"],
+                        root,
+                    );
+                }
                 let phase = classify_image_phase(&tail);
                 return Err(match &phase {
                     ImagePhase::Upstream { detail } => format!(
                         "[{}] the image phase failed upstream, not in this tree: {detail} \
-                         (`docker compose up -d --build` exited {code}; no container was \
-                          started, so the rehearsal below never ran)",
+                         (`docker compose up -d --build` exited {code}; the rehearsal \
+                          never ran and any partially started services were torn down)",
                         phase.label()
                     ),
                     ImagePhase::Repository => format!(
@@ -1903,7 +1910,6 @@ impl ImagePhase {
 
 /// Phrases only an upstream registry, a proxy or the network produces.
 const UPSTREAM_MARKERS: &[&str] = &[
-    "failed to resolve source metadata",
     "unexpected status from head request",
     "toomanyrequests",
     "pull rate limit",
@@ -1930,6 +1936,7 @@ const UPSTREAM_MARKERS: &[&str] = &[
     "unexpected status code",
     "pull access denied",
     "denied: requested access to the resource is denied",
+    "too many connections",
 ];
 
 /// Phrases that put the fault inside this repository.
@@ -1945,6 +1952,17 @@ const REPOSITORY_MARKERS: &[&str] = &[
     "dockerfile parse error",
     "unknown instruction",
     "error: could not compile",
+    // Docker BuildKit wraps every image-resolution failure - including this
+    // tree's own broken `FROM` pins - in the same "failed to resolve source
+    // metadata" preamble. These phrases are the resolution failure naming a
+    // defect inside this repository, and they win over any outage marker that
+    // also appears. A bare 404 or `pull access denied` stays upstream on
+    // purpose; a `: not found` after a digest is this tree naming the pin it
+    // wrote down wrong.
+    "manifest unknown",
+    "manifest invalid",
+    ": not found",
+    "invalid reference format",
 ];
 
 /// How many trailing output lines are kept to classify a failed image phase.
@@ -2080,6 +2098,9 @@ fn run_tee(
 
     let mut tail: VecDeque<String> = VecDeque::with_capacity(keep_lines);
     for (_, line) in rx {
+        if keep_lines == 0 {
+            continue;
+        }
         if tail.len() >= keep_lines {
             tail.pop_front();
         }
@@ -2684,6 +2705,72 @@ access to the resource is denied\n";
             "lossy conversion at the boundary: {tail:?}"
         );
         assert!(!tail.contains('\\'), "no escape sequences: {tail:?}");
+    }
+
+    #[test]
+    fn a_broken_from_pin_is_not_blamed_on_the_registry() {
+        // Docker BuildKit wraps every image-resolution failure in "failed to
+        // resolve source metadata", including the ones this repository
+        // causes: a pinned digest that does not exist. A resolution failure
+        // that names the pin it cannot find is this tree naming a defect in
+        // the tree, not the registry failing.
+        let broken_digest =
+            "target indexer: failed to solve: cgr.dev/chainguard/wolfi-base@sha256:0000: \
+failed to resolve source metadata for cgr.dev/chainguard/wolfi-base@sha256:0000: \
+cgr.dev/chainguard/wolfi-base@sha256:0000: not found\n";
+        assert_eq!(classify_image_phase(broken_digest), ImagePhase::Repository);
+        let unknown_manifest =
+            "failed to resolve source metadata for ghcr.io/x/y@sha256:aa: manifest unknown\n";
+        assert_eq!(
+            classify_image_phase(unknown_manifest),
+            ImagePhase::Repository
+        );
+    }
+
+    #[test]
+    fn the_bare_resolution_preamble_is_not_proof_of_an_outage() {
+        // "failed to resolve source metadata" is how BuildKit opens every
+        // image-resolution failure - outage, bad pin and missing tag alike.
+        // With no outage-naming phrase in the same output, an unproven claim
+        // is not a defence: this reads as the tree's defect.
+        let out =
+            "failed to resolve source metadata for ghcr.io/x/y:v1: unexpected thing happened\n";
+        assert_eq!(classify_image_phase(out), ImagePhase::Repository);
+    }
+
+    #[test]
+    fn a_denied_pull_stays_the_registries_refusal() {
+        // Deliberate call, kept from the 2026-11-23 review: "pull access
+        // denied" means the registry would not serve this runner (private
+        // namespace or expired token), and no line of `ops/` grants the
+        // runner that access. It stays upstream; the residual ambiguity is
+        // recorded, not hidden.
+        let denied = "Error response from daemon: pull access denied for budlum/validator\n";
+        assert_eq!(classify_image_phase(denied).label(), "ARIZA");
+    }
+
+    #[test]
+    fn run_tee_reads_past_invalid_utf8_bytes() {
+        // A single non-UTF-8 byte must not cut the pipe short: everything
+        // after it, including the line that names the defect, still has to
+        // reach the caller.
+        let root = checked_repo_root().expect("repo root");
+        let (code, tail) = run_tee(
+            "sh",
+            &["-c", "printf '503 Service Unavailable\nbad\\377byte\nerror: could not compile `budlum_core`\n' 1>&2; exit 1"],
+            &root,
+            50,
+        )
+        .expect("sh runs");
+        assert_eq!(code, 1);
+        assert!(tail.contains("error: could not compile"), "{tail}");
+    }
+
+    #[test]
+    fn run_tee_with_a_zero_line_tail_keeps_nothing() {
+        let root = checked_repo_root().expect("repo root");
+        let (_, tail) = run_tee("echo", &["hello"], &root, 0).expect("echo runs");
+        assert_eq!(tail, "", "{tail}");
     }
 
     #[test]
