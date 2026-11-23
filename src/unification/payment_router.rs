@@ -2732,6 +2732,40 @@ mod tests {
         )
         .is_err());
 
+        // Consent belongs to the intent and current block time, not to the
+        // planner. A verifier must refuse a quote that was valid while planning
+        // but expired before settlement, or whose fee exceeds user slippage.
+        let mut expired_quote = quote.clone();
+        expired_quote.valid_until_unix_secs = 1_499;
+        assert!(verify_leg_against_target(
+            &leg(405),
+            Some(&expired_quote),
+            1,
+            [0x01; 32],
+            100,
+            1_500,
+        )
+        .is_err());
+        let mut boundary_quote = quote.clone();
+        boundary_quote.valid_until_unix_secs = 1_500;
+        assert_eq!(
+            verify_leg_against_target(&leg(405), Some(&boundary_quote), 1, [0x01; 32], 100, 1_500,),
+            Ok(405)
+        );
+        let mut over_slippage_quote = quote.clone();
+        over_slippage_quote.fee_bps = 101;
+        let mut over_slippage_leg = leg(405);
+        over_slippage_leg.fee_bps = 101;
+        assert!(verify_leg_against_target(
+            &over_slippage_leg,
+            Some(&over_slippage_quote),
+            1,
+            [0x01; 32],
+            100,
+            1_500,
+        )
+        .is_err());
+
         let amount_mismatch = SplitTenderLeg {
             direct_same_domain: true,
             quote_id: None,
