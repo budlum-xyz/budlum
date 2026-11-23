@@ -92,11 +92,21 @@
 //! from a different parent, and no comparison of the two windows' difficulty
 //! tells a reorg from a race. The same-slot door treats an equal-work sibling
 //! as a tie and slashes nobody; only a proof carrying strictly more difficulty
-//! slashes. The Bitcoin reorg case is therefore still open: refuting work needs
-//! a witness that out-works the attested branch by a margin, which today's
-//! one-successor transaction cannot carry, and until it lands the honest claim
-//! for a proof-of-work domain is "refutable by strictly more work at its own
-//! slot", not "refutable".
+//! slashes.
+//!
+//! A reorganised proof-of-work block is refuted by a witness instead
+//! ([`work_reorg`], `ObjectiveFaultProof::WorkReorg` through
+//! `ExternalDomainTx::SubmitFaultProof`). The challenger resupplies the header
+//! chain the accepted attestation committed to and a competing chain from the
+//! same pinned checkpoint; the door recomputes both in exact 256-bit work and
+//! acts only when the competing branch leaves the attested block out and
+//! carries at least the registered confirmation depth more work than the
+//! attested branch. That is a fault of the external network, not of the
+//! carrier who waited the depth: the attestation is withdrawn, the domain is
+//! frozen, and no bond moves. A tie, a one-block race and anything short of
+//! the margin change nothing. The limit that remains is the size of one
+//! transaction: both branches above the fork point and the shared prefix have
+//! to fit in it.
 //!
 //! # The rule underneath all six
 //!
@@ -154,6 +164,7 @@ pub mod symbiotic_vault;
 pub mod tendermint;
 pub mod ton_catchain;
 pub mod versioning;
+pub mod work_reorg;
 pub mod zkvm_proof;
 
 pub use algorand_stateproof::{

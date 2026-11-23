@@ -5391,6 +5391,15 @@ fn encode_objective_fault_proof(
             encode_signed_pospace_signage(first, out);
             encode_signed_pospace_signage(second, out);
         }
+        // Tag 10: proof-of-work reorganisation witness, appended last.
+        ObjectiveFaultProof::WorkReorg(reorg) => {
+            put_u8(out, 10);
+            put_u64(out, reorg.height);
+            put_u32(out, reorg.evidence_version);
+            put_bytes(out, &reorg.shared_headers);
+            put_bytes(out, &reorg.attested_tail);
+            put_bytes(out, &reorg.witness_tail);
+        }
     }
 }
 

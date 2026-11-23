@@ -1029,6 +1029,45 @@ impl ExternalDomainRegistry {
         self.slash(domain, prover, evidence_digest, value_atoms, challenger)
     }
 
+    /// Withdraws accepted attestations that a verified proof-of-work witness
+    /// out-worked. Nobody is charged: the carrier waited the registered depth
+    /// and the external network reorganised underneath it. Each withdrawn
+    /// claim is tombstoned exactly as a slashed one is, so it can be neither
+    /// served nor accepted again, and the carrier receipt stays in the book.
+    /// Returns how many attestations left the book.
+    ///
+    /// Invoked exclusively by
+    /// [`crate::cross_domain::external::intake::IntakeState::adjudicate_work_reorg`]
+    /// after both branches of the witness were verified by the adapter.
+    ///
+    /// # Errors
+    ///
+    /// An unknown domain.
+    pub(crate) fn withdraw_outworked(
+        &mut self,
+        domain: &DomainKey,
+        slots: &[(u64, u32)],
+    ) -> Result<usize, RegistryError> {
+        let Some(reg) = self.domains.get_mut(domain) else {
+            return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
+        };
+        let mut withdrawn = 0usize;
+        for slot in slots {
+            if let Some(attestation) = reg.attestations.remove(slot) {
+                reg.attestation_provers.insert(
+                    slashed_claim_tombstone(
+                        attestation.height,
+                        attestation.evidence_version,
+                        &attestation.state_root,
+                    ),
+                    Address::zero(),
+                );
+                withdrawn = withdrawn.saturating_add(1);
+            }
+        }
+        Ok(withdrawn)
+    }
+
     /// Slash a Symbiotic vault operator for equivocation: two valid
     /// attestations at the same epoch with different collateral roots.
     /// The epoch+root pair is recorded so replayed contradictions are refused.

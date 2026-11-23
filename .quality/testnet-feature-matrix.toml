@@ -145,6 +145,11 @@ state = "closed"
 evidence = "verify_merkle_is_closed_on_testnet"
 
 [[feature]]
+id = "work_reorg_witness"
+state = "open"
+evidence = "work_reorg_witness_is_open_on_testnet"
+
+[[feature]]
 id = "zk_qc_fault_proof"
 state = "closed"
 evidence = "zk_qc_fault_proof_is_closed_on_testnet"

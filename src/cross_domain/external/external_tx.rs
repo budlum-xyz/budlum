@@ -188,6 +188,13 @@ pub enum ObjectiveFaultProof {
         first: Box<crate::cross_domain::external::pospace_vdf::SignedPoSpaceSignage>,
         second: Box<crate::cross_domain::external::pospace_vdf::SignedPoSpaceSignage>,
     },
+    /// Multi-header proof-of-work witness for an `AdapterSpec::BitcoinSpv`
+    /// domain: the header chain an accepted attestation committed to and a
+    /// competing chain from the same pinned checkpoint that leaves the
+    /// attested block out and carries at least the registered confirmation
+    /// depth more work. Withdraws the out-worked attestation and freezes the
+    /// domain; no bond is charged. APPENDED (tag `10`).
+    WorkReorg(Box<crate::cross_domain::external::work_reorg::WorkReorgProof>),
 }
 
 /// What the executor hands the door: the signer, the chain, the fee the
@@ -829,6 +836,9 @@ fn submit_fault_proof(
             .map(|_| ()),
         ObjectiveFaultProof::PoSpaceDoubleSignage { first, second } => intake
             .adjudicate_pospace_double_signage(domain, first, second)
+            .map(|_| ()),
+        ObjectiveFaultProof::WorkReorg(reorg) => intake
+            .adjudicate_work_reorg(domain, reorg, now_secs)
             .map(|_| ()),
     }
     .map_err(ExternalDomainTxError::from)
@@ -1503,6 +1513,46 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    /// A work witness names a proof-of-work rule. Against a domain of any
+    /// other family the fault-proof door refuses it by name and writes
+    /// nothing, whatever the witness carries.
+    #[test]
+    fn a_work_witness_against_a_domain_of_another_family_is_refused_and_writes_nothing() {
+        use crate::cross_domain::external::work_reorg::WorkReorgProof;
+
+        let (mut state, key, poster) = registered();
+        let challenger = addr(42);
+        state.add_balance(&challenger, 10_000);
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::SubmitEvidence(Box::new(evidence(poster, 200, [0xAA; 32]))),
+        )
+        .expect("the attestation lands");
+
+        let before = state.settlement.root();
+        let witness = WorkReorgProof {
+            height: 200,
+            evidence_version: 2,
+            shared_headers: Vec::new(),
+            attested_tail: vec![0x11; 80],
+            witness_tail: vec![0x22; 80],
+        };
+        let err = execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::SubmitFaultProof {
+                domain: key,
+                proof: ObjectiveFaultProof::WorkReorg(Box::new(witness)),
+            },
+        )
+        .expect_err("a sync-committee domain takes no work witness");
+        assert!(err.to_string().contains("bitcoin-spv"), "{err}");
+        assert_eq!(state.settlement.root(), before);
+        assert_eq!(state.get_balance(&challenger), 10_000);
+        assert_fault_domain_state(&state, &key, DomainState::Active);
     }
 
     #[test]
