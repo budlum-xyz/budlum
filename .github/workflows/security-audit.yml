@@ -461,10 +461,10 @@ jobs:
           fi
 
   scorecard:
-    # scorecard-action refuses every non-default ref. Keep the scheduled/main
-    # measurement, but do not turn an intentional testnet workflow dispatch
-    # into a red security verdict before the action can produce SARIF.
-    if: github.ref == 'refs/heads/main'
+    # scorecard-action refuses every non-default ref. Keep the scheduled
+    # default-branch measurement, but do not turn an intentional testnet
+    # workflow dispatch into a red security verdict before SARIF exists.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     name: OpenSSF Scorecard
     runs-on: ubuntu-latest
     timeout-minutes: 45
