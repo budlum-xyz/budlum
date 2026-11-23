@@ -64,7 +64,7 @@ impl Default for ParallelSchedulerPolicy {
 
 impl ParallelSchedulerPolicy {
     /// Default Testnet (`45261`) policy: both parallel layers are closed until
-    /// an explicit activation height and equality evidence are committed (`IP-59`).
+    /// an explicit activation height and equality evidence are committed.
     #[must_use]
     pub const fn testnet_launch() -> Self {
         Self {
@@ -94,7 +94,7 @@ impl ParallelSchedulerPolicy {
     }
 
     /// Intra-EE (`Block-STM`) parallelism requires its own explicit flag **and**
-    /// passing state-root equality verification (`IP-59`).
+    /// passing state-root equality verification.
     ///
     /// Convenience: queried before enabling intra-EE parallel worker lanes.
     #[must_use]
@@ -107,7 +107,7 @@ impl ParallelSchedulerPolicy {
 
 /// Non-consensus timing and wave summary emitted by [`execute_block_with_policy`].
 ///
-/// Convenience: consumed by calibration reports (`IP-59`) and equality tests.
+/// Convenience: consumed by calibration reports and equality tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockExecutionReport {
     pub tx_count: usize,

@@ -77,7 +77,7 @@ impl std::error::Error for RelayerError {}
 /// Used for replay protection and slashing evidence.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RelayLedger {
-    /// `Message_id` → (`relayer_address`, `relay_height`, `proof_hash`)
+    /// `Message_id` -> (`relayer_address`, `relay_height`, `proof_hash`)
     #[serde(with = "crate::core::map_keys")]
     relayed: BTreeMap<MessageId, RelayRecord>,
 }
@@ -183,7 +183,7 @@ const RELAY_RETENTION_BLOCKS: u64 = 10 * crate::cross_domain::nonce::FINALITY_PR
 
 /// Configuration for the Universal Relayer.
 ///
-/// (karar B): the `relay_window_blocks`, `min_relayer_stake`
+/// (design option B): the `relay_window_blocks`, `min_relayer_stake`
 /// and `slash_ratio_*` fields are gone - nothing outside this file ever read
 /// them, and a config field nobody reads is a promise nobody keeps. Serde
 /// ignores them if an old config still carries them.
@@ -203,7 +203,7 @@ pub struct RelayerConfig {}
 pub struct UniversalRelayer {
     pub config: RelayerConfig,
     pub ledger: RelayLedger,
-    /// Pending relay requests: `message_id` → (`source_event`, `target_domain`).
+    /// Pending relay requests: `message_id` -> (`source_event`, `target_domain`).
     /// Populated when a bridge lock/burn creates a cross-domain message.
     #[serde(with = "crate::core::map_keys")]
     pending: BTreeMap<MessageId, PendingRelay>,

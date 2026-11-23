@@ -311,6 +311,11 @@ pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeErr
     for (sig64, pubkey32) in signatures.iter().zip(account_keys.iter()) {
         let vk = VerifyingKey::from_bytes(pubkey32)
             .map_err(|e| SolanaEnvelopeError::InvalidSignature(e.to_string()))?;
+        if vk.is_weak() {
+            return Err(SolanaEnvelopeError::InvalidSignature(String::from(
+                "small-order Ed25519 public key refused",
+            )));
+        }
         let sig = Signature::from_bytes(sig64);
         vk.verify_strict(message_bytes, &sig)
             .map_err(|e| SolanaEnvelopeError::InvalidSignature(e.to_string()))?;
@@ -448,12 +453,9 @@ pub fn decode_solana_base64(text: &str) -> Result<Vec<u8>, &'static str> {
 
     let mut out = Vec::with_capacity(input.len() / 4 * 3);
     let quartet_count = input.len() / 4;
-    for (index, quartet) in input.chunks_exact(4).enumerate() {
+    for (index, quartet) in input.as_chunks::<4>().0.iter().enumerate() {
         let last = index + 1 == quartet_count;
-        let &[q0, q1, q2, q3] = <[u8; 4]>::try_from(quartet)
-            .ok()
-            .as_ref()
-            .ok_or("invalid base64 quartet")?;
+        let &[q0, q1, q2, q3] = quartet;
         let a = base64_digit(q0).ok_or("invalid base64 first digit")?;
         let b = base64_digit(q1).ok_or("invalid base64 second digit")?;
         out.push((a << 2) | (b >> 4));

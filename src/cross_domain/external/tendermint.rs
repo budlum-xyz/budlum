@@ -1,6 +1,9 @@
 //! Tendermint and CometBFT commit finality: the adapter for the family whose
 //! finality is a signed commit.
 //!
+//! WIRING: standalone ICS-07 bisection header-skip verifier lands
+//! with the non-adjacent Tendermint anchor rotation transaction door.
+//!
 //! # What this adapter verifies, and what it refuses to assume
 //!
 //! A Tendermint commit is a set of Ed25519 precommits over a canonical vote:
@@ -208,19 +211,18 @@ fn merkle_inner(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 }
 
 fn merkle_root(items: &[Vec<u8>]) -> [u8; 32] {
-    match items.len() {
-        0 => Sha256::digest([]).into(),
-        1 => merkle_leaf(&items[0]),
-        len => {
-            let split = split_point(len);
-            let (left, right) = items.split_at(split);
+    match items {
+        [] => Sha256::digest([]).into(),
+        [single] => merkle_leaf(single),
+        many => {
+            let (left, right) = many.split_at(split_point(many.len()));
             merkle_inner(&merkle_root(left), &merkle_root(right))
         }
     }
 }
 
-/// The largest power of two strictly below `len`, CometBFT's split point.
-fn split_point(len: usize) -> usize {
+/// The largest power of two strictly below `len` (`CometBFT` split point).
+const fn split_point(len: usize) -> usize {
     let highest = 1usize << (usize::BITS - 1 - len.leading_zeros());
     if highest == len {
         highest >> 1
@@ -533,6 +535,9 @@ impl TendermintCommitEvidence {
         }
         let mut seen_validators: std::collections::BTreeSet<[u8; ADDRESS_LEN]> =
             std::collections::BTreeSet::new();
+        let mut total_power = 0u128;
+        // CometBFT protocol ceiling (`types.MaxTotalVotingPower = MaxInt64 / 8`).
+        let max_total_voting_power = (i64::MAX as u128) / 8;
         for (index, validator) in self.validators.iter().enumerate() {
             if validator.voting_power == 0 {
                 return Err(rule(format!(
@@ -552,6 +557,30 @@ impl TendermintCommitEvidence {
                     hex::encode(validator.address)
                 )));
             }
+            total_power = total_power.saturating_add(u128::from(validator.voting_power));
+            if total_power > max_total_voting_power {
+                return Err(rule(format!(
+                    "total voting power {total_power} exceeds CometBFT ceiling {max_total_voting_power}"
+                )));
+            }
+        }
+        // The set must be the one the header commits to. Deliberately checked
+        // after the per-entry rules: an entry whose address is not its key, or a
+        // doubled entry, is a more precise diagnosis than "the root disagrees",
+        // and both are the same bug seen from two angles.
+        if self.commit_time_nanos >= NANOS_PER_SECOND {
+            return Err(rule(format!(
+                "commit_time carries {} nanoseconds, which is not a timestamp",
+                self.commit_time_nanos
+            )));
+        }
+        let set_hash = validator_set_hash(&self.validators);
+        if set_hash != self.validators_hash {
+            return Err(rule(format!(
+                "the supplied validator set hashes to {} but the header's validator-set root is {}",
+                hex::encode(set_hash),
+                hex::encode(self.validators_hash)
+            )));
         }
         // The set must be the one the header commits to. Deliberately checked
         // after the per-entry rules: an entry whose address is not its key, or a
@@ -673,7 +702,7 @@ impl TendermintCommitEvidence {
 
 /// `2 * total / 3 + 1`, in integer arithmetic.
 #[must_use]
-pub fn quorum_threshold(total_voting_power: u128) -> u128 {
+pub const fn quorum_threshold(total_voting_power: u128) -> u128 {
     total_voting_power * 2 / 3 + 1
 }
 
@@ -692,11 +721,1100 @@ pub fn validator_address_of(public_key: &[u8; PUBLIC_KEY_LEN]) -> [u8; ADDRESS_L
     address
 }
 
+/// Maximum RFC-6962 Merkle branch depth accepted for `CometBFT` header proofs.
+const MAX_RFC6962_DEPTH: usize = 32;
+/// `CometBFT` `Header` field index of `next_validators_hash` (0-based across 14 fields).
+pub const COMETBFT_HEADER_NEXT_VALIDATORS_INDEX: usize = 8;
+/// `CometBFT` `Header` field index of `app_hash` (0-based across 14 fields).
+pub const COMETBFT_HEADER_APP_HASH_INDEX: usize = 10;
+/// Total canonical leaf count of a `CometBFT` `Header` RFC-6962 Merkle tree.
+pub const COMETBFT_HEADER_TOTAL_LEAVES: usize = 14;
+
+/// RFC-6962 binary Merkle inclusion proof used by `CometBFT` `Header.Hash()` and IBC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rfc6962Proof {
+    /// Zero-based leaf position inside the tree.
+    pub index: usize,
+    /// Total number of leaves committed in the tree.
+    pub total: usize,
+    /// Sibling ("aunt") hashes ordered from leaf level to root.
+    pub aunts: Vec<[u8; 32]>,
+}
+
+fn rfc6962_leaf_hash(leaf: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update([0x00]);
+    h.update(leaf);
+    let d = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&d);
+    out
+}
+
+fn rfc6962_inner_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update([0x01]);
+    h.update(left);
+    h.update(right);
+    let d = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&d);
+    out
+}
+
+/// Largest power of two strictly less than `n` (for `n >= 2`), matching
+/// CometBFT `crypto/merkle::getSplitPoint`.
+const fn rfc6962_split_point(n: usize) -> usize {
+    let bitlen = (usize::BITS - n.leading_zeros()) as usize;
+    let k = 1usize << (bitlen - 1);
+    if k == n {
+        k >> 1
+    } else {
+        k
+    }
+}
+
+fn rfc6962_root_from_aunts(
+    index: usize,
+    total: usize,
+    leaf_hash: [u8; 32],
+    aunts: &[[u8; 32]],
+) -> Option<[u8; 32]> {
+    if total == 0 || index >= total || aunts.len() > MAX_RFC6962_DEPTH {
+        return None;
+    }
+    if total == 1 {
+        return aunts.is_empty().then_some(leaf_hash);
+    }
+    let (&top_aunt, sub_aunts) = aunts.split_last()?;
+    let k = rfc6962_split_point(total);
+    if index < k {
+        let left = rfc6962_root_from_aunts(index, k, leaf_hash, sub_aunts)?;
+        Some(rfc6962_inner_hash(&left, &top_aunt))
+    } else {
+        let right = rfc6962_root_from_aunts(index - k, total - k, leaf_hash, sub_aunts)?;
+        Some(rfc6962_inner_hash(&top_aunt, &right))
+    }
+}
+
+/// Verify an RFC-6962 inclusion proof for `leaf` against `expected_root`.
+///
+/// Proves `CometBFT` header fields (such as `AppHash` or `NextValidatorsHash`)
+/// inside the validator-signed `block_hash`.
+/// WIRING: Tendermint/IBC header-field verification consumed by [`verify_skipping_commit`].
+#[must_use]
+pub fn verify_rfc6962_inclusion(
+    leaf: &[u8],
+    proof: &Rfc6962Proof,
+    expected_root: &[u8; 32],
+) -> bool {
+    if *expected_root == [0u8; 32] {
+        return false;
+    }
+    let Some(computed) = rfc6962_root_from_aunts(
+        proof.index,
+        proof.total,
+        rfc6962_leaf_hash(leaf),
+        &proof.aunts,
+    ) else {
+        return false;
+    };
+    bool::from(subtle::ConstantTimeEq::ct_eq(
+        computed.as_slice(),
+        expected_root.as_slice(),
+    ))
+}
+
+/// Maximum single-step height jump permitted from a trusted anchor.
+///
+/// Spans above `MAX_HEIGHT_DRIFT` require multi-step ICS-07 bisection.
+/// WIRING: enforced by [`verify_skipping_commit`], [`TendermintFinalityAdapter`],
+/// [`TendermintLightClient`], and `settlement::shared_security`.
+pub const MAX_HEIGHT_DRIFT: u64 = 100_000;
+
+/// Maximum intermediate commits in one [`TendermintLightClient::verify_bisection`] call.
+///
+/// WIRING: enforced by [`TendermintLightClient::verify_bisection`].
+pub const MAX_BISECTION_STEPS: usize = 32;
+
+/// Maximum finalized consensus states retained by [`TendermintLightClient`].
+const MAX_STORED_CONSENSUS_STATES: usize = 256;
+
+/// Whether a commit's height is inside the backward era floor of a pinned anchor.
+///
+/// Forward is unbounded at the raw anchor floor (while ICS-07 light-client and
+/// era-pinned transitions additionally enforce strict forward drift bounds via
+/// `height_within_forward_drift`); backward is bounded by [`MAX_HEIGHT_DRIFT`].
+/// WIRING: pinned-era drift guard consumed by [`TendermintFinalityAdapter::verify`] and intake callers.
+#[must_use]
+pub const fn height_within_pinned_era(pinned_height: u64, height: u64) -> bool {
+    height.saturating_add(MAX_HEIGHT_DRIFT) >= pinned_height
+}
+
+/// Check whether `target_height` strictly advances within `1..=max_drift` past `reference_height`.
+#[must_use]
+const fn height_within_forward_drift(
+    reference_height: u64,
+    target_height: u64,
+    max_drift: u64,
+) -> bool {
+    match target_height.checked_sub(reference_height) {
+        Some(delta) => delta >= 1 && delta <= max_drift,
+        None => false,
+    }
+}
+
+/// Verify an RFC-6962 inclusion proof for a `CometBFT` `BytesValue`-wrapped header field.
+fn verify_header_bytes_inclusion(
+    field_bytes: &[u8],
+    expected_index: usize,
+    proof: &Rfc6962Proof,
+    expected_block_hash: &[u8; 32],
+) -> bool {
+    if proof.index != expected_index || proof.total != COMETBFT_HEADER_TOTAL_LEAVES {
+        return false;
+    }
+    let wrapped = proto_bytes_value(field_bytes);
+    verify_rfc6962_inclusion(&wrapped, proof, expected_block_hash)
+}
+
+/// IBC ICS-07 `CometBFT` light-client trust and unbonding parameters.
+///
+/// Enforces the fundamental `CometBFT` fork-accountability inequality
+/// `0 < trusting_period_secs < unbonding_period_secs` so any `> 1/3` Byzantine
+/// coalition signing a lunatic or equivocating header remains bonded and
+/// slashable throughout the trusting window.
+///
+/// WIRING: validated by [`TendermintLightClient`], [`verify_tendermint_misbehaviour`],
+/// and `settlement::shared_security::execute_tendermint_misbehaviour_slash`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TendermintLightParams {
+    /// Maximum age (seconds) of a trusted header before expiry.
+    pub trusting_period_secs: u64,
+    /// Staking unbonding period (seconds) of the target `CometBFT` chain.
+    pub unbonding_period_secs: u64,
+    /// Maximum seconds a header's BFT time may lead the verifier's clock.
+    pub max_clock_drift_secs: u64,
+    /// Maximum single-step height leap before bisection is mandatory.
+    pub max_height_drift: u64,
+}
+
+impl TendermintLightParams {
+    /// Construct canonical Cosmos Hub / ICS-07 parameters (`trusting = 2/3 * unbonding`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError::ConsensusRule`] if `unbonding_period_secs < 3`.
+    pub fn standard_for_unbonding(unbonding_period_secs: u64) -> Result<Self, AdapterError> {
+        let trusting_period_secs = unbonding_period_secs.saturating_div(3).saturating_mul(2);
+        let params = Self {
+            trusting_period_secs,
+            unbonding_period_secs,
+            max_clock_drift_secs: MAX_FUTURE_SECONDS,
+            max_height_drift: MAX_HEIGHT_DRIFT,
+        };
+        params.validate()?;
+        Ok(params)
+    }
+
+    /// Enforce `0 < trusting_period < unbonding_period` and bounded drift.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError::ConsensusRule`] on any invalid parameter.
+    pub fn validate(&self) -> Result<(), AdapterError> {
+        if self.trusting_period_secs == 0 {
+            return Err(rule("ICS-07 trusting_period_secs must be positive"));
+        }
+        if self.trusting_period_secs >= self.unbonding_period_secs {
+            return Err(rule(format!(
+                "ICS-07 trusting_period_secs ({}) must be strictly less than unbonding_period_secs ({})",
+                self.trusting_period_secs, self.unbonding_period_secs
+            )));
+        }
+        if self.max_height_drift == 0 || self.max_height_drift > MAX_HEIGHT_DRIFT {
+            return Err(rule(format!(
+                "ICS-07 max_height_drift ({}) is outside 1..={MAX_HEIGHT_DRIFT}",
+                self.max_height_drift
+            )));
+        }
+        if self.max_clock_drift_secs > 24 * 60 * 60 {
+            return Err(rule("ICS-07 max_clock_drift_secs exceeds 24 hours"));
+        }
+        Ok(())
+    }
+}
+
+/// Pinned-era trust anchor on [`TendermintFinalityAdapter`].
+///
+/// Prevents a retired committee whose unbonding window elapsed long ago from
+/// finalizing arbitrary future heights under a static validator-set pin.
+/// WIRING: attached via [`TendermintFinalityAdapter::with_trusted_era`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TendermintEraAnchor {
+    /// Block height at which the validator set was pinned.
+    pub pinned_height: u64,
+    /// Block BFT Unix timestamp (seconds) at `pinned_height`.
+    pub pinned_time_secs: u64,
+    /// Validated ICS-07 trusting, unbonding, and height-drift limits.
+    pub params: TendermintLightParams,
+}
+
+/// Trusted light-client checkpoint for `CometBFT`/IBC skipping verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedTendermintState {
+    pub chain_id: String,
+    pub height: u64,
+    pub time_secs: u64,
+    pub trusting_period_secs: u64,
+    pub validators: Vec<TendermintValidator>,
+    pub next_validators_hash: [u8; 32],
+}
+
+/// Verified state produced by advancing a [`TrustedTendermintState`] to a newer commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedTendermintSkip {
+    pub height: u64,
+    pub block_hash: [u8; 32],
+    pub app_hash: [u8; 32],
+    pub validator_set_hash: [u8; 32],
+    pub next_validators_hash: Option<[u8; 32]>,
+    pub median_time_secs: u64,
+    pub trusted_overlap_power: u128,
+    pub target_signed_power: u128,
+}
+
+/// Verified internal commit summary shared by skipping, bisection, and misbehaviour.
+struct CheckedCommit<'a> {
+    set_hash: [u8; 32],
+    median_ts: u64,
+    target_signed: u128,
+    trusted_overlap: u128,
+    target_signers: std::collections::BTreeMap<[u8; ADDRESS_LEN], &'a TendermintValidator>,
+    trusted_signers: Vec<TendermintValidator>,
+}
+
+fn build_trusted_validator_map(
+    trusted: &TrustedTendermintState,
+) -> Result<
+    (
+        std::collections::BTreeMap<[u8; ADDRESS_LEN], TendermintValidator>,
+        u128,
+    ),
+    AdapterError,
+> {
+    if trusted.validators.is_empty() || trusted.validators.len() > MAX_VALIDATORS {
+        return Err(rule("trusted validator set size outside valid bounds"));
+    }
+    let mut map = std::collections::BTreeMap::new();
+    let mut total = 0u128;
+    for v in &trusted.validators {
+        if v.voting_power == 0 || v.address != validator_address_of(&v.public_key) {
+            return Err(rule("trusted validator entry invalid or zero power"));
+        }
+        if map.insert(v.address, *v).is_some() {
+            return Err(rule("duplicate validator in trusted Tendermint state"));
+        }
+        total = total.saturating_add(u128::from(v.voting_power));
+    }
+    Ok((map, total))
+}
+
+/// Verify a `CometBFT` commit's 14-leaf `Header.Hash()`, target `2/3 + 1`
+/// quorum, BFT vote-time median, and trusted-validator overlap.
+fn verify_commit_against_trusted_map<'a>(
+    expected_chain_id: &str,
+    trusted_map: &std::collections::BTreeMap<[u8; ADDRESS_LEN], TendermintValidator>,
+    commit: &'a TendermintCommitEvidence,
+    max_clock_drift_secs: u64,
+    now_secs: u64,
+) -> Result<CheckedCommit<'a>, AdapterError> {
+    commit.validate_shape()?;
+    if expected_chain_id.is_empty() || commit.chain_id != expected_chain_id {
+        return Err(rule(
+            "target commit chain_id mismatches trusted light-client state",
+        ));
+    }
+    // Bind EVERY header field (`validators_hash`, `next_validators_hash`,
+    // `app_hash`, `commit_time`, `height`) to the signed `block_hash` before
+    // accepting a single vote: prevents substituting a Sybil validator set or
+    // forged `app_hash` next to genuine round-0 precommit signatures.
+    let recomputed_block_hash = commit.header_hash();
+    if !bool::from(subtle::ConstantTimeEq::ct_eq(
+        recomputed_block_hash.as_slice(),
+        commit.block_hash.as_slice(),
+    )) {
+        return Err(rule(
+            "target commit header_hash disagrees with signed block_hash",
+        ));
+    }
+    let set_hash = validator_set_hash(&commit.validators);
+    if !bool::from(subtle::ConstantTimeEq::ct_eq(
+        set_hash.as_slice(),
+        commit.validators_hash.as_slice(),
+    )) {
+        return Err(rule(
+            "target commit validator set disagrees with signed header validators_hash",
+        ));
+    }
+
+    let target_map: std::collections::BTreeMap<[u8; ADDRESS_LEN], &'a TendermintValidator> =
+        commit.validators.iter().map(|v| (v.address, v)).collect();
+    let target_total = commit.total_voting_power();
+    let target_required = quorum_threshold(target_total);
+
+    let mut target_signed = 0u128;
+    let mut trusted_overlap = 0u128;
+    let mut signed_times: Vec<(u64, u128)> = Vec::with_capacity(commit.signatures.len());
+    let mut target_signers = std::collections::BTreeMap::new();
+    let mut trusted_signers = Vec::new();
+
+    for sig in &commit.signatures {
+        // Every commit signature must belong to the header's own validator set.
+        let tv = target_map
+            .get(&sig.address)
+            .copied()
+            .ok_or_else(|| rule("precommit signer is not a member of target validator set"))?;
+        let vote_ts = u64::try_from(sig.timestamp_seconds)
+            .map_err(|_| rule("precommit carries negative timestamp"))?;
+        let sign_bytes = commit.canonical_vote_bytes(sig);
+        verify_signature(&sign_bytes, &sig.signature, &tv.public_key).map_err(|_| {
+            AdapterError::Crypto {
+                what: "invalid Ed25519 precommit signature in target set".into(),
+            }
+        })?;
+        let p = u128::from(tv.voting_power);
+        target_signed = target_signed.saturating_add(p);
+        signed_times.push((vote_ts, p));
+        target_signers.insert(tv.address, tv);
+
+        if let Some(old_v) = trusted_map.get(&sig.address) {
+            if !bool::from(subtle::ConstantTimeEq::ct_eq(
+                tv.public_key.as_slice(),
+                old_v.public_key.as_slice(),
+            )) {
+                return Err(rule("validator address collided with distinct public key"));
+            }
+            trusted_overlap = trusted_overlap.saturating_add(u128::from(old_v.voting_power));
+            trusted_signers.push(*old_v);
+        }
+    }
+
+    if target_signed < target_required {
+        return Err(rule(format!(
+            "target signed power {target_signed}/{target_total} below 2/3+1 quorum {target_required}"
+        )));
+    }
+
+    signed_times.sort_by_key(|(ts, _)| *ts);
+    let half = target_signed / 2;
+    let mut acc = 0u128;
+    let mut median_ts = commit.commit_time;
+    for (ts, power) in &signed_times {
+        acc = acc.saturating_add(*power);
+        if acc > half {
+            median_ts = *ts;
+            break;
+        }
+    }
+    if commit.commit_time.abs_diff(median_ts) > MAX_COMMIT_TIME_SKEW_SECONDS {
+        return Err(rule(
+            "target commit_time diverges from signed precommit median",
+        ));
+    }
+    if commit.commit_time > now_secs.saturating_add(max_clock_drift_secs)
+        || median_ts > now_secs.saturating_add(max_clock_drift_secs)
+    {
+        return Err(rule(
+            "target commit BFT time exceeds future clock drift bound",
+        ));
+    }
+
+    Ok(CheckedCommit {
+        set_hash,
+        median_ts,
+        target_signed,
+        trusted_overlap,
+        target_signers,
+        trusted_signers,
+    })
+}
+
+fn verify_skipping_commit_bounded(
+    trusted: &TrustedTendermintState,
+    target: &TendermintCommitEvidence,
+    app_hash_proof: Option<&Rfc6962Proof>,
+    next_validators: Option<([u8; 32], &Rfc6962Proof)>,
+    now_secs: u64,
+    max_clock_drift_secs: u64,
+    max_height_drift: u64,
+) -> Result<VerifiedTendermintSkip, AdapterError> {
+    if trusted.trusting_period_secs == 0 {
+        return Err(rule(
+            "trusted light-client state carries zero trusting_period_secs",
+        ));
+    }
+    if now_secs.saturating_sub(trusted.time_secs) >= trusted.trusting_period_secs {
+        return Err(AdapterError::Stale {
+            age: now_secs.saturating_sub(trusted.time_secs),
+            max_age: trusted.trusting_period_secs,
+        });
+    }
+    if !height_within_forward_drift(trusted.height, target.height, max_height_drift) {
+        return Err(rule(format!(
+            "target commit height {} outside trusted era ({}..={})",
+            target.height,
+            trusted.height.saturating_add(1),
+            trusted.height.saturating_add(max_height_drift)
+        )));
+    }
+    let (trusted_map, trusted_total) = build_trusted_validator_map(trusted)?;
+    let checked = verify_commit_against_trusted_map(
+        &trusted.chain_id,
+        &trusted_map,
+        target,
+        max_clock_drift_secs,
+        now_secs,
+    )?;
+
+    // Sequential ICS-07 check: at `trusted.height + 1`, if the trusted header
+    // committed a non-zero `next_validators_hash`, the target validator set
+    // MUST equal it (a mismatch is a lunatic header and MUST NOT fall through
+    // to `> 1/3` overlap). Matching accepts even 100% validator turnover.
+    let is_adjacent = Some(target.height) == trusted.height.checked_add(1);
+    let is_committed_adjacent = if is_adjacent && trusted.next_validators_hash != [0u8; 32] {
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            checked.set_hash.as_slice(),
+            trusted.next_validators_hash.as_slice(),
+        )) {
+            return Err(rule(
+                "adjacent commit validators_hash contradicts trusted next_validators_hash (lunatic header)",
+            ));
+        }
+        true
+    } else {
+        false
+    };
+
+    if !is_committed_adjacent && checked.trusted_overlap.saturating_mul(3) <= trusted_total {
+        return Err(rule(format!(
+            "skipping trust level failed: trusted overlap {}/{trusted_total} does not exceed 1/3",
+            checked.trusted_overlap
+        )));
+    }
+
+    if target.commit_time <= trusted.time_secs || checked.median_ts <= trusted.time_secs {
+        return Err(rule(
+            "target commit BFT time does not strictly advance past trusted time",
+        ));
+    }
+
+    // `header_hash() == block_hash` already binds `target.app_hash` at leaf 10;
+    // when an explicit RFC-6962 opening is also provided, verify it matches the
+    // canonical `google.protobuf.BytesValue(app_hash)` leaf.
+    if let Some(proof) = app_hash_proof {
+        if !verify_header_bytes_inclusion(
+            &target.app_hash,
+            COMETBFT_HEADER_APP_HASH_INDEX,
+            proof,
+            &target.block_hash,
+        ) {
+            return Err(rule(
+                "RFC-6962 proof fails to bind app_hash into signed CometBFT block_hash",
+            ));
+        }
+    }
+
+    let verified_next = if let Some((next_hash, proof)) = next_validators {
+        if next_hash == [0u8; 32]
+            || !bool::from(subtle::ConstantTimeEq::ct_eq(
+                next_hash.as_slice(),
+                target.next_validators_hash.as_slice(),
+            ))
+            || !verify_header_bytes_inclusion(
+                &next_hash,
+                COMETBFT_HEADER_NEXT_VALIDATORS_INDEX,
+                proof,
+                &target.block_hash,
+            )
+        {
+            return Err(rule(
+                "RFC-6962 proof fails to bind next_validators_hash into signed block_hash",
+            ));
+        }
+        Some(next_hash)
+    } else if target.next_validators_hash != [0u8; 32] {
+        Some(target.next_validators_hash)
+    } else {
+        None
+    };
+
+    Ok(VerifiedTendermintSkip {
+        height: target.height,
+        block_hash: target.block_hash,
+        app_hash: target.app_hash,
+        validator_set_hash: checked.set_hash,
+        next_validators_hash: verified_next,
+        median_time_secs: checked.median_ts,
+        trusted_overlap_power: checked.trusted_overlap,
+        target_signed_power: checked.target_signed,
+    })
+}
+
+/// Verify a `CometBFT`/IBC light-client transition from `trusted` to `target`
+/// under the Amintoosi-Buchman-Kwon skipping theorem and bounded single-step height drift.
+///
+/// Enforces full 14-leaf `Header.Hash() == block_hash`, `validators_hash`
+/// agreement, strict adjacent `next_validators_hash` equality, `> 1/3` trusted
+/// voting-power overlap + `>= 2/3 + 1` target quorum on non-adjacent skips,
+/// unexpired `trusting_period_secs`, strict BFT time advance, and optional
+/// RFC-6962 openings over canonical `BytesValue` header leaves.
+///
+/// # Errors
+///
+/// Returns [`AdapterError`] if any header, signature, quorum, overlap, height
+/// drift, trusting period, BFT time, or RFC-6962 proof check fails.
+///
+/// WIRING: consumed by `IntakeState::rotate_tendermint_anchor`,
+/// `IntakeState::rotate_tendermint_anchor_bisection` (through
+/// [`TendermintLightClient::verify_bisection`]) and [`TendermintLightClient`].
+pub fn verify_skipping_commit(
+    trusted: &TrustedTendermintState,
+    target: &TendermintCommitEvidence,
+    app_hash_proof: Option<&Rfc6962Proof>,
+    next_validators: Option<([u8; 32], &Rfc6962Proof)>,
+    now_secs: u64,
+) -> Result<VerifiedTendermintSkip, AdapterError> {
+    verify_skipping_commit_bounded(
+        trusted,
+        target,
+        app_hash_proof,
+        next_validators,
+        now_secs,
+        MAX_FUTURE_SECONDS,
+        MAX_HEIGHT_DRIFT,
+    )
+}
+
+/// Classification of accountable IBC ICS-07 `CometBFT` consensus misbehaviour.
+///
+/// WIRING: carried inside [`VerifiedTendermintMisbehaviour`] to freeze
+/// [`TendermintLightClient`] and slash culpable restaked operators in shared security.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TendermintMisbehaviourKind {
+    /// Two valid commits at the same height signing distinct `block_hash`es.
+    DoubleSignEquivocation,
+    /// Two valid commits with `h1.height < h2.height` and `h1.time >= h2.time`.
+    BftTimeViolation,
+    /// Commit at `trusted.height + 1` with `> 1/3` trusted signatures whose
+    /// `validators_hash` contradicts `trusted.next_validators_hash`.
+    LunaticHeader,
+}
+
+/// IBC ICS-07 `Misbehaviour` evidence packet submitted to freeze a light client
+/// and slash culpable restaked `CometBFT` operators.
+///
+/// For [`TendermintMisbehaviourKind::DoubleSignEquivocation`] and
+/// [`TendermintMisbehaviourKind::BftTimeViolation`], both `header_1` and
+/// `header_2` are supplied; for [`TendermintMisbehaviourKind::LunaticHeader`],
+/// `header_2` may be `None`.
+///
+/// WIRING: verified by [`verify_tendermint_misbehaviour`],
+/// [`TendermintLightClient::submit_misbehaviour`], and
+/// `settlement::shared_security::execute_tendermint_misbehaviour_slash`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TendermintMisbehaviour {
+    /// First conflicting (or lunatic) signed `CometBFT` header and commit.
+    pub header_1: TendermintCommitEvidence,
+    /// Second conflicting signed `CometBFT` header and commit (absent for single-header lunatic proof).
+    pub header_2: Option<TendermintCommitEvidence>,
+}
+
+/// Cryptographically verified ICS-07 misbehaviour verdict with deduplicated
+/// culpable validator list for on-chain shared-security slashing.
+///
+/// WIRING: returned by [`verify_tendermint_misbehaviour`] and consumed by
+/// `settlement::shared_security::execute_tendermint_misbehaviour_slash`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedTendermintMisbehaviour {
+    /// Target `CometBFT` chain identifier.
+    pub chain_id: String,
+    /// Proven class of consensus fault.
+    pub kind: TendermintMisbehaviourKind,
+    /// Height of the trusted checkpoint anchoring verification.
+    pub trusted_height: u64,
+    /// Height of `header_1`.
+    pub header_1_height: u64,
+    /// Height of `header_2` (equals `header_1_height` for single-header lunatic fault).
+    pub header_2_height: u64,
+    /// Deduplicated validators proven to have co-signed the fault (sorted by address).
+    pub culprits: Vec<TendermintValidator>,
+    /// Total trusted-set voting power held by `culprits`.
+    pub culprit_trusted_power: u128,
+    /// Deterministic replay-protection digest binding the fault and culprits.
+    pub evidence_id: [u8; 32],
+}
+
+fn check_trust_for_misbehaviour(
+    trusted: &TrustedTendermintState,
+    trusted_total: u128,
+    commit: &TendermintCommitEvidence,
+    checked: &CheckedCommit<'_>,
+) -> Result<(), AdapterError> {
+    let is_committed_adjacent = Some(commit.height) == trusted.height.checked_add(1)
+        && trusted.next_validators_hash != [0u8; 32]
+        && bool::from(subtle::ConstantTimeEq::ct_eq(
+            checked.set_hash.as_slice(),
+            trusted.next_validators_hash.as_slice(),
+        ));
+    if !is_committed_adjacent && checked.trusted_overlap.saturating_mul(3) <= trusted_total {
+        return Err(rule(
+            "misbehaviour header lacks > 1/3 trusted voting-power backing",
+        ));
+    }
+    Ok(())
+}
+
+fn misbehaviour_evidence_id(
+    chain_id: &str,
+    kind: TendermintMisbehaviourKind,
+    trusted_height: u64,
+    h1: &TendermintCommitEvidence,
+    h2_meta: (u64, [u8; 32]),
+    culprits: &[TendermintValidator],
+) -> [u8; 32] {
+    let kind_byte = match kind {
+        TendermintMisbehaviourKind::DoubleSignEquivocation => 1u8,
+        TendermintMisbehaviourKind::BftTimeViolation => 2u8,
+        TendermintMisbehaviourKind::LunaticHeader => 3u8,
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"budlum/tendermint/ics07-misbehaviour/v1");
+    let cid = chain_id.as_bytes();
+    hasher.update(u32::try_from(cid.len()).unwrap_or(u32::MAX).to_le_bytes());
+    hasher.update(cid);
+    hasher.update([kind_byte]);
+    hasher.update(trusted_height.to_le_bytes());
+    hasher.update(h1.height.to_le_bytes());
+    hasher.update(32u32.to_le_bytes());
+    hasher.update(h1.block_hash);
+    hasher.update(h2_meta.0.to_le_bytes());
+    hasher.update(32u32.to_le_bytes());
+    hasher.update(h2_meta.1);
+    hasher.update(
+        u32::try_from(culprits.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
+    for v in culprits {
+        hasher.update(u32::try_from(ADDRESS_LEN).unwrap_or(u32::MAX).to_le_bytes());
+        hasher.update(v.address);
+        hasher.update(
+            u32::try_from(PUBLIC_KEY_LEN)
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        hasher.update(v.public_key);
+        hasher.update(v.voting_power.to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
+/// Verify an IBC ICS-07 [`TendermintMisbehaviour`] proof against an unexpired
+/// [`TrustedTendermintState`] and validated [`TendermintLightParams`].
+///
+/// Extracts exact culpable validators without ever blaming innocent validators:
+/// - **Double-sign equivocation** (`h1.height == h2.height`, `h1.block_hash !=
+///   h2.block_hash`): culprits are the exact intersection of validators that
+///   signed BOTH conflicting headers with matching Ed25519 keys.
+/// - **BFT time violation** (`h1.height < h2.height`, `h1.time >= h2.time`):
+///   culprits are the exact intersection of validators that signed BOTH
+///   time-violating commits.
+/// - **Lunatic header** (`h1.height == trusted.height + 1`,
+///   `h1.validators_hash != trusted.next_validators_hash` with `> 1/3` trusted
+///   voting power): culprits are the exact trusted validators that signed the
+///   invalid validator-set transition.
+///
+/// # Errors
+///
+/// Returns [`AdapterError`] if `params` violate `trusting_period < unbonding_period`,
+/// the trusted state has expired, any commit fails signature/quorum/header-hash
+/// checks, no consensus violation exists, or the culprit intersection is empty.
+///
+/// WIRING: consumed by [`TendermintLightClient::submit_misbehaviour`] and
+/// `settlement::shared_security::execute_tendermint_misbehaviour_slash`.
+pub fn verify_tendermint_misbehaviour(
+    trusted: &TrustedTendermintState,
+    params: &TendermintLightParams,
+    evidence: &TendermintMisbehaviour,
+    now_secs: u64,
+) -> Result<VerifiedTendermintMisbehaviour, AdapterError> {
+    params.validate()?;
+    let effective_trusting = trusted
+        .trusting_period_secs
+        .min(params.trusting_period_secs);
+    if effective_trusting == 0 || effective_trusting >= params.unbonding_period_secs {
+        return Err(rule(
+            "trusted state trusting_period violates ICS-07 unbonding bound",
+        ));
+    }
+    if now_secs.saturating_sub(trusted.time_secs) >= effective_trusting {
+        return Err(AdapterError::Stale {
+            age: now_secs.saturating_sub(trusted.time_secs),
+            max_age: effective_trusting,
+        });
+    }
+    let (trusted_map, trusted_total) = build_trusted_validator_map(trusted)?;
+
+    let h1 = &evidence.header_1;
+    if !height_within_forward_drift(trusted.height, h1.height, params.max_height_drift) {
+        return Err(rule("misbehaviour header_1 height outside trusted era"));
+    }
+    let c1 = verify_commit_against_trusted_map(
+        &trusted.chain_id,
+        &trusted_map,
+        h1,
+        params.max_clock_drift_secs,
+        now_secs,
+    )?;
+
+    let Some(h2) = evidence.header_2.as_ref() else {
+        // Single-header lunatic fault at `trusted.height + 1`.
+        if Some(h1.height) != trusted.height.checked_add(1)
+            || trusted.next_validators_hash == [0u8; 32]
+        {
+            return Err(rule(
+                "single-header lunatic misbehaviour requires height == trusted.height + 1 and non-zero trusted.next_validators_hash",
+            ));
+        }
+        if bool::from(subtle::ConstantTimeEq::ct_eq(
+            c1.set_hash.as_slice(),
+            trusted.next_validators_hash.as_slice(),
+        )) {
+            return Err(rule(
+                "header matches trusted next_validators_hash and is not lunatic",
+            ));
+        }
+        if c1.trusted_overlap.saturating_mul(3) <= trusted_total {
+            return Err(rule(
+                "lunatic header lacks > 1/3 trusted voting-power signatures",
+            ));
+        }
+        let mut culprits = c1.trusted_signers;
+        culprits.sort_by_key(|v| v.address);
+        if culprits.is_empty() {
+            return Err(rule("lunatic header carries no culpable trusted signers"));
+        }
+        let evidence_id = misbehaviour_evidence_id(
+            &trusted.chain_id,
+            TendermintMisbehaviourKind::LunaticHeader,
+            trusted.height,
+            h1,
+            (h1.height, h1.block_hash),
+            &culprits,
+        );
+        return Ok(VerifiedTendermintMisbehaviour {
+            chain_id: trusted.chain_id.clone(),
+            kind: TendermintMisbehaviourKind::LunaticHeader,
+            trusted_height: trusted.height,
+            header_1_height: h1.height,
+            header_2_height: h1.height,
+            culprits,
+            culprit_trusted_power: c1.trusted_overlap,
+            evidence_id,
+        });
+    };
+
+    if !height_within_forward_drift(trusted.height, h2.height, params.max_height_drift) {
+        return Err(rule("misbehaviour header_2 height outside trusted era"));
+    }
+    let c2 = verify_commit_against_trusted_map(
+        &trusted.chain_id,
+        &trusted_map,
+        h2,
+        params.max_clock_drift_secs,
+        now_secs,
+    )?;
+    check_trust_for_misbehaviour(trusted, trusted_total, h1, &c1)?;
+    check_trust_for_misbehaviour(trusted, trusted_total, h2, &c2)?;
+
+    // Canonicalize order (`low` has height <= `high`).
+    let (low_h, low_c, high_h, high_c) = if h1.height <= h2.height {
+        (h1, &c1, h2, &c2)
+    } else {
+        (h2, &c2, h1, &c1)
+    };
+
+    let kind = if low_h.height == high_h.height {
+        if bool::from(subtle::ConstantTimeEq::ct_eq(
+            low_h.block_hash.as_slice(),
+            high_h.block_hash.as_slice(),
+        )) {
+            return Err(rule(
+                "same-height misbehaviour headers sign the identical block_hash",
+            ));
+        }
+        TendermintMisbehaviourKind::DoubleSignEquivocation
+    } else if low_h.commit_time >= high_h.commit_time || low_c.median_ts >= high_c.median_ts {
+        TendermintMisbehaviourKind::BftTimeViolation
+    } else {
+        return Err(rule(
+            "ordered headers respect BFT time monotonicity and show no misbehaviour",
+        ));
+    };
+
+    // Exact double-signer intersection: only validators that cryptographically
+    // signed BOTH conflicting commits are marked culpable.
+    let mut culprits = Vec::new();
+    let mut culprit_trusted_power = 0u128;
+    for (addr, v1) in &low_c.target_signers {
+        if let Some(v2) = high_c.target_signers.get(addr) {
+            if bool::from(subtle::ConstantTimeEq::ct_eq(
+                v1.public_key.as_slice(),
+                v2.public_key.as_slice(),
+            )) {
+                culprits.push(**v1);
+                if let Some(tv) = trusted_map.get(addr) {
+                    culprit_trusted_power =
+                        culprit_trusted_power.saturating_add(u128::from(tv.voting_power));
+                }
+            }
+        }
+    }
+    if culprits.is_empty() {
+        return Err(rule(
+            "conflicting commits share no attributable overlapping double-signers",
+        ));
+    }
+    // Canonicalize evidence_id order on equal heights by smaller block_hash so
+    // swapping `(h1, h2)` never produces a distinct replay identifier.
+    let (first_h, second_h) =
+        if low_h.height == high_h.height && high_h.block_hash < low_h.block_hash {
+            (high_h, low_h)
+        } else {
+            (low_h, high_h)
+        };
+    let evidence_id = misbehaviour_evidence_id(
+        &trusted.chain_id,
+        kind,
+        trusted.height,
+        first_h,
+        (second_h.height, second_h.block_hash),
+        &culprits,
+    );
+
+    Ok(VerifiedTendermintMisbehaviour {
+        chain_id: trusted.chain_id.clone(),
+        kind,
+        trusted_height: trusted.height,
+        header_1_height: first_h.height,
+        header_2_height: second_h.height,
+        culprits,
+        culprit_trusted_power,
+        evidence_id,
+    })
+}
+
+/// Finalized per-height `CometBFT` consensus root recorded by [`TendermintLightClient`].
+///
+/// WIRING: returned by [`TendermintLightClient::consensus_state`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TendermintConsensusState {
+    /// Verified block height.
+    pub height: u64,
+    /// Validator-signed 14-leaf RFC-6962 `CometBFT` `Header.Hash()`.
+    pub block_hash: [u8; 32],
+    /// Authenticated IBC/ABCI `AppHash` at `height`.
+    pub app_hash: [u8; 32],
+    /// Authenticated `ValidatorSet.Hash()` active at `height`.
+    pub validators_hash: [u8; 32],
+    /// Authenticated `NextValidatorsHash` committed for `height + 1`.
+    pub next_validators_hash: [u8; 32],
+    /// Verified BFT Unix timestamp (seconds).
+    pub timestamp_secs: u64,
+}
+
+/// Stateful IBC ICS-07 `CometBFT` light client.
+///
+/// Enforces `0 < trusting_period < unbonding_period`, sequential
+/// `next_validators_hash` chaining, `> 1/3` Amintoosi-Buchman-Kwon skipping,
+/// atomic multi-step bisection across arbitrary validator turnover, bounded
+/// consensus-state retention, and permanent fail-closed freeze on proven
+/// misbehaviour.
+///
+/// WIRING: consumed by `settlement::shared_security::execute_tendermint_misbehaviour_slash`
+/// and IBC light-client verification paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TendermintLightClient {
+    params: TendermintLightParams,
+    latest_trusted: TrustedTendermintState,
+    consensus_states: std::collections::BTreeMap<u64, TendermintConsensusState>,
+    frozen_height: Option<u64>,
+    frozen_evidence_id: Option<[u8; 32]>,
+}
+
+impl TendermintLightClient {
+    /// Initialize an ICS-07 client from a governance-pinned trusted state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError::ConsensusRule`] if `params`, `initial_trusted`,
+    /// or `initial_block_hash` fails validation.
+    pub fn new(
+        mut initial_trusted: TrustedTendermintState,
+        initial_block_hash: [u8; 32],
+        initial_app_hash: [u8; 32],
+        params: TendermintLightParams,
+    ) -> Result<Self, AdapterError> {
+        params.validate()?;
+        if initial_trusted.chain_id.is_empty() || initial_trusted.height == 0 {
+            return Err(rule(
+                "initial trusted state must carry non-empty chain_id and height > 0",
+            ));
+        }
+        if initial_block_hash == [0u8; 32] {
+            return Err(rule("initial trusted block_hash cannot be all zeroes"));
+        }
+        let _ = build_trusted_validator_map(&initial_trusted)?;
+        initial_trusted.trusting_period_secs = params.trusting_period_secs;
+        let validators_hash = validator_set_hash(&initial_trusted.validators);
+        let mut consensus_states = std::collections::BTreeMap::new();
+        consensus_states.insert(
+            initial_trusted.height,
+            TendermintConsensusState {
+                height: initial_trusted.height,
+                block_hash: initial_block_hash,
+                app_hash: initial_app_hash,
+                validators_hash,
+                next_validators_hash: initial_trusted.next_validators_hash,
+                timestamp_secs: initial_trusted.time_secs,
+            },
+        );
+        Ok(Self {
+            params,
+            latest_trusted: initial_trusted,
+            consensus_states,
+            frozen_height: None,
+            frozen_evidence_id: None,
+        })
+    }
+
+    /// Returns `true` once proven misbehaviour has permanently frozen this client.
+    ///
+    /// Convenience: kept for the CLI and bridge health inspectors.
+    #[must_use]
+    pub const fn is_frozen(&self) -> bool {
+        self.frozen_height.is_some()
+    }
+
+    /// Look up the authenticated [`TendermintConsensusState`] finalized at `height`.
+    #[must_use]
+    pub fn consensus_state(&self, height: u64) -> Option<&TendermintConsensusState> {
+        self.consensus_states.get(&height)
+    }
+
+    /// Return the current latest trusted light-client state.
+    ///
+    /// Convenience: kept for the CLI and relayer bisection planners.
+    #[must_use]
+    pub const fn latest_trusted(&self) -> &TrustedTendermintState {
+        &self.latest_trusted
+    }
+
+    /// Verify and apply one adjacent or `> 1/3`-skipping header update.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] if the client is frozen, the trusting period
+    /// expired, or `target` fails skipping/sequential verification.
+    ///
+    /// Convenience: kept for the CLI and relayer header-update handlers.
+    pub fn update(
+        &mut self,
+        target: &TendermintCommitEvidence,
+        now_secs: u64,
+    ) -> Result<VerifiedTendermintSkip, AdapterError> {
+        if self.is_frozen() {
+            return Err(rule("Tendermint light client is permanently frozen"));
+        }
+        let verified = verify_skipping_commit_bounded(
+            &self.latest_trusted,
+            target,
+            None,
+            None,
+            now_secs,
+            self.params.max_clock_drift_secs,
+            self.params.max_height_drift,
+        )?;
+        self.commit_verified_header(target, &verified);
+        Ok(verified)
+    }
+
+    /// Verify [`TendermintMisbehaviour`], permanently freeze this light client
+    /// fail-closed, and return culpable validators for shared-security slashing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] if the client is already frozen or `evidence`
+    /// fails ICS-07 misbehaviour verification.
+    pub fn submit_misbehaviour(
+        &mut self,
+        evidence: &TendermintMisbehaviour,
+        now_secs: u64,
+    ) -> Result<VerifiedTendermintMisbehaviour, AdapterError> {
+        if self.is_frozen() {
+            return Err(rule("Tendermint light client is already frozen"));
+        }
+        let verified =
+            verify_tendermint_misbehaviour(&self.latest_trusted, &self.params, evidence, now_secs)?;
+        self.frozen_height = Some(verified.header_1_height.min(verified.header_2_height));
+        self.frozen_evidence_id = Some(verified.evidence_id);
+        Ok(verified)
+    }
+
+    fn commit_verified_header(
+        &mut self,
+        commit: &TendermintCommitEvidence,
+        skip: &VerifiedTendermintSkip,
+    ) {
+        let next_hash = skip.next_validators_hash.unwrap_or([0u8; 32]);
+        self.latest_trusted = TrustedTendermintState {
+            chain_id: commit.chain_id.clone(),
+            height: skip.height,
+            time_secs: skip.median_time_secs,
+            trusting_period_secs: self.params.trusting_period_secs,
+            validators: commit.validators.clone(),
+            next_validators_hash: next_hash,
+        };
+        if !self.consensus_states.contains_key(&skip.height)
+            && self.consensus_states.len() >= MAX_STORED_CONSENSUS_STATES
+        {
+            if let Some(&oldest) = self.consensus_states.keys().next() {
+                self.consensus_states.remove(&oldest);
+            }
+        }
+        self.consensus_states.insert(
+            skip.height,
+            TendermintConsensusState {
+                height: skip.height,
+                block_hash: skip.block_hash,
+                app_hash: skip.app_hash,
+                validators_hash: skip.validator_set_hash,
+                next_validators_hash: next_hash,
+                timestamp_secs: skip.median_time_secs,
+            },
+        );
+    }
+}
+
 fn rule(reason: impl Into<String>) -> AdapterError {
     AdapterError::ConsensusRule {
         rule: reason.into(),
     }
 }
+
+#[path = "tendermint_bisection.rs"]
+mod bisection;
 
 // ---------------------------------------------------------------------------
 // The canonical encoding
@@ -806,6 +1924,7 @@ pub struct TendermintFinalityAdapter {
     /// validator-set forgery and unsigned `app_hash` substitution).
     pinned_validator_set: Option<[u8; 32]>,
     require_pinned_set: bool,
+    trusted_era: Option<TendermintEraAnchor>,
     golden: Option<RawConsensusEvidence>,
 }
 
@@ -831,6 +1950,7 @@ impl TendermintFinalityAdapter {
             chain_id: chain_id.to_string(),
             pinned_validator_set: None,
             require_pinned_set: false,
+            trusted_era: None,
             golden: None,
         }
     }
@@ -846,6 +1966,16 @@ impl TendermintFinalityAdapter {
         adapter.pinned_validator_set = validator_set_hash.filter(|h| *h != [0u8; 32]);
         adapter.require_pinned_set = true;
         adapter
+    }
+
+    /// Attach a pinned-era height and ICS-07 trusting-period anchor so
+    /// retired committees past `trusting_period` or `max_height_drift` fail closed.
+    ///
+    /// Convenience: kept for the CLI and era-bounded `CometBFT` domain builders.
+    #[must_use]
+    pub const fn with_trusted_era(mut self, era: TendermintEraAnchor) -> Self {
+        self.trusted_era = Some(era);
+        self
     }
 
     /// The chain id this adapter will only ever attest.
@@ -893,6 +2023,12 @@ impl TendermintFinalityAdapter {
 impl ExternalFinalityAdapter for TendermintFinalityAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        !self.require_pinned_set
+            || self.pinned_validator_set.is_some()
+            || self.trusted_era.is_some()
     }
 
     fn verify(
@@ -983,6 +2119,36 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
         } else {
             decoded.app_hash
         };
+
+        if let Some(era) = &self.trusted_era {
+            era.params.validate()?;
+            let age = policy.now.saturating_sub(era.pinned_time_secs);
+            if age >= era.params.trusting_period_secs {
+                return Err(AdapterError::Stale {
+                    age,
+                    max_age: era.params.trusting_period_secs,
+                });
+            }
+            if !height_within_pinned_era(era.pinned_height, decoded.height)
+                || !height_within_forward_drift(
+                    era.pinned_height,
+                    decoded.height,
+                    era.params.max_height_drift,
+                )
+            {
+                return Err(rule(format!(
+                    "commit height {} escapes pinned era ({}..={}); advance anchor via ICS-07 bisection",
+                    decoded.height,
+                    era.pinned_height.saturating_add(1),
+                    era.pinned_height.saturating_add(era.params.max_height_drift)
+                )));
+            }
+            if decoded.commit_time <= era.pinned_time_secs {
+                return Err(rule(
+                    "commit BFT time does not strictly advance past pinned era timestamp",
+                ));
+            }
+        }
 
         if policy.require_declared_match {
             if evidence.declared_height != decoded.height {
@@ -1707,7 +2873,10 @@ mod tests {
     fn every_header_field_is_covered_by_the_block_id() {
         let commit = noble_commit();
         let original = commit.header_hash();
-        let mutations: Vec<(&str, Box<dyn Fn(&mut TendermintCommitEvidence)>)> = vec![
+        // A named alias keeps the table readable: every entry is one field
+        // name and one closure that perturbs that field.
+        type FieldMutation<'a> = (&'a str, Box<dyn Fn(&mut TendermintCommitEvidence)>);
+        let mutations: Vec<FieldMutation<'_>> = vec![
             (
                 "chain_id",
                 Box::new(|c: &mut TendermintCommitEvidence| c.chain_id = "noble-2".to_string()),
@@ -2794,5 +3963,712 @@ mod tests {
             result.is_err(),
             "a forged signature must not finalize: {result:?}"
         );
+    }
+
+    fn build_rfc6962_tree_and_proof(
+        leaves: &[Vec<u8>],
+        target_idx: usize,
+    ) -> ([u8; 32], Rfc6962Proof) {
+        fn rec(slice: &[Vec<u8>], idx: Option<usize>, aunts: &mut Vec<[u8; 32]>) -> [u8; 32] {
+            if slice.len() == 1 {
+                return rfc6962_leaf_hash(&slice[0]);
+            }
+            let k = rfc6962_split_point(slice.len());
+            let (left_s, right_s) = slice.split_at(k);
+            match idx {
+                Some(i) if i < k => {
+                    let l = rec(left_s, Some(i), aunts);
+                    let r = rec(right_s, None, aunts);
+                    aunts.push(r);
+                    rfc6962_inner_hash(&l, &r)
+                }
+                Some(i) => {
+                    let l = rec(left_s, None, aunts);
+                    let r = rec(right_s, Some(i - k), aunts);
+                    aunts.push(l);
+                    rfc6962_inner_hash(&l, &r)
+                }
+                None => {
+                    let l = rec(left_s, None, aunts);
+                    let r = rec(right_s, None, aunts);
+                    rfc6962_inner_hash(&l, &r)
+                }
+            }
+        }
+        let mut aunts = Vec::new();
+        let root = rec(leaves, Some(target_idx), &mut aunts);
+        (
+            root,
+            Rfc6962Proof {
+                index: target_idx,
+                total: leaves.len(),
+                aunts,
+            },
+        )
+    }
+
+    #[test]
+    fn tendermint_skipping_light_client_verifies_rotation_and_rfc6962_app_hash_and_refuses_forgery()
+    {
+        use crate::crypto::primitives::KeyPair;
+
+        let chain_id = "cosmoshub-4";
+        let keys: Vec<KeyPair> = (0..6).map(|_| KeyPair::generate().expect("kp")).collect();
+        let make_val = |kp: &KeyPair, power: u64| {
+            let public_key = kp.public_key_bytes();
+            TendermintValidator {
+                address: validator_address_of(&public_key),
+                public_key,
+                voting_power: power,
+            }
+        };
+
+        // Trusted validator set at height 100: keys[0..4], 100 power each (total 400).
+        let trusted_vals = vec![
+            make_val(&keys[0], 100),
+            make_val(&keys[1], 100),
+            make_val(&keys[2], 100),
+            make_val(&keys[3], 100),
+        ];
+        // Rotated validator set at non-adjacent height 250: keys[0], keys[1] stay (200/400 = 50% > 1/3),
+        // keys[4], keys[5] join (total target power 400; keys[0,1,4] sign = 300 >= 267).
+        let target_vals = vec![
+            make_val(&keys[0], 100),
+            make_val(&keys[1], 100),
+            make_val(&keys[4], 100),
+            make_val(&keys[5], 100),
+        ];
+        let next_vals_hash = [0x77; 32];
+        let app_hash = [0x99; 32];
+        let parts_hash = [0x55; 32];
+        let vote_ts = 1_750_010_000i64;
+        let target_validators_hash = validator_set_hash(&target_vals);
+        let proposer = validator_address_of(&keys[0].public_key_bytes());
+
+        // Construct canonical 14-leaf CometBFT Header RFC-6962 tree so BOTH
+        // `commit.header_hash() == block_hash` AND individual RFC-6962 field
+        // openings for `app_hash` (10) and `next_validators_hash` (8) hold.
+        let mut version_leaf = Vec::new();
+        put_scalar(&mut version_leaf, 1, 1);
+        let mut ts_leaf = Vec::new();
+        put_scalar(&mut ts_leaf, 1, vote_ts as u64);
+        let mut last_ps = Vec::new();
+        put_scalar(&mut last_ps, 1, 1);
+        put_bytes(&mut last_ps, 2, &[0x22; 32]);
+        let mut last_bid = Vec::new();
+        put_bytes(&mut last_bid, 1, &[0x11; 32]);
+        put_bytes(&mut last_bid, 2, &last_ps);
+        let header_leaves = vec![
+            version_leaf,
+            proto_string_value(chain_id),
+            proto_int64_value(250),
+            ts_leaf,
+            last_bid,
+            proto_bytes_value(&[0x33; 32]),
+            proto_bytes_value(&[0x44; 32]),
+            proto_bytes_value(&target_validators_hash),
+            proto_bytes_value(&next_vals_hash),
+            proto_bytes_value(&[0x66; 32]),
+            proto_bytes_value(&app_hash),
+            proto_bytes_value(&[0x88; 32]),
+            proto_bytes_value(&[0xaa; 32]),
+            proto_bytes_value(&proposer),
+        ];
+        let (block_hash, app_proof) =
+            build_rfc6962_tree_and_proof(&header_leaves, COMETBFT_HEADER_APP_HASH_INDEX);
+        let (block_hash_chk, next_proof) =
+            build_rfc6962_tree_and_proof(&header_leaves, COMETBFT_HEADER_NEXT_VALIDATORS_INDEX);
+        assert_eq!(block_hash, block_hash_chk);
+
+        let sign_commit = |signer_indices: &[usize]| -> TendermintCommitEvidence {
+            let signatures = signer_indices
+                .iter()
+                .map(|&idx| {
+                    let msg = vote_sign_bytes(
+                        chain_id,
+                        250,
+                        0,
+                        &block_hash,
+                        1,
+                        &parts_hash,
+                        (vote_ts, 0),
+                    );
+                    let pk = keys[idx].public_key_bytes();
+                    TendermintSignature {
+                        address: validator_address_of(&pk),
+                        timestamp_seconds: vote_ts,
+                        timestamp_nanos: 0,
+                        signature: keys[idx].sign(&msg).to_vec(),
+                    }
+                })
+                .collect();
+            let ev = TendermintCommitEvidence {
+                chain_id: chain_id.to_string(),
+                height: 250,
+                round: 0,
+                block_hash,
+                parts_total: 1,
+                parts_hash,
+                version_block: 1,
+                last_block_hash: [0x11; 32],
+                last_parts_total: 1,
+                last_parts_hash: [0x22; 32],
+                last_commit_hash: [0x33; 32],
+                data_hash: [0x44; 32],
+                validators_hash: target_validators_hash,
+                next_validators_hash: next_vals_hash,
+                consensus_hash: [0x66; 32],
+                app_hash,
+                last_results_hash: [0x88; 32],
+                evidence_hash: [0xaa; 32],
+                proposer_address: proposer,
+                commit_time: vote_ts as u64,
+                commit_time_nanos: 0,
+                validators: target_vals.clone(),
+                signatures,
+            };
+            assert_eq!(ev.header_hash(), block_hash);
+            ev
+        };
+
+        let trusted = TrustedTendermintState {
+            chain_id: chain_id.to_string(),
+            height: 100,
+            time_secs: 1_750_000_000,
+            trusting_period_secs: 86_400,
+            validators: trusted_vals,
+            next_validators_hash: [0x12; 32],
+        };
+        let valid_skip = sign_commit(&[0, 1, 4]);
+        let verified = verify_skipping_commit(
+            &trusted,
+            &valid_skip,
+            Some(&app_proof),
+            Some((next_vals_hash, &next_proof)),
+            1_750_010_010,
+        )
+        .expect("50% trusted overlap + 75% target quorum + RFC-6962 proofs verify");
+        assert_eq!(verified.height, 250);
+        assert_eq!(verified.app_hash, app_hash);
+        assert_eq!(verified.next_validators_hash, Some(next_vals_hash));
+        assert_eq!(verified.trusted_overlap_power, 200);
+        assert_eq!(verified.target_signed_power, 300);
+
+        // 1. Forgery: signers [0, 4, 5] reach 300/400 (75% > 2/3) of target set,
+        //    but only 100/400 (25% <= 1/3) of trusted set -> refused!
+        let low_overlap = sign_commit(&[0, 4, 5]);
+        assert!(matches!(
+            verify_skipping_commit(
+                &trusted,
+                &low_overlap,
+                Some(&app_proof),
+                None,
+                1_750_010_010
+            ),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // 2. Forgery: substituted app_hash fails RFC-6962 header proof against signed block_hash.
+        let mut forged_app = valid_skip.clone();
+        forged_app.app_hash = [0xEE; 32];
+        assert!(matches!(
+            verify_skipping_commit(&trusted, &forged_app, Some(&app_proof), None, 1_750_010_010),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // 3. Expired trusting period must fail closed with AdapterError::Stale.
+        assert!(matches!(
+            verify_skipping_commit(&trusted, &valid_skip, Some(&app_proof), None, 1_750_100_000),
+            Err(AdapterError::Stale { .. })
+        ));
+    }
+
+    fn build_signed_tm_commit(
+        chain_id: &str,
+        height: u64,
+        commit_time: u64,
+        app_hash: [u8; 32],
+        next_validators_hash: [u8; 32],
+        val_keys: &[(&crate::crypto::primitives::KeyPair, u64)],
+        signer_positions: &[usize],
+    ) -> TendermintCommitEvidence {
+        let validators: Vec<TendermintValidator> = val_keys
+            .iter()
+            .map(|(kp, power)| {
+                let pk = kp.public_key_bytes();
+                TendermintValidator {
+                    address: validator_address_of(&pk),
+                    public_key: pk,
+                    voting_power: *power,
+                }
+            })
+            .collect();
+        let validators_hash = validator_set_hash(&validators);
+        let proposer_address = validators[0].address;
+        let parts_hash = Sha256::digest(app_hash).into();
+        let mut commit = TendermintCommitEvidence {
+            chain_id: chain_id.to_string(),
+            height,
+            round: 0,
+            block_hash: [0u8; 32],
+            parts_total: 1,
+            parts_hash,
+            version_block: 11,
+            last_block_hash: [0x11; 32],
+            last_parts_total: 1,
+            last_parts_hash: [0x22; 32],
+            last_commit_hash: [0x33; 32],
+            data_hash: [0x44; 32],
+            validators_hash,
+            next_validators_hash,
+            consensus_hash: [0x66; 32],
+            app_hash,
+            last_results_hash: [0x88; 32],
+            evidence_hash: [0xaa; 32],
+            proposer_address,
+            commit_time,
+            commit_time_nanos: 0,
+            validators,
+            signatures: Vec::new(),
+        };
+        commit.block_hash = commit.header_hash();
+        let ts_i64 = i64::try_from(commit_time).expect("ts");
+        commit.signatures = signer_positions
+            .iter()
+            .map(|&pos| {
+                let (kp, _) = val_keys[pos];
+                let pk = kp.public_key_bytes();
+                let msg = vote_sign_bytes(
+                    chain_id,
+                    height,
+                    0,
+                    &commit.block_hash,
+                    1,
+                    &parts_hash,
+                    (ts_i64, 0),
+                );
+                TendermintSignature {
+                    address: validator_address_of(&pk),
+                    timestamp_seconds: ts_i64,
+                    timestamp_nanos: 0,
+                    signature: kp.sign(&msg).to_vec(),
+                }
+            })
+            .collect();
+        commit
+    }
+
+    #[test]
+    fn skipping_commit_refuses_sybil_validator_injection_against_signed_header() {
+        use crate::crypto::primitives::KeyPair;
+
+        let chain_id = "cosmoshub-sybil-probe-1";
+        let honest: Vec<KeyPair> = (1u8..=4)
+            .map(|s| KeyPair::from_seed(&[s; 32]).expect("key"))
+            .collect();
+        let sybil = KeyPair::from_seed(&[0xFA; 32]).expect("sybil");
+
+        let honest_pairs: Vec<(&KeyPair, u64)> = honest.iter().map(|k| (k, 100)).collect();
+        let real_commit = build_signed_tm_commit(
+            chain_id,
+            250,
+            1_760_005_000,
+            [0xAB; 32],
+            validator_set_hash(
+                &honest_pairs
+                    .iter()
+                    .map(|(k, p)| TendermintValidator {
+                        address: validator_address_of(&k.public_key_bytes()),
+                        public_key: k.public_key_bytes(),
+                        voting_power: *p,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            &honest_pairs,
+            &[0, 1, 2],
+        );
+
+        let trusted = TrustedTendermintState {
+            chain_id: chain_id.to_string(),
+            height: 100,
+            time_secs: 1_760_000_000,
+            trusting_period_secs: 86_400,
+            validators: real_commit.validators.clone(),
+            next_validators_hash: [0u8; 32],
+        };
+
+        // Zero-Byzantine hijack attempt: take TWO genuine honest precommits from
+        // `real_commit` (>1/3 trusted overlap = 200/400), swap `validators` for a
+        // 10,000-power Sybil key signing the same real `block_hash`, and claim a
+        // forged `next_validators_hash`! Must fail closed on `header_hash() != block_hash`.
+        let sybil_pk = sybil.public_key_bytes();
+        let sybil_val = TendermintValidator {
+            address: validator_address_of(&sybil_pk),
+            public_key: sybil_pk,
+            voting_power: 10_000,
+        };
+        let sybil_msg = vote_sign_bytes(
+            chain_id,
+            250,
+            0,
+            &real_commit.block_hash,
+            1,
+            &real_commit.parts_hash,
+            (1_760_005_000, 0),
+        );
+        let mut hijacked = real_commit.clone();
+        hijacked.validators = vec![
+            real_commit.validators[0],
+            real_commit.validators[1],
+            sybil_val,
+        ];
+        hijacked.validators_hash = validator_set_hash(&hijacked.validators);
+        hijacked.signatures = vec![
+            real_commit.signatures[0].clone(),
+            real_commit.signatures[1].clone(),
+            TendermintSignature {
+                address: sybil_val.address,
+                timestamp_seconds: 1_760_005_000,
+                timestamp_nanos: 0,
+                signature: sybil.sign(&sybil_msg).to_vec(),
+            },
+        ];
+        let err = verify_skipping_commit(&trusted, &hijacked, None, None, 1_760_005_010)
+            .expect_err("Sybil validator injection onto honest signed block_hash must fail closed");
+        assert!(
+            matches!(err, AdapterError::ConsensusRule { ref rule } if rule.contains("header_hash")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn ics07_light_client_enforces_unbonding_bound_adjacent_next_set_and_100pct_churn_bisection() {
+        use crate::crypto::primitives::KeyPair;
+
+        // trusting_period >= unbonding_period must be refused at the door.
+        assert!(TendermintLightParams {
+            trusting_period_secs: 1_814_400,
+            unbonding_period_secs: 1_814_400,
+            max_clock_drift_secs: 60,
+            max_height_drift: 1_000,
+        }
+        .validate()
+        .is_err());
+
+        let params = TendermintLightParams::standard_for_unbonding(1_814_400).expect("21d params");
+        assert_eq!(params.trusting_period_secs, 1_209_600);
+
+        let chain_id = "ibc-bisect-1";
+        let keys: Vec<KeyPair> = (10u8..=21)
+            .map(|s| KeyPair::from_seed(&[s; 32]).expect("key"))
+            .collect();
+        let val_of = |kp: &KeyPair, p: u64| TendermintValidator {
+            address: validator_address_of(&kp.public_key_bytes()),
+            public_key: kp.public_key_bytes(),
+            voting_power: p,
+        };
+
+        // H=100: [0,1,2,3] -> H=150: [0,1,4,5] (50% overlap) -> H=200: [4,5,6,7]
+        // (0% overlap with H=100! Single skip H=100->H=200 MUST FAIL; 2-step
+        // bisection [H=150, H=200] MUST SUCCEED!) -> H=201: [8,9,10,11] (100%
+        // instant churn via committed adjacent `next_validators_hash`!).
+        let set_100: Vec<(&KeyPair, u64)> = keys[0..4].iter().map(|k| (k, 100)).collect();
+        let set_150: Vec<(&KeyPair, u64)> = vec![
+            (&keys[0], 100),
+            (&keys[1], 100),
+            (&keys[4], 100),
+            (&keys[5], 100),
+        ];
+        let set_200: Vec<(&KeyPair, u64)> = keys[4..8].iter().map(|k| (k, 100)).collect();
+        let set_201: Vec<(&KeyPair, u64)> = keys[8..12].iter().map(|k| (k, 100)).collect();
+        let set_201_hash = validator_set_hash(
+            &set_201
+                .iter()
+                .map(|(k, p)| val_of(k, *p))
+                .collect::<Vec<_>>(),
+        );
+
+        let c150 = build_signed_tm_commit(
+            chain_id,
+            150,
+            1_770_001_000,
+            [0x15; 32],
+            [0xAA; 32],
+            &set_150,
+            &[0, 1, 2],
+        );
+        let c200 = build_signed_tm_commit(
+            chain_id,
+            200,
+            1_770_002_000,
+            [0x20; 32],
+            set_201_hash,
+            &set_200,
+            &[0, 1, 2],
+        );
+        let c201 = build_signed_tm_commit(
+            chain_id,
+            201,
+            1_770_002_006,
+            [0x21; 32],
+            [0xBB; 32],
+            &set_201,
+            &[0, 1, 2],
+        );
+
+        let initial = TrustedTendermintState {
+            chain_id: chain_id.to_string(),
+            height: 100,
+            time_secs: 1_770_000_000,
+            trusting_period_secs: params.trusting_period_secs,
+            validators: set_100.iter().map(|(k, p)| val_of(k, *p)).collect(),
+            next_validators_hash: [0x99; 32],
+        };
+        let mut client =
+            TendermintLightClient::new(initial.clone(), [0x01; 32], [0x02; 32], params)
+                .expect("client");
+
+        // Direct skip 100 -> 200 has 0% trusted overlap -> refused and state unchanged.
+        assert!(client.update(&c200, 1_770_003_000).is_err());
+        assert_eq!(client.latest_trusted().height, 100);
+
+        // Atomic 3-step bisection [150, 200, 201] crosses 100% validator turnover cleanly!
+        let tip = client
+            .verify_bisection(&[c150, c200, c201], 1_770_003_000)
+            .expect("bisection + adjacent next_validators_hash transition succeeds");
+        assert_eq!(tip.height, 201);
+        assert_eq!(tip.app_hash, [0x21; 32]);
+        assert_eq!(
+            client.consensus_state(201).expect("stored").app_hash,
+            [0x21; 32]
+        );
+
+        // TendermintFinalityAdapter::with_trusted_era refuses height leaps past max_height_drift.
+        let set_100_hash = validator_set_hash(&initial.validators);
+        let far_commit = build_signed_tm_commit(
+            chain_id,
+            100 + MAX_HEIGHT_DRIFT + 1,
+            1_770_005_000,
+            [0xFA; 32],
+            [0xFB; 32],
+            &set_100,
+            &[0, 1, 2],
+        );
+        let era_adapter =
+            TendermintFinalityAdapter::new_pinned("test", chain_id, Some(set_100_hash))
+                .with_trusted_era(TendermintEraAnchor {
+                    pinned_height: 100,
+                    pinned_time_secs: 1_770_000_000,
+                    params,
+                });
+        let raw_ev = RawConsensusEvidence {
+            adapter: era_adapter.descriptor().id,
+            evidence_version: EVIDENCE_VERSION,
+            network: "test".to_string(),
+            payload: far_commit.encode().expect("encode"),
+            declared_height: far_commit.height,
+            declared_root: far_commit.app_hash,
+            submitter: Address([1u8; 32]),
+        };
+        let pol = VerificationPolicy {
+            min_depth: 1,
+            require_declared_match: true,
+            max_age: 0,
+            now: 1_770_005_010,
+            require_slashable: false,
+        };
+        let leap_err = era_adapter
+            .verify(&raw_ev, &pol)
+            .expect_err("height leap past MAX_HEIGHT_DRIFT must fail closed");
+        assert!(matches!(
+            leap_err,
+            AdapterError::ConsensusRule { ref rule } if rule.contains("pinned era")
+        ));
+    }
+
+    #[test]
+    fn ics07_misbehaviour_detects_double_sign_time_violation_and_lunatic_and_freezes_client() {
+        use crate::crypto::primitives::KeyPair;
+
+        let chain_id = "ibc-slash-1";
+        let keys: Vec<KeyPair> = (30u8..=34)
+            .map(|s| KeyPair::from_seed(&[s; 32]).expect("key"))
+            .collect();
+        let set: Vec<(&KeyPair, u64)> = keys[0..4].iter().map(|k| (k, 100)).collect();
+        let vals: Vec<TendermintValidator> = set
+            .iter()
+            .map(|(k, p)| TendermintValidator {
+                address: validator_address_of(&k.public_key_bytes()),
+                public_key: k.public_key_bytes(),
+                voting_power: *p,
+            })
+            .collect();
+        let set_hash = validator_set_hash(&vals);
+        let params = TendermintLightParams::standard_for_unbonding(1_814_400).expect("params");
+        let trusted = TrustedTendermintState {
+            chain_id: chain_id.to_string(),
+            height: 500,
+            time_secs: 1_780_000_000,
+            trusting_period_secs: params.trusting_period_secs,
+            validators: vals.clone(),
+            next_validators_hash: set_hash,
+        };
+
+        // 1. Same-height double-sign equivocation: [0,1,2] sign A, [1,2,3] sign B ->
+        //    ONLY double-signers [1,2] are blamed; honest [0] and [3] are untouched!
+        let fork_a = build_signed_tm_commit(
+            chain_id,
+            510,
+            1_780_000_600,
+            [0xA1; 32],
+            set_hash,
+            &set,
+            &[0, 1, 2],
+        );
+        let fork_b = build_signed_tm_commit(
+            chain_id,
+            510,
+            1_780_000_600,
+            [0xB2; 32],
+            set_hash,
+            &set,
+            &[1, 2, 3],
+        );
+        let mut client =
+            TendermintLightClient::new(trusted.clone(), [0x50; 32], [0x51; 32], params).unwrap();
+        let eq = client
+            .submit_misbehaviour(
+                &TendermintMisbehaviour {
+                    header_1: fork_a.clone(),
+                    header_2: Some(fork_b),
+                },
+                1_780_001_000,
+            )
+            .expect("double-sign freezes client");
+        assert_eq!(eq.kind, TendermintMisbehaviourKind::DoubleSignEquivocation);
+        let culprit_addrs: Vec<[u8; 20]> = eq.culprits.iter().map(|v| v.address).collect();
+        assert_eq!(culprit_addrs.len(), 2);
+        assert!(culprit_addrs.contains(&vals[1].address));
+        assert!(culprit_addrs.contains(&vals[2].address));
+        assert!(!culprit_addrs.contains(&vals[0].address));
+        assert!(!culprit_addrs.contains(&vals[3].address));
+        assert_eq!(eq.culprit_trusted_power, 200);
+        assert!(client.is_frozen());
+        // Frozen client permanently rejects all subsequent header updates.
+        assert!(client.update(&fork_a, 1_780_001_000).is_err());
+
+        // 2. BFT time monotonicity violation: h=520 has t=900, h=525 has t=800 (< 900).
+        let t_hi = build_signed_tm_commit(
+            chain_id,
+            520,
+            1_780_000_900,
+            [0xC1; 32],
+            set_hash,
+            &set,
+            &[0, 1, 2],
+        );
+        let t_lo = build_signed_tm_commit(
+            chain_id,
+            525,
+            1_780_000_800,
+            [0xC2; 32],
+            set_hash,
+            &set,
+            &[0, 2, 3],
+        );
+        let tv = verify_tendermint_misbehaviour(
+            &trusted,
+            &params,
+            &TendermintMisbehaviour {
+                header_1: t_hi,
+                header_2: Some(t_lo),
+            },
+            1_780_001_000,
+        )
+        .expect("BFT time violation detected");
+        assert_eq!(tv.kind, TendermintMisbehaviourKind::BftTimeViolation);
+        assert_eq!(tv.culprits.len(), 2);
+
+        // 3. Lunatic header at `trusted.height + 1 = 501`: [0, 1] (>1/3 trusted)
+        //    collude with attacker key[4] to sign a validator set contradicting `trusted.next_validators_hash`.
+        let lunatic_set: Vec<(&KeyPair, u64)> =
+            vec![(&keys[0], 100), (&keys[1], 100), (&keys[4], 100)];
+        let lunatic = build_signed_tm_commit(
+            chain_id,
+            501,
+            1_780_000_010,
+            [0xEE; 32],
+            [0xFF; 32],
+            &lunatic_set,
+            &[0, 1, 2],
+        );
+        // Normal light-client update MUST refuse adjacent lunatic header even though overlap is 50% > 1/3!
+        assert!(verify_skipping_commit(&trusted, &lunatic, None, None, 1_780_001_000).is_err());
+        let lun = verify_tendermint_misbehaviour(
+            &trusted,
+            &params,
+            &TendermintMisbehaviour {
+                header_1: lunatic,
+                header_2: None,
+            },
+            1_780_001_000,
+        )
+        .expect("lunatic header detected");
+        assert_eq!(lun.kind, TendermintMisbehaviourKind::LunaticHeader);
+        assert_eq!(lun.culprits.len(), 2);
+        assert_eq!(lun.culprit_trusted_power, 200);
+    }
+
+    #[test]
+    fn a_skipping_commit_that_rebuilds_its_header_needs_no_app_hash_proof() {
+        let chain_id = "noble-1";
+        let keyring = keys(4);
+        let trusted_vals: Vec<TendermintValidator> = keyring
+            .iter()
+            .map(|key| TendermintValidator {
+                address: validator_address_of(&key.public_key_bytes()),
+                public_key: key.public_key_bytes(),
+                voting_power: 100,
+            })
+            .collect();
+        let target_vals = trusted_vals.clone();
+        let mut target = synthetic_commit(&[100, 100, 100, 100], 3);
+        target.chain_id = chain_id.to_string();
+        target.height = 101;
+        target.validators_hash = validator_set_hash(&target_vals);
+        target.next_validators_hash = validator_set_hash(&target_vals);
+        target.validators = target_vals.clone();
+        target.block_hash = target.header_hash();
+        resign(&mut target, &keyring);
+
+        let trusted = TrustedTendermintState {
+            chain_id: chain_id.to_string(),
+            height: 100,
+            time_secs: 1_699_999_000,
+            trusting_period_secs: 86_400,
+            validators: trusted_vals,
+            next_validators_hash: validator_set_hash(&target_vals),
+        };
+        let verified = verify_skipping_commit(&trusted, &target, None, None, 1_700_000_010)
+            .expect("a header that rebuilds the signed block id proves its own app hash");
+        assert_eq!(verified.app_hash, target.app_hash);
+
+        let mut tampered = target.clone();
+        tampered.app_hash = [0x5cu8; 32];
+        assert!(matches!(
+            verify_skipping_commit(&trusted, &tampered, None, None, 1_700_000_010),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+    }
+
+    #[test]
+    fn the_pinned_era_bound_is_asymmetric_and_bounded() {
+        const PIN: u64 = 200_000;
+        assert!(height_within_pinned_era(PIN, PIN));
+        assert!(height_within_pinned_era(PIN, PIN + MAX_HEIGHT_DRIFT));
+        assert!(height_within_pinned_era(PIN, 5_000_000));
+        assert!(height_within_pinned_era(PIN, PIN - MAX_HEIGHT_DRIFT));
+        assert!(!height_within_pinned_era(PIN, PIN - MAX_HEIGHT_DRIFT - 1));
+        assert!(!height_within_pinned_era(u64::MAX, 0));
     }
 }
