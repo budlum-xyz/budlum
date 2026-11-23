@@ -20,7 +20,7 @@ on:
     branches: [main, consensus-of-consensuses]
   schedule:
     # Weekly hygiene scan (effects of cargo update + new deps)
-    - cron: '17 3 * * 3' # Wednesday 03:17 UTC
+    - cron: '17 16 * * 3' # Wednesday 16:17 UTC
   workflow_dispatch:
 
 # Read-only.
@@ -198,7 +198,7 @@ jobs:
 
           # budzero is a separate workspace and its root is a VIRTUAL manifest (only
           # [workspace], no package). cargo-geiger refuses to run at such a root:
-          # reddediyor: "is a virtual manifest, but this command requires
+          # "is a virtual manifest, but this command requires
           # "running against an actual package". So until now this step had not
           # scanned a single crate of budzero - during the `|| true` era this passed
           # silently, and it surfaced once the gate became fail-closed.

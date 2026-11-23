@@ -151,10 +151,31 @@ fn zstd_encode(content: &[u8], level: i32, long_range: bool) -> Result<Vec<u8>, 
     enc.finish().map_err(|e| CodecError::Encode(e.to_string()))
 }
 
-/// Shannon entropy of `bytes` in millibits per byte, integers only.
+/// Pure-integer binary logarithm in Q32.32 fixed-point (`x >= 1`).
+fn log2_q32(x: u64) -> u64 {
+    if x <= 1 {
+        return 0;
+    }
+    let int_part = u64::from(63u32.saturating_sub(x.leading_zeros()));
+    let mut mantissa: u128 = (u128::from(x) << 32) >> int_part;
+    let mut frac: u64 = 0;
+    for bit in (0..32u32).rev() {
+        mantissa = (mantissa * mantissa) >> 32;
+        if mantissa >= (2u128 << 32) {
+            frac |= 1u64 << bit;
+            mantissa >>= 1;
+        }
+    }
+    (int_part << 32) | frac
+}
+
+/// Shannon entropy of `bytes` in millibits per byte, pure integer arithmetic only.
 #[must_use]
 pub fn entropy_millibits(bytes: &[u8]) -> u32 {
-    if bytes.is_empty() {
+    let Ok(n) = u64::try_from(bytes.len()) else {
+        return 8_000;
+    };
+    if n <= 1 {
         return 0;
     }
     let mut counts = [0u64; 256];
@@ -163,18 +184,18 @@ pub fn entropy_millibits(bytes: &[u8]) -> u32 {
             *c += 1;
         }
     }
-    let n = bytes.len() as f64;
-    // Off the consensus path: selection runs on the uploader's side and
-    // only its verified output is recorded.
-    let h: f64 = counts
-        .iter()
-        .filter(|c| **c > 0)
-        .map(|c| {
-            let p = *c as f64 / n;
-            -p * p.log2()
-        })
-        .sum();
-    (h * 1000.0) as u32
+    let log2_n = u128::from(log2_q32(n));
+    let mut weighted_sum: u128 = 0;
+    for &c in &counts {
+        if c > 0 {
+            weighted_sum =
+                weighted_sum.saturating_add(u128::from(c).saturating_mul(u128::from(log2_q32(c))));
+        }
+    }
+    let avg_log2_c = weighted_sum / u128::from(n);
+    let h_q32 = log2_n.saturating_sub(avg_log2_c);
+    let millibits = (h_q32.saturating_mul(1_000)) >> 32;
+    u32::try_from(millibits.min(8_000)).unwrap_or(8_000)
 }
 
 /// The selected codec and payload.
@@ -213,7 +234,7 @@ pub fn select(content: &[u8]) -> Selected {
         raw.clone()
     };
     // Quick probe: a gain of 5 % or less does not justify the slow levels.
-    let gain_ok = (best.payload.len() as u64) * 100 < len * 95;
+    let gain_ok = u128::from(best.payload.len() as u64) * 100 < u128::from(len) * 95;
     if gain_ok {
         if let Some(c) = zstd_encode(content, STORE_LEVEL, true)
             .ok()
@@ -524,5 +545,17 @@ mod tests {
                 max: MAX_CODEC_DECODE_BYTES
             })
         );
+    }
+
+    #[test]
+    fn entropy_millibits_is_exact_integer_at_powers_of_two_and_uniform_alphabet() {
+        assert_eq!(entropy_millibits(&[]), 0);
+        assert_eq!(entropy_millibits(&[0xAA; 512]), 0);
+        let two_sym: Vec<u8> = (0..1024).map(|i| (i & 1) as u8).collect();
+        assert_eq!(entropy_millibits(&two_sym), 1_000);
+        let four_sym: Vec<u8> = (0..1024).map(|i| (i & 3) as u8).collect();
+        assert_eq!(entropy_millibits(&four_sym), 2_000);
+        let all_bytes: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        assert_eq!(entropy_millibits(&all_bytes), 8_000);
     }
 }

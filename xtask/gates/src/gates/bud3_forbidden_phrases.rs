@@ -106,11 +106,43 @@ fn offenders(root: &Path) -> Vec<(String, &'static str)> {
             continue;
         };
         let lower = text.to_lowercase();
-        if let Some(p) = PHRASES.iter().find(|p| lower.contains(*p)) {
+        if let Some(p) = PHRASES.iter().find(|p| mentions(&lower, p)) {
             out.push((rel, *p));
         }
     }
     out
+}
+
+/// A phrase is a *phrase*: it has to stand on its own word boundaries.
+///
+/// `"zero storage"` inside `"BudZero storage slot"` is one word glued to the
+/// next, not the claim. A plain `contains` cannot tell them apart, so it
+/// reports a file that says the opposite of the forbidden claim. The boundary
+/// is checked only on the phrase's outer edges: the space inside the phrase
+/// still matches whatever whitespace the source happens to carry.
+fn mentions(lower: &str, phrase: &str) -> bool {
+    let boundary_before = |start: usize| {
+        lower[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+    };
+    let boundary_after = |end: usize| {
+        lower[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+    };
+    let mut from = 0usize;
+    while let Some(offset) = lower[from..].find(phrase) {
+        let start = from + offset;
+        let end = start + phrase.len();
+        if boundary_before(start) && boundary_after(end) {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
 }
 
 fn baseline(root: &Path) -> BTreeSet<String> {
@@ -180,6 +212,14 @@ pub fn self_test() -> Result<String, String> {
         put("src/clean.rs", "// The object is header plus payload.\n")?;
         put(BASELINE, "# legacy\n")?;
         run(&dir).map_err(|e| format!("canary: a clean tree failed: {e}"))?;
+        // A word glued to a phrase is not the phrase: this file says the
+        // opposite of the forbidden claim and must not be reported.
+        put(
+            "src/namespaced.rs",
+            "// dynamic BudZero storage slot operand\n",
+        )?;
+        run(&dir).map_err(|e| format!("canary: a namespaced symbol was read as a claim: {e}"))?;
+        std::fs::remove_file(dir.join("src/namespaced.rs")).map_err(|e| e.to_string())?;
         put("src/bad.rs", "// The network Holds Nothing.\n")?;
         if run(&dir).is_ok() {
             return Err(String::from("canary: an injected phrase passed"));
@@ -207,5 +247,22 @@ mod tests {
     #[test]
     fn bud3_forbidden_phrases_gate() {
         assert!(super::self_test().is_ok(), "{:?}", super::self_test());
+    }
+
+    /// The gate has to separate a claim from a symbol that happens to end in
+    /// the same letters. `BudZero storage` is the subsystem's own name.
+    #[test]
+    fn a_phrase_must_stand_on_its_own_word_boundaries() {
+        assert!(!super::mentions(
+            "dynamic budzero storage slot",
+            "zero storage"
+        ));
+        assert!(!super::mentions("budzero_storage", "zero storage"));
+        assert!(super::mentions(
+            "the object needs zero storage at rest",
+            "zero storage"
+        ));
+        assert!(super::mentions("zero storage", "zero storage"));
+        assert!(super::mentions("(zero storage)", "zero storage"));
     }
 }

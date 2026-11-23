@@ -14,7 +14,7 @@ hangi kesinlik kanıtının geçerli olduğunu sorar. Böylece değer, bir arac�
 alanlar arasında hareket eder.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-6043%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-6836%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
@@ -25,7 +25,7 @@ alanlar arasında hareket eder.
 > [!WARNING]
 > **Herkese açık testnet veya ana ağ açılışı için kanıt yoktur; dış denetim
 > yapılmadı.** Bu yazılım geliştirme aşamasındadır. Gerçek değer taşıyan trafik
-> için kullanmayın. [Testnet açılış kapısı kaydı](docs/audit/TLG_REPORT.md),
+> için kullanmayın. Testnet açılış kapısı kaydı (operatör çalışma deposunda tutulur, bu ağaçta değildir),
 > depodaki kodu ve benzetimli testleri doğrulanmış dağıtımdan ayırır.
 
 ---
@@ -188,7 +188,7 @@ dolayısıyla sistemin tamamı tek bir ağaç olarak derlenir, test edilir ve da
 | Katman | Bu depoda | Ne olduğu |
 | --- | --- | --- |
 | **BudZero** | [`budzero/`](budzero), [README](budzero/README.md) | ZK yerlisi sanal makine: belirlenimli ISA, gaz ölçümlü VM, derleyici ve bir Plonky3 STARK kanıtlayıcı/doğrulayıcı |
-| **B.U.D.** | [`bud/`](bud) · [`src/storage/`](src/storage) | Broad Universal Database: `bud/` 1.0/2.0/3.0 uygulamasıdır (tarif / QR / makbuz / uzlaşma modülleri, [bud README](bud/README.md)); `src/storage/` uzlaşma katmanının depolama motorudur (içerik adresleme, anlaşmalar, meydan okuma/yanıt kanıtları) |
+| **B.U.D. 3.0** | [`src/storage/bud3/`](src/storage/bud3) · [`src/storage/`](src/storage) | Broad Universal Database 3.0: kendi kendini doğrulayan BOF-1 nesne deposu, RaptorQ çeşme parçaları, belirlenimli sıkıştırma, Merkle saklama kanıtları ve erişim kademeli şifreleme |
 | **AI inference layer** | [`src/ai_inference/`](src/ai_inference) | Kapalı devre yapay zeka katmanı: model kayıt defteri, operatör hesaplama teminatı, çaba kademeleri, Pollen ile kapılanan veri erişimi, algı beyanları (V3), SocialFi çıktı köprüsü. Zincir dışı çalışma alanı: [`crates/ai-inference/`](crates/ai-inference) |
 | **Pollen** | [`src/pollen/`](src/pollen) | Rıza ile kapılanan veri pazarı, izinler, şifreleme ve yapay zeka katmanının geçmek zorunda olduğu kapı |
 | **BNS** | [`src/bns/`](src/bns) | `.bud` adlandırması: kayıt, alt alanlar, içerik ve depolama kayıtları |
@@ -199,7 +199,6 @@ dolayısıyla sistemin tamamı tek bir ağaç olarak derlenir, test edilir ve da
 | Yol | İçerik |
 | --- | --- |
 | [`crates/`](crates) | Bağımsız çalışma alanları: wallet-core, budlum-explorer, ai_inference, note-packing |
-| [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 uygulaması (kendi çalışma alanı) |
 | [`docs/`](docs) | Başvuru belgeleri: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, NOTICE |
 | [`config/`](config) | Devnet / testnet / mainnet profilleri ve genesis şablonları |
 | [`xtask/gates/`](xtask/gates) | CI kapıları; her biri kendi kendini sınar ([Mühendislik standartları](#mühendislik-standartları)) |
@@ -267,9 +266,10 @@ cargo run --manifest-path xtask/tools/Cargo.toml -- pre-push   # fmt + clippy, s
 | `pq-ml-dsa` | Açık | FIPS 204 ML-DSA (NIST nihai) - ML-DSA-65 doğrulayıcı imzaları (`ml-dsa`). Şema genesis içine yazılır; derlemesi zincirle çelişen bir düğüm başlamayı reddeder |
 | `p2p-mdns` | - | Yalnızca devnet için yerel eş keşfi. mDNS uyarıları erişilemez kalsın diye sürüm derlemelerinden bilerek çıkarılmıştır |
 
-`cargo build --all-features` komutunun **başarısız olması beklenir**: PQ arka uçları
-birbirini dışlar ve bunu bir `compile_error!` zorlar. CI bu başarısızlığı doğrular,
-böylece koruma sessizce çürüyemez.
+`cargo build --all-features` komutunun **başarılması beklenir**: pq-dilithium, birbirini
+dışlayan ikiliyle birlikte çıktı (304cfe8); kalan arka uçlar birlikte yaşar. CI'nın özellik
+kanaryası (`cargo check --all-features`) bir özellik kombinasyonu bozulduğunda derlemeyi
+düşürür; böylece koruma sessizce çürüyemez.
 
 ---
 
@@ -285,7 +285,7 @@ cargo run --release -- --network devnet
 
 ```bash
 docker compose -f ops/docker-compose.yml up   # bkz. ops/docker-compose.yml
-bash ops/scripts/devnet-multinode-smoke.sh
+cargo run --manifest-path xtask/tools/Cargo.toml -- devnet-multinode-smoke
 ```
 
 ### Profilden çalıştırma
@@ -305,7 +305,7 @@ bir tören dosyasına karşı yanlışlıkla "ana ağ" başlatamaz.
 
 Testnet profilinin zincir kimliği `45261`, ağ imzası `BDLT`'dir. Bu yapılandırma,
 herkese açık bir ağın açıldığının **kanıtı değildir**. İşletmecilerin önce
-[açılış kapısını](docs/audit/TLG_REPORT.md), genesis törenini ve uç nokta
+açılış kapısını (kanıt kaydı operatör çalışma deposunda tutulur), genesis törenini ve uç nokta
 kurulumunu tamamlaması gerekir. Yerel prova için:
 
 - **Cüzdan oluşturun:** `bud wallet create --key-file ./secrets/wallet.json`
@@ -489,7 +489,7 @@ depolama modülleri, BNS, pazar ve SocialFi modülleri, EVM zincir bağdaştır�
 tokenomi ve anlık görüntüler depoda bulunur. Kodun varlığı; köprünün, birleşik
 B.U.D. 3.0 üretim yolunun, ortamlar arası yürütmenin veya fiziksel cihazlarla
 testnet provasının geçtiği anlamına **gelmez**. Gereken kanıtlar için
-[açılış kapısı kaydına](docs/audit/TLG_REPORT.md) bakın.
+açılış kapısı kaydına (operatör çalışma deposunda tutulur) bakın.
 
 **Bilerek etkinleştirilmemiş ve bu durum değişirse kırılan testlerle sabitlenmiş:** zincir
 üstü yapay zeka çıkarım kanıtı *doğrulaması* ([durum](docs/AI_VERIFICATION_STATUS.md)) ·

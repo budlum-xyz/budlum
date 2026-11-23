@@ -48,7 +48,7 @@ fn l3_code_path_roundtrips() {
 
 #[test]
 fn signature_wire_size_matches_the_cost_model() {
-    // (F17): the sketch must count every serialized field -
+    // The sketch must count every serialized field -
     // epoch 4 + randomizer 16 + LEN*32 chains + T_LOG2*32 path. The old
     // formula omitted the randomizer (2660) and disagreed with
     // SECURITY-ARGUMENT.md's 2676.

@@ -111,7 +111,7 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/core/account.rs",
-        5,
+        6,
         "one is the release of the unbonding queue (money already committed as stake \
          and already counted against the ceiling is returned - not new supply \
          but supply changing category); one is the body of `try_mint_balance` itself, \
@@ -126,7 +126,12 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          neither line opens minting headroom. The fifth is \
          `claim_delegator_rewards`: it pays out the delegation reward row that \
          the distribution already booked against fees taken in - recorded \
-         value changing hands, not new supply.",
+         value changing hands, not new supply. The sixth is \
+         `release_pool_deposit`: it returns what `lock_pool_deposit` took out \
+         of the same owner's balance, capped at what the pool-deposit escrow \
+         actually holds, and that escrow counts in `total_bud_committed` the \
+         whole time it is held - an occupancy deposit coming home, not new \
+         supply.",
     ),
     (
         "src/chain/storage_maintenance.rs",

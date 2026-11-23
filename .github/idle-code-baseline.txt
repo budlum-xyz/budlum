@@ -776,7 +776,6 @@ budzero/bud-state/src/lib.rs	fn	verify_account_proof
 budzero/bud-state/src/note.rs	fn	from_field_elements
 budzero/bud-state/src/note.rs	fn	spend
 budzero/bud-state/src/note.rs	struct	NoteRegistry
-budzero/bud-state/src/note.rs	struct	PrivacyNote
 budzero/bud-vm/src/lib.rs	const	POSEIDON_ALPHA
 budzero/bud-vm/src/lib.rs	const	POSEIDON_ROUNDS_IN_USE
 budzero/bud-vm/src/lib.rs	fn	consume_gas
@@ -947,7 +946,6 @@ crates/wallet-core/src/lib.rs	fn	ensure_view_key
 crates/wallet-core/src/lib.rs	fn	export_view_key_for_disclosure
 crates/wallet-core/src/lib.rs	fn	from_mnemonic
 crates/wallet-core/src/lib.rs	fn	from_user_opt_in
-crates/wallet-core/src/lib.rs	fn	guardian_count
 crates/wallet-core/src/lib.rs	fn	is_executable
 crates/wallet-core/src/lib.rs	fn	is_note_privacy_active
 crates/wallet-core/src/lib.rs	fn	is_privacy_active
@@ -1003,7 +1001,6 @@ src/account_abstraction/quantum_account.rs	const	RECOVERY_DOMAIN_V3
 src/account_abstraction/quantum_account.rs	const	SEED_DOMAIN_V1
 src/account_abstraction/quantum_account.rs	const	STORAGE_PACT_DOMAIN
 src/account_abstraction/quantum_account.rs	enum	SeedError
-src/account_abstraction/quantum_account.rs	fn	guardian_root
 src/account_abstraction/quantum_account.rs	fn	is_timelock_satisfied
 src/account_abstraction/quantum_account.rs	fn	seed_from_entropy
 src/account_abstraction/quantum_account.rs	fn	verify_multisig_threshold
@@ -1037,7 +1034,6 @@ src/ai/execution/guest.rs	const	GAS_PER_LAYER
 src/ai/execution/guest.rs	const	GAS_PER_PARAM
 src/ai/execution/guest.rs	const	MAX_GUEST_OPS
 src/ai/execution/guest.rs	const	MLP_GUEST_VERSION
-src/ai/execution/guest.rs	const	WORD_BYTES
 src/ai/execution/guest.rs	fn	build_fixed_point_mlp_guest
 src/ai/execution/guest.rs	fn	commit_i32_limbs
 src/ai/execution/guest.rs	fn	estimate_full_gas
@@ -1045,7 +1041,6 @@ src/ai/execution/guest.rs	fn	estimate_guest_instruction_count
 src/ai/execution/guest.rs	fn	estimate_structural_gas
 src/ai/execution/guest.rs	fn	for_spec
 src/ai/execution/guest.rs	fn	input_dim
-src/ai/execution/guest.rs	fn	output_dim
 src/ai/execution/guest.rs	fn	program_hash_from_words
 src/ai/execution/guest.rs	fn	prove_mlp_inference
 src/ai/execution/guest.rs	fn	read_guest_output
@@ -1100,7 +1095,6 @@ src/bns/types.rs	fn	with_storage
 src/budlumxyz/mod.rs	fn	list_apps
 src/budlumxyz/mod.rs	fn	mark_verified_by_governance
 src/budlumxyz/mod.rs	fn	update_app
-src/chain/blockchain.rs	const	FINALITY_DEPTH
 src/chain/blockchain.rs	const	MAX_VALIDATOR_SNAPSHOTS
 src/chain/blockchain.rs	fn	build_global_header
 src/chain/blockchain.rs	fn	credit_development_account
@@ -1346,9 +1340,7 @@ src/domain/fork_choice.rs	struct	ForkCandidate
 src/domain/fork_choice.rs	struct	ResolvedHead
 src/domain/fork_choice.rs	trait	ConsensusDomainForkChoice
 src/domain/plugin.rs	struct	ZkDomainPlugin
-src/domain/plugin_registry.rs	fn	domain_ids
 src/domain/plugin_registry.rs	struct	PluginReplacement
-src/domain/registry.rs	const	MAX_REGISTERED_DOMAINS
 src/domain/registry.rs	fn	domain_leaf_hash
 src/domain/sovereign.rs	const	MAX_AUDIT_EXPORT_SPAN_BLOCKS
 src/domain/sovereign.rs	const	MAX_SOVEREIGN_DOMAIN_TEMPLATES
@@ -1531,7 +1523,6 @@ src/pollen/offers.rs	fn	purchase_signing_hash
 src/privacy/note_registry.rs	const	MAX_LIVE_COMMITMENTS
 src/privacy/note_registry.rs	const	MAX_SPENT_NULLIFIERS
 src/privacy/note_registry.rs	fn	contains_commitment
-src/privacy/note_registry.rs	fn	derive_nullifier
 src/privacy/note_registry.rs	fn	is_nullifier_spent
 src/privacy/note_registry.rs	fn	prune_spent_nullifiers
 src/privacy/note_registry.rs	fn	spent_nullifier_count
@@ -1675,17 +1666,6 @@ src/storage/living_threshold.rs	fn	break_even_rate_scaled
 src/storage/living_threshold.rs	fn	one_reproduction_picodollars
 src/storage/living_threshold.rs	struct	Lever
 src/storage/living_threshold.rs	struct	OperatorRates
-src/storage/lrc.rs	const	MAX_GROUP_SHARDS
-src/storage/lrc.rs	enum	LrcError
-src/storage/lrc.rs	fn	best_case_loss_tolerance
-src/storage/lrc.rs	fn	guaranteed_loss_tolerance
-src/storage/lrc.rs	fn	local_group_members
-src/storage/lrc.rs	fn	local_group_of
-src/storage/lrc.rs	fn	lrc_layout_digest
-src/storage/lrc.rs	fn	lrc_overhead_per_mille
-src/storage/lrc.rs	fn	lrc_parity_shards
-src/storage/lrc.rs	fn	lrc_total_shards
-src/storage/lrc.rs	fn	new_lrc_group
 src/storage/manifest.rs	const	MIN_AEAD_CIPHERTEXT_BYTES
 src/storage/manifest.rs	fn	is_client_encrypted
 src/storage/manifest.rs	fn	loss_tolerance
@@ -1695,22 +1675,8 @@ src/storage/manifest.rs	fn	overhead_per_mille
 src/storage/manifest.rs	fn	replication
 src/persistence/state_trie.rs	fn	bulk_insert
 src/persistence/state_trie.rs	fn	root_ref
-src/storage/mobile_self.rs	enum	ReplicaRecommendation
-src/storage/mobile_self.rs	fn	availability_label
-src/storage/mobile_self.rs	fn	recommendation_for_content
-src/storage/msr.rs	const	TRAFFIC_SCALE
-src/storage/msr.rs	enum	MsrError
-src/storage/msr.rs	fn	lrc_repair_traffic_scaled
-src/storage/msr.rs	fn	msr_repair_traffic_scaled
-src/storage/msr.rs	fn	msr_speedup_over_lrc_scaled
-src/storage/pact_binding.rs	fn	add_pact
-src/storage/pact_binding.rs	fn	is_pure_production
-src/storage/pact_binding.rs	fn	is_residual_only
 src/storage/pact_binding.rs	fn	kq_pact_registry
 src/storage/pact_binding.rs	fn	kq_storage_bound
-src/storage/pact_binding.rs	fn	kq_storage_pact
-src/storage/pact_binding.rs	fn	recompute_root
-src/storage/pact_binding.rs	fn	verify_commitment
 src/storage/pact_binding.rs	struct	PactGates
 src/storage/provider.rs	fn	provider_challenge_id
 src/storage/provider.rs	struct	ProviderChallengeResult
@@ -1754,7 +1720,7 @@ src/tokenomics/reward_pool.rs	fn	total_epoch_payout
 # wiring, and they come out when the settlement layer starts calling them.
 
 #
-# 2026-08-31 (user-approved hybrid, recorded in budlum-xyz/workspace
+# 2026-08-31 (operator-approved hybrid schedule; remaining entries tracked
 # DENETIM-PLANI-3.0.md): the ai-serve economics modules (fee_scenario,
 # cost_forecast, validator_cost, staging, metric) are the published fee
 # schedule and cost model as code, the single source every doc number
@@ -1763,7 +1729,7 @@ src/tokenomics/reward_pool.rs	fn	total_epoch_payout
 # come out when the settlement layer starts calling them.
 
 #
-# 2026-08-31 (user-approved hybrid, recorded in budlum-xyz/workspace
+# 2026-08-31 (operator-approved hybrid schedule; remaining entries tracked
 # DENETIM-PLANI-3.0.md): the ai-serve economics modules (fee_scenario,
 # cost_forecast, validator_cost, staging, metric, residency) are the
 # published fee schedule and cost model as code, the single source every
@@ -1857,21 +1823,6 @@ crates/ai-inference/crates/ai-serve/src/validator_cost.rs	struct	ValidatorBudget
 #                          the teammate working the same PR).
 #   ScreenItem/contract_digest/honest_custody/network_held_bytes ride the
 #   screen surface above.
-src/storage/mobile_self.rs	enum	UploadCustodyRefusal
-src/storage/mobile_self.rs	fn	decide_upload_custody
-src/storage/mobile_self.rs	fn	put_user_content
-src/storage/mobile_self.rs	fn	record_network_default_attempt
-src/storage/mobile_self.rs	fn	record_network_held
-src/storage/mobile_self.rs	fn	user_held_items
-src/storage/one_share.rs	enum	ShareRefusal
-src/storage/one_share.rs	fn	admit_as_server
-src/storage/one_share.rs	fn	all_user_held
-src/storage/one_share.rs	fn	screen
-src/storage/one_share.rs	fn	storage_fee_owed_usd
-src/storage/one_view.rs	fn	contract_digest
-src/storage/one_view.rs	fn	honest_custody
-src/storage/one_view.rs	fn	network_held_bytes
-src/storage/one_view.rs	struct	ScreenItem
 src/storage/three_nft.rs	enum	ThreeNftRegistryError
 src/storage/three_nft.rs	fn	drop_validator
 src/storage/three_nft.rs	fn	reemit_video_from_pin

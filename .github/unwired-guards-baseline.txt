@@ -5,16 +5,16 @@
 #
 # Current exemptions are explicit and feature-scoped:
 #
-# - src/ai/execution/blind_compute.rs: IP-60 T-Expansion waits for IP-56 and
+# - src/ai/execution/blind_compute.rs: confidential compute proof path waits for private transfer activation and
 #   activation after M7.
 # - src/ai_inference/verify.rs: helper/scaffold proof format is not the
 #   transaction verifier. The module documents serialization, program-hash,
 #   and public-input mismatches; tests lock out production callers.
 # - src/consensus/zk_verifier.rs: the ZK QC fault-proof path stays fail-closed
 #   until BudZero STARK verification is integrated.
-# - src/light_client/mod.rs: IP-60 remote-state verification is not consumed
+# - src/light_client/mod.rs: remote-state verification is not consumed
 #   by a production transition before its post-M7 activation.
 # - src/storage/server_admission.rs: legacy B.U.D. 1.0 admission is excluded
-#   pending IP-07 removal; B.U.D. 3.0 manifest deals own active routing.
+#   pending legacy storage removal; B.U.D. 3.0 manifest deals own active routing.
 #
 # Any change to these reasons must be backed by the feature matrix and tests.

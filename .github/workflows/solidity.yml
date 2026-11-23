@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses, agg/phase-5-pcs-claims]
+  # On demand, for issue 203: the external-domain contract compile must be
+  # startable on a blocked head without pushing to it. Same per-ref
+  # concurrency group as the event runs, so no extra queue lane.
+  workflow_dispatch:
 
 concurrency:
   group: solidity-${{ github.ref }}
@@ -49,7 +53,7 @@ jobs:
           echo "compiled ${#files[@]} file(s)"
 
   forge-test:
-    name: Foundry tests (F01-F06, AppBinding, Mikoriza)
+    name: Foundry tests (FinalityVerifier, AppBinding, Mikoriza)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -95,7 +99,7 @@ jobs:
 
       # The BLS-only challenge window needs the real pairing precompile:
       # under prague the classical half verifies for the Rust-generated
-      # fixture and ML-DSA stays absent, which is the regime F02/F05/F06
+      # fixture and ML-DSA stays absent, which is the classical-only window regime these tests
       # pin (pending -> challenge -> settle).
       - name: "forge test (prague: BLS-only challenge window)"
         run: >-

@@ -33,7 +33,7 @@ on:
   pull_request:
     branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses, agg/phase-5-pcs-claims]
   schedule:
-    - cron: "0 7 * * 4" # weekly, Thursday 07:00 UTC
+    - cron: "0 13 * * 4" # weekly, Thursday 13:00 UTC
   workflow_dispatch:
 
 concurrency:
