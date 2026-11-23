@@ -789,7 +789,15 @@ fn verify_receipt_settles_intent(
     receipt: &UniversalPaymentReceipt,
     intent: &UniversalPaymentIntent,
 ) -> Result<(), PaymentError> {
-    let _ = (receipt, intent);
+    if receipt.intent_id != intent.intent_id()
+        || receipt.target_domain != intent.target_domain
+        || receipt.target_asset_id != intent.target_asset_id
+        || receipt.target_amount_delivered != intent.target_amount
+    {
+        return Err(PaymentError::InvalidIntent(String::from(
+            "the receipt does not settle the intent it was planned for",
+        )));
+    }
     Ok(())
 }
 
