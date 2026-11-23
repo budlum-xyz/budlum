@@ -2117,6 +2117,112 @@ mod modern_domain_kind_tests {
         )
         .is_err());
     }
+    /// The verifier re-derives both canonical statement digests from the trusted
+    /// anchor plus the bundle's own declared fields, and refuses a bundle whose
+    /// `input_hash`/`output_hash` do not equal those re-derivations. The
+    /// snapshotless path is the one an adversary reaches with a fully forged
+    /// outer header, and until now only the *fields* feeding the derivation were
+    /// covered by forged-bundle tests: mutating either digest itself was caught
+    /// by nothing. This locks both digests.
+    #[test]
+    fn ulp_verifier_rederives_input_and_output_hash_and_refuses_forgeries() {
+        let single = UlpDomainSnapshot {
+            domain_id: 7,
+            external_chain_id: 700,
+            kind: UlpDomainKind::TendermintBft,
+            prev_height: 10,
+            finalized_height: 20,
+            state_root: [0x11; 32],
+            event_root: [0x22; 32],
+            anchor_hash: [0x33; 32],
+            security_weight: 1_000,
+            pq_attested: true,
+            outflow_bps: 400,
+        };
+        let compiled = compile_ulp_program(45_261, 1).expect("compile 1-domain ULP-1 circuit");
+        let hub_root = [0xAB; 32];
+        let seed = [0xCD; 32];
+        let registry = SchemeStatusRegistry::genesis();
+        let (bundle, _sorted, _metrics) = prove_universal_light_proof(
+            &compiled,
+            77,
+            hub_root,
+            std::slice::from_ref(&single),
+            &seed,
+            12,
+            &registry,
+        )
+        .expect("prove a 1-domain ULP-1 bundle");
+
+        // The honest bundle opens: the lock must not be a blanket refusal.
+        let verified = open_universal_light_proof(
+            &bundle,
+            &compiled.program_hash,
+            45_261,
+            &hub_root,
+            77,
+            &registry,
+        )
+        .expect("the honest bundle opens");
+        assert_eq!(verified.settlement_epoch, 77);
+        assert_eq!(verified.domain_count, 1);
+
+        // What the prover shipped is exactly what the verifier derives itself.
+        assert_eq!(
+            bundle.input_hash,
+            ulp_input_hash(45_261, 77, 1, &hub_root),
+            "shipped input_hash must equal the canonical derivation"
+        );
+        assert_eq!(
+            bundle.output_hash,
+            ulp_output_hash(
+                45_261,
+                77,
+                1,
+                &bundle.domains_merkle_root,
+                bundle.total_security_weight,
+                bundle.all_pq_attested,
+                bundle.max_outflow_bps,
+            ),
+            "shipped output_hash must equal the canonical derivation"
+        );
+
+        // A forged input_hash is refused, and the refusal names the digest.
+        let mut forged_input = bundle.clone();
+        forged_input.input_hash = [0xEE; 32];
+        match open_universal_light_proof(
+            &forged_input,
+            &compiled.program_hash,
+            45_261,
+            &hub_root,
+            77,
+            &registry,
+        ) {
+            Err(UlpError::BindingMismatch(reason)) => assert!(
+                reason.contains("input_hash"),
+                "the refusal must name the violated digest, got: {reason}"
+            ),
+            other => panic!("forged input_hash must be refused, got {other:?}"),
+        }
+
+        // A forged output_hash is refused, and the refusal names that digest too.
+        let mut forged_output = bundle.clone();
+        forged_output.output_hash = [0xEF; 32];
+        match open_universal_light_proof(
+            &forged_output,
+            &compiled.program_hash,
+            45_261,
+            &hub_root,
+            77,
+            &registry,
+        ) {
+            Err(UlpError::BindingMismatch(reason)) => assert!(
+                reason.contains("output_hash"),
+                "the refusal must name the violated digest, got: {reason}"
+            ),
+            other => panic!("forged output_hash must be refused, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]
