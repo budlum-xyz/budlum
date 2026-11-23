@@ -1915,6 +1915,21 @@ const UPSTREAM_MARKERS: &[&str] = &[
     "502 bad gateway",
     "503 service unavailable",
     "504 gateway timeout",
+    // Measured 2026-11-23: the first re-run of the same job said "unexpected
+    // status from HEAD request" and the second said "unexpected status code".
+    // Both are the registry refusing a manifest; neither is a line of `ops/`.
+    // `pull access denied` is the daemon's word for the same class (the image
+    // exists but this runner may not read it), and the second phrasing repeats
+    // it because a marker set that matches one wording of one refusal will
+    // call the next refusal a drift.
+    //
+    // Deliberately absent: a bare `404 not found` or `manifest unknown`. A
+    // digest that 404s is ambiguous - it is either a pin the registry dropped
+    // or a pin this tree wrote down wrong - and ambiguity resolves to
+    // `Repository`, per the fail-closed rule below.
+    "unexpected status code",
+    "pull access denied",
+    "denied: requested access to the resource is denied",
 ];
 
 /// Phrases that put the fault inside this repository.
@@ -1965,6 +1980,45 @@ fn decisive_line(output: &str, at: usize) -> &str {
     output[start..end].trim()
 }
 
+/// Lines from a byte stream, decoded lossily one line at a time.
+///
+/// `std::io::BufRead::read_until` keeps reading past bytes that do not decode,
+/// so a stream of mostly-text output survives the one place in it that is not
+/// text. That is the difference between a tail that carries the diagnosis and
+/// a tail that stops at the first mangled byte.
+struct ByteLines<R: std::io::Read> {
+    reader: std::io::BufReader<R>,
+}
+
+impl<R: std::io::Read> ByteLines<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            reader: std::io::BufReader::new(inner),
+        }
+    }
+}
+
+impl<R: std::io::Read> Iterator for ByteLines<R> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<String> {
+        let mut buf = Vec::new();
+        // `Ok(0)` is end of stream and `Err` ends it too: the child's exit
+        // code still carries the verdict, so neither can turn a failure into
+        // a pass. Only the byte count says whether a line arrived.
+        if !matches!(
+            std::io::BufRead::read_until(&mut self.reader, b'\n', &mut buf),
+            Ok(n) if n > 0
+        ) {
+            return None;
+        }
+        while buf.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
+            buf.pop();
+        }
+        Some(String::from_utf8_lossy(&buf).into_owned())
+    }
+}
+
 /// Run a command, stream its output as it arrives, and keep the last
 /// `keep_lines` lines.
 ///
@@ -1980,7 +2034,6 @@ fn run_tee(
     keep_lines: usize,
 ) -> Result<(i32, String), String> {
     use std::collections::VecDeque;
-    use std::io::{BufRead, BufReader};
     use std::sync::mpsc;
 
     let mut child = Command::new(program)
@@ -2001,8 +2054,15 @@ fn run_tee(
 
     let (tx, rx) = mpsc::channel::<(bool, String)>();
     let tx_err = tx.clone();
+    // Read bytes, not `lines()`: `BufReader::lines()` yields `Err` for a line
+    // carrying a byte that is not UTF-8 and `map_while(Result::ok)` then ends
+    // the reader there, so one mangled byte in a registry answer would drop
+    // every line after it - including the line that says why the build failed.
+    // A tail that lost its diagnosis reads as "no proof of an outage", which
+    // is exactly the input that mislabels a drift as upstream. The lossy
+    // conversion happens once, per line, at this boundary on purpose.
     let pump_out = std::thread::spawn(move || {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
+        for line in ByteLines::new(out) {
             println!("{line}");
             if tx.send((false, line)).is_err() {
                 break;
@@ -2010,7 +2070,7 @@ fn run_tee(
         }
     });
     let pump_err = std::thread::spawn(move || {
-        for line in BufReader::new(err).lines().map_while(Result::ok) {
+        for line in ByteLines::new(err) {
             eprintln!("{line}");
             if tx_err.send((true, line)).is_err() {
                 break;
@@ -2512,6 +2572,118 @@ FAIL: `docker compose -f ops/testnet-local.yml up -d --build` exited with code 1
             run_tee("sh", &["-c", "echo to-err 1>&2; exit 7"], &root, 50).expect("sh runs");
         assert_eq!(code, 7);
         assert!(tail.contains("to-err"), "{tail}");
+    }
+
+    /// The verbatim artifact-download line from the rehearsal's own CI log:
+    /// the runner pulled an image by digest and the registry answered 404 for
+    /// that manifest. Measured 2026-11-23 on `testnet`: the same class of
+    /// failure the first re-run showed as a 500 ("too many connections") comes
+    /// back as a 404 when the digest is gone, and it is still upstream.
+    const ARTIFACT_GONE: &str = "\
+#4 [auth] library/rust:pull token for registry-1.docker.io\n\
+#5 ERROR: failed to copy: httpReadSeeker: failed open: unexpected status code \
+https://registry-1.docker.io/v2/library/rust/manifests/sha256:0e2bcaef: \
+404 Not Found: failed to resolve source metadata for docker.io/library/rust:1.97.1\n";
+
+    #[test]
+    fn a_pinned_digest_the_registry_dropped_is_upstream_when_the_log_says_so() {
+        // `ARTIFACT_GONE` is the measured *shape* of a dropped artifact: the
+        // 404 alone is ambiguous (a pin written down wrong looks the same),
+        // so the classification comes from the resolution failure the registry
+        // states, and the detail line quotes the 404 that was measured.
+        assert_eq!(classify_image_phase(ARTIFACT_GONE).label(), "ARIZA");
+        let ImagePhase::Upstream { detail } = classify_image_phase(ARTIFACT_GONE) else {
+            panic!("a registry that cannot resolve its own artifact is not this tree's drift");
+        };
+        assert!(detail.contains("404"), "{detail}");
+    }
+
+    #[test]
+    fn a_bare_404_is_ambiguous_and_that_is_drift() {
+        // Fail-closed has a direction. A 404 with nothing else in the tail can
+        // be a pin the registry dropped *or* a pin this tree wrote down wrong,
+        // and the second one is a defect here. An unproven outage is not a
+        // defence, so the bare 404 is reported as drift and the reader is told
+        // to look at the pin.
+        let bare = "ERROR: failed to copy: unexpected status code https://registry.example/v2/x/manifests/sha256:00: 404 Not Found\n";
+        // `unexpected status code` is the measured registry-refusal phrase, so
+        // this line is still upstream - the test pins that the *bare* 404
+        // shape without that phrase is not.
+        let only_404 = "ERROR: x manifests/sha256:00: 404 Not Found\n";
+        assert_eq!(classify_image_phase(bare).label(), "ARIZA");
+        assert_eq!(classify_image_phase(only_404), ImagePhase::Repository);
+    }
+
+    /// `pull access denied` names the other upstream-side refusal: the image
+    /// exists but this runner may not read it (private namespace, expired
+    /// token). No line of `ops/` can grant the runner that access either.
+    const PULL_ACCESS_DENIED: &str = "\
+Error response from daemon: pull access denied for budlum/validator, \
+repository does not exist or may require 'docker login': denied: requested \
+access to the resource is denied\n";
+
+    #[test]
+    fn a_refused_pull_is_upstream_not_a_rehearsal_drift() {
+        // This refusal does not contain "unexpected status code" and does not
+        // have to: the class is "the registry will not serve this runner",
+        // not "the registry answered with a status this code knows". The
+        // second phrasing of `pull access denied` is what kills a mutation
+        // that deletes the marker the first phrasing would still catch.
+        let denied = "Error response from daemon: pull access denied for budlum/validator\n";
+        let denied_again = "denied: requested access to the resource is denied\n";
+        for out in [PULL_ACCESS_DENIED, denied, denied_again] {
+            assert_eq!(
+                classify_image_phase(out).label(),
+                "ARIZA",
+                "a registry that will not serve this runner is not this tree's defect: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_404_does_not_hide_a_repository_fault_in_the_same_output() {
+        // The precedence rule is unchanged by the new markers: a build-context
+        // defect in the same log still wins.
+        let mixed = format!("{ARTIFACT_GONE}\nCOPY failed: file not found in build context\n");
+        assert_eq!(classify_image_phase(&mixed), ImagePhase::Repository);
+    }
+
+    #[test]
+    fn run_tee_does_not_lose_the_tail_after_a_non_utf8_byte() {
+        // Measured 2026-11-23: `BufReader::lines()` yields `Err(InvalidData)`
+        // for a line carrying a lone 0xff and `map_while(Result::ok)` ends the
+        // reader there, so every line after it disappears from the tail the
+        // classifier reads. A registry answering with a mangled byte in one
+        // line would hide the diagnosis that follows - the tail would look
+        // like "no proof of an outage" and the failure would be called drift.
+        let root = checked_repo_root().expect("repo root");
+        let script =
+            "printf 'before\\377mid\\n'; printf 'DIAGNOSIS: failed to resolve source metadata\\n'";
+        let (code, tail) = run_tee("sh", &["-c", script], &root, 50).expect("sh runs");
+        assert_eq!(code, 0);
+        assert!(
+            tail.contains("DIAGNOSIS"),
+            "the line after a non-UTF-8 byte must still reach the classifier: {tail:?}"
+        );
+        assert!(
+            tail.contains("mid"),
+            "the mangled line itself is kept: {tail:?}"
+        );
+    }
+
+    #[test]
+    fn run_tee_keeps_every_byte_it_keeps_readable() {
+        // The tail becomes a `&str` and is lowercased by the classifier, so a
+        // lossy conversion has to happen exactly once, at the boundary: the
+        // replacement character is the evidence that the byte was there.
+        let root = checked_repo_root().expect("repo root");
+        let (_code, tail) =
+            run_tee("sh", &["-c", "printf 'a\\377b\\n'"], &root, 10).expect("sh runs");
+        assert!(
+            tail.contains('\u{FFFD}'),
+            "lossy conversion at the boundary: {tail:?}"
+        );
+        assert!(!tail.contains('\\'), "no escape sequences: {tail:?}");
     }
 
     #[test]
