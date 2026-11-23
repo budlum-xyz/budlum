@@ -399,13 +399,14 @@ pub struct SolverSlashReceipt {
     pub slash_hash: Hash32,
 }
 
-/// Atomic storage-deal input grouping owner content metadata with split-tender
-/// payment parameters.
+/// Atomic storage-deal input grouping owner content metadata, cryptographic
+/// per-replica proofs, and split-tender payment parameters.
 ///
 /// WIRING: Input bundle consumed by [`UnificationLedger::execute_atomic_storage_deal`].
 pub struct AtomicStorageDeal<'a> {
     pub owner_id: Hash32,
     pub record: UnifiedContentRecord,
+    pub replica_proofs: &'a [StorageReplicaProof],
     pub bns_name: Option<&'a str>,
     pub intent: &'a UniversalPaymentIntent,
     pub bonded_quotes: &'a [BondedLiquidityQuote],
@@ -1361,12 +1362,17 @@ impl UnificationLedger {
     }
 
     /// Execute an all-or-nothing atomic storage deal: settles a finality-gated
-    /// split-tender payment, registers `record` under authenticated `owner_id`,
-    /// and optionally binds `bns_name` to `record.sha3_256_digest`.
+    /// split-tender payment, registers `record` under authenticated `owner_id`
+    /// only after verifying every replica against its cryptographic
+    /// [`StorageReplicaProof`] (including anchored domain state roots for
+    /// [`StorageReplicaProof::ExternalDomainMerkle`]), and optionally binds
+    /// `bns_name` to `record.sha3_256_digest`.
     ///
-    /// If object registration or BNS binding fails (for example, attempting to
-    /// hijack another owner's `bns://` name), the entire payment, quote fill,
-    /// domain outflow, and merchant credit roll back atomically.
+    /// If replica proof verification, object registration, or BNS binding fails
+    /// (for example, claiming `ErasureVerified` without a valid `Bud3Custody`
+    /// proof or attempting to hijack another owner's `bns://` name), the entire
+    /// payment, quote fill, domain outflow, and merchant credit roll back
+    /// atomically.
     ///
     /// # Errors
     ///
@@ -1381,7 +1387,8 @@ impl UnificationLedger {
     ) -> Result<(UniversalPaymentReceipt, Hash32), UnificationExecutionError> {
         let AtomicStorageDeal {
             owner_id,
-            record,
+            mut record,
+            replica_proofs,
             bns_name,
             intent,
             bonded_quotes,
@@ -1392,7 +1399,46 @@ impl UnificationLedger {
                 "storage deal owner_id must equal payment intent payer_id",
             )));
         }
+        if record.replicas.len() != replica_proofs.len() {
+            return Err(UnificationExecutionError::InvalidArgument(format!(
+                "storage deal replica count ({}) must match replica_proofs count ({})",
+                record.replicas.len(),
+                replica_proofs.len()
+            )));
+        }
         let digest = record.sha3_256_digest;
+        let candidate_replicas = std::mem::take(&mut record.replicas);
+        let Some(mut seed_replica) = candidate_replicas.first().cloned() else {
+            return Err(UnificationExecutionError::Storage(
+                StorageFabricError::InvalidMetadata(String::from(
+                    "content record must declare at least one replica",
+                )),
+            ));
+        };
+        for proof in replica_proofs {
+            if let StorageReplicaProof::ExternalDomainMerkle {
+                domain_id,
+                finalized_state_root,
+                ..
+            } = proof
+            {
+                let anchor = self
+                    .domains
+                    .get(domain_id)
+                    .ok_or(UnificationExecutionError::UnanchoredDomain(*domain_id))?;
+                if anchor.guarantee.fault_tolerance_bps == 0
+                    || !anchor.guarantee.attestation.state_root
+                    || anchor.finalized_state_root != *finalized_state_root
+                {
+                    return Err(UnificationExecutionError::InvalidArgument(format!(
+                        "external storage domain {domain_id} finalized_state_root is not anchored with state_root attestation"
+                    )));
+                }
+            }
+        }
+        seed_replica.verification = VerificationStrength::AttestedDeal;
+        record.replicas.push(seed_replica);
+
         let mut snapshot = self.clone();
         let mut staged_balances = balances.to_vec();
         let receipt = snapshot.execute_finality_gated_payment(
@@ -1401,7 +1447,12 @@ impl UnificationLedger {
             bonded_quotes,
             now_unix_secs,
         )?;
-        let record_hash = snapshot.storage.register_owned_object(owner_id, record)?;
+        let mut record_hash = snapshot.storage.register_owned_object(owner_id, record)?;
+        for (replica, proof) in candidate_replicas.into_iter().zip(replica_proofs.iter()) {
+            record_hash = snapshot
+                .storage
+                .verify_and_attach_replica(&digest, replica, proof)?;
+        }
         if let Some(name) = bns_name {
             snapshot
                 .storage
@@ -1734,6 +1785,15 @@ mod tests {
         assert_eq!(alice_bals[0].available_amount, 2_000);
         assert_eq!(ledger.state_root(), root_before);
 
+        assert_forged_storage_deal_replicas_roll_back(
+            &mut ledger,
+            alice,
+            &bad_intent,
+            &q_d1,
+            &mut alice_bals,
+            root_before,
+        );
+
         // 3. Atomic storage deal + BNS registration settles cleanly for Alice.
         let mut alice_site = UnifiedContentRecord::from_bytes(b"<h1>alice</h1>", "text/html");
         let alice_digest = alice_site.sha3_256_digest;
@@ -1745,6 +1805,11 @@ mod tests {
             available: true,
             latency_ms: 5,
         });
+        let alice_proofs = [StorageReplicaProof::Bud3Custody {
+            data_shards: 4,
+            parity_shards: 2,
+            custody_merkle_root: [0xA1; 32],
+        }];
         let alice_deal = UniversalPaymentIntent {
             target_amount: 400,
             nonce: 3,
@@ -1755,6 +1820,7 @@ mod tests {
                 AtomicStorageDeal {
                     owner_id: alice,
                     record: alice_site,
+                    replica_proofs: &alice_proofs,
                     bns_name: Some("alice.bud"),
                     intent: &alice_deal,
                     bonded_quotes: std::slice::from_ref(&q_d1),
@@ -1790,6 +1856,11 @@ mod tests {
             available: true,
             latency_ms: 5,
         });
+        let bob_proofs = [StorageReplicaProof::Bud3Custody {
+            data_shards: 4,
+            parity_shards: 2,
+            custody_merkle_root: [0xB2; 32],
+        }];
         let bob_deal = UniversalPaymentIntent {
             payer_id: bob,
             merchant_id: merchant,
@@ -1807,6 +1878,7 @@ mod tests {
                 AtomicStorageDeal {
                     owner_id: bob,
                     record: bob_site,
+                    replica_proofs: &bob_proofs,
                     bns_name: Some("alice.bud"),
                     intent: &bob_deal,
                     bonded_quotes: std::slice::from_ref(&q_d1),
@@ -2370,6 +2442,372 @@ mod tests {
             "no production path maps an external domain's `DomainKey` to the `DomainId` \
              the unification ledger stores; an external domain cannot be named in the \
              ledger at all, so its observed finality guarantee has no destination"
+        );
+    }
+
+    fn assert_forged_storage_deal_replicas_roll_back(
+        ledger: &mut UnificationLedger,
+        alice: Hash32,
+        template_intent: &UniversalPaymentIntent,
+        bonded_quote: &BondedLiquidityQuote,
+        alice_bals: &mut [DomainTokenBalance],
+        expected_root: Hash32,
+    ) {
+        let initial_balance = alice_bals[0].available_amount;
+        let deal_intent = UniversalPaymentIntent {
+            target_amount: 100,
+            nonce: 290,
+            ..template_intent.clone()
+        };
+
+        // (a) Empty replica set fails closed with InvalidMetadata.
+        let empty_site = UnifiedContentRecord::from_bytes(b"<h1>empty</h1>", "text/html");
+        assert!(matches!(
+            ledger.execute_atomic_storage_deal(
+                AtomicStorageDeal {
+                    owner_id: alice,
+                    record: empty_site,
+                    replica_proofs: &[],
+                    bns_name: Some("empty.bud"),
+                    intent: &deal_intent,
+                    bonded_quotes: std::slice::from_ref(bonded_quote),
+                    now_unix_secs: 1_000,
+                },
+                alice_bals,
+            ),
+            Err(UnificationExecutionError::Storage(
+                StorageFabricError::InvalidMetadata(_)
+            ))
+        ));
+
+        // (b) Missing replica proof (count mismatch) fails closed.
+        let mut unproven_site = UnifiedContentRecord::from_bytes(b"<h1>unproven</h1>", "text/html");
+        let unproven_digest = unproven_site.sha3_256_digest;
+        unproven_site.replicas.push(StorageReplica {
+            network: StorageNetworkKind::Bud3,
+            domain_id: 1,
+            native_locator: hex::encode(unproven_digest),
+            verification: VerificationStrength::ErasureVerified,
+            available: true,
+            latency_ms: 5,
+        });
+        assert!(matches!(
+            ledger.execute_atomic_storage_deal(
+                AtomicStorageDeal {
+                    owner_id: alice,
+                    record: unproven_site.clone(),
+                    replica_proofs: &[],
+                    bns_name: Some("unproven.bud"),
+                    intent: &deal_intent,
+                    bonded_quotes: std::slice::from_ref(bonded_quote),
+                    now_unix_secs: 1_000,
+                },
+                alice_bals,
+            ),
+            Err(UnificationExecutionError::InvalidArgument(_))
+        ));
+
+        // (c) Claiming ErasureVerified with only a DeclaredDealOnly commitment fails
+        //     after payment staging and rolls back balances, credits, and state_root.
+        let weak_proof = [StorageReplicaProof::DeclaredDealOnly {
+            deal_commitment: [0x44; 32],
+        }];
+        assert!(matches!(
+            ledger.execute_atomic_storage_deal(
+                AtomicStorageDeal {
+                    owner_id: alice,
+                    record: unproven_site.clone(),
+                    replica_proofs: &weak_proof,
+                    bns_name: Some("unproven.bud"),
+                    intent: &deal_intent,
+                    bonded_quotes: std::slice::from_ref(bonded_quote),
+                    now_unix_secs: 1_000,
+                },
+                alice_bals,
+            ),
+            Err(UnificationExecutionError::Storage(
+                StorageFabricError::InvalidMetadata(_)
+            ))
+        ));
+
+        // (d) Forged Bud3Custody proof (zero custody root) and tampered IPFS preimage
+        //     both fail closed and leave ledger state untouched.
+        let bad_bud3 = [StorageReplicaProof::Bud3Custody {
+            data_shards: 4,
+            parity_shards: 2,
+            custody_merkle_root: [0u8; 32],
+        }];
+        assert!(matches!(
+            ledger.execute_atomic_storage_deal(
+                AtomicStorageDeal {
+                    owner_id: alice,
+                    record: unproven_site,
+                    replica_proofs: &bad_bud3,
+                    bns_name: Some("unproven.bud"),
+                    intent: &deal_intent,
+                    bonded_quotes: std::slice::from_ref(bonded_quote),
+                    now_unix_secs: 1_000,
+                },
+                alice_bals,
+            ),
+            Err(UnificationExecutionError::Storage(
+                StorageFabricError::InvalidMetadata(_)
+            ))
+        ));
+
+        let mut ipfs_site = UnifiedContentRecord::from_bytes(b"ipfs-verified", "text/plain");
+        ipfs_site.replicas.push(StorageReplica {
+            network: StorageNetworkKind::Ipfs,
+            domain_id: StorageNetworkKind::Ipfs.default_domain_id(),
+            native_locator: String::from(
+                "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            ),
+            verification: VerificationStrength::CryptographicHash,
+            available: true,
+            latency_ms: 15,
+        });
+        let tampered_preimage = [StorageReplicaProof::ContentHashPreimage {
+            payload: b"tampered-ipfs".to_vec(),
+        }];
+        assert!(matches!(
+            ledger.execute_atomic_storage_deal(
+                AtomicStorageDeal {
+                    owner_id: alice,
+                    record: ipfs_site,
+                    replica_proofs: &tampered_preimage,
+                    bns_name: None,
+                    intent: &deal_intent,
+                    bonded_quotes: std::slice::from_ref(bonded_quote),
+                    now_unix_secs: 1_000,
+                },
+                alice_bals,
+            ),
+            Err(UnificationExecutionError::Storage(
+                StorageFabricError::InvalidMetadata(_)
+            ))
+        ));
+
+        assert_eq!(alice_bals[0].available_amount, initial_balance);
+        assert_eq!(
+            ledger.merchant_credit(
+                &template_intent.merchant_id,
+                template_intent.target_domain,
+                &template_intent.target_asset_id,
+            ),
+            0
+        );
+        assert!(ledger
+            .storage_fabric()
+            .resolve("bns://unproven.bud", VerificationStrength::AttestedDeal)
+            .is_err());
+        assert_eq!(ledger.state_root(), expected_root);
+    }
+
+    #[test]
+    fn atomic_storage_deal_enforces_anchored_external_merkle_and_multi_replica_proofs() {
+        use crate::crypto::facts::QuantumClass;
+        use crate::settlement::domains::CommitmentAttestation;
+        use crate::settlement::universal_finality::{FinalityGuarantee, FinalityReversibility};
+
+        let bft = FinalityGuarantee {
+            reversibility: FinalityReversibility::DeterministicQuorum,
+            quantum_posture: QuantumClass::Lattice,
+            attestation: CommitmentAttestation {
+                state_root: true,
+                tx_root: true,
+                event_root: true,
+                parent: true,
+            },
+            slashable_backing: true,
+            fault_tolerance_bps: 3_333,
+        };
+        let mut ledger = UnificationLedger::new(bft);
+        let asset = [0x11; 32];
+        let payer = [0x21; 32];
+        let merchant = [0x22; 32];
+        ledger
+            .anchor_domain_finality(1, bft, 50_000, 10_000, 50, [0xAA; 32])
+            .unwrap();
+
+        let payload = b"multi-network-verified-bundle";
+        let mut arweave_only =
+            UnifiedContentRecord::from_bytes(payload, "application/octet-stream");
+        let ar_domain = StorageNetworkKind::Arweave.default_domain_id();
+        let ar_tx = "arweave_tx_locator_0001";
+        let ar_leaf = storage_domain_commitment_leaf(
+            StorageNetworkKind::Arweave,
+            ar_domain,
+            &arweave_only.sha3_256_digest,
+            &arweave_only.sha256_digest,
+            ar_tx,
+        );
+        let ar_root = build_storage_domain_commitment_root(&[ar_leaf, [0x77; 32]]);
+        let ar_proof_nodes =
+            build_storage_domain_inclusion_proof(&[ar_leaf, [0x77; 32]], 0).unwrap();
+        arweave_only.replicas.push(StorageReplica {
+            network: StorageNetworkKind::Arweave,
+            domain_id: ar_domain,
+            native_locator: String::from(ar_tx),
+            verification: VerificationStrength::MerkleRoot,
+            available: true,
+            latency_ms: 45,
+        });
+        let ar_proof = [StorageReplicaProof::ExternalDomainMerkle {
+            domain_id: ar_domain,
+            finalized_state_root: ar_root,
+            leaf_index: 0,
+            leaf_count: 2,
+            proof: ar_proof_nodes.clone(),
+        }];
+        let intent = UniversalPaymentIntent {
+            payer_id: payer,
+            merchant_id: merchant,
+            nonce: 1,
+            target_domain: 1,
+            target_asset_id: asset,
+            target_amount: 250,
+            max_slippage_bps: 0,
+            deadline_unix_secs: 5_000,
+            invoice_hash: [0x51; 32],
+            rail: PaymentRail::OnChain,
+        };
+        let mut bals = vec![DomainTokenBalance {
+            domain_id: 1,
+            asset_id: asset,
+            symbol: String::from("BUD"),
+            available_amount: 1_000,
+        }];
+
+        // 1. Unanchored external storage domain must fail closed with UnanchoredDomain.
+        assert_eq!(
+            ledger.execute_atomic_storage_deal(
+                AtomicStorageDeal {
+                    owner_id: payer,
+                    record: arweave_only.clone(),
+                    replica_proofs: &ar_proof,
+                    bns_name: Some("ar.bud"),
+                    intent: &intent,
+                    bonded_quotes: &[],
+                    now_unix_secs: 1_000,
+                },
+                &mut bals,
+            ),
+            Err(UnificationExecutionError::UnanchoredDomain(ar_domain))
+        );
+
+        // 2. Anchored external storage domain with a different finalized_state_root rejects
+        //    unanchored/spoofed Merkle roots before any settlement commits.
+        ledger
+            .anchor_domain_finality(ar_domain, bft, 50_000, 10_000, 10, [0xEE; 32])
+            .unwrap();
+        let root_with_wrong_anchor = ledger.state_root();
+        assert!(matches!(
+            ledger.execute_atomic_storage_deal(
+                AtomicStorageDeal {
+                    owner_id: payer,
+                    record: arweave_only,
+                    replica_proofs: &ar_proof,
+                    bns_name: Some("ar.bud"),
+                    intent: &intent,
+                    bonded_quotes: &[],
+                    now_unix_secs: 1_000,
+                },
+                &mut bals,
+            ),
+            Err(UnificationExecutionError::InvalidArgument(_))
+        ));
+        assert_eq!(bals[0].available_amount, 1_000);
+        assert_eq!(ledger.state_root(), root_with_wrong_anchor);
+
+        // 3. Once the external domain's finalized_state_root is anchored, a multi-replica
+        //    deal (Bud3 + IPFS + Arweave + Storj) atomically verifies every proof tier.
+        ledger
+            .anchor_domain_finality(ar_domain, bft, 50_000, 10_000, 11, ar_root)
+            .unwrap();
+        let mut multi = UnifiedContentRecord::from_bytes(payload, "application/octet-stream");
+        let digest_hex = hex::encode(multi.sha3_256_digest);
+        multi.replicas = vec![
+            StorageReplica {
+                network: StorageNetworkKind::Bud3,
+                domain_id: 1,
+                native_locator: digest_hex,
+                verification: VerificationStrength::ErasureVerified,
+                available: false,
+                latency_ms: 5,
+            },
+            StorageReplica {
+                network: StorageNetworkKind::Ipfs,
+                domain_id: StorageNetworkKind::Ipfs.default_domain_id(),
+                native_locator: String::from(
+                    "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+                ),
+                verification: VerificationStrength::CryptographicHash,
+                available: false,
+                latency_ms: 20,
+            },
+            StorageReplica {
+                network: StorageNetworkKind::Arweave,
+                domain_id: ar_domain,
+                native_locator: String::from(ar_tx),
+                verification: VerificationStrength::MerkleRoot,
+                available: true,
+                latency_ms: 45,
+            },
+            StorageReplica {
+                network: StorageNetworkKind::Storj,
+                domain_id: StorageNetworkKind::Storj.default_domain_id(),
+                native_locator: String::from("bucket/verified-deal.bin"),
+                verification: VerificationStrength::AttestedDeal,
+                available: true,
+                latency_ms: 12,
+            },
+        ];
+        let proofs = [
+            StorageReplicaProof::Bud3Custody {
+                data_shards: 6,
+                parity_shards: 3,
+                custody_merkle_root: [0xC1; 32],
+            },
+            StorageReplicaProof::ContentHashPreimage {
+                payload: payload.to_vec(),
+            },
+            StorageReplicaProof::ExternalDomainMerkle {
+                domain_id: ar_domain,
+                finalized_state_root: ar_root,
+                leaf_index: 0,
+                leaf_count: 2,
+                proof: ar_proof_nodes,
+            },
+            StorageReplicaProof::DeclaredDealOnly {
+                deal_commitment: [0xD4; 32],
+            },
+        ];
+        ledger
+            .execute_atomic_storage_deal(
+                AtomicStorageDeal {
+                    owner_id: payer,
+                    record: multi,
+                    replica_proofs: &proofs,
+                    bns_name: Some("multi.bud"),
+                    intent: &intent,
+                    bonded_quotes: &[],
+                    now_unix_secs: 1_000,
+                },
+                &mut bals,
+            )
+            .expect("multi-replica verified deal commits");
+        assert_eq!(bals[0].available_amount, 750);
+        assert_eq!(ledger.merchant_credit(&merchant, 1, &asset), 250);
+        // Requiring MerkleRoot skips offline Bud3/IPFS and weak Storj (AttestedDeal),
+        // selecting the anchored Arweave MerkleRoot replica!
+        let resolved = ledger
+            .storage_fabric()
+            .resolve("bns://multi.bud", VerificationStrength::MerkleRoot)
+            .expect("anchored Arweave replica satisfies MerkleRoot");
+        assert_eq!(resolved.primary.network, StorageNetworkKind::Arweave);
+        assert_eq!(
+            resolved.primary.verification,
+            VerificationStrength::MerkleRoot
         );
     }
 }
