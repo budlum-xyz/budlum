@@ -20,7 +20,7 @@
 //! founded with host approval it also answers the keys that ask to join,
 //! and it does that with a transaction like any other.
 
-use super::invite::{GardenInvite, MAX_INVITE_PEERS};
+use super::invite::{fit_peers, GardenInvite};
 use super::net::{
     self, announced_address, peer_id_of, validator_dial_address, BudgetedFrame, FramePermits,
     GardenGossip, GardenNet, GardenRequest, GardenResponse, NetCommand, NetEvent, MAX_GOSSIP_BATCH,
@@ -3682,7 +3682,11 @@ impl Node {
                 peers.push(seed.clone());
             }
         }
-        peers.truncate(MAX_INVITE_PEERS);
+        // The list is already in the order that matters: the host first,
+        // then the validators this node has verified, then the seeds. The
+        // record keeps as many of them as it has room for, so a Garden that
+        // outgrows the record still hands out an invite that works.
+        let peers = fit_peers(peers);
         GardenInvite::new(&state.genesis, self.token, peers)
     }
 
@@ -4048,11 +4052,18 @@ impl Node {
                 tracing::warn!(error = %e, "garden domain status could not be settled");
             }
         }
+        // The fallback is reached when this node can no longer name a
+        // dialable validator, so it falls back to the seeds it started
+        // from. It builds the record directly, which means it does not go
+        // through `check`, so the peer list is cut to the record's budget
+        // here. Without that cut this one path could hand out a record
+        // longer than the ceiling every other path enforces, and the
+        // leaver's parting invite would be the one invite nobody can read.
         let invite = self.invite().unwrap_or_else(|_| GardenInvite {
             chain_id,
             genesis_hash: self.ledger.state.genesis.hash(),
             token: self.token,
-            peers: self.seeds.clone(),
+            peers: fit_peers(self.seeds.clone()),
         });
         let outcome = GardenLeaveOutcome {
             chain_id,
@@ -6657,7 +6668,19 @@ mod tests {
 
         // Dial each validator's own announced address directly (with 5 active
         // validators and 3 holders, exactly 2 validators are non-holders).
-        let peer_addrs = host_handle.invite().await.unwrap().peers;
+        //
+        // The addresses come from the status, which is the node's own list
+        // of validators, and not from the invite. An invite is a record a
+        // person carries, so it is held to a byte ceiling and names only as
+        // many peers as fit; it is not a directory of the Garden and must
+        // not be read as one.
+        let host_status = host_handle.status().await.unwrap();
+        let peer_addrs: Vec<String> = host_status["validators"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["address"].as_str().unwrap().to_string())
+            .collect();
         assert_eq!(peer_addrs.len(), 5, "expected all 5 validator addresses");
         let mut refused_non_holders = 0usize;
         for addr in &peer_addrs {

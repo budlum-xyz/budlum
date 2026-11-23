@@ -228,10 +228,12 @@ impl GardenService {
         let (handle, seat, status) = self
             .enter(GardenEntry::Create { title, limits }, seat)
             .await?;
-        let link = handle.invite().await?.to_link();
+        let invite = handle.invite().await?;
+        let link = invite.to_link();
+        let qr = invite.qr_content()?;
         *slot = Slot::Running(handle, seat);
         drop(slot);
-        Ok(json!({ "garden": status, "invite": link, "qr": link }))
+        Ok(json!({ "garden": status, "invite": link, "qr": qr }))
     }
 
     /// Join a Garden with an invite link or QR content.
@@ -427,8 +429,10 @@ impl GardenService {
     /// Refuses when the node is not running in a Garden, and when it has no
     /// address another node can dial.
     pub async fn invite(&self) -> Result<Value, String> {
-        let link = self.running().await?.invite().await?.to_link();
-        Ok(json!({ "invite": link, "qr": link }))
+        let invite = self.running().await?.invite().await?;
+        let link = invite.to_link();
+        let qr = invite.qr_content()?;
+        Ok(json!({ "invite": link, "qr": qr }))
     }
 
     /// Answer a key that waits for the host. `key` is the validator key as

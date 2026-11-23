@@ -21,10 +21,59 @@ use crate::domain::types::Hash32;
 
 /// The scheme and version prefix of an invite line.
 const INVITE_PREFIX: &str = "budlum-garden:1?";
-/// Longest invite line accepted, in bytes.
-const MAX_INVITE_BYTES: usize = 4096;
+/// Longest invite record, in bytes.
+///
+/// An invite has to survive being carried by hand: read off one screen,
+/// typed into another, or drawn as a QR code a camera has to resolve at
+/// arm's length. Those carriers set the ceiling, not the parser, so the
+/// ceiling is a property of the record and the code holds the record to
+/// it at both ends: `to_link` refuses to build a longer one and `parse`
+/// refuses to read a longer one.
+///
+/// The fixed part of a link is 182 bytes (prefix 16, `chain=` and sixteen
+/// hex 22, `&genesis=` and sixty-four hex 73, `&token=` and sixty-four hex
+/// 71). Each peer costs `&peer=` plus its address, and an IPv4 address with
+/// a peer id runs to about 87 bytes, so this ceiling carries a host and two
+/// relays. Measured: one peer 269 bytes, three 443, four 530.
+pub const MAX_INVITE_BYTES: usize = 512;
+/// Longest QR payload, in bytes.
+///
+/// A QR carrying this many bytes at error-correction level L is version
+/// 20 or below, which still resolves from a phone camera at the distance
+/// one person holds a screen out to another.
+pub const MAX_QR_BYTES: usize = 640;
 /// Most peer addresses one invite carries.
 pub const MAX_INVITE_PEERS: usize = 8;
+/// The bytes an invite spends before its first peer address.
+///
+/// Prefix 16, `chain=` and sixteen hex 22, `&genesis=` and sixty-four hex
+/// 73, `&token=` and sixty-four hex 71.
+const FIXED_INVITE_BYTES: usize = INVITE_PREFIX.len() + 6 + 16 + 9 + 64 + 7 + 64;
+
+/// Keep the peer addresses that fit the record, in the order given.
+///
+/// The caller orders the list by usefulness: the host first, then the
+/// relays that reach it. A Garden with more validators than the record can
+/// name is normal, so running past the ceiling is not an error here, it is
+/// the point at which the list stops. Refusing instead would mean a Garden
+/// stops being able to invite anyone the moment it grows, and the whole
+/// record would be decided by whichever validator joined last.
+///
+/// The hard refusal stays in `check`: a record that arrives over the
+/// ceiling, from a hand or another implementation, is still refused.
+pub fn fit_peers(peers: Vec<String>) -> Vec<String> {
+    let mut kept = Vec::new();
+    let mut length = FIXED_INVITE_BYTES;
+    for peer in peers {
+        let cost = "&peer=".len() + peer.len();
+        if kept.len() == MAX_INVITE_PEERS || length + cost > MAX_INVITE_BYTES {
+            break;
+        }
+        length += cost;
+        kept.push(peer);
+    }
+    kept
+}
 /// Longest peer address inside an invite, in bytes.
 const MAX_PEER_BYTES: usize = 256;
 
@@ -134,7 +183,29 @@ impl GardenInvite {
                 }
             }
         }
+        // The record is held to its ceiling here rather than at the parser,
+        // so the same rule covers both directions: a node cannot hand out an
+        // invite it would itself refuse to read. Checking it at the end means
+        // the length is measured on the record that passed every other rule.
+        let length = self.link_bytes();
+        if length > MAX_INVITE_BYTES {
+            return Err(format!(
+                "invite is {length} bytes, over the {MAX_INVITE_BYTES} byte ceiling"
+            ));
+        }
         Ok(())
+    }
+
+    /// The length of the invite line in bytes.
+    ///
+    /// Counted the way `to_link` writes it, so the ceiling the checker
+    /// applies and the record a validator hands out are the same thing.
+    fn link_bytes(&self) -> usize {
+        let mut length = FIXED_INVITE_BYTES;
+        for peer in &self.peers {
+            length += "&peer=".len() + peer.len();
+        }
+        length
     }
 
     /// The invite line. It is also the QR content.
@@ -204,6 +275,30 @@ impl GardenInvite {
         Ok(invite)
     }
 
+    /// The QR payload of this invite.
+    ///
+    /// Today it is the invite line itself, so the two are one record and a
+    /// person who reads either one reads the same Garden. The payload has
+    /// its own ceiling because its carrier is a camera rather than a
+    /// parser, and the two ceilings answer to different limits: a record
+    /// has to stay small enough to retype, a QR has to stay inside a
+    /// version a phone resolves at arm's length.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a payload over [`MAX_QR_BYTES`], so a Garden never shows a
+    /// QR that a camera on the other side of the room cannot read.
+    pub fn qr_content(&self) -> Result<String, String> {
+        let content = self.to_link();
+        if content.len() > MAX_QR_BYTES {
+            return Err(format!(
+                "qr content is {} bytes, over the {MAX_QR_BYTES} byte ceiling",
+                content.len()
+            ));
+        }
+        Ok(content)
+    }
+
     /// Check a genesis fetched from a peer against this invite.
     pub fn accepts(&self, genesis: &GardenGenesis) -> Result<(), String> {
         genesis.verify()?;
@@ -245,6 +340,84 @@ mod tests {
             token,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn garden_invite_size() {
+        let token = [3u8; 32];
+        let g = genesis(&token);
+
+        // The record a host hands out stays inside both ceilings: the one
+        // the parser applies and the one a QR has to carry.
+        let invite = GardenInvite::new(&g, token, vec![peer("/ip4/192.0.2.10", 4001)]).unwrap();
+        let link = invite.to_link();
+        assert_eq!(
+            link.len(),
+            invite.link_bytes(),
+            "the counter and the writer disagree"
+        );
+        assert!(
+            link.len() < MAX_INVITE_BYTES,
+            "a one peer invite is {} bytes",
+            link.len()
+        );
+        assert!(
+            link.len() < MAX_QR_BYTES,
+            "the QR content is {} bytes",
+            link.len()
+        );
+
+        // A record over the ceiling is refused where it is built, not only
+        // where it is read. Without this the node would hand out an invite
+        // it would itself refuse, and the ceiling would be a wish.
+        let many: Vec<String> = (0..MAX_INVITE_PEERS)
+            .map(|n| peer(&format!("/ip4/192.0.2.{}", 10 + n), 4001))
+            .collect();
+        let refusal = GardenInvite::new(&g, token, many).unwrap_err();
+        assert!(
+            refusal.contains("over the") && refusal.contains("byte ceiling"),
+            "{refusal}"
+        );
+
+        // And the same record is refused when it arrives from outside, so
+        // another implementation cannot hand this node a record this node
+        // would never write.
+        let mut handmade = invite.to_link();
+        while handmade.len() <= MAX_INVITE_BYTES {
+            handmade.push_str(&format!("&peer={}", peer("/ip4/192.0.2.99", 4001)));
+        }
+        assert!(GardenInvite::parse(&handmade).is_err());
+
+        // What the node hands out is built to fit, so a Garden that grows
+        // past the record still invites: the list stops, it does not fail.
+        let crowd: Vec<String> = (0..MAX_INVITE_PEERS)
+            .map(|n| peer(&format!("/ip4/192.0.2.{}", 20 + n), 4001))
+            .collect();
+        let fitted = fit_peers(crowd.clone());
+        assert!(!fitted.is_empty(), "the record kept no peer at all");
+        assert!(fitted.len() < crowd.len(), "nothing was dropped");
+        assert_eq!(fitted[0], crowd[0], "the first address is not the host");
+        let built = GardenInvite::new(&g, token, fitted).unwrap();
+        assert!(built.to_link().len() <= MAX_INVITE_BYTES);
+    }
+
+    #[test]
+    fn garden_invite_same_record() {
+        // The link and the QR content are one record, not two that have to
+        // be kept in step. A second reading of the same Garden gives the
+        // same bytes, so a person who copies either one copies the same
+        // invite.
+        let token = [3u8; 32];
+        let g = genesis(&token);
+        let peers = vec![peer("/ip4/192.0.2.10", 4001), peer("/ip4/192.0.2.11", 4002)];
+        let first = GardenInvite::new(&g, token, peers.clone()).unwrap();
+        let second = GardenInvite::new(&g, token, peers).unwrap();
+        assert_eq!(first.to_link(), second.to_link());
+        assert_eq!(GardenInvite::parse(&first.to_link()).unwrap(), first);
+        // Reading it back and writing it out again is the identity, so the
+        // record survives every hop a person puts it through.
+        let round = GardenInvite::parse(&first.to_link()).unwrap().to_link();
+        assert_eq!(round, first.to_link());
     }
 
     #[test]
