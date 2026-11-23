@@ -4482,6 +4482,105 @@ mod tests {
         host_handle.leave().await.unwrap();
     }
 
+    /// The invite follows the host when the host moves.
+    ///
+    /// A host that reconnects from another network comes back with the same
+    /// key and a new address. The invite other validators hand out has to
+    /// name where the host is now; an invite that still points at the old
+    /// address is a door with the wrong number on it, and the person
+    /// holding it dials a host that is not there any more.
+    #[tokio::test]
+    async fn garden_invite_host_moves() {
+        // The same secret twice is the same validator: the host leaves and
+        // the node that returns is that host, not a newcomer.
+        let host_secret = random_bytes();
+        let host_handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits::testnet_default(),
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            host_secret,
+            None,
+        )
+        .await
+        .unwrap();
+        let first_invite = host_handle.invite().await.unwrap();
+        let first_address = host_handle.status().await.unwrap()["me"]["address"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let guest = spawn(
+            GardenEntry::Invite(first_invite.clone()),
+            config("guest", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while guest.status().await.unwrap()["active_validators"] != 2 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the guest never became a validator");
+
+        // The host goes and comes back on a fresh listener.
+        let outcome = host_handle.leave().await.unwrap();
+        let returned = spawn(
+            GardenEntry::Invite(outcome.invite),
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            host_secret,
+            None,
+        )
+        .await
+        .expect("the host could not return");
+        let moved_address = returned.status().await.unwrap()["me"]["address"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while guest.status().await.unwrap()["status"] != json!("Active") {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the Garden did not run again after the host returned");
+
+        // The invite a validator hands out names where the host is now.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if guest
+                    .invite()
+                    .await
+                    .is_ok_and(|i| i.peers.contains(&moved_address))
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the invite never caught up with the host's new address");
+
+        // And it no longer names where the host used to be. Binding port
+        // zero twice can hand back the same port, and then there is no old
+        // address to drop; the check runs only when the host really moved.
+        if moved_address != first_address {
+            let now = guest.invite().await.unwrap();
+            assert!(
+                !now.peers.contains(&first_address),
+                "the invite still carries the host's old address {first_address}"
+            );
+        }
+
+        returned.leave().await.unwrap();
+        guest.leave().await.unwrap();
+    }
+
     /// A Frozen Garden still hands out its invite.
     ///
     /// Freezing stops new blocks, not the Garden's identity. The record a
