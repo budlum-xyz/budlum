@@ -104,6 +104,22 @@ impl DomainKey {
         ]))
     }
 
+    /// Derives the distinct domain identity of an L1-settled rollup bound to
+    /// its `parent_domain` and full rollup settlement specification.
+    #[must_use]
+    pub fn from_rollup_spec(
+        parent_domain: &Self,
+        rollup_network: &str,
+        spec_digest: &[u8; 32],
+    ) -> Self {
+        Self(crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_ROLLUP_DOMAIN_KEY_V1",
+            &parent_domain.0,
+            rollup_network.as_bytes(),
+            spec_digest,
+        ]))
+    }
+
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0

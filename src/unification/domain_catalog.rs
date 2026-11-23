@@ -305,6 +305,47 @@ impl UniversalDomainCatalog {
             let _ = catalog.register_domain(record);
         }
 
+        // 3. Registered L1-settled rollup domains: expose OutputComposition
+        //    only when both state-transition finality and data availability are
+        //    independently established.
+        for (key, rollup) in &state.settlement.external_intake.rollup_domains {
+            let mut candidate =
+                u32::from_le_bytes([key.0[0], key.0[1], key.0[2], key.0[3]]) | 0x8000_0000;
+            while catalog.domains.contains_key(&candidate) {
+                candidate = candidate.wrapping_add(1) | 0x8000_0000;
+            }
+            let both_ready = state
+                .settlement
+                .external_intake
+                .certified_rollup_row(key)
+                .is_some_and(crate::cross_domain::external::CertifiedRollupRow::both_established);
+            let mut capabilities = BTreeSet::new();
+            if state.bridge_state.has_asset_for_domain(candidate) {
+                capabilities.insert(DomainCapability::UniversalPayment);
+                capabilities.insert(DomainCapability::CrossDomainLiquidation);
+            }
+            if both_ready {
+                capabilities.insert(DomainCapability::OutputComposition);
+            }
+            let record = UniversalDomainRecord {
+                domain_id: candidate,
+                name: format!("Rollup-{}", rollup.spec.rollup_network),
+                caip2_reference: format!(
+                    "rollup:{}:{}",
+                    rollup.spec.rollup_network,
+                    hex::encode(key.0.get(..6).unwrap_or(&key.0)),
+                ),
+                consensus_kind: ConsensusKind::Bft,
+                execution_env_id: None,
+                object_layer_family: None,
+                native_symbol: "EXT".to_string(),
+                native_decimals: 8,
+                preserves_inner_rules: true,
+                capabilities,
+            };
+            let _ = catalog.register_domain(record);
+        }
+
         catalog
     }
 

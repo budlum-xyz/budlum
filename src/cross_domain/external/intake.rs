@@ -653,6 +653,13 @@ pub struct IntakeState {
     /// tombstone ledger, folded into [`Self::state_digest`].
     #[serde(default)]
     pub guard: IntakeGuard,
+    /// Registered L1-settled rollup domains anchored to `parent_domain` in
+    /// [`Self::entries`], folded into [`Self::state_digest`].
+    #[serde(default, with = "crate::core::map_keys")]
+    pub rollup_domains: std::collections::BTreeMap<
+        DomainKey,
+        crate::cross_domain::external::rollup_l1::RollupDomainEntry,
+    >,
 }
 
 /// Which anchor map an external-domain adapter family reads.
@@ -957,6 +964,17 @@ pub enum IntakeError {
     ChallengeWindowClosed { reason: String },
     #[error("multiple bonded anchors serve ({adapter}, {network}); pass an explicit DomainKey")]
     AmbiguousBondedDomain { adapter: String, network: String },
+    #[error("rollup domain {0:?} is already registered")]
+    DuplicateRollupDomain(DomainKey),
+    #[error(
+        "parent L1 domain {parent_domain:?} holds no finalized attestation at height {l1_height}"
+    )]
+    UnattestedParentL1Height {
+        parent_domain: DomainKey,
+        l1_height: u64,
+    },
+    #[error(transparent)]
+    Rollup(#[from] crate::cross_domain::external::rollup_l1::RollupVerifyError),
     #[error(transparent)]
     Guard(#[from] IntakeGuardError),
 }
@@ -2447,6 +2465,281 @@ impl IntakeState {
             guarantee,
             economic_bound,
         })
+    }
+
+    /// Registers an L1-settled rollup domain bound to a serving `parent_domain`
+    /// (and, when configured, a serving `da-sampling-v1` external DA domain).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] if the rollup specification, bond/economics,
+    /// parent L1 domain, or external DA binding fails validation.
+    pub fn register_rollup_domain(
+        &mut self,
+        request: crate::cross_domain::external::rollup_l1::RollupRegistrationRequest,
+    ) -> Result<DomainKey, IntakeError> {
+        use crate::cross_domain::external::rollup_l1::{
+            RollupDaBinding, RollupDomainEntry, RollupVerifyError,
+        };
+
+        request.spec.validate()?;
+        let need = request.economics.required_bond_atoms().max(1);
+        if request.bond_atoms < need {
+            return Err(IntakeError::Registry(RegistryError::InsufficientBond {
+                posted: request.bond_atoms,
+                required: need,
+            }));
+        }
+        let capped_ceiling = request
+            .economics
+            .routing_ceiling_atoms
+            .min(request.bond_atoms);
+        if !honesty_is_cheaper(&request.economics, request.economics.routing_ceiling_atoms)
+            || !honesty_is_cheaper(&request.economics, capped_ceiling)
+        {
+            return Err(IntakeError::DishonestEconomics);
+        }
+
+        let Some(parent_entry) = self.entries.get(&request.spec.parent_domain) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        let Some(parent_reg) = self.registry.domain(&request.spec.parent_domain) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        if !parent_reg.record.state.serves() {
+            return Err(IntakeError::Registry(RegistryError::NotServing {
+                state: format!("{:?}", parent_reg.record.state),
+            }));
+        }
+        let parent_authenticates_state_root = match &parent_entry.spec {
+            AdapterSpec::EthereumSync {
+                committee: Some(_), ..
+            } => true,
+            AdapterSpec::CasperFfg {
+                committee: Some(c), ..
+            } => c.epoch > 0 && !c.validators.is_empty(),
+            AdapterSpec::TendermintCommit {
+                chain_id,
+                validator_set_hash: Some(h),
+                ..
+            } => !chain_id.trim().is_empty() && *h != [0u8; 32],
+            AdapterSpec::HotStuffQc {
+                committee: Some(c), ..
+            } => !c.members.is_empty(),
+            AdapterSpec::DagCertificate {
+                committee: Some(c), ..
+            } => !c.members.is_empty(),
+            AdapterSpec::MysticetiDag {
+                committee: Some(c), ..
+            } => c.epoch > 0 && !c.members.is_empty(),
+            AdapterSpec::ZkVm {
+                program_hash: Some(_),
+                chain_id: Some(_),
+                ..
+            } => true,
+            AdapterSpec::BitVmCovenant {
+                anchor: Some(a), ..
+            } => a.validate().is_ok(),
+            _ => false,
+        };
+        if !parent_authenticates_state_root {
+            return Err(RollupVerifyError::ParentL1MissingStateRootAttestation.into());
+        }
+
+        if let RollupDaBinding::ExternalDaDomain {
+            da_domain,
+            min_samples,
+        } = &request.spec.da_binding
+        {
+            let Some(da_entry) = self.entries.get(da_domain) else {
+                return Err(IntakeError::UnknownDomain);
+            };
+            let Some(da_reg) = self.registry.domain(da_domain) else {
+                return Err(IntakeError::UnknownDomain);
+            };
+            if !da_reg.record.state.serves() {
+                return Err(IntakeError::Registry(RegistryError::NotServing {
+                    state: format!("{:?}", da_reg.record.state),
+                }));
+            }
+            let valid_da = matches!(
+                &da_entry.spec,
+                AdapterSpec::DataAvailability {
+                    committee: Some(c),
+                    ..
+                } if c.min_samples >= *min_samples
+            );
+            if !valid_da {
+                return Err(RollupVerifyError::InvalidDaBinding.into());
+            }
+        }
+
+        let key = request.spec.domain_key();
+        if self.rollup_domains.contains_key(&key) || self.entries.contains_key(&key) {
+            return Err(IntakeError::DuplicateRollupDomain(key));
+        }
+
+        self.rollup_domains.insert(
+            key,
+            RollupDomainEntry {
+                spec: request.spec,
+                economics: request.economics,
+                bond_atoms: request.bond_atoms,
+                poster: request.poster,
+                latest_l2_height: None,
+                latest_established_l2_height: None,
+                rows_by_l2_height: std::collections::BTreeMap::new(),
+            },
+        );
+        Ok(key)
+    }
+
+    /// Verifies and records an Ethereum MPT account + storage proof anchoring a
+    /// rollup batch to an already-finalized `l1_height` on `parent_domain`,
+    /// composing `parent_l1_finality.meet(&rollup_proof_finality)` and
+    /// evaluating the independent DA verdict.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] if the rollup or parent L1 domain is unknown,
+    /// not serving, lacks an accepted attestation at `l1_height`, or fails MPT
+    /// / monotonic progression checks.
+    pub fn submit_rollup_state_proof(
+        &mut self,
+        proof: &crate::cross_domain::external::rollup_l1::RollupStateProofSubmission,
+    ) -> Result<crate::cross_domain::external::rollup_l1::CertifiedRollupRow, IntakeError> {
+        use crate::cross_domain::external::rollup_l1::{
+            verify_rollup_state_proof, FinalizedParentL1Snapshot, RollupDaBinding,
+            VerifiedExternalDaSnapshot,
+        };
+        use crate::settlement::universal_finality::FinalityGuarantee;
+
+        let Some(rollup_snapshot) = self.rollup_domains.get(&proof.rollup_domain).cloned() else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        let parent_key = rollup_snapshot.spec.parent_domain;
+        let Some(parent_entry) = self.entries.get(&parent_key) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        let Some(parent_reg) = self.registry.domain(&parent_key) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        if !parent_reg.record.state.serves() {
+            return Err(IntakeError::Registry(RegistryError::NotServing {
+                state: format!("{:?}", parent_reg.record.state),
+            }));
+        }
+        let Some(l1_att) = parent_reg
+            .attestations
+            .range((proof.l1_height, 0)..=(proof.l1_height, u32::MAX))
+            .next_back()
+            .map(|(_, att)| att)
+        else {
+            return Err(IntakeError::UnattestedParentL1Height {
+                parent_domain: parent_key,
+                l1_height: proof.l1_height,
+            });
+        };
+        let parent_finality = FinalityGuarantee::for_external_spec_with_backing(
+            &parent_entry.spec,
+            Some(&l1_att.security),
+        );
+        let l1_finalized_at = match l1_att.time_unit {
+            crate::cross_domain::external::spec::TimeUnit::UnixSeconds => l1_att.finalized_at,
+            crate::cross_domain::external::spec::TimeUnit::Slot => {
+                l1_att.finalized_at.saturating_mul(12)
+            }
+            crate::cross_domain::external::spec::TimeUnit::Epoch => {
+                l1_att.finalized_at.saturating_mul(384)
+            }
+            crate::cross_domain::external::spec::TimeUnit::Round
+            | crate::cross_domain::external::spec::TimeUnit::Height => l1_att.finalized_at,
+        };
+        let parent_snap = FinalizedParentL1Snapshot {
+            parent_domain: parent_key,
+            l1_height: proof.l1_height,
+            l1_state_root: l1_att.state_root,
+            l1_finalized_at,
+            parent_finality,
+            parent_live_ceiling_atoms: parent_reg.effective_routing_ceiling_atoms(),
+        };
+
+        let external_da =
+            match &rollup_snapshot.spec.da_binding {
+                RollupDaBinding::ParentL1 => Ok(None),
+                RollupDaBinding::ExternalDaDomain { da_domain, .. } => match proof.da_height {
+                    None => Err("missing da_height for external DA binding".to_string()),
+                    Some(da_h) => {
+                        match (self.entries.get(da_domain), self.registry.domain(da_domain)) {
+                            (Some(da_entry), Some(da_reg)) if da_reg.record.state.serves() => {
+                                let maybe_da_att = da_reg
+                                    .attestations
+                                    .range((da_h, 0)..=(da_h, u32::MAX))
+                                    .next_back()
+                                    .map(|(_, att)| att);
+                                match (&da_entry.spec, maybe_da_att) {
+                                    (
+                                        AdapterSpec::DataAvailability {
+                                            committee: Some(committee),
+                                            ..
+                                        },
+                                        Some(da_att),
+                                    ) => {
+                                        let da_guarantee =
+                                            FinalityGuarantee::for_external_spec_with_backing(
+                                                &da_entry.spec,
+                                                Some(&da_att.security),
+                                            );
+                                        Ok(Some(VerifiedExternalDaSnapshot {
+                                            da_domain: *da_domain,
+                                            da_height: da_h,
+                                            data_root: da_att.state_root,
+                                            attested_min_samples: committee.min_samples,
+                                            da_guarantee,
+                                        }))
+                                    }
+                                    (_, None) => {
+                                        Err(format!("no verified DA attestation at height {da_h}"))
+                                    }
+                                    _ => Err("bound external domain is not a pinned DA adapter"
+                                        .to_string()),
+                                }
+                            }
+                            (Some(_), Some(da_reg)) => Err(format!(
+                                "external DA domain is not serving: {:?}",
+                                da_reg.record.state
+                            )),
+                            _ => Err("unknown external DA domain".to_string()),
+                        }
+                    }
+                },
+            };
+
+        let row = verify_rollup_state_proof(
+            &rollup_snapshot.spec,
+            rollup_snapshot.bond_atoms,
+            rollup_snapshot.economics.routing_ceiling_atoms,
+            &parent_snap,
+            proof,
+            external_da,
+        )?;
+        let _digest = row.row_digest();
+
+        if let Some(entry_mut) = self.rollup_domains.get_mut(&proof.rollup_domain) {
+            entry_mut.record_verified_row(row.clone())?;
+        }
+        Ok(row)
+    }
+
+    /// Returns the latest certified settlement row for `rollup_domain`, if any.
+    #[must_use]
+    pub fn certified_rollup_row(
+        &self,
+        rollup_domain: &DomainKey,
+    ) -> Option<&crate::cross_domain::external::rollup_l1::CertifiedRollupRow> {
+        let entry = self.rollup_domains.get(rollup_domain)?;
+        let l2_h = entry.latest_l2_height?;
+        entry.rows_by_l2_height.get(&l2_h)
     }
 
     /// Resolves `(adapter, network)` to the governance-voted [`DomainKey`] when

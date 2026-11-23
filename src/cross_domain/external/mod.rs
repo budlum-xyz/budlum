@@ -143,6 +143,7 @@ pub mod prover;
 pub mod quorum;
 pub mod registry;
 pub mod restaking_avs;
+pub mod rollup_l1;
 pub mod selftest;
 pub mod sentry;
 pub mod simplex_bft;
@@ -293,6 +294,11 @@ pub use registry::{no_backing, DomainRegistration, ExternalDomainRegistry, Regis
 pub use restaking_avs::{
     AvsQuorumMember, PinnedRestakingAvsSet, RestakedOperator, RestakingAvsAdapter,
     RestakingSlashingProof,
+};
+pub use rollup_l1::{
+    CertifiedRollupRow, RollupDaBinding, RollupDaVerdict, RollupDomainEntry, RollupDomainSpec,
+    RollupFinalityVerdict, RollupProofModel, RollupRegistrationRequest, RollupStateProofSubmission,
+    RollupVerifyError, MIN_ROLLUP_CHALLENGE_WINDOW_SECS,
 };
 pub use selftest::{
     admit, admit_observed, apply_patch, run_probe, AdmissionReport, BytePatch, ExpectedRefusal,

@@ -40,6 +40,9 @@ use crate::cross_domain::external::intake::{
     MAX_BONDED_ANCHOR_CHALLENGE_HEIGHTS, MIN_BONDED_ANCHOR_CHALLENGE_HEIGHTS,
 };
 use crate::cross_domain::external::quorum::QuorumPolicy;
+use crate::cross_domain::external::rollup_l1::{
+    RollupRegistrationRequest, RollupStateProofSubmission,
+};
 use crate::cross_domain::external::spec::{DomainKey, RawConsensusEvidence};
 use crate::cross_domain::external::versioning::ForkError;
 use serde::{Deserialize, Serialize};
@@ -123,6 +126,14 @@ pub enum ExternalDomainTx {
         domain: DomainKey,
         proof: Box<BondedAnchorChallengeProof>,
     },
+    /// Register an L1-settled rollup domain anchored to a serving
+    /// `parent_domain` (and optional external `da-sampling-v1` DA domain).
+    /// APPENDED LAST (tag `12`).
+    RegisterRollup(Box<RollupRegistrationRequest>),
+    /// Submit an Ethereum MPT account + storage proof anchoring a rollup batch
+    /// to an already-finalized `l1_height` on `parent_domain`.
+    /// APPENDED LAST (tag `13`).
+    SubmitRollupStateProof(Box<RollupStateProofSubmission>),
 }
 
 /// Cryptographic proof authorizing a permissionless committee or validator-set
@@ -281,6 +292,13 @@ fn uses_ethereum_sync(state: &AccountState, tx: &ExternalDomainTx) -> bool {
         | ExternalDomainTx::SubmitFaultProof { domain, .. }
         | ExternalDomainTx::RotateCommittee { domain, .. }
         | ExternalDomainTx::ChallengeBondedAnchor { domain, .. } => entry_is_sync(domain),
+        ExternalDomainTx::RegisterRollup(req) => entry_is_sync(&req.spec.parent_domain),
+        ExternalDomainTx::SubmitRollupStateProof(proof) => state
+            .settlement
+            .external_intake
+            .rollup_domains
+            .get(&proof.rollup_domain)
+            .is_some_and(|r| entry_is_sync(&r.spec.parent_domain)),
     }
 }
 
@@ -353,6 +371,10 @@ pub fn execute_external_domain_tx(
         ExternalDomainTx::RegisterBonded(bonded) => register_bonded(state, ctx, bonded),
         ExternalDomainTx::ChallengeBondedAnchor { domain, proof } => {
             challenge_bonded_anchor(state, ctx, domain, proof)
+        }
+        ExternalDomainTx::RegisterRollup(request) => register_rollup(state, ctx, request),
+        ExternalDomainTx::SubmitRollupStateProof(proof) => {
+            submit_rollup_state_proof(state, ctx, proof)
         }
     }
 }
@@ -567,6 +589,54 @@ fn register_bonded(
                 .to_string(),
         ));
     }
+    Ok(())
+}
+
+fn register_rollup(
+    state: &mut AccountState,
+    ctx: &ExternalDomainTxContext,
+    request: &RollupRegistrationRequest,
+) -> Result<(), ExternalDomainTxError> {
+    if request.poster != ctx.sender {
+        return Err(ExternalDomainTxError::PosterIsNotSender);
+    }
+    let bond = fundable_bond(state, ctx, request.bond_atoms)?;
+    state
+        .lock_external_bond(&ctx.sender, bond)
+        .map_err(ExternalDomainTxError::Intake)?;
+    if let Err(err) = state
+        .settlement
+        .external_intake
+        .register_rollup_domain(request.clone())
+    {
+        state
+            .release_external_bond(&ctx.sender, bond)
+            .map_err(ExternalDomainTxError::Intake)?;
+        return Err(err.into());
+    }
+    Ok(())
+}
+
+fn submit_rollup_state_proof(
+    state: &mut AccountState,
+    ctx: &ExternalDomainTxContext,
+    proof: &RollupStateProofSubmission,
+) -> Result<(), ExternalDomainTxError> {
+    if proof.submitter != ctx.sender {
+        return Err(ExternalDomainTxError::SubmitterIsNotSender);
+    }
+    if !state
+        .settlement
+        .external_intake
+        .rollup_domains
+        .contains_key(&proof.rollup_domain)
+    {
+        return Err(ExternalDomainTxError::UnknownDomain);
+    }
+    state
+        .settlement
+        .external_intake
+        .submit_rollup_state_proof(proof)?;
     Ok(())
 }
 
@@ -3237,5 +3307,414 @@ mod tests {
             good_env.economic_bound.routing_ceiling_atoms,
             economics.required_bond_atoms()
         );
+    }
+
+    #[test]
+    fn rollup_l1_mpt_op_and_zk_domains_execute_end_to_end_with_meet_and_da_verdicts() {
+        use crate::cross_domain::external::da_sampling::{
+            DaCommitteeMember, DataAvailabilityAdapter, PinnedDaCommittee,
+        };
+        use crate::cross_domain::external::rollup_l1::tests::{build_l1_fixture, u64_word};
+        use crate::cross_domain::external::spec::ExternalFinalityAdapter;
+        use crate::cross_domain::external::{
+            RollupDaBinding, RollupDomainSpec, RollupProofModel, RollupRegistrationRequest,
+            RollupStateProofSubmission,
+        };
+        use crate::crypto::facts::QuantumClass;
+        use crate::unification::domain_catalog::{DomainCapability, UniversalDomainCatalog};
+
+        let poster = addr(0x71);
+        let prover = addr(0x72);
+        let mut state = AccountState::new();
+        let initial_bond = bond();
+        state.add_balance(&poster, initial_bond * 4 + 10_000);
+        state.add_balance(&prover, initial_bond * 2 + 10_000);
+
+        let committee = PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x77; 96],
+            next_committee_root: [0xe7; 32],
+        };
+        state
+            .settlement
+            .external_intake
+            .pin_ethereum_committee("sepolia", committee.clone());
+        let l1_spec = AdapterSpec::EthereumSync {
+            network: "sepolia".to_string(),
+            committee: Some(committee.clone()),
+        };
+        let l1_adapter_id = l1_spec.build(Some(test_bls()), None).descriptor().id;
+        let economics = IntakeState::conservative_economics(1_000_000);
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::Register(Box::new(RegistrationRequest {
+                spec: l1_spec,
+                policy: VerificationPolicy::strict(1_000),
+                bond_atoms: economics.required_bond_atoms(),
+                economics,
+                versions: VersionPolicy::single(l1_adapter_id, 2, 0),
+                poster,
+                golden: sepolia_evidence(poster, &committee, 64, [0xa0; 32]),
+            })),
+        )
+        .expect("register L1 parent domain");
+        let parent_key = DomainKey::from_parts(&l1_adapter_id, "sepolia");
+
+        let op_contract = [0x31; 20];
+        let op_state_slot = [0x01; 32];
+        let op_height_slot = [0x02; 32];
+        let op_ts_slot = [0x03; 32];
+        let op_l2_root = [0xB1; 32];
+        let (l1_root_op, op_code_hash, op_acct_proof, op_stor_proof) = build_l1_fixture(
+            op_contract,
+            b"OP_OUTPUT_ORACLE_V1",
+            &[
+                (op_state_slot, op_l2_root),
+                (op_height_slot, u64_word(777)),
+                (op_ts_slot, u64_word(1_400)),
+            ],
+        );
+
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::SubmitEvidence(Box::new(sepolia_evidence(
+                poster, &committee, 128, l1_root_op,
+            ))),
+        )
+        .expect("submit L1 slot 128");
+
+        let op_spec = RollupDomainSpec {
+            rollup_network: "op-sepolia".to_string(),
+            parent_domain: parent_key,
+            l1_rollup_contract: op_contract,
+            expected_code_hash: Some(op_code_hash),
+            state_root_slot: op_state_slot,
+            batch_height_slot: op_height_slot,
+            proof_model: RollupProofModel::OptimisticFaultProof {
+                proposal_timestamp_slot: op_ts_slot,
+                challenge_window_secs: 300,
+            },
+            da_binding: RollupDaBinding::ParentL1,
+        };
+        let op_key = op_spec.domain_key();
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::RegisterRollup(Box::new(RollupRegistrationRequest {
+                spec: op_spec,
+                economics,
+                bond_atoms: economics.required_bond_atoms(),
+                poster,
+            })),
+        )
+        .expect("register OP rollup");
+
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(prover),
+            &ExternalDomainTx::SubmitRollupStateProof(Box::new(RollupStateProofSubmission {
+                rollup_domain: op_key,
+                l1_height: 128,
+                account_proof: op_acct_proof.clone(),
+                state_root_proof: op_stor_proof.clone(),
+                batch_height_proof: op_stor_proof.clone(),
+                auxiliary_slot_proof: op_stor_proof.clone(),
+                da_height: None,
+                submitter: prover,
+            })),
+        )
+        .expect("submit OP rollup proof inside challenge window");
+
+        let op_early = state
+            .settlement
+            .external_intake
+            .certified_rollup_row(&op_key)
+            .expect("OP row recorded");
+        assert!(!op_early.both_established());
+        assert_eq!(op_early.value_routing_ceiling_atoms, 0);
+        assert_eq!(
+            op_early.verdict_summary(),
+            "finality=pending-challenge-window|da=established-parent-l1"
+        );
+        let catalog_early = UniversalDomainCatalog::from_chain_state(&state);
+        assert!(catalog_early
+            .list()
+            .into_iter()
+            .filter(|d| d.name == "Rollup-op-sepolia")
+            .all(|d| !d
+                .capabilities
+                .contains(&DomainCapability::OutputComposition)));
+
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::SubmitEvidence(Box::new(sepolia_evidence(
+                poster, &committee, 512, l1_root_op,
+            ))),
+        )
+        .expect("submit L1 slot 512");
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(prover),
+            &ExternalDomainTx::SubmitRollupStateProof(Box::new(RollupStateProofSubmission {
+                rollup_domain: op_key,
+                l1_height: 512,
+                account_proof: op_acct_proof,
+                state_root_proof: op_stor_proof.clone(),
+                batch_height_proof: op_stor_proof.clone(),
+                auxiliary_slot_proof: op_stor_proof,
+                da_height: None,
+                submitter: prover,
+            })),
+        )
+        .expect("submit OP rollup proof after challenge window");
+
+        let op_matured = state
+            .settlement
+            .external_intake
+            .certified_rollup_row(&op_key)
+            .expect("matured OP row");
+        assert!(op_matured.both_established());
+        assert!(op_matured.value_routing_ceiling_atoms > 0);
+        assert_eq!(
+            op_matured.verdict_summary(),
+            "finality=established|da=established-parent-l1"
+        );
+        let catalog_matured = UniversalDomainCatalog::from_chain_state(&state);
+        assert!(catalog_matured
+            .list()
+            .into_iter()
+            .any(|d| d.name == "Rollup-op-sepolia"
+                && d.capabilities
+                    .contains(&DomainCapability::OutputComposition)));
+
+        let sk_da = [0x44u8; 32];
+        let vk_da = ed25519_dalek::SigningKey::from_bytes(&sk_da)
+            .verifying_key()
+            .to_bytes();
+        let da_committee = PinnedDaCommittee {
+            namespace_id: [0x5A; 32],
+            min_samples: 2,
+            min_square_size: 2,
+            members: vec![DaCommitteeMember {
+                ed25519_pubkey: vk_da,
+                voting_weight: 100,
+                pq_pubkey: Vec::new(),
+            }],
+        };
+        let da_adapter = DataAvailabilityAdapter::new("celestia-mocha", Some(da_committee.clone()));
+        let da_adapter_id = da_adapter.descriptor().id;
+        let da_key = DomainKey::from_parts(&da_adapter_id, "celestia-mocha");
+        state
+            .settlement
+            .external_intake
+            .pinned_da_committees
+            .insert("celestia-mocha".to_string(), da_committee.clone());
+        let da_spec = AdapterSpec::DataAvailability {
+            network: "celestia-mocha".to_string(),
+            committee: Some(da_committee),
+        };
+        let dummy_golden = RawConsensusEvidence {
+            adapter: da_adapter_id,
+            evidence_version: 1,
+            network: "celestia-mocha".to_string(),
+            payload: vec![1, 2, 3],
+            declared_height: 1,
+            declared_root: [0x51; 32],
+            submitter: poster,
+        };
+        let fake_report = crate::cross_domain::external::AdmissionReport {
+            adapter_version: da_adapter.descriptor().adapter_version,
+            evidence_version: 1,
+            golden_verified: true,
+            probes: vec![(
+                "probe".to_string(),
+                crate::cross_domain::external::ProbeOutcome::Refused {
+                    kind: crate::cross_domain::external::RefusalKind::Malformed,
+                },
+            )],
+            probe_commitment: [0x11; 32],
+            admitted: true,
+        };
+        state
+            .settlement
+            .external_intake
+            .registry
+            .register(
+                "celestia-mocha",
+                da_adapter.descriptor(),
+                economics,
+                VersionPolicy::single(da_adapter_id, 1, 0),
+                &fake_report,
+                economics.required_bond_atoms(),
+                poster,
+            )
+            .expect("register DA domain");
+        state.settlement.external_intake.entries.insert(
+            da_key,
+            crate::cross_domain::external::IntakeEntry {
+                spec: da_spec,
+                policy: VerificationPolicy::strict(1_000),
+                admission: fake_report,
+                golden: dummy_golden,
+                registrant: poster,
+            },
+        );
+
+        let zk_contract = [0x32; 20];
+        let zk_state_slot = [0x11; 32];
+        let zk_height_slot = [0x12; 32];
+        let zk_prog_slot = [0x13; 32];
+        let zk_vk = [0x91; 32];
+        let zk_l2_root = [0xC2; 32];
+        let (l1_root_zk, zk_code_hash, zk_acct_proof, zk_stor_proof) = build_l1_fixture(
+            zk_contract,
+            b"ZK_VALIDITY_VERIFIER_V1",
+            &[
+                (zk_state_slot, zk_l2_root),
+                (zk_height_slot, u64_word(999)),
+                (zk_prog_slot, zk_vk),
+            ],
+        );
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::SubmitEvidence(Box::new(sepolia_evidence(
+                poster, &committee, 640, l1_root_zk,
+            ))),
+        )
+        .expect("submit L1 slot 640 for ZK rollup");
+
+        let zk_spec = RollupDomainSpec {
+            rollup_network: "zksync-era".to_string(),
+            parent_domain: parent_key,
+            l1_rollup_contract: zk_contract,
+            expected_code_hash: Some(zk_code_hash),
+            state_root_slot: zk_state_slot,
+            batch_height_slot: zk_height_slot,
+            proof_model: RollupProofModel::ValidityProof {
+                verifier_program_commitment: zk_vk,
+                program_commitment_slot: Some(zk_prog_slot),
+                quantum_posture: QuantumClass::Hash,
+            },
+            da_binding: RollupDaBinding::ExternalDaDomain {
+                da_domain: da_key,
+                min_samples: 2,
+            },
+        };
+        let zk_key = zk_spec.domain_key();
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::RegisterRollup(Box::new(RollupRegistrationRequest {
+                spec: zk_spec,
+                economics,
+                bond_atoms: economics.required_bond_atoms(),
+                poster,
+            })),
+        )
+        .expect("register ZK rollup");
+
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(prover),
+            &ExternalDomainTx::SubmitRollupStateProof(Box::new(RollupStateProofSubmission {
+                rollup_domain: zk_key,
+                l1_height: 640,
+                account_proof: zk_acct_proof.clone(),
+                state_root_proof: zk_stor_proof.clone(),
+                batch_height_proof: zk_stor_proof.clone(),
+                auxiliary_slot_proof: zk_stor_proof.clone(),
+                da_height: Some(77),
+                submitter: prover,
+            })),
+        )
+        .expect("submit ZK rollup proof while DA pending");
+
+        let zk_pending_da = state
+            .settlement
+            .external_intake
+            .certified_rollup_row(&zk_key)
+            .expect("ZK row");
+        assert!(zk_pending_da.finality_verdict.is_established());
+        assert!(!zk_pending_da.da_verdict.is_established());
+        assert_eq!(zk_pending_da.value_routing_ceiling_atoms, 0);
+        assert_eq!(
+            zk_pending_da.verdict_summary(),
+            "finality=established|da=pending"
+        );
+        let digest_before = state
+            .settlement
+            .external_intake
+            .state_digest()
+            .expect("state_digest");
+
+        state
+            .settlement
+            .external_intake
+            .registry
+            .commit_attestation(
+                &crate::cross_domain::external::FinalityAttestation {
+                    adapter: da_adapter_id,
+                    domain: da_key,
+                    height: 77,
+                    state_root: [0xD4; 32],
+                    finalized_at: 1_700_000_077,
+                    time_unit: crate::cross_domain::external::spec::TimeUnit::UnixSeconds,
+                    security: crate::cross_domain::external::SecurityBacking::SignatureSet {
+                        scheme: crate::crypto::facts::ObservedScheme::Scheme(
+                            crate::crypto::scheme::SchemeId::ED25519,
+                        ),
+                        signers: 1,
+                        required: 1,
+                        total_weight: 100,
+                        slashable: true,
+                    },
+                    evidence_digest: [0xE1; 32],
+                    adapter_version: 1,
+                    evidence_version: 1,
+                    attested_block_hash: None,
+                    attested_event_root: None,
+                    attested_tx_root: None,
+                },
+                poster,
+            )
+            .expect("commit DA attestation at height 77");
+
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(prover),
+            &ExternalDomainTx::SubmitRollupStateProof(Box::new(RollupStateProofSubmission {
+                rollup_domain: zk_key,
+                l1_height: 640,
+                account_proof: zk_acct_proof,
+                state_root_proof: zk_stor_proof.clone(),
+                batch_height_proof: zk_stor_proof.clone(),
+                auxiliary_slot_proof: zk_stor_proof,
+                da_height: Some(77),
+                submitter: prover,
+            })),
+        )
+        .expect("re-submit ZK rollup proof with DA height 77 attested");
+
+        let zk_established = state
+            .settlement
+            .external_intake
+            .certified_rollup_row(&zk_key)
+            .expect("ZK row established");
+        assert!(zk_established.both_established());
+        assert!(zk_established.value_routing_ceiling_atoms > 0);
+        assert_eq!(
+            zk_established.verdict_summary(),
+            "finality=established|da=established-sampled"
+        );
+        let digest_after = state
+            .settlement
+            .external_intake
+            .state_digest()
+            .expect("state_digest");
+        assert_ne!(digest_before, digest_after);
     }
 }

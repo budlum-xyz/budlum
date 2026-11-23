@@ -2769,10 +2769,12 @@ impl Transaction {
             TransactionType::ExternalDomain(
                 crate::cross_domain::external::ExternalDomainTx::Register(_)
                 | crate::cross_domain::external::ExternalDomainTx::RegisterBonded(_)
+                | crate::cross_domain::external::ExternalDomainTx::RegisterRollup(_)
                 | crate::cross_domain::external::ExternalDomainTx::Readmit { .. },
             ) => schedule.contract_call_gas * 4 + schedule.gas_per_signature * 8,
             TransactionType::ExternalDomain(
                 crate::cross_domain::external::ExternalDomainTx::SubmitEvidence(_)
+                | crate::cross_domain::external::ExternalDomainTx::SubmitRollupStateProof(_)
                 | crate::cross_domain::external::ExternalDomainTx::ChallengeContradiction(_)
                 | crate::cross_domain::external::ExternalDomainTx::ChallengeAncestry(_),
             ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature,
@@ -5106,13 +5108,137 @@ fn encode_external_domain_tx(
             encode_raw_evidence(&bonded.request.golden, out);
             put_u64(out, bonded.challenge_window_heights);
         }
-        // Tag 11: optimistic bonded-anchor challenge proof (K-B.5).
+        // Tag 11: optimistic bonded-anchor challenge proof.
         ExternalDomainTx::ChallengeBondedAnchor { domain, proof } => {
             put_u8(out, 11);
             put_fixed(out, &domain.0);
             encode_bonded_anchor_challenge_proof(proof, out);
         }
+        // Tag 12: L1-settled rollup registration bound to parent_domain.
+        ExternalDomainTx::RegisterRollup(request) => {
+            put_u8(out, 12);
+            encode_rollup_registration_request(request, out);
+        }
+        // Tag 13: Ethereum MPT account + storage proof anchoring a rollup batch.
+        ExternalDomainTx::SubmitRollupStateProof(proof) => {
+            put_u8(out, 13);
+            encode_rollup_state_proof_submission(proof, out);
+        }
     }
+}
+
+fn encode_rollup_registration_request(
+    req: &crate::cross_domain::external::RollupRegistrationRequest,
+    out: &mut Vec<u8>,
+) {
+    encode_rollup_domain_spec(&req.spec, out);
+    encode_domain_economics(&req.economics, out);
+    put_u128(out, req.bond_atoms);
+    put_fixed(out, req.poster.as_bytes());
+}
+
+fn encode_rollup_domain_spec(
+    spec: &crate::cross_domain::external::RollupDomainSpec,
+    out: &mut Vec<u8>,
+) {
+    put_string(out, &spec.rollup_network);
+    put_fixed(out, &spec.parent_domain.0);
+    put_fixed(out, &spec.l1_rollup_contract);
+    put_option_fixed32(out, spec.expected_code_hash);
+    put_fixed(out, &spec.state_root_slot);
+    put_fixed(out, &spec.batch_height_slot);
+    encode_rollup_proof_model(&spec.proof_model, out);
+    encode_rollup_da_binding(&spec.da_binding, out);
+}
+
+fn encode_rollup_proof_model(
+    model: &crate::cross_domain::external::RollupProofModel,
+    out: &mut Vec<u8>,
+) {
+    use crate::cross_domain::external::RollupProofModel;
+    match model {
+        RollupProofModel::OptimisticFaultProof {
+            proposal_timestamp_slot,
+            challenge_window_secs,
+        } => {
+            put_u8(out, 0);
+            put_fixed(out, proposal_timestamp_slot);
+            put_u64(out, *challenge_window_secs);
+        }
+        RollupProofModel::ValidityProof {
+            verifier_program_commitment,
+            program_commitment_slot,
+            quantum_posture,
+        } => {
+            put_u8(out, 1);
+            put_fixed(out, verifier_program_commitment);
+            put_option_fixed32(out, *program_commitment_slot);
+            put_u8(
+                out,
+                crate::cross_domain::external::rollup_l1::quantum_tag(*quantum_posture),
+            );
+        }
+        RollupProofModel::MultiProver {
+            required_provers,
+            total_provers,
+            attestation_bitmap_slot,
+            quantum_posture,
+        } => {
+            put_u8(out, 2);
+            put_u8(out, *required_provers);
+            put_u8(out, *total_provers);
+            put_fixed(out, attestation_bitmap_slot);
+            put_u8(
+                out,
+                crate::cross_domain::external::rollup_l1::quantum_tag(*quantum_posture),
+            );
+        }
+    }
+}
+
+fn encode_rollup_da_binding(
+    binding: &crate::cross_domain::external::RollupDaBinding,
+    out: &mut Vec<u8>,
+) {
+    use crate::cross_domain::external::RollupDaBinding;
+    match binding {
+        RollupDaBinding::ParentL1 => put_u8(out, 0),
+        RollupDaBinding::ExternalDaDomain {
+            da_domain,
+            min_samples,
+        } => {
+            put_u8(out, 1);
+            put_fixed(out, &da_domain.0);
+            put_fixed(out, &min_samples.to_le_bytes());
+        }
+    }
+}
+
+fn encode_mpt_node_vec(nodes: &[Vec<u8>], out: &mut Vec<u8>) {
+    put_u64(out, nodes.len() as u64);
+    for node in nodes {
+        put_bytes(out, node);
+    }
+}
+
+fn encode_rollup_state_proof_submission(
+    proof: &crate::cross_domain::external::RollupStateProofSubmission,
+    out: &mut Vec<u8>,
+) {
+    put_fixed(out, &proof.rollup_domain.0);
+    put_u64(out, proof.l1_height);
+    encode_mpt_node_vec(&proof.account_proof, out);
+    encode_mpt_node_vec(&proof.state_root_proof, out);
+    encode_mpt_node_vec(&proof.batch_height_proof, out);
+    encode_mpt_node_vec(&proof.auxiliary_slot_proof, out);
+    match proof.da_height {
+        None => put_u8(out, 0),
+        Some(h) => {
+            put_u8(out, 1);
+            put_u64(out, h);
+        }
+    }
+    put_fixed(out, proof.submitter.as_bytes());
 }
 
 fn encode_bonded_anchor_challenge_proof(
@@ -5922,6 +6048,62 @@ mod v29_signing_tests {
             .signing_hash(),
             base_chal
         );
+
+        let rollup_reg = crate::cross_domain::external::RollupRegistrationRequest {
+            spec: crate::cross_domain::external::RollupDomainSpec {
+                rollup_network: "op-sepolia".to_string(),
+                parent_domain: DomainKey([0x44; 32]),
+                l1_rollup_contract: [0x22; 20],
+                expected_code_hash: Some([0x33; 32]),
+                state_root_slot: [0x01; 32],
+                batch_height_slot: [0x02; 32],
+                proof_model:
+                    crate::cross_domain::external::RollupProofModel::OptimisticFaultProof {
+                        proposal_timestamp_slot: [0x03; 32],
+                        challenge_window_secs: 604_800,
+                    },
+                da_binding: crate::cross_domain::external::RollupDaBinding::ExternalDaDomain {
+                    da_domain: DomainKey([0x55; 32]),
+                    min_samples: 16,
+                },
+            },
+            economics: DomainEconomics::default(),
+            bond_atoms: 250_000,
+            poster,
+        };
+        let mk_rollup_reg = |r: crate::cross_domain::external::RollupRegistrationRequest| {
+            signed_variant(TransactionType::ExternalDomain(
+                ExternalDomainTx::RegisterRollup(Box::new(r)),
+            ))
+        };
+        let base_rollup_hash = mk_rollup_reg(rollup_reg.clone()).signing_hash();
+        let mut alt_rollup = rollup_reg;
+        alt_rollup.spec.da_binding =
+            crate::cross_domain::external::RollupDaBinding::ExternalDaDomain {
+                da_domain: DomainKey([0x55; 32]),
+                min_samples: 32,
+            };
+        assert_ne!(mk_rollup_reg(alt_rollup).signing_hash(), base_rollup_hash);
+
+        let rollup_proof = crate::cross_domain::external::RollupStateProofSubmission {
+            rollup_domain: DomainKey([0x77; 32]),
+            l1_height: 100,
+            account_proof: vec![vec![1, 2, 3]],
+            state_root_proof: vec![vec![4, 5]],
+            batch_height_proof: vec![vec![6, 7]],
+            auxiliary_slot_proof: vec![vec![8, 9]],
+            da_height: Some(50),
+            submitter: poster,
+        };
+        let mk_rollup_proof = |p: crate::cross_domain::external::RollupStateProofSubmission| {
+            signed_variant(TransactionType::ExternalDomain(
+                ExternalDomainTx::SubmitRollupStateProof(Box::new(p)),
+            ))
+        };
+        let base_proof_hash = mk_rollup_proof(rollup_proof.clone()).signing_hash();
+        let mut alt_proof = rollup_proof;
+        alt_proof.da_height = Some(51);
+        assert_ne!(mk_rollup_proof(alt_proof).signing_hash(), base_proof_hash);
     }
 
     fn assert_bft_fault_proof_preimages() {
