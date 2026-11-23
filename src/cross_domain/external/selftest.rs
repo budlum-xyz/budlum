@@ -210,6 +210,18 @@ impl AdmissionReport {
         self.probes.len()
     }
 
+    /// Names of the probes that did not pass, in run order, so a refusal
+    /// can say which corruption the adapter mishandled instead of only how
+    /// many.
+    #[must_use]
+    pub fn failing_probe_names(&self) -> Vec<String> {
+        self.probes
+            .iter()
+            .filter(|(_, outcome)| !outcome.passed())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// The digest a registration commits to. A domain's bond covers this
     /// digest, so changing the probe set after admission is a new admission,
     /// not an edit.

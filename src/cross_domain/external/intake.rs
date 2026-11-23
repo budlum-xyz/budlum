@@ -655,11 +655,17 @@ pub enum IntakeError {
     MissingBlsVerifier,
     #[error("ethereum sync admission is closed: no sync committee is pinned")]
     CommitteeNotPinned,
-    #[error("admission failed: golden={golden_verified}, {passed}/{total} probes passed")]
+    #[error(
+        "admission failed: golden={golden_verified}, {passed}/{total} probes passed, failing: {}",
+        failing.join(", ")
+    )]
     AdmissionRefused {
         golden_verified: bool,
         passed: usize,
         total: usize,
+        /// Names of the probes that did not pass, in run order; a refusal
+        /// that only counts its failures cannot be diagnosed from a log line.
+        failing: Vec<String>,
     },
     #[error("the declared economics reward lying at the routing ceiling")]
     DishonestEconomics,
@@ -1151,6 +1157,7 @@ impl IntakeState {
                 golden_verified: new_admission.golden_verified,
                 passed: new_admission.passed(),
                 total: new_admission.total(),
+                failing: new_admission.failing_probe_names(),
             });
         }
         Ok((*key, new_spec, new_golden, new_policy, new_admission))
@@ -1524,6 +1531,7 @@ impl IntakeState {
                 golden_verified: admission.golden_verified,
                 passed: admission.passed(),
                 total: admission.total(),
+                failing: admission.failing_probe_names(),
             });
         }
         let descriptor = adapter.descriptor();
@@ -4866,5 +4874,49 @@ mod tests {
             .registry
             .readmit(&key, &re_adm, "post-rotation readmission")
             .expect("readmission must succeed with rotated golden evidence");
+    }
+
+    /// A refusal that only counts its failures cannot be diagnosed from a
+    /// log line; the error must name the probes that did not pass.
+    #[test]
+    fn a_refused_admission_names_its_failing_probes() {
+        use crate::cross_domain::external::selftest::{AdmissionReport, ProbeOutcome, RefusalKind};
+
+        let report = AdmissionReport {
+            adapter_version: 1,
+            evidence_version: 1,
+            golden_verified: true,
+            probes: vec![
+                (
+                    String::from("header-flip"),
+                    ProbeOutcome::Refused {
+                        kind: RefusalKind::ConsensusRule,
+                    },
+                ),
+                (String::from("signature-strip"), ProbeOutcome::Accepted),
+            ],
+            probe_commitment: [0u8; 32],
+            admitted: false,
+        };
+        assert_eq!(
+            report.failing_probe_names(),
+            vec![String::from("signature-strip")]
+        );
+
+        let err = IntakeError::AdmissionRefused {
+            golden_verified: report.golden_verified,
+            passed: report.passed(),
+            total: report.total(),
+            failing: report.failing_probe_names(),
+        };
+        let shown = err.to_string();
+        assert!(
+            shown.contains("signature-strip"),
+            "refusal must name the failing probe: {shown}"
+        );
+        assert!(
+            !shown.contains("header-flip"),
+            "a passing probe must not be blamed: {shown}"
+        );
     }
 }
