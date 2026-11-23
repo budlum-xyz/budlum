@@ -3853,8 +3853,7 @@ mod tests {
 
     #[test]
     fn anchor_contract_accepts_validator_set_pinned_tendermint() {
-        let pinned =
-            TendermintFinalityAdapter::new_pinned("fixture", "fixture-1", Some([1u8; 32]));
+        let pinned = TendermintFinalityAdapter::new_pinned("fixture", "fixture-1", Some([1u8; 32]));
         assert!(pinned.has_pinned_trust_anchor());
     }
 
