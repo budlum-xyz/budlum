@@ -27,6 +27,8 @@ import pathlib
 import socketserver
 import sys
 import threading
+import pathlib
+from pathlib import Path
 
 HERE = pathlib.Path(__file__).resolve().parent
 TARGET = HERE / "install_protoc.py"
@@ -179,22 +181,35 @@ def probe_pin_table_is_pinned_to_one_version(mod):
 
 
 def probe_source_build_pins_the_tag(mod, src):
-    """S3: source fallback must clone the pinned tag, not a branch."""
-    # The clone command is the security decision; read it from the source text
-    # so the probe fails if someone drops --branch.
+    """S3: the source fallback must name the COMMIT it builds, not a tag.
+
+    The first version of the installer cloned `--branch v29.3` and built
+    whatever that tag pointed at. A tag is a movable pointer: a force-push or a
+    tampered mirror yields a tree nobody pinned, and `verify_final()` then
+    blesses the binary built from it because the version string matches. The
+    contract is a commit digest, checked after checkout.
+    """
     text = src.read_text()
-    # The clone is a list literal (`"--depth", "1"`), so match the arguments,
-    # not a shell-shaped string: a probe that greps for "--depth 1" would fail
-    # on correct code and pass on nothing.
-    checks = {
-        "--depth 1": '"--depth"' in text and '"1"' in text,
-        "--branch v{PROTOC_VERSION}": '"--branch"' in text and "f\"v{PROTOC_VERSION}\"" in text,
-        "submodules pinned": '"--shallow-submodules"' in text and '"--recurse-submodules"' in text,
-    }
-    missing = [k for k, ok in checks.items() if not ok]
-    if missing:
-        return "vulnerable", f"source build misses: {', '.join(missing)}"
-    return "safe", "clones the pinned tag with shallow submodules"
+    problems = []
+    if not getattr(mod, "PROTOC_SOURCE_COMMIT", ""):
+        problems.append("no PROTOC_SOURCE_COMMIT constant")
+    else:
+        commit = mod.PROTOC_SOURCE_COMMIT
+        if len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
+            problems.append(f"PROTOC_SOURCE_COMMIT {commit!r} is not a 40-hex digest")
+        if commit not in text:
+            problems.append("the digest is not used")
+    if '"--branch"' in text:
+        problems.append("still clones a branch/tag name")
+    if '"rev-parse"' not in text or '"HEAD"' not in text:
+        problems.append("the checked-out commit is never read back")
+    if '"checkout", "--detach"' not in text:
+        problems.append("no detached checkout of the pinned commit")
+    if '"--shallow-submodules"' not in text or '"--recurse-submodules"' not in text:
+        problems.append("submodules not pinned shallow")
+    if problems:
+        return "vulnerable", "; ".join(problems)
+    return "safe", "clones and checks out a 40-hex commit, reads it back, shallow submodules"
 
 
 def probe_shell_escape_in_sudo(mod, src):
@@ -302,6 +317,113 @@ def probe_already_pinned_accepts_a_shadowed_binary(mod, src):
     return "safe", "already_pinned does something else"
 
 
+def probe_shadowed_protoc_on_path_short_circuits(mod, workdir):
+    """S4 (open finding): a protoc earlier on PATH must not satisfy the check.
+
+    `already_pinned()` asks `shutil.which("protoc")`. A binary the runner's PATH
+    puts first - planted by whoever can write that directory - that prints the
+    pinned version silently replaces the hash-verified install. The check must
+    identify the binary it trusts, not just find one that agrees.
+    """
+    fake = workdir / "planted" / "protoc"
+    fake.parent.mkdir(parents=True, exist_ok=True)
+    fake.write_text("#!/bin/sh\necho 'libprotoc " + mod.PROTOC_VERSION + "'\n")
+    fake.chmod(0o755)
+    log = []
+
+    def fake_run(cmd, *a, **kw):
+        log.append(cmd)
+        return mod.subprocess.CompletedProcess(cmd, 0, stdout=f"libprotoc {mod.PROTOC_VERSION}\n", stderr="")
+
+    real_which, real_run = mod.shutil.which, mod.subprocess.run
+    mod.shutil.which = lambda name: str(fake) if name == "protoc" else real_which(name)
+    mod.subprocess.run = fake_run
+    try:
+        # The install path must not be satisfiable by a PATH binary alone.
+        trusted = mod.already_pinned()
+    finally:
+        mod.shutil.which, mod.subprocess.run = real_which, real_run
+
+    installed = Path(getattr(mod, "INSTALLED_PROTOC", "/usr/local/bin/protoc"))
+    if trusted and not installed.exists():
+        return (
+            "vulnerable",
+            f"already_pinned() trusted {fake} (a PATH binary, not {installed}); "
+            "the hash-verified install is skipped",
+        )
+    return "safe", f"already_pinned() -> {trusted}; it does not accept a PATH-only binary"
+
+
+def probe_source_tree_is_verified(mod, src):
+    """S3 (closed finding): a tree that is not the pinned commit must stop the job.
+
+    Text matching is not evidence - this probe stayed green when the
+    `head != PROTOC_SOURCE_COMMIT` guard was emptied, and the guard is the whole
+    control. So the probe drives `install_from_source()` itself with a fake git
+    that reports a different commit, and requires SystemExit.
+    """
+    commit = getattr(mod, "PROTOC_SOURCE_COMMIT", "")
+    if not commit:
+        return "vulnerable", "no pinned source commit"
+    calls = []
+
+    def fake_run(cmd, *a, **kw):
+        calls.append(cmd)
+        if "rev-parse" in cmd:
+            return mod.subprocess.CompletedProcess(
+                cmd, 0, stdout=("f" * 40) + "\n", stderr=""
+            )
+        # The build has to "produce" a binary or the probe would stop on
+        # "the source build did not produce a protoc binary" instead of on the
+        # thing it is testing.
+        if "cmake" in cmd[0] and "--build" in cmd:
+            out = pathlib.Path(cmd[cmd.index("--build") + 1])
+            (out / f"protoc-{mod.PROTOC_VERSION}").write_text("#!/bin/sh\n")
+        return mod.subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    real_run, real_which = mod.subprocess.run, mod.shutil.which
+    mod.subprocess.run = fake_run
+    mod.shutil.which = lambda name: f"/usr/bin/{name}"
+    # A stop for the wrong reason is not this control: the first version of
+    # this probe passed a mismatched tree whenever *anything* exited 1, and
+    # `check=True` on the fake git raises SystemExit(1) too. The stop must come
+    # from the read-back comparison itself, so the pinned digest must be in the
+    # message. Measured: with the guard emptied, the mismatch then falls through
+    # to the build and no SystemExit happens at all.
+    mismatch_message = ""
+    captured = io.StringIO()
+    real_stderr = sys.stderr
+    sys.stderr = captured
+    try:
+        try:
+            mod.install_from_source()
+            stopped = False
+        except SystemExit as exc:
+            stopped = exc.code not in (0, None)
+            mismatch_message = str(exc)
+    finally:
+        sys.stderr = real_stderr
+        mod.subprocess.run, mod.shutil.which = real_run, real_which
+    # `die()` prints to stderr and raises SystemExit(1); the message is the
+    # evidence, so read it from where the code actually puts it.
+    mismatch_message += captured.getvalue()
+
+    if not stopped:
+        return (
+            "vulnerable",
+            f"install_from_source() compiled a tree reporting {'f'*40} while the pin is {commit}",
+        )
+    if commit not in mismatch_message:
+        return (
+            "vulnerable",
+            f"the build stopped, but not on the digest comparison (message: {mismatch_message[:80]})",
+        )
+    used_digest = any("fetch" in c and commit in c for c in calls)
+    if not used_digest:
+        return "vulnerable", "the pinned commit was never fetched by digest"
+    return "safe", f"a tree reporting {'f'*40} stops the job; the pin {commit[:12]} is fetched by digest"
+
+
 def main() -> int:
     src = TARGET.read_text()
     mod = load_target()
@@ -334,6 +456,8 @@ def main() -> int:
     record(probe_redirect_is_followed_and_verified, mod, workdir)
     record(probe_http_error_is_unreachable_not_tamper, mod, workdir)
     record(probe_path_hijack_of_the_target_dir, mod, workdir, TARGET)
+    record(probe_shadowed_protoc_on_path_short_circuits, mod, workdir)
+    record(probe_source_tree_is_verified, mod, TARGET)
 
     import shutil as _sh
     _sh.rmtree(workdir, ignore_errors=True)

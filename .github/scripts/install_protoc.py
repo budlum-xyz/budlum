@@ -47,6 +47,17 @@ from pathlib import Path
 
 PROTOC_VERSION = "29.3"
 
+#: The one path this installer trusts. `already_pinned()` answers "is *this*
+#: binary the pinned version", not "is some binary on PATH willing to claim it".
+INSTALLED_PROTOC = "/usr/local/bin/protoc"
+
+#: The commit the source fallback builds: the commit that tag `v29.3` pointed
+#: at when the pin was taken (dereferenced from the annotated tag
+#: `85425fce61be6ce0d7ac6f2a154fef7de2e684f3`, 2025-01-08). A tag name is
+#: mutable; the source build must name the tree it compiles, or "the same
+#: pinned version" rests on whoever last moved the tag.
+PROTOC_SOURCE_COMMIT = "b407e8416e3893036aee5af9a12bd9b6a0e2b2e6"
+
 # (zip name, sha256) per machine architecture. The x86_64 pin is the one the
 # workflow step carried before the acquisition was shared; the aarch64 pin is
 # the same release, verified against the published checksum list.
@@ -90,8 +101,15 @@ def sha256_of(path: Path) -> str:
 
 
 def already_pinned() -> bool:
-    protoc = shutil.which("protoc")
-    if protoc is None:
+    """True only when *the trusted binary* prints the pinned version.
+
+    Measured defect this closes: the check used `shutil.which("protoc")`, so a
+    binary earlier on PATH that prints `libprotoc 29.3` satisfied it and the
+    hash-verified install was skipped entirely. A check that asks "does
+    anything on PATH agree with me" cannot defend the download it precedes.
+    """
+    protoc = INSTALLED_PROTOC
+    if not os.access(protoc, os.X_OK):
         return False
     try:
         out = subprocess.run(
@@ -163,16 +181,29 @@ def install_from_source() -> None:
 
     # The codeload tarball is not used here: it does not carry the git
     # submodules (abseil-cpp, upb) the build needs. A shallow clone of the
-    # pinned tag with shallow submodules is a different failure domain from
-    # the release asset CDN, and the resulting binary is the same pinned
-    # version.
-    run(
-        [
-            "git", "clone", "--depth", "1", "--branch", f"v{PROTOC_VERSION}",
-            "--recurse-submodules", "--shallow-submodules",
-            "https://github.com/protocolbuffers/protobuf", str(src),
-        ]
-    )
+    # pinned commit with shallow submodules is a different failure domain from
+    # the release asset CDN.
+    #
+    # The clone names the COMMIT, not the tag, and the commit is read back:
+    # a tag is a pointer somebody can move, and the first version of this
+    # fallback built whatever `v29.3` happened to mean that day, then called
+    # verify_final() on its own output. Pinning the version string was never
+    # the same thing as pinning the tree.
+    shallow = [
+        "git", "clone", "--depth", "1", "--recurse-submodules",
+        "--shallow-submodules", "https://github.com/protocolbuffers/protobuf",
+        str(src),
+    ]
+    run(shallow)
+    run(["git", "-C", str(src), "fetch", "--depth", "1", "origin", PROTOC_SOURCE_COMMIT])
+    run(["git", "-C", str(src), "checkout", "--detach", PROTOC_SOURCE_COMMIT])
+    head = subprocess.run(
+        ["git", "-C", str(src), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if head != PROTOC_SOURCE_COMMIT:
+        die(f"the source tree is {head}, not the pinned {PROTOC_SOURCE_COMMIT}")
+    run(["git", "-C", str(src), "submodule", "update", "--init", "--recursive", "--depth", "1"])
     run(
         [
             "cmake", "-S", str(src), "-B", str(build),
