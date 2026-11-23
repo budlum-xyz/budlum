@@ -61,13 +61,71 @@ impl std::fmt::Display for SeedError {
 impl std::error::Error for SeedError {}
 pub const BUD_MAGIC: [u8; 8] = *b"BUDLUM\x01\x00";
 
-#[derive(Debug, Clone)]
+/// Serde for byte arrays longer than 32: array impls stop there, so the
+/// fields travel as length-prefixed byte strings instead.
+///
+/// The encoding is stable and self-describing: a `Vec<u8>` on the wire, with
+/// the length checked against the array type on the way back. A short or long
+/// payload is refused rather than silently truncated or zero-filled.
+pub(crate) mod big_array {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer, const N: usize>(
+        value: &[u8; N],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(value)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
+        deserializer: D,
+    ) -> Result<[u8; N], D::Error> {
+        let bytes: Vec<u8> = Vec::deserialize(deserializer)?;
+        bytes
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("byte array has the wrong length"))
+    }
+}
+
+/// Serde for `Vec<[u8; N]>` with the same wire shape as [`big_array`]: a
+/// sequence of byte strings, each length-checked on restore.
+pub(crate) mod big_array_vec {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer, const N: usize>(
+        value: &[[u8; N]],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(value.len()))?;
+        for item in value {
+            seq.serialize_element(item.as_slice())?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
+        deserializer: D,
+    ) -> Result<Vec<[u8; N]>, D::Error> {
+        let rows: Vec<Vec<u8>> = Vec::deserialize(deserializer)?;
+        rows.into_iter()
+            .map(|row| {
+                row.try_into()
+                    .map_err(|_| serde::de::Error::custom("guardian key has the wrong length"))
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QuantumAccount {
     pub address: [u8; 32],
+    #[serde(with = "big_array")]
     pub pq_public_key: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
     pub storage_root: [u8; 32],
     pub pact_root: [u8; 32],
     pub guardian_root: [u8; 32],
+    #[serde(with = "big_array_vec")]
     pub guardians: Vec<[u8; ML_DSA_87_PUBLIC_KEY_LEN]>,
     pub multisig_threshold: usize,
     pub recovery_threshold: usize,
@@ -344,10 +402,12 @@ impl RecoveryProposal {
     }
 }
 
+#[cfg(test)]
+pub(crate) use crate::storage::pact_binding::Pact;
 /// The PACT binding type lives in `src/storage/pact_binding.rs`.
 ///
-/// There used to be a second `PactBinding` definition here: the same five fields, the same 128-byte
-/// budget check, the same `verify_commitment`. `storage::Pact` is a superset of it -
+/// There used to be a duplicate five-field PACT binding struct here with the same 128-byte
+/// budget check and the same `verify_commitment`. `storage::Pact` is a superset of it -
 /// it also carries `id` and `mod_flag`, and binds to a root through
 /// `PactRegistry`.
 ///
@@ -356,7 +416,7 @@ impl RecoveryProposal {
 /// `is_residual_only` did not exist on this side, so it could not tell a pure-production PACT
 /// from a residual-only one. The copy was removed; the single definition
 /// is used from outside.
-pub use crate::storage::pact_binding::{Pact, PactRegistry};
+pub use crate::storage::pact_binding::PactRegistry;
 
 /// One guardian's vote on a recovery proposal: the guardian's ML-DSA-87
 /// public key, the digest of the proposal it approves, and its signature
@@ -474,11 +534,25 @@ impl BftGuardianFinality {
         if votes.len() < threshold {
             return Err("K-BUD-BFT-GUARDIAN: quorum < threshold");
         }
-        let quorum = (guardians.len() * 2).div_ceil(3);
+        let quorum = Self::strict_bft_quorum(guardians.len());
         if votes.len() < quorum {
-            return Err("K-BUD-BFT-GUARDIAN: quorum <2n/3");
+            return Err("K-BUD-BFT-GUARDIAN: quorum <= 2n/3");
         }
         Ok(votes)
+    }
+
+    /// Strict Byzantine quorum `floor(2n / 3) + 1 > 2n / 3`.
+    ///
+    /// Guarantees every pair of finalizing vote subsets over `total_guardians >= 1`
+    /// intersects in at least `floor(total_guardians / 3) + 1 >= f + 1` guardians,
+    /// closing the `ceil(2n / 3) == 2n / 3` split-brain when `3 | total_guardians`
+    /// (e.g. `n = 3, f = 1` or `n = 6, f = 2`).
+    const fn strict_bft_quorum(total_guardians: usize) -> usize {
+        if total_guardians == 0 {
+            0
+        } else {
+            total_guardians.saturating_mul(2) / 3 + 1
+        }
     }
 }
 
@@ -798,10 +872,52 @@ mod tests {
             BftGuardianFinality::finalize(honest.clone(), &guardians, 2, &proposal).is_ok(),
             "three honest votes finalise"
         );
-        assert!(
-            BftGuardianFinality::finalize(honest[..2].to_vec(), &guardians, 2, &proposal).is_ok(),
-            "two of three is both the threshold and 2n/3"
+        assert_eq!(
+            BftGuardianFinality::finalize(honest[..2].to_vec(), &guardians, 2, &proposal)
+                .unwrap_err(),
+            "K-BUD-BFT-GUARDIAN: quorum <= 2n/3",
+            "two of three equals 2n/3 and permits f=1 split-brain; strict >2n/3 requires 3"
         );
+        // Split-brain regression (n = 3, f = 1 and n = 6, f = 2): a Byzantine
+        // minority double-signing `proposal` and `other` cannot finalize both.
+        let byz_left = vec![honest[0].clone(), vote(&keys[2], proposal)];
+        let byz_right = vec![honest[1].clone(), vote(&keys[2], other)];
+        assert!(BftGuardianFinality::finalize(byz_left, &guardians, 2, &proposal).is_err());
+        assert!(BftGuardianFinality::finalize(byz_right, &guardians, 2, &other).is_err());
+
+        let keys6 = [
+            WalletKeyPair::generate(),
+            WalletKeyPair::generate(),
+            WalletKeyPair::generate(),
+            WalletKeyPair::generate(),
+            WalletKeyPair::generate(),
+            WalletKeyPair::generate(),
+        ];
+        let g6: Vec<[u8; ML_DSA_87_PUBLIC_KEY_LEN]> =
+            keys6.iter().map(WalletKeyPair::public_key_bytes).collect();
+        let split_a = vec![
+            vote(&keys6[0], proposal),
+            vote(&keys6[1], proposal),
+            vote(&keys6[4], proposal),
+            vote(&keys6[5], proposal),
+        ];
+        let split_b = vec![
+            vote(&keys6[2], other),
+            vote(&keys6[3], other),
+            vote(&keys6[4], other),
+            vote(&keys6[5], other),
+        ];
+        assert_eq!(
+            BftGuardianFinality::finalize(split_a, &g6, 4, &proposal).unwrap_err(),
+            "K-BUD-BFT-GUARDIAN: quorum <= 2n/3"
+        );
+        assert_eq!(
+            BftGuardianFinality::finalize(split_b, &g6, 4, &other).unwrap_err(),
+            "K-BUD-BFT-GUARDIAN: quorum <= 2n/3"
+        );
+        let supermajority_5: Vec<GuardianVote> =
+            keys6.iter().take(5).map(|k| vote(k, proposal)).collect();
+        assert!(BftGuardianFinality::finalize(supermajority_5, &g6, 4, &proposal).is_ok());
         // the same guardian twice, padded to the count
         let dup = vec![honest[0].clone(), honest[0].clone()];
         assert!(BftGuardianFinality::finalize(dup, &guardians, 2, &proposal).is_err());

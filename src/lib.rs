@@ -8,13 +8,16 @@
 // no client has to learn a second shape.
 #![recursion_limit = "256"]
 /// Quantum-safe account abstraction. Signature verification is bound to ML-DSA-87
-/// it therefore requires the `wallet-ml-dsa` feature.
-#[cfg(feature = "wallet-ml-dsa")]
+/// it therefore requires the `wallet-ml-dsa` feature for its signing
+/// doors, but the registry itself is consensus state (folded into the
+/// block state root and the snapshot digest) and consensus state cannot
+/// depend on an optional feature: the module is always compiled.
 pub mod account_abstraction;
 pub mod aggregation;
 pub mod ai;
 pub mod ai_inference;
 pub mod app_registry;
+pub mod bat3;
 pub mod bns;
 pub mod budlumxyz;
 pub mod chain;

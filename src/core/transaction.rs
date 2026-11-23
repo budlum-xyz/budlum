@@ -88,7 +88,7 @@ pub const MAX_V8_SIGNERS: usize = 16;
 /// admission instead of being guessed from key length.
 ///
 /// WIRING: consumed cross-file by the identity verification-method encoding
-/// (`registry::identity`, MethodKind::MlDsa87) when the identity transaction
+/// (`registry::identity`, `MethodKind::MlDsa87`) when the identity transaction
 /// door lands; until then the account-identity absorb in this file pins it.
 pub const ML_DSA_87_SCHEME_ID: &str = "ml-dsa-87-fips204-v1";
 
@@ -150,9 +150,10 @@ pub struct GasSchedule {
 const TX_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/transaction";
 
 impl crate::core::chain_config::Network {
+    #[must_use]
     pub fn gas_schedule(&self) -> GasSchedule {
         match self {
-            crate::core::chain_config::Network::Mainnet => GasSchedule {
+            Self::Mainnet => GasSchedule {
                 base_fee: 10,
                 gas_per_byte: 2,
                 gas_per_signature: 1_000,
@@ -161,7 +162,7 @@ impl crate::core::chain_config::Network {
                 vote_gas: 35_000,
                 contract_call_gas: 50_000,
             },
-            crate::core::chain_config::Network::Testnet => GasSchedule {
+            Self::Testnet => GasSchedule {
                 base_fee: 1,
                 gas_per_byte: 1,
                 gas_per_signature: 500,
@@ -170,7 +171,7 @@ impl crate::core::chain_config::Network {
                 vote_gas: 25_000,
                 contract_call_gas: 35_000,
             },
-            crate::core::chain_config::Network::Devnet => GasSchedule {
+            Self::Devnet => GasSchedule {
                 base_fee: 1,
                 gas_per_byte: 1,
                 gas_per_signature: 100,
@@ -183,7 +184,7 @@ impl crate::core::chain_config::Network {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExternalChain {
     Ethereum,
     Solana,
@@ -199,6 +200,7 @@ impl ExternalChain {
     /// Canonical domain id used by the consensus-owned external-root anchor
     /// Registry. These ids are part of the bridge wire contract and must not
     /// Be derived from an untrusted relayer payload.
+    #[must_use]
     pub const fn domain_id(self) -> u32 {
         match self {
             Self::Ethereum => 1,
@@ -321,6 +323,7 @@ impl BridgeBurnTx {
     /// `holder_signature` itself is not in here (it is the result of signing
     /// this value), and neither is an amount: the amount comes from the
     /// transfer row, which the row's own id pins.
+    #[must_use]
     pub fn authorization_hash(&self, chain_id: u64) -> [u8; 32] {
         crate::core::hash::hash_fields_bytes(&[
             BRIDGE_BURN_AUTHORIZATION_TAG,
@@ -608,24 +611,24 @@ pub enum TransactionType {
     AiInferenceRequest(crate::ai::types::AiInferenceRequest),
     /// Submit an AI inference layer inference result by an active bonded RoleId(8) operator.
     AiInferenceResult(crate::ai::types::AiInferenceResult),
-    /// Reclaim escrowed max_fee for expired unfinalized AI request.
+    /// Reclaim escrowed `max_fee` for expired unfinalized AI request.
     AiFeeReclaim(crate::ai::types::AiRequestId),
     /// Deactivate an AI model (owner-only, prevents new requests).
     AiModelDeactivate(crate::ai::types::AiModelId),
     /// Reactivate a previously deactivated AI model.
     AiModelReactivate(crate::ai::types::AiModelId),
     /// Cancel a pending AI inference request (requester-only).
-    /// Returns escrowed max_fee for refund by the executor layer.
+    /// Returns escrowed `max_fee` for refund by the executor layer.
     AiRequestCancel(crate::ai::types::AiRequestId),
-    /// Register a Pollen DataAsset (owner-submitted).
+    /// Register a Pollen `DataAsset` (owner-submitted).
     PollenRegisterDataAsset(crate::pollen::DataAsset),
-    /// Register a seller/owner sale authorization for DataAsset pollen.
+    /// Register a seller/owner sale authorization for `DataAsset` pollen.
     PollenAuthorizeSale(crate::pollen::SaleAuthorization),
-    /// Register an owner-submitted AccessGrant.
+    /// Register an owner-submitted `AccessGrant`.
     PollenGrantAccess(crate::pollen::AccessGrant),
-    /// Revoke a Pollen AccessGrant by id (owner-only in executor).
+    /// Revoke a Pollen `AccessGrant` by id (owner-only in executor).
     PollenRevokeGrant(crate::pollen::GrantId),
-    /// Revoke a Pollen DataAsset by id (owner-only in executor).
+    /// Revoke a Pollen `DataAsset` by id (owner-only in executor).
     PollenRevokeDataAsset(crate::pollen::AssetId),
     /// Slash a verifier for equivocation.
     AiDisputeSlash {
@@ -646,20 +649,20 @@ pub enum TransactionType {
     PrivateTransferSubmit(crate::privacy::PrivateTransferSubmit),
     /// Faucet/test helper - insert a live note commitment (governance/tests).
     PrivacyNoteInsert([u8; 32]),
-    /// AI execution layer: attach BudZKVM execution proof to a result
+    /// AI execution layer: attach `BudZKVM` execution proof to a result
     /// (active RoleId(8) operator-submitted; structural verify on the chain).
     AiAttachExecutionProof {
         request_id: crate::ai::types::AiRequestId,
         proof: crate::ai::types::AiExecutionProof,
     },
     /// AI inference layer production onboarding: bond `amount` from the signed sender into
-    /// The permissionless AI_OPERATOR role (RoleId 8).
+    /// The permissionless `AI_OPERATOR` role (`RoleId` 8).
     AiOperatorBond,
     /// Begin RoleId(8) unbonding after all observable tasks/disputes close.
     AiOperatorUnbond,
     /// Withdraw the complete RoleId(8) principal after the unbonding epoch.
     AiOperatorWithdraw,
-    /// Register the validator's consensus public keys and RFC 9380 BLS PoP.
+    /// Register the validator's consensus public keys and RFC 9380 BLS `PoP`.
     /// The outer Ed25519 transaction signature binds these keys to `from`.
     RegisterConsensusKeys(ConsensusKeyRegistration),
     /// Domain settlement: apply the nonce writes a verified domain commitment
@@ -676,7 +679,7 @@ pub enum TransactionType {
     ///
     /// Carries the registry's own `IdentityTx` and nothing else. No domain
     /// field is defined here: the executor's single arm supplies the kind
-    /// read from state, because a caller-declared "this is PoA" is authority
+    /// read from state, because a caller-declared "this is `PoA`" is authority
     /// fabrication - the same refusal the domain-freeze path applies in
     /// `chain/blockchain.rs`, applied at the identity door.
     Identity(crate::registry::IdentityTx),
@@ -697,7 +700,7 @@ pub enum TransactionType {
     /// naming types: the signing gate reads the enum
     /// body's identifiers to resolve carried payload types.)
     Storage(crate::domain::storage_tx::StorageTx),
-    /// PoA admission door: a candidate applies for themselves, an admin of
+    /// `PoA` admission door: a candidate applies for themselves, an admin of
     /// the target domain decides, and the admin set changes only through
     /// admins or governance. Ids, a dossier commitment and reasons - no
     /// authority fields, because the sender IS the claimed actor at the one
@@ -1067,6 +1070,7 @@ pub fn decode_v7_signer_key(
 }
 
 impl Transaction {
+    #[must_use]
     pub fn new(from: Address, to: Address, amount: u64, data: Vec<u8>) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1080,6 +1084,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_stake(from: Address, amount: u64, nonce: u64) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1094,6 +1099,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_delegate(
         from: Address,
         validator: Address,
@@ -1115,6 +1121,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_undelegate(
         from: Address,
         validator: Address,
@@ -1136,6 +1143,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_withdraw_delegation(
         from: Address,
         validator: Address,
@@ -1156,6 +1164,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_validator_commission(
         from: Address,
         commission_ppm: u32,
@@ -1175,6 +1184,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_consensus_key_registration(
         from: Address,
         fee: u64,
@@ -1194,6 +1204,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_ai_operator_bond(
         from: Address,
         amount: u64,
@@ -1213,6 +1224,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_ai_operator_unbond(from: Address, fee: u64, nonce: u64, chain_id: u64) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1226,6 +1238,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_ai_operator_withdraw(from: Address, fee: u64, nonce: u64, chain_id: u64) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1239,6 +1252,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_proposal(from: Address, p_type: ProposalType, duration: u64, nonce: u64) -> Self {
         let mut data = Vec::new();
         data.extend_from_slice(&duration.to_le_bytes());
@@ -1258,6 +1272,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_vote(from: Address, proposal_id: u64, vote_for: bool, nonce: u64) -> Self {
         let mut data = Vec::new();
         data.push(if vote_for { 1 } else { 0 });
@@ -1275,6 +1290,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_contract_call(from: Address, fee: u64, nonce: u64, bytecode: Vec<u8>) -> Self {
         Self::new_contract_call_to(from, Address::zero(), fee, nonce, bytecode)
     }
@@ -1285,6 +1301,7 @@ impl Transaction {
     /// bytecode-only calls. A non-zero `to` is an explicit application identity
     /// and enables the testnet application revenue split at block settlement.
     /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    #[must_use]
     pub fn new_contract_call_to(
         from: Address,
         to: Address,
@@ -1305,6 +1322,7 @@ impl Transaction {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new_with_chain_id(
         from: Address,
         to: Address,
@@ -1318,7 +1336,7 @@ impl Transaction {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
-        let mut tx = Transaction {
+        let mut tx = Self {
             from,
             to,
             amount,
@@ -1341,6 +1359,7 @@ impl Transaction {
         tx.hash = tx.calculate_hash();
         tx
     }
+    #[must_use]
     pub fn new_with_fee(
         from: Address,
         to: Address,
@@ -1360,8 +1379,9 @@ impl Transaction {
             TransactionType::Transfer,
         )
     }
+    #[must_use]
     pub fn genesis() -> Self {
-        let mut tx = Transaction {
+        let mut tx = Self {
             from: Address::zero(),
             to: Address::zero(),
             amount: 0,
@@ -1387,6 +1407,7 @@ impl Transaction {
     /// Canonical V4 signing preimage. Every execution-relevant variant
     /// Field is committed explicitly; serde/bincode/JSON are never used as a
     /// Consensus signing encoding.
+    #[must_use]
     pub fn signing_hash(&self) -> [u8; 32] {
         let mut preimage = Vec::new();
         put_u8(&mut preimage, transaction_type_tag(&self.tx_type));
@@ -1456,6 +1477,7 @@ impl Transaction {
         }
         wrapped.finalize().into()
     }
+    #[must_use]
     pub fn calculate_hash(&self) -> String {
         hex::encode(self.signing_hash())
     }
@@ -2106,6 +2128,7 @@ impl Transaction {
     /// Verify under the scheme statuses of a fresh genesis. Every path that
     /// decides on behalf of a chain calls [`Self::verify_in`] with the
     /// chain-state registry.
+    #[must_use]
     pub fn verify(&self) -> bool {
         self.verify_in(&crate::crypto::scheme::SchemeStatusRegistry::genesis())
     }
@@ -2177,12 +2200,11 @@ impl Transaction {
             debug!("only a V6 transaction may carry a multisig authorization");
             return false;
         }
-        let signature = match &self.signature {
-            Some(s) => s,
-            None => {
-                debug!("TX has no signature");
-                return false;
-            }
+        let signature = if let Some(s) = &self.signature {
+            s
+        } else {
+            debug!("TX has no signature");
+            return false;
         };
         let signing_hash = self.signing_hash();
         if self.signature_version == SIGNATURE_VERSION_V5 {
@@ -2545,9 +2567,11 @@ impl Transaction {
         }
         true
     }
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).unwrap_or_else(|_| TX_SERIALIZE_FAILED.to_vec())
     }
+    #[must_use]
     pub fn fee_bid(&self) -> crate::chain::fee_market::FeeBid {
         crate::chain::fee_market::FeeBid {
             max_fee: if self.max_fee == 0 {
@@ -2563,6 +2587,7 @@ impl Transaction {
     ///
     /// `max_fee` and `priority_fee` remain signed wire-compatibility fields;
     /// State validation rejects any value that diverges from this flat fee.
+    #[must_use]
     pub fn fee_limit(&self) -> u64 {
         self.fee
     }
@@ -2593,6 +2618,7 @@ impl Transaction {
     ///
     /// Do not use this helper for admission or state transitions. Those paths
     /// must use `checked_liquid_cost` and reject overflow.
+    #[must_use]
     pub fn total_cost(&self) -> u64 {
         self.checked_total_cost().unwrap_or(u64::MAX)
     }
@@ -2618,6 +2644,7 @@ impl Transaction {
     /// Caller reaching for this to size a transaction will get a number the
     /// Chain has never charged. `bud_estimateGas` deliberately does not use it;
     /// It returns the flat fee floor instead.
+    #[must_use]
     pub fn estimate_gas_with_schedule(&self, schedule: GasSchedule) -> u64 {
         let intrinsic = match &self.tx_type {
             TransactionType::Transfer => schedule.transfer_gas,
@@ -2744,8 +2771,14 @@ impl Transaction {
                 | crate::cross_domain::external::ExternalDomainTx::Readmit { .. },
             ) => schedule.contract_call_gas * 4 + schedule.gas_per_signature * 8,
             TransactionType::ExternalDomain(
-                crate::cross_domain::external::ExternalDomainTx::SubmitEvidence(_),
+                crate::cross_domain::external::ExternalDomainTx::SubmitEvidence(_)
+                | crate::cross_domain::external::ExternalDomainTx::ChallengeContradiction(_)
+                | crate::cross_domain::external::ExternalDomainTx::ChallengeAncestry(_),
             ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature,
+            TransactionType::ExternalDomain(
+                crate::cross_domain::external::ExternalDomainTx::SubmitFaultProof { .. }
+                | crate::cross_domain::external::ExternalDomainTx::RotateCommittee { .. },
+            ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature * 2,
             TransactionType::ExternalDomain(_) => schedule.contract_call_gas * 2,
             // Registration validates the domain record and escrows a bond; a
             // ZK proof runs the STARK verifier: both are verification work on
@@ -3273,7 +3306,7 @@ fn encode_message(message: &crate::cross_domain::message::CrossDomainMessage, ou
         crate::cross_domain::message::quantum_class_code(message.source_quantum_class),
     );
 }
-/// Canonical preimage of a PoA admission transaction.
+/// Canonical preimage of a `PoA` admission transaction.
 ///
 /// Operation tag, domain id, and the addresses/commitments/reasons each arm
 /// carries - every field the execution body reads is under the signature, so
@@ -3780,6 +3813,13 @@ fn encode_identity_record(record: &crate::registry::IdentityRecord, out: &mut Ve
         put_fixed(out, guardian.as_bytes());
     }
     put_u64(out, record.recovery_threshold as u64);
+    // The per-subject credential ceiling reads `issued_credentials`, and the
+    // recovery digest reads `recovery_nonce` to refuse a replayed guardian
+    // quorum. Both ride on the wire, so both are inside the signed preimage:
+    // otherwise a relay could lower the counter or rewind the nonce on a
+    // record whose signature still verifies.
+    put_u64(out, record.issued_credentials);
+    put_u64(out, record.recovery_nonce);
 }
 fn encode_credential_commitment(
     credential: &crate::registry::CredentialCommitment,
@@ -5030,6 +5070,299 @@ fn encode_external_domain_tx(
                 },
             );
         }
+        // Tag 6: cryptographic contradiction challenge, appended first.
+        ExternalDomainTx::ChallengeContradiction(evidence) => {
+            put_u8(out, 6);
+            encode_raw_evidence(evidence, out);
+        }
+        // Tag 7: cross-slot ancestry challenge.
+        ExternalDomainTx::ChallengeAncestry(evidence) => {
+            put_u8(out, 7);
+            encode_raw_evidence(evidence, out);
+        }
+        // Tag 8: objective protocol equivocation or BitVM2 single-step fault proof.
+        ExternalDomainTx::SubmitFaultProof { domain, proof } => {
+            put_u8(out, 8);
+            put_fixed(out, &domain.0);
+            encode_objective_fault_proof(proof, out);
+        }
+        // Tag 9: permissionless committee or validator-set rotation proof, appended last.
+        ExternalDomainTx::RotateCommittee { domain, proof } => {
+            put_u8(out, 9);
+            put_fixed(out, &domain.0);
+            encode_committee_rotation_proof(proof, out);
+        }
+    }
+}
+
+fn encode_committee_rotation_proof(
+    proof: &crate::cross_domain::external::CommitteeRotationProof,
+    out: &mut Vec<u8>,
+) {
+    use crate::cross_domain::external::CommitteeRotationProof;
+    match proof {
+        CommitteeRotationProof::EthereumSyncSsz(eth) => {
+            put_u8(out, 0);
+            put_u64(out, eth.next_period);
+            put_u64(out, eth.next_member_pubkeys.len() as u64);
+            for pk in &eth.next_member_pubkeys {
+                put_bytes(out, pk);
+            }
+            put_bytes(out, &eth.next_aggregate_pubkey);
+            put_fixed(out, &eth.finalized_state_root);
+            put_u64(out, eth.next_sync_committee_gindex);
+            put_u64(out, eth.next_sync_committee_branch.len() as u64);
+            for node in &eth.next_sync_committee_branch {
+                put_fixed(out, node);
+            }
+            put_u64(out, eth.finalized_root_gindex);
+            put_fixed(out, &eth.subsequent_committee_root);
+        }
+        CommitteeRotationProof::TendermintSkip {
+            anchor_commit,
+            update,
+            next_validators_proof,
+            trusting_period_secs,
+        } => {
+            put_u8(out, 1);
+            encode_tendermint_commit_evidence(anchor_commit, out);
+            encode_tendermint_commit_evidence(update, out);
+            match next_validators_proof {
+                Some((root, merkle)) => {
+                    put_u8(out, 1);
+                    put_fixed(out, root);
+                    put_u64(out, merkle.index as u64);
+                    put_u64(out, merkle.total as u64);
+                    put_u64(out, merkle.aunts.len() as u64);
+                    for aunt in &merkle.aunts {
+                        put_fixed(out, aunt);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+            put_u64(out, *trusting_period_secs);
+        }
+        CommitteeRotationProof::TendermintBisection {
+            trusted,
+            light_params,
+            steps,
+        } => {
+            put_u8(out, 2);
+            put_string(out, &trusted.chain_id);
+            put_u64(out, trusted.height);
+            put_u64(out, trusted.time_secs);
+            put_u64(out, trusted.trusting_period_secs);
+            put_u64(out, trusted.validators.len() as u64);
+            for v in &trusted.validators {
+                put_fixed(out, &v.address);
+                put_fixed(out, &v.public_key);
+                put_u64(out, v.voting_power);
+            }
+            put_fixed(out, &trusted.next_validators_hash);
+            put_u64(out, light_params.trusting_period_secs);
+            put_u64(out, light_params.unbonding_period_secs);
+            put_u64(out, light_params.max_clock_drift_secs);
+            put_u64(out, light_params.max_height_drift);
+            put_u64(out, steps.len() as u64);
+            for step in steps {
+                encode_tendermint_commit_evidence(step, out);
+            }
+        }
+    }
+}
+
+fn encode_objective_fault_proof(
+    proof: &crate::cross_domain::external::ObjectiveFaultProof,
+    out: &mut Vec<u8>,
+) {
+    use crate::cross_domain::external::ObjectiveFaultProof;
+    match proof {
+        ObjectiveFaultProof::HotStuffEquivocation(hs) => {
+            put_u8(out, 0);
+            put_u64(out, hs.epoch);
+            put_u64(out, hs.view);
+            put_fixed(out, &hs.block_hash_a);
+            put_fixed(out, &hs.block_hash_b);
+            for vote in [&hs.vote_a, &hs.vote_b] {
+                put_fixed(out, &vote.signer_pubkey);
+                put_bytes(out, &vote.ed25519_sig);
+                put_bytes(out, &vote.pq_sig);
+            }
+        }
+        ObjectiveFaultProof::CasperFfgEquivocation(ffg) => {
+            put_u8(out, 1);
+            for vote in [&ffg.vote_a, &ffg.vote_b] {
+                put_fixed(out, &vote.signer);
+                put_u64(out, vote.source_epoch);
+                put_fixed(out, &vote.source_root);
+                put_u64(out, vote.target_epoch);
+                put_fixed(out, &vote.target_root);
+                put_bytes(out, &vote.signature);
+                put_bytes(out, &vote.pq_signature);
+            }
+        }
+        ObjectiveFaultProof::MysticetiEquivocation(my) => {
+            put_u8(out, 2);
+            for vertex in [&my.vertex_a, &my.vertex_b] {
+                put_fixed(out, &vertex.author);
+                put_u64(out, vertex.epoch);
+                put_u64(out, vertex.round);
+                put_fixed(out, &vertex.payload_digest);
+                put_u64(out, vertex.parents.len() as u64);
+                for parent in &vertex.parents {
+                    put_fixed(out, parent);
+                }
+                put_bytes(out, &vertex.ed25519_sig);
+                put_bytes(out, &vertex.pq_sig);
+            }
+        }
+        ObjectiveFaultProof::BitVmDisprove(bv) => {
+            put_u8(out, 3);
+            put_fixed(out, &bv.claim.state_root);
+            put_fixed(out, &bv.claim.tx_root);
+            put_fixed(out, &bv.claim.event_root);
+            put_fixed(out, &bv.claim.program_hash);
+            put_fixed(out, &bv.claim.trace_merkle_root);
+            put_u32(out, bv.claim.trace_chunk_count);
+            put_u64(out, bv.claim.claim_pow_height);
+            put_bytes(out, &bv.claim.operator_ed25519_sig);
+            put_bytes(out, &bv.claim.operator_pq_sig);
+            put_u32(out, bv.disputed_chunk.chunk_index);
+            put_fixed(out, &bv.disputed_chunk.pre_state);
+            put_fixed(out, &bv.disputed_chunk.claimed_post_state);
+            put_u8(out, bv.disputed_chunk.step_opcode);
+            put_fixed(out, &bv.disputed_chunk.step_witness);
+            put_u64(out, bv.trace_merkle_proof.len() as u64);
+            for step in &bv.trace_merkle_proof {
+                put_fixed(out, &step.sibling);
+                put_u8(out, u8::from(step.sibling_is_left));
+            }
+        }
+        ObjectiveFaultProof::DagEquivocation(dag) => {
+            use crate::cross_domain::external::dag_bft::DagEquivocationProof;
+            put_u8(out, 4);
+            match dag.as_ref() {
+                DagEquivocationProof::AnchorCertificate {
+                    round,
+                    first_anchor_digest,
+                    first_sigs,
+                    second_anchor_digest,
+                    second_sigs,
+                } => {
+                    put_u8(out, 0);
+                    put_u64(out, *round);
+                    put_fixed(out, first_anchor_digest);
+                    put_u64(out, first_sigs.len() as u64);
+                    for s in first_sigs {
+                        put_fixed(out, &s.signer_pubkey);
+                        put_bytes(out, &s.ed25519_sig);
+                        put_bytes(out, &s.pq_sig);
+                    }
+                    put_fixed(out, second_anchor_digest);
+                    put_u64(out, second_sigs.len() as u64);
+                    for s in second_sigs {
+                        put_fixed(out, &s.signer_pubkey);
+                        put_bytes(out, &s.ed25519_sig);
+                        put_bytes(out, &s.pq_sig);
+                    }
+                }
+                DagEquivocationProof::CausalParent { first, second } => {
+                    put_u8(out, 1);
+                    for cp in [first, second] {
+                        put_u64(out, cp.round);
+                        put_fixed(out, &cp.author);
+                        put_fixed(out, &cp.payload_root);
+                        put_fixed(out, &cp.digest);
+                        put_bytes(out, &cp.author_ed25519_sig);
+                        put_bytes(out, &cp.author_pq_sig);
+                    }
+                }
+                DagEquivocationProof::VoterVertex { first, second } => {
+                    put_u8(out, 2);
+                    for vv in [first, second] {
+                        put_u64(out, vv.round);
+                        put_fixed(out, &vv.author);
+                        put_u64(out, vv.parent_digests.len() as u64);
+                        for pd in &vv.parent_digests {
+                            put_fixed(out, pd);
+                        }
+                        put_fixed(out, &vv.digest);
+                        put_bytes(out, &vv.ed25519_sig);
+                        put_bytes(out, &vv.pq_sig);
+                    }
+                }
+            }
+        }
+        ObjectiveFaultProof::TendermintMisbehaviour {
+            trusted,
+            params: light_params,
+            evidence: misbehaviour,
+        } => {
+            put_u8(out, 5);
+            put_string(out, &trusted.chain_id);
+            put_u64(out, trusted.height);
+            put_u64(out, trusted.time_secs);
+            put_u64(out, trusted.trusting_period_secs);
+            put_u64(out, trusted.validators.len() as u64);
+            for v in &trusted.validators {
+                put_fixed(out, &v.address);
+                put_fixed(out, &v.public_key);
+                put_u64(out, v.voting_power);
+            }
+            put_fixed(out, &trusted.next_validators_hash);
+            put_u64(out, light_params.trusting_period_secs);
+            put_u64(out, light_params.unbonding_period_secs);
+            put_u64(out, light_params.max_clock_drift_secs);
+            put_u64(out, light_params.max_height_drift);
+            encode_tendermint_commit_evidence(&misbehaviour.header_1, out);
+            match &misbehaviour.header_2 {
+                Some(h2) => {
+                    put_u8(out, 1);
+                    encode_tendermint_commit_evidence(h2, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+    }
+}
+
+fn encode_tendermint_commit_evidence(
+    c: &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
+    out: &mut Vec<u8>,
+) {
+    put_string(out, &c.chain_id);
+    put_u64(out, c.height);
+    put_u64(out, c.round.cast_unsigned());
+    put_fixed(out, &c.block_hash);
+    put_u32(out, c.parts_total);
+    put_fixed(out, &c.parts_hash);
+    put_u64(out, c.version_block);
+    put_fixed(out, &c.last_block_hash);
+    put_u32(out, c.last_parts_total);
+    put_fixed(out, &c.last_parts_hash);
+    put_fixed(out, &c.last_commit_hash);
+    put_fixed(out, &c.data_hash);
+    put_fixed(out, &c.validators_hash);
+    put_fixed(out, &c.next_validators_hash);
+    put_fixed(out, &c.consensus_hash);
+    put_fixed(out, &c.app_hash);
+    put_fixed(out, &c.last_results_hash);
+    put_fixed(out, &c.evidence_hash);
+    put_fixed(out, &c.proposer_address);
+    put_u64(out, c.commit_time);
+    put_u32(out, c.commit_time_nanos);
+    put_u64(out, c.validators.len() as u64);
+    for v in &c.validators {
+        put_fixed(out, &v.address);
+        put_fixed(out, &v.public_key);
+        put_u64(out, v.voting_power);
+    }
+    put_u64(out, c.signatures.len() as u64);
+    for sig in &c.signatures {
+        put_fixed(out, &sig.address);
+        put_u64(out, sig.timestamp_seconds.cast_unsigned());
+        put_u32(out, sig.timestamp_nanos);
+        put_bytes(out, &sig.signature);
     }
 }
 
@@ -5119,6 +5452,117 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                         put_u64(out, *voting_weight);
                         put_bytes(out, pq_pubkey);
                     }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 5: linear chained BFT (HotStuff 3-chain QC) adapter, appended last.
+        AdapterSpec::HotStuffQc { network, committee } => {
+            put_u8(out, 5);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::hotstuff::HotStuffValidator {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 6: stake-weighted round-DAG BFT (Bullshark) adapter, appended last.
+        AdapterSpec::DagCertificate { network, committee } => {
+            put_u8(out, 6);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::dag_bft::DagBftValidator {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 7: dual-quorum Casper-FFG checkpoint adapter, appended last.
+        AdapterSpec::CasperFfg { network, committee } => {
+            put_u8(out, 7);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.validators.len() as u64);
+                    for member in &pin.validators {
+                        let crate::cross_domain::external::casper_ffg::FfgValidator {
+                            pubkey,
+                            stake,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, pubkey);
+                        put_u64(out, *stake);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 8: uncertified 3-round Mysticeti DAG adapter, appended last.
+        AdapterSpec::MysticetiDag { network, committee } => {
+            put_u8(out, 8);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::mysticeti_dag::MysticetiMember {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 9: BitVM2 / DisproveScript PoW covenant adapter, appended last.
+        AdapterSpec::BitVmCovenant { network, anchor } => {
+            put_u8(out, 9);
+            put_string(out, network);
+            match anchor {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.height);
+                    put_fixed(out, &pin.block_hash);
+                    put_u32(out, pin.bits);
+                    put_fixed(out, &pin.program_hash);
+                    put_u64(out, pin.min_pow_confirmations);
+                    put_u64(out, pin.challenge_blocks);
+                    put_fixed(out, &pin.operator_ed25519_pubkey);
+                    put_bytes(out, &pin.operator_pq_pubkey);
                 }
                 None => put_u8(out, 0),
             }
@@ -5318,6 +5762,185 @@ mod v29_signing_tests {
             ..QuorumPolicy::strict(2, 3)
         });
         assert_ne!(strict.signing_hash(), loose.signing_hash());
+
+        assert_bft_fault_proof_preimages();
+        assert_dag_and_bitvm_fault_proof_preimages();
+    }
+
+    fn assert_bft_fault_proof_preimages() {
+        use crate::cross_domain::external::casper_ffg::{FfgEquivocationProof, FfgVote};
+        use crate::cross_domain::external::hotstuff::{HotStuffEquivocationProof, HotStuffVoteSig};
+        use crate::cross_domain::external::{DomainKey, ExternalDomainTx, ObjectiveFaultProof};
+
+        let submit_fault = |domain: DomainKey, proof: ObjectiveFaultProof| {
+            TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof { domain, proof })
+        };
+        let hs_base = HotStuffEquivocationProof {
+            epoch: 7,
+            view: 12,
+            block_hash_a: [0x11; 32],
+            block_hash_b: [0x22; 32],
+            vote_a: HotStuffVoteSig {
+                signer_pubkey: [0x33; 32],
+                ed25519_sig: vec![1, 2],
+                pq_sig: vec![3, 4],
+            },
+            vote_b: HotStuffVoteSig {
+                signer_pubkey: [0x33; 32],
+                ed25519_sig: vec![5, 6],
+                pq_sig: vec![7, 8],
+            },
+        };
+        let hs_h0 = signed_variant(submit_fault(
+            DomainKey([1u8; 32]),
+            ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_base.clone())),
+        ))
+        .signing_hash();
+        let mut hs_mut = hs_base.clone();
+        hs_mut.vote_b.pq_sig.push(9);
+        assert_ne!(
+            hs_h0,
+            signed_variant(submit_fault(
+                DomainKey([1u8; 32]),
+                ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_mut)),
+            ))
+            .signing_hash()
+        );
+        assert_ne!(
+            hs_h0,
+            signed_variant(submit_fault(
+                DomainKey([2u8; 32]),
+                ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_base)),
+            ))
+            .signing_hash()
+        );
+
+        let ffg_base = FfgEquivocationProof {
+            vote_a: FfgVote {
+                signer: [0x41; 32],
+                source_epoch: 1,
+                source_root: [0x42; 32],
+                target_epoch: 3,
+                target_root: [0x43; 32],
+                signature: vec![1],
+                pq_signature: vec![2],
+            },
+            vote_b: FfgVote {
+                signer: [0x41; 32],
+                source_epoch: 2,
+                source_root: [0x44; 32],
+                target_epoch: 4,
+                target_root: [0x45; 32],
+                signature: vec![3],
+                pq_signature: vec![4],
+            },
+        };
+        let ffg_h0 = signed_variant(submit_fault(
+            DomainKey([3u8; 32]),
+            ObjectiveFaultProof::CasperFfgEquivocation(Box::new(ffg_base.clone())),
+        ))
+        .signing_hash();
+        let mut ffg_mut = ffg_base;
+        ffg_mut.vote_b.pq_signature.push(5);
+        assert_ne!(
+            ffg_h0,
+            signed_variant(submit_fault(
+                DomainKey([3u8; 32]),
+                ObjectiveFaultProof::CasperFfgEquivocation(Box::new(ffg_mut)),
+            ))
+            .signing_hash()
+        );
+    }
+
+    fn assert_dag_and_bitvm_fault_proof_preimages() {
+        use crate::cross_domain::external::bitvm_covenant::{
+            BitVmPegClaim, DisproveScriptProof, MerkleStep, TraceChunkStep,
+        };
+        use crate::cross_domain::external::mysticeti_dag::{
+            MysticetiEquivocationProof, MysticetiVertex,
+        };
+        use crate::cross_domain::external::{DomainKey, ExternalDomainTx, ObjectiveFaultProof};
+
+        let submit_fault = |domain: DomainKey, proof: ObjectiveFaultProof| {
+            TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof { domain, proof })
+        };
+        let my_base = MysticetiEquivocationProof {
+            vertex_a: MysticetiVertex {
+                author: [0x51; 32],
+                epoch: 2,
+                round: 10,
+                payload_digest: [0x52; 32],
+                parents: vec![[0x53; 32]],
+                ed25519_sig: vec![1],
+                pq_sig: vec![2],
+            },
+            vertex_b: MysticetiVertex {
+                author: [0x51; 32],
+                epoch: 2,
+                round: 10,
+                payload_digest: [0x54; 32],
+                parents: vec![[0x55; 32]],
+                ed25519_sig: vec![3],
+                pq_sig: vec![4],
+            },
+        };
+        let my_h0 = signed_variant(submit_fault(
+            DomainKey([4u8; 32]),
+            ObjectiveFaultProof::MysticetiEquivocation(Box::new(my_base.clone())),
+        ))
+        .signing_hash();
+        let mut my_mut = my_base;
+        my_mut.vertex_b.parents.push([0x56; 32]);
+        assert_ne!(
+            my_h0,
+            signed_variant(submit_fault(
+                DomainKey([4u8; 32]),
+                ObjectiveFaultProof::MysticetiEquivocation(Box::new(my_mut)),
+            ))
+            .signing_hash()
+        );
+
+        let bv_base = DisproveScriptProof {
+            claim: BitVmPegClaim {
+                state_root: [0x61; 32],
+                tx_root: [0x62; 32],
+                event_root: [0x63; 32],
+                program_hash: [0x64; 32],
+                trace_merkle_root: [0x65; 32],
+                trace_chunk_count: 2,
+                claim_pow_height: 51,
+                operator_ed25519_sig: vec![1],
+                operator_pq_sig: vec![2],
+            },
+            disputed_chunk: TraceChunkStep {
+                chunk_index: 0,
+                pre_state: [0x66; 32],
+                claimed_post_state: [0x67; 32],
+                step_opcode: 3,
+                step_witness: [0x68; 32],
+            },
+            trace_merkle_proof: vec![MerkleStep {
+                sibling: [0x69; 32],
+                sibling_is_left: false,
+            }],
+        };
+        let bv_h0 = signed_variant(submit_fault(
+            DomainKey([5u8; 32]),
+            ObjectiveFaultProof::BitVmDisprove(Box::new(bv_base.clone())),
+        ))
+        .signing_hash();
+        let mut bv_mut = bv_base;
+        if let Some(step) = bv_mut.trace_merkle_proof.first_mut() {
+            step.sibling_is_left = true;
+        }
+        assert_ne!(
+            bv_h0,
+            signed_variant(submit_fault(
+                DomainKey([5u8; 32]),
+                ObjectiveFaultProof::BitVmDisprove(Box::new(bv_mut)),
+            ))
+            .signing_hash()
+        );
     }
 
     /// Every field a settlement transaction carries reaches the signing
@@ -5763,6 +6386,8 @@ mod v29_signing_tests {
             credential_roots: Default::default(),
             guardians: vec![],
             recovery_threshold: 0,
+            issued_credentials: 0,
+            recovery_nonce: 0,
         };
         let base_credential = CredentialCommitment {
             issuer: test_addr_from_byte(2u8),
@@ -5837,6 +6462,26 @@ mod v29_signing_tests {
         let mut r = base_record.clone();
         r.recovery_threshold = 1;
         assert_ne!(base_register, hash_of(register(r)), "recovery_threshold");
+        // `issued_credentials` is the per-subject ceiling the credential door
+        // reads, and `recovery_nonce` is what stops an applied guardian quorum
+        // from being replayed into the same epoch. A record carries both on the
+        // wire, so a relay that lowered the counter or rewound the nonce would
+        // otherwise be editing an authorization outcome behind a signature that
+        // still verifies.
+        let mut r = base_record.clone();
+        r.issued_credentials = 7;
+        assert_ne!(
+            base_register,
+            hash_of(register(r)),
+            "issued_credentials must be in the signed preimage"
+        );
+        let mut r = base_record.clone();
+        r.recovery_nonce = 3;
+        assert_ne!(
+            base_register,
+            hash_of(register(r)),
+            "recovery_nonce must be in the signed preimage"
+        );
 
         let base_issue = hash_of(issue(base_credential.clone()));
         let mut c = base_credential.clone();
@@ -6874,5 +7519,195 @@ mod recovery_tests {
         kind.tx_type = TransactionType::Stake;
         kind.hash = kind.calculate_hash();
         assert!(!kind.verify_in(&registry));
+    }
+
+    #[test]
+    fn objective_fault_proof_preimage_covers_dag_and_tendermint_fields() {
+        use crate::cross_domain::external::dag_bft::{
+            DagBftSig, DagCausalParent, DagEquivocationProof, DagVoterVertex,
+        };
+        use crate::cross_domain::external::tendermint::{
+            TendermintCommitEvidence, TendermintLightParams, TendermintMisbehaviour,
+            TendermintSignature, TendermintValidator, TrustedTendermintState,
+        };
+        use crate::cross_domain::external::{DomainKey, ExternalDomainTx, ObjectiveFaultProof};
+
+        let domain = DomainKey([0x44; 32]);
+        let base_tx = Transaction::new_with_chain_id(
+            Address::from([1u8; 32]),
+            Address::from([2u8; 32]),
+            0,
+            1,
+            0,
+            Vec::new(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::Transfer,
+        );
+        let hash_of = |proof: ObjectiveFaultProof| {
+            let mut tx = base_tx.clone();
+            tx.tx_type = TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof {
+                domain,
+                proof,
+            });
+            tx.signing_hash()
+        };
+
+        let base_sig = DagBftSig {
+            signer_pubkey: [1u8; 32],
+            ed25519_sig: vec![2u8; 64],
+            pq_sig: vec![3u8; 8],
+        };
+        let anchor_base = DagEquivocationProof::AnchorCertificate {
+            round: 4,
+            first_anchor_digest: [0xA1; 32],
+            first_sigs: vec![base_sig.clone()],
+            second_anchor_digest: [0xA2; 32],
+            second_sigs: vec![base_sig],
+        };
+        let mut anchor_round = anchor_base.clone();
+        if let DagEquivocationProof::AnchorCertificate { round, .. } = &mut anchor_round {
+            *round = 6;
+        }
+        let mut anchor_pq = anchor_base.clone();
+        if let DagEquivocationProof::AnchorCertificate { second_sigs, .. } = &mut anchor_pq {
+            second_sigs[0].pq_sig.push(9);
+        }
+
+        let parent_base = DagCausalParent {
+            round: 3,
+            author: [0xB1; 32],
+            payload_root: [0xB2; 32],
+            digest: [0xB3; 32],
+            author_ed25519_sig: vec![4u8; 64],
+            author_pq_sig: vec![5u8; 8],
+        };
+        let mut parent_alt = parent_base.clone();
+        parent_alt.payload_root[0] ^= 1;
+
+        let voter_base = DagVoterVertex {
+            round: 5,
+            author: [0xC1; 32],
+            parent_digests: vec![[0xC2; 32]],
+            digest: [0xC3; 32],
+            ed25519_sig: vec![6u8; 64],
+            pq_sig: vec![7u8; 8],
+        };
+        let mut voter_alt = voter_base.clone();
+        voter_alt.parent_digests.push([0xC4; 32]);
+
+        let tm_val = TendermintValidator {
+            address: [0x11; 20],
+            public_key: [0x22; 32],
+            voting_power: 100,
+        };
+        let tm_header = TendermintCommitEvidence {
+            chain_id: "cosmoshub-4".to_string(),
+            height: 50,
+            round: 0,
+            block_hash: [0x31; 32],
+            parts_total: 1,
+            parts_hash: [0x32; 32],
+            version_block: 11,
+            last_block_hash: [0x33; 32],
+            last_parts_total: 1,
+            last_parts_hash: [0x34; 32],
+            last_commit_hash: [0x35; 32],
+            data_hash: [0x36; 32],
+            validators_hash: [0x37; 32],
+            next_validators_hash: [0x38; 32],
+            consensus_hash: [0x39; 32],
+            app_hash: [0x3A; 32],
+            last_results_hash: [0x3B; 32],
+            evidence_hash: [0x3C; 32],
+            proposer_address: [0x3D; 20],
+            commit_time: 1_700_000_000,
+            commit_time_nanos: 42,
+            validators: vec![tm_val],
+            signatures: vec![TendermintSignature {
+                address: [0x11; 20],
+                timestamp_seconds: 1_700_000_000,
+                timestamp_nanos: 42,
+                signature: vec![8u8; 64],
+            }],
+        };
+        let tm_trusted = TrustedTendermintState {
+            chain_id: "cosmoshub-4".to_string(),
+            height: 49,
+            time_secs: 1_699_999_990,
+            trusting_period_secs: 1_209_600,
+            validators: vec![tm_val],
+            next_validators_hash: [0x37; 32],
+        };
+        let tm_params = TendermintLightParams {
+            trusting_period_secs: 1_209_600,
+            unbonding_period_secs: 1_814_400,
+            max_clock_drift_secs: 10,
+            max_height_drift: 10_000,
+        };
+        let mut tm_header_2 = tm_header.clone();
+        tm_header_2.block_hash[0] ^= 0xFF;
+
+        let mut tm_params_alt = tm_params;
+        tm_params_alt.max_height_drift += 1;
+
+        let hashes = [
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(anchor_base))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(anchor_round))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(anchor_pq))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::CausalParent {
+                    first: parent_base.clone(),
+                    second: parent_base,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::CausalParent {
+                    first: parent_alt.clone(),
+                    second: parent_alt,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::VoterVertex {
+                    first: voter_base.clone(),
+                    second: voter_base,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::VoterVertex {
+                    first: voter_alt.clone(),
+                    second: voter_alt,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::TendermintMisbehaviour {
+                trusted: Box::new(tm_trusted.clone()),
+                params: tm_params,
+                evidence: Box::new(TendermintMisbehaviour {
+                    header_1: tm_header.clone(),
+                    header_2: None,
+                }),
+            }),
+            hash_of(ObjectiveFaultProof::TendermintMisbehaviour {
+                trusted: Box::new(tm_trusted.clone()),
+                params: tm_params,
+                evidence: Box::new(TendermintMisbehaviour {
+                    header_1: tm_header.clone(),
+                    header_2: Some(tm_header_2),
+                }),
+            }),
+            hash_of(ObjectiveFaultProof::TendermintMisbehaviour {
+                trusted: Box::new(tm_trusted),
+                params: tm_params_alt,
+                evidence: Box::new(TendermintMisbehaviour {
+                    header_1: tm_header,
+                    header_2: None,
+                }),
+            }),
+        ];
+        let unique: std::collections::BTreeSet<[u8; 32]> = hashes.into_iter().collect();
+        assert_eq!(
+            unique.len(),
+            hashes.len(),
+            "every DagEquivocation and TendermintMisbehaviour field must move signing_hash"
+        );
     }
 }

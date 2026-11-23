@@ -19,6 +19,7 @@ use rustls::{ClientConfig, RootCertStore, ServerConfig, SupportedProtocolVersion
 pub static TLS_VERSIONS: &[&SupportedProtocolVersion] = &[&rustls::version::TLS13];
 
 /// The provider with X25519MLKEM768 as its only key-exchange group.
+///
 /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 #[must_use]
 pub fn hybrid_only_provider() -> CryptoProvider {

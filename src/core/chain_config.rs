@@ -31,44 +31,47 @@ impl Network {
     /// the chain id), so a signature could not have been replayed onto
     /// Ethereum. The cost was to users rather than to consensus: every EVM
     /// wallet resolves a chain id through that registry, so a Budlum RPC
-    /// announcing `1` presents itself to MetaMask as Ethereum Mainnet, and the
+    /// announcing `1` presents itself to `MetaMask` as Ethereum Mainnet, and the
     /// user is asked to approve what looks like an Ethereum transaction.
     ///
     /// 45260..=45262 are unassigned in the same registry. Changing this before
     /// mainnet costs a genesis hash; changing it after would mean asking every
     /// wallet and explorer to migrate.
+    #[must_use]
     pub fn chain_id(&self) -> ChainId {
         match self {
-            Network::Mainnet => ChainId(45260),
-            Network::Testnet => ChainId(45261),
-            Network::Devnet => ChainId(45262),
+            Self::Mainnet => ChainId(45260),
+            Self::Testnet => ChainId(45261),
+            Self::Devnet => ChainId(45262),
         }
     }
 
+    #[must_use]
     pub fn default_port(&self) -> u16 {
         match self {
-            Network::Mainnet => 4001,
-            Network::Testnet => 5001,
-            Network::Devnet => 6001,
+            Self::Mainnet => 4001,
+            Self::Testnet => 5001,
+            Self::Devnet => 6001,
         }
     }
 
+    #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
-            Network::Mainnet => "mainnet",
-            Network::Testnet => "testnet",
-            Network::Devnet => "devnet",
+            Self::Mainnet => "mainnet",
+            Self::Testnet => "testnet",
+            Self::Devnet => "devnet",
         }
     }
 
     pub fn bootnodes(&self) -> Vec<String> {
         match self {
-            Network::Mainnet => guarded_mainnet_peer_entries(MAINNET_BOOTNODES),
-            Network::Testnet => TESTNET_BOOTNODES
+            Self::Mainnet => guarded_mainnet_peer_entries(MAINNET_BOOTNODES),
+            Self::Testnet => TESTNET_BOOTNODES
                 .iter()
                 .map(std::string::ToString::to_string)
                 .collect(),
-            Network::Devnet => DEVNET_BOOTNODES
+            Self::Devnet => DEVNET_BOOTNODES
                 .iter()
                 .map(std::string::ToString::to_string)
                 .collect(),
@@ -77,23 +80,23 @@ impl Network {
 
     pub fn fallback_bootnodes(&self) -> Vec<String> {
         match self {
-            Network::Mainnet => guarded_mainnet_peer_entries(MAINNET_FALLBACK_BOOTNODES),
-            Network::Testnet => TESTNET_FALLBACK_BOOTNODES
+            Self::Mainnet => guarded_mainnet_peer_entries(MAINNET_FALLBACK_BOOTNODES),
+            Self::Testnet => TESTNET_FALLBACK_BOOTNODES
                 .iter()
                 .map(std::string::ToString::to_string)
                 .collect(),
-            Network::Devnet => Vec::new(),
+            Self::Devnet => Vec::new(),
         }
     }
 
     pub fn dns_seeds(&self) -> Vec<String> {
         match self {
-            Network::Mainnet => guarded_mainnet_peer_entries(MAINNET_DNS_SEEDS),
-            Network::Testnet => TESTNET_DNS_SEEDS
+            Self::Mainnet => guarded_mainnet_peer_entries(MAINNET_DNS_SEEDS),
+            Self::Testnet => TESTNET_DNS_SEEDS
                 .iter()
                 .map(std::string::ToString::to_string)
                 .collect(),
-            Network::Devnet => Vec::new(),
+            Self::Devnet => Vec::new(),
         }
     }
 
@@ -101,35 +104,41 @@ impl Network {
     ///
     /// Kept next to `chain_id` on purpose: the two are a pair, and an id
     /// changed in one and not the other silently stops resolving.
+    #[must_use]
     pub fn from_chain_id(chain_id: u64) -> Option<Self> {
         match chain_id {
-            45260 => Some(Network::Mainnet),
-            45261 => Some(Network::Testnet),
-            45262 => Some(Network::Devnet),
+            45260 => Some(Self::Mainnet),
+            45261 => Some(Self::Testnet),
+            45262 => Some(Self::Devnet),
             _ => None,
         }
     }
 
+    #[must_use]
     pub fn epoch_len(&self) -> u64 {
         self.consensus_params().epoch_len
     }
 
+    #[must_use]
     pub fn min_stake(&self) -> u64 {
         self.consensus_params().min_stake
     }
 
     /// The bond floor of a Full validator. Same value as [`Self::min_stake`],
     /// named for the class split.
+    #[must_use]
     pub fn min_stake_full(&self) -> u64 {
         self.consensus_params().min_stake
     }
 
     /// The bond floor of a mobile validator (Android or iOS opportunistic).
+    #[must_use]
     pub fn min_stake_mobile(&self) -> u64 {
         self.consensus_params().min_stake_mobile
     }
 
     /// The bond floor of a validator class on this profile.
+    #[must_use]
     pub fn class_floor(&self, class: crate::validators::ValidatorClass) -> u64 {
         if class.holds_seat() {
             self.min_stake_full()
@@ -138,6 +147,7 @@ impl Network {
         }
     }
 
+    #[must_use]
     pub fn finality_quorum(&self) -> (u64, u64) {
         let params = self.consensus_params();
         (
@@ -146,13 +156,15 @@ impl Network {
         )
     }
 
+    #[must_use]
     pub fn slot_ms(&self) -> u64 {
         self.consensus_params().slot_ms
     }
 
+    #[must_use]
     pub fn consensus_params(&self) -> ConsensusParams {
         match self {
-            Network::Mainnet => ConsensusParams {
+            Self::Mainnet => ConsensusParams {
                 epoch_len: 100,
                 // 1 BUD (10^6 atoms). Written in BUD so the unit is explicit;
                 // the mainnet value is Ayaz's decision (DECISIONS.md).
@@ -166,7 +178,7 @@ impl Network {
                 max_votes_per_msg: 128,
                 transport_v2_activation_height: 0,
             },
-            Network::Testnet => ConsensusParams {
+            Self::Testnet => ConsensusParams {
                 epoch_len: 50,
                 // TESTNET-DEFAULT: 1,000 BUD.
                 min_stake: crate::tokenomics::bud(1_000),
@@ -179,7 +191,7 @@ impl Network {
                 max_votes_per_msg: 128,
                 transport_v2_activation_height: 0,
             },
-            Network::Devnet => ConsensusParams {
+            Self::Devnet => ConsensusParams {
                 epoch_len: 10,
                 min_stake: 1_000,
                 min_stake_mobile: 100,
@@ -201,8 +213,8 @@ impl Network {
     #[must_use]
     pub fn reward_pool(&self) -> Option<crate::tokenomics::reward_pool::RewardPoolSchedule> {
         match self {
-            Network::Testnet => Some(crate::tokenomics::reward_pool::RewardPoolSchedule::default()),
-            Network::Mainnet | Network::Devnet => None,
+            Self::Testnet => Some(crate::tokenomics::reward_pool::RewardPoolSchedule::default()),
+            Self::Mainnet | Self::Devnet => None,
         }
     }
 
@@ -217,7 +229,7 @@ impl Network {
         &self,
     ) -> crate::settlement::shared_security::SharedSecurityParams {
         crate::settlement::shared_security::SharedSecurityParams {
-            enabled: matches!(self, Network::Devnet),
+            enabled: matches!(self, Self::Devnet),
             // TESTNET-DEFAULT: restaked weight stays below a third of
             // the total, so ETH-backed validators cannot finalize alone.
             max_restaked_share_ppm: 300_000,
@@ -233,9 +245,10 @@ impl Network {
     /// (`45260`) remain closed until explicit activation.
     #[must_use]
     pub const fn app_binding_enabled(&self) -> bool {
-        matches!(self, Network::Devnet)
+        matches!(self, Self::Devnet)
     }
 
+    #[must_use]
     pub fn mempool_config(&self) -> crate::mempool::pool::MempoolConfig {
         match self {
             // Mainnet holds five times the default entry count, so the byte
@@ -243,7 +256,7 @@ impl Network {
             // bytes rather than entries the binding limit on the network that
             // needs the entries most. The ratio to `max_size` is kept, not the
             // absolute number.
-            Network::Mainnet => crate::mempool::pool::MempoolConfig {
+            Self::Mainnet => crate::mempool::pool::MempoolConfig {
                 max_size: 100_000,
                 max_per_sender: 100,
                 min_fee: 10,
@@ -255,7 +268,7 @@ impl Network {
                 // the same here as on the testnet.
                 duty_block_bytes: crate::mempool::pool::DEFAULT_DUTY_BLOCK_BYTES,
             },
-            Network::Testnet => crate::mempool::pool::MempoolConfig {
+            Self::Testnet => crate::mempool::pool::MempoolConfig {
                 max_size: 50_000,
                 max_per_sender: 200,
                 min_fee: 1,
@@ -264,13 +277,14 @@ impl Network {
                 max_pool_bytes: crate::mempool::pool::DEFAULT_MAX_POOL_BYTES,
                 duty_block_bytes: crate::mempool::pool::DEFAULT_DUTY_BLOCK_BYTES,
             },
-            Network::Devnet => crate::mempool::pool::MempoolConfig::default(),
+            Self::Devnet => crate::mempool::pool::MempoolConfig::default(),
         }
     }
 
+    #[must_use]
     pub fn security_config(&self) -> SecurityConfig {
         match self {
-            Network::Mainnet => SecurityConfig {
+            Self::Mainnet => SecurityConfig {
                 max_peers: 100,
                 peer_rate_limit_per_minute: 120,
                 max_peers_per_subnet: 4,
@@ -281,7 +295,7 @@ impl Network {
                 max_outbound_per_subnet: 4,
                 enable_circuit_relay: false,
             },
-            Network::Testnet => SecurityConfig {
+            Self::Testnet => SecurityConfig {
                 max_peers: 75,
                 peer_rate_limit_per_minute: 240,
                 max_peers_per_subnet: 4,
@@ -292,7 +306,7 @@ impl Network {
                 max_outbound_per_subnet: 4,
                 enable_circuit_relay: true,
             },
-            Network::Devnet => SecurityConfig {
+            Self::Devnet => SecurityConfig {
                 max_peers: 25,
                 peer_rate_limit_per_minute: 1_000,
                 max_peers_per_subnet: 8,
@@ -306,11 +320,12 @@ impl Network {
         }
     }
 
+    #[must_use]
     pub fn magic_bytes(&self) -> [u8; 4] {
         match self {
-            Network::Mainnet => *b"BDLM",
-            Network::Testnet => *b"BDLT",
-            Network::Devnet => *b"BDLD",
+            Self::Mainnet => *b"BDLM",
+            Self::Testnet => *b"BDLT",
+            Self::Devnet => *b"BDLD",
         }
     }
 }
@@ -350,6 +365,7 @@ pub fn reward_pool_for_chain_id(
     Network::from_chain_id(chain_id).and_then(|network| network.reward_pool())
 }
 
+#[must_use]
 pub fn epoch_len_for_chain_id(chain_id: u64) -> u64 {
     Network::from_chain_id(chain_id).map_or(EPOCH_LEN, |network| network.epoch_len())
 }
@@ -394,12 +410,14 @@ pub fn check_epoch_len_matches_chain_id(
 
 pub const SLOT_MS: u64 = 1000;
 
+#[must_use]
 pub fn slot_ms_for_chain_id(chain_id: u64) -> u64 {
     Network::from_chain_id(chain_id).map_or(SLOT_MS, |network| network.slot_ms())
 }
 
 pub const FINALITY_CHECKPOINT_INTERVAL: u64 = 10;
 
+#[must_use]
 pub fn finality_checkpoint_interval_for_chain_id(chain_id: u64) -> u64 {
     Network::from_chain_id(chain_id).map_or(FINALITY_CHECKPOINT_INTERVAL, |network| {
         network.consensus_params().finality_checkpoint_interval
@@ -512,12 +530,14 @@ fn guarded_mainnet_peer_entries(entries: &[&str]) -> Vec<String> {
 /// bootnode list and DNS-seed list are both empty would come up, listen, and
 /// never meet another node while looking healthy. Startup refuses that
 /// instead of idling.
+#[must_use]
 pub fn has_peer_source(network: Network, bootnodes: &[String], dns_seeds: &[String]) -> bool {
     network == Network::Devnet || !bootnodes.is_empty() || !dns_seeds.is_empty()
 }
 
 /// Returns the first entry in the input list carrying a placeholder/dummy
 /// marker (case-insensitive). `None` on a clean list.
+#[must_use]
 pub fn first_placeholder_peer(entries: &[String]) -> Option<String> {
     entries
         .iter()
@@ -569,9 +589,11 @@ pub struct SecurityConfig {
 pub struct ChainId(pub u64);
 
 impl ChainId {
+    #[must_use]
     pub fn new(value: u64) -> Self {
-        ChainId(value)
+        Self(value)
     }
+    #[must_use]
     pub fn value(&self) -> u64 {
         self.0
     }
@@ -585,7 +607,7 @@ impl Default for ChainId {
 
 impl From<u64> for ChainId {
     fn from(value: u64) -> Self {
-        ChainId(value)
+        Self(value)
     }
 }
 

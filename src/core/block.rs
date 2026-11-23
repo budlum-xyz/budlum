@@ -508,20 +508,19 @@ impl Block {
                 // Collapse to the SAME leaf on every node, deterministic, and
                 // Guaranteed not to collide with any well-formed 32-byte hash because
                 // Of the distinct 0x01 domain tag.
-                match hex_32(&tx.hash) {
-                    Some(bytes) => leaf.extend_from_slice(&bytes),
-                    None => {
-                        // Domain tag 0x01: malformed hash. The leaf commits to
-                        // a digest of the string itself, not to a constant:
-                        // with a constant every malformed hash produced the
-                        // same leaf, so two different transaction lists
-                        // shared one `tx_root`, and PoW/PoS validation does
-                        // not recompute the root from `Transaction::verify`.
-                        leaf[0] = 0x01;
-                        leaf.extend_from_slice(&crate::core::hash::calculate_hash_bytes(
-                            tx.hash.as_bytes(),
-                        ));
-                    }
+                if let Some(bytes) = hex_32(&tx.hash) {
+                    leaf.extend_from_slice(&bytes);
+                } else {
+                    // Domain tag 0x01: malformed hash. The leaf commits to
+                    // a digest of the string itself, not to a constant:
+                    // with a constant every malformed hash produced the
+                    // same leaf, so two different transaction lists
+                    // shared one `tx_root`, and PoW/PoS validation does
+                    // not recompute the root from `Transaction::verify`.
+                    leaf[0] = 0x01;
+                    leaf.extend_from_slice(&crate::core::hash::calculate_hash_bytes(
+                        tx.hash.as_bytes(),
+                    ));
                 }
                 crate::core::hash::calculate_hash_bytes(&leaf)
             })
@@ -757,19 +756,17 @@ impl Block {
         &self,
         registry: &crate::crypto::scheme::SchemeStatusRegistry,
     ) -> bool {
-        let producer_addr = match &self.producer {
-            Some(p) => p,
-            None => {
-                warn!("Block has no producer");
-                return false;
-            }
+        let producer_addr = if let Some(p) = &self.producer {
+            p
+        } else {
+            warn!("Block has no producer");
+            return false;
         };
-        let signature = match &self.signature {
-            Some(s) => s,
-            None => {
-                warn!("Block has no signature");
-                return false;
-            }
+        let signature = if let Some(s) = &self.signature {
+            s
+        } else {
+            warn!("Block has no signature");
+            return false;
         };
         let binary_hash = self.calculate_hash_bytes();
         let calculated_hash = hex::encode(binary_hash);
@@ -853,6 +850,7 @@ impl Block {
         }
     }
     #[cfg(test)]
+    #[must_use]
     pub fn verify_signature_with_pubkey(&self, expected_pubkey: &Address) -> bool {
         self.verify_signature_with_pubkey_in(
             &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
