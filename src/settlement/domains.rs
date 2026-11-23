@@ -480,7 +480,13 @@ pub fn refresh_unification_anchors(
 ) -> Result<usize, SettlementTxError> {
     let hub = crate::settlement::universal_finality::FinalityGuarantee::settlement_hub();
     let mut ledger = crate::unification::UnificationLedger::new(hub);
-    ledger.restore_anchors(state.settlement.unification.clone());
+    ledger
+        .restore_anchors(state.settlement.unification.clone())
+        .map_err(|err| {
+            SettlementTxError::Refused(format!(
+                "the unification ledger refused its own anchor snapshot: {err}"
+            ))
+        })?;
     // Mainnet requires post-quantum quorum co-signatures; the other
     // networks do not. The same rule the RPC surface applies.
     let pq_enforced = chain_id

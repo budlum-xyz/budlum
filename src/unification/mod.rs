@@ -543,6 +543,41 @@ impl Default for UnificationAnchors {
     }
 }
 
+/// Check a restored anchor snapshot against the invariants the ledger
+/// assumes. See [`UnificationLedger::restore_anchors`].
+fn validate_anchors(anchors: &UnificationAnchors) -> Result<(), UnificationExecutionError> {
+    if anchors.domains.len() > MAX_LEDGER_DOMAINS {
+        return Err(UnificationExecutionError::CapacityExceeded);
+    }
+    if anchors.next_external_domain_id != 0
+        && !is_external_domain_id(anchors.next_external_domain_id)
+    {
+        return Err(UnificationExecutionError::InvalidArgument(String::from(
+            "next_external_domain_id lies outside the reserved external range",
+        )));
+    }
+    for (id, state) in &anchors.domains {
+        if state.domain_id != *id {
+            return Err(UnificationExecutionError::InvalidArgument(String::from(
+                "an anchored domain is keyed under an id it does not carry",
+            )));
+        }
+    }
+    for (_key, id) in &anchors.external_domains {
+        if !is_external_domain_id(*id) {
+            return Err(UnificationExecutionError::InvalidArgument(String::from(
+                "an external name lies outside the reserved external range",
+            )));
+        }
+        if !anchors.domains.contains_key(id) {
+            return Err(UnificationExecutionError::InvalidArgument(String::from(
+                "an external name points at a domain the table does not hold",
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl UnificationAnchors {
     /// The anchors of a ledger that has admitted nothing yet.
     #[must_use]
@@ -776,16 +811,17 @@ impl UnificationLedger {
     ///
     /// # Errors
     ///
-    /// This function never fails; the `Result` keeps the read surface
-    /// uniform with the rest of the ledger.
-    #[must_use]
+    /// Returns [`UnificationExecutionError::InvalidArgument`] when the
+    /// snapshot breaks an invariant the ledger relies on, or
+    /// [`UnificationExecutionError::CapacityExceeded`] when its domain table
+    /// is past the ledger's ceiling.
     pub fn from_anchors(
         hub_guarantee: crate::settlement::universal_finality::FinalityGuarantee,
         anchors: UnificationAnchors,
-    ) -> Self {
+    ) -> Result<Self, UnificationExecutionError> {
         let mut ledger = Self::new(hub_guarantee);
-        ledger.restore_anchors(anchors);
-        ledger
+        ledger.restore_anchors(anchors)?;
+        Ok(ledger)
     }
 
     /// Load the anchors consensus state kept back into the ledger.
@@ -796,12 +832,28 @@ impl UnificationLedger {
     ///
     /// # Errors
     ///
-    /// This function never fails; the `Result` keeps the read surface
-    /// uniform with the rest of the ledger.
-    pub fn restore_anchors(&mut self, anchors: UnificationAnchors) {
+    /// The anchors are consensus state: they arrive from a peer, a snapshot,
+    /// or a restart, so they are untrusted input like any other. This refuses
+    /// a snapshot that breaks an invariant the ledger relies on, instead of
+    /// adopting it and refusing every later anchor:
+    ///
+    /// - a `next_external_domain_id` outside the reserved range (zero is the
+    ///   exhausted marker, and stays allowed),
+    /// - an external name outside that range, or naming a domain the table
+    ///   does not hold,
+    /// - a domain table past the ledger's ceiling.
+    ///
+    /// [`UnificationExecutionError::InvalidArgument`] names the broken rule;
+    /// [`UnificationExecutionError::CapacityExceeded`] covers the ceiling.
+    pub fn restore_anchors(
+        &mut self,
+        anchors: UnificationAnchors,
+    ) -> Result<(), UnificationExecutionError> {
+        validate_anchors(&anchors)?;
         self.domains = anchors.domains;
         self.external_domains = anchors.external_domains;
         self.next_external_domain_id = anchors.next_external_domain_id;
+        Ok(())
     }
 
     /// Anchor an external domain's finality envelope under the ledger's own
@@ -2808,6 +2860,57 @@ mod tests {
         assert_eq!(
             resolved.primary.verification,
             VerificationStrength::MerkleRoot
+        );
+    }
+
+    // --- restore_anchors: the snapshot is untrusted input ---
+
+    fn empty_anchors() -> UnificationAnchors {
+        UnificationAnchors {
+            domains: std::collections::BTreeMap::new(),
+            external_domains: std::collections::BTreeMap::new(),
+            next_external_domain_id: EXTERNAL_DOMAIN_ID_PREFIX,
+        }
+    }
+
+    #[test]
+    fn restore_anchors_refuses_a_next_external_id_outside_the_reserved_range() {
+        let hub = crate::settlement::universal_finality::FinalityGuarantee::settlement_hub();
+        let mut ledger = UnificationLedger::new(hub);
+        let mut bad = empty_anchors();
+        // 0x0000_0001 is a consensus-domain name, not an external one.
+        bad.next_external_domain_id = 0x0000_0001;
+        assert!(
+            ledger.restore_anchors(bad).is_err(),
+            "a next id in the consensus range would hand a new external domain a \
+             name that collides with a consensus domain"
+        );
+    }
+
+    #[test]
+    fn restore_anchors_accepts_the_exhausted_marker() {
+        let hub = crate::settlement::universal_finality::FinalityGuarantee::settlement_hub();
+        let mut ledger = UnificationLedger::new(hub);
+        let mut done = empty_anchors();
+        done.next_external_domain_id = 0;
+        assert!(
+            ledger.restore_anchors(done).is_ok(),
+            "zero is the documented exhausted marker, not a corrupt snapshot"
+        );
+    }
+
+    #[test]
+    fn restore_anchors_refuses_an_external_name_without_its_domain() {
+        use crate::cross_domain::external::DomainKey;
+        let hub = crate::settlement::universal_finality::FinalityGuarantee::settlement_hub();
+        let mut ledger = UnificationLedger::new(hub);
+        let mut bad = empty_anchors();
+        bad.external_domains
+            .insert(DomainKey([0x11; 32]), EXTERNAL_DOMAIN_ID_PREFIX);
+        assert!(
+            ledger.restore_anchors(bad).is_err(),
+            "a name that points at nothing would let a receipt name a domain nobody \
+             can read"
         );
     }
 }
