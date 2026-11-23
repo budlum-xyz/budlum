@@ -1387,6 +1387,7 @@ impl ExternalFinalityAdapter for AuxPowPopAdapter {
     }
 
     fn fault_probes(&self) -> Vec<FaultProbe> {
+        const PARENT0_MERKLE_ROOT_OFFSET: usize = 208;
         let sig_tail = self
             .golden
             .as_ref()
@@ -1396,11 +1397,39 @@ impl ExternalFinalityAdapter for AuxPowPopAdapter {
             .as_ref()
             .and_then(|g| g.payload.get(8).copied())
             .map_or(0xFE, |b| b ^ 0xFF);
-        let flipped_sig = self
-            .golden
+        let tail_probe = if self
+            .pinned
             .as_ref()
-            .and_then(|g| g.payload.get(sig_tail).copied())
-            .map_or(0xCA, |b| b ^ 0xFF);
+            .is_some_and(|p| p.pop_signers.is_empty())
+        {
+            let flipped_mr = self
+                .golden
+                .as_ref()
+                .and_then(|g| g.payload.get(PARENT0_MERKLE_ROOT_OFFSET).copied())
+                .map_or(0xCA, |b| b ^ 0xFF);
+            FaultProbe {
+                name: "refuses corrupted parent coinbase merkle_root".into(),
+                patch: BytePatch::InPayload {
+                    offset: PARENT0_MERKLE_ROOT_OFFSET,
+                    bytes: vec![flipped_mr],
+                },
+                expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
+            }
+        } else {
+            let flipped_sig = self
+                .golden
+                .as_ref()
+                .and_then(|g| g.payload.get(sig_tail).copied())
+                .map_or(0xCA, |b| b ^ 0xFF);
+            FaultProbe {
+                name: "refuses corrupted PoP anchor signature".into(),
+                patch: BytePatch::InPayload {
+                    offset: sig_tail,
+                    bytes: vec![flipped_sig],
+                },
+                expect: ExpectedRefusal::Kind(RefusalKind::Crypto),
+            }
+        };
         vec![
             FaultProbe {
                 name: "refuses unsupported auxpow-pop evidence version".into(),
@@ -1440,14 +1469,7 @@ impl ExternalFinalityAdapter for AuxPowPopAdapter {
                 },
                 expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
             },
-            FaultProbe {
-                name: "refuses corrupted PoP anchor signature".into(),
-                patch: BytePatch::InPayload {
-                    offset: sig_tail,
-                    bytes: vec![flipped_sig],
-                },
-                expect: ExpectedRefusal::Kind(RefusalKind::Crypto),
-            },
+            tail_probe,
             FaultProbe {
                 name: "refuses truncated auxpow-pop payload".into(),
                 patch: BytePatch::TruncatePayload { keep: 4 },
@@ -1458,6 +1480,15 @@ impl ExternalFinalityAdapter for AuxPowPopAdapter {
 
     fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
         self.golden.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned.as_ref().is_some_and(|p| {
+            p.aux_chain_id != 0
+                && !bool::from(p.trusted_parent_hash.ct_eq(&[0u8; 32]))
+                && expand_compact_bits(p.max_target_bits).is_ok()
+                && (p.pop_signers.is_empty() || index_pop_signers(&p.pop_signers).is_ok())
+        })
     }
 }
 
@@ -1795,5 +1826,192 @@ mod tests {
             ..proof
         };
         assert!(verify_pop_equivocation(NET, &pinned, &same).is_err());
+    }
+
+    fn build_no_committee_fixture(
+        clear_pop_sigs: bool,
+    ) -> (PinnedAuxPowAnchor, AuxPowPopEvidence, RawConsensusEvidence) {
+        let (_, mut pinned, mut bundle, mut raw) = build_fixture();
+        pinned.pop_signers.clear();
+        if clear_pop_sigs {
+            bundle.pop_sigs.clear();
+        }
+        raw.payload = encode_auxpow_evidence(&bundle).expect("encode no-committee bundle");
+        (pinned, bundle, raw)
+    }
+
+    fn no_committee_policy(require_slashable: bool) -> VerificationPolicy {
+        VerificationPolicy {
+            min_depth: 6,
+            max_age: 1_000,
+            now: 88_100,
+            require_declared_match: true,
+            require_slashable,
+        }
+    }
+
+    #[test]
+    fn auxpow_pop_without_pinned_committee_refuses_evidence_carrying_pop_signatures_first() {
+        let (pinned, _bundle, raw) = build_no_committee_fixture(false);
+        let adapter = AuxPowPopAdapter::new(NET, Some(pinned));
+
+        for require_slashable in [false, true] {
+            let err = adapter
+                .verify(&raw, &no_committee_policy(require_slashable))
+                .expect_err("unpinned PoP signatures must fail closed before policy check");
+            assert!(
+                matches!(
+                    &err,
+                    AdapterError::ConsensusRule { rule }
+                        if rule == "unexpected PoP signatures without pinned PoP committee"
+                ),
+                "require_slashable={require_slashable} expected unexpected-PoP-signatures ConsensusRule, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn auxpow_pop_without_pinned_committee_refuses_slashable_policy_and_backs_with_work_bits() {
+        let (pinned, bundle, raw) = build_no_committee_fixture(true);
+        let adapter = AuxPowPopAdapter::new(NET, Some(pinned.clone())).with_golden(raw.clone());
+
+        let slash_err = adapter
+            .verify(&raw, &no_committee_policy(true))
+            .expect_err("committee-less AuxPoW has no slashable bond");
+        assert!(
+            matches!(slash_err, AdapterError::UnslashableBacking),
+            "expected UnslashableBacking, got {slash_err:?}"
+        );
+
+        let policy = no_committee_policy(false);
+        let mut facts = CryptoFacts::default();
+        let att = adapter.verify_observed(&raw, &policy, &mut facts).expect(
+            "pure AuxPoW without PoP committee must verify under unslashable-allowed policy",
+        );
+        assert_eq!(att.height, 88_000);
+        assert_eq!(att.state_root, [0x51; 32]);
+        assert!(
+            facts.is_empty(),
+            "pure SHA-256d AuxPoW emits no signature scheme"
+        );
+        assert_eq!(facts.quantum_class(), None);
+        match att.security {
+            SecurityBacking::Work { difficulty_bits } => {
+                // min_cumulative_work[31] = 12 => bit_len >= 4; regtest work stays well below
+                // the 64-bit tier-1 deep-PoW settlement threshold.
+                assert!(
+                    (4..64).contains(&difficulty_bits),
+                    "unexpected difficulty_bits={difficulty_bits}"
+                );
+            }
+            other => panic!("expected SecurityBacking::Work, got {other:?}"),
+        }
+
+        // Selftest admission must succeed both for multi-leaf (depth=2) and single-leaf (depth=0)
+        // committee-less AuxPoW evidence.
+        let (report, admit_facts) = admit_observed(&adapter, &policy);
+        assert!(report.golden_verified);
+        assert!(
+            report.admitted,
+            "committee-less AuxPoW adapter must pass selftest admission: {report:?}"
+        );
+        assert!(admit_facts.is_empty());
+
+        let mut single_leaf_cb = Vec::new();
+        single_leaf_cb.extend_from_slice(b"\x01\x00\x00\x00coinbase-single:");
+        single_leaf_cb.extend_from_slice(&AUXPOW_COINBASE_MAGIC);
+        single_leaf_cb.extend_from_slice(&bundle.aux_block.digest);
+        single_leaf_cb.extend_from_slice(&1u32.to_le_bytes());
+        single_leaf_cb.extend_from_slice(&0u32.to_le_bytes());
+        let cb_hash = sha256d(&single_leaf_cb);
+        let other_tx = [0x99u8; 32];
+        let parent_mr = dsha_pair(&cb_hash, &other_tx);
+        let mut single_headers = Vec::new();
+        let mut prev = pinned.trusted_parent_hash;
+        for i in 0u8..6 {
+            let mr = if i == 0 { parent_mr } else { [0x70 + i; 32] };
+            let (hdr, h) = mine_header(prev, mr, 1_750_100_000 + u32::from(i) * 60, EASY_BITS);
+            single_headers.push(hdr);
+            prev = h;
+        }
+        let single_bundle = AuxPowPopEvidence {
+            aux_block: bundle.aux_block,
+            parent_headers: single_headers,
+            coinbase_tx: single_leaf_cb,
+            coinbase_index: 0,
+            coinbase_branch: vec![other_tx],
+            aux_slot_index: 0,
+            aux_branch: Vec::new(),
+            pop_sigs: Vec::new(),
+        };
+        let mut single_raw = raw;
+        single_raw.payload = encode_auxpow_evidence(&single_bundle).unwrap();
+        let single_adapter = AuxPowPopAdapter::new(NET, Some(pinned)).with_golden(single_raw);
+        let (single_report, _) = admit_observed(&single_adapter, &policy);
+        assert!(
+            single_report.admitted,
+            "single-leaf committee-less AuxPoW must also pass selftest admission: {single_report:?}"
+        );
+    }
+
+    #[test]
+    fn auxpow_pop_descriptor_and_pin_digest_flip_when_pinned_committee_is_empty() {
+        let (signers, committee_pin, _, _) = build_fixture();
+        let (empty_pin, _, _) = build_no_committee_fixture(true);
+
+        let unpinned = AuxPowPopAdapter::new(NET, None);
+        assert!(
+            !unpinned.has_pinned_trust_anchor(),
+            "unpinned adapter must report has_pinned_trust_anchor() == false"
+        );
+
+        let mut zero_chain = empty_pin.clone();
+        zero_chain.aux_chain_id = 0;
+        assert!(!AuxPowPopAdapter::new(NET, Some(zero_chain)).has_pinned_trust_anchor());
+
+        let mut zero_parent = empty_pin.clone();
+        zero_parent.trusted_parent_hash = [0u8; 32];
+        assert!(!AuxPowPopAdapter::new(NET, Some(zero_parent)).has_pinned_trust_anchor());
+
+        let mut bad_bits = empty_pin.clone();
+        bad_bits.max_target_bits = 0;
+        assert!(!AuxPowPopAdapter::new(NET, Some(bad_bits)).has_pinned_trust_anchor());
+
+        let mut bad_signer_pin = committee_pin.clone();
+        bad_signer_pin.pop_signers[0].bond_weight = 0;
+        assert!(!AuxPowPopAdapter::new(NET, Some(bad_signer_pin)).has_pinned_trust_anchor());
+
+        let committee_adapter = AuxPowPopAdapter::new(NET, Some(committee_pin.clone()));
+        let empty_adapter = AuxPowPopAdapter::new(NET, Some(empty_pin.clone()));
+        assert!(committee_adapter.has_pinned_trust_anchor());
+        assert!(empty_adapter.has_pinned_trust_anchor());
+
+        let cd = committee_adapter.descriptor();
+        let ed = empty_adapter.descriptor();
+        assert_eq!(cd.finality_kind, FinalityKind::EconomicFinality);
+        assert_eq!(cd.trust_model, TrustModel::HonestMajority { set_size: 4 });
+        assert_eq!(cd.required_depth, 6);
+
+        assert_eq!(ed.finality_kind, FinalityKind::Probabilistic);
+        assert_eq!(ed.trust_model, TrustModel::Trustless);
+        assert_eq!(ed.required_depth, 6);
+
+        assert_eq!(
+            empty_pin.canonical_pin_digest(),
+            empty_pin.canonical_pin_digest()
+        );
+        assert_ne!(
+            committee_pin.canonical_pin_digest(),
+            empty_pin.canonical_pin_digest(),
+            "empty and populated PoP committees must produce distinct canonical pin digests"
+        );
+        assert_eq!(
+            empty_pin.pop_member_info(&signers[0].ed.public_key_bytes()),
+            None
+        );
+        assert_eq!(
+            committee_pin.pop_member_info(&signers[0].ed.public_key_bytes()),
+            Some((400, true))
+        );
     }
 }
