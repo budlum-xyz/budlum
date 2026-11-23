@@ -16,7 +16,6 @@ testnet-quantum
 testnet
 garden
 budlum-stack
-budlum-consensus-of-consensuses
 agg/phase-5-pcs-claims
 agg/phase-2-sig-claims
 agg/phase-3-recursion-stark
