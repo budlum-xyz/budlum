@@ -177,7 +177,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: rust
           queries: security-extended
@@ -213,7 +213,7 @@ jobs:
       - name: Build (CodeQL extraction)
         run: cargo build --lib --locked
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
 
   msrv:
     name: MSRV check (1.97.1)
@@ -477,7 +477,7 @@ jobs:
           publish_results: false
       - name: Upload Scorecard SARIF (Security tab)
         if: always()
-        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: scorecard.sarif
           category: scorecard
