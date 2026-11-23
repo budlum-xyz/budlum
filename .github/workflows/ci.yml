@@ -17,7 +17,12 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # A new run of the group supersedes the one in progress; a re-run does not.
+  # Re-running an older head's run used to land in the same group and cancel
+  # the current head's run before its library test finished (measured
+  # 2026-11-23: a re-run queued at 08:20 cancelled nine jobs of the head's run,
+  # then the run). A re-run (attempt 2 and later) now waits for the group.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.run_attempt == '1' }}
 
 permissions:
   contents: read

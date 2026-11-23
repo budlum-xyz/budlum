@@ -20,7 +20,7 @@ on:
     branches: [main, consensus-of-consensuses]
   schedule:
     # Weekly hygiene scan (effects of cargo update + new deps)
-    - cron: '17 3 * * 3' # Wednesday 03:17 UTC
+    - cron: '17 16 * * 3' # Wednesday 16:17 UTC
   workflow_dispatch:
 
 # Read-only.

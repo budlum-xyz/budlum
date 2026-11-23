@@ -605,7 +605,14 @@ headers and root proofs with `bud_getGlobalHeader` and
 `bud_getGlobalHeaderProof`; `bud_sealGlobalHeader` is refused. A light client
 walks trust anchor, finality certificate, block, global header, root:
 `budlum-light` checks the last step with a header opening from the export
-(`global_headers`, `--require-global-headers`).
+(`global_headers`, `--require-global-headers`). The walk then reaches past the
+hub: each entry of the export's `finality_reads` carries the Universal
+Finality Certificate and inclusion proofs for the domain rows a client wants,
+and the certificate is accepted only if the verified header commits to it
+(`finality_certificate_root`). One trust anchor thus verifies the finalized
+root of every domain the certificate carries, and each read prints the
+`--trusted-finality-checkpoint` / `--trusted-finality-digest` pair that
+`bud finality show` and `bud finality route` require.
 
 ## 18. Registry: complete stake + slash + unbond state machine
 
