@@ -4452,13 +4452,11 @@ mod tests {
         assert_eq!(from_guest.genesis_hash, from_host.genesis_hash);
         assert_eq!(from_guest.token, from_host.token);
 
-        // It is a record, so it obeys the record's rules.
+        // It is a record, so it obeys the record's rules. Both of these
+        // refuse an oversized record, so a round trip through them is the
+        // ceiling being enforced, checked as behaviour rather than against
+        // a number copied out of the module that owns it.
         let link = from_guest.to_link();
-        assert!(
-            link.len() <= super::super::invite::MAX_INVITE_BYTES,
-            "a guest's invite is {} bytes",
-            link.len()
-        );
         assert_eq!(GardenInvite::parse(&link).unwrap(), from_guest);
         assert_eq!(from_guest.qr_content().unwrap(), link);
 

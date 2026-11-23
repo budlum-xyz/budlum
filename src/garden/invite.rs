@@ -35,15 +35,15 @@ const INVITE_PREFIX: &str = "budlum-garden:1?";
 /// 71). Each peer costs `&peer=` plus its address, and an IPv4 address with
 /// a peer id runs to about 87 bytes, so this ceiling carries a host and two
 /// relays. Measured: one peer 269 bytes, three 443, four 530.
-pub const MAX_INVITE_BYTES: usize = 512;
+const MAX_INVITE_BYTES: usize = 512;
 /// Longest QR payload, in bytes.
 ///
 /// A QR carrying this many bytes at error-correction level L is version
 /// 20 or below, which still resolves from a phone camera at the distance
 /// one person holds a screen out to another.
-pub const MAX_QR_BYTES: usize = 640;
+const MAX_QR_BYTES: usize = 640;
 /// Most peer addresses one invite carries.
-pub const MAX_INVITE_PEERS: usize = 8;
+const MAX_INVITE_PEERS: usize = 8;
 /// The bytes an invite spends before its first peer address.
 ///
 /// Prefix 16, `chain=` and sixteen hex 22, `&genesis=` and sixty-four hex
