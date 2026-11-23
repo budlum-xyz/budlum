@@ -7,7 +7,10 @@
 //! bytes.
 //!
 //! ```text
-//! g1|chain=<id>|genesis=<hex>|owner=<hex>|host=<hex>|addr=<host addr>|relay=<a>,<b>|exp=<ms>|uses=<n>|sig=<hex>
+//! g1|chain=<id>|genesis=<b64u>|token=<b64u>|owner=<b64u>|host=<b64u>|addr=<host addr>|relay=<a>,<b>|exp=<ms>|uses=<n>|sig=<b64u>
+//!
+//! Binary fields ride base64url without padding: hex would double the bytes,
+//! and the directive binds the record to 512 of them.
 //! ```
 //!
 //! The link is `budlum://garden/join#<base64url record>`. With a local address
@@ -145,13 +148,15 @@ fn base64url_decode(text: &str) -> Result<Vec<u8>, String> {
 }
 
 fn parse_hash_field(label: &str, value: &str) -> Result<Hash32, String> {
-    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if value.len() != 43 || !value.bytes().all(|b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')
+    }) {
         return Err(format!(
-            "invite record field '{label}' must be 64 hex characters"
+            "invite record field '{label}' must be 43 base64url characters"
         ));
     }
-    let bytes =
-        hex::decode(value).map_err(|_| format!("invite record field '{label}' is not hex"))?;
+    let bytes = base64url_decode(value)
+        .map_err(|_| format!("invite record field '{label}' is not base64url"))?;
     <[u8; 32]>::try_from(bytes.as_slice())
         .map_err(|_| format!("invite record field '{label}' is not 32 bytes"))
 }
@@ -241,15 +246,15 @@ impl GardenInviteRecord {
             "g{}|chain={}|genesis={}|token={}|owner={}|host={}|addr={}|relay={}|exp={}|uses={}|sig={}",
             self.version,
             self.chain_id,
-            hex::encode(self.genesis_hash),
-            hex::encode(self.token),
-            hex::encode(self.owner),
-            hex::encode(self.host),
+            base64url_encode(&self.genesis_hash),
+            base64url_encode(&self.token),
+            base64url_encode(&self.owner),
+            base64url_encode(&self.host),
             self.host_address,
             self.relays.join(","),
             self.expires_unix_ms,
             self.max_uses,
-            hex::encode(self.signature)
+            base64url_encode(&self.signature)
         )
     }
 
@@ -310,8 +315,14 @@ impl GardenInviteRecord {
             "" => Vec::new(),
             list => list.split(',').map(str::to_string).collect(),
         };
-        let raw = hex::decode(take("sig")?)
-            .map_err(|_| "invite record signature is not hex".to_string())?;
+        let sig_field = take("sig")?;
+        if sig_field.len() != 86 || !sig_field.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')
+        }) {
+            return Err("invite record signature must be 86 base64url characters".to_string());
+        }
+        let raw = base64url_decode(&sig_field)
+            .map_err(|_| "invite record signature is not base64url".to_string())?;
         let mut signature_bytes = [0u8; 64];
         if raw.len() != 64 {
             return Err("invite record signature is not 64 bytes".to_string());
