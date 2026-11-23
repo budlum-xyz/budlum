@@ -295,7 +295,11 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: Binary Size (rapor)
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # c4b49fda measured two independent 40-minute cancellations: the release
+    # build took 20m20s-20m41s and cargo-bloat was still measuring after
+    # 18m57s/19m21s. The measurement and every threshold stay unchanged; this
+    # budget lets the existing fail-closed report reach a verdict.
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
