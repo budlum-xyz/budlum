@@ -2008,9 +2008,7 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
     }
 
     fn has_pinned_trust_anchor(&self) -> bool {
-        !self.require_pinned_set
-            || self.pinned_validator_set.is_some()
-            || self.trusted_era.is_some()
+        self.pinned_validator_set.is_some()
     }
 
     fn verify(

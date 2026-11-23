@@ -621,10 +621,12 @@ pub trait ExternalFinalityAdapter: Send + Sync {
     /// Returns `true` when this adapter instance holds a pinned trust anchor
     /// (validator committee, PoW checkpoint header, or ZK program/chain pin).
     ///
-    /// Adapters that can be constructed in a closed unpinned state override
-    /// this method so [`crate::cross_domain::external::ExternalDomainFinalityBridge`]
-    /// fails closed with `MissingTrustAnchor` before evaluating untrusted bytes.
+    /// The default is deliberately closed: a new or third-party adapter cannot
+    /// claim an anchor merely by omitting this method. An implementation must
+    /// derive `true` from its own instance state so
+    /// [`crate::cross_domain::external::ExternalDomainFinalityBridge`] refuses
+    /// unanchored evidence before evaluating untrusted bytes.
     fn has_pinned_trust_anchor(&self) -> bool {
-        true
+        false
     }
 }
