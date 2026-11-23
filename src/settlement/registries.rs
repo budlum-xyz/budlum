@@ -72,6 +72,30 @@ pub struct SettlementRegistries {
     /// Empty: absent from the serialization and from the root.
     #[serde(default, skip_serializing_if = "ObjectLayerRegistry::is_empty")]
     pub object_layer: ObjectLayerRegistry,
+    /// The unification ledger's finality anchors: the guarantees the ledger
+    /// has admitted, the names it gave the external domains that produced
+    /// them, and the counter that hands out the next name.
+    ///
+    /// The ledger itself is a runtime structure - its router and its storage
+    /// fabric have never been part of the state root, and they do not need
+    /// to be. The anchors are the consensus facts: two nodes that disagreed
+    /// about which guarantees the ledger holds, or about which external
+    /// domain a name belongs to, would disagree about which cross-domain
+    /// payments are authorized and about how much a domain may still send.
+    ///
+    /// Empty: absent from the serialization and from the root, like the
+    /// registries around it.
+    ///
+    /// TRAILING: this field is written last, after every other registry.
+    /// The stored state is bincode, which is not self-describing: a field
+    /// added in the middle would be read as the field that follows it, and
+    /// the registry behind it would be decoded from the wrong bytes. A
+    /// trailing field is the only shape an addition can take here.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::unification::UnificationAnchors::is_empty"
+    )]
+    pub unification: crate::unification::UnificationAnchors,
 }
 
 impl SettlementRegistries {
@@ -99,6 +123,7 @@ impl SettlementRegistries {
             && self.shared_security.is_empty()
             && self.quantum.is_empty()
             && self.object_layer.is_empty()
+            && self.unification.is_empty()
     }
 
     /// True when the external intake holds any record - including governance-
@@ -189,6 +214,14 @@ impl SettlementRegistries {
         if !self.object_layer.is_empty() {
             fields.push(b"BDLM_OBJECT_LAYER_V1");
             fields.push(&object_layer);
+        }
+        // The unification ledger's anchors join only once the ledger has
+        // admitted something, so a chain that never anchored a finality
+        // guarantee keeps its pinned roots.
+        let unification = self.unification.root();
+        if !self.unification.is_empty() {
+            fields.push(b"BDLM_UNIFICATION_ANCHORS_V1");
+            fields.push(&unification);
         }
         hash_fields_bytes(&fields)
     }

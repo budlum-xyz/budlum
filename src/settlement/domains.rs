@@ -321,6 +321,17 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
     if domain.id == 0 {
         return Err("Consensus domain id 0 is reserved".into());
     }
+    // The unification ledger mints its own names for external domains in a
+    // reserved id range. A consensus domain taking an id from that range
+    // would make one number mean two domains - and the ledger, which keys
+    // its anchored domains by id, would overwrite whichever it anchored
+    // second. The range is refused here so the two namespaces stay apart.
+    if crate::unification::is_external_domain_id(domain.id) {
+        return Err(format!(
+            "Domain {} lies in the reserved external domain id range",
+            domain.id
+        ));
+    }
     // Bitcoin uses numeric chain id 0; no other canonical or custom slot may
     // register with zero. Keep this consistent with the chain bootstrap gate.
     if domain.domain_chain_id == 0
@@ -411,6 +422,149 @@ pub fn check_ingest_garden_domain_reservation(
         }
     }
     Ok(())
+}
+
+/// Anchor the observed finality guarantees into the unification ledger.
+///
+/// The ledger is what makes a cross-domain payment finality-gated: its
+/// conservation, slashing and atomic rollback rules read the guarantees the
+/// domains have produced. An anchor is where a guarantee lands, and without
+/// one the ledger's rules never see a real guarantee - every finality-gated
+/// route would have to be authorized by a hand-built fixture.
+///
+/// Two kinds of domain reach the ledger:
+///
+/// 1. **Consensus domains** - the ones registered through
+///    [`SettlementTx::RegisterDomain`]. Their guarantee follows from the
+///    domain itself ([`FinalityGuarantee::for_domain`]).
+/// 2. **External domains** - the ones registered in the external intake.
+///    An external domain is addressed by its own `DomainKey`, not by a
+///    `DomainId`, and the guarantee that describes its observed backing is
+///    derived from the backing its last accepted attestation carried. The
+///    ledger mints the name - in a reserved id range, so it can never
+///    collide with a consensus domain - and keeps it: the same key always
+///    resolves to the same name, so the outflow already counted against that
+///    name stays counted.
+///
+/// The anchors live in `state.settlement.unification`, so they survive the
+/// call and enter the settlement state root. Two nodes that disagreed about
+/// them would disagree about which cross-domain payments are authorized.
+///
+/// # Errors
+///
+/// Returns [`SettlementTxError::Refused`] when the ledger refuses an
+/// anchor - the domain table is at its ceiling, or an anchor regressed a
+/// finalized height. The chain refuses the transaction rather than keeping
+/// an anchor set that does not describe its own state.
+///
+/// WIRING: called from [`execute_settlement_tx`] after every accepted
+/// settlement transaction.
+pub fn refresh_unification_anchors(
+    state: &mut AccountState,
+    chain_id: u64,
+) -> Result<usize, SettlementTxError> {
+    let hub = crate::settlement::universal_finality::FinalityGuarantee::settlement_hub();
+    let mut ledger = crate::unification::UnificationLedger::new(hub);
+    ledger.restore_anchors(state.settlement.unification.clone());
+    // Mainnet requires post-quantum quorum co-signatures; the other
+    // networks do not. The same rule the RPC surface applies.
+    let pq_enforced = chain_id
+        == crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+
+    let mut anchored = 0usize;
+
+    // The consensus domains. Their guarantee follows from the domain, and
+    // their finalized state root is the last block they committed.
+    for domain in state.settlement.domains.domains() {
+        if domain.id == 0 {
+            continue;
+        }
+        // A domain that has committed nothing yet has no finalized state
+        // root. Anchoring the empty root would claim a finality nobody
+        // observed.
+        if domain.last_committed_hash == [0u8; 32] {
+            continue;
+        }
+        let guarantee = crate::settlement::universal_finality::FinalityGuarantee::for_domain(
+            &domain,
+            pq_enforced,
+        );
+        let bond = u128::from(domain.operator_bond);
+        ledger
+            .anchor_domain_finality(
+                domain.id,
+                guarantee,
+                bond,
+                bond,
+                domain.last_committed_height,
+                domain.last_committed_hash,
+            )
+            .map_err(|err| {
+                SettlementTxError::Refused(format!(
+                    "the unification ledger refused the anchor for consensus domain {}: {err}",
+                    domain.id
+                ))
+            })?;
+        anchored += 1;
+    }
+
+    // The external domains. The intake is consensus state: the
+    // registrations, the attestations they accumulated and the backing those
+    // attestations carried all live in `state.settlement.external_intake`.
+    let external: Vec<(
+        crate::cross_domain::external::DomainKey,
+        crate::settlement::universal_finality::FinalityGuarantee,
+        u128,
+        u64,
+        crate::domain::types::Hash32,
+    )> = {
+        let intake = &state.settlement.external_intake;
+        intake
+            .registry
+            .domains()
+            .filter_map(|registration| {
+                let key = registration.record.domain;
+                let entry = intake.entries.get(&key)?;
+                // A domain that has never produced an accepted attestation
+                // has no observed finality to anchor. Anchoring the
+                // registration's promise alone would give it a fault
+                // tolerance it never proved.
+                let attestation = registration.latest_attestation()?;
+                if attestation.state_root == [0u8; 32] {
+                    return None;
+                }
+                let guarantee =
+                    crate::settlement::universal_finality::FinalityGuarantee::for_external_spec_with_backing(
+                        &entry.spec,
+                        registration.record.last_backing.as_ref(),
+                    );
+                Some((
+                    key,
+                    guarantee,
+                    registration.record.bond_atoms,
+                    attestation.height,
+                    attestation.state_root,
+                ))
+            })
+            .collect()
+    };
+    for (key, guarantee, bond, height, state_root) in external {
+        ledger
+            .anchor_external_domain_finality(&key, guarantee, bond, bond, height, state_root)
+            .map_err(|err| {
+                SettlementTxError::Refused(format!(
+                    "the unification ledger refused the anchor for external domain {}: {err}",
+                    hex::encode(key.0)
+                ))
+            })?;
+        anchored += 1;
+    }
+
+    // The anchors go back into consensus state.
+    state.settlement.unification = ledger.anchors();
+    Ok(anchored)
 }
 
 /// Register a consensus domain in the settlement registry.
@@ -1794,6 +1948,26 @@ pub fn apply_domain_tip_resets(
 ///
 /// The [`SettlementTxError`] that names the failed check.
 pub fn execute_settlement_tx(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &SettlementTx,
+) -> Result<(), SettlementTxError> {
+    let outcome = execute_settlement_tx_inner(state, ctx, tx);
+    // The ledger follows the state, not the other way round. Whatever the
+    // transaction did to the domains - a new commitment, a new height - the
+    // ledger's anchors are recomputed from the state it left behind, so the
+    // guarantees it enforces are the guarantees the state actually carries.
+    if outcome.is_ok() {
+        refresh_unification_anchors(state, ctx.chain_id)?;
+    }
+    outcome
+}
+
+/// The settlement transaction doors themselves.
+///
+/// The public [`execute_settlement_tx`] wraps this and refreshes the
+/// unification ledger's anchors afterwards.
+fn execute_settlement_tx_inner(
     state: &mut AccountState,
     ctx: &SettlementTxContext,
     tx: &SettlementTx,

@@ -316,7 +316,14 @@ pub(crate) fn validate_safe_label(field: &str, value: &str, max_len: usize) -> R
 }
 
 /// Hard cap on registered domain finality anchors in [`UnificationLedger`].
-const MAX_LEDGER_DOMAINS: usize = 512;
+///
+/// The ledger anchors every consensus domain and every external domain, so
+/// its ceiling has to cover both registries' ceilings. A ceiling below the
+/// domain registry's own would be a trapdoor: the registry would still
+/// admit a domain, the ledger would refuse to anchor it, and every
+/// settlement transaction with it would fail - the chain would stop
+/// settling because it had more domains than its ledger had room for.
+const MAX_LEDGER_DOMAINS: usize = crate::domain::registry::MAX_REGISTERED_DOMAINS * 2;
 
 /// Hard cap on bonded liquidity solvers in [`UnificationLedger`].
 const MAX_LEDGER_SOLVERS: usize = 4_096;
@@ -335,6 +342,31 @@ pub struct AnchoredDomainState {
     pub finalized_height: u64,
     pub finalized_state_root: Hash32,
     pub epoch_outflow_atoms: u128,
+}
+
+/// The first `DomainId` the unification ledger hands to an external domain.
+///
+/// The domain id space is partitioned, and the ledger takes the one range
+/// that is provably nobody else's. Bit 31 marks a Garden domain
+/// ([`crate::garden::is_garden_domain_id`]), so the ledger mints names with
+/// bit 30 set and bit 31 clear: `0x4000_0000..=0x7FFF_FFFF`.
+///
+/// The range is reserved, not merely used. A consensus domain may not
+/// register an id inside it
+/// ([`crate::settlement::domains::validate_domain_registration`]), and the
+/// ledger refuses an internal anchor there
+/// ([`UnificationLedger::anchor_domain_finality`]). Two nodes cannot
+/// disagree about which domain an id names, because the id says which
+/// namespace it came from.
+pub const EXTERNAL_DOMAIN_ID_PREFIX: crate::domain::types::DomainId = 0x4000_0000;
+
+/// The last `DomainId` the unification ledger hands to an external domain.
+pub const EXTERNAL_DOMAIN_ID_LIMIT: crate::domain::types::DomainId = 0x7FFF_FFFF;
+
+/// True when `id` lies in the range reserved for the names the unification
+/// ledger mints for external domains.
+pub const fn is_external_domain_id(id: crate::domain::types::DomainId) -> bool {
+    id >= EXTERNAL_DOMAIN_ID_PREFIX && id <= EXTERNAL_DOMAIN_ID_LIMIT
 }
 
 /// Bonded quote-solver entry securing cross-domain split-tender fulfillment.
@@ -421,6 +453,26 @@ pub enum UnificationExecutionError {
 pub struct UnificationLedger {
     hub_guarantee: crate::settlement::universal_finality::FinalityGuarantee,
     domains: std::collections::BTreeMap<crate::domain::types::DomainId, AnchoredDomainState>,
+    /// The ledger's own name for every external domain it has admitted.
+    ///
+    /// An external domain is addressed by its own `DomainKey`; the ledger
+    /// stores domains under a numeric `DomainId`. This map is the bridge
+    /// between the two, and it is the reason an external domain's finality
+    /// envelope has anywhere to land.
+    ///
+    /// The identity is stable: the same `DomainKey` always resolves to the
+    /// same `DomainId`. A ledger that handed out a fresh name per call would
+    /// count the same outflow twice and slash a receipt naming a domain
+    /// nobody else knows.
+    external_domains: std::collections::BTreeMap<
+        crate::cross_domain::external::DomainKey,
+        crate::domain::types::DomainId,
+    >,
+    /// The next unused `DomainId` this ledger will hand to an external
+    /// domain. It starts at [`EXTERNAL_DOMAIN_ID_PREFIX`] and only ever
+    /// moves forward, and only when an anchor actually succeeded. Zero
+    /// means the range is exhausted.
+    next_external_domain_id: crate::domain::types::DomainId,
     solvers: std::collections::BTreeMap<Hash32, SolverBondRecord>,
     settled_quote_obligations: std::collections::BTreeMap<(Hash32, Hash32), (Hash32, u128)>,
     slash_hashes: Vec<Hash32>,
@@ -429,6 +481,154 @@ pub struct UnificationLedger {
     committed_bundles: std::collections::BTreeMap<Hash32, Hash32>,
     router: UniversalPaymentRouter,
     storage: UnifiedStorageFabric,
+}
+
+/// The part of the unification ledger that consensus state keeps.
+///
+/// The ledger itself is a runtime structure - its router and its storage
+/// fabric have never been part of the state root, and they do not need to
+/// be. What *does* belong to consensus state is the set of finality
+/// anchors: the guarantees the ledger has admitted, the names it gave the
+/// external domains that produced them, and the counter that hands out the
+/// next name.
+///
+/// Those three are consensus facts. The conservation ceiling, the slashing
+/// rule, and the atomic rollback all read them, and two nodes that disagree
+/// about them would disagree about which payments are authorized. So they
+/// live in the state root, and the ledger is rebuilt around them.
+///
+/// WIRING: Carried by [`crate::settlement::SettlementRegistries`] so that
+/// the anchors survive a restart and enter the settlement state root.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnificationAnchors {
+    /// The finality anchor of every domain the ledger has admitted.
+    domains: std::collections::BTreeMap<crate::domain::types::DomainId, AnchoredDomainState>,
+    /// The ledger's own name for every external domain it has admitted.
+    ///
+    /// The key is a `DomainKey`, whose canonical string form is the 64-hex
+    /// form the rest of the external registries use, so the map survives a
+    /// JSON snapshot.
+    #[serde(with = "crate::core::map_keys")]
+    external_domains: std::collections::BTreeMap<
+        crate::cross_domain::external::DomainKey,
+        crate::domain::types::DomainId,
+    >,
+    /// The next unused `DomainId` this ledger will hand to an external
+    /// domain. Zero is reserved, so the first name is one.
+    #[serde(default = "first_external_domain_id")]
+    next_external_domain_id: crate::domain::types::DomainId,
+}
+
+/// The counter's start value.
+///
+/// A counter that deserializes as zero would mean "the range is exhausted",
+/// and the ledger would refuse every external domain. The default has to be
+/// the first name in the range, not zero.
+const fn first_external_domain_id() -> crate::domain::types::DomainId {
+    EXTERNAL_DOMAIN_ID_PREFIX
+}
+
+impl Default for UnificationAnchors {
+    /// A fresh anchor set starts at the first name in the reserved range.
+    ///
+    /// The derived `Default` would start the counter at zero, and zero is
+    /// the ledger's "the range is exhausted" marker - a ledger restored
+    /// from a default anchor set would refuse every external domain.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl UnificationAnchors {
+    /// The anchors of a ledger that has admitted nothing yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            domains: std::collections::BTreeMap::new(),
+            external_domains: std::collections::BTreeMap::new(),
+            next_external_domain_id: EXTERNAL_DOMAIN_ID_PREFIX,
+        }
+    }
+
+    /// The anchors, as the ledger's own state.
+    ///
+    /// # Errors
+    ///
+    /// This function never fails; the `Result` keeps the read surface
+    /// uniform with the rest of the ledger.
+    #[must_use]
+    pub fn domains(
+        &self,
+    ) -> &std::collections::BTreeMap<crate::domain::types::DomainId, AnchoredDomainState> {
+        &self.domains
+    }
+
+    /// The name of every external domain the ledger has admitted.
+    ///
+    /// # Errors
+    ///
+    /// This function never fails; the `Result` keeps the read surface
+    /// uniform with the rest of the ledger.
+    #[must_use]
+    pub fn external_domains(
+        &self,
+    ) -> &std::collections::BTreeMap<
+        crate::cross_domain::external::DomainKey,
+        crate::domain::types::DomainId,
+    > {
+        &self.external_domains
+    }
+
+    /// The name the ledger will give the next external domain.
+    ///
+    /// # Errors
+    ///
+    /// This function never fails; the `Result` keeps the read surface
+    /// uniform with the rest of the ledger.
+    #[must_use]
+    pub fn next_external_domain_id(&self) -> crate::domain::types::DomainId {
+        self.next_external_domain_id
+    }
+
+    /// True when the ledger has admitted nothing yet.
+    ///
+    /// An empty anchor set joins nothing to the state root, so a chain that
+    /// never saw a cross-domain finality keeps its pinned roots.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.domains.is_empty() && self.external_domains.is_empty()
+    }
+
+    /// The anchors' own root.
+    ///
+    /// The domains are hashed under their own id, so an anchor that moves
+    /// from one domain to another changes the root even when the guarantees
+    /// themselves did not.
+    #[must_use]
+    pub fn root(&self) -> Hash32 {
+        let mut leaves: Vec<Hash32> = Vec::new();
+        for (domain_id, state) in &self.domains {
+            leaves.push(crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_ULEDGER_ANCHOR_DOMAIN_V1",
+                &domain_id.to_le_bytes(),
+                &state.guarantee.fault_tolerance_bps.to_le_bytes(),
+                &[u8::from(state.guarantee.slashable_backing)],
+                &state.slashable_bond_atoms.to_le_bytes(),
+                &state.routing_ceiling_atoms.to_le_bytes(),
+                &state.finalized_height.to_le_bytes(),
+                &state.finalized_state_root,
+                &state.epoch_outflow_atoms.to_le_bytes(),
+            ]));
+        }
+        for (key, domain_id) in &self.external_domains {
+            leaves.push(crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_ULEDGER_ANCHOR_EXTERNAL_V1",
+                &key.0,
+                &domain_id.to_le_bytes(),
+            ]));
+        }
+        crate::core::hash::hash_fields_bytes(&[b"BDLM_ULEDGER_ANCHORS_V1", &leaves])
+    }
 }
 
 impl UnificationLedger {
@@ -441,6 +641,8 @@ impl UnificationLedger {
         Self {
             hub_guarantee,
             domains: std::collections::BTreeMap::new(),
+            external_domains: std::collections::BTreeMap::new(),
+            next_external_domain_id: EXTERNAL_DOMAIN_ID_PREFIX,
             solvers: std::collections::BTreeMap::new(),
             settled_quote_obligations: std::collections::BTreeMap::new(),
             slash_hashes: Vec::new(),
@@ -475,6 +677,47 @@ impl UnificationLedger {
                 "domain_id and finalized_state_root must be non-zero",
             )));
         }
+        // The external range belongs to the names the ledger mints. A
+        // consensus domain taking an id from it would make one number mean
+        // two domains, and the ledger would overwrite whichever it anchored
+        // second.
+        if is_external_domain_id(domain_id) {
+            return Err(UnificationExecutionError::InvalidArgument(String::from(
+                "a consensus domain may not take the id range reserved for external domains",
+            )));
+        }
+        self.anchor_state_into(
+            domain_id,
+            guarantee,
+            slashable_bond_atoms,
+            routing_ceiling_atoms,
+            finalized_height,
+            finalized_state_root,
+        )
+    }
+
+    /// Anchor a domain's finality envelope under an id the caller has
+    /// already chosen.
+    ///
+    /// The shared body of the two anchors. The internal door refuses the
+    /// external id range before it gets here; the external door mints an id
+    /// inside that range. Everything else is the same rule: the height may
+    /// not regress, the domain table has a ceiling, and the outflow the
+    /// domain has already accumulated is carried over.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnificationExecutionError`] on height regression or domain
+    /// table capacity exhaustion.
+    fn anchor_state_into(
+        &mut self,
+        domain_id: crate::domain::types::DomainId,
+        guarantee: crate::settlement::universal_finality::FinalityGuarantee,
+        slashable_bond_atoms: u128,
+        routing_ceiling_atoms: u128,
+        finalized_height: u64,
+        finalized_state_root: Hash32,
+    ) -> Result<(), UnificationExecutionError> {
         let prior_outflow = if let Some(existing) = self.domains.get(&domain_id) {
             if finalized_height < existing.finalized_height {
                 return Err(UnificationExecutionError::InvalidArgument(String::from(
@@ -501,6 +744,166 @@ impl UnificationLedger {
             },
         );
         Ok(())
+    }
+
+    /// The ledger's anchors, as consensus state keeps them.
+    ///
+    /// # Errors
+    ///
+    /// This function never fails; the `Result` keeps the read surface
+    /// uniform with the rest of the ledger.
+    #[must_use]
+    pub fn anchors(&self) -> UnificationAnchors {
+        UnificationAnchors {
+            domains: self.domains.clone(),
+            external_domains: self.external_domains.clone(),
+            next_external_domain_id: self.next_external_domain_id,
+        }
+    }
+
+    /// Restore a ledger around anchors that consensus state kept.
+    ///
+    /// The router and the storage fabric are runtime structures and start
+    /// empty; the anchors are the consensus facts, and they come back
+    /// exactly as they were left.
+    ///
+    /// # Errors
+    ///
+    /// This function never fails; the `Result` keeps the read surface
+    /// uniform with the rest of the ledger.
+    #[must_use]
+    pub fn from_anchors(
+        hub_guarantee: crate::settlement::universal_finality::FinalityGuarantee,
+        anchors: UnificationAnchors,
+    ) -> Self {
+        let mut ledger = Self::new(hub_guarantee);
+        ledger.restore_anchors(anchors);
+        ledger
+    }
+
+    /// Load the anchors consensus state kept back into the ledger.
+    ///
+    /// The router and the storage fabric stay empty: they are runtime
+    /// structures and were never part of the state root. The anchors are the
+    /// consensus facts, and they come back exactly as they were left.
+    ///
+    /// # Errors
+    ///
+    /// This function never fails; the `Result` keeps the read surface
+    /// uniform with the rest of the ledger.
+    pub fn restore_anchors(&mut self, anchors: UnificationAnchors) {
+        self.domains = anchors.domains;
+        self.external_domains = anchors.external_domains;
+        self.next_external_domain_id = anchors.next_external_domain_id;
+    }
+
+    /// Anchor an external domain's finality envelope under the ledger's own
+    /// name for it.
+    ///
+    /// An external domain is addressed by its `DomainKey`; the ledger stores
+    /// domains under a numeric `DomainId`. This is the bridge: the ledger
+    /// resolves the key to the name it already gave that domain, or gives it
+    /// one now, and then anchors the envelope under that name.
+    ///
+    /// The name is stable. The same key always resolves to the same
+    /// `DomainId`, so the outflow the ledger has already counted against a
+    /// domain, and the slashing receipt that names it, keep referring to the
+    /// same domain. Two different domains never share a name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnificationExecutionError`] if the finalized state root is
+    /// zero, the height regresses, the domain table is full, or the identity
+    /// space is exhausted.
+    ///
+    /// WIRING: Admits the observed finality guarantee produced for an
+    /// external domain into the ledger, so the finality conservation,
+    /// slashing, and atomic rollback rules can read it.
+    #[must_use]
+    pub fn anchor_external_domain_finality(
+        &mut self,
+        key: &crate::cross_domain::external::DomainKey,
+        guarantee: crate::settlement::universal_finality::FinalityGuarantee,
+        slashable_bond_atoms: u128,
+        routing_ceiling_atoms: u128,
+        finalized_height: u64,
+        finalized_state_root: Hash32,
+    ) -> Result<crate::domain::types::DomainId, UnificationExecutionError> {
+        // A domain the ledger has already named keeps its name. The anchor
+        // may still be refused - the height may not regress, the table may be
+        // full - and a refusal must not unname the domain: the outflow the
+        // ledger has already counted against that name stays counted, and a
+        // name that vanished would leave the receipt naming a domain nobody
+        // can look up.
+        if let Some(existing) = self.external_domains.get(key).copied() {
+            self.anchor_state_into(
+                existing,
+                guarantee,
+                slashable_bond_atoms,
+                routing_ceiling_atoms,
+                finalized_height,
+                finalized_state_root,
+            )?;
+            return Ok(existing);
+        }
+
+        // A new domain. The name is computed but NOT committed: the anchor
+        // is written first, and only an anchor that actually succeeded
+        // commits the name and moves the counter.
+        //
+        // The other order - name first, anchor second - leaves a ghost
+        // mapping behind whenever the anchor is refused: the key would point
+        // at a domain the ledger never anchored, and the counter would have
+        // burned an id for a domain that does not exist.
+        let candidate = self.next_external_domain_id;
+        if candidate == 0 || !is_external_domain_id(candidate) {
+            return Err(UnificationExecutionError::CapacityExceeded);
+        }
+        self.anchor_state_into(
+            candidate,
+            guarantee,
+            slashable_bond_atoms,
+            routing_ceiling_atoms,
+            finalized_height,
+            finalized_state_root,
+        )?;
+
+        // Commit. The name and the counter move together, and neither can
+        // fail, so the ledger is never half-anchored.
+        self.next_external_domain_id = match candidate.checked_add(1) {
+            Some(next) if is_external_domain_id(next) => next,
+            // The range is exhausted. Zero says so, and the next attempt is
+            // refused rather than handing out the last id twice.
+            _ => 0,
+        };
+        self.external_domains.insert(*key, candidate);
+        Ok(candidate)
+    }
+
+    /// The ledger's name for an external domain, if it has given one.
+    ///
+    /// # Errors
+    ///
+    /// This function never fails; `None` means the domain is not known.
+    #[must_use]
+    pub fn domain_id_for_external(
+        &self,
+        key: &crate::cross_domain::external::DomainKey,
+    ) -> Option<crate::domain::types::DomainId> {
+        self.external_domains.get(key).copied()
+    }
+
+    /// The anchored state of a domain, under the ledger's own name for it.
+    ///
+    /// # Errors
+    ///
+    /// This function never fails; `None` means the domain is not anchored.
+    #[must_use]
+    pub fn domain_state(
+        &self,
+        domain_id: crate::domain::types::DomainId,
+    ) -> Option<&AnchoredDomainState> {
+        self.domains.get(&domain_id)
     }
 
     /// Deposit slashable collateral for `solver_id` to back cross-domain quotes.
@@ -1516,6 +1919,282 @@ mod tests {
             files.push((relative.to_string(), text));
         }
         files
+    }
+
+    /// The ledger must name an external domain for itself, and keep naming it
+    /// the same way.
+    ///
+    /// The ledger stores domains under a numeric `DomainId`, while an external
+    /// domain is addressed by its own `DomainKey`. When a domain's finality
+    /// envelope arrives, the ledger has to turn one into the other. Two
+    /// properties matter, and both are about the ledger staying a ledger:
+    ///
+    /// 1. **The name is stable.** The same domain must land on the same
+    ///    `DomainId` every time, or the anchored state, the outflow that has
+    ///    already been counted against it, and the slashing receipt that
+    ///    names it would each be talking about a different domain.
+    /// 2. **The guarantee is stored.** After the anchor, the ledger must hold
+    ///    the guarantee it was given, under that name - otherwise the
+    ///    finality-gated payment rules still have nothing to read.
+    ///
+    /// This test pins both.
+    #[test]
+    fn the_ledger_names_an_external_domain_and_keeps_the_guarantee() {
+        use crate::cross_domain::external::DomainKey;
+        use crate::crypto::facts::QuantumClass;
+        use crate::settlement::domains::CommitmentAttestation;
+        use crate::settlement::universal_finality::{FinalityGuarantee, FinalityReversibility};
+
+        let full_att = CommitmentAttestation {
+            state_root: true,
+            tx_root: true,
+            event_root: true,
+            parent: true,
+        };
+        let hub_g = FinalityGuarantee {
+            reversibility: FinalityReversibility::DeterministicQuorum,
+            quantum_posture: QuantumClass::Lattice,
+            attestation: full_att,
+            slashable_backing: true,
+            fault_tolerance_bps: 10_000,
+        };
+        let mut ledger = UnificationLedger::new(hub_g);
+
+        let key = DomainKey([0x77; 32]);
+
+        // The ledger must accept an external domain by its own key.
+        let assigned = ledger
+            .anchor_external_domain_finality(&key, hub_g, 10_000, 100_000, 42, [0x31; 32])
+            .expect("the ledger accepts an external domain");
+
+        assert!(
+            assigned != 0,
+            "the ledger must not name a domain with the reserved id 0"
+        );
+        // The name must come from the range reserved for external domains.
+        // A name drawn from the consensus range would collide with a
+        // consensus domain that happens to hold the same number, and the
+        // ledger keys its anchored domains by id.
+        assert!(
+            crate::unification::is_external_domain_id(assigned),
+            "the ledger named an external domain with the id {assigned}, which lies \
+             outside the reserved external range"
+        );
+
+        // The same domain must land on the same name. A ledger that hands out
+        // a fresh identity per call would count the same outflow twice and
+        // slash a receipt that names a domain nobody else knows.
+        let again = ledger
+            .anchor_external_domain_finality(&key, hub_g, 10_000, 100_000, 43, [0x32; 32])
+            .expect("the ledger accepts the same external domain again");
+        assert_eq!(
+            assigned, again,
+            "the ledger gave one external domain two identities; the outflow it \
+             has already counted and the receipt that names it would then refer \
+             to different domains"
+        );
+
+        // And the guarantee must actually be there, under that name.
+        let anchored = ledger
+            .domain_state(assigned)
+            .expect("the anchored domain is readable");
+        assert_eq!(
+            anchored.guarantee.fault_tolerance_bps, hub_g.fault_tolerance_bps,
+            "the ledger stored a different guarantee than the one it was given"
+        );
+        assert_eq!(
+            anchored.finalized_height, 43,
+            "the ledger did not advance the domain's finalized height"
+        );
+
+        // A different domain must get a different name.
+        let other = ledger
+            .anchor_external_domain_finality(
+                &DomainKey([0x78; 32]),
+                hub_g,
+                10_000,
+                100_000,
+                7,
+                [0x33; 32],
+            )
+            .expect("the ledger accepts a second external domain");
+        assert_ne!(
+            assigned, other,
+            "two external domains were given the same identity"
+        );
+    }
+
+    /// A refused anchor must leave nothing behind.
+    ///
+    /// The ledger names an external domain and anchors its finality envelope
+    /// in one step. If the name were committed before the anchor, a refused
+    /// anchor would leave a ghost: the key would point at a domain the
+    /// ledger never anchored, and the id counter would have burned a name on
+    /// a domain that does not exist. The next domain would then start one
+    /// name further along, and the ghost key would still answer to a domain
+    /// with no state.
+    #[test]
+    fn a_refused_anchor_leaves_no_ghost_mapping() {
+        use crate::cross_domain::external::DomainKey;
+        use crate::crypto::facts::QuantumClass;
+        use crate::settlement::domains::CommitmentAttestation;
+        use crate::settlement::universal_finality::{FinalityGuarantee, FinalityReversibility};
+
+        let hub_g = FinalityGuarantee {
+            reversibility: FinalityReversibility::DeterministicQuorum,
+            quantum_posture: QuantumClass::Lattice,
+            attestation: CommitmentAttestation {
+                state_root: true,
+                tx_root: true,
+                event_root: true,
+                parent: true,
+            },
+            slashable_backing: true,
+            fault_tolerance_bps: 10_000,
+        };
+        let mut ledger = UnificationLedger::new(hub_g);
+        let key = DomainKey([0x77; 32]);
+        let root_before = ledger.state_root();
+
+        // A zero state root is refused by the anchor.
+        let refused =
+            ledger.anchor_external_domain_finality(&key, hub_g, 10_000, 100_000, 42, [0u8; 32]);
+        assert!(
+            refused.is_err(),
+            "the ledger accepted an anchor with a zero finalized state root"
+        );
+
+        // No ghost mapping: the key names nothing.
+        assert!(
+            ledger.domain_id_for_external(&key).is_none(),
+            "a refused anchor left the key naming a domain the ledger never anchored"
+        );
+
+        // And no counter drift: the refused attempt changed nothing at all.
+        assert_eq!(
+            ledger.state_root(),
+            root_before,
+            "a refused anchor mutated the ledger"
+        );
+
+        // The next successful anchor takes the FIRST name in the range, so
+        // the refusal did not burn one.
+        let named = ledger
+            .anchor_external_domain_finality(&key, hub_g, 10_000, 100_000, 42, [0x31; 32])
+            .expect("the ledger accepts an external domain");
+        assert_eq!(
+            named,
+            crate::unification::EXTERNAL_DOMAIN_ID_PREFIX,
+            "a refused anchor burned a name; the first admitted domain did not get \
+             the first name in the reserved range"
+        );
+    }
+
+    /// A consensus domain may not take the range reserved for external
+    /// domains.
+    ///
+    /// The ledger keys its anchored domains by `DomainId`. If an internal
+    /// domain could hold an id from the external range, the two namespaces
+    /// would overlap and the ledger would overwrite whichever it anchored
+    /// second - silently, and with a guarantee that belonged to the other
+    /// domain.
+    #[test]
+    fn a_consensus_domain_cannot_take_the_external_id_range() {
+        use crate::crypto::facts::QuantumClass;
+        use crate::settlement::domains::CommitmentAttestation;
+        use crate::settlement::universal_finality::{FinalityGuarantee, FinalityReversibility};
+
+        let hub_g = FinalityGuarantee {
+            reversibility: FinalityReversibility::DeterministicQuorum,
+            quantum_posture: QuantumClass::Lattice,
+            attestation: CommitmentAttestation {
+                state_root: true,
+                tx_root: true,
+                event_root: true,
+                parent: true,
+            },
+            slashable_backing: true,
+            fault_tolerance_bps: 10_000,
+        };
+        let mut ledger = UnificationLedger::new(hub_g);
+
+        let refused = ledger.anchor_domain_finality(
+            crate::unification::EXTERNAL_DOMAIN_ID_PREFIX,
+            hub_g,
+            10_000,
+            100_000,
+            5,
+            [0x31; 32],
+        );
+        assert!(
+            refused.is_err(),
+            "a consensus domain took an id from the reserved external range"
+        );
+        assert!(
+            ledger
+                .domain_state(crate::unification::EXTERNAL_DOMAIN_ID_PREFIX)
+                .is_none(),
+            "the refused consensus anchor was stored anyway"
+        );
+    }
+
+    /// A consensus domain and an external domain never share an identity.
+    ///
+    /// The two namespaces are apart by construction, so a consensus domain
+    /// at id 1 and an external domain both anchored in the same ledger keep
+    /// their own state.
+    #[test]
+    fn an_external_domain_never_collides_with_a_consensus_domain() {
+        use crate::cross_domain::external::DomainKey;
+        use crate::crypto::facts::QuantumClass;
+        use crate::settlement::domains::CommitmentAttestation;
+        use crate::settlement::universal_finality::{FinalityGuarantee, FinalityReversibility};
+
+        let hub_g = FinalityGuarantee {
+            reversibility: FinalityReversibility::DeterministicQuorum,
+            quantum_posture: QuantumClass::Lattice,
+            attestation: CommitmentAttestation {
+                state_root: true,
+                tx_root: true,
+                event_root: true,
+                parent: true,
+            },
+            slashable_backing: true,
+            fault_tolerance_bps: 10_000,
+        };
+        let mut ledger = UnificationLedger::new(hub_g);
+
+        ledger
+            .anchor_domain_finality(1, hub_g, 10_000, 100_000, 5, [0x31; 32])
+            .expect("the ledger accepts a consensus domain");
+        let external = ledger
+            .anchor_external_domain_finality(
+                &DomainKey([0x77; 32]),
+                hub_g,
+                10_000,
+                100_000,
+                6,
+                [0x32; 32],
+            )
+            .expect("the ledger accepts an external domain");
+
+        assert_ne!(
+            external, 1,
+            "an external domain took the identity of a consensus domain"
+        );
+        assert!(
+            ledger.domain_state(1).is_some(),
+            "the consensus domain's anchored state was overwritten by the external domain"
+        );
+        assert!(
+            ledger.domain_state(external).is_some(),
+            "the external domain's anchored state is missing"
+        );
+        assert_eq!(
+            ledger.domain_state(1).map(|d| d.finalized_height),
+            Some(5),
+            "the consensus domain's anchored height changed"
+        );
     }
 
     /// The settlement finality chain must reach the unification ledger.
