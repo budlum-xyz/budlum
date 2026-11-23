@@ -27,12 +27,12 @@ use sha3::{Digest, Sha3_256};
 #[derive(Debug, Clone)]
 pub(crate) struct Pact {
     pub id: [u8; 32],
-    pub recipe_hash: [u8; 32],
+    pub program_hash: [u8; 32],
     pub seed: [u8; 32],
     pub commitment: [u8; 32],
     pub residual_commitment: [u8; 32],
     pub byte_budget: u64,
-    pub mode_flag: u8, // 0=pure production, 1=recipe+residual, 2=residual-only
+    pub mode_flag: u8, // 0=pure production, 1=program+residual, 2=residual-only
 }
 
 impl Pact {
@@ -46,7 +46,7 @@ impl Pact {
     #[allow(clippy::missing_const_for_fn)]
     pub fn new(
         id: [u8; 32],
-        recipe_hash: [u8; 32],
+        program_hash: [u8; 32],
         seed: [u8; 32],
         commitment: [u8; 32],
         residual: [u8; 32],
@@ -66,7 +66,7 @@ impl Pact {
         }
         Ok(Self {
             id,
-            recipe_hash,
+            program_hash,
             seed,
             commitment,
             residual_commitment: residual,
@@ -164,7 +164,6 @@ impl PactRegistry {
     /// # Errors
     ///
     /// Returns an error when the id is already registered or the registry is full.
-    #[cfg(test)]
     pub(crate) fn add_pact(&mut self, pact: Pact) -> Result<(), &'static str> {
         if self.pacts.len() >= MAX_PACTS {
             return Err("storage pact: registry is full");
@@ -178,7 +177,7 @@ impl PactRegistry {
             .pacts
             .partition_point(|existing| existing.id <= pact.id);
         self.pacts.insert(at, pact);
-        self.recompute_root();
+        self.root = self.computed_root();
         Ok(())
     }
 
@@ -202,7 +201,7 @@ impl PactRegistry {
             return [0u8; 32];
         }
         // Every field of every pact is in the preimage. V1 hashed only `id`
-        // and `commitment`, so `recipe_hash`, `seed`, `residual_commitment`,
+        // and `commitment`, so `program_hash`, `seed`, `residual_commitment`,
         // `byte_budget` and `mode_flag` could change under a root that still
         // verified; a residual-only pact and a pure-production pact with the
         // same id and commitment were one root. The count in front of the
@@ -218,7 +217,7 @@ impl PactRegistry {
         h.update((self.pacts.len() as u64).to_le_bytes());
         for p in &self.pacts {
             h.update(p.id);
-            h.update(p.recipe_hash);
+            h.update(p.program_hash);
             h.update(p.seed);
             h.update(p.commitment);
             h.update(p.residual_commitment);
@@ -357,7 +356,7 @@ mod tests {
         };
         assert!(base().verify_root().is_ok());
         let edits: [fn(&mut Pact); 5] = [
-            |p| p.recipe_hash = [9u8; 32],
+            |p| p.program_hash = [9u8; 32],
             |p| p.seed = [9u8; 32],
             |p| p.residual_commitment = [9u8; 32],
             |p| p.byte_budget = 11,
@@ -496,7 +495,7 @@ mod tests {
         let mut forged_mode = PactRegistry {
             pacts: vec![Pact {
                 id: [2u8; 32],
-                recipe_hash: [0u8; 32],
+                program_hash: [0u8; 32],
                 seed: [0u8; 32],
                 commitment: comm,
                 residual_commitment: [9u8; 32], // contradicts mode_flag 0
