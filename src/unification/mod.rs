@@ -630,7 +630,10 @@ impl UnificationAnchors {
                 &domain_id.to_le_bytes(),
             ]));
         }
-        crate::core::hash::hash_fields_bytes(&[b"BDLM_ULEDGER_ANCHORS_V1", &leaves])
+        // Each anchor leaf is a distinct field so the length prefix keeps the
+        // leaf boundaries unambiguous (same scheme as the two loops above).
+        let leaf_refs: Vec<&[u8]> = leaves.iter().map(|leaf| leaf.as_slice()).collect();
+        crate::core::hash::hash_fields_bytes(&[b"BDLM_ULEDGER_ANCHORS_V1", &leaf_refs])
     }
 }
 
