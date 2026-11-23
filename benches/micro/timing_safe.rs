@@ -2,7 +2,7 @@
 // never part of a running validator. A failed setup step should stop the
 // measurement loudly rather than be threaded through `Result`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-//! benches/micro/timing_safe.rs - a dudect-style statistical timing regression test.
+//! `benches/micro/timing_safe.rs` - a dudect-style statistical timing regression test.
 //!
 //! Statistically audits that the `constant_time_eq_str` comparison in RPC
 //! authentication really stays constant time:
@@ -21,8 +21,8 @@
 //! variance is tiny; as the denominator shrinks t inflates. The tighter the measurement the
 //! MORE red the gate goes - even as constant-timeness improves. A real run:
 //!
-//! control (naive, LEAKY) : mean_first=19.05ns mean_last=41.41ns |t|=83.62
-//! constant_time_eq_str : mean_first=119.48ns mean_last=118.45ns |t|=7.62
+//! control (naive, LEAKY) : `mean_first=19.05ns` `mean_last=41.41ns` |t|=83.62
+//! `constant_time_eq_str` : `mean_first=119.48ns` `mean_last=118.45ns` |t|=7.62
 //!
 //! The naive implementation leaks 22.36 ns; the real function 1.03 ns - three cycles at 3 GHz,
 //! that is on the order of `Instant::now()` resolution. The gate counted that as a
@@ -37,10 +37,10 @@
 //! literature). The threshold 4.5 is the dudect standard.
 //!
 //! Running:
-//! cargo bench --bench timing_safe (this is what CI uses)
+//! cargo bench --bench `timing_safe` (this is what CI uses)
 //! Environment variables (for local in-depth analysis):
-//! TIMING_SAFE_BATCHES (default 64), TIMING_SAFE_ITERS (default 4096 per batch per class)
-//! TIMING_SAFE_PQ_SAMPLES (default 400) and TIMING_SAFE_SLH_SAMPLES (default 10): signs per
+//! `TIMING_SAFE_BATCHES` (default 64), `TIMING_SAFE_ITERS` (default 4096 per batch per class)
+//! `TIMING_SAFE_PQ_SAMPLES` (default 400) and `TIMING_SAFE_SLH_SAMPLES` (default 10): signs per
 //! key class for the post-quantum signers
 
 use std::env;
@@ -132,6 +132,44 @@ fn clock_granularity_ns() -> u64 {
     best
 }
 
+/// ABBA class order for one four-sample block.
+///
+/// The previous fixed ABAB order always measured the first class at an even
+/// sample index and the second class at an odd one. A period-two scheduler,
+/// sibling-thread, or frequency disturbance could therefore masquerade as a
+/// secret-dependent difference. ABBA puts each class in both parity slots
+/// without introducing randomness into the reproducible harness.
+fn first_class_for_sample(sample: usize) -> bool {
+    matches!(sample % 4, 0 | 3)
+}
+
+/// Both classes must occupy both parity slots in the four-sample schedule.
+fn sampling_order_is_phase_balanced(order: &[bool]) -> bool {
+    let mut observed = [[false; 2]; 2];
+    for (sample, &first_class) in order.iter().enumerate() {
+        let class = usize::from(u8::from(first_class));
+        observed[class][sample % 2] = true;
+    }
+    observed.into_iter().flatten().all(|seen| seen)
+}
+
+/// Runtime mutation control for the harness itself: ABBA passes, while the old
+/// ABAB schedule is rejected because class and sample parity are identical.
+fn sampling_order_self_check() -> Option<String> {
+    let order: Vec<bool> = (0..4).map(first_class_for_sample).collect();
+    if order != [true, false, false, true] || !sampling_order_is_phase_balanced(&order) {
+        return Some(format!(
+            "ABBA sampling order is not phase-balanced: {order:?}"
+        ));
+    }
+    if sampling_order_is_phase_balanced(&[true, false, true, false]) {
+        return Some(String::from(
+            "the old ABAB sampling order was accepted as phase-balanced",
+        ));
+    }
+    None
+}
+
 fn measure_min_per_batch<T: ?Sized, F: Fn(&T, &T) -> bool>(
     f: F,
     first: &T,
@@ -146,8 +184,9 @@ fn measure_min_per_batch<T: ?Sized, F: Fn(&T, &T) -> bool>(
         let mut m_first = f64::INFINITY;
         let mut m_last = f64::INFINITY;
         for i in 0..iters {
-            // Interleaved measurement: drift loads both classes equally.
-            let (cand, acc) = if i % 2 == 0 {
+            // ABBA interleaving balances both classes across even and odd
+            // sample slots, so a period-two disturbance cannot become a class.
+            let (cand, acc) = if first_class_for_sample(i) {
                 (first, &mut m_first)
             } else {
                 (last, &mut m_last)
@@ -391,16 +430,27 @@ fn pq_signer_classes() -> Result<(), ExitCode> {
 }
 
 fn main() -> ExitCode {
+    if let Some(reason) = sampling_order_self_check() {
+        eprintln!("FAIL(harness): sampling order contract broken: {reason}");
+        return ExitCode::from(2);
+    }
     if let Some(neden) = welch_sentinel_self_check() {
         eprintln!("FAIL(harness): welch_t sentinel contract broken: {neden}");
         return ExitCode::from(2);
     }
     // One batch has no variance to compare (`variance` divides by len - 1),
-    // and zero iterations produce empty samples; with either, Welch's t
-    // degenerates to NaN and every later comparison passes silently,
-    // turning the gate into an unconditional PASS. Floor both.
+    // and fewer than four iterations cannot complete one ABBA block. Either
+    // condition can turn the gate into a measurement of phase or nothing.
     let batches = getenv_usize("TIMING_SAFE_BATCHES", 64).max(2);
-    let iters = getenv_usize("TIMING_SAFE_ITERS", 4096).max(1);
+    let requested_iters = getenv_usize("TIMING_SAFE_ITERS", 4096).max(4);
+    let remainder = requested_iters % 4;
+    let iters = if remainder == 0 {
+        requested_iters
+    } else {
+        requested_iters
+            .checked_add(4 - remainder)
+            .unwrap_or(requested_iters - remainder)
+    };
 
     // A deterministic 64-byte API key (in the x-api-key length class).
     let mut rng = XorShift(0xB0D1_0CA7_5EED_1234);

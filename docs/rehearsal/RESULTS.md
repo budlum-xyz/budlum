@@ -9,7 +9,7 @@ threshold in the field. No dated field report, CI run number, real-device logs,
 or published genesis ceremony evidence is recorded below. The local compose
 workflow (`.github/workflows/testnet-rehearsal.yml`) is a separate, shorter
 four-validator rehearsal whose report is uploaded as a CI artifact, not
-appended to this file. The [TLG ledger](../audit/TLG_REPORT.md) stays unverified
+appended to this file. The [launch-gate ledger](../audit/TLG_REPORT.md) stays unverified
 until actual run artifacts and approvals are attached.
 
 ## 1. Drill targets (not measured results)
@@ -31,7 +31,7 @@ until actual run artifacts and approvals are attached.
 - **Metered network policy:** zero custody symbol bytes over cellular unless `allow_cellular_opt_in = true`.
 
 `analyze_mobile_field_logs` validates submitted records; the synthetic JSONL
-in `tests/rehearsal/main.rs` does not measure a device. To change a TLG status,
+in `tests/rehearsal/main.rs` does not measure a device. To change a launch-gate status,
 record device and build identifiers, operator, UTC start/end, input logs, actual
 measurements including failures, commit SHA and CI run or rehearsal artifact,
 then have a reviewer other than the author approve the evidence.
@@ -50,4 +50,4 @@ session. No validator process, finalized block, faucet grant, explorer page,
 AppBinding payment, object upload or physical-device test was observed. These are
 **startup blockers**, not passing runtime measurements and not a failed field
 drill. Re-run the actual user journey on the final commit in an authorized
-environment before changing any TLG verdict.
+environment before changing any launch-gate verdict.

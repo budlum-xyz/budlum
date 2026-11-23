@@ -1,4 +1,4 @@
-//! Phase 3 STARK recursion, MasterProof size/speed, and 10,000-block Shadow
+//! Phase 3 STARK recursion, `MasterProof` size/speed, and 10,000-block Shadow
 //! parity measurement harness.
 //!
 //! Run with: `cargo bench --bench agg_phase3_stark`

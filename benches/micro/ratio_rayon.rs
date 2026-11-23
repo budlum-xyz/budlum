@@ -80,12 +80,11 @@ where
             best = Some((spent, out));
         }
     }
-    match best {
-        Some(pair) => pair,
-        None => {
-            eprintln!("ratio_rayon: no repetition ran, refusing to report");
-            exit(2);
-        }
+    if let Some(pair) = best {
+        pair
+    } else {
+        eprintln!("ratio_rayon: no repetition ran, refusing to report");
+        exit(2);
     }
 }
 
