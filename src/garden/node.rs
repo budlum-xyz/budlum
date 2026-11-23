@@ -4527,6 +4527,21 @@ mod tests {
         .await
         .expect("the guest never became a validator");
 
+        // A record handed out while two validators are up names both of
+        // them. This is the invite that has to survive the move: a door
+        // that only ever named the host would shut the moment he walked.
+        let stable_invite = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let candidate = host_handle.invite().await.unwrap();
+                if candidate.peers.len() >= 2 {
+                    return candidate;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the invite never named both validators");
+
         // The host goes and comes back on a fresh listener.
         let outcome = host_handle.leave().await.unwrap();
         let returned = spawn(
@@ -4577,6 +4592,26 @@ mod tests {
             );
         }
 
+        // The point of the section: the record handed out before the move
+        // still opens the door after it. Nobody reissued it and nobody told
+        // the holder the host had moved.
+        let latecomer = spawn(
+            GardenEntry::Invite(stable_invite),
+            config("latecomer", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .expect("the invite from before the move was refused");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while latecomer.status().await.unwrap()["active_validators"] != 3 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the invite from before the move no longer admits anyone");
+
+        latecomer.leave().await.unwrap();
         returned.leave().await.unwrap();
         guest.leave().await.unwrap();
     }
@@ -4591,7 +4626,20 @@ mod tests {
     /// they are in.
     #[tokio::test]
     async fn garden_invite_while_frozen() {
-        let host_handle = host().await;
+        // Spawned by hand rather than through host(): this test needs the
+        // host's secret so the same validator can come back later.
+        let host_secret = random_bytes();
+        let host_handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits::testnet_default(),
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            host_secret,
+            None,
+        )
+        .await
+        .unwrap();
         let invite = host_handle.invite().await.unwrap();
 
         let guest = spawn(
@@ -4612,7 +4660,7 @@ mod tests {
 
         // The host goes. With the host silent past host_timeout_ms, every
         // remaining validator observes Frozen.
-        host_handle.leave().await.unwrap();
+        let outcome = host_handle.leave().await.unwrap();
         tokio::time::timeout(Duration::from_secs(30), async {
             while guest.status().await.unwrap()["status"] != json!("Frozen") {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -4637,6 +4685,64 @@ mod tests {
         // Still Frozen: reading the invite did not restart anything.
         assert_eq!(guest.status().await.unwrap()["status"], json!("Frozen"));
 
+        // Someone takes that invite and walks up to the door while the
+        // Garden is still Frozen. The join is started in the background
+        // because it is expected to wait, not to fail.
+        let frozen_count = guest.status().await.unwrap()["active_validators"].clone();
+        let newcomer_secret = random_bytes();
+        let joining = tokio::spawn(async move {
+            spawn(
+                GardenEntry::Invite(frozen_invite),
+                config("newcomer", "/ip4/127.0.0.1/tcp/0"),
+                newcomer_secret,
+                None,
+            )
+            .await
+        });
+
+        // A Frozen chain writes no blocks, so nothing can admit anyone:
+        // the caller waits at the door instead of being turned away.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(
+            guest.status().await.unwrap()["active_validators"],
+            frozen_count,
+            "a Frozen Garden admitted a validator with no block to record it"
+        );
+        assert!(!joining.is_finished(), "the join did not wait for the host");
+
+        // The host comes back and the chain runs again.
+        let returned = spawn(
+            GardenEntry::Invite(outcome.invite),
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            host_secret,
+            None,
+        )
+        .await
+        .expect("the host could not return");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while guest.status().await.unwrap()["status"] != json!("Active") {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the Garden did not run again after the host returned");
+
+        // Now the waiting join finishes on its own.
+        let newcomer = tokio::time::timeout(Duration::from_secs(60), joining)
+            .await
+            .expect("the join never finished after the host returned")
+            .expect("the joining task panicked")
+            .expect("the invite opened while Frozen was refused in the end");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while newcomer.status().await.unwrap()["active_validators"] != 3 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the newcomer never became a validator");
+
+        newcomer.leave().await.unwrap();
+        returned.leave().await.unwrap();
         guest.leave().await.unwrap();
     }
 
