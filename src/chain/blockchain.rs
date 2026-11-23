@@ -3006,7 +3006,11 @@ impl Blockchain {
             },
             checkpoint_height: self.chain.last().map_or(0, |b| b.index),
             external_intake_root: if self.state.settlement.has_external_intake() {
-                self.state.settlement.external_intake_digest().ok()
+                // Three states, not two: an intake that cannot be encoded is
+                // not an absent intake (B-10108 #1/#2).
+                crate::settlement::registries::SettlementRegistries::intake_root_for_header(
+                    self.state.settlement.external_intake_digest(),
+                )
             } else {
                 None
             },
