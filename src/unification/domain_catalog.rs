@@ -11,13 +11,17 @@
 use crate::domain::storage_params::StorageDomainParams;
 use crate::domain::types::{ConsensusKind, DomainId, Hash32};
 use crate::object_layer::family::HomeVmFamily;
-use crate::unification::{hash_domain_fields, unification_merkle_root, validate_safe_label};
+use crate::unification::{
+    build_merkle_proof, hash_domain_fields, unification_merkle_root, validate_safe_label,
+    verify_merkle_proof,
+};
 use budlum_uel_abi::EeId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Maximum number of registered universal domains held in one catalog snapshot.
-pub const MAX_UNIVERSAL_DOMAINS: usize = 512;
+pub const MAX_UNIVERSAL_DOMAINS: usize = crate::domain::registry::MAX_REGISTERED_DOMAINS;
+const _: () = assert!(MAX_UNIVERSAL_DOMAINS == crate::domain::registry::MAX_REGISTERED_DOMAINS);
 
 /// Maximum capabilities declared by a single domain record.
 pub const MAX_DOMAIN_CAPABILITIES: usize = 16;
@@ -152,6 +156,141 @@ impl UniversalDomainCatalog {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Projects live chain state (local `ConsensusDomainRegistry`, external
+    /// `IntakeState`, active `ObjectLayerRegistry` charters, and `BridgeState`
+    /// assets) into a read-only unified domain catalog view.
+    ///
+    /// Unregistered ecosystem templates from [`Self::with_canonical_ecosystems`]
+    /// are never included, and every [`DomainCapability`] is derived directly
+    /// from live on-chain records rather than self-declared metadata.
+    #[must_use]
+    pub fn from_chain_state(state: &crate::core::account::AccountState) -> Self {
+        use crate::cross_domain::external::profile::DomainState;
+        use crate::object_layer::charter::CharterStatus;
+
+        let mut catalog = Self::new();
+
+        // 1. Registered local consensus domains.
+        for domain in state.settlement.domains.domains() {
+            let active_charter = state
+                .settlement
+                .object_layer
+                .charters
+                .get(&domain.id)
+                .filter(|c| c.status == CharterStatus::Active);
+
+            let caip2_reference = state
+                .settlement
+                .domains
+                .caip2_for_domain(domain.id)
+                .or_else(|| {
+                    active_charter
+                        .map(|c| c.chain_reference.trim())
+                        .filter(|r| !r.is_empty())
+                })
+                .map_or_else(
+                    || format!("budlum-domain:{}:{}", domain.domain_chain_id, domain.id),
+                    ToOwned::to_owned,
+                );
+
+            let mut capabilities = BTreeSet::new();
+            let has_bridge_backing =
+                domain.bridge_enabled || state.bridge_state.has_asset_for_domain(domain.id);
+            if has_bridge_backing {
+                capabilities.insert(DomainCapability::UniversalPayment);
+                capabilities.insert(DomainCapability::CrossDomainLiquidation);
+            }
+            if domain.bridge_enabled && domain.is_active() {
+                capabilities.insert(DomainCapability::PosAndCardRail);
+            }
+            if active_charter.is_some() {
+                capabilities.insert(DomainCapability::ObjectLayerCustody);
+            }
+            let adapter_lower = domain.finality_adapter.to_ascii_lowercase();
+            if domain.kind == ConsensusKind::Pospace
+                || adapter_lower.contains("storage")
+                || adapter_lower.contains("arweave")
+                || adapter_lower.contains("filecoin")
+            {
+                capabilities.insert(DomainCapability::DecentralizedStorage);
+            }
+            if domain.kind == ConsensusKind::Zk || !domain.zk_program_allowlist.is_empty() {
+                capabilities.insert(DomainCapability::VerifiableCompute);
+            }
+            if domain.is_active() {
+                capabilities.insert(DomainCapability::OutputComposition);
+            }
+
+            let record = UniversalDomainRecord {
+                domain_id: domain.id,
+                name: format!("Domain-{}", domain.id),
+                caip2_reference,
+                consensus_kind: domain.kind.clone(),
+                execution_env_id: None,
+                object_layer_family: active_charter.map(|c| c.vm_family),
+                native_symbol: if domain.id == 0 {
+                    "BUD".to_string()
+                } else {
+                    format!("DOM{}", domain.id)
+                },
+                native_decimals: 8,
+                preserves_inner_rules: true,
+                capabilities,
+            };
+            let _ = catalog.register_domain(record);
+        }
+
+        // 2. Registered external intake domains (live on-chain external adapters).
+        for (key, entry) in &state.settlement.external_intake.entries {
+            let mut candidate =
+                u32::from_le_bytes([key.0[0], key.0[1], key.0[2], key.0[3]]) | 0x8000_0000;
+            while catalog.domains.contains_key(&candidate) {
+                candidate = candidate.wrapping_add(1) | 0x8000_0000;
+            }
+            let is_serving = state
+                .settlement
+                .external_intake
+                .registry
+                .domain(key)
+                .is_some_and(|reg| {
+                    matches!(
+                        reg.record.state,
+                        DomainState::Active | DomainState::Admitted
+                    )
+                });
+            let adapter_name = entry.golden.adapter;
+            let network = entry.golden.network.as_str();
+            let caip2_reference = format!(
+                "external:{}:{}",
+                hex::encode(adapter_name.0.get(..6).unwrap_or(&adapter_name.0)),
+                network
+            );
+            let mut capabilities = BTreeSet::new();
+            if state.bridge_state.has_asset_for_domain(candidate) {
+                capabilities.insert(DomainCapability::UniversalPayment);
+                capabilities.insert(DomainCapability::CrossDomainLiquidation);
+            }
+            if is_serving {
+                capabilities.insert(DomainCapability::OutputComposition);
+            }
+            let record = UniversalDomainRecord {
+                domain_id: candidate,
+                name: format!("External-{network}"),
+                caip2_reference,
+                consensus_kind: ConsensusKind::Bft,
+                execution_env_id: None,
+                object_layer_family: None,
+                native_symbol: "EXT".to_string(),
+                native_decimals: 8,
+                preserves_inner_rules: true,
+                capabilities,
+            };
+            let _ = catalog.register_domain(record);
+        }
+
+        catalog
     }
 
     /// Builds the canonical catalog covering every major blockchain consensus
@@ -542,6 +681,64 @@ impl UniversalDomainCatalog {
             .collect();
         unification_merkle_root(b"BDLM_UNIVERSAL_CATALOG_V1", &leaves)
     }
+
+    /// Builds a single Merkle inclusion proof attesting that `domain_id` (with
+    /// its canonical CAIP-2 identity, consensus family, and derived
+    /// capabilities) is committed under [`Self::catalog_root`].
+    #[must_use]
+    pub fn prove_domain_inclusion(
+        &self,
+        domain_id: DomainId,
+    ) -> Option<UniversalDomainInclusionProof> {
+        let mut leaves = Vec::with_capacity(self.domains.len());
+        let mut target = None;
+        for (idx, (&id, record)) in self.domains.iter().enumerate() {
+            leaves.push(record.commitment_hash());
+            if id == domain_id {
+                target = Some((idx, record.clone()));
+            }
+        }
+        let (leaf_index, record) = target?;
+        let siblings = build_merkle_proof(b"BDLM_UNIVERSAL_CATALOG_V1", &leaves, leaf_index)?;
+        Some(UniversalDomainInclusionProof {
+            record,
+            leaf_index,
+            leaf_count: leaves.len(),
+            siblings,
+        })
+    }
+}
+
+/// Self-contained Merkle inclusion proof against [`UniversalDomainCatalog::catalog_root`].
+///
+/// Allows a light client to verify with a single proof that a domain is
+/// registered together with its CAIP-2 reference, consensus family, and
+/// state-derived capability set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UniversalDomainInclusionProof {
+    /// Registered domain record committed at `leaf_index`.
+    pub record: UniversalDomainRecord,
+    /// Zero-based position of `record` in the canonical sorted catalog.
+    pub leaf_index: usize,
+    /// Total number of registered domains in the committed catalog.
+    pub leaf_count: usize,
+    /// Merkle sibling hashes from leaf to root.
+    pub siblings: Vec<Hash32>,
+}
+
+impl UniversalDomainInclusionProof {
+    /// Verifies this inclusion proof against `catalog_root`.
+    #[must_use]
+    pub fn verify(&self, catalog_root: &Hash32) -> bool {
+        verify_merkle_proof(
+            b"BDLM_UNIVERSAL_CATALOG_V1",
+            catalog_root,
+            self.leaf_index,
+            self.leaf_count,
+            &self.record.commitment_hash(),
+            &self.siblings,
+        )
+    }
 }
 
 struct PresetSpec<'a> {
@@ -648,5 +845,135 @@ mod tests {
             catalog.register_domain(future_chain),
             Err(CatalogError::DuplicateDomainId(42))
         );
+    }
+
+    #[test]
+    fn from_chain_state_exposes_only_registered_domains_and_derives_capabilities() {
+        use crate::core::account::AccountState;
+        use crate::cross_domain::bridge::AssetId;
+        use crate::domain::types::{ConsensusDomain, DomainStatus, RootScheme};
+        use crate::object_layer::charter::{CharterStatus, DataPolicy, DomainCharter};
+
+        // Empty state produces an empty live catalog (never leaks unregistered templates).
+        let mut state = AccountState::new();
+        let empty = UniversalDomainCatalog::from_chain_state(&state);
+        assert_eq!(empty.len(), 0);
+
+        // Register a local BFT domain with bridge disabled and no charter.
+        let domain = ConsensusDomain {
+            id: 77,
+            kind: ConsensusKind::Bft,
+            status: DomainStatus::Active,
+            domain_chain_id: 777,
+            operator: Some(crate::core::address::Address::from([0x77; 32])),
+            operator_bond: crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND,
+            config_hash: [1u8; 32],
+            validator_set_hash: [2u8; 32],
+            finality_adapter: "bft-quorum-commit".to_string(),
+            min_confirmations: 1,
+            bridge_enabled: false,
+            block_hash_scheme: RootScheme::Sha3_256,
+            state_root_scheme: RootScheme::Sha3_256,
+            tx_root_scheme: RootScheme::Sha3_256,
+            last_committed_height: 0,
+            last_committed_hash: [0u8; 32],
+            pow_parameters: None,
+            zk_program_allowlist: Vec::new(),
+            plugin_code_hash: None,
+            genesis_state_root: [0u8; 32],
+        };
+        state
+            .settlement
+            .domains
+            .register(domain)
+            .expect("register domain");
+
+        let view1 = UniversalDomainCatalog::from_chain_state(&state);
+        assert_eq!(view1.len(), 1);
+        let rec1 = view1.get(77).expect("registered domain must appear");
+        assert!(rec1
+            .capabilities
+            .contains(&DomainCapability::OutputComposition));
+        assert!(!rec1
+            .capabilities
+            .contains(&DomainCapability::UniversalPayment));
+        assert!(!rec1
+            .capabilities
+            .contains(&DomainCapability::ObjectLayerCustody));
+
+        // Registering a bridge asset for domain 77 derives UniversalPayment immediately.
+        let asset = AssetId::for_domain(77, b"USDC");
+        state
+            .bridge_state
+            .register_asset(asset, 77)
+            .expect("register bridge asset");
+        let view2 = UniversalDomainCatalog::from_chain_state(&state);
+        let rec2 = view2.get(77).expect("domain");
+        assert!(rec2
+            .capabilities
+            .contains(&DomainCapability::UniversalPayment));
+
+        // Adding an active ObjectLayer charter derives ObjectLayerCustody + CAIP-2;
+        // retiring the charter removes ObjectLayerCustody immediately.
+        state.settlement.object_layer.charters.insert(
+            77,
+            DomainCharter {
+                vm_family: HomeVmFamily::Evm,
+                chain_reference: "eip155:777".to_string(),
+                address_prefix: String::new(),
+                endpoint: vec![0xAA; 20],
+                endpoint_code_hash: [0x11; 32],
+                verifier: vec![0xBB; 20],
+                verifier_code_hash: [0x22; 32],
+                upgrade_notice: 100,
+                silence_window: 1000,
+                data_policy: DataPolicy::Public,
+                status: CharterStatus::Active,
+                operator: None,
+            },
+        );
+        let view3 = UniversalDomainCatalog::from_chain_state(&state);
+        let rec3 = view3.get(77).expect("domain");
+        assert!(rec3
+            .capabilities
+            .contains(&DomainCapability::ObjectLayerCustody));
+        assert_eq!(rec3.caip2_reference, "eip155:777");
+
+        state
+            .settlement
+            .object_layer
+            .charters
+            .get_mut(&77)
+            .expect("charter")
+            .status = CharterStatus::Retired;
+        let view4 = UniversalDomainCatalog::from_chain_state(&state);
+        let rec4 = view4.get(77).expect("domain");
+        assert!(!rec4
+            .capabilities
+            .contains(&DomainCapability::ObjectLayerCustody));
+    }
+    #[test]
+    fn single_merkle_proof_verifies_registered_domain_and_rejects_tampered_record() {
+        let catalog = UniversalDomainCatalog::with_canonical_ecosystems();
+        let root = catalog.catalog_root();
+        let target_id = catalog.list()[0].domain_id;
+
+        let proof = catalog
+            .prove_domain_inclusion(target_id)
+            .expect("registered domain must produce an inclusion proof");
+        assert!(proof.verify(&root));
+
+        // Tampering with consensus family or CAIP-2 reference invalidates proof.
+        let mut tampered_caip2 = proof.clone();
+        tampered_caip2.record.caip2_reference = "eip155:999999".to_string();
+        assert!(!tampered_caip2.verify(&root));
+
+        // Wrong root is rejected.
+        let mut bad_root = root;
+        bad_root[0] ^= 0xFF;
+        assert!(!proof.verify(&bad_root));
+
+        // Unregistered domain yields None.
+        assert!(catalog.prove_domain_inclusion(u32::MAX - 7).is_none());
     }
 }

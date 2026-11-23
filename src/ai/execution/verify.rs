@@ -30,6 +30,7 @@ pub struct ExecutionVerifyReport {
 }
 
 impl ExecutionVerifyReport {
+    #[must_use]
     pub fn is_structurally_valid(&self) -> bool {
         self.commitments_ok
             && self.model_bound
@@ -40,12 +41,14 @@ impl ExecutionVerifyReport {
     }
 
     /// Structural + STARK: requires `stark_ok == Some(true)`.
+    #[must_use]
     pub fn is_fully_valid(&self) -> bool {
         self.is_structurally_valid() && self.stark_ok == Some(true)
     }
 }
 
 /// Structural checks (no STARK). Used when guest bytecode is not available.
+#[must_use]
 pub fn verify_execution_proof_structural(
     proof: &AiExecutionProof,
     request: &AiInferenceRequest,
@@ -54,6 +57,7 @@ pub fn verify_execution_proof_structural(
     verify_execution_proof_structural_with_model(proof, request, result, None)
 }
 
+#[must_use]
 pub fn verify_execution_proof_structural_with_model(
     proof: &AiExecutionProof,
     request: &AiInferenceRequest,
@@ -130,6 +134,50 @@ pub fn expected_initial_state_root(
     ))
 }
 
+/// Recompute the exact AIR-bound `ExecutionPublicInputs::event_digest` that the
+/// canonical fixed-point MLP guest logs for `output_ref` when the model's final
+/// layer has dimension `output_dim`.
+///
+/// The guest initializes `R_HASH = 0`, folds each final-layer neuron via
+/// `Opcode::Poseidon(R_HASH, R_HASH, R_ACC)`, and emits a single `Opcode::Log`
+/// over `R_HASH`. Comparing that derived digest against `pi.event_digest` stops
+/// a prover from running the genuine guest on one input, keeping the valid
+/// STARK, and substituting an arbitrary `AiInferenceResult::output_ref`.
+///
+/// Convenience: exposed for AI execution-proof verifiers and callers.
+///
+/// # Errors
+///
+/// Returns an error if `output_dim == 0` or `output_ref.len() != output_dim * 4`.
+pub fn expected_mlp_output_event_digest(
+    output_ref: &[u8],
+    output_dim: usize,
+) -> Result<[u8; 32], String> {
+    if output_dim == 0 {
+        return Err("execution proof model output_dim cannot be zero".into());
+    }
+    let expected_len = output_dim
+        .checked_mul(4)
+        .ok_or_else(|| "execution proof output_ref byte length overflow".to_string())?;
+    if output_ref.len() != expected_len {
+        return Err(format!(
+            "execution proof output_ref length {} != expected {} for output_dim {}",
+            output_ref.len(),
+            expected_len,
+            output_dim
+        ));
+    }
+    let mut rolling = 0u64;
+    for chunk in output_ref.as_chunks::<4>().0 {
+        let mut word = [0u8; 4];
+        word.copy_from_slice(chunk);
+        let limb = i32::from_le_bytes(word);
+        let field_val = crate::ai::execution::guest::i32_to_field(limb);
+        rolling = bud_vm::poseidon4_hash(rolling, field_val);
+    }
+    Ok(bud_proof::event_digest_from_events(&[rolling]))
+}
+
 /// Full chain path: structural checks plus the STARK, one call, `program` and the
 /// public inputs supplied together.
 ///
@@ -138,6 +186,7 @@ pub fn expected_initial_state_root(
 /// structural function alone accepts a proof it never cryptographically
 /// checked, and one that reaches for the STARK alone accepts a proof whose
 /// commitments do not match the request it is attached to.
+#[must_use]
 pub fn verify_execution_proof_full(
     proof: &AiExecutionProof,
     request: &AiInferenceRequest,
@@ -152,6 +201,47 @@ pub fn verify_execution_proof_full(
         None => verify_execution_proof_structural(proof, request, result),
     };
     if let Some((program, pi)) = program_and_pi {
+        if let Some(claimed) = proof.public_inputs.as_ref() {
+            if &claimed.to_execution_inputs() != pi {
+                rep.stark_ok = Some(false);
+                rep.stark_error = Some(
+                    "execution proof carried public_inputs disagree with expected inputs".into(),
+                );
+                return rep;
+            }
+        }
+        if let Some(spec) = model {
+            if matches!(
+                crate::ai::execution::AiExecutionModelClass::from_u8(spec.execution_class),
+                Some(crate::ai::execution::AiExecutionModelClass::FixedPointMlpV1)
+            ) {
+                if let Some(out_dim) = spec
+                    .execution_dims
+                    .as_ref()
+                    .and_then(|dims| dims.last().copied())
+                {
+                    match expected_mlp_output_event_digest(
+                        result.output_ref.as_slice(),
+                        usize::from(out_dim),
+                    ) {
+                        Ok(expected_event) if expected_event == pi.event_digest => {}
+                        Ok(_) => {
+                            rep.stark_ok = Some(false);
+                            rep.stark_error = Some(
+                                "execution proof event_digest does not match result output_ref"
+                                    .into(),
+                            );
+                            return rep;
+                        }
+                        Err(e) => {
+                            rep.stark_ok = Some(false);
+                            rep.stark_error = Some(e);
+                            return rep;
+                        }
+                    }
+                }
+            }
+        }
         match verify_execution_proof_stark(proof, program, pi) {
             Ok(()) => rep.stark_ok = Some(true),
             Err(e) => {
@@ -867,5 +957,135 @@ mod stark_path_e2e {
         assert!(!rep.is_fully_valid());
         rep.stark_ok = Some(true);
         assert!(rep.is_fully_valid());
+    }
+
+    #[test]
+    fn full_verifier_rejects_forged_result_output_and_trailing_envelope_bytes() {
+        use crate::ai::execution::{
+            encode_input_limbs, encode_output_limbs, guest_program_for_model, matmul_program_hash,
+            prove_mlp_inference, weights_digest, FixedPointMlpSpec,
+        };
+        use crate::ai::types::{
+            canonical_input_commitment, canonical_output_commitment, AiModelId, AiRequestId,
+            BoundedBytes,
+        };
+        use crate::core::address::Address;
+
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![1],
+        };
+        let input = vec![4i32, 5i32]; // y = 2*4 + 3*5 + 1 = 24
+        let owner = Address::from([0x21u8; 32]);
+        let model_id = AiModelId::of(&owner, &[0x44u8; 32], 1);
+        let (proof, host_out) =
+            prove_mlp_inference(&spec, model_id, &input, 5_000_000).expect("prove genuine MLP");
+        assert_eq!(host_out, vec![24]);
+
+        let model = AiModelSpec {
+            model_id,
+            model_hash: [0x44u8; 32],
+            owner,
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 1024,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            require_execution_proof: true,
+            execution_program_hash: Some(matmul_program_hash(&spec).unwrap()),
+            execution_class: 1,
+            execution_weights_digest: Some(weights_digest(&spec)),
+            execution_dims: Some(spec.dims.clone()),
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        };
+
+        let raw_in = encode_input_limbs(&input);
+        let raw_out = encode_output_limbs(&host_out);
+        let req = AiInferenceRequest {
+            request_id: AiRequestId([0x88u8; 32]),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(&raw_in),
+            input_ref: BoundedBytes::try_new(raw_in).unwrap(),
+            max_fee: 0,
+            callback: None,
+            submitted_at_block: 0,
+            deadline_block: 10,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: None,
+        };
+        let honest_res = AiInferenceResult {
+            request_id: req.request_id,
+            verifier: owner,
+            output_commitment: canonical_output_commitment(&raw_out),
+            output_ref: BoundedBytes::try_new(raw_out).unwrap(),
+            result_nonce: 0,
+            signature: vec![],
+            submitted_at_block: 1,
+        };
+        let program = guest_program_for_model(&model).unwrap();
+        let pi = proof
+            .public_inputs
+            .as_ref()
+            .expect("public inputs present")
+            .to_execution_inputs();
+
+        // Honest proof and result pass full verification.
+        let ok_rep = verify_execution_proof_full(
+            &proof,
+            &req,
+            &honest_res,
+            Some(&model),
+            Some((program.as_slice(), &pi)),
+        );
+        assert!(ok_rep.is_fully_valid(), "unexpected failure: {ok_rep:?}");
+
+        // Attacker reuses the genuine STARK proof and rewrites both result.output_ref
+        // and proof.output_commitment to a forged prediction [999_999].
+        let forged_bytes = encode_output_limbs(&[999_999]);
+        let forged_commit = canonical_output_commitment(&forged_bytes);
+        let forged_res = AiInferenceResult {
+            output_commitment: forged_commit,
+            output_ref: BoundedBytes::try_new(forged_bytes).unwrap(),
+            ..honest_res.clone()
+        };
+        let mut forged_proof = proof.clone();
+        forged_proof.output_commitment = forged_commit;
+        let bad_rep = verify_execution_proof_full(
+            &forged_proof,
+            &req,
+            &forged_res,
+            Some(&model),
+            Some((program.as_slice(), &pi)),
+        );
+        assert!(!bad_rep.is_fully_valid());
+        assert_eq!(bad_rep.stark_ok, Some(false));
+        assert!(
+            bad_rep
+                .stark_error
+                .as_deref()
+                .is_some_and(|e| e.contains("event_digest")),
+            "expected event_digest mismatch, got {bad_rep:?}"
+        );
+
+        // Appending trailing malleable bytes to the postcard envelope is refused.
+        let mut malleable = proof.clone();
+        malleable.proof_bytes.push(0xAA);
+        let mal_rep = verify_execution_proof_full(
+            &malleable,
+            &req,
+            &honest_res,
+            Some(&model),
+            Some((program.as_slice(), &pi)),
+        );
+        assert_eq!(mal_rep.stark_ok, Some(false));
+        assert!(mal_rep
+            .stark_error
+            .as_deref()
+            .is_some_and(|e| e.contains("trailing byte")));
     }
 }

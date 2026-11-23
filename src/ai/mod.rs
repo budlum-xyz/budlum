@@ -19,8 +19,8 @@ pub use execution::{
 };
 pub use registry::AiRegistry;
 
-/// Testnet keeps proof-required AI models closed until BLG-059 through BLG-062
-/// are resolved and the VL-1 opening gate is independently verified.
+/// Testnet keeps proof-required AI models closed until full public-input and
+/// weight-memory binding verification is independently verified for opening.
 pub const FULL_AI_STARK_VERIFICATION_LIVE: bool = false;
 
 /// Descriptor summarizing the active VL-0..VL-3 verification layer, DIP,
@@ -119,8 +119,8 @@ mod tests {
         }
     }
 
-    /// Test helper: when the verifier stake is below MIN_VERIFIER_STAKE
-    /// stakes, then calls submit_result (the auth check
+    /// Test helper: when the verifier stake is below `MIN_VERIFIER_STAKE`
+    /// stakes, then calls `submit_result` (the auth check
     /// afterwards: an unauthorised verifier cannot count a result).
     fn submit_result_staked(
         registry: &mut AiRegistry,
@@ -2122,7 +2122,7 @@ mod tests {
         assert!(result.unwrap_err().contains("different"));
     }
 
-    // ===================== F06 Edge-Case Test Matrisi =====================
+    // ===================== Edge-Case Test Matrix =====================
 
     /// Helper: create a standard test registry with one active model.
     fn setup_ai_registry(
@@ -2478,17 +2478,27 @@ mod tests {
         let err = submit_ai_result(&mut registry, req_id, v_a, b"two", 2, 16).unwrap_err();
         assert!(err.contains("EQUIVOCATION"));
 
-        // Verifier B submits the first commitment → should succeed
-        let outcome = submit_ai_result(&mut registry, req_id, v_b, b"one", 2, 17).unwrap();
-        // Agreement_threshold=2, two verifiers with [1u8;32] → finalization
+        // Verifier B submits the first commitment: accepted, and A's tainted
+        // equivocating submission is excluded from quorum and rewards.
+        let v_c =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000023")
+                .unwrap();
+        registry
+            .lock_verifier_stake(&v_c, crate::ai::registry::MIN_VERIFIER_STAKE)
+            .unwrap();
+        let partial = submit_ai_result(&mut registry, req_id, v_b, b"one", 2, 17).unwrap();
+        assert!(
+            partial.is_none(),
+            "equivocating verifier A must not count toward B's quorum"
+        );
+        // Honest verifier C supplies the second untainted matching result -> finalization.
+        let outcome = submit_ai_result(&mut registry, req_id, v_c, b"one", 3, 18).unwrap();
         assert!(
             outcome.is_some(),
-            "Verifiers B should finalize with A's commitment"
+            "honest verifiers B and C finalize without equivocator A"
         );
         let finalized = outcome.unwrap();
-        assert_eq!(finalized.agreeing_verifiers.len(), 2);
-        assert!(finalized.agreeing_verifiers.contains(&v_a));
-        assert!(finalized.agreeing_verifiers.contains(&v_b));
+        assert_eq!(finalized.agreeing_verifiers, vec![v_b, v_c]);
     }
 
     #[test]

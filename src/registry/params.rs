@@ -221,11 +221,11 @@ pub struct RegistryParams {
     /// change it as the application fee policy evolves.
     pub app_fee_share_ppm: u64,
     /// Fixed fee charged in addition to the base transaction fee when an
-    /// account registers an AppBinding application. A non-zero fee keeps application
+    /// account registers an `AppBinding` application. A non-zero fee keeps application
     /// identity rows from being a free state-growth vector; the testnet
     /// profile uses one base unit.
     pub app_binding_registration_fee: u64,
-    /// Number of blocks used when an AppBinding intent leaves its deadline at zero.
+    /// Number of blocks used when an `AppBinding` intent leaves its deadline at zero.
     /// The testnet profile fixes this default at 600 blocks; an explicit
     /// deadline can still be chosen by the intent owner within policy.
     pub app_binding_default_intent_deadline_blocks: u64,

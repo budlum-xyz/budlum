@@ -1,7 +1,7 @@
 //! Instant Duty Handover (Section 7.6) and Disaster Recovery Mode (Section 7.7).
 //!
 //! Budlum validators never forfeit stake merely for going offline (`V-4`), and
-//! Mobile / MobileOpportunistic validators never sit on the finality path (`V-2`).
+//! Mobile / `MobileOpportunistic` validators never sit on the finality path (`V-2`).
 //! Every protocol duty therefore defines a deterministic, bounded-latency
 //! handover rule when its current holder fails to respond, alongside a bounded
 //! disaster recovery mode when more than one third of active finality seats go
@@ -21,7 +21,7 @@
 //! trade-off as Ethereum's inactivity leak), requiring post-partition social
 //! coordination if conflicting checkpoints finalize.
 //!
-//! WIRING: `Blockchain` owns `RecoveryTracker` and PoS calls
+//! WIRING: `Blockchain` owns `RecoveryTracker` and `PoS` calls
 //! `proposer_round_for_timestamps`. The seat, custody, repair and presence
 //! helpers remain drill/churn utilities until their state-transition callers
 //! adopt them; those harnesses are not production activation evidence.
@@ -575,7 +575,7 @@ impl RecoveryTracker {
     /// records `(address, class, present_on_available_chain)` once at least 1
     /// epoch has elapsed in recovery mode.
     ///
-    /// Preserves invariant `V-2`: Mobile and MobileOpportunistic validators are
+    /// Preserves invariant `V-2`: Mobile and `MobileOpportunistic` validators are
     /// never admitted to the recovery committee. See module docs for residual
     /// partition risk `R-03`.
     #[must_use]

@@ -71,7 +71,7 @@ fn aptos_every_route_is_public_and_has_one_effect() {
         match endpoint.answer {
             Answer::ChainRead => assert_eq!(endpoint.effect, Effect::Read),
             Answer::MoveUnavailable { .. } => {
-                assert!(matches!(endpoint.effect, Effect::Read | Effect::TxSubmit))
+                assert!(matches!(endpoint.effect, Effect::Read | Effect::TxSubmit));
             }
         }
     }

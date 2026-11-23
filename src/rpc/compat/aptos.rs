@@ -211,11 +211,13 @@ const ENDPOINTS: &[Endpoint] = &[
 
 /// Whether the HTTP request belongs to this gateway, including an unknown
 /// path that must receive this gateway's 404 rather than a JSON-RPC error.
+#[must_use]
 pub fn owns_path(path: &str) -> bool {
     path == "/v1" || path.starts_with("/v1/")
 }
 
 /// Validate the dedicated Aptos bind address before any listener starts.
+///
 /// The public endpoint is exposed by the reverse proxy, never by binding this
 /// unauthenticated REST service to a non-loopback interface.
 pub fn validate_listener(addr: &str) -> Result<std::net::SocketAddr, String> {
@@ -463,10 +465,7 @@ impl AptosUpstream {
     }
 
     fn url_for(&self, uri: &hyper::Uri) -> Result<reqwest::Url, Box<HttpResponse>> {
-        let suffix = uri
-            .path_and_query()
-            .map(|value| value.as_str())
-            .unwrap_or("/v1");
+        let suffix = uri.path_and_query().map_or("/v1", |value| value.as_str());
         let reject = || {
             Box::new(proxy_error(
                 StatusCode::BAD_REQUEST,
@@ -678,6 +677,7 @@ pub struct AptosGateway {
 }
 
 impl AptosGateway {
+    #[must_use]
     pub fn new(chain: ChainHandle, node: NodeClient) -> Self {
         Self {
             chain,
@@ -686,6 +686,7 @@ impl AptosGateway {
         }
     }
 
+    #[must_use]
     pub fn with_upstream(mut self, upstream: AptosUpstream) -> Self {
         self.upstream = Some(upstream);
         self

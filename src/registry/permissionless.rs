@@ -92,9 +92,9 @@ const REGISTRY_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/permissionles
 impl SlashingCondition {
     pub fn as_bytes(&self) -> &'static [u8] {
         match self {
-            SlashingCondition::DoubleSign => b"double_sign",
-            SlashingCondition::LivenessFault => b"liveness_fault",
-            SlashingCondition::MaliciousBehaviour => b"malicious_behaviour",
+            Self::DoubleSign => b"double_sign",
+            Self::LivenessFault => b"liveness_fault",
+            Self::MaliciousBehaviour => b"malicious_behaviour",
         }
     }
 }
@@ -227,37 +227,37 @@ pub enum RegistryError {
 impl std::fmt::Display for RegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RegistryError::InsufficientStake { required, provided } => write!(
+            Self::InsufficientStake { required, provided } => write!(
                 f,
                 "insufficient stake: required {required}, provided {provided}"
             ),
-            RegistryError::AlreadyRegistered { account, role } => {
+            Self::AlreadyRegistered { account, role } => {
                 write!(f, "{account} already registered as {role}")
             }
-            RegistryError::NotRegistered { account, role } => {
+            Self::NotRegistered { account, role } => {
                 write!(f, "{account} is not registered as {role}")
             }
-            RegistryError::NotActive { account, role } => {
+            Self::NotActive { account, role } => {
                 write!(f, "{account} is not active as {role}")
             }
-            RegistryError::StillUnbonding {
+            Self::StillUnbonding {
                 release_epoch,
                 current_epoch,
             } => write!(
                 f,
                 "stake still unbonding until epoch {release_epoch} (now {current_epoch})"
             ),
-            RegistryError::UnsupportedRole { role } => {
+            Self::UnsupportedRole { role } => {
                 write!(f, "role {role} has no bond registration path")
             }
-            RegistryError::RelayerNotActive { account } => write!(
+            Self::RelayerNotActive { account } => write!(
                 f,
                 "{account} is not an active relayer (register with stake first)"
             ),
-            RegistryError::AlreadySlashed { account, role } => {
+            Self::AlreadySlashed { account, role } => {
                 write!(f, "{account} is already slashed as {role}")
             }
-            RegistryError::StakeOverflow { account, role } => {
+            Self::StakeOverflow { account, role } => {
                 write!(f, "stake of {account} as {role} would overflow")
             }
         }
@@ -457,7 +457,8 @@ impl PermissionlessRegistry {
         }
     }
 
-    pub fn with_params(params: RegistryParams) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_params(params: RegistryParams) -> Self {
         Self {
             registrations: BTreeMap::new(),
             params,
@@ -2650,7 +2651,7 @@ mod tests {
         reg.register_attester(addr(30), 5_000, 0).unwrap();
         // Bond on bond is refused - a second
         // registration of the same role must not stack stake or reset
-        // cooldowns (F04's seam).
+        // cooldowns (bypassing cooldown accounting).
         assert!(
             reg.register_attester(addr(30), 6_000, 0).is_err(),
             "bonding an attester role twice must refuse"

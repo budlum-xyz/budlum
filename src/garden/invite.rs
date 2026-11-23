@@ -75,6 +75,28 @@ impl GardenInvite {
         Ok(invite)
     }
 
+    /// Build the invite a record stands for, through the same validation the
+    /// line parser uses.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an address list the invite line cannot carry.
+    pub(crate) fn from_record(
+        chain_id: u64,
+        genesis_hash: Hash32,
+        token: Hash32,
+        peers: Vec<String>,
+    ) -> Result<Self, String> {
+        let invite = Self {
+            chain_id,
+            genesis_hash,
+            token,
+            peers,
+        };
+        invite.check()?;
+        Ok(invite)
+    }
+
     fn check(&self) -> Result<(), String> {
         // A Garden runs on its own chain id only. An invite that names a
         // primary Budlum chain is refused with the name of that network.

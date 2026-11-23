@@ -11,7 +11,7 @@
 //!
 //! [`IdentityRecord`] is the DID side: `did:bud:<address>` maps to the
 //! address itself, and the record carries the verification methods (key
-//! handles, [MethodKind::MlDsa87] today, because `ml-dsa-87` is the node's
+//! handles, [`MethodKind::MlDsa87`] today, because `ml-dsa-87` is the node's
 //! own signature primitive), the current credential root, and the guardian
 //! set with its recovery threshold. [`CredentialCommitment`] is the
 //! Verifiable-Credentials side: a closed field list where every field is a
@@ -21,7 +21,7 @@
 //!
 //! # Domain placement
 //!
-//! Write authority lives on the PoA domain; the gate is [`ConsensusKind::PoA`]
+//! Write authority lives on the `PoA` domain; the gate is [`ConsensusKind::PoA`]
 //! and it is enforced by the registry itself, not left to callers, because a
 //! rule a caller can forget is a rule that will be forgotten. Other domains
 //! verify against an anchored root - that part is the cross-domain anchor
@@ -169,6 +169,15 @@ impl VerificationMethod {
     }
 }
 
+/// Per-record ceiling on verification methods: the registry root re-folds
+/// every method each block, so the vector length is consensus work.
+pub const MAX_IDENTITY_METHODS: usize = 32;
+/// Per-record ceiling on guardians, same consensus-work argument.
+pub const MAX_IDENTITY_GUARDIANS: usize = 32;
+/// Per-credential ceiling on committed fields: `root()` re-hashes every
+/// field each block through the registry fold.
+pub const MAX_CREDENTIAL_FIELDS: usize = 64;
+
 /// The DID side of the registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityRecord {
@@ -187,6 +196,17 @@ pub struct IdentityRecord {
     pub credential_roots: BTreeSet<[u8; 32]>,
     pub guardians: Vec<Address>,
     pub recovery_threshold: usize,
+    /// Count of every credential ever issued to this subject, including
+    /// re-issues of a root already on record: the per-subject ceiling counts
+    /// this, so one funded subject cannot fill the global credential pool
+    /// with one root under fresh timestamps.
+    #[serde(default)]
+    pub issued_credentials: u64,
+    /// Applied guardian recoveries. The recovery digest signs over this, so
+    /// an applied quorum can never be replayed to roll the DID back inside
+    /// the same epoch.
+    #[serde(default)]
+    pub recovery_nonce: u64,
 }
 
 impl IdentityRecord {
@@ -212,6 +232,8 @@ impl IdentityRecord {
             credential_roots: BTreeSet::new(),
             guardians,
             recovery_threshold,
+            issued_credentials: 0,
+            recovery_nonce: 0,
         };
         record.validate()?;
         Ok(record)
@@ -224,6 +246,20 @@ impl IdentityRecord {
         if self.methods.is_empty() {
             return Err(IdentityError::NoMethods {
                 did: did_of(&self.subject),
+            });
+        }
+        if self.methods.len() > MAX_IDENTITY_METHODS {
+            return Err(IdentityError::TooMany {
+                did: did_of(&self.subject),
+                what: "verification methods",
+                max: MAX_IDENTITY_METHODS,
+            });
+        }
+        if self.guardians.len() > MAX_IDENTITY_GUARDIANS {
+            return Err(IdentityError::TooMany {
+                did: did_of(&self.subject),
+                what: "guardians",
+                max: MAX_IDENTITY_GUARDIANS,
             });
         }
         for (i, method) in self.methods.iter().enumerate() {
@@ -343,6 +379,13 @@ impl CredentialCommitment {
     /// committing to nothing (a root over an empty list is a constant, and a
     /// constant root means every such credential "matches" every other).
     pub fn validate(&self) -> Result<(), IdentityError> {
+        if self.fields.len() > MAX_CREDENTIAL_FIELDS {
+            return Err(IdentityError::TooMany {
+                did: did_of(&self.subject),
+                what: "credential fields",
+                max: MAX_CREDENTIAL_FIELDS,
+            });
+        }
         if self.schema.is_empty() || self.schema.len() > 64 || self.fields.is_empty() {
             if self.fields.is_empty() {
                 return Err(IdentityError::NoFields);
@@ -434,6 +477,7 @@ pub fn disclosure_proof(leaves: &[[u8; 32]], leaf_index: usize) -> Option<Disclo
 }
 
 /// Recomputes the leaf from the disclosure material and walks it to a root.
+///
 /// True only if that root is the expected one; every failure mode (wrong
 /// salt, wrong value digest, wrong name, tampered path) lands in `false`,
 /// never in a panic or a "looks close enough".
@@ -500,6 +544,8 @@ pub struct IdentityRegistry {
     /// `Address` newtype's manual `Serialize`.
     credentials: BTreeMap<String, CredentialCommitment>,
     revoked: BTreeSet<String>,
+    #[serde(default)]
+    retired: BTreeSet<Address>,
 }
 
 /// Enforces the domain boundary shared by registry operations and the
@@ -569,7 +615,7 @@ impl IdentityRegistry {
     ) -> Result<(), IdentityError> {
         require_poa_domain(domain)?;
         match op {
-            IdentityOp::Register { record } => self.register(record),
+            IdentityOp::Register { record } => self.register(record, now),
             IdentityOp::Issue { credential } => self.issue(credential, now),
             IdentityOp::Revoke { credential } => self.revoke(credential, now),
             IdentityOp::Recover {
@@ -580,24 +626,56 @@ impl IdentityRegistry {
         }
     }
 
-    fn register(&mut self, record: IdentityRecord) -> Result<(), IdentityError> {
+    fn register(&mut self, record: IdentityRecord, now: u64) -> Result<(), IdentityError> {
         record.validate()?;
         if record.credential_root.is_some() || !record.credential_roots.is_empty() {
             return Err(IdentityError::RootMismatch {
                 did: did_of(&record.subject),
             });
         }
+        // The two counters live outside the hand-built signing preimage, so
+        // a relay could rewrite them on a signed registration. A fresh
+        // record has spent nothing: anything else is a tampered payload and
+        // would brick the DID (u64::MAX counters refuse every later issue
+        // and never spend a recovery quorum).
+        if record.issued_credentials != 0 || record.recovery_nonce != 0 {
+            return Err(IdentityError::BadApproval(format!(
+                "register: a fresh record carries no spent counters ({}, {})",
+                record.issued_credentials, record.recovery_nonce
+            )));
+        }
         let subject = record.subject;
-        if self.records.contains_key(&subject) {
+        if self.records.contains_key(&subject) || self.retired.contains(&subject) {
             return Err(IdentityError::AlreadyExists {
                 did: did_of(&subject),
             });
         }
         const MAX_IDENTITY_RECORDS: usize = 65_536;
-        if self.records.len() >= MAX_IDENTITY_RECORDS {
+        let reclaimable: Vec<Address> = if self.records.len() >= MAX_IDENTITY_RECORDS {
+            self.records
+                .iter()
+                .filter(|(addr, rec)| {
+                    rec.guardians.is_empty()
+                        && rec.methods.iter().all(|m| !m.is_live_at(now))
+                        && !self.credentials.iter().any(|(cid, cred)| {
+                            !self.revoked.contains(cid)
+                                && cred.is_live_at(now)
+                                && (cred.subject == **addr || cred.issuer == **addr)
+                        })
+                })
+                .map(|(addr, _)| *addr)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if self.records.len().saturating_sub(reclaimable.len()) >= MAX_IDENTITY_RECORDS {
             return Err(IdentityError::BadApproval(format!(
                 "identity registry reached {MAX_IDENTITY_RECORDS} records"
             )));
+        }
+        for dead in reclaimable {
+            self.records.remove(&dead);
+            self.retired.insert(dead);
         }
         self.records.insert(subject, record);
         Ok(())
@@ -622,6 +700,7 @@ impl IdentityRegistry {
         let subject = credential.subject;
         let issuer = credential.issuer;
         let id = credential_id(&credential);
+        let id_hex = hex32(&id);
         let root = credential.root();
         {
             if !self.records.contains_key(&subject) {
@@ -639,16 +718,39 @@ impl IdentityRegistry {
                     did: did_of(&issuer),
                 });
             }
-            if self.credentials.contains_key(hex32(&id).as_str()) {
+            if self.credentials.contains_key(id_hex.as_str())
+                || self.revoked.contains(id_hex.as_str())
+            {
                 return Err(IdentityError::AlreadyIssued {
                     did: did_of(&subject),
                 });
             }
             const MAX_IDENTITY_CREDENTIALS: usize = 262_144;
             const MAX_CREDENTIALS_PER_SUBJECT: usize = 256;
-            if self.credentials.len() >= MAX_IDENTITY_CREDENTIALS {
+            let live_credentials = self
+                .credentials
+                .iter()
+                .filter(|(cid, cred)| {
+                    !self.revoked.contains(*cid) && !cred.expires_at.is_some_and(|exp| exp <= now)
+                })
+                .count();
+            if live_credentials >= MAX_IDENTITY_CREDENTIALS {
                 return Err(IdentityError::BadApproval(format!(
                     "identity registry reached {MAX_IDENTITY_CREDENTIALS} credentials"
+                )));
+            }
+            let issuer_live = self
+                .credentials
+                .iter()
+                .filter(|(cid, cred)| {
+                    cred.issuer == issuer
+                        && !self.revoked.contains(*cid)
+                        && !cred.expires_at.is_some_and(|exp| exp <= now)
+                })
+                .count();
+            if issuer_live >= MAX_CREDENTIALS_PER_SUBJECT {
+                return Err(IdentityError::BadApproval(format!(
+                    "issuer reached {MAX_CREDENTIALS_PER_SUBJECT} live credentials"
                 )));
             }
             if let Some(record) = self.records.get(&subject) {
@@ -659,10 +761,23 @@ impl IdentityRegistry {
                         "subject reached {MAX_CREDENTIALS_PER_SUBJECT} credential roots"
                     )));
                 }
+                // The root-set cap above counts distinct roots only; this
+                // counts every issue, so re-issuing one root under fresh
+                // timestamps cannot fill the global pool from one subject.
+                if record.issued_credentials >= MAX_CREDENTIALS_PER_SUBJECT as u64 {
+                    return Err(IdentityError::BadApproval(format!(
+                        "subject reached {MAX_CREDENTIALS_PER_SUBJECT} issued credentials"
+                    )));
+                }
             }
         }
-        self.credentials.insert(hex32(&id), credential);
+        let revoked = &self.revoked;
+        self.credentials.retain(|cid, cred| {
+            !revoked.contains(cid) && !cred.expires_at.is_some_and(|exp| exp <= now)
+        });
+        self.credentials.insert(id_hex, credential);
         if let Some(record) = self.records.get_mut(&subject) {
+            record.issued_credentials = record.issued_credentials.saturating_add(1);
             record.credential_root = Some(root);
             // The root joins the record's live set
             // instead of replacing it - issuing a second credential no
@@ -674,12 +789,13 @@ impl IdentityRegistry {
 
     fn revoke(&mut self, credential: CredentialCommitment, _now: u64) -> Result<(), IdentityError> {
         let id = hex32(&credential_id(&credential));
+        if self.revoked.contains(&id) {
+            return Err(IdentityError::AlreadyRevoked);
+        }
         if !self.credentials.contains_key(&id) {
             return Err(IdentityError::UnknownCredential);
         }
-        if !self.revoked.insert(id) {
-            return Err(IdentityError::AlreadyRevoked);
-        }
+        let _ = self.revoked.insert(id);
         Ok(())
     }
 
@@ -739,7 +855,18 @@ impl IdentityRegistry {
         record
             .methods
             .push(VerificationMethod::new(new_key, MethodKind::MlDsa87));
+        // The applied quorum is spent: the next recovery digest signs over
+        // the incremented nonce, so these approvals can never run again.
+        record.recovery_nonce = record.recovery_nonce.saturating_add(1);
         Ok(())
+    }
+
+    /// The recovery nonce the next guardian quorum must sign over.
+    #[must_use]
+    pub fn recovery_nonce_of(&self, subject: &Address) -> u64 {
+        self.records
+            .get(subject)
+            .map_or(0, |record| record.recovery_nonce)
     }
 
     /// Whether the registry carries any state at all. The account root uses
@@ -763,7 +890,7 @@ impl IdentityRegistry {
     #[must_use]
     pub fn root(&self) -> [u8; 32] {
         let mut acc = hash_fields_bytes(&[
-            b"bud-identity-root-v2",
+            b"bud-identity-root-v3",
             &(self.records.len() as u64).to_le_bytes(),
         ]);
         for (subject, record) in &self.records {
@@ -812,6 +939,8 @@ impl IdentityRegistry {
                 &credential_root,
                 &credential_roots,
                 &guardians,
+                &record.issued_credentials.to_le_bytes(),
+                &record.recovery_nonce.to_le_bytes(),
             ]);
         }
         acc = hash_fields_bytes(&[
@@ -848,6 +977,16 @@ impl IdentityRegistry {
         for id in &self.revoked {
             acc = hash_fields_bytes(&[&acc, b"revoked", id.as_bytes()]);
         }
+        if !self.retired.is_empty() {
+            acc = hash_fields_bytes(&[
+                &acc,
+                b"retired-count",
+                &(self.retired.len() as u64).to_le_bytes(),
+            ]);
+            for subject in &self.retired {
+                acc = hash_fields_bytes(&[&acc, b"retired", subject.as_bytes()]);
+            }
+        }
         acc
     }
 
@@ -860,12 +999,12 @@ impl IdentityRegistry {
     /// not yet issued at `now`, subject unregistered, root mismatch against
     /// the credential's own fields.
     pub fn is_credential_valid(&self, id: &[u8; 32], now: u64) -> Result<(), IdentityError> {
-        let credential = self
-            .credential(id)
-            .ok_or(IdentityError::UnknownCredential)?;
         if self.is_revoked(id) {
             return Err(IdentityError::AlreadyRevoked);
         }
+        let credential = self
+            .credential(id)
+            .ok_or(IdentityError::UnknownCredential)?;
         if !credential.is_live_at(now) {
             return Err(IdentityError::NotLive {
                 issued_at: credential.issued_at,
@@ -955,13 +1094,15 @@ pub fn recovery_digest(
     new_key: &[u8; 32],
     epoch: u64,
     chain_id: u64,
+    recovery_nonce: u64,
 ) -> [u8; 32] {
     hash_fields_bytes(&[
-        b"bud-identity-recovery-v1",
+        b"bud-identity-recovery-v2",
         subject.as_bytes(),
         new_key,
         &epoch.to_le_bytes(),
         &chain_id.to_le_bytes(),
+        &recovery_nonce.to_le_bytes(),
     ])
 }
 
@@ -1112,7 +1253,13 @@ pub fn authorize_recovery_in(
     epoch: u64,
     chain_id: u64,
 ) -> Result<(), IdentityError> {
-    let digest = recovery_digest(&subject, &new_key, epoch, chain_id);
+    let digest = recovery_digest(
+        &subject,
+        &new_key,
+        epoch,
+        chain_id,
+        registry.recovery_nonce_of(&subject),
+    );
     let mut guardians = Vec::with_capacity(approvals.len());
     for approval in approvals {
         let guardian = crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(
@@ -1211,7 +1358,7 @@ pub fn authorize_issue_consent_in(
 /// naming somebody else in the payload and hoping for a check is the shape
 /// `BudlumxyzAttestApp` refused for the same reason, in this same tree.
 ///
-/// The domain this runs on is passed in, not assumed: the registry's PoA
+/// The domain this runs on is passed in, not assumed: the registry's `PoA`
 /// gate still decides, so an executor wired to the wrong domain fails at
 /// the door the rules live behind, not in a comment claiming the wiring.
 ///
@@ -1346,7 +1493,7 @@ pub fn execute_identity_tx_in(
     }
 }
 
-/// The mutations the PoA gate wraps.
+/// The mutations the `PoA` gate wraps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityOp {
     Register {
@@ -1368,7 +1515,7 @@ pub enum IdentityOp {
 /// Why an identity write or a validity query was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityError {
-    /// Only the PoA domain writes the identity registry.
+    /// Only the `PoA` domain writes the identity registry.
     NotPoaDomain { domain: String },
     /// A DID was already registered; rotation goes through recovery, not a
     /// second registration.
@@ -1393,6 +1540,13 @@ pub enum IdentityError {
     DuplicateGuardian { did: String },
     /// A threshold with no one to meet it.
     ThresholdWithoutGuardians { did: String },
+    /// A per-record vector exceeded its protocol ceiling; the registry root
+    /// re-folds these vectors every block, so their length is consensus work.
+    TooMany {
+        did: String,
+        what: &'static str,
+        max: usize,
+    },
     /// A threshold unreachable with the guardian set present.
     UnreachableQuorum {
         did: String,
@@ -1460,6 +1614,9 @@ impl std::fmt::Display for IdentityError {
             Self::DuplicateKeyId { did } => write!(f, "{did} lists one key handle twice"),
             Self::SubjectIsOwnGuardian { did } => write!(f, "{did} is its own guardian"),
             Self::DuplicateGuardian { did } => write!(f, "{did} lists a guardian twice"),
+            Self::TooMany { did, what, max } => {
+                write!(f, "{did} exceeds the ceiling of {max} {what}")
+            }
             Self::ThresholdWithoutGuardians { did } => {
                 write!(f, "{did} sets a recovery threshold with no guardians")
             }
@@ -2148,9 +2305,11 @@ mod tests {
             revoke,
             credential_revoke_digest(&edited, &credential.issuer, chain)
         );
-        let rec = recovery_digest(&addr(1), &[9; 32], 20, chain);
-        assert_ne!(rec, recovery_digest(&addr(1), &[9; 32], 21, chain));
-        assert_ne!(rec, recovery_digest(&addr(2), &[9; 32], 20, chain));
+        let rec = recovery_digest(&addr(1), &[9; 32], 20, chain, 0);
+        assert_ne!(rec, recovery_digest(&addr(1), &[9; 32], 21, chain, 0));
+        assert_ne!(rec, recovery_digest(&addr(2), &[9; 32], 20, chain, 0));
+        // An applied quorum bumps the nonce, so its digest can never recur.
+        assert_ne!(rec, recovery_digest(&addr(1), &[9; 32], 20, chain, 1));
         assert_ne!(rec, credential_issue_digest(&credential, chain));
         // Domain tags are part of the hash input; two rules must not be
         // able to collide on crafted material the way a bare concatenation
@@ -2703,7 +2862,13 @@ mod tests {
         // A real guardian quorum over the real recovery digest passes.
         let subject = addr(1);
         let new_key = [9u8; 32];
-        let msg = recovery_digest(&subject, &new_key, 200, 1);
+        let msg = recovery_digest(
+            &subject,
+            &new_key,
+            200,
+            1,
+            registry.recovery_nonce_of(&subject),
+        );
         let approvals = vec![
             GuardianApproval {
                 public_key: g1.public_key_bytes().to_vec(),
@@ -2732,6 +2897,40 @@ mod tests {
             record.live_method(&new_key, 200).is_some(),
             "the quorum must have rotated the DID to the new key"
         );
+        assert_eq!(registry.recovery_nonce_of(&subject), 1);
+
+        // Replaying the applied quorum must fail: the digest now signs over
+        // the bumped nonce, so the captured signatures no longer verify and
+        // a guardian cannot roll the DID back inside the same epoch.
+        let stale_msg = recovery_digest(&subject, &[11u8; 32], 200, 1, 0);
+        let replay = vec![
+            GuardianApproval {
+                public_key: g1.public_key_bytes().to_vec(),
+                signature: g1
+                    .sign(crate::crypto::ctx::IDENTITY_V2, &stale_msg)
+                    .to_vec(),
+            },
+            GuardianApproval {
+                public_key: g2.public_key_bytes().to_vec(),
+                signature: g2
+                    .sign(crate::crypto::ctx::IDENTITY_V2, &stale_msg)
+                    .to_vec(),
+            },
+        ];
+        let rolled_back = execute_identity_tx(
+            &mut registry,
+            &subject,
+            IdentityTx::Recover {
+                subject,
+                new_key: [11u8; 32],
+                approvals: replay,
+            },
+            &ConsensusKind::PoA,
+            200,
+            1,
+        )
+        .expect_err("approvals signed over a spent nonce must be refused");
+        assert!(matches!(rolled_back, IdentityError::BadApproval(_)));
     }
 
     #[test]
@@ -2812,5 +3011,212 @@ mod tests {
             ),
             Err(IdentityError::BadApproval(_))
         ));
+    }
+
+    #[test]
+    fn a_relay_tampered_counter_cannot_enter_through_register() {
+        // The counters ride the transaction payload outside the signing
+        // preimage; the door refuses anything a fresh record cannot have.
+        let mut registry = IdentityRegistry::new();
+        let mut record = subject_record();
+        record.issued_credentials = u64::MAX;
+        assert!(matches!(
+            registry.apply(&ConsensusKind::PoA, IdentityOp::Register { record }, 0),
+            Err(IdentityError::BadApproval(_))
+        ));
+        let mut record = subject_record();
+        record.recovery_nonce = 1;
+        assert!(matches!(
+            registry.apply(&ConsensusKind::PoA, IdentityOp::Register { record }, 0),
+            Err(IdentityError::BadApproval(_))
+        ));
+        assert!(registry.record(&addr(1)).is_none());
+    }
+
+    #[test]
+    fn oversized_method_guardian_and_field_vectors_are_refused() {
+        // 33 methods: one over the ceiling.
+        let methods: Vec<VerificationMethod> = (0u8..33)
+            .map(|i| VerificationMethod::new([i; 32], MethodKind::MlDsa87))
+            .collect();
+        let err = IdentityRecord::new(addr(1), methods, vec![], 0).unwrap_err();
+        assert!(matches!(
+            err,
+            IdentityError::TooMany {
+                what: "verification methods",
+                ..
+            }
+        ));
+
+        // 33 guardians: one over the ceiling.
+        let guardians: Vec<Address> = (2u8..35).map(addr).collect();
+        let err = IdentityRecord::new(addr(1), one_method(), guardians, 2).unwrap_err();
+        assert!(matches!(
+            err,
+            IdentityError::TooMany {
+                what: "guardians",
+                ..
+            }
+        ));
+
+        // 65 credential fields: one over the ceiling; the registry root
+        // re-hashes every field each block, so this length is consensus work.
+        let fields: Vec<FieldCommitment> = (0u8..65)
+            .map(|i| FieldCommitment {
+                name: format!("f{i}"),
+                commitment: [i; 32],
+            })
+            .collect();
+        let cred = CredentialCommitment {
+            issuer: addr(1),
+            subject: addr(1),
+            schema: "cap".to_string(),
+            fields,
+            issued_at: 0,
+            expires_at: None,
+        };
+        assert!(matches!(
+            cred.validate().unwrap_err(),
+            IdentityError::TooMany {
+                what: "credential fields",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn reissuing_one_root_under_fresh_timestamps_cannot_pass_the_subject_ceiling() {
+        let mut registry = IdentityRegistry::new();
+        let subject = Address::from([0x63u8; 32]);
+        registry
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Register {
+                    record: IdentityRecord::new(
+                        subject,
+                        vec![VerificationMethod::new([3u8; 32], MethodKind::MlDsa87)],
+                        vec![],
+                        0,
+                    )
+                    .unwrap(),
+                },
+                0,
+            )
+            .unwrap();
+        // The SAME credential root, re-issued under 256 fresh timestamps:
+        // the distinct-root cap never trips, the issue counter must.
+        let cred_at = |t: u64| CredentialCommitment {
+            issuer: subject,
+            subject,
+            schema: "same".to_string(),
+            fields: vec![FieldCommitment {
+                name: "k".to_string(),
+                commitment: [0x5A; 32],
+            }],
+            issued_at: t,
+            expires_at: None,
+        };
+        for t in 0u64..256 {
+            registry
+                .apply(
+                    &ConsensusKind::PoA,
+                    IdentityOp::Issue {
+                        credential: cred_at(t),
+                    },
+                    t,
+                )
+                .unwrap();
+        }
+        let err = registry
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Issue {
+                    credential: cred_at(256),
+                },
+                256,
+            )
+            .unwrap_err();
+        assert!(matches!(err, IdentityError::BadApproval(_)));
+
+        // Expired and revoked credentials release their global map slots on later issuances
+        // while keeping revoked IDs recorded in `revoked`.
+        let mut bounded = IdentityRegistry::new();
+        let s1 = addr(41);
+        let s2 = addr(42);
+        for (s, k) in [(s1, 41u8), (s2, 42u8)] {
+            bounded
+                .apply(
+                    &ConsensusKind::PoA,
+                    IdentityOp::Register {
+                        record: IdentityRecord::new(
+                            s,
+                            vec![VerificationMethod::new([k; 32], MethodKind::MlDsa87)],
+                            vec![],
+                            0,
+                        )
+                        .unwrap(),
+                    },
+                    0,
+                )
+                .unwrap();
+        }
+        let exp_cred = CredentialCommitment {
+            issuer: s1,
+            subject: s1,
+            schema: "ephemeral".to_string(),
+            fields: vec![FieldCommitment {
+                name: "f".to_string(),
+                commitment: [0x77; 32],
+            }],
+            issued_at: 1,
+            expires_at: Some(5),
+        };
+        let exp_id = credential_id(&exp_cred);
+        bounded
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Issue {
+                    credential: exp_cred.clone(),
+                },
+                1,
+            )
+            .unwrap();
+        bounded
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Revoke {
+                    credential: exp_cred,
+                },
+                2,
+            )
+            .unwrap();
+        let next_cred = CredentialCommitment {
+            issuer: s2,
+            subject: s2,
+            schema: "live".to_string(),
+            fields: vec![FieldCommitment {
+                name: "f".to_string(),
+                commitment: [0x88; 32],
+            }],
+            issued_at: 10,
+            expires_at: Some(100),
+        };
+        bounded
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Issue {
+                    credential: next_cred,
+                },
+                10,
+            )
+            .unwrap();
+        assert!(
+            bounded.is_revoked(&exp_id),
+            "revocation marker must persist after reclaiming the expired/revoked credential slot"
+        );
+        assert!(
+            bounded.credential(&exp_id).is_none(),
+            "revoked/expired credential entry must be reclaimed from the active credentials pool"
+        );
     }
 }

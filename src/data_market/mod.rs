@@ -43,6 +43,9 @@ pub const DATA_MARKET_RPC_METHODS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataMarketError {
     ZeroSellerOrPrice,
+    SelfPurchase,
+    ExpiryOverflow,
+    CapacityExceeded,
     UnknownObject,
     ContentIdMismatch,
     NotObjectOwner,
@@ -56,6 +59,12 @@ pub enum DataMarketError {
     Grant(GrantBud3Error),
     Registry(RegistryError),
 }
+
+/// Maximum active and historical listings retained in `DataMarketRegistry`.
+pub const MAX_DATA_MARKET_LISTINGS: usize = 65_536;
+
+/// Maximum settled receipts and replay keys retained in `DataMarketRegistry`.
+pub const MAX_DATA_MARKET_RECEIPTS: usize = 262_144;
 
 /// On-chain listing of a B.U.D. 3.0 data object in the Data Market.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +103,7 @@ impl PurchaseAuthorizationV5 {
             &self.listing_id,
             &self.content_id.digest,
             &self.content_id.len.to_le_bytes(),
+            &[self.content_id.kind as u8],
             &self.price_atoms.to_le_bytes(),
             self.buyer.as_bytes(),
             &self.buyer_hpke_pk,
@@ -202,6 +212,11 @@ impl DataMarketRegistry {
             &object_commitment,
             &nft_id,
         ]);
+        if !self.listings.contains_key(&listing_id)
+            && self.listings.len() >= MAX_DATA_MARKET_LISTINGS
+        {
+            return Err(DataMarketError::CapacityExceeded);
+        }
         let listing = DataMarketListing {
             listing_id,
             seller,
@@ -213,6 +228,25 @@ impl DataMarketRegistry {
         };
         self.listings.insert(listing_id, listing.clone());
         Ok(listing)
+    }
+
+    /// Deactivate a live listing owned by `seller` so no future settlements fire.
+    ///
+    /// exposed for: seller listing delist path.
+    pub fn deactivate_listing(
+        &mut self,
+        listing_id: &[u8; 32],
+        seller: &Address,
+    ) -> Result<(), DataMarketError> {
+        let listing = self
+            .listings
+            .get_mut(listing_id)
+            .ok_or(DataMarketError::UnknownListing)?;
+        if listing.seller != *seller {
+            return Err(DataMarketError::NotObjectOwner);
+        }
+        listing.active = false;
+        Ok(())
     }
 
     /// Look up a listing by `listing_id`.
@@ -246,6 +280,12 @@ impl DataMarketRegistry {
         if !listing.active {
             return Err(DataMarketError::InactiveListing);
         }
+        if auth.buyer == Address::zero() || auth.buyer == listing.seller {
+            return Err(DataMarketError::SelfPurchase);
+        }
+        if self.receipts.len() >= MAX_DATA_MARKET_RECEIPTS {
+            return Err(DataMarketError::CapacityExceeded);
+        }
         let (live_commitment, live_obj) = bud3
             .resolve_live_object(&listing.content_ref.object_commitment)
             .ok_or(DataMarketError::UnknownObject)?;
@@ -258,7 +298,11 @@ impl DataMarketRegistry {
         if self.consumed_purchases.contains(&purchase_key) {
             return Err(DataMarketError::ReplayedPurchase);
         }
+        // Guard against post-listing `ReplaceObject` bait-and-switch: the live
+        // object's ContentId MUST still match both the listing AND the buyer's
+        // signed `auth.content_id`.
         if auth.content_id != listing.content_ref.content_id
+            || live_obj.record.content_id != auth.content_id
             || auth.price_atoms != listing.price_atoms
         {
             return Err(DataMarketError::ContentIdMismatch);
@@ -272,7 +316,9 @@ impl DataMarketRegistry {
             &seller_grant.content_key,
         )
         .map_err(DataMarketError::Grant)?;
-        let expires_at_epoch = current_epoch.saturating_add(listing.grant_duration_epochs);
+        let expires_at_epoch = current_epoch
+            .checked_add(listing.grant_duration_epochs)
+            .ok_or(DataMarketError::ExpiryOverflow)?;
         let row = build_grant_row(
             &listing.nft_id,
             &seller_grant.grant_nonce,
@@ -294,7 +340,8 @@ impl DataMarketRegistry {
         .map_err(DataMarketError::Registry)?;
 
         let price_attos = u128::from(listing.price_atoms)
-            .saturating_mul(u128::from(crate::core::account::ATTOS_PER_ATOM));
+            .checked_mul(u128::from(crate::core::account::ATTOS_PER_ATOM))
+            .ok_or_else(|| DataMarketError::PaymentFailed("price_attos overflows u128".into()))?;
         accounts
             .transfer_attos_in_unit(
                 &auth.buyer,
@@ -303,14 +350,22 @@ impl DataMarketRegistry {
                 crate::core::account::BudEnvUnit::BudZeroAtom,
             )
             .map_err(DataMarketError::PaymentFailed)?;
-        bud3.issue_grant(
+        if let Err(reg_err) = bud3.issue_grant(
             &listing.nft_id,
             &seller_grant.grant_nonce,
             listing.seller.as_bytes(),
             row.clone(),
             current_epoch,
-        )
-        .map_err(DataMarketError::Registry)?;
+        ) {
+            // Roll back buyer payment atomically so buyer never pays without a grant.
+            let _ = accounts.transfer_attos_in_unit(
+                &listing.seller,
+                &auth.buyer,
+                price_attos,
+                crate::core::account::BudEnvUnit::BudZeroAtom,
+            );
+            return Err(DataMarketError::Registry(reg_err));
+        }
         self.consumed_purchases.insert(purchase_key);
 
         let receipt = DataMarketPurchaseReceipt {
@@ -565,5 +620,72 @@ mod tests {
         assert_eq!(replay, Err(DataMarketError::ReplayedPurchase));
         assert_eq!(accounts.get_balance(&buyer), buyer_balance);
         assert_eq!(accounts.get_balance(&seller), seller_balance);
+
+        // Regression: expiry overflow, self-purchase wash-trade, and deactivated listing fail closed.
+        let buyer2_seed = [0x58u8; 32];
+        let buyer2_pk = ml_dsa_public_key(SchemeId::ML_DSA_87, &buyer2_seed).unwrap();
+        let buyer2 =
+            crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(&buyer2_pk)
+                .unwrap();
+        accounts.credit_account(&buyer2, 500);
+        let mut auth2 = PurchaseAuthorizationV5 {
+            chain_id: 45_261,
+            listing_id: listing.listing_id,
+            content_id: listing.content_ref.content_id,
+            price_atoms: listing.price_atoms,
+            buyer: buyer2,
+            buyer_ml_dsa_87_pk: buyer2_pk,
+            buyer_signature: Vec::new(),
+            buyer_hpke_pk: buyer_hpke.public_key().to_vec(),
+        };
+        auth2.buyer_signature = ml_dsa_sign(
+            SchemeId::ML_DSA_87,
+            &buyer2_seed,
+            &auth2.signing_digest(),
+            STORAGE_V2,
+            &[0u8; 32],
+        )
+        .unwrap();
+        let otk2 = ml_dsa_public_key(SchemeId::ML_DSA_65, &[0x69; 32]).unwrap();
+        assert_eq!(
+            market.settle_purchase_with_grant(
+                &mut accounts,
+                &mut bud3,
+                45_261,
+                &auth2,
+                &SellerGrantBundle {
+                    grant_nonce: [0x68; 32],
+                    one_time_ml_dsa_65_pk: otk2.clone(),
+                    content_key: ContentKey([0x77; 32]),
+                },
+                u64::MAX,
+            ),
+            Err(DataMarketError::ExpiryOverflow)
+        );
+        assert_eq!(accounts.get_balance(&buyer2), 500);
+
+        // Non-owner cannot delist; seller can delist and block future sales.
+        assert_eq!(
+            market.deactivate_listing(&listing.listing_id, &buyer2),
+            Err(DataMarketError::NotObjectOwner)
+        );
+        market
+            .deactivate_listing(&listing.listing_id, &seller)
+            .unwrap();
+        assert_eq!(
+            market.settle_purchase_with_grant(
+                &mut accounts,
+                &mut bud3,
+                45_261,
+                &auth2,
+                &SellerGrantBundle {
+                    grant_nonce: [0x68; 32],
+                    one_time_ml_dsa_65_pk: otk2,
+                    content_key: ContentKey([0x77; 32]),
+                },
+                3,
+            ),
+            Err(DataMarketError::InactiveListing)
+        );
     }
 }

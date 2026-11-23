@@ -1067,6 +1067,289 @@ fn extract_selector_value(
     }
 }
 
+/// Domain separation tag for external-domain step receipt Merkle proofs.
+pub const EXTERNAL_STEP_RECEIPT_TAG: &[u8] = b"BDLM_EXTERNAL_STEP_RECEIPT_V1";
+
+/// Explicit atomicity classification for a receipt-attested cross-VM composition.
+///
+/// The three classes are deliberately distinct so callers can never present a
+/// two-phase or asynchronous compensating workflow as single-block synchronous
+/// atomicity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtomicityClass {
+    /// All steps settle inside one settlement block under one shared UER-1
+    /// batch root and domain.
+    SingleBlockSynchronous,
+    /// Steps span multiple consensus domains; every step carries a verified
+    /// receipt proof bound to a finalized root before downstream execution commits.
+    FinalityBoundTwoPhase,
+    /// Multi-domain asynchronous workflow where every external step declares a
+    /// non-zero compensation commitment digest for deterministic rollback.
+    CompensatingAsync,
+}
+
+impl AtomicityClass {
+    #[must_use]
+    const fn tag_byte(self) -> u8 {
+        match self {
+            Self::SingleBlockSynchronous => 1,
+            Self::FinalityBoundTwoPhase => 2,
+            Self::CompensatingAsync => 3,
+        }
+    }
+}
+
+/// Cryptographic receipt attestation proving that a [`NormalizedMachineOutput`]
+/// came from an actual verified execution rather than caller-fabricated data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepReceiptAttestation {
+    /// Receipt proven against a UER-1 settlement block batch root.
+    UerBatch {
+        inclusion: Box<crate::execution::uer::UerInclusionProof>,
+        batch_root: Hash32,
+    },
+    /// Receipt proven against an external domain's finalized Merkle root over
+    /// normalized step `artifact_hash()` leaves.
+    ExternalDomainMerkle {
+        domain_id: DomainId,
+        finality_root: Hash32,
+        leaf_index: usize,
+        leaf_count: usize,
+        proof: Vec<Hash32>,
+        /// Required (`Some(non_zero)`) when composing under
+        /// [`AtomicityClass::CompensatingAsync`].
+        compensation_commitment: Option<Hash32>,
+    },
+}
+
+/// A [`UnifiedOutputBundle`] paired with its verified [`AtomicityClass`] and
+/// cryptographic commitment over every step's receipt attestation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttestedOutputBundle {
+    pub bundle: UnifiedOutputBundle,
+    pub atomicity: AtomicityClass,
+    pub attestation_root: Hash32,
+}
+
+/// Compute the deterministic Merkle root over external-domain normalized step
+/// artifact hashes using [`EXTERNAL_STEP_RECEIPT_TAG`].
+///
+/// Convenience: external-domain relayers and test suites build step receipt
+/// roots committed into finality proofs.
+#[must_use]
+pub fn build_external_step_receipt_root(step_artifact_hashes: &[Hash32]) -> Hash32 {
+    unification_merkle_root(EXTERNAL_STEP_RECEIPT_TAG, step_artifact_hashes)
+}
+
+/// Build an inclusion proof for `leaf_index` in an external-domain step receipt
+/// Merkle tree constructed with [`build_external_step_receipt_root`].
+///
+/// Convenience: external-domain relayers and test suites construct receipt
+/// proofs consumed by [`OutputComposer::compose_attested`].
+#[must_use]
+pub fn build_external_step_receipt_proof(
+    step_artifact_hashes: &[Hash32],
+    leaf_index: usize,
+) -> Option<Vec<Hash32>> {
+    build_merkle_proof(EXTERNAL_STEP_RECEIPT_TAG, step_artifact_hashes, leaf_index)
+}
+
+impl OutputComposer {
+    /// Verify cryptographic receipt attestations for every step in `plan`,
+    /// enforce the declared [`AtomicityClass`] invariant, and compose a single
+    /// [`AttestedOutputBundle`].
+    ///
+    /// Rejects fail-closed if any step lacks a receipt attestation, any unknown
+    /// step attestation is attached, any UER-1 or external Merkle proof fails
+    /// verification, any output digest disagrees with the attested UER receipt,
+    /// or the declared [`AtomicityClass`] requirements are violated.
+    ///
+    /// Convenience: composes cross-VM outputs only after verifying each step's
+    /// cryptographic execution receipt proof and atomicity discipline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompositionError`] on missing/invalid attestations, mismatched
+    /// atomicity invariants, or standard composition failures.
+    pub fn compose_attested(
+        plan: &OutputCompositionPlan,
+        atomicity: AtomicityClass,
+        attestations: &BTreeMap<String, StepReceiptAttestation>,
+    ) -> Result<AttestedOutputBundle, CompositionError> {
+        if attestations.len() != plan.steps.len() {
+            return Err(CompositionError::BundleVerificationFailed(format!(
+                "attestations count ({}) must match steps count ({})",
+                attestations.len(),
+                plan.steps.len()
+            )));
+        }
+
+        let mut shared_sync_anchor: Option<(DomainId, Hash32)> = None;
+        let mut step_att_hashes: BTreeMap<&str, Hash32> = BTreeMap::new();
+
+        for step in &plan.steps {
+            let Some(att) = attestations.get(step.step_id.as_str()) else {
+                return Err(CompositionError::BundleVerificationFailed(format!(
+                    "missing receipt attestation for step `{}`",
+                    step.step_id
+                )));
+            };
+
+            let att_hash = match att {
+                StepReceiptAttestation::UerBatch {
+                    inclusion,
+                    batch_root,
+                } => {
+                    if *batch_root == [0u8; 32] {
+                        return Err(CompositionError::BundleVerificationFailed(format!(
+                            "zero UER batch root for step `{}`",
+                            step.step_id
+                        )));
+                    }
+                    inclusion.verify(batch_root).map_err(|err| {
+                        CompositionError::BundleVerificationFailed(format!(
+                            "UER inclusion proof failed for step `{}`: {err}",
+                            step.step_id
+                        ))
+                    })?;
+                    if inclusion.receipt.status != crate::execution::uer::UerStatus::Success {
+                        return Err(CompositionError::StepFailed(step.step_id.clone()));
+                    }
+                    if inclusion.receipt.origin_ee != step.ee_id {
+                        return Err(CompositionError::BundleVerificationFailed(format!(
+                            "UER receipt origin_ee ({}) disagrees with step `{}` ee_id ({})",
+                            inclusion.receipt.origin_ee, step.step_id, step.ee_id
+                        )));
+                    }
+                    let expected_output_digest =
+                        crate::core::hash::calculate_hash_bytes(&step.return_data);
+                    if inclusion.receipt.output_digest != expected_output_digest {
+                        return Err(CompositionError::BundleVerificationFailed(format!(
+                            "UER receipt output_digest disagrees with step `{}` return_data",
+                            step.step_id
+                        )));
+                    }
+                    if atomicity == AtomicityClass::SingleBlockSynchronous {
+                        match shared_sync_anchor {
+                            None => shared_sync_anchor = Some((step.domain_id, *batch_root)),
+                            Some((anchor_domain, anchor_root)) => {
+                                if anchor_domain != step.domain_id || anchor_root != *batch_root {
+                                    return Err(CompositionError::BundleVerificationFailed(
+                                        String::from(
+                                            "SingleBlockSynchronous requires one shared domain and UER batch root across all steps",
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    let receipt_id = inclusion.receipt.receipt_id();
+                    hash_domain_fields(
+                        b"BDLM_ATTESTED_STEP_V1",
+                        &[&[1], step.step_id.as_bytes(), batch_root, &receipt_id],
+                    )
+                }
+                StepReceiptAttestation::ExternalDomainMerkle {
+                    domain_id,
+                    finality_root,
+                    leaf_index,
+                    leaf_count,
+                    proof,
+                    compensation_commitment,
+                } => {
+                    if atomicity == AtomicityClass::SingleBlockSynchronous {
+                        return Err(CompositionError::BundleVerificationFailed(format!(
+                            "step `{}` uses ExternalDomainMerkle, which cannot satisfy SingleBlockSynchronous atomicity",
+                            step.step_id
+                        )));
+                    }
+                    if *domain_id != step.domain_id {
+                        return Err(CompositionError::BundleVerificationFailed(format!(
+                            "external attestation domain ({domain_id}) disagrees with step `{}` domain ({})",
+                            step.step_id, step.domain_id
+                        )));
+                    }
+                    if *finality_root == [0u8; 32] {
+                        return Err(CompositionError::BundleVerificationFailed(format!(
+                            "zero external finality root for step `{}`",
+                            step.step_id
+                        )));
+                    }
+                    let leaf = step.artifact_hash();
+                    if !verify_merkle_proof(
+                        EXTERNAL_STEP_RECEIPT_TAG,
+                        finality_root,
+                        *leaf_index,
+                        *leaf_count,
+                        &leaf,
+                        proof,
+                    ) {
+                        return Err(CompositionError::BundleVerificationFailed(format!(
+                            "external Merkle receipt proof failed for step `{}`",
+                            step.step_id
+                        )));
+                    }
+                    let comp_bytes = match (atomicity, compensation_commitment) {
+                        (AtomicityClass::CompensatingAsync, None) => {
+                            return Err(CompositionError::BundleVerificationFailed(format!(
+                                "CompensatingAsync requires a non-zero compensation_commitment for step `{}`",
+                                step.step_id
+                            )));
+                        }
+                        (AtomicityClass::CompensatingAsync, Some(c)) if *c == [0u8; 32] => {
+                            return Err(CompositionError::BundleVerificationFailed(format!(
+                                "CompensatingAsync rejects all-zero compensation_commitment for step `{}`",
+                                step.step_id
+                            )));
+                        }
+                        (_, Some(c)) => *c,
+                        (_, None) => [0u8; 32],
+                    };
+                    hash_domain_fields(
+                        b"BDLM_ATTESTED_STEP_V1",
+                        &[
+                            &[2],
+                            step.step_id.as_bytes(),
+                            &domain_id.to_le_bytes(),
+                            finality_root,
+                            &leaf,
+                            &comp_bytes,
+                        ],
+                    )
+                }
+            };
+            step_att_hashes.insert(step.step_id.as_str(), att_hash);
+        }
+
+        let bundle = Self::compose(plan)?;
+        let ordered_att_leaves: Vec<Hash32> = bundle
+            .execution_order
+            .iter()
+            .filter_map(|sid| step_att_hashes.get(sid.as_str()).copied())
+            .collect();
+        if ordered_att_leaves.len() != bundle.execution_order.len() {
+            return Err(CompositionError::BundleVerificationFailed(String::from(
+                "attested step count disagrees with composed execution order",
+            )));
+        }
+        let steps_att_root =
+            unification_merkle_root(b"BDLM_ATTESTED_BUNDLE_V1", &ordered_att_leaves);
+        let attestation_root = hash_domain_fields(
+            b"BDLM_ATTESTED_BUNDLE_V1",
+            &[
+                &[atomicity.tag_byte()],
+                &bundle.bundle_root,
+                &steps_att_root,
+            ],
+        );
+        Ok(AttestedOutputBundle {
+            bundle,
+            atomicity,
+            attestation_root,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

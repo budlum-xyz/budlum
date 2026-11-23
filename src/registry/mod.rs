@@ -8,7 +8,7 @@
 //!   Gate**. Security = stake + slashing. This is a generic, role-parameterised
 //!   Primitive (see [`role`]) so future application layers can reuse it.
 //!
-//! * [`poa_membership`] - the isolated permissioned exception for the PoA
+//! * [`poa_membership`] - the isolated permissioned exception for the `PoA`
 //!   Domain (institutional / regulated parties). Entry is by **KYC + approval**,
 //!   Never by staking.
 //!

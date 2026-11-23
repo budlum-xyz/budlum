@@ -26,11 +26,17 @@ pub struct DataOffer {
     pub cid: ContentId,
     pub price: u64, // Price in $BUD
     pub active: bool,
+    /// Block height at listing time; the TTL sweep's age reference. `0`
+    /// marks a row recorded before this field existed: its age is unknown,
+    /// so it is never TTL-swept (a wrong eviction is not fail-closed), and
+    /// it stays out of the root fold so pre-field roots stay byte-identical.
+    #[serde(default)]
+    pub created_at_block: u64,
 }
 
 /// Receipt for an authorization-backed pollen purchase. This is not a LUM/DeFi
 /// Settlement: `payment_commitment` binds the buyer-side payment proof for a
-/// Future adapter while the DataAsset ownership remains with `seller`.
+/// Future adapter while the `DataAsset` ownership remains with `seller`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PollenPurchaseReceipt {
     pub receipt_id: GrantId,
@@ -50,6 +56,7 @@ pub struct PollenPurchaseReceipt {
 
 impl PollenPurchaseReceipt {
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new(
         authorization_id: SaleAuthorizationId,
         asset_id: AssetId,
@@ -96,6 +103,7 @@ impl PollenPurchaseReceipt {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn derive_id(
         authorization_id: SaleAuthorizationId,
         asset_id: AssetId,
@@ -181,6 +189,7 @@ impl PollenPurchaseReceipt {
         Ok(())
     }
 
+    #[must_use]
     pub fn calculate_leaf(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -207,6 +216,27 @@ impl PollenPurchaseReceipt {
 /// Convenience: pub so marketplace callers can refuse past the
 /// same bound the registry enforces in this module.
 pub const MAX_OFFERS: usize = 100_000;
+
+/// Live `.bud` listings one seller may hold at once: the table is shared,
+/// and without a per-seller ceiling one funded account fills it for good.
+pub const MAX_NAME_OFFERS_PER_SELLER: usize = 64;
+
+/// Live data-offer listings one seller may hold at once, so one funded
+/// account cannot exhaust [`MAX_OFFERS`] across the shared marketplace.
+/// The row deposit prices the occupancy; this bound is the structural
+/// backstop behind it, the same pair every bounded pool carries.
+const MAX_DATA_OFFERS_PER_SELLER: usize = 256;
+
+/// Highest price a data listing may ask, bounded by total token supply so
+/// settlement arithmetic cannot overflow `u64` and pin an unbuyable slot.
+const MAX_DATA_OFFER_PRICE: u64 = crate::tokenomics::BUD_TOTAL_SUPPLY;
+
+/// How far ahead a name listing may expire. The full-table sweep reclaims
+/// only expired rows, so the expiry a seller picks is also the lifetime of
+/// the table space it occupies. The bound is the longest registration a
+/// settled offer could grant: a listing has no reason to outlive the
+/// longest life its own product can have.
+pub const MAX_NAME_OFFER_TTL_EPOCHS: u64 = crate::registry::params::MAX_DURATION;
 /// Most data assets the registry holds.
 ///
 /// Convenience: pub so marketplace callers can refuse past the
@@ -248,8 +278,8 @@ pub struct MarketplaceRegistry {
     pub name_offers: BTreeMap<u64, NameOffer>,
     #[serde(default)]
     pub next_name_offer_id: u64,
-    /// Pollen: registered data buds. The asset is not sold; its
-    /// Access pollen is sold via `AccessGrant`.
+    /// Data market: registered data buds. The asset is not sold; its
+    /// Access grant is sold via `AccessGrant`.
     #[serde(default)]
     pub data_assets: BTreeMap<AssetId, DataAsset>,
     /// Pollen: owner-signed access grants. Strict AI gate consumes these.
@@ -280,6 +310,7 @@ pub struct MarketplaceRegistry {
 }
 
 impl MarketplaceRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -335,9 +366,45 @@ impl MarketplaceRegistry {
         seller: Address,
         cid: ContentId,
         price: u64,
+        current_block: u64,
     ) -> Result<u64, String> {
         if price == 0 {
             return Err("Price must be greater than zero".into());
+        }
+        if price > MAX_DATA_OFFER_PRICE {
+            return Err(format!(
+                "Price {price} exceeds maximum supply ceiling ({MAX_DATA_OFFER_PRICE})"
+            ));
+        }
+        let seller_live = self
+            .offers
+            .values()
+            .filter(|offer| offer.active && offer.seller == seller)
+            .count();
+        if seller_live >= MAX_DATA_OFFERS_PER_SELLER {
+            return Err(format!(
+                "seller reached maximum active data offers ({MAX_DATA_OFFERS_PER_SELLER})"
+            ));
+        }
+        // Listing is a claim on the payment stream for these bytes: when the
+        // content is already a registered asset or is bound to one, only
+        // that asset's owner may list it. Anyone can still list content
+        // nobody has registered.
+        let owner_of = |asset_id: &AssetId| self.data_assets.get(asset_id).map(|asset| asset.owner);
+        if let Some(bound) = self.protected_content.asset_for(&cid) {
+            match owner_of(&bound) {
+                Some(owner) if owner == seller => {}
+                Some(_) | None => {
+                    return Err(
+                        "Content is bound to a data-market asset another account owns".into(),
+                    );
+                }
+            }
+        }
+        for asset in self.data_assets.values() {
+            if asset.manifest_id == cid && asset.owner != seller {
+                return Err("Content is registered as another account's data asset".into());
+            }
         }
         if self.offers.len() >= MAX_OFFERS {
             self.offers.retain(|_, o| o.active);
@@ -368,6 +435,7 @@ impl MarketplaceRegistry {
             cid,
             price,
             active: true,
+            created_at_block: current_block,
         };
         self.offers.insert(id, offer);
         self.next_offer_id = self.next_offer_id.saturating_add(1);
@@ -388,6 +456,7 @@ impl MarketplaceRegistry {
         Ok(())
     }
 
+    #[must_use]
     pub fn get_offer(&self, id: u64) -> Option<&DataOffer> {
         self.offers.get(&id)
     }
@@ -593,10 +662,12 @@ impl MarketplaceRegistry {
         Ok(())
     }
 
+    #[must_use]
     pub fn get_encryption_policy(&self, version: u32) -> Option<&EncryptionPolicy> {
         self.encryption_policies.get(&version)
     }
 
+    #[must_use]
     pub fn active_encryption_policies(&self) -> Vec<&EncryptionPolicy> {
         self.encryption_policies
             .values()
@@ -818,6 +889,7 @@ impl MarketplaceRegistry {
         Ok((grant_id, receipt))
     }
 
+    #[must_use]
     pub fn get_sale_authorization(
         &self,
         authorization_id: &SaleAuthorizationId,
@@ -825,7 +897,7 @@ impl MarketplaceRegistry {
         self.sale_authorizations.get(authorization_id)
     }
 
-    /// Strict AI gate. Returns `Ok(None)` for non-Pollen input_ref payloads
+    /// Strict AI gate. Returns `Ok(None)` for non-Pollen `input_ref` payloads
     /// (legacy prompt/opaque bytes). Returns `Err` for Pollen references that
     /// Lack a valid grant. There is no DAO/admin override.
     ///
@@ -1042,6 +1114,7 @@ impl MarketplaceRegistry {
         grant.record_read()
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -1054,6 +1127,12 @@ impl MarketplaceRegistry {
             hasher.update(offer.cid.0);
             hasher.update(offer.price.to_le_bytes());
             hasher.update([u8::from(offer.active)]);
+            // Folded only when known: a pre-field row carries 0, adds no
+            // bytes here, and keeps every pre-field root byte-identical.
+            if offer.created_at_block != 0 {
+                hasher.update(b"born");
+                hasher.update(offer.created_at_block.to_le_bytes());
+            }
         }
         for (asset_id, asset) in &self.data_assets {
             hasher.update(b"asset");
@@ -1131,6 +1210,27 @@ impl MarketplaceRegistry {
         }
         if request.expires_at_epoch <= current_epoch {
             return Err("Name offer expires_at_epoch must be in the future".into());
+        }
+        // The expiry is what lets the full-table sweep reclaim rows; a
+        // caller-chosen far future expiry would make its rows permanent.
+        if request.expires_at_epoch > current_epoch.saturating_add(MAX_NAME_OFFER_TTL_EPOCHS) {
+            return Err(format!(
+                "Name offer expires_at_epoch must be within {MAX_NAME_OFFER_TTL_EPOCHS} epochs"
+            ));
+        }
+        // One seller cannot hold the shared table: the per-seller ceiling
+        // counts its live rows before the global one is even consulted.
+        let live_rows = self
+            .name_offers
+            .values()
+            .filter(|offer| {
+                offer.seller == seller && offer.active && current_epoch < offer.expires_at_epoch
+            })
+            .count();
+        if live_rows >= MAX_NAME_OFFERS_PER_SELLER {
+            return Err(format!(
+                "Name offer seller reached {MAX_NAME_OFFERS_PER_SELLER} live listings"
+            ));
         }
         if request.kind == OfferKind::Primary {
             if !crate::bns::BnsRegistry::is_valid_duration(request.duration) {
@@ -1416,6 +1516,106 @@ mod tests {
             .is_err());
     }
 
+    /// The root fold for a pre-field offer must be byte-identical to the
+    /// fold the registry used before `created_at_block` existed: this test
+    /// IS that old fold, written out by hand.
+    #[test]
+    fn a_pre_field_offer_adds_no_born_bytes_to_the_root() {
+        let mut registry = MarketplaceRegistry::new();
+        registry.offers.insert(
+            3,
+            DataOffer {
+                id: 3,
+                seller: addr(1),
+                cid: ContentId::of(b"x"),
+                price: 9,
+                active: true,
+                created_at_block: 0,
+            },
+        );
+        registry.next_offer_id = 4;
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_MARKETPLACE_REGISTRY_V2");
+        hasher.update(4u64.to_le_bytes());
+        hasher.update(b"offer");
+        hasher.update(3u64.to_le_bytes());
+        hasher.update(addr(1).0);
+        hasher.update(ContentId::of(b"x").0);
+        hasher.update(9u64.to_le_bytes());
+        hasher.update([1u8]);
+        hasher.update(b"protected_content");
+        hasher.update(registry.protected_content.root());
+        let pre_field_fold: [u8; 32] = hasher.finalize().into();
+        assert_eq!(
+            registry.root(),
+            pre_field_fold,
+            "an unknown birth block must add no bytes to the fold"
+        );
+        if let Some(offer) = registry.offers.get_mut(&3) {
+            offer.created_at_block = 7;
+        }
+        assert_ne!(
+            registry.root(),
+            pre_field_fold,
+            "a known birth block is consensus state and must move the root"
+        );
+    }
+
+    #[test]
+    fn a_legacy_offer_blob_without_the_field_reads_back_as_age_unknown() {
+        let offer = DataOffer {
+            id: 1,
+            seller: addr(1),
+            cid: ContentId::of(b"x"),
+            price: 5,
+            active: true,
+            created_at_block: 77,
+        };
+        let mut value = serde_json::to_value(&offer).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("an offer serializes as a map")
+            .remove("created_at_block");
+        let legacy: DataOffer = serde_json::from_value(value).expect("legacy blob");
+        assert_eq!(legacy.created_at_block, 0, "pre-field rows read back as 0");
+    }
+
+    #[test]
+    fn create_offer_records_the_listing_block() {
+        let mut registry = MarketplaceRegistry::new();
+        let id = registry
+            .create_offer(addr(2), ContentId::of(b"y"), 5, 42)
+            .expect("listing");
+        let offer = registry.get_offer(id).expect("live offer");
+        assert_eq!(offer.created_at_block, 42);
+    }
+
+    #[test]
+    fn one_seller_cannot_hold_the_data_offer_table_or_ask_an_unpayable_price() {
+        let mut reg = MarketplaceRegistry::new();
+        let seller = addr(3);
+        assert!(
+            reg.create_offer(seller, ContentId::of(b"unbuyable"), u64::MAX, 7)
+                .is_err(),
+            "a u64::MAX price makes purchase arithmetic overflow and pins an unbuyable slot"
+        );
+        for n in 0..256u32 {
+            reg.create_offer(seller, ContentId::of(&n.to_le_bytes()), 100, 7)
+                .expect("a seller within the live ceiling lists freely");
+        }
+        assert!(
+            reg.create_offer(seller, ContentId::of(b"one-too-many"), 100, 7)
+                .is_err(),
+            "the live ceiling refuses the next listing"
+        );
+        reg.close_offer(0, &seller).expect("the seller closes one");
+        reg.create_offer(seller, ContentId::of(b"after-close"), 100, 8)
+            .expect("a closed listing frees its ceiling slot");
+        let other = addr(9);
+        reg.create_offer(other, ContentId::of(b"independent"), 100, 7)
+            .expect("another seller is untouched by the first one's ceiling");
+    }
+
     #[test]
     fn offer_registry_is_capped_and_prunes_closed_offers() {
         let mut registry = MarketplaceRegistry::new();
@@ -1428,16 +1628,17 @@ mod tests {
                     cid: ContentId::of(b"x"),
                     price: 1,
                     active: true,
+                    created_at_block: 7,
                 },
             );
         }
         registry.next_offer_id = MAX_OFFERS as u64;
         assert!(registry
-            .create_offer(addr(2), ContentId::of(b"y"), 5)
+            .create_offer(addr(2), ContentId::of(b"y"), 5, 7)
             .is_err());
         registry.close_offer(0, &addr(1)).unwrap();
         registry
-            .create_offer(addr(2), ContentId::of(b"y"), 5)
+            .create_offer(addr(2), ContentId::of(b"y"), 5, 7)
             .unwrap();
         assert_eq!(registry.offers.len(), MAX_OFFERS);
     }
@@ -1908,14 +2109,14 @@ mod tests {
         let cid = crate::storage::content_id::ContentId([0xAB; 32]);
 
         let id = reg
-            .create_offer(first, cid, 100)
+            .create_offer(first, cid, 100, 7)
             .expect("a fresh registry has no id to collide with");
 
         // The shape a restored snapshot can carry.
         reg.next_offer_id = id;
 
         let err = reg
-            .create_offer(second, cid, 999)
+            .create_offer(second, cid, 999, 7)
             .expect_err("creating an offer on a live id must be refused");
         assert!(
             err.contains("already live"),
@@ -1934,8 +2135,8 @@ mod tests {
         let seller = Address::from([3u8; 32]);
         let cid = crate::storage::content_id::ContentId([0xCD; 32]);
 
-        let a = reg.create_offer(seller, cid, 10).expect("first offer");
-        let b = reg.create_offer(seller, cid, 20).expect("second offer");
+        let a = reg.create_offer(seller, cid, 10, 7).expect("first offer");
+        let b = reg.create_offer(seller, cid, 20, 7).expect("second offer");
         assert_ne!(a, b, "an incrementing counter must keep producing new ids");
     }
 
@@ -1985,10 +2186,10 @@ mod tests {
         let seller = addr(1);
         let cid = ContentId([0xEE; 32]);
         reg.next_offer_id = u64::MAX;
-        let id = reg.create_offer(seller, cid, 50).unwrap();
+        let id = reg.create_offer(seller, cid, 50, 7).unwrap();
         assert_eq!(id, u64::MAX);
         assert_eq!(reg.next_offer_id, u64::MAX);
-        assert!(reg.create_offer(seller, cid, 50).is_err());
+        assert!(reg.create_offer(seller, cid, 50, 7).is_err());
 
         for v in 1..=(MAX_ENCRYPTION_POLICIES as u32) {
             reg.set_encryption_policy(EncryptionPolicy::post_quantum(v, 100, None))
@@ -1997,5 +2198,85 @@ mod tests {
         let next_v = (MAX_ENCRYPTION_POLICIES as u32) + 1;
         let over = EncryptionPolicy::post_quantum(next_v, 100, None);
         assert!(reg.set_encryption_policy(over).is_err());
+    }
+
+    #[test]
+    fn listing_content_registered_by_another_is_refused() {
+        let mut reg = MarketplaceRegistry::default();
+        let owner = addr(1);
+        let stranger = addr(2);
+        let cid = ContentId::of(b"owned bytes");
+        let asset = DataAsset::new(owner, cid, [0x10; 32], false);
+        let asset_id = asset.asset_id;
+        reg.register_data_asset(asset).unwrap();
+
+        // A stranger cannot claim the payment stream for registered content.
+        assert!(reg
+            .create_offer(stranger, cid, 100, 7)
+            .unwrap_err()
+            .contains("another account"));
+        // The owner still lists it.
+        reg.create_offer(owner, cid, 100, 7).unwrap();
+
+        // Bound content follows its asset's owner the same way.
+        reg.protected_content
+            .bind(cid, asset_id, owner, owner)
+            .unwrap();
+        assert!(reg.create_offer(stranger, cid, 100, 7).is_err());
+        reg.create_offer(owner, cid, 150, 7).unwrap();
+        // Unregistered content stays open to anyone, exactly as before.
+        reg.create_offer(stranger, ContentId::of(b"nobody registered this"), 5, 7)
+            .unwrap();
+    }
+
+    #[test]
+    fn one_seller_cannot_hold_the_name_table_and_cannot_pick_an_immortal_expiry() {
+        let mut reg = MarketplaceRegistry::default();
+        let seller = crate::bns::BNS_PRIMARY_SELLERS[0];
+        let request = |n: usize, expires: u64| crate::bns::CreateNameOffer {
+            name: format!("isim{n:03}.bud"),
+            price_atoms: 1_000,
+            duration: 365,
+            kind: crate::bns::OfferKind::Primary,
+            expires_at_epoch: expires,
+        };
+
+        // The expiry is the lifetime of the table row: a far-future value is
+        // refused outright.
+        assert!(reg
+            .create_name_offer(seller, request(0, MAX_NAME_OFFER_TTL_EPOCHS + 2), 1)
+            .unwrap_err()
+            .contains("within"));
+
+        // The per-seller ceiling trips long before the shared table fills.
+        for n in 0..MAX_NAME_OFFERS_PER_SELLER {
+            reg.create_name_offer(seller, request(n, 500), 1).unwrap();
+        }
+        assert!(reg
+            .create_name_offer(seller, request(MAX_NAME_OFFERS_PER_SELLER, 500), 1)
+            .unwrap_err()
+            .contains("live listings"));
+
+        // Another seller is untouched by the first one's ceiling.
+        let other = addr(9);
+        reg.create_name_offer(other, request(900, 500), 1).unwrap();
+
+        // Data-offer table bounds per-seller live occupancy and refuses overflow prices.
+        assert!(
+            reg.create_offer(seller, ContentId::of(b"unbuyable"), u64::MAX, 1)
+                .is_err(),
+            "u64::MAX price makes purchase arithmetic overflow and permanently pins the slot"
+        );
+        for n in 0..256u32 {
+            reg.create_offer(seller, ContentId::of(&n.to_le_bytes()), 100, 1)
+                .expect("seller within 256 live data offers");
+        }
+        assert!(
+            reg.create_offer(seller, ContentId::of(b"257th-offer"), 100, 1)
+                .is_err(),
+            "seller exceeding 256 live data offers must be refused"
+        );
+        reg.create_offer(other, ContentId::of(b"other-seller-offer"), 100, 1)
+            .expect("independent seller remains able to list");
     }
 }

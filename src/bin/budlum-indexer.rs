@@ -189,16 +189,12 @@ impl Node {
             .public_slots
             .try_acquire()
             .map_err(|_| PublicCallError::Busy)?;
-        let allowed = self
-            .public_rate
-            .lock()
-            .map(|mut window| {
-                window.take(
-                    self.started.elapsed().as_secs(),
-                    PUBLIC_NODE_CALLS_PER_MINUTE,
-                )
-            })
-            .unwrap_or(false);
+        let allowed = self.public_rate.lock().is_ok_and(|mut window| {
+            window.take(
+                self.started.elapsed().as_secs(),
+                PUBLIC_NODE_CALLS_PER_MINUTE,
+            )
+        });
         if !allowed {
             return Err(PublicCallError::Limited);
         }
@@ -361,10 +357,13 @@ impl Index {
                 .flatten()
                 .and_then(|v| serde_json::from_slice(&v).ok())
                 .unwrap_or_else(|| serde_json::json!({"blocks": 0, "first": height}));
-            let blocks = previous.get("blocks").and_then(|b| b.as_u64()).unwrap_or(0);
+            let blocks = previous
+                .get("blocks")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             let first = previous
                 .get("first")
-                .and_then(|f| f.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(height);
             let record = serde_json::json!({
                 "blocks": blocks.saturating_add(1),
@@ -401,7 +400,7 @@ impl Index {
             .iter()
             .rev()
             .take(limit)
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .filter_map(|(_, raw)| serde_json::from_slice(&raw).ok())
             .collect()
     }
@@ -425,7 +424,7 @@ impl Index {
             .range(prefix.clone()..upper)
             .rev()
             .take(limit)
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .filter_map(|(_, hash)| std::str::from_utf8(&hash).ok().and_then(|h| self.tx(h)))
             .collect()
     }
@@ -433,7 +432,7 @@ impl Index {
     fn producers(&self) -> Vec<serde_json::Value> {
         self.producers
             .iter()
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .filter_map(|(address, raw)| {
                 let mut record: serde_json::Value = serde_json::from_slice(&raw).ok()?;
                 record["address"] =
@@ -584,8 +583,7 @@ async fn route(
             Some(ip) => clients
                 .rates
                 .lock()
-                .map(|mut rates| rates.take_node(ip, clients.started.elapsed().as_secs()))
-                .unwrap_or(false),
+                .is_ok_and(|mut rates| rates.take_node(ip, clients.started.elapsed().as_secs())),
             None => false,
         };
         if !allowed {
@@ -690,8 +688,7 @@ async fn handle(
         let allowed = clients
             .rates
             .lock()
-            .map(|mut rates| rates.take(ip, clients.started.elapsed().as_secs()))
-            .unwrap_or(false);
+            .is_ok_and(|mut rates| rates.take(ip, clients.started.elapsed().as_secs()));
         if !allowed {
             return Ok(json_response(
                 StatusCode::TOO_MANY_REQUESTS,

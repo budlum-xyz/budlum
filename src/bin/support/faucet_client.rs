@@ -118,15 +118,15 @@ pub async fn request_funds(url: &str, address: &str) -> Result<(), String> {
     let token: [u8; 16] = raw.try_into().map_err(|_| "invalid challenge length")?;
     let bits = challenge
         .get("difficulty_bits")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .ok_or("invalid challenge difficulty")?;
     let chain_id = challenge
         .get("chain_id")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .ok_or("invalid challenge chain")?;
     let expiry = challenge
         .get("expires_at")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .ok_or("invalid challenge expiry")?;
     if bits == 0 || bits > 20 || chain_id != Network::Testnet.chain_id().value() {
         return Err("unsupported faucet challenge or chain".into());
@@ -165,7 +165,9 @@ pub async fn request_funds(url: &str, address: &str) -> Result<(), String> {
         .and_then(|v| v.as_str())
         .ok_or("receipt has no transaction hash")?;
     if parse_address(returned_to)? != to
-        || receipt.get("amount_atoms").and_then(|v| v.as_u64())
+        || receipt
+            .get("amount_atoms")
+            .and_then(serde_json::Value::as_u64)
             != Some(budlum_core::tokenomics::bud(DEFAULT_AMOUNT_BUD))
         || tx_hash
             .strip_prefix("0x")

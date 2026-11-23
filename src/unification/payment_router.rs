@@ -312,10 +312,12 @@ pub enum PaymentError {
     ArithmeticOverflow,
 }
 
-/// Stateful router enforcing atomic split-tender settlement and anti-replay.
+/// Stateful router enforcing atomic split-tender settlement, cross-intent quote
+/// liquidity accounting, and anti-replay.
 #[derive(Debug, Clone, Default)]
 pub struct UniversalPaymentRouter {
     settled_intents: BTreeSet<Hash32>,
+    consumed_quote_liquidity: BTreeMap<Hash32, u128>,
 }
 
 impl UniversalPaymentRouter {
@@ -339,6 +341,17 @@ impl UniversalPaymentRouter {
         quotes: &[LiquidityQuote],
         now_unix_secs: u64,
     ) -> Result<UniversalPaymentReceipt, PaymentError> {
+        let empty = BTreeMap::new();
+        Self::quote_payment_with_consumed(intent, balances, quotes, &empty, now_unix_secs)
+    }
+
+    fn quote_payment_with_consumed(
+        intent: &UniversalPaymentIntent,
+        balances: &[DomainTokenBalance],
+        quotes: &[LiquidityQuote],
+        prior_consumed: &BTreeMap<Hash32, u128>,
+        now_unix_secs: u64,
+    ) -> Result<UniversalPaymentReceipt, PaymentError> {
         intent.validate(now_unix_secs)?;
         if balances.len() > MAX_SPLIT_TENDER_LEGS || quotes.len() > MAX_PAYMENT_QUOTES {
             return Err(PaymentError::InputLimitExceeded);
@@ -354,8 +367,10 @@ impl UniversalPaymentRouter {
         }
         let mut remaining_quote_liquidity: BTreeMap<Hash32, u128> = BTreeMap::new();
         for quote in quotes {
+            let already_used = prior_consumed.get(&quote.quote_id).copied().unwrap_or(0);
+            let avail = quote.max_target_liquidity.saturating_sub(already_used);
             if remaining_quote_liquidity
-                .insert(quote.quote_id, quote.max_target_liquidity)
+                .insert(quote.quote_id, avail)
                 .is_some()
             {
                 return Err(PaymentError::InvalidIntent(String::from(
@@ -553,10 +568,23 @@ impl UniversalPaymentRouter {
         if self.settled_intents.len() >= MAX_SETTLED_INTENTS {
             return Err(PaymentError::InputLimitExceeded);
         }
-        let receipt = Self::quote_payment(intent, balances, quotes, now_unix_secs)?;
-        // Pre-validate cumulative debits per balance index before mutating any balance
-        // (supports multiple legs drawing from the same source balance across quotes).
+        let receipt = Self::quote_payment_with_consumed(
+            intent,
+            balances,
+            quotes,
+            &self.consumed_quote_liquidity,
+            now_unix_secs,
+        )?;
+        verify_receipt_settles_intent(&receipt, intent)?;
+        // Pre-validate cumulative debits per balance index AND cumulative quote
+        // liquidity draws before mutating any state (atomic rollback guarantee).
+        let quotes_by_id: BTreeMap<Hash32, &LiquidityQuote> =
+            quotes.iter().map(|q| (q.quote_id, q)).collect();
+        let mut provisional_quotes: BTreeMap<Hash32, u128> = BTreeMap::new();
+        let mut new_quote_entries = 0usize;
         let mut cumulative_debits: BTreeMap<usize, u128> = BTreeMap::new();
+        let mut source_total_value = 0u128;
+        let mut total_fees = 0u128;
         for leg in &receipt.legs {
             let (idx, _) = balances
                 .iter()
@@ -569,6 +597,70 @@ impl UniversalPaymentRouter {
             *entry = entry
                 .checked_add(leg.source_debited)
                 .ok_or(PaymentError::ArithmeticOverflow)?;
+            let leg_gross_value = if let Some(qid) = leg.quote_id {
+                let quote = quotes_by_id
+                    .get(&qid)
+                    .copied()
+                    .ok_or(PaymentError::ArithmeticOverflow)?;
+                let cap = quote.max_target_liquidity;
+                let base = if let Some(&staged) = provisional_quotes.get(&qid) {
+                    staged
+                } else if let Some(&existing) = self.consumed_quote_liquidity.get(&qid) {
+                    existing
+                } else {
+                    new_quote_entries = new_quote_entries.saturating_add(1);
+                    0
+                };
+                let updated = base
+                    .checked_add(leg.target_delivered)
+                    .ok_or(PaymentError::ArithmeticOverflow)?;
+                if updated > cap {
+                    return Err(PaymentError::InsufficientMultiDomainLiquidity {
+                        shortfall: updated - cap,
+                    });
+                }
+                provisional_quotes.insert(qid, updated);
+                verify_leg_against_target(
+                    leg,
+                    Some(quote),
+                    receipt.target_domain,
+                    receipt.target_asset_id,
+                )?
+            } else {
+                verify_leg_against_target(
+                    leg,
+                    None,
+                    receipt.target_domain,
+                    receipt.target_asset_id,
+                )?
+            };
+            let leg_fee = leg_gross_value
+                .checked_sub(leg.target_delivered)
+                .ok_or_else(|| {
+                    PaymentError::InvalidIntent(String::from(
+                        "split-tender leg delivered more target value than debited source value",
+                    ))
+                })?;
+            source_total_value = source_total_value
+                .checked_add(leg_gross_value)
+                .ok_or(PaymentError::ArithmeticOverflow)?;
+            total_fees = total_fees
+                .checked_add(leg_fee)
+                .ok_or(PaymentError::ArithmeticOverflow)?;
+        }
+        verify_split_tender_supply_conservation(
+            &receipt,
+            source_total_value,
+            intent.target_amount,
+            total_fees,
+        )?;
+        if self
+            .consumed_quote_liquidity
+            .len()
+            .saturating_add(new_quote_entries)
+            > MAX_SETTLED_INTENTS
+        {
+            return Err(PaymentError::InputLimitExceeded);
         }
         let mut provisional: Vec<(usize, u128)> = Vec::with_capacity(cumulative_debits.len());
         for (idx, total_debited) in cumulative_debits {
@@ -579,14 +671,45 @@ impl UniversalPaymentRouter {
                 .ok_or(PaymentError::ArithmeticOverflow)?;
             provisional.push((idx, next_amount));
         }
-        // Atomic commit: apply all validated debits together.
+        // Atomic commit: apply validated debits, quote fills, and anti-replay together.
         for (idx, next_amount) in provisional {
             if let Some(bal) = balances.get_mut(idx) {
                 bal.available_amount = next_amount;
             }
         }
+        for (qid, used) in provisional_quotes {
+            self.consumed_quote_liquidity.insert(qid, used);
+        }
         self.settled_intents.insert(id);
         Ok(receipt)
+    }
+
+    /// Returns cumulative target liquidity already consumed from `quote_id`.
+    #[must_use]
+    pub fn consumed_quote_liquidity(&self, quote_id: &Hash32) -> u128 {
+        self.consumed_quote_liquidity
+            .get(quote_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Deterministic Merkle commitment over settled intent IDs and quote fills.
+    #[must_use]
+    pub(crate) fn state_commitment(&self) -> Hash32 {
+        let intent_leaves: Vec<Hash32> = self.settled_intents.iter().copied().collect();
+        let quote_leaves: Vec<Hash32> = self
+            .consumed_quote_liquidity
+            .iter()
+            .map(|(qid, used)| {
+                hash_domain_fields(b"BDLM_ROUTER_QUOTE_FILL_V1", &[qid, &used.to_le_bytes()])
+            })
+            .collect();
+        let intents_root = unification_merkle_root(b"BDLM_ROUTER_INTENTS_V1", &intent_leaves);
+        let quotes_root = unification_merkle_root(b"BDLM_ROUTER_QUOTES_V1", &quote_leaves);
+        hash_domain_fields(
+            b"BDLM_PAYMENT_ROUTER_ROOT_V1",
+            &[&intents_root, &quotes_root],
+        )
     }
 
     /// Returns whether `intent_id` has already been settled.
@@ -649,6 +772,94 @@ fn required_source_for_target(
     let gross_target =
         mul_div_ceil(target_amount, BPS_DENOM, net_bps).ok_or(PaymentError::ArithmeticOverflow)?;
     mul_div_ceil(gross_target, RATE_SCALE, rate_scaled).ok_or(PaymentError::ArithmeticOverflow)
+}
+
+/// Check that a planned receipt settles the intent it was planned for: the
+/// same intent, target domain, target asset and target amount.
+///
+/// The leg checks take the receipt's target as their reference, and the
+/// receipt is the planner's output, so that reference has to be bound to the
+/// signed intent before any leg is weighed.
+///
+/// # Errors
+///
+/// Returns [`PaymentError::InvalidIntent`] when the receipt names another
+/// intent, target or amount.
+fn verify_receipt_settles_intent(
+    receipt: &UniversalPaymentReceipt,
+    intent: &UniversalPaymentIntent,
+) -> Result<(), PaymentError> {
+    if receipt.intent_id != intent.intent_id()
+        || receipt.target_domain != intent.target_domain
+        || receipt.target_asset_id != intent.target_asset_id
+        || receipt.target_amount_delivered != intent.target_amount
+    {
+        return Err(PaymentError::InvalidIntent(String::from(
+            "the receipt does not settle the intent it was planned for",
+        )));
+    }
+    Ok(())
+}
+
+/// Check one split-tender leg against the quote it draws on and return the
+/// source value it debits, in target units.
+///
+/// The debit is re-derived from the quote's own rate and fee instead of being
+/// read from the leg, so a leg that charges another fee than its quote, draws
+/// on another source asset, targets another receipt asset, or debits any other
+/// amount is refused before a balance moves. Conservation over the receipt
+/// cannot see this on its own: it takes each leg's fee as debit minus delivery,
+/// so a leg planned with no fee balances just as well as one planned with the
+/// quoted fee. A direct leg moves the receipt's target asset one to one and
+/// charges nothing.
+///
+/// # Errors
+///
+/// Returns [`PaymentError::InvalidIntent`] when the leg disagrees with its
+/// quote, or [`PaymentError::ArithmeticOverflow`] when the arithmetic does.
+fn verify_leg_against_target(
+    leg: &SplitTenderLeg,
+    quote: Option<&LiquidityQuote>,
+    expected_target_domain: DomainId,
+    expected_target_asset_id: Hash32,
+) -> Result<u128, PaymentError> {
+    let Some(quote) = quote else {
+        let source_is_target = leg.source_domain == expected_target_domain
+            && leg.source_asset_id == expected_target_asset_id;
+        if !leg.direct_same_domain
+            || !source_is_target
+            || leg.fee_bps != 0
+            || leg.source_debited != leg.target_delivered
+        {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "a direct split-tender leg must move the target asset one to one with no fee",
+            )));
+        }
+        return Ok(leg.source_debited);
+    };
+    let source_matches_quote =
+        leg.source_domain == quote.source_domain && leg.source_asset_id == quote.source_asset_id;
+    let quote_targets_receipt = quote.target_domain == expected_target_domain
+        && quote.target_asset_id == expected_target_asset_id;
+    if leg.direct_same_domain
+        || leg.fee_bps != quote.fee_bps
+        || !source_matches_quote
+        || !quote_targets_receipt
+    {
+        return Err(PaymentError::InvalidIntent(String::from(
+            "split-tender leg and quote do not match the source, target, and fee",
+        )));
+    }
+    let charged =
+        required_source_for_target(leg.target_delivered, quote.rate_scaled, quote.fee_bps)?;
+    if leg.source_debited != charged {
+        return Err(PaymentError::InvalidIntent(format!(
+            "split-tender leg debits {} where its quote charges {charged} for {}",
+            leg.source_debited, leg.target_delivered
+        )));
+    }
+    mul_div_floor(leg.source_debited, quote.rate_scaled, RATE_SCALE)
+        .ok_or(PaymentError::ArithmeticOverflow)
 }
 
 /// One collateral holding pledged on an external domain inside a cross-domain
@@ -839,12 +1050,29 @@ impl UniversalLiquidationCoordinator {
             return Err(LiquidationError::InvalidRepayAmount { max_repay });
         }
 
-        // Compute provisional seizures first so failure leaves `position` untouched.
+        // Compute provisional seizures in canonical `(domain_id, asset_id)` order
+        // so seizure legs and receipt hashes are caller-order-invariant, and failure
+        // leaves `position` untouched.
+        let mut canonical_order: Vec<usize> = (0..position.collateral.len()).collect();
+        canonical_order.sort_by(|&i, &j| {
+            let key_i = position
+                .collateral
+                .get(i)
+                .map(|c| (c.domain_id, c.asset_id));
+            let key_j = position
+                .collateral
+                .get(j)
+                .map(|c| (c.domain_id, c.asset_id));
+            key_i.cmp(&key_j)
+        });
         let mut plan: Vec<(usize, SeizedCollateralLeg)> = Vec::new();
-        for (idx, col) in position.collateral.iter().enumerate() {
+        for idx in canonical_order {
             if remaining_seize_usd == 0 {
                 break;
             }
+            let Some(col) = position.collateral.get(idx) else {
+                continue;
+            };
             if col.amount == 0 {
                 continue;
             }
@@ -932,6 +1160,828 @@ impl UniversalLiquidationCoordinator {
             seized_legs,
             receipt_hash,
         })
+    }
+}
+
+/// Maximum number of domain asset members grouped inside a single
+/// [`AssetEquivalenceClass`].
+const MAX_EQUIVALENCE_MEMBERS: usize = 64;
+
+/// One domain-native representation participating in a proof-backed
+/// [`AssetEquivalenceClass`] (for example, native USDC on Ethereum, Solana, or
+/// Cosmos).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetEquivalenceMember {
+    /// Canonical domain identifier in the settlement registry.
+    pub domain_id: DomainId,
+    /// Canonical 32-byte domain-namespaced asset identifier (`bridge::AssetId::for_domain`).
+    pub asset_id: Hash32,
+    /// Human-readable symbol on that domain.
+    pub symbol: String,
+    /// Effective settlement routing fee in basis points (`<= MAX_SLIPPAGE_BPS`).
+    pub fee_bps: u16,
+    /// Available liquidity in base units on this domain.
+    pub available_liquidity: u128,
+    /// Finality or provenance Merkle root attesting that this member is backed
+    /// by an admitted external finality proof rather than an unverified claim.
+    pub provenance_proof_root: Hash32,
+    /// Whether this member's external domain finality proof verified on the
+    /// settlement layer.
+    pub finality_proven: bool,
+}
+
+impl AssetEquivalenceMember {
+    #[must_use]
+    fn commitment_hash(&self) -> Hash32 {
+        hash_domain_fields(
+            b"BDLM_ASSET_EQUIV_MEMBER_V1",
+            &[
+                &self.domain_id.to_le_bytes(),
+                &self.asset_id,
+                self.symbol.as_bytes(),
+                &self.fee_bps.to_le_bytes(),
+                &self.available_liquidity.to_le_bytes(),
+                &self.provenance_proof_root,
+                &[u8::from(self.finality_proven)],
+            ],
+        )
+    }
+}
+
+/// Fungible cross-domain equivalence class grouping proof-verified native
+/// representations of the same logical asset across multiple chains so the
+/// payment router can select the cheapest proven route without minting
+/// synthetic wrappers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetEquivalenceClass {
+    /// Deterministic commitment identifying this equivalence class.
+    pub class_id: Hash32,
+    /// Logical asset symbol (for example `USDC`).
+    pub logical_symbol: String,
+    /// Canonical members sorted by `(domain_id, asset_id)`.
+    pub members: Vec<AssetEquivalenceMember>,
+}
+
+impl AssetEquivalenceClass {
+    /// Build a canonical [`AssetEquivalenceClass`] after validating symbol,
+    /// capacity bounds, fee caps, and `(domain_id, asset_id)` uniqueness.
+    ///
+    /// Convenience: constructs verified cross-domain asset equivalence classes
+    /// for multi-chain payment routing without synthetic wrappers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::InvalidIntent`] if `logical_symbol` is invalid,
+    /// `members` is empty, a fee exceeds `MAX_SLIPPAGE_BPS`, or duplicate
+    /// `(domain_id, asset_id)` members are supplied, or
+    /// [`PaymentError::InputLimitExceeded`] if `members.len() > MAX_EQUIVALENCE_MEMBERS`.
+    pub fn new(
+        logical_symbol: String,
+        mut members: Vec<AssetEquivalenceMember>,
+    ) -> Result<Self, PaymentError> {
+        validate_safe_label("logical_symbol", &logical_symbol, 32)
+            .map_err(PaymentError::InvalidIntent)?;
+        if members.is_empty() {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "asset equivalence class must contain at least one member",
+            )));
+        }
+        if members.len() > MAX_EQUIVALENCE_MEMBERS {
+            return Err(PaymentError::InputLimitExceeded);
+        }
+
+        let mut seen = BTreeSet::new();
+        for member in &members {
+            validate_safe_label("member.symbol", &member.symbol, 32)
+                .map_err(PaymentError::InvalidIntent)?;
+            if member.fee_bps > MAX_SLIPPAGE_BPS {
+                return Err(PaymentError::InvalidIntent(format!(
+                    "member fee {} bps exceeds MAX_SLIPPAGE_BPS ({MAX_SLIPPAGE_BPS})",
+                    member.fee_bps
+                )));
+            }
+            if !seen.insert((member.domain_id, member.asset_id)) {
+                return Err(PaymentError::InvalidIntent(format!(
+                    "duplicate equivalence member for domain {}",
+                    member.domain_id
+                )));
+            }
+        }
+
+        members.sort_by_key(|m| (m.domain_id, m.asset_id));
+        let member_hashes: Vec<Hash32> = members
+            .iter()
+            .map(AssetEquivalenceMember::commitment_hash)
+            .collect();
+        let members_root = unification_merkle_root(b"BDLM_ASSET_EQUIV_CLASS_V1", &member_hashes);
+        let class_id = hash_domain_fields(
+            b"BDLM_ASSET_EQUIV_CLASS_V1",
+            &[logical_symbol.as_bytes(), &members_root],
+        );
+        Ok(Self {
+            class_id,
+            logical_symbol,
+            members,
+        })
+    }
+
+    /// Select the cheapest finality-proven member with a non-zero provenance
+    /// root and enough liquidity to fill `required_amount`.
+    ///
+    /// Unproven members (`finality_proven == false`) or members carrying an
+    /// all-zero `provenance_proof_root` are ignored fail-closed even if they
+    /// advertise a lower fee. Ties break deterministically by `(domain_id, asset_id)`.
+    ///
+    /// Convenience: routes universal payments to the cheapest cryptographically
+    /// proven native asset member in an equivalence class.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::InvalidIntent`] if `required_amount == 0`, or
+    /// [`PaymentError::InsufficientMultiDomainLiquidity`] if no proven member
+    /// can satisfy `required_amount`.
+    pub fn select_cheapest_proven(
+        &self,
+        required_amount: u128,
+    ) -> Result<&AssetEquivalenceMember, PaymentError> {
+        if required_amount == 0 {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "required_amount must be positive",
+            )));
+        }
+        let mut best: Option<&AssetEquivalenceMember> = None;
+        let mut max_available = 0u128;
+
+        for member in &self.members {
+            if !member.finality_proven || member.provenance_proof_root == [0u8; 32] {
+                continue;
+            }
+            if member.available_liquidity > max_available {
+                max_available = member.available_liquidity;
+            }
+            if member.available_liquidity < required_amount {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some(cur) => {
+                    (member.fee_bps, member.domain_id, member.asset_id)
+                        < (cur.fee_bps, cur.domain_id, cur.asset_id)
+                }
+            };
+            if better {
+                best = Some(member);
+            }
+        }
+
+        best.ok_or(PaymentError::InsufficientMultiDomainLiquidity {
+            shortfall: required_amount.saturating_sub(max_available),
+        })
+    }
+}
+
+/// Derive the unified 32-byte cross-domain asset identifier for `(domain, local_asset)`
+/// using the bridge's canonical domain-namespaced rule.
+///
+/// Convenience: keeps payment router balances and quotes aligned on the exact
+/// same 32-byte asset identity used by the bridge, object layer, and UEL.
+#[must_use]
+pub fn universal_asset_id(domain: DomainId, local_asset: &[u8]) -> Hash32 {
+    *crate::cross_domain::bridge::AssetId::for_domain(domain, local_asset).as_bytes()
+}
+
+/// Verify supply conservation on a [`UniversalPaymentReceipt`]:
+/// 1. The sum of `target_delivered` across all `legs` must equal
+///    `receipt.target_amount_delivered` without overflow.
+/// 2. `delivered_total_value + total_fees` must equal `source_total_value`
+///    without overflow (no unbacked minting or silent value leak).
+///
+/// Convenience: external and test verifier enforcing strict conservation of
+/// value across multi-leg split-tender payment receipts.
+///
+/// # Errors
+///
+/// Returns [`PaymentError::ArithmeticOverflow`] on overflow or
+/// [`PaymentError::InvalidIntent`] if conservation is violated.
+pub fn verify_split_tender_supply_conservation(
+    receipt: &UniversalPaymentReceipt,
+    source_total_value: u128,
+    delivered_total_value: u128,
+    total_fees: u128,
+) -> Result<(), PaymentError> {
+    let legs_delivered = receipt.legs.iter().try_fold(0u128, |acc, leg| {
+        acc.checked_add(leg.target_delivered)
+            .ok_or(PaymentError::ArithmeticOverflow)
+    })?;
+    if legs_delivered != receipt.target_amount_delivered {
+        return Err(PaymentError::InvalidIntent(format!(
+            "split-tender leg sum ({legs_delivered}) disagrees with receipt target_amount_delivered ({})",
+            receipt.target_amount_delivered
+        )));
+    }
+    let accounted = delivered_total_value
+        .checked_add(total_fees)
+        .ok_or(PaymentError::ArithmeticOverflow)?;
+    if accounted != source_total_value {
+        return Err(PaymentError::InvalidIntent(format!(
+            "supply conservation violated: delivered ({delivered_total_value}) + fees ({total_fees}) != source ({source_total_value})"
+        )));
+    }
+    Ok(())
+}
+
+/// Three distinct completion levels answering when a payment is "done" and what
+/// backs it at that instant:
+/// 1. [`Self::Guaranteed`]: included in a Budlum block with escrowed payer funds
+///    and sufficient solver bond (~3s).
+/// 2. [`Self::Finalized`]: sealed inside a Budlum finality checkpoint (~15s).
+/// 3. [`Self::Delivered`]: target-domain delivery proof verified on Budlum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentCompletionLevel {
+    Guaranteed = 1,
+    Finalized = 2,
+    Delivered = 3,
+}
+
+/// Block-level guarantee evidence attached once a payment intent enters a block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuaranteedPaymentProof {
+    pub block_height: u64,
+    pub escrow_commitment: Hash32,
+    pub solver_bond_commitment: Hash32,
+}
+
+/// Checkpoint-level finality evidence attached once Budlum finality seals the block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalizedPaymentProof {
+    pub checkpoint_height: u64,
+    pub finality_certificate_digest: Hash32,
+}
+
+/// Target-domain delivery evidence attached once merchant receipt is proven on Budlum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveredPaymentProof {
+    pub target_domain: DomainId,
+    pub delivery_proof_root: Hash32,
+    pub merchant_receipt_hash: Hash32,
+}
+
+/// Three-tier payment status report exposing each completion level separately so
+/// terminals and wallets never conflate block inclusion, finality, and delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentStatusReport {
+    pub intent_id: Hash32,
+    pub guaranteed: Option<GuaranteedPaymentProof>,
+    pub finalized: Option<FinalizedPaymentProof>,
+    pub delivered: Option<DeliveredPaymentProof>,
+}
+
+impl PaymentStatusReport {
+    /// Validate strict monotonicity and non-zero commitments across the three
+    /// completion tiers (`Delivered` requires `Finalized`, which requires
+    /// `Guaranteed`).
+    ///
+    /// Convenience: validates three-tier payment completion status before
+    /// exposing it to wallets, POS terminals, or JSON-RPC consumers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::InvalidIntent`] if any commitment is all-zero or
+    /// a higher tier is claimed without its prerequisite lower tier.
+    pub fn validate(&self) -> Result<(), PaymentError> {
+        if self.intent_id == [0u8; 32] {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment status intent_id must be non-zero",
+            )));
+        }
+        if let Some(g) = &self.guaranteed {
+            if g.block_height == 0
+                || g.escrow_commitment == [0u8; 32]
+                || g.solver_bond_commitment == [0u8; 32]
+            {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "guaranteed proof requires non-zero height, escrow, and solver bond commitments",
+                )));
+            }
+        }
+        if let Some(f) = &self.finalized {
+            let Some(g) = &self.guaranteed else {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "finalized status requires prior guaranteed block inclusion proof",
+                )));
+            };
+            if f.checkpoint_height < g.block_height || f.finality_certificate_digest == [0u8; 32] {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "finalized proof requires checkpoint_height >= block_height and non-zero certificate digest",
+                )));
+            }
+        }
+        if let Some(d) = &self.delivered {
+            if self.finalized.is_none() {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "delivered status requires prior finalized checkpoint proof",
+                )));
+            }
+            if d.delivery_proof_root == [0u8; 32] || d.merchant_receipt_hash == [0u8; 32] {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "delivered proof requires non-zero delivery root and merchant receipt hash",
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the highest verified [`PaymentCompletionLevel`] reached so far.
+    ///
+    /// Convenience: lets POS terminals and wallets display exact completion tier.
+    #[must_use]
+    pub fn highest_level(&self) -> Option<PaymentCompletionLevel> {
+        if self.delivered.is_some() {
+            Some(PaymentCompletionLevel::Delivered)
+        } else if self.finalized.is_some() {
+            Some(PaymentCompletionLevel::Finalized)
+        } else if self.guaranteed.is_some() {
+            Some(PaymentCompletionLevel::Guaranteed)
+        } else {
+            None
+        }
+    }
+
+    /// Whether this report validates cleanly and satisfies a merchant's required
+    /// minimum [`PaymentCompletionLevel`].
+    ///
+    /// Convenience: enforces merchant risk thresholds per ticket size.
+    #[must_use]
+    pub fn meets_threshold(&self, required: PaymentCompletionLevel) -> bool {
+        if self.validate().is_err() {
+            return false;
+        }
+        self.highest_level().is_some_and(|level| level >= required)
+    }
+}
+
+/// Registered PQ-hybrid signing context for offline spend vouchers. The
+/// signing facade refuses any context outside the registry, so the voucher
+/// payload keeps its own domain tag below.
+pub const OFFLINE_VOUCHER_CTX: &[u8] = crate::crypto::ctx::OFFLINE_VOUCHER_V1;
+
+/// Domain separation tag of the offline voucher signing payload.
+const OFFLINE_VOUCHER_TAG: &[u8] = b"BDLM_OFFLINE_VOUCHER_V1";
+
+/// Maximum offline vouchers settled in a single batch call.
+const MAX_OFFLINE_VOUCHERS_PER_BATCH: usize = 256;
+
+/// Pre-authorized spend account backed by an on-chain escrow cap so an offline
+/// POS terminal can verify PQ-hybrid signed vouchers in sub-second latency and
+/// settle them in batch when connectivity resumes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreauthorizedSpendAccount {
+    pub account_id: Hash32,
+    /// Encoded [`crate::crypto::composite::CompositePublicKey`] of the payer.
+    pub payer_composite_pubkey: Vec<u8>,
+    pub asset_id: Hash32,
+    /// Hard upper bound on cumulative offline spend backed by escrow.
+    pub spend_cap_atoms: u128,
+    /// Cumulative atoms already settled from previous batches.
+    pub spent_atoms: u128,
+    /// Account expiry timestamp (Unix seconds).
+    pub valid_until_unix_secs: u64,
+    /// Nonces already consumed (strict replay guard).
+    pub used_nonces: BTreeSet<u64>,
+}
+
+/// Offline-verifiable payment voucher signed by the payer's PQ-hybrid composite
+/// keypair against a [`PreauthorizedSpendAccount`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedOfflineVoucher {
+    pub account_id: Hash32,
+    pub voucher_nonce: u64,
+    pub merchant_id: Hash32,
+    pub amount_atoms: u128,
+    pub valid_until_unix_secs: u64,
+    /// Encoded [`crate::crypto::composite::CompositeSignature`].
+    pub signature: Vec<u8>,
+}
+
+impl SignedOfflineVoucher {
+    /// Deterministic signing payload committing every voucher field.
+    ///
+    /// Convenience: shared by payer wallets signing vouchers and offline POS
+    /// terminals verifying them without network access.
+    #[must_use]
+    pub fn signing_payload(&self) -> Hash32 {
+        hash_domain_fields(
+            OFFLINE_VOUCHER_TAG,
+            &[
+                &self.account_id,
+                &self.voucher_nonce.to_le_bytes(),
+                &self.merchant_id,
+                &self.amount_atoms.to_le_bytes(),
+                &self.valid_until_unix_secs.to_le_bytes(),
+            ],
+        )
+    }
+
+    /// Verify this voucher completely offline against `account` at `now_unix_secs`
+    /// without mutating state.
+    ///
+    /// Convenience: enables sub-second offline POS verification using Budlum's
+    /// PQ-hybrid composite signature verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError`] if the account mismatches, the voucher or account
+    /// is expired, the amount is zero or exceeds remaining escrow, the nonce was
+    /// already spent, or the PQ-hybrid signature fails verification.
+    pub fn verify_offline(
+        &self,
+        account: &PreauthorizedSpendAccount,
+        now_unix_secs: u64,
+    ) -> Result<(), PaymentError> {
+        if self.account_id != account.account_id {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "voucher account_id disagrees with pre-authorized spend account",
+            )));
+        }
+        if self.merchant_id == [0u8; 32] {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "voucher merchant_id must be non-zero",
+            )));
+        }
+        if self.amount_atoms == 0 {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "voucher amount must be positive",
+            )));
+        }
+        if now_unix_secs > account.valid_until_unix_secs {
+            return Err(PaymentError::Expired {
+                now: now_unix_secs,
+                deadline: account.valid_until_unix_secs,
+            });
+        }
+        if now_unix_secs > self.valid_until_unix_secs {
+            return Err(PaymentError::Expired {
+                now: now_unix_secs,
+                deadline: self.valid_until_unix_secs,
+            });
+        }
+        if account.used_nonces.contains(&self.voucher_nonce) {
+            return Err(PaymentError::ReplayDetected);
+        }
+        let remaining = account.spend_cap_atoms.saturating_sub(account.spent_atoms);
+        if self.amount_atoms > remaining {
+            return Err(PaymentError::InsufficientMultiDomainLiquidity {
+                shortfall: self.amount_atoms.saturating_sub(remaining),
+            });
+        }
+
+        let pk =
+            crate::crypto::composite::CompositePublicKey::decode(&account.payer_composite_pubkey)
+                .map_err(|err| {
+                PaymentError::InvalidIntent(format!("invalid payer composite public key: {err}"))
+            })?;
+        let sig = crate::crypto::composite::CompositeSignature::decode(&self.signature).map_err(
+            |err| {
+                PaymentError::InvalidIntent(format!("invalid voucher composite signature: {err}"))
+            },
+        )?;
+        let digest = self.signing_payload();
+        crate::crypto::composite::verify(&pk, OFFLINE_VOUCHER_CTX, &digest, &sig).map_err(
+            |err| {
+                PaymentError::InvalidIntent(format!(
+                    "offline voucher signature verification failed: {err}"
+                ))
+            },
+        )?;
+        Ok(())
+    }
+}
+
+impl PreauthorizedSpendAccount {
+    /// Atomically verify and settle a batch of [`SignedOfflineVoucher`] items.
+    ///
+    /// Rejects duplicate nonces (within the batch or against previously settled
+    /// nonces), expired vouchers, invalid signatures, and cumulative spend
+    /// exceeding `spend_cap_atoms` without mutating the account on any failure.
+    ///
+    /// Convenience: settles batched offline POS vouchers in one atomic step.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError`] without mutating `self` if any voucher fails.
+    pub fn settle_voucher_batch(
+        &mut self,
+        vouchers: &[SignedOfflineVoucher],
+        now_unix_secs: u64,
+    ) -> Result<u128, PaymentError> {
+        if vouchers.is_empty() {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "voucher batch must not be empty",
+            )));
+        }
+        if vouchers.len() > MAX_OFFLINE_VOUCHERS_PER_BATCH {
+            return Err(PaymentError::InputLimitExceeded);
+        }
+
+        let mut batch_nonces = BTreeSet::new();
+        let mut batch_total = 0u128;
+        for v in vouchers {
+            v.verify_offline(self, now_unix_secs)?;
+            if !batch_nonces.insert(v.voucher_nonce) {
+                return Err(PaymentError::ReplayDetected);
+            }
+            batch_total = batch_total
+                .checked_add(v.amount_atoms)
+                .ok_or(PaymentError::ArithmeticOverflow)?;
+        }
+
+        let next_spent = self
+            .spent_atoms
+            .checked_add(batch_total)
+            .ok_or(PaymentError::ArithmeticOverflow)?;
+        if next_spent > self.spend_cap_atoms {
+            return Err(PaymentError::InsufficientMultiDomainLiquidity {
+                shortfall: next_spent.saturating_sub(self.spend_cap_atoms),
+            });
+        }
+
+        // All checks passed: commit atomically.
+        self.spent_atoms = next_spent;
+        for nonce in batch_nonces {
+            self.used_nonces.insert(nonce);
+        }
+        Ok(batch_total)
+    }
+}
+
+/// Versioned, canonically-encoded universal payment request URI/QR standard
+/// (`budlum:pay/v1?...`) so POS terminals, websites, and invoices produce
+/// byte-for-byte identical encodings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UniversalPaymentRequestUri {
+    pub version: u8,
+    pub recipient: Hash32,
+    pub target_domain: DomainId,
+    pub target_asset_id: Hash32,
+    pub target_amount: u128,
+    pub invoice_digest: Hash32,
+    pub deadline_unix_secs: u64,
+    pub callback_ref: Option<String>,
+}
+
+impl UniversalPaymentRequestUri {
+    /// Encode into the canonical `budlum:pay/v1?...` URI string with fixed
+    /// parameter order and lowercase hex digests.
+    ///
+    /// Convenience: produces identical URI/QR bytes across terminals, websites,
+    /// and merchant invoices.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::InvalidIntent`] if version != 1, recipient or
+    /// asset or amount is zero, or `callback_ref` contains unsafe characters.
+    pub fn encode_canonical(&self) -> Result<String, PaymentError> {
+        if self.version != 1 {
+            return Err(PaymentError::InvalidIntent(format!(
+                "unsupported payment request URI version {}",
+                self.version
+            )));
+        }
+        if self.recipient == [0u8; 32]
+            || self.target_asset_id == [0u8; 32]
+            || self.target_amount == 0
+        {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment request requires non-zero recipient, asset, and amount",
+            )));
+        }
+        let mut out = format!(
+            "budlum:pay/v1?amount={}&asset={}&deadline={}&domain={}&invoice={}&recipient={}",
+            self.target_amount,
+            hex::encode(self.target_asset_id),
+            self.deadline_unix_secs,
+            self.target_domain,
+            hex::encode(self.invoice_digest),
+            hex::encode(self.recipient),
+        );
+        if let Some(cb) = &self.callback_ref {
+            validate_safe_label("callback_ref", cb, 64).map_err(PaymentError::InvalidIntent)?;
+            out.push_str("&callback=");
+            out.push_str(cb);
+        }
+        Ok(out)
+    }
+
+    /// Parse a canonical `budlum:pay/v1?...` URI string fail-closed.
+    ///
+    /// Rejects unknown keys, duplicate keys, malformed hex, or missing fields.
+    ///
+    /// Convenience: decodes terminal/web/invoice payment URIs in wallets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::InvalidIntent`] on any syntax or semantic violation.
+    pub fn decode_canonical(raw: &str) -> Result<Self, PaymentError> {
+        let Some(query) = raw.strip_prefix("budlum:pay/v1?") else {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment request URI must start with `budlum:pay/v1?`",
+            )));
+        };
+        if raw.len() > 512 || !raw.is_ascii() {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment request URI exceeds 512 ASCII bytes",
+            )));
+        }
+        let mut kv: BTreeMap<&str, &str> = BTreeMap::new();
+        for pair in query.split('&') {
+            let Some((k, v)) = pair.split_once('=') else {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "malformed query parameter in payment request URI",
+                )));
+            };
+            if kv.insert(k, v).is_some() {
+                return Err(PaymentError::InvalidIntent(format!(
+                    "duplicate parameter `{k}` in payment request URI"
+                )));
+            }
+        }
+
+        let parse_h32 = |key: &str| -> Result<Hash32, PaymentError> {
+            let val = kv.get(key).ok_or_else(|| {
+                PaymentError::InvalidIntent(format!("missing `{key}` in payment request URI"))
+            })?;
+            let bytes = hex::decode(val).map_err(|_| {
+                PaymentError::InvalidIntent(format!(
+                    "invalid hex for `{key}` in payment request URI"
+                ))
+            })?;
+            let arr: Hash32 = bytes.try_into().map_err(|_| {
+                PaymentError::InvalidIntent(format!(
+                    "`{key}` must be 32 bytes in payment request URI"
+                ))
+            })?;
+            Ok(arr)
+        };
+
+        for key in kv.keys() {
+            if !matches!(
+                *key,
+                "amount" | "asset" | "callback" | "deadline" | "domain" | "invoice" | "recipient"
+            ) {
+                return Err(PaymentError::InvalidIntent(format!(
+                    "unknown parameter `{key}` in payment request URI"
+                )));
+            }
+        }
+
+        let target_amount = kv
+            .get("amount")
+            .ok_or_else(|| PaymentError::InvalidIntent(String::from("missing `amount`")))?
+            .parse::<u128>()
+            .map_err(|_| PaymentError::InvalidIntent(String::from("invalid `amount`")))?;
+        let target_domain = kv
+            .get("domain")
+            .ok_or_else(|| PaymentError::InvalidIntent(String::from("missing `domain`")))?
+            .parse::<DomainId>()
+            .map_err(|_| PaymentError::InvalidIntent(String::from("invalid `domain`")))?;
+        let deadline_unix_secs = kv
+            .get("deadline")
+            .ok_or_else(|| PaymentError::InvalidIntent(String::from("missing `deadline`")))?
+            .parse::<u64>()
+            .map_err(|_| PaymentError::InvalidIntent(String::from("invalid `deadline`")))?;
+        let recipient = parse_h32("recipient")?;
+        let target_asset_id = parse_h32("asset")?;
+        let invoice_digest = parse_h32("invoice")?;
+        let callback_ref = match kv.get("callback") {
+            Some(cb) => {
+                validate_safe_label("callback_ref", cb, 64).map_err(PaymentError::InvalidIntent)?;
+                Some(String::from(*cb))
+            }
+            None => None,
+        };
+
+        let parsed = Self {
+            version: 1,
+            recipient,
+            target_domain,
+            target_asset_id,
+            target_amount,
+            invoice_digest,
+            deadline_unix_secs,
+            callback_ref,
+        };
+        let canonical = parsed.encode_canonical()?;
+        if canonical != raw {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment request URI is not in canonical byte order",
+            )));
+        }
+        Ok(parsed)
+    }
+
+    /// Deterministic domain-separated digest committing every field of this request.
+    ///
+    /// Convenience: binds merchant invoices and QR codes to on-chain payment intents.
+    #[must_use]
+    pub fn request_digest(&self) -> Hash32 {
+        let cb = self.callback_ref.as_deref().unwrap_or("");
+        hash_domain_fields(
+            b"BDLM_PAY_REQUEST_URI_V1",
+            &[
+                &[self.version],
+                &self.recipient,
+                &self.target_domain.to_le_bytes(),
+                &self.target_asset_id,
+                &self.target_amount.to_le_bytes(),
+                &self.invoice_digest,
+                &self.deadline_unix_secs.to_le_bytes(),
+                cb.as_bytes(),
+            ],
+        )
+    }
+}
+
+/// Reverse payment intent bound cryptographically to an original
+/// [`UniversalPaymentReceipt`] so a merchant refund can never be forged or
+/// issued twice for the same settled payment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefundIntent {
+    pub original_intent_id: Hash32,
+    pub original_receipt_hash: Hash32,
+    pub merchant_id: Hash32,
+    pub refund_recipient: Hash32,
+    pub refund_amount: u128,
+    pub reason_code: u16,
+}
+
+impl RefundIntent {
+    /// Deterministic identifier committing every refund field.
+    ///
+    /// Convenience: identifies merchant refund intents for accounting and replay checks.
+    #[must_use]
+    pub fn refund_id(&self) -> Hash32 {
+        hash_domain_fields(
+            b"BDLM_REFUND_INTENT_V1",
+            &[
+                &self.original_intent_id,
+                &self.original_receipt_hash,
+                &self.merchant_id,
+                &self.refund_recipient,
+                &self.refund_amount.to_le_bytes(),
+                &self.reason_code.to_le_bytes(),
+            ],
+        )
+    }
+}
+
+/// Single-use refund tracker ensuring each settled [`UniversalPaymentReceipt`]
+/// can be refunded at most once and never above its delivered amount.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefundRegistry {
+    #[serde(with = "crate::core::map_keys")]
+    refunded_receipts: BTreeMap<Hash32, Hash32>,
+}
+
+impl RefundRegistry {
+    /// Validate and record `refund` against `original` receipt fail-closed.
+    ///
+    /// Convenience: prevents duplicate or over-amount refunds against settled receipts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ReplayDetected`] if `original.receipt_hash` was
+    /// already refunded, or [`PaymentError::InvalidIntent`] if bindings or amount
+    /// bounds disagree.
+    pub fn record_refund(
+        &mut self,
+        original: &UniversalPaymentReceipt,
+        refund: &RefundIntent,
+    ) -> Result<Hash32, PaymentError> {
+        if refund.original_intent_id != original.intent_id
+            || refund.original_receipt_hash != original.receipt_hash
+        {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "refund intent does not match original payment receipt proof",
+            )));
+        }
+        if refund.merchant_id == [0u8; 32] || refund.refund_recipient == [0u8; 32] {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "refund requires non-zero merchant_id and refund_recipient",
+            )));
+        }
+        if refund.refund_amount == 0 || refund.refund_amount > original.target_amount_delivered {
+            return Err(PaymentError::InvalidIntent(format!(
+                "refund_amount ({}) must be in 1..={}",
+                refund.refund_amount, original.target_amount_delivered
+            )));
+        }
+        if self.refunded_receipts.contains_key(&original.receipt_hash) {
+            return Err(PaymentError::ReplayDetected);
+        }
+        let rid = refund.refund_id();
+        self.refunded_receipts.insert(original.receipt_hash, rid);
+        Ok(rid)
     }
 }
 
@@ -1388,5 +2438,302 @@ mod tests {
         assert_eq!(receipt.seized_legs[1].value_usd_scaled, 1_500);
         assert_eq!(pos.collateral[0].amount, 1);
         assert_eq!(pos.collateral[1].amount, 500);
+    }
+
+    #[test]
+    fn settle_payment_tracks_quote_liquidity_across_intents_and_liquidation_is_order_invariant() {
+        let usdc_eth = [0x01; 32];
+        let bud_asset = [0x02; 32];
+        let quote = LiquidityQuote {
+            quote_id: [0x77; 32],
+            source_domain: 1,
+            source_asset_id: bud_asset,
+            target_domain: 3,
+            target_asset_id: usdc_eth,
+            rate_scaled: RATE_SCALE,
+            fee_bps: 0,
+            max_target_liquidity: 100,
+            valid_until_unix_secs: 2_000,
+        };
+        let mut balances = vec![DomainTokenBalance {
+            domain_id: 1,
+            asset_id: bud_asset,
+            symbol: "BUD".into(),
+            available_amount: 500,
+        }];
+        let make_intent = |nonce: u64| UniversalPaymentIntent {
+            payer_id: [0xA1; 32],
+            merchant_id: [0xB2; 32],
+            nonce,
+            target_domain: 3,
+            target_asset_id: usdc_eth,
+            target_amount: 80,
+            max_slippage_bps: 50,
+            deadline_unix_secs: 2_000,
+            invoice_hash: [u8::try_from(nonce).unwrap_or(0); 32],
+            rail: PaymentRail::OnChain,
+        };
+        let mut router = UniversalPaymentRouter::new();
+        router
+            .settle_payment(
+                &make_intent(1),
+                &mut balances,
+                std::slice::from_ref(&quote),
+                1_500,
+            )
+            .expect("first intent consumes 80/100 quote liquidity");
+        let second = router.settle_payment(
+            &make_intent(2),
+            &mut balances,
+            std::slice::from_ref(&quote),
+            1_500,
+        );
+        assert_eq!(
+            second,
+            Err(PaymentError::InsufficientMultiDomainLiquidity { shortfall: 60 }),
+            "quote with 20 remaining liquidity must not settle a second 80-unit intent"
+        );
+        // Failed second intent must leave balances untouched at 420.
+        assert_eq!(balances[0].available_amount, 420);
+
+        // Liquidation seizure order and receipt_hash must be independent of collateral Vec order.
+        let c_a = CollateralAsset {
+            domain_id: 2,
+            asset_id: [0x10; 32],
+            amount: 4_000,
+            price_usd_scaled: RATE_SCALE,
+            oracle_updated_unix_secs: 1_000,
+            liquidation_threshold_bps: 8_000,
+        };
+        let c_b = CollateralAsset {
+            domain_id: 5,
+            asset_id: [0x20; 32],
+            amount: 4_000,
+            price_usd_scaled: RATE_SCALE,
+            oracle_updated_unix_secs: 1_000,
+            liquidation_threshold_bps: 8_000,
+        };
+        let mut pos_ab = CrossDomainPosition {
+            position_id: [0xF1; 32],
+            debt_domain: 3,
+            debt_asset_id: usdc_eth,
+            debt_amount: 10_000,
+            debt_price_usd_scaled: RATE_SCALE,
+            debt_oracle_updated_unix_secs: 1_000,
+            collateral: vec![c_a.clone(), c_b.clone()],
+        };
+        let mut pos_ba = CrossDomainPosition {
+            collateral: vec![c_b, c_a],
+            ..pos_ab.clone()
+        };
+        let r_ab =
+            UniversalLiquidationCoordinator::execute_liquidation(&mut pos_ab, 3_000, 0, 1_010)
+                .unwrap();
+        let r_ba =
+            UniversalLiquidationCoordinator::execute_liquidation(&mut pos_ba, 3_000, 0, 1_010)
+                .unwrap();
+        assert_eq!(r_ab.receipt_hash, r_ba.receipt_hash);
+        assert_eq!(r_ab.seized_legs, r_ba.seized_legs);
+    }
+
+    #[test]
+    fn settle_payment_enforces_non_tautological_split_tender_conservation() {
+        let bud_asset = [0x01; 32];
+        let usdc_asset = [0x02; 32];
+        let mut balances = vec![
+            DomainTokenBalance {
+                domain_id: 1,
+                asset_id: bud_asset,
+                symbol: String::from("BUD"),
+                available_amount: 600,
+            },
+            DomainTokenBalance {
+                domain_id: 3,
+                asset_id: usdc_asset,
+                symbol: String::from("USDC"),
+                available_amount: 1_000,
+            },
+        ];
+        let quotes = vec![LiquidityQuote {
+            quote_id: [0x91; 32],
+            source_domain: 3,
+            source_asset_id: usdc_asset,
+            target_domain: 1,
+            target_asset_id: bud_asset,
+            rate_scaled: RATE_SCALE,
+            fee_bps: 100, // 1%
+            max_target_liquidity: 1_000,
+            valid_until_unix_secs: 2_000,
+        }];
+        let intent = UniversalPaymentIntent {
+            payer_id: [0xA1; 32],
+            merchant_id: [0xB2; 32],
+            target_domain: 1,
+            target_asset_id: bud_asset,
+            target_amount: 1_000,
+            max_slippage_bps: 200,
+            rail: PaymentRail::OnChain,
+            invoice_hash: [0xC3; 32],
+            deadline_unix_secs: 2_000,
+            nonce: 77,
+        };
+        let mut router = UniversalPaymentRouter::new();
+        let receipt = router
+            .settle_payment(&intent, &mut balances, &quotes, 1_500)
+            .expect("valid split-tender payment must pass supply conservation");
+        assert_eq!(receipt.target_amount_delivered, 1_000);
+
+        // Tampered receipt where leg sum diverges from delivered amount fails closed.
+        let mut bad_receipt = receipt.clone();
+        bad_receipt.target_amount_delivered = 1_001;
+        assert!(verify_split_tender_supply_conservation(&bad_receipt, 1_005, 1_001, 4).is_err());
+
+        // Conservation violation where delivered + fees != source_total_value fails closed.
+        assert!(verify_split_tender_supply_conservation(&receipt, 1_005, 1_000, 3).is_err());
+    }
+
+    /// The leg checks take the receipt's target as their reference. A receipt
+    /// is the planner's output, so it is judged against the signed intent
+    /// first: another target domain, asset, amount or intent is refused.
+    #[test]
+    fn a_receipt_planned_for_another_target_is_refused() {
+        let intent = UniversalPaymentIntent {
+            payer_id: [0xA1; 32],
+            merchant_id: [0xB2; 32],
+            target_domain: 1,
+            target_asset_id: [0x01; 32],
+            target_amount: 400,
+            max_slippage_bps: 200,
+            rail: PaymentRail::OnChain,
+            invoice_hash: [0xC3; 32],
+            deadline_unix_secs: 2_000,
+            nonce: 78,
+        };
+        let honest = UniversalPaymentReceipt {
+            intent_id: intent.intent_id(),
+            target_domain: 1,
+            target_asset_id: [0x01; 32],
+            target_amount_delivered: 400,
+            legs: Vec::new(),
+            legs_merkle_root: [0; 32],
+            pos_auth_code: None,
+            receipt_hash: [0; 32],
+        };
+        assert_eq!(verify_receipt_settles_intent(&honest, &intent), Ok(()));
+        let drifted = [
+            UniversalPaymentReceipt {
+                target_domain: 3,
+                ..honest.clone()
+            },
+            UniversalPaymentReceipt {
+                target_asset_id: [0x02; 32],
+                ..honest.clone()
+            },
+            UniversalPaymentReceipt {
+                target_amount_delivered: 401,
+                ..honest.clone()
+            },
+            UniversalPaymentReceipt {
+                intent_id: [0xEE; 32],
+                ..honest.clone()
+            },
+        ];
+        for receipt in &drifted {
+            assert!(
+                verify_receipt_settles_intent(receipt, &intent).is_err(),
+                "a receipt for another target must be refused: {receipt:?}"
+            );
+        }
+    }
+
+    /// A leg planned without its quote's fee balances under conservation alone,
+    /// because conservation reads the fee as debit minus delivery. The per-leg
+    /// check re-derives the debit from the quote and refuses it.
+    #[test]
+    fn a_leg_that_skips_its_quoted_fee_is_refused() {
+        let quote = LiquidityQuote {
+            quote_id: [0x91; 32],
+            source_domain: 3,
+            source_asset_id: [0x02; 32],
+            target_domain: 1,
+            target_asset_id: [0x01; 32],
+            rate_scaled: RATE_SCALE,
+            fee_bps: 100,
+            max_target_liquidity: 1_000,
+            valid_until_unix_secs: 2_000,
+        };
+        let leg = |source_debited: u128| SplitTenderLeg {
+            source_domain: 3,
+            source_asset_id: [0x02; 32],
+            source_symbol: String::from("USDC"),
+            source_debited,
+            target_delivered: 400,
+            fee_bps: 100,
+            direct_same_domain: false,
+            quote_id: Some(quote.quote_id),
+        };
+
+        // 400 delivered at a 1% fee costs 405 of source; the gross value is 405
+        // and the fee 5.
+        assert_eq!(
+            verify_leg_against_target(&leg(405), Some(&quote), 1, [0x01; 32]),
+            Ok(405)
+        );
+
+        // The same leg planned with no fee: 400 for 400.
+        let feeless = leg(400);
+        let receipt = UniversalPaymentReceipt {
+            intent_id: [0xA1; 32],
+            target_domain: 1,
+            target_asset_id: [0x01; 32],
+            target_amount_delivered: 400,
+            legs: vec![feeless.clone()],
+            legs_merkle_root: [0u8; 32],
+            pos_auth_code: None,
+            receipt_hash: [0u8; 32],
+        };
+        assert_eq!(
+            verify_split_tender_supply_conservation(&receipt, 400, 400, 0),
+            Ok(()),
+            "conservation alone accepts the feeless leg"
+        );
+        assert!(verify_leg_against_target(&feeless, Some(&quote), 1, [0x01; 32]).is_err());
+
+        // A fee, source identity, or target identity that differs from the
+        // quote is refused as well.
+        let mut wrong_fee = leg(405);
+        wrong_fee.fee_bps = 0;
+        assert!(verify_leg_against_target(&wrong_fee, Some(&quote), 1, [0x01; 32]).is_err());
+        let mut wrong_asset = leg(405);
+        wrong_asset.source_asset_id = [0x03; 32];
+        assert!(verify_leg_against_target(&wrong_asset, Some(&quote), 1, [0x01; 32]).is_err());
+        let mut wrong_target_quote = quote.clone();
+        wrong_target_quote.target_asset_id = [0x09; 32];
+        assert!(
+            verify_leg_against_target(&leg(405), Some(&wrong_target_quote), 1, [0x01; 32]).is_err()
+        );
+
+        let amount_mismatch = SplitTenderLeg {
+            direct_same_domain: true,
+            quote_id: None,
+            fee_bps: 0,
+            ..leg(405)
+        };
+        assert!(verify_leg_against_target(&amount_mismatch, None, 1, [0x01; 32]).is_err());
+        let wrong_target_direct = SplitTenderLeg {
+            source_debited: 400,
+            ..amount_mismatch
+        };
+        assert!(verify_leg_against_target(&wrong_target_direct, None, 1, [0x01; 32]).is_err());
+        let honest_direct = SplitTenderLeg {
+            source_domain: 1,
+            source_asset_id: [0x01; 32],
+            source_symbol: String::from("BUD"),
+            ..wrong_target_direct
+        };
+        assert_eq!(
+            verify_leg_against_target(&honest_direct, None, 1, [0x01; 32]),
+            Ok(400)
+        );
     }
 }

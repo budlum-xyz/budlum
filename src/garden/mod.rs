@@ -35,6 +35,7 @@
 //!   own disk; when the last validator leaves nothing is left anywhere.
 
 mod invite;
+mod invite_record;
 mod net;
 mod node;
 mod service;

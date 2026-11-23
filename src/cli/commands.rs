@@ -17,9 +17,9 @@ pub enum ConsensusType {
 impl std::fmt::Display for ConsensusType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConsensusType::PoW => write!(f, "PoW (Proof of Work)"),
-            ConsensusType::PoS => write!(f, "PoS (Proof of Stake)"),
-            ConsensusType::PoA => write!(f, "PoA (Proof of Authority)"),
+            Self::PoW => write!(f, "PoW (Proof of Work)"),
+            Self::PoS => write!(f, "PoS (Proof of Stake)"),
+            Self::PoA => write!(f, "PoA (Proof of Authority)"),
         }
     }
 }
@@ -40,10 +40,10 @@ pub enum PrivacyLevel {
 impl std::fmt::Display for PrivacyLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PrivacyLevel::None => write!(f, "None (Public)"),
-            PrivacyLevel::Stealth => write!(f, "Stealth Addresses"),
-            PrivacyLevel::Confidential => write!(f, "Confidential Transactions"),
-            PrivacyLevel::Full => write!(f, "Full Privacy"),
+            Self::None => write!(f, "None (Public)"),
+            Self::Stealth => write!(f, "Stealth Addresses"),
+            Self::Confidential => write!(f, "Confidential Transactions"),
+            Self::Full => write!(f, "Full Privacy"),
         }
     }
 }
@@ -1201,13 +1201,17 @@ impl NodeConfig {
         if let Some(ref name) = legacy.network {
             self.network = network_named("the legacy config file", name);
         }
-        if self.consensus.is_none() {
-            self.consensus = legacy.consensus.as_deref().and_then(|s| match s {
-                "pow" => Some(ConsensusType::PoW),
-                "pos" => Some(ConsensusType::PoS),
-                "poa" => Some(ConsensusType::PoA),
-                _ => None,
-            });
+        if let Some(raw_type) = legacy.consensus.as_deref() {
+            let parsed = match parse_legacy_consensus_type(raw_type) {
+                Ok(kind) => kind,
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    std::process::exit(1);
+                }
+            };
+            if self.consensus.is_none() {
+                self.consensus = Some(parsed);
+            }
         }
         if let Some(diff) = legacy.difficulty {
             self.difficulty = diff;
@@ -2302,5 +2306,38 @@ mod persona_config_tests {
             .expect("parse metrics config");
         cfg.apply_file_config(fc);
         assert_eq!(cfg.metrics_listener.as_deref(), Some("127.0.0.1:29093"));
+    }
+
+    #[test]
+    fn legacy_config_rejects_unknown_consensus_type() {
+        assert_eq!(
+            super::parse_legacy_consensus_type("pow"),
+            Ok(super::ConsensusType::PoW)
+        );
+        assert_eq!(
+            super::parse_legacy_consensus_type("pos"),
+            Ok(super::ConsensusType::PoS)
+        );
+        assert_eq!(
+            super::parse_legacy_consensus_type("poa"),
+            Ok(super::ConsensusType::PoA)
+        );
+        let err = super::parse_legacy_consensus_type("poss")
+            .expect_err("legacy config with invalid consensus must fail closed");
+        assert!(
+            err.contains("CRITICAL: Invalid consensus 'poss'"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+fn parse_legacy_consensus_type(raw: &str) -> Result<ConsensusType, String> {
+    match raw {
+        "pow" => Ok(ConsensusType::PoW),
+        "pos" => Ok(ConsensusType::PoS),
+        "poa" => Ok(ConsensusType::PoA),
+        other => Err(format!(
+            "CRITICAL: Invalid consensus '{other}' in legacy config file"
+        )),
     }
 }
