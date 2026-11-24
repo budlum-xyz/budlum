@@ -461,7 +461,9 @@ mod tests {
     const NOW: u64 = 1_700_000_000_000;
 
     /// A Garden chain id, which is never a primary Budlum chain id.
-    const CHAIN: u64 = 0x0001_0000_0000_0007;
+    // A Garden chain id carries the Garden prefix (types.rs), or the record
+    // refuses to issue: the tests use a real one rather than a made-up number.
+    const CHAIN: u64 = 0x4741_0000_0000_0007;
 
     fn key(seed: u8) -> KeyPair {
         KeyPair::from_seed(&[seed; 32]).unwrap()
