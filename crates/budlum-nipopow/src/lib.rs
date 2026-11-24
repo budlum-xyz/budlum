@@ -3,25 +3,55 @@
 //! Budlum is a Universal Settlement Layer: it ingests the finality proofs of
 //! many external consensus domains and records them in a single
 //! `GlobalBlockHeader`. For Nakamoto/PoW-style chains the canonical succinct
-//! client is **NIPoPoW** (Non-Interactive Proofs of Proof-of-Work,
-//! Kiayias et al. 2017): instead of shipping the whole header chain, a prover
-//! sends a short interlink-structured proof that a superchain of a given
-//! cumulative work exists.
+//! client is NIPoPoW (Non-Interactive Proofs of Proof-of-Work, Kiayias et al.
+//! 2017): instead of shipping the whole header chain, a prover sends a short
+//! interlink-structured proof that a superchain of a given cumulative work
+//! exists.
 //!
-//! This crate implements the *verification* half of that protocol in a
+//! This crate implements the verification half of that protocol in a
 //! hash-agnostic, dependency-light way (SHA-256 is used as the production
 //! digest). It is the historical-line culmination of `bitcoin_spv.rs`
-//! (Chaum → hashcash/b-money → Nakamoto → Bitcoin SPV): SPV proves payment
-//! inclusion; NIPoPoW proves *chain superiority* succinctly, which is what a
+//! (Chaum, hashcash and b-money, Nakamoto, Bitcoin SPV): SPV proves payment
+//! inclusion; NIPoPoW proves chain superiority succinctly, which is what a
 //! settlement layer needs to admit a PoW domain's finality.
 //!
-//! # Security assumption (see `mimari/NIHAI_SISTEM_SINIRLARI.md`)
+//! # What a proof is allowed to claim
 //!
-//! Verification is **fail-closed**: any structurally invalid proof is rejected.
-//! The *economic* guarantee — that an adversary with strictly less than 50%
-//! hash-power cannot forge a proof preferred over the honest one — relies on
-//! the honest-chain / <½-PoW assumption. That assumption is an open research
-//! boundary for NIPoPoW-class proofs and is documented, not claimed solved.
+//! A verifier is only as strong as the fields its proof cannot choose. This
+//! crate binds three of them, and each binding was added because a working
+//! adversarial test could break the verifier without it:
+//!
+//! 1. *The interlink is part of the proof of work.* `hash_block` digests the
+//!    interlink together with the parent, the height, the nonce and the level,
+//!    so a pointer that no miner committed to cannot direct a descent.
+//!    Without this an adversary splices a jump into any valid-PoW fork of its
+//!    own making, at a cost of a handful of hashes.
+//! 2. *The trusted anchor is an id and a height.* An anchor that is only an id
+//!    is satisfied by any header that names it as its parent, so one level-1
+//!    header could claim a height of two to the fortieth for two hashes of
+//!    work. `TrustedAnchor` carries both, and the oldest header in the proof
+//!    must be the anchor's immediate child.
+//! 3. *Goodness counts superblocks.* Every accepted header has level at least
+//!    one, so counting level-at-least-one blocks counted the proof's own
+//!    length and made the security parameter vacuous. Goodness is now the
+//!    number of headers at or above `SecurityParams::superblock_level`, and a
+//!    proof may not repeat a header to inflate it.
+//!
+//! # Security assumption
+//!
+//! Verification is fail-closed: any structurally invalid proof is rejected, and
+//! so is any proof that does not satisfy the parameters it is checked against.
+//! The economic guarantee - that an adversary with strictly less than half the
+//! hash power cannot forge a proof preferred over the honest one - rests on the
+//! honest-chain and majority-hash-power assumption. That assumption is an open
+//! research boundary for NIPoPoW-class proofs; it is stated, not claimed solved.
+//!
+//! WIRING: unwired - the crate is the verification half of the NIPoPoW family.
+//! It reaches the network through `src/cross_domain/external/nipopow.rs`, which
+//! is to call these types from an `ExternalFinalityAdapter` implementation.
+//! Until that adapter depends on the crate, every public item here is named
+//! only by this crate's own tests, and `EvidenceEnvelope` carries the family
+//! attestation across the boundary.
 
 pub mod envelope;
 
@@ -31,14 +61,82 @@ use std::collections::BTreeMap;
 /// Fixed 32-byte digest used for block identity, interlink anchors and PoW.
 pub type Hash32 = [u8; 32];
 
+/// Highest difficulty level a header may declare.
+///
+/// A level is a count of leading zero bits over a 32-byte digest, so 256 is the
+/// arithmetic ceiling; the bound is deliberately far below it so that a proof
+/// cannot demand a level no fixture and no caller can produce, and so that the
+/// level fits comfortably inside the interlink vector a header carries.
+pub const MAX_LEVEL: u8 = 32;
+
+/// The block a verifier already trusts, identified by digest *and* height.
+///
+/// The height is not decoration: without it the anchor is a 32-byte string that
+/// any freshly mined header can name as its parent, which makes a claimed
+/// height worthless.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrustedAnchor {
+    /// Digest of the trusted block.
+    pub id: Hash32,
+    /// Height of the trusted block.
+    pub height: u64,
+}
+
+impl TrustedAnchor {
+    /// The chain genesis, whose height is zero by definition.
+    #[must_use]
+    pub const fn genesis(id: Hash32) -> Self {
+        Self { id, height: 0 }
+    }
+}
+
+/// The parameters a proof is checked against.
+///
+/// `m` is the goodness bound: how many superblocks the proof must exhibit at or
+/// above `superblock_level`. The three values are related, and the constructor
+/// refuses every combination that would make the bound vacuous.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SecurityParams {
+    /// Superblocks the proof must carry.
+    pub m: usize,
+    /// Level at which a header counts as a superblock.
+    pub superblock_level: u8,
+    /// Highest level any header in the proof may declare.
+    pub max_level: u8,
+}
+
+impl SecurityParams {
+    /// Build parameters, or `None` when the combination cannot bound anything.
+    ///
+    /// A level-1 header costs two hashes on average, so a superblock level of 1
+    /// would make goodness the proof's length. `m` of zero would be satisfied
+    /// by no proof at all, and `max_level` below the superblock level would make
+    /// the bound unreachable. All three are refused here rather than checked
+    /// again at every call site.
+    #[must_use]
+    pub const fn new(m: usize, superblock_level: u8, max_level: u8) -> Option<Self> {
+        if m == 0 || superblock_level < 2 || superblock_level > max_level || max_level < 2 {
+            return None;
+        }
+        if max_level > MAX_LEVEL {
+            return None;
+        }
+        Some(Self {
+            m,
+            superblock_level,
+            max_level,
+        })
+    }
+}
+
 /// A single proof-of-work header in a NIPoPoW chain.
 #[derive(Clone, Debug)]
 pub struct PowHeader {
-    /// `SHA256(parent || height || nonce || level)` — the PoW commitment.
+    /// The proof-of-work commitment over every other field, interlink included.
     pub id: Hash32,
-    /// Parent header id (the trusted checkpoint for height 0).
+    /// Parent header id (the trusted anchor for the oldest header).
     pub parent: Hash32,
-    /// Chain height (genesis-of-proof = 0).
+    /// Chain height.
     pub height: u64,
     /// Nonce that makes `id` carry `level` leading zero bits.
     pub nonce: u64,
@@ -57,78 +155,73 @@ pub struct NipopowProof {
     pub prefix: Vec<PowHeader>,
     /// Interlink-descent path from just below the prefix down to the anchor.
     pub suffix: Vec<PowHeader>,
-    /// Trusted checkpoint the proof must connect to.
+    /// Digest of the trusted block the descent must reach.
     pub anchor: Hash32,
 }
 
 impl NipopowProof {
-    /// Fail-closed verification of a NIPoPoW proof.
+    /// Fail-closed verification of a NIPoPoW proof against a trusted anchor.
     ///
-    /// `m` is the goodness bound (minimum number of level-≥1 blocks the proof
-    /// must exhibit) and `max_level` the highest difficulty level in the proof.
-    /// Returns `true` only when the proof is (a) internally consistent, (b)
-    /// every header carries valid PoW, (c) the interlink/suffix descends
-    /// without gaps to `anchor`, and (d) it satisfies the goodness bound.
-    pub fn verify(&self, m: usize, max_level: u8) -> bool {
-        let mut all: Vec<&PowHeader> = Vec::new();
-        all.extend(self.prefix.iter());
-        all.extend(self.suffix.iter());
-        if all.is_empty() {
-            return false;
-        }
-        // The contiguous head is the proof: without it there is nothing to
-        // anchor a suffix descent to, and the prefix/suffix junction logic
-        // below indexes prefix[0]. Reject instead of panicking.
+    /// Returns `true` only when every header is committed by its own proof of
+    /// work (interlink included), the prefix is contiguous, the suffix descends
+    /// without gaps, the descent reaches the anchor's immediate child at the
+    /// anchor's height plus one, no header is repeated, and the proof carries at
+    /// least `params.m` superblocks.
+    #[must_use]
+    pub fn verify(&self, anchor: &TrustedAnchor, params: &SecurityParams) -> bool {
+        // The head is what a settlement claim is about: a proof with no prefix
+        // describes no head, and the junction logic below indexes prefix[0].
         if self.prefix.is_empty() {
             return false;
         }
 
-        // (a) PoW validity for every header.
+        let mut all: Vec<&PowHeader> = Vec::with_capacity(self.prefix.len() + self.suffix.len());
+        all.extend(self.prefix.iter());
+        all.extend(self.suffix.iter());
+
+        // (a) Every header is committed by its own proof of work. The digest
+        //     covers the interlink, so a spliced pointer is not a free parameter.
+        let mut seen: BTreeMap<Hash32, ()> = BTreeMap::new();
         for h in &all {
-            if h.level == 0 || h.level > max_level {
+            if h.level == 0 || h.level > params.max_level {
                 return false;
             }
-            if leading_zero_bits(&h.id) < h.level as u32 {
-                return false;
-            }
-            if hash_block(&h.parent, h.height, h.nonce, h.level) != h.id {
-                return false;
-            }
-            // Interlink length must cover the declared level.
             if h.interlink.len() != h.level as usize {
                 return false;
             }
+            if leading_zero_bits(&h.id) < u32::from(h.level) {
+                return false;
+            }
+            if hash_header(h) != h.id {
+                return false;
+            }
+            // A chain cannot contain the same block twice, and a repeated
+            // superblock would otherwise pay for goodness more than once.
+            if seen.insert(h.id, ()).is_some() {
+                return false;
+            }
         }
 
-        // (b) prefix contiguity.
+        // (b) Prefix contiguity.
         for w in 1..self.prefix.len() {
             let prev = &self.prefix[w - 1];
             let cur = &self.prefix[w];
-            if cur.height != prev.height + 1 {
-                return false;
-            }
-            if cur.parent != prev.id {
+            if cur.height != prev.height + 1 || cur.parent != prev.id {
                 return false;
             }
         }
 
-        // (c) junction between prefix and suffix.
-        if self.suffix.is_empty() {
-            // The whole chain is the proof: must start at the anchor.
-            if self.prefix[0].parent != self.anchor {
-                return false;
-            }
-        } else {
-            if self.prefix[0].parent != self.suffix[0].id {
-                return false;
-            }
-            if self.prefix[0].height != self.suffix[0].height + 1 {
+        // (c) Junction between prefix and suffix.
+        if let Some(first_suffix) = self.suffix.first() {
+            if self.prefix[0].parent != first_suffix.id
+                || self.prefix[0].height != first_suffix.height + 1
+            {
                 return false;
             }
         }
 
-        // (d) suffix descent: each step is either contiguous or a valid
-        //     interlink jump to a strictly lower, sufficiently-levelled ancestor.
+        // (d) Suffix descent: each step is either the contiguous parent or an
+        //     interlink pointer this header's own digest committed to.
         for w in 1..self.suffix.len() {
             let up = &self.suffix[w - 1];
             let down = &self.suffix[w];
@@ -137,14 +230,11 @@ impl NipopowProof {
             }
             let contiguous = down.id == up.parent;
             let mut interlink_ok = false;
-            for (k, ptr) in up.interlink.iter().enumerate() {
-                if *ptr == down.id {
-                    // The pointed ancestor must satisfy the interlink contract:
-                    // strictly lower and levelled >= k+1. A forged pointer to a
-                    // header not carried in the proof cannot satisfy this because
-                    // `down` is an actual proof header, so any mismatch fails
-                    // closed (it would also fail the contiguous check).
-                    if down.level as usize > k && down.height < up.height {
+            if !contiguous {
+                for (k, ptr) in up.interlink.iter().enumerate() {
+                    // A zero pointer is "no ancestor at this level", never a
+                    // jump target, and the committed level must reach the slot.
+                    if *ptr != [0u8; 32] && *ptr == down.id && down.level as usize > k {
                         interlink_ok = true;
                         break;
                     }
@@ -155,23 +245,27 @@ impl NipopowProof {
             }
         }
 
-        // (e) the descent must reach the trusted anchor.
-        if let Some(bottom) = self.suffix.last() {
-            if bottom.parent != self.anchor {
-                return false;
-            }
-        } else if self.prefix[0].parent != self.anchor {
+        // (e) The descent reaches the anchor: the oldest header in the proof is
+        //     the anchor's immediate child, at the anchor's height plus one.
+        let oldest = self.suffix.last().unwrap_or(&self.prefix[0]);
+        if oldest.parent != anchor.id {
+            return false;
+        }
+        if oldest.height != anchor.height.saturating_add(1) {
             return false;
         }
 
-        // (f) goodness bound: enough level-≥1 blocks to defeat an adversary
-        //     with strictly less than 50% hash-power (NIPoPoW security).
-        let level1 = all.iter().filter(|h| h.level >= 1).count();
-        level1 >= m
+        // (f) Goodness: superblocks the proof actually exhibits.
+        let superblocks = all
+            .iter()
+            .filter(|h| h.level >= params.superblock_level)
+            .count();
+        superblocks >= params.m
     }
 }
 
 /// Count leading zero bits of a 32-byte digest (from the MSB).
+#[must_use]
 pub fn leading_zero_bits(h: &Hash32) -> u32 {
     let mut bits = 0u32;
     for &byte in h {
@@ -185,41 +279,75 @@ pub fn leading_zero_bits(h: &Hash32) -> u32 {
     bits
 }
 
-/// `SHA256(parent || height(LE u64) || nonce(LE u64) || level(u8))`.
-pub fn hash_block(parent: &Hash32, height: u64, nonce: u64, level: u8) -> Hash32 {
+/// `SHA256(parent || height || nonce || level || interlink_len || interlink)`.
+///
+/// Integers are little-endian and the interlink is length-prefixed, so the
+/// encoding is unambiguous: an empty interlink and a one-element interlink of
+/// zeros digest differently.
+#[must_use]
+pub fn hash_block(
+    parent: &Hash32,
+    height: u64,
+    nonce: u64,
+    level: u8,
+    interlink: &[Hash32],
+) -> Hash32 {
     let mut hasher = Sha256::new();
     hasher.update(parent);
     hasher.update(height.to_le_bytes());
     hasher.update(nonce.to_le_bytes());
     hasher.update([level]);
+    let count = u32::try_from(interlink.len()).unwrap_or(u32::MAX);
+    hasher.update(count.to_le_bytes());
+    for pointer in interlink {
+        hasher.update(pointer);
+    }
     let out = hasher.finalize();
     let mut id = [0u8; 32];
     id.copy_from_slice(&out);
     id
 }
 
-/// Mine a header at `level` (requires `level` leading zero bits) atop `parent`.
-fn mine(parent: &Hash32, height: u64, level: u8) -> PowHeader {
+/// The proof-of-work commitment of a whole header.
+#[must_use]
+pub fn hash_header(header: &PowHeader) -> Hash32 {
+    hash_block(
+        &header.parent,
+        header.height,
+        header.nonce,
+        header.level,
+        &header.interlink,
+    )
+}
+
+/// Mine a header at `level` (requires `level` leading zero bits) atop `parent`,
+/// committing to the given interlink.
+///
+/// The interlink must be known before mining: it is part of what the work
+/// commits to, which is the whole reason a descent cannot be redirected.
+fn mine_header(parent: &Hash32, height: u64, level: u8, interlink: Vec<Hash32>) -> PowHeader {
     let mut nonce: u64 = 0;
     loop {
-        let id = hash_block(parent, height, nonce, level);
-        if leading_zero_bits(&id) >= level as u32 {
-            // Interlink is filled in by the builder once the ancestor map exists.
+        let id = hash_block(parent, height, nonce, level, &interlink);
+        if leading_zero_bits(&id) >= u32::from(level) {
             return PowHeader {
                 id,
                 parent: *parent,
                 height,
                 nonce,
                 level,
-                interlink: vec![[0u8; 32]; level as usize],
+                interlink,
             };
         }
         nonce = nonce.wrapping_add(1);
     }
 }
 
-/// Incremental builder of a NIPoPoW chain used by tests and (in production)
-/// by the prover side.
+/// Incremental builder of a NIPoPoW chain used by tests and by the prover side.
+///
+/// The anchor is the genesis the chain is built on: the first header is at
+/// height one and names the anchor as its parent, which is exactly the shape
+/// [`NipopowProof::verify`] requires.
 pub struct ChainBuilder {
     anchor: Hash32,
     headers: Vec<PowHeader>,
@@ -228,6 +356,8 @@ pub struct ChainBuilder {
 }
 
 impl ChainBuilder {
+    /// A builder whose genesis is `anchor` at height zero.
+    #[must_use]
     pub fn new(anchor: Hash32) -> Self {
         Self {
             anchor,
@@ -238,43 +368,56 @@ impl ChainBuilder {
 
     /// Append a mined header at `level`. Returns its id.
     pub fn push(&mut self, level: u8) -> Hash32 {
-        let height = self.headers.len() as u64;
-        let parent = if self.headers.is_empty() {
-            self.anchor
-        } else {
-            self.headers[height as usize - 1].id
-        };
-        let mut header = mine(&parent, height, level);
+        let height = self.headers.len() as u64 + 1;
+        let parent = self.headers.last().map_or(self.anchor, |header| header.id);
 
-        // Fill the interlink: for each k in 0..level, point to the closest
-        // proper ancestor with level >= k+1 (the value before we update it).
-        for k in 0..level as usize {
-            let mu = (k + 1) as u8;
-            if let Some(&aid) = self.last_at_level.get(&mu) {
-                header.interlink[k] = aid;
-            } else {
-                header.interlink[k] = [0u8; 32];
+        // The interlink contract says "closest proper ancestor at level k+1",
+        // so a level-3 header fills the level-1 and level-2 slots as well. Using
+        // the exact-level map only would leave holes a descent must then cross
+        // one parent link at a time, which is what made honest proofs long.
+        let mut interlink = vec![[0u8; 32]; usize::from(level)];
+        for (k, slot) in interlink.iter_mut().enumerate() {
+            let mu = u8::try_from(k + 1).unwrap_or(u8::MAX);
+            if let Some(ancestor) = self.last_at_level.get(&mu) {
+                *slot = *ancestor;
             }
         }
+
+        let header = mine_header(&parent, height, level, interlink);
         let id = header.id;
-        self.last_at_level.insert(level, id);
+        for mu in 1..=level {
+            self.last_at_level.insert(mu, id);
+        }
         self.headers.push(header);
         id
     }
 
+    /// The headers mined so far, ascending by height.
+    #[must_use]
     pub fn headers(&self) -> &[PowHeader] {
         &self.headers
     }
 
+    /// Digest of the head, or the anchor when nothing is mined yet.
+    #[must_use]
     pub fn head(&self) -> Hash32 {
-        self.headers.last().map(|h| h.id).unwrap_or(self.anchor)
+        self.headers.last().map_or(self.anchor, |header| header.id)
     }
 
+    /// Digest of the genesis the chain was built on.
+    #[must_use]
     pub fn anchor(&self) -> Hash32 {
         self.anchor
     }
 
+    /// The trusted anchor this chain is verified against.
+    #[must_use]
+    pub fn trusted_anchor(&self) -> TrustedAnchor {
+        TrustedAnchor::genesis(self.anchor)
+    }
+
     /// Build a succinct proof of `m` goodness from the current head.
+    #[must_use]
     pub fn build_proof(&self, m: usize) -> NipopowProof {
         let total = self.headers.len();
         let k = (3 * m).min(total);
@@ -288,19 +431,16 @@ impl ChainBuilder {
             let mut cur = &self.headers[prefix_start - 1];
             loop {
                 suffix.push(cur.clone());
-                if cur.height == 0 {
+                if cur.height == 1 {
                     break;
                 }
                 // Follow the highest available interlink level (velvet descent).
                 let mut next: Option<&PowHeader> = None;
                 for lvl in (1..=cur.level as usize).rev() {
-                    let idx = lvl - 1;
-                    if idx < cur.interlink.len() {
-                        if let Some(n) = by_id.get(&cur.interlink[idx]) {
-                            if n.height < cur.height {
-                                next = Some(n);
-                                break;
-                            }
+                    if let Some(n) = by_id.get(&cur.interlink[lvl - 1]) {
+                        if n.height < cur.height {
+                            next = Some(n);
+                            break;
                         }
                     }
                 }
@@ -331,31 +471,46 @@ mod tests {
 
     #[test]
     fn mined_header_carries_requested_level() {
-        let mut b = ChainBuilder::new([0u8; 32]);
-        let id = b.push(3);
-        let h = &b.headers()[0];
-        assert_eq!(h.level, 3);
-        assert_eq!(h.id, id);
-        // Mining requires `>= level` leading zero bits, so the digest may carry
-        // more than exactly `level` (a higher-difficulty block still satisfies
-        // a lower level) — assert the bound, not an exact count.
-        assert!(leading_zero_bits(&h.id) >= 3);
+        let mut builder = ChainBuilder::new([0u8; 32]);
+        let id = builder.push(3);
+        let header = &builder.headers()[0];
+        assert_eq!(header.level, 3);
+        assert_eq!(header.id, id);
+        assert!(leading_zero_bits(&header.id) >= 3);
+        assert_eq!(header.height, 1);
     }
 
     #[test]
     fn interlink_points_to_closest_higher_ancestor() {
-        let mut b = ChainBuilder::new([0u8; 32]);
-        // levels: 1,2,1,3 -> index 3 is level 3.
-        b.push(1);
-        b.push(2);
-        b.push(1);
-        b.push(3);
-        let h3 = &b.headers()[3];
-        // interlink[2] (mu=3) must point to the closest level>=3 ancestor: none
-        // before it, so it is zero; interlink[1] (mu=2) points to header index 1
-        // (the level-2 ancestor); interlink[0] (mu=1) points to header index 2.
-        assert_eq!(h3.interlink[2], [0u8; 32]);
-        assert_eq!(h3.interlink[1], b.headers()[1].id);
-        assert_eq!(h3.interlink[0], b.headers()[2].id);
+        let mut builder = ChainBuilder::new([0u8; 32]);
+        // Levels 1, 2, 1, 3: the level-3 header at index 3 must fill every slot
+        // with the closest ancestor that reaches that level.
+        builder.push(1);
+        builder.push(2);
+        builder.push(1);
+        builder.push(3);
+        let header = &builder.headers()[3];
+        assert_eq!(header.interlink[2], [0u8; 32]);
+        assert_eq!(header.interlink[1], builder.headers()[1].id);
+        assert_eq!(header.interlink[0], builder.headers()[2].id);
+    }
+
+    #[test]
+    fn hash_commits_to_the_interlink() {
+        let parent = [3u8; 32];
+        let empty = hash_block(&parent, 4, 9, 1, &[]);
+        let zero_pointer = hash_block(&parent, 4, 9, 1, &[[0u8; 32]]);
+        let real_pointer = hash_block(&parent, 4, 9, 1, &[[7u8; 32]]);
+        assert_ne!(empty, zero_pointer);
+        assert_ne!(zero_pointer, real_pointer);
+    }
+
+    #[test]
+    fn vacuous_parameters_are_refused() {
+        assert!(SecurityParams::new(0, 2, 8).is_none());
+        assert!(SecurityParams::new(4, 1, 8).is_none());
+        assert!(SecurityParams::new(4, 5, 4).is_none());
+        assert!(SecurityParams::new(4, 2, 33).is_none());
+        assert!(SecurityParams::new(4, 2, 8).is_some());
     }
 }

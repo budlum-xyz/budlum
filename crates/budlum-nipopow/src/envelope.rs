@@ -2,7 +2,7 @@
 //!
 //! Every external-family verifier in this repository eventually emits one kind
 //! of object for the settlement layer to ingest: a *finality evidence
-//! envelope* — who vouches for which header of which chain at which height,
+//! envelope*: who vouches for which header of which chain at which height,
 //! plus an opaque family attestation. The envelope is the only thing the
 //! aggregation/settlement path must understand; the family attestation is
 //! decoded by the family adapter, never by the envelope codec.
@@ -26,8 +26,12 @@
 //! Encoding is deterministic: the same envelope always encodes to the same
 //! bytes, so envelopes can be hashed, chained and stored content-addressed.
 //! Decoding is fail-closed: any deviation from the layout, any zeroed
-//! mandatory field, any tag mismatch is a typed rejection — never a panic,
+//! mandatory field, any tag mismatch is a typed rejection, never a panic,
 //! never a best-effort repair.
+//!
+//! WIRING: unwired - the codec is the shared container every family adapter will
+//! emit. It is called from `src/cross_domain/external/` once an adapter depends
+//! on this crate; until then its items are named only by its own tests.
 
 use sha2::{Digest, Sha256};
 use std::fmt;
