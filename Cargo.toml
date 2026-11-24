@@ -293,6 +293,10 @@ name = "garden_scenario"
 path = "tests/garden/garden_scenario.rs"
 
 [[test]]
+name = "garden_acceptance"
+path = "tests/garden/garden_acceptance.rs"
+
+[[test]]
 name = "garden_nat"
 path = "tests/garden/garden_nat.rs"
 
