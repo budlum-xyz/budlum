@@ -89,6 +89,15 @@ jobs:
       # the artifact carries the Sigstore attestation alone, which is stated in
       # the log instead of being skipped silently.
       - name: Sign the SBOM with SLH-DSA-SHAKE-256s
+        # The seed is the release signing key: a stored repository secret whose
+        # blast radius is the release, not the run. An `environment:` would put
+        # the protection in settings this file cannot read or test, so the
+        # guard is written here and it is a ref: only the default branch may
+        # reach it. A dispatch on any other ref skips the step, and the
+        # artifact step below then carries the Sigstore attestation alone
+        # (`if-no-files-found: warn`), which is exactly what it already did
+        # when the secret was unset.
+        if: github.ref == 'refs/heads/main'
         env:
           PQ_RELEASE_SEED: ${{ secrets.PQ_RELEASE_SEED }}
         run: |

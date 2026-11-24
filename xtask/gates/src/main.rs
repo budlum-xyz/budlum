@@ -192,6 +192,7 @@ mod gates {
     pub mod seals_move_with_their_tree;
     pub mod security_parameters;
     pub mod security_quality_wired;
+    pub mod secret_scopes_are_guarded;
     pub mod security_scans_can_fail;
     pub mod self_derived_ids_cover_every_field;
     pub mod self_interrogation;
@@ -266,6 +267,14 @@ struct Gate {
 }
 
 const GATES: &[Gate] = &[
+    Gate {
+        name: "secret-scopes-are-guarded",
+        replaces: None,
+        run: gates::secret_scopes_are_guarded::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::secret_scopes_are_guarded::self_test,
+    },
     Gate {
         name: "zkvm-refuses-untrusted-proofs",
         replaces: None,
