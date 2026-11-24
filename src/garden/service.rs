@@ -451,17 +451,29 @@ impl GardenService {
         let qr = invite.qr_content()?;
         // The record says the same thing the line says and more: who
         // opened the door, until when, and for how many.
-        let record = handle.record().await?;
-        Ok(json!({
-            "invite": link,
-            "qr": qr,
-            "record": record.to_link(),
-            "record_qr": record.to_qr(None)?,
-            "owner": hex::encode(record.owner),
-            "host": hex::encode(record.host),
-            "expires_at_ms": record.expires_at_ms,
-            "uses": record.uses,
-        }))
+        //
+        // The line is what every caller already relies on, so a record
+        // this node cannot build does not take the invite down with it.
+        // The reason is reported rather than swallowed: an address long
+        // enough to push the record past its ceiling is a thing an
+        // operator has to be able to see.
+        let mut answer = json!({ "invite": link, "qr": qr });
+        match handle.record().await {
+            Ok(record) => {
+                let fields = &mut answer;
+                fields["record"] = json!(record.to_link());
+                fields["record_qr"] = json!(record.to_qr(None)?);
+                fields["owner"] = json!(hex::encode(record.owner));
+                fields["host"] = json!(hex::encode(record.host));
+                fields["expires_at_ms"] = json!(record.expires_at_ms);
+                fields["uses"] = json!(record.uses);
+            }
+            Err(reason) => {
+                answer["record"] = Value::Null;
+                answer["record_refused"] = json!(reason);
+            }
+        }
+        Ok(answer)
     }
 
     /// Read an invite record and say what is inside it.

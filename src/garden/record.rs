@@ -654,6 +654,27 @@ mod tests {
     }
 
     #[test]
+    fn an_address_too_long_for_the_record_is_refused_not_half_written() {
+        // One address can be long enough that nothing is left to put in
+        // the record. The record says so instead of handing out a link
+        // with no address in it, and the caller keeps the older line.
+        let huge = format!("/dns4/{}/tcp/30333", "a".repeat(200));
+        let refused = GardenRecord::issue(
+            CHAIN,
+            [0xab; 32],
+            [0xcd; 32],
+            key(9).public_key_bytes(),
+            vec![huge],
+            NOW,
+            DEFAULT_RECORD_TTL_MS,
+            5,
+            &key(1),
+        );
+        let refusal = refused.unwrap_err();
+        assert!(refusal.contains("nowhere to knock"), "{refusal}");
+    }
+
+    #[test]
     fn a_record_with_nowhere_to_knock_is_refused() {
         let nowhere = GardenRecord::issue(
             CHAIN,
