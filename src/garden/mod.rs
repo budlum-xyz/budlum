@@ -75,15 +75,13 @@ pub(crate) use types::is_garden_domain_id;
 pub fn self_test_object_round_trip() -> Result<(), String> {
     // Big enough to become more than one symbol, small enough that a
     // phone finishes it well inside the fifteen seconds section 4 allows.
-    let object: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
-    // `open` is the tests-only shortcut; production carries its own ceiling,
-    // so this takes the ceiling the Garden itself uses.
-    let mut store = storage::GardenContentStore::open_with_limit(
-        None,
-        1 << 20,
-        storage::MAX_LOCAL_GARDEN_BYTES,
-    )
-    .map_err(|e| format!("the object store did not open: {e}"))?;
+    let object: Vec<u8> = (0..8192u32)
+        .map(|i| u8::try_from(i % 251).unwrap_or_default())
+        .collect();
+    // In memory, and with a ceiling a phone can hold: the coded symbols of
+    // an 8 KiB object fit many times over inside four mebibytes.
+    let mut store = storage::GardenContentStore::open_with_limit(None, 1 << 20, 4 << 20)
+        .map_err(|e| format!("the object store did not open: {e}"))?;
     let content_id = store
         .put(&object)
         .map_err(|e| format!("the object was not stored: {e}"))?;
