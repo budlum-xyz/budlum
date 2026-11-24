@@ -735,8 +735,17 @@ mod tests {
 
     #[test]
     fn comments_do_not_read_as_variants() {
+        // The same pipeline `run` uses: strip first, then locate, then split.
+        // A reader that skipped the strip would see the doc comment's commas as
+        // variant separators, so the assertion is on the stripped text.
         let spec = spec_fixture(false);
-        let body = block_after(&spec, "enum AdapterSpec").expect("body");
+        let stripped = strip_comments(&spec);
+        assert_eq!(stripped.len(), spec.len(), "the stripper must keep offsets");
+        assert!(
+            !stripped.contains("angle brackets"),
+            "comment text must be gone"
+        );
+        let body = block_after(&stripped, "enum AdapterSpec").expect("body");
         let names = variant_names(body).expect("names");
         assert_eq!(names, vec!["First", "Second"]);
         assert_eq!(discriminant_text("Alpha = 0,"), Some("0"));

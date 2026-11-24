@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: e9da5fda2772aabc2c327795bc4c1ea11d3313818829107319b0a0bbb6dcd00a
+digest: c6d5563c1b002bf579c5d019e2ade248a9c8a7f3a586c809f73bcaf81e49aa2e
 files: 197
 Cargo.lock	7e8ca4b31fc0795bb139134686126f1d552e1e75e9ffbc2089fbc52944a48a1f
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
@@ -68,7 +68,7 @@ src/gates/evidence_provenance.rs	68c9d4a6bd85f6ee31f13641158658d887fa856114c4ef6
 src/gates/exact_named_tests.rs	5d06b1cfdae90e6866d4189d95aacea8c642a770856acd071d4c52afc8e6e298
 src/gates/explorer_parity.rs	12d664eaebb46a2dc484197d4d2b99477b82a6e3ddb6d8e57de05bb0cba25f90
 src/gates/explorer_patchset.rs	21f40d70534cb98a9741b516b07a822c3efadea913130d95b83ba4736107e233
-src/gates/finality_acceptance_surface_is_append_only.rs	f6ad51c7a5d3cc5b1b9a1de8fa59e96e63e86b8085fd010867d0304396cdbd7e
+src/gates/finality_acceptance_surface_is_append_only.rs	86b0eb0e77a54a851f27f607a1f2d327a49b0cf4ab1c0adc4a1a822cacde9cff
 src/gates/fixture_integrity.rs	5a78c66a7907b0b48492cf9db521c687fd636ef41525d0b428cd77a0dce525ab
 src/gates/forgery_tests.rs	a858fb319c8dde7e002e9fb9f7ebcda2861064e90f5a664786a9958e120cce88
 src/gates/fork_choice_gate.rs	6271b7d077801fd39698c6b8f7ed3259ef1fd8aedcd2f9acb919d30c819df5a7
