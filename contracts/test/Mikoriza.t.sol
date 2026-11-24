@@ -312,3 +312,165 @@ contract MikorizaTest is Harness {
         assertTrue(!registrar.wasBound(validator, OPERATOR, hex"ff"), "a key never bound is not");
     }
 }
+
+/// @notice Minimal allocation manager: membership and one strategy of stake.
+contract HookAllocationManager is IAllocationManager {
+    mapping(address => bool) public members;
+    mapping(address => uint256) public stake;
+
+    function setMember(address operator, uint256 amount) external {
+        members[operator] = true;
+        stake[operator] = amount;
+    }
+
+    function getMinimumSlashableStake(OperatorSet memory, address[] memory operators, address[] memory strategies, uint32)
+        external
+        view
+        returns (uint256[][] memory out)
+    {
+        out = new uint256[][](operators.length);
+        for (uint256 i = 0; i < operators.length; i++) {
+            out[i] = new uint256[](strategies.length);
+            out[i][0] = stake[operators[i]];
+        }
+    }
+
+    function isMemberOfOperatorSet(address operator, OperatorSet memory) external view returns (bool) {
+        return members[operator];
+    }
+
+    function slashOperator(address, SlashingParams calldata params)
+        external
+        view
+        returns (uint256, uint256[] memory shares)
+    {
+        shares = new uint256[](params.strategies.length);
+        return (1, shares);
+    }
+}
+
+/// @notice The production registrar with the BLS-gated `bind` opened for tests:
+///         the Cancun profile has no EIP-2537 precompile, so the binding step
+///         itself is covered by `the main registrar suite`.
+contract HookRegistrarHarness is BudlumRegistrar {
+    constructor(IAllocationManager manager, address[] memory strategies_)
+        BudlumRegistrar(manager, 1, strategies_, 45_261, keccak256("generator"), 1e17)
+    {}
+
+    function forceBind(address operator, bytes32 validator, bytes memory compressedKey) external {
+        bytes32 row = bindingKey(validator, operator);
+        bindings[row] = Binding({operator: operator, compressedKey: compressedKey, uncompressedKey: hex"01"});
+        boundKeys[row][keccak256(hex"01")] = true;
+        validatorOf[operator] = validator;
+    }
+}
+
+/// @notice The AVS hooks and allocation readers of `BudlumRegistrar` had no
+///         test in `the main registrar suite`. This file locks their refusal surface:
+///         every test is a boundary a caller can reach, and each is either a
+///         refusal or a saturation - never a silent success.
+contract RegistrarHooksTest is Harness {
+    HookAllocationManager internal manager;
+    HookRegistrarHarness internal registrar;
+
+    function setUp() public {
+        manager = new HookAllocationManager();
+        address[] memory strategies = new address[](1);
+        strategies[0] = address(0xBEEF);
+        registrar = new HookRegistrarHarness(manager, strategies);
+    }
+
+    // ---------------------------------------------------------------- hooks
+
+    function test_register_hook_refuses_every_caller_but_the_allocation_manager() public {
+        vm.prank(address(0xA11CE));
+        vm.expectRevert(bytes("registrar hook"));
+        registrar.registerOperator(address(0xA11CE), address(registrar), new uint32[](0), hex"");
+    }
+
+    function test_register_hook_refuses_a_foreign_avs() public {
+        vm.prank(address(manager));
+        vm.expectRevert(bytes("registrar hook"));
+        registrar.registerOperator(address(0xA11CE), address(0xBAD), new uint32[](0), hex"");
+    }
+
+    function test_register_hook_accepts_the_allocation_manager_for_this_avs() public {
+        vm.prank(address(manager));
+        registrar.registerOperator(address(0xA11CE), address(registrar), new uint32[](0), hex"");
+    }
+
+    function test_deregister_hook_refuses_every_caller_but_the_allocation_manager() public {
+        vm.prank(address(0xA11CE));
+        vm.expectRevert(bytes("registrar hook"));
+        registrar.deregisterOperator(address(0xA11CE), address(registrar), new uint32[](0));
+    }
+
+    function test_deregister_hook_refuses_a_foreign_avs() public {
+        vm.prank(address(manager));
+        vm.expectRevert(bytes("registrar hook"));
+        registrar.deregisterOperator(address(0xA11CE), address(0xBAD), new uint32[](0));
+    }
+
+    function test_deregister_hook_accepts_the_allocation_manager_for_this_avs() public {
+        vm.prank(address(manager));
+        registrar.deregisterOperator(address(0xA11CE), address(registrar), new uint32[](0));
+    }
+
+    function test_supports_avs_is_true_only_for_this_registrar() public view {
+        assertTrue(registrar.supportsAVS(address(registrar)), "this AVS must be supported");
+        assertTrue(!registrar.supportsAVS(address(0xBAD)), "a foreign AVS must not be supported");
+    }
+
+    // ------------------------------------------------------- allocation math
+
+    /// A stake above `uint64::MAX` gwei must saturate, not revert and not wrap:
+    /// a revert here would let one whale operator stall every report.
+    function test_allocated_units_saturate_above_u64() public {
+        manager.setMember(address(0xA11CE), type(uint256).max);
+        assertEq(registrar.allocatedUnits(address(0xA11CE)), uint256(type(uint64).max), "must saturate");
+    }
+
+    function test_allocated_units_are_zero_for_a_non_member() public view {
+        assertEq(registrar.allocatedUnits(address(0xA11CE)), 0, "non-member has no units");
+    }
+
+    // ------------------------------------------------------ report allocation
+
+    function test_report_allocation_refuses_an_unbound_operator() public {
+        manager.setMember(address(0xA11CE), 1e18);
+        vm.expectPartialRevert(BudlumRegistrar.NotBound.selector);
+        registrar.reportAllocation(address(0xA11CE));
+    }
+
+    function test_report_allocation_is_permissionless_and_emits_the_true_allocation() public {
+        manager.setMember(address(0xA11CE), 7_000_000_000);
+        registrar.forceBind(address(0xA11CE), keccak256("validator"), hex"01");
+
+        uint64 expectedEpoch = uint64(block.number);
+        vm.prank(address(0xBAD));
+        uint64 units = registrar.reportAllocation(address(0xA11CE));
+        assertEq(units, 7, "units must be the true allocation in gwei");
+        assertEq(
+            registrar.lastReportedBlock(address(0xA11CE)),
+            uint256(expectedEpoch),
+            "the report must be stamped with the observed epoch"
+        );
+    }
+
+    function test_report_allocation_refuses_a_second_report_in_the_same_block() public {
+        manager.setMember(address(0xA11CE), 1e18);
+        registrar.forceBind(address(0xA11CE), keccak256("validator"), hex"01");
+        registrar.reportAllocation(address(0xA11CE));
+
+        vm.expectPartialRevert(BudlumRegistrar.AlreadyReported.selector);
+        registrar.reportAllocation(address(0xA11CE));
+    }
+
+    function test_report_allocation_accepts_a_report_in_a_later_block() public {
+        manager.setMember(address(0xA11CE), 1e18);
+        registrar.forceBind(address(0xA11CE), keccak256("validator"), hex"01");
+        registrar.reportAllocation(address(0xA11CE));
+        vm.roll(block.number + 1);
+        registrar.reportAllocation(address(0xA11CE));
+    }
+}
