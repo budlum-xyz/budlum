@@ -23,8 +23,10 @@
 //! the honest-chain / <½-PoW assumption. That assumption is an open research
 //! boundary for NIPoPoW-class proofs and is documented, not claimed solved.
 
+pub mod envelope;
+
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Fixed 32-byte digest used for block identity, interlink anchors and PoW.
 pub type Hash32 = [u8; 32];
@@ -72,6 +74,12 @@ impl NipopowProof {
         all.extend(self.prefix.iter());
         all.extend(self.suffix.iter());
         if all.is_empty() {
+            return false;
+        }
+        // The contiguous head is the proof: without it there is nothing to
+        // anchor a suffix descent to, and the prefix/suffix junction logic
+        // below indexes prefix[0]. Reject instead of panicking.
+        if self.prefix.is_empty() {
             return false;
         }
 
@@ -136,7 +144,7 @@ impl NipopowProof {
                     // header not carried in the proof cannot satisfy this because
                     // `down` is an actual proof header, so any mismatch fails
                     // closed (it would also fail the contiguous check).
-                    if down.level as usize >= k + 1 && down.height < up.height {
+                    if down.level as usize > k && down.height < up.height {
                         interlink_ok = true;
                         break;
                     }
@@ -216,7 +224,7 @@ pub struct ChainBuilder {
     anchor: Hash32,
     headers: Vec<PowHeader>,
     /// Most recent header id seen at each level (1-indexed by level).
-    last_at_level: HashMap<u8, Hash32>,
+    last_at_level: BTreeMap<u8, Hash32>,
 }
 
 impl ChainBuilder {
@@ -224,7 +232,7 @@ impl ChainBuilder {
         Self {
             anchor,
             headers: Vec::new(),
-            last_at_level: HashMap::new(),
+            last_at_level: BTreeMap::new(),
         }
     }
 
@@ -259,10 +267,7 @@ impl ChainBuilder {
     }
 
     pub fn head(&self) -> Hash32 {
-        self.headers
-            .last()
-            .map(|h| h.id)
-            .unwrap_or(self.anchor)
+        self.headers.last().map(|h| h.id).unwrap_or(self.anchor)
     }
 
     pub fn anchor(&self) -> Hash32 {
@@ -276,8 +281,7 @@ impl ChainBuilder {
         let prefix_start = total - k;
         let prefix: Vec<PowHeader> = self.headers[prefix_start..].to_vec();
 
-        let by_id: HashMap<Hash32, &PowHeader> =
-            self.headers.iter().map(|h| (h.id, h)).collect();
+        let by_id: BTreeMap<Hash32, &PowHeader> = self.headers.iter().map(|h| (h.id, h)).collect();
 
         let mut suffix: Vec<PowHeader> = Vec::new();
         if prefix_start > 0 {

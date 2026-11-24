@@ -3,7 +3,7 @@
 //! the crate API they import does not compile until `src/lib.rs` lands, which
 //! is the "breaking test" that must precede every new behavior.
 
-use budlum_nipopow::{ChainBuilder, Hash32, PowHeader, leading_zero_bits};
+use budlum_nipopow::{leading_zero_bits, ChainBuilder, Hash32, PowHeader};
 
 fn anchor() -> Hash32 {
     [0xaa; 32]
@@ -14,7 +14,13 @@ fn anchor() -> Hash32 {
 fn build_chain(n: usize) -> ChainBuilder {
     let mut b = ChainBuilder::new(anchor());
     for i in 0..n {
-        let level = if i % 7 == 0 { 3 } else if i % 3 == 0 { 2 } else { 1 };
+        let level = if i % 7 == 0 {
+            3
+        } else if i % 3 == 0 {
+            2
+        } else {
+            1
+        };
         b.push(level);
     }
     b
@@ -60,7 +66,10 @@ fn broken_interlink_is_rejected() {
     // The step from suffix[0] down to suffix[1] is an interlink jump (not a
     // contiguous parent link). Corrupt every interlink pointer of suffix[0] so
     // that descent can no longer be validated; it must fail closed.
-    assert!(proof.suffix.len() > 1, "suffix must contain an interlink step");
+    assert!(
+        proof.suffix.len() > 1,
+        "suffix must contain an interlink step"
+    );
     if let Some(first) = proof.suffix.first_mut() {
         for p in first.interlink.iter_mut() {
             *p = [0x99; 32];
@@ -118,5 +127,8 @@ fn prefix_must_be_contiguous_and_connected() {
         hdr.parent = [0x55; 32];
         proof.prefix[1] = hdr;
     }
-    assert!(!proof.verify(6, 3), "non-contiguous prefix must be rejected");
+    assert!(
+        !proof.verify(6, 3),
+        "non-contiguous prefix must be rejected"
+    );
 }
