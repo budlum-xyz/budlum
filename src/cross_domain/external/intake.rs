@@ -238,6 +238,69 @@ pub enum AdapterSpec {
         #[serde(default)]
         anchor: Option<crate::cross_domain::external::bitvm_covenant::PinnedBitVmAnchor>,
     },
+    /// `Solana Tower-BFT` epoch-slot finality bound to a governance-pinned
+    /// epoch. APPENDED LAST (tag `10`).
+    SolanaTowerBft {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch>,
+    },
+    /// `Proof-of-Space+VDF` plot-chain finality bound to a governance-pinned
+    /// anchor. APPENDED LAST (tag `11`).
+    PoSpaceVdf {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::pospace_vdf::PinnedPoSpaceAnchor>,
+    },
+    /// `Aptos Jolteon/Dumbo-NG` epoch-BFT finality bound to a governance-pinned
+    /// epoch state. APPENDED LAST (tag `12`).
+    AptosJolteonBft {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::aptos_jolteon_bft::PinnedJolteonEpochState>,
+    },
+    /// `Near Doomslug` epoch block-producer finality bound to a
+    /// governance-pinned epoch. APPENDED LAST (tag `13`).
+    NearDoomslugBft {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::near_doomslug::PinnedNearEpoch>,
+    },
+    /// ChainKey NI DKG subnet root finality bound to a governance-pinned
+    /// chain-key root. APPENDED LAST (tag `14`).
+    ChainKeyNiDkg {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::chain_key_ni_dkg::PinnedChainKeyRoot>,
+    },
+    /// `GhostDAG PoW` blue-work finality bound to a governance-pinned anchor.
+    /// APPENDED LAST (tag `15`).
+    GhostdagPow {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor>,
+    },
+    /// Heterogeneous multi-prover (STARK + PQ leg) fault-proof finality bound
+    /// to a governance-pinned config. APPENDED LAST (tag `16`).
+    HeterogeneousMultiProver {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::heterogeneous_multiprover::PinnedMultiProverConfig>,
+    },
+    /// `HoneyBadger BFT` asynchronous threshold-signature finality bound to a
+    /// governance-pinned committee. APPENDED LAST (tag `17`).
+    HoneyBadgerBft {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee>,
+    },
+    /// `Stark validity rollup` state-transition finality bound to a
+    /// governance-pinned program and trusted batch. APPENDED LAST (tag `18`).
+    StarkValidityRollup {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::stark_validity_rollup::PinnedStarkRollupConfig>,
+    },
 }
 
 impl AdapterSpec {
@@ -255,7 +318,16 @@ impl AdapterSpec {
             | Self::DagCertificate { network, .. }
             | Self::CasperFfg { network, .. }
             | Self::MysticetiDag { network, .. }
-            | Self::BitVmCovenant { network, .. } => network,
+            | Self::BitVmCovenant { network, .. }
+            | Self::SolanaTowerBft { network, .. }
+            | Self::PoSpaceVdf { network, .. }
+            | Self::AptosJolteonBft { network, .. }
+            | Self::NearDoomslugBft { network, .. }
+            | Self::ChainKeyNiDkg { network, .. }
+            | Self::GhostdagPow { network, .. }
+            | Self::HeterogeneousMultiProver { network, .. }
+            | Self::HoneyBadgerBft { network, .. }
+            | Self::StarkValidityRollup { network, .. } => network,
         }
     }
 
@@ -272,9 +344,16 @@ impl AdapterSpec {
         golden: Option<RawConsensusEvidence>,
     ) -> Box<dyn ExternalFinalityAdapter> {
         use crate::cross_domain::external::{
+            aptos_jolteon_bft::AptosJolteonAdapter,
             bitvm_covenant::BitVmCovenantAdapter, casper_ffg::CasperFfgAdapter,
             da_sampling::DataAvailabilityAdapter, dag_bft::BullsharkDagAdapter,
-            hotstuff::HotStuffThreeChainAdapter, mysticeti_dag::MysticetiDagAdapter,
+            ghostdag::GhostdagPowAdapter,
+            heterogeneous_multiprover::HeterogeneousMultiProverAdapter,
+            honeybadger_bft::HoneyBadgerBftAdapter, hotstuff::HotStuffThreeChainAdapter,
+            mysticeti_dag::MysticetiDagAdapter, near_doomslug::NearDoomslugAdapter,
+            pospace_vdf::PoSpaceVdfAdapter, solana_tower_bft::SolanaTowerBftAdapter,
+            stark_validity_rollup::StarkValidityRollupAdapter,
+            chain_key_ni_dkg::ChainKeyNiDkgAdapter,
         };
         match self {
             Self::EthereumSync { network, committee } => box_with_golden(
@@ -334,6 +413,51 @@ impl AdapterSpec {
                 || BitVmCovenantAdapter::new(network, anchor.clone()),
                 golden,
                 BitVmCovenantAdapter::with_golden,
+            ),
+            Self::SolanaTowerBft { network, pinned } => box_with_golden(
+                || SolanaTowerBftAdapter::new(network, pinned.clone()),
+                golden,
+                SolanaTowerBftAdapter::with_golden,
+            ),
+            Self::PoSpaceVdf { network, pinned } => box_with_golden(
+                || PoSpaceVdfAdapter::new(network, pinned.clone()),
+                golden,
+                PoSpaceVdfAdapter::with_golden,
+            ),
+            Self::AptosJolteonBft { network, pinned } => box_with_golden(
+                || AptosJolteonAdapter::new(network, pinned.clone()),
+                golden,
+                AptosJolteonAdapter::with_golden,
+            ),
+            Self::NearDoomslugBft { network, pinned } => box_with_golden(
+                || NearDoomslugAdapter::new(network, pinned.clone()),
+                golden,
+                NearDoomslugAdapter::with_golden,
+            ),
+            Self::ChainKeyNiDkg { network, pinned } => box_with_golden(
+                || ChainKeyNiDkgAdapter::new(network, pinned.clone()),
+                golden,
+                ChainKeyNiDkgAdapter::with_golden,
+            ),
+            Self::GhostdagPow { network, pinned } => box_with_golden(
+                || GhostdagPowAdapter::new(network, pinned.clone()),
+                golden,
+                GhostdagPowAdapter::with_golden,
+            ),
+            Self::HeterogeneousMultiProver { network, pinned } => box_with_golden(
+                || HeterogeneousMultiProverAdapter::new(network, pinned.clone()),
+                golden,
+                HeterogeneousMultiProverAdapter::with_golden,
+            ),
+            Self::HoneyBadgerBft { network, pinned } => box_with_golden(
+                || HoneyBadgerBftAdapter::new(network, pinned.clone()),
+                golden,
+                HoneyBadgerBftAdapter::with_golden,
+            ),
+            Self::StarkValidityRollup { network, pinned } => box_with_golden(
+                || StarkValidityRollupAdapter::new(network, pinned.clone()),
+                golden,
+                StarkValidityRollupAdapter::with_golden,
             ),
         }
     }
@@ -1516,6 +1640,27 @@ impl IntakeState {
             if anchor.as_ref() != Some(pinned) {
                 return Err(IntakeError::CommitteeNotPinned);
             }
+        }
+        // Orphan-family admission (Madde 0.5 dilim): each of these families
+        // carries its governance pin in the spec itself; a spec without the
+        // pin is the closed admission state and is refused at the door, so a
+        // permissionless registrant cannot install an unpinned adapter.
+        let orphan_unpinned = |s: &AdapterSpec| -> bool {
+            matches!(
+                s,
+                AdapterSpec::SolanaTowerBft { pinned: None, .. }
+                    | AdapterSpec::PoSpaceVdf { pinned: None, .. }
+                    | AdapterSpec::AptosJolteonBft { pinned: None, .. }
+                    | AdapterSpec::NearDoomslugBft { pinned: None, .. }
+                    | AdapterSpec::ChainKeyNiDkg { pinned: None, .. }
+                    | AdapterSpec::GhostdagPow { pinned: None, .. }
+                    | AdapterSpec::HeterogeneousMultiProver { pinned: None, .. }
+                    | AdapterSpec::HoneyBadgerBft { pinned: None, .. }
+                    | AdapterSpec::StarkValidityRollup { pinned: None, .. }
+            )
+        };
+        if orphan_unpinned(&spec) {
+            return Err(IntakeError::CommitteeNotPinned);
         }
         // Economics under which lying pays are refused at the door. The
         // framework checks the bond amount; whether the fee/penalty shape
@@ -4919,4 +5064,244 @@ mod tests {
             "a passing probe must not be blamed: {shown}"
         );
     }
+    /// Madde 0.5 dilim (Taç): 9 yetim aile — pin tipi zaten var, spec varyantı yok.
+    /// Her varyant `network + Option<Pinned...>` taşır; kapalı-kabul: pinned
+    /// `None` olduğunda `register_domain` `CommitteeNotPinned` reddedilir.
+    fn orphan_family_specs_with_pins() -> Vec<AdapterSpec> {
+        use crate::cross_domain::external::{
+            aptos_jolteon_bft::{JolteonValidator, PinnedJolteonEpochState},
+            chain_key_ni_dkg::PinnedChainKeyRoot,
+            ghostdag::PinnedGhostdagAnchor,
+            heterogeneous_multiprover::{
+                MultiProverCommitteeMember, PinnedFaultProposer, PinnedMultiProverConfig,
+            },
+            honeybadger_bft::{HoneyBadgerValidator, PinnedHoneyBadgerCommittee},
+            near_doomslug::{NearBlockProducer, PinnedNearEpoch},
+            pospace_vdf::PinnedPoSpaceAnchor,
+            solana_tower_bft::{PinnedSolEpoch, SolanaValidator},
+            stark_validity_rollup::PinnedStarkRollupConfig,
+        };
+        let h = |b: u8| [b; 32];
+        vec![
+            AdapterSpec::SolanaTowerBft {
+                network: "solana-mainnet".to_string(),
+                pinned: Some(PinnedSolEpoch {
+                    genesis_hash_hex: "4w4".repeat(20),
+                    epoch: 1,
+                    first_slot: 0,
+                    last_slot: 432_000,
+                    has_bonded_slash_escrow: true,
+                    validators: vec![SolanaValidator {
+                        vote_account: h(1),
+                        stake_lamports: 10,
+                        ed25519_pubkey: h(2),
+                        pq_pubkey: vec![0x01],
+                    }],
+                }),
+            },
+            AdapterSpec::PoSpaceVdf {
+                network: "chia-mainnet".to_string(),
+                pinned: Some(PinnedPoSpaceAnchor {
+                    genesis_challenge: h(3),
+                    min_plot_k: 20,
+                    min_iterations_per_block: 1,
+                    max_iterations_per_block: 1_000_000,
+                    required_depth: 2000,
+                    min_cumulative_weight: 2_000,
+                    require_pq_attestation: false,
+                    pq_attestor_pubkey: None,
+                }),
+            },
+            AdapterSpec::AptosJolteonBft {
+                network: "aptos-mainnet".to_string(),
+                pinned: Some(PinnedJolteonEpochState {
+                    epoch: 5,
+                    validators: vec![JolteonValidator {
+                        ed25519_pubkey: h(4),
+                        voting_power: 1,
+                        pq_pubkey: vec![0x02],
+                    }],
+                }),
+            },
+            AdapterSpec::NearDoomslugBft {
+                network: "near-mainnet".to_string(),
+                pinned: Some(PinnedNearEpoch {
+                    epoch_id: h(5),
+                    next_epoch_id: h(6),
+                    next_bp_hash: h(7),
+                    block_producers: vec![NearBlockProducer {
+                        account_id: "prod.near".to_string(),
+                        ed25519_pubkey: h(8),
+                        stake: 100,
+                        pq_pubkey: Vec::new(),
+                    }],
+                }),
+            },
+            AdapterSpec::ChainKeyNiDkg {
+                network: "cas-mainnet".to_string(),
+                pinned: Some(PinnedChainKeyRoot {
+                    subnet_id: h(9),
+                    root_bls_pubkey: vec![0x0a],
+                    root_pq_pubkey: vec![0x0b],
+                    dkg_interval_length: 100,
+                    min_registry_version: 1,
+                }),
+            },
+            AdapterSpec::GhostdagPow {
+                network: "kaspa-mainnet".to_string(),
+                pinned: Some(PinnedGhostdagAnchor {
+                    anchor_hash: h(0x0c),
+                    anchor_daa_score: 1000,
+                    anchor_blue_score: 900,
+                    anchor_blue_work: [1, 2, 3, 4],
+                    anchor_timestamp_secs: 1_700_000_000,
+                    k: 10,
+                    max_parents: 10,
+                    merge_depth_bound: 100,
+                    max_target_bits: 32,
+                    required_blue_depth: 50,
+                    max_future_drift_secs: 60,
+                }),
+            },
+            AdapterSpec::HeterogeneousMultiProver {
+                network: "mev-mainnet".to_string(),
+                pinned: Some(PinnedMultiProverConfig {
+                    stark_program_hash: h(0x0d),
+                    chain_id: 1,
+                    challenge_window_secs: 3600,
+                    min_fault_bond_atoms: 100,
+                    fault_proposers: vec![PinnedFaultProposer {
+                        ed25519_pk: h(0x0e),
+                        pq_pk: vec![0x0f],
+                    }],
+                    expected_measurement: h(0x10),
+                    committee: vec![MultiProverCommitteeMember {
+                        ed25519_pk: h(0x11),
+                        pq_pk: vec![0x12],
+                        weight: 1,
+                    }],
+                    require_canonical_stark_set: true,
+                    require_pq_leg: false,
+                }),
+            },
+            AdapterSpec::HoneyBadgerBft {
+                network: "mev-rollup".to_string(),
+                pinned: Some(PinnedHoneyBadgerCommittee {
+                    network_id: "mev-rollup".to_string(),
+                    genesis_hash: h(0x13),
+                    committee_epoch: 1,
+                    min_acs_epoch: 0,
+                    validators: vec![HoneyBadgerValidator {
+                        validator_id: h(0x14),
+                        mldsa65_pubkey: vec![0x15],
+                        weight: 1,
+                    }],
+                }),
+            },
+            AdapterSpec::StarkValidityRollup {
+                network: "starknet-mainnet".to_string(),
+                pinned: Some(PinnedStarkRollupConfig {
+                    network_id: "starknet-mainnet".to_string(),
+                    chain_id: 534_352,
+                    pinned_program_hash: h(0x16),
+                    trusted_batch_number: 100,
+                    trusted_state_root: h(0x17),
+                    expected_forced_queue_head: h(0x18),
+                    max_forced_inclusion_lag_batches: 128,
+                    require_canonical_program: true,
+                }),
+            },
+        ]
+    }
+
+    #[test]
+    fn orphan_family_specs_build_report_their_network_and_roundtrip() {
+        // RED->GREEN: 9 varyant `build()`'dan canli adaptor donerek descriptor
+        // carpar, `network()` spec'in carry ettigi network'i reports, ve
+        // bincode (consensus state persistence format) roundtrip equality
+        // korur. Variantlar yoksa bu test derleme RED (komut hatasi) olur.
+        for spec in orphan_family_specs_with_pins() {
+            let expected_network = spec.network().to_string();
+            let desc = spec
+                .build(None, None)
+                .descriptor()
+                .id;
+            let adapter = spec.build(None, None);
+            assert_eq!(adapter.descriptor().id, desc, "stable descriptor id");
+            let round: AdapterSpec = bincode::deserialize(&bincode::serialize(&spec).unwrap())
+                .expect("bincode roundtrip");
+            assert_eq!(round, spec, "bincode roundtrip equality");
+            assert_eq!(round.network(), expected_network);
+            assert!(!expected_network.is_empty());
+        }
+    }
+
+    #[test]
+    fn orphan_family_specs_refuse_unpinned_registration() {
+        // Kapalı-kabul: pin alanı `None` olan spec'ler `register_domain`'da
+        // REDEDILIR (fail-closed). Admission economics kontrolune gitmeden
+        // CommitteeNotPinned hatasi döndürülmelidir.
+        let unpinned = [
+            AdapterSpec::SolanaTowerBft {
+                network: "solana-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::PoSpaceVdf {
+                network: "chia-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::AptosJolteonBft {
+                network: "aptos-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::NearDoomslugBft {
+                network: "near-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::ChainKeyNiDkg {
+                network: "cas-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::GhostdagPow {
+                network: "kaspa-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::HeterogeneousMultiProver {
+                network: "mev-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::HoneyBadgerBft {
+                network: "mev-rollup".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::StarkValidityRollup {
+                network: "starknet-mainnet".to_string(),
+                pinned: None,
+            },
+        ];
+        for spec in unpinned {
+            let mut state = IntakeState::new();
+            let economics = IntakeState::conservative_economics(1_000_000);
+            let err = state
+                .register_domain(
+                    RegistrationRequest {
+                        spec,
+                        policy: VerificationPolicy::strict(1_000),
+                        economics,
+                        versions: versions_for(&spec),
+                        bond_atoms: economics.required_bond_atoms(),
+                        poster: addr(9),
+                        golden: golden_for(&spec),
+                    },
+                    None,
+                )
+                .unwrap_err();
+            assert_eq!(
+                err,
+                IntakeError::CommitteeNotPinned,
+                "an unpinned orphan-family spec must be refused closed"
+            );
+        }
+    }
+
 }
