@@ -156,7 +156,7 @@ impl SettlementRegistries {
     /// an intake whose digest could not be produced. The third state is not
     /// "no intake" - a light client reading the header would then see an
     /// absent component where the truth is a node that could not encode its
-    /// own state - so it folds [`unencodable_marker`], the same marker
+    /// own state - so it folds the private `unencodable_marker`, the same marker
     /// [`Self::root`] folds, because two markers for one meaning would let a
     /// node disagree with itself.
     ///
