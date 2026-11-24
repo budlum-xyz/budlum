@@ -421,7 +421,12 @@ fn base64url_encode(bytes: &[u8]) -> String {
         for i in 0..width {
             let shift = 18 - i * 6;
             let index = usize::try_from((packed >> shift) & 0x3f).unwrap_or(0);
-            out.push(char::from(ALPHABET[index]));
+            // The mask keeps `index` inside `0..64`, but the gate wants the
+            // absence decided rather than indexed: a letter that is not there
+            // writes nothing instead of aborting a release build.
+            if let Some(letter) = ALPHABET.get(index) {
+                out.push(char::from(*letter));
+            }
         }
     }
     out
