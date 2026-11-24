@@ -120,6 +120,7 @@ jobs:
             --lockfile=crates/bpqs/Cargo.lock \
             --lockfile=crates/bud-codec/Cargo.lock \
             --lockfile=crates/budlum-explorer/Cargo.lock \
+            --lockfile=crates/budlum-nipopow/Cargo.lock \
             --lockfile=crates/budlum-types/Cargo.lock \
             --lockfile=crates/note-packing/Cargo.lock \
             --lockfile=crates/uel-abi/Cargo.lock \
@@ -155,6 +156,7 @@ jobs:
             --lockfile=crates/bpqs/Cargo.lock \
             --lockfile=crates/bud-codec/Cargo.lock \
             --lockfile=crates/budlum-explorer/Cargo.lock \
+            --lockfile=crates/budlum-nipopow/Cargo.lock \
             --lockfile=crates/budlum-types/Cargo.lock \
             --lockfile=crates/note-packing/Cargo.lock \
             --lockfile=crates/uel-abi/Cargo.lock \
