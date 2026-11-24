@@ -22,7 +22,16 @@ concurrency:
   # the current head's run before its library test finished (measured
   # 2026-11-23: a re-run queued at 08:20 cancelled nine jobs of the head's run,
   # then the run). A re-run (attempt 2 and later) now waits for the group.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.run_attempt == '1' }}
+  #
+  # The integration line is exempt. A pull request into `testnet` or
+  # `ortak-teslim` is the one place a complete verdict is required, and a push
+  # to its head arrives faster than the suite runs: measured on
+  # `arena/ajan-teslim` on 2026-11-24, six pushes landed between 08:22 and
+  # 08:38 (one every 2.7 minutes) and 72 of the 74 check runs on the head ended
+  # `cancelled`. Cancelling a working branch's run costs nothing that is not
+  # re-measured by the next push; cancelling the integration head's run costs
+  # the verdict the branch exists to produce.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.run_attempt == '1' && github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 permissions:
   contents: read
