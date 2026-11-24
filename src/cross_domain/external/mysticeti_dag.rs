@@ -828,9 +828,9 @@ impl MysticetiDagAdapter {
                     rule: "Mysticeti voting round lists the same validator twice".to_string(),
                 });
             }
-            if !vote.parents.contains(&anchor_digest) {
+            if vote.parents.first() != Some(&anchor_digest) {
                 return Err(AdapterError::ConsensusRule {
-                    rule: "Mysticeti voting vertex does not link directly to the round-r anchor"
+                    rule: "Mysticeti voting vertex must endorse the round-r anchor as primary parent (parents[0])"
                         .to_string(),
                 });
             }
@@ -1280,6 +1280,111 @@ mod tests {
             },
         )
         .is_err());
+
+        // Accountable safety invariant: a single round-(r + 1) voting vertex must
+        // designate its voted anchor at `parents[0]`. Listing a second round-r
+        // vertex in `parents[1..]` as causal DAG history must NEVER grant quorum
+        // stake to a conflicting commitment at the same height without >1/3
+        // round-(r + 1) equivocation.
+        let rival_commitment = MysticetiAnchorCommitment {
+            state_root: [0x99; 32],
+            tx_root: [0x98; 32],
+            event_root: [0x97; 32],
+            block_hash: [0x96; 32],
+            parent_anchor_digest: [0x20; 32],
+        };
+        let rival_proposer = signers.get(1).expect("s1");
+        let rival_anchor = sign_vertex(
+            rival_proposer,
+            NET,
+            ANCHOR_ROUND,
+            rival_commitment.digest(),
+            vec![rival_commitment.parent_anchor_digest],
+        );
+        let primary_anchor = sign_vertex(
+            signers.first().expect("s0"),
+            NET,
+            ANCHOR_ROUND,
+            MysticetiAnchorCommitment {
+                state_root: [0x21; 32],
+                tx_root: [0x22; 32],
+                event_root: [0x23; 32],
+                block_hash: [0x24; 32],
+                parent_anchor_digest: [0x20; 32],
+            }
+            .digest(),
+            vec![[0x20; 32]],
+        );
+        let primary_digest = primary_anchor.digest(NET);
+        let rival_digest = rival_anchor.digest(NET);
+        let honest_causal_votes: Vec<MysticetiVertex> = signers
+            .iter()
+            .take(3)
+            .enumerate()
+            .map(|(idx, s)| {
+                let offset = u8::try_from(idx).unwrap_or(0);
+                sign_vertex(
+                    s,
+                    NET,
+                    ANCHOR_ROUND + 1,
+                    [0x70u8.saturating_add(offset); 32],
+                    vec![primary_digest, rival_digest],
+                )
+            })
+            .collect();
+        let honest_vote_digests: Vec<[u8; 32]> =
+            honest_causal_votes.iter().map(|v| v.digest(NET)).collect();
+        let honest_decisions: Vec<MysticetiVertex> = signers
+            .iter()
+            .take(3)
+            .enumerate()
+            .map(|(idx, s)| {
+                let offset = u8::try_from(idx).unwrap_or(0);
+                sign_vertex(
+                    s,
+                    NET,
+                    ANCHOR_ROUND + 2,
+                    [0x80u8.saturating_add(offset); 32],
+                    honest_vote_digests.clone(),
+                )
+            })
+            .collect();
+        let primary_wave = MysticetiWaveEvidence {
+            commitment: MysticetiAnchorCommitment {
+                state_root: [0x21; 32],
+                tx_root: [0x22; 32],
+                event_root: [0x23; 32],
+                block_hash: [0x24; 32],
+                parent_anchor_digest: [0x20; 32],
+            },
+            anchor: primary_anchor,
+            voting_vertices: honest_causal_votes.clone(),
+            decision_vertices: honest_decisions.clone(),
+        };
+        let mut primary_raw = bad_raw.clone();
+        primary_raw.declared_root = [0x21; 32];
+        primary_raw.payload = encode_mysticeti_evidence(&primary_wave);
+        assert!(
+            adapter.verify(&primary_raw, &policy).is_ok(),
+            "primary anchor at parents[0] with causal parents[1] must verify"
+        );
+
+        let rival_wave = MysticetiWaveEvidence {
+            commitment: rival_commitment,
+            anchor: rival_anchor,
+            voting_vertices: honest_causal_votes,
+            decision_vertices: honest_decisions,
+        };
+        let mut rival_raw = primary_raw;
+        rival_raw.declared_root = [0x99; 32];
+        rival_raw.payload = encode_mysticeti_evidence(&rival_wave);
+        assert!(
+            matches!(
+                adapter.verify(&rival_raw, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "secondary causal parent at parents[1] must not finalize a conflicting state_root"
+        );
     }
 
     #[test]
