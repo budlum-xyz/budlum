@@ -3979,6 +3979,9 @@ mod rpc_tests {
             .await
             .is_err());
         assert!(public.garden_resolve("00".repeat(32)).await.is_err());
+        // Reading a record is a Garden surface too, and the public listener
+        // refuses it for the same reason it refuses every other one.
+        assert!(public.garden_read_record("not a record".into()).await.is_err());
         assert!(public.garden_trace("00".repeat(32)).await.is_err());
         assert!(public.garden_feed(Some(5)).await.is_err());
 
