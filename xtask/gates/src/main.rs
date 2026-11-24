@@ -228,6 +228,7 @@ mod gates {
     pub mod wire_fields_are_signed;
     pub mod workflow_red_keeps_its_words;
     pub mod workflow_trigger_promises;
+    pub mod workflows_are_dispatchable;
     pub mod workflows_cover_every_workspace;
     pub mod workflows_produce_jobs;
     pub mod zero_address_sender_is_verified;
@@ -534,6 +535,14 @@ const GATES: &[Gate] = &[
         run: gates::workflows_produce_jobs::run,
         run_args: None,
         self_test: gates::workflows_produce_jobs::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "workflows-are-dispatchable",
+        replaces: None,
+        run: gates::workflows_are_dispatchable::run,
+        run_args: None,
+        self_test: gates::workflows_are_dispatchable::self_test,
         run_log: None,
     },
     Gate {
