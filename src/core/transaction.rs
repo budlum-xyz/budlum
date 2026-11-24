@@ -5323,6 +5323,31 @@ fn encode_objective_fault_proof(
                 None => put_u8(out, 0),
             }
         }
+        ObjectiveFaultProof::BabylonEotsEquivocation(proof) => {
+            use crate::cross_domain::external::babylon_eots::EotsEquivocationProof;
+            put_u8(out, 6);
+            put_fixed(out, &proof.provider);
+            put_fixed(out, &proof.eots_key);
+            put_bytes(out, &proof.first_message);
+            put_bytes(out, &proof.second_message);
+            put_bytes(out, &proof.first_signature);
+            put_bytes(out, &proof.second_signature);
+            put_fixed(out, &proof.first_state_root);
+            put_fixed(out, &proof.second_state_root);
+            let EotsEquivocationProof {
+                first_checkpoint,
+                second_checkpoint,
+                proof_digest,
+                ..
+            } = proof.as_ref();
+            put_fixed(out, &first_checkpoint.block_hash);
+            put_u64(out, first_checkpoint.btc_height);
+            put_fixed(out, &first_checkpoint.mmr_root);
+            put_fixed(out, &second_checkpoint.block_hash);
+            put_u64(out, second_checkpoint.btc_height);
+            put_fixed(out, &second_checkpoint.mmr_root);
+            put_fixed(out, proof_digest);
+        }
     }
 }
 
@@ -5567,6 +5592,30 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
+        AdapterSpec::BabylonEots { network, pinned } => {
+            put_u8(out, 15);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.chain_id);
+                    put_fixed(out, &pin.anchor.tip_block_hash);
+                    put_u64(out, pin.anchor.tip_height);
+                    put_u64(out, pin.anchor.required_confirmations);
+                    put_u64(out, pin.epoch_keys.len() as u64);
+                    for (epoch, key) in &pin.epoch_keys {
+                        put_u64(out, *epoch);
+                        put_fixed(out, &key.x_only);
+                    }
+                    put_u64(out, pin.epoch_pq_keys.len() as u64);
+                    for (epoch, key) in &pin.epoch_pq_keys {
+                        put_u64(out, *epoch);
+                        put_bytes(out, key);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
     }
 }
 
@@ -5765,6 +5814,144 @@ mod v29_signing_tests {
 
         assert_bft_fault_proof_preimages();
         assert_dag_and_bitvm_fault_proof_preimages();
+        assert_babylon_preimages();
+    }
+
+    /// The Babylon registration carries the pinned epoch-key table under family
+    /// tag 15 (10..14 are spoken for), and every field of an EOTS equivocation
+    /// proof reaches the signing preimage: the pinned key, either signature,
+    /// either checkpoint, and the digest itself.
+    fn assert_babylon_preimages() {
+        use crate::cross_domain::external::babylon_eots::{
+            test_support, BtcCheckpoint, BtcWeakSubjectivityAnchor, EotsEquivocationProof,
+            PinnedBabylonEots,
+        };
+        use crate::cross_domain::external::{
+            AdapterSpec, DomainKey, ExternalDomainTx, IntakeState, ObjectiveFaultProof,
+            RegistrationRequest, VersionPolicy,
+        };
+
+        let pin = test_support::pinned();
+        let request = |spec: AdapterSpec| {
+            let golden = test_support::golden_evidence();
+            let mut policy = crate::cross_domain::external::VerificationPolicy::strict(0);
+            policy.require_slashable = false;
+            let economics = IntakeState::conservative_economics(1_000);
+            RegistrationRequest {
+                versions: VersionPolicy::single(golden.adapter, golden.evidence_version, 0),
+                spec,
+                policy,
+                economics,
+                bond_atoms: economics.required_bond_atoms(),
+                poster: test_addr_from_byte(1u8),
+                golden,
+            }
+        };
+        let register = |spec: AdapterSpec| {
+            TransactionType::ExternalDomain(ExternalDomainTx::Register(Box::new(request(spec))))
+        };
+        let network = test_support::NETWORK.to_string();
+        let base = signed_variant(register(AdapterSpec::BabylonEots {
+            network: network.clone(),
+            pinned: Some(pin.clone()),
+        }))
+        .signing_hash();
+
+        // Family tag: the byte after the tx-type byte and before the network
+        // string is 15, and a tag-9 reading of the same bytes is impossible.
+        let mut bytes = Vec::new();
+        encode_external_domain_tx(
+            &ExternalDomainTx::Register(Box::new(request(AdapterSpec::BabylonEots {
+                network: network.clone(),
+                pinned: Some(pin.clone()),
+            }))),
+            &mut bytes,
+        );
+        assert_eq!(bytes[0], 0, "Register is external tx 0");
+        assert_eq!(bytes[1], 15, "BabylonEots is adapter family 15");
+
+        let variants = [
+            AdapterSpec::BabylonEots {
+                network: "babylon-testnet".to_string(),
+                pinned: Some(pin.clone()),
+            },
+            AdapterSpec::BabylonEots {
+                network: network.clone(),
+                pinned: None,
+            },
+            AdapterSpec::BabylonEots {
+                network: network.clone(),
+                pinned: Some(PinnedBabylonEots {
+                    anchor: BtcWeakSubjectivityAnchor {
+                        tip_block_hash: pin.anchor.tip_block_hash,
+                        tip_height: pin.anchor.tip_height + 1,
+                        required_confirmations: pin.anchor.required_confirmations,
+                    },
+                    ..pin.clone()
+                }),
+            },
+            AdapterSpec::BabylonEots {
+                network: network.clone(),
+                pinned: Some(PinnedBabylonEots {
+                    epoch_pq_keys: vec![(test_support::EPOCH, vec![9, 9])],
+                    ..pin.clone()
+                }),
+            },
+        ];
+        for (i, variant) in variants.into_iter().enumerate() {
+            assert_ne!(
+                signed_variant(register(variant)).signing_hash(),
+                base,
+                "Babylon registration field {i} is not signed"
+            );
+        }
+
+        let proof = test_support::equivocation_proof(&pin, test_support::PINNED_SEED);
+        let submit_fault = |proof: EotsEquivocationProof| {
+            TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof {
+                domain: DomainKey([6u8; 32]),
+                proof: ObjectiveFaultProof::BabylonEotsEquivocation(Box::new(proof)),
+            })
+        };
+        let proof_base = signed_variant(submit_fault(proof.clone())).signing_hash();
+        let mut proof_bytes = Vec::new();
+        encode_objective_fault_proof(
+            &ObjectiveFaultProof::BabylonEotsEquivocation(Box::new(proof.clone())),
+            &mut proof_bytes,
+        );
+        assert_eq!(
+            proof_bytes[0], 6,
+            "BabylonEotsEquivocation is fault proof 6"
+        );
+
+        let mut second_sig = proof.clone();
+        second_sig.second_signature.push(0);
+        assert_ne!(
+            signed_variant(submit_fault(second_sig)).signing_hash(),
+            proof_base
+        );
+        let mut second_checkpoint = proof.clone();
+        second_checkpoint.second_checkpoint = BtcCheckpoint {
+            block_hash: [0x77; 32],
+            btc_height: proof.second_checkpoint.btc_height + 1,
+            mmr_root: [0x78; 32],
+        };
+        assert_ne!(
+            signed_variant(submit_fault(second_checkpoint)).signing_hash(),
+            proof_base
+        );
+        let mut second_root = proof.clone();
+        second_root.second_state_root[0] ^= 1;
+        assert_ne!(
+            signed_variant(submit_fault(second_root)).signing_hash(),
+            proof_base
+        );
+        let mut digest = proof;
+        digest.proof_digest[31] ^= 1;
+        assert_ne!(
+            signed_variant(submit_fault(digest)).signing_hash(),
+            proof_base
+        );
     }
 
     fn assert_bft_fault_proof_preimages() {

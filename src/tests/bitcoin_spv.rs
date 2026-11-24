@@ -311,12 +311,26 @@ fn adapter_spec_variant_indices_stay_pinned() {
         program_hash: None,
         chain_id: None,
     };
+    let babylon = Spec::BabylonEots {
+        network: "babylon-mainnet".to_string(),
+        pinned: None,
+    };
     let eth_bytes = bincode::serialize(&eth).expect("eth spec serializes");
     let zk_bytes = bincode::serialize(&zk).expect("zk spec serializes");
     let btc_bytes = bincode::serialize(&bitcoin_spec()).expect("btc spec serializes");
+    let babylon_bytes = bincode::serialize(&babylon).expect("babylon spec serializes");
     assert_eq!(u32::from_le_bytes(eth_bytes[0..4].try_into().unwrap()), 0);
     assert_eq!(u32::from_le_bytes(zk_bytes[0..4].try_into().unwrap()), 1);
     assert_eq!(u32::from_le_bytes(btc_bytes[0..4].try_into().unwrap()), 2);
+    // The bincode discriminant is the variant's declaration position, not the
+    // manual wire tag `encode_adapter_spec` writes into the transaction
+    // preimage (that tag is 15, the first free slot after the reserved 10..14,
+    // and is pinned by the signing-preimage test). Appending `BabylonEots`
+    // last gives it position 10 and leaves every earlier variant untouched.
+    assert_eq!(
+        u32::from_le_bytes(babylon_bytes[0..4].try_into().unwrap()),
+        10
+    );
 }
 
 /// The declared height and root are derived from the headers, not believed

@@ -238,6 +238,16 @@ pub enum AdapterSpec {
         #[serde(default)]
         anchor: Option<crate::cross_domain::external::bitvm_covenant::PinnedBitVmAnchor>,
     },
+    /// Babylon / BTC-restaking EOTS finality bound to one network and one
+    /// governance-pinned epoch-key table plus Bitcoin weak-subjectivity
+    /// anchor. APPENDED LAST (tag `15`): the wire tag is the first free slot
+    /// after the reserved 10..14 (Sekstant / ScheduleFork). A spec without a
+    /// pin is the closed admission state: `register_domain` refuses it.
+    BabylonEots {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::babylon_eots::PinnedBabylonEots>,
+    },
 }
 
 impl AdapterSpec {
@@ -255,7 +265,8 @@ impl AdapterSpec {
             | Self::DagCertificate { network, .. }
             | Self::CasperFfg { network, .. }
             | Self::MysticetiDag { network, .. }
-            | Self::BitVmCovenant { network, .. } => network,
+            | Self::BitVmCovenant { network, .. }
+            | Self::BabylonEots { network, .. } => network,
         }
     }
 
@@ -272,9 +283,10 @@ impl AdapterSpec {
         golden: Option<RawConsensusEvidence>,
     ) -> Box<dyn ExternalFinalityAdapter> {
         use crate::cross_domain::external::{
-            bitvm_covenant::BitVmCovenantAdapter, casper_ffg::CasperFfgAdapter,
-            da_sampling::DataAvailabilityAdapter, dag_bft::BullsharkDagAdapter,
-            hotstuff::HotStuffThreeChainAdapter, mysticeti_dag::MysticetiDagAdapter,
+            babylon_eots::BabylonEotsAdapter, bitvm_covenant::BitVmCovenantAdapter,
+            casper_ffg::CasperFfgAdapter, da_sampling::DataAvailabilityAdapter,
+            dag_bft::BullsharkDagAdapter, hotstuff::HotStuffThreeChainAdapter,
+            mysticeti_dag::MysticetiDagAdapter,
         };
         match self {
             Self::EthereumSync { network, committee } => box_with_golden(
@@ -334,6 +346,18 @@ impl AdapterSpec {
                 || BitVmCovenantAdapter::new(network, anchor.clone()),
                 golden,
                 BitVmCovenantAdapter::with_golden,
+            ),
+            Self::BabylonEots { network, pinned } => box_with_golden(
+                || match pinned {
+                    Some(pinned) => pinned.build_adapter(network),
+                    // `None` is the closed admission state: `register_domain`
+                    // refuses it before this is ever built, and a spec that
+                    // somehow reaches here verifies nothing (chain id 0, no
+                    // keys, no anchor).
+                    None => BabylonEotsAdapter::new(network, 0),
+                },
+                golden,
+                BabylonEotsAdapter::with_golden,
             ),
         }
     }
@@ -473,6 +497,12 @@ pub struct IntakeState {
         String,
         crate::cross_domain::external::bitvm_covenant::PinnedBitVmAnchor,
     >,
+    /// Governance-pinned Babylon EOTS epoch-key tables keyed by external network.
+    #[serde(default)]
+    pub pinned_babylon_eots_anchors: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::babylon_eots::PinnedBabylonEots,
+    >,
     /// Deterministic, admin-keyless intake circuit breaker and contradiction
     /// tombstone ledger, folded into [`Self::state_digest`].
     #[serde(default)]
@@ -497,6 +527,7 @@ pub enum AnchorFamily {
     Bitcoin,
     Tendermint,
     Da,
+    BabylonEots,
 }
 
 impl AnchorFamily {
@@ -508,6 +539,7 @@ impl AnchorFamily {
             Self::Bitcoin => "bitcoin",
             Self::Tendermint => "tendermint",
             Self::Da => "da",
+            Self::BabylonEots => "babylon-eots",
         }
     }
 }
@@ -529,6 +561,7 @@ pub enum PinnedExternalAnchor {
     Bitcoin(PinnedBitcoinAnchor),
     Tendermint(crate::cross_domain::external::tendermint::PinnedTendermintAnchor),
     Da(crate::cross_domain::external::da_sampling::PinnedDaCommittee),
+    BabylonEots(crate::cross_domain::external::babylon_eots::PinnedBabylonEots),
 }
 
 impl PinnedExternalAnchor {
@@ -540,6 +573,7 @@ impl PinnedExternalAnchor {
             Self::Bitcoin(_) => AnchorFamily::Bitcoin,
             Self::Tendermint(_) => AnchorFamily::Tendermint,
             Self::Da(_) => AnchorFamily::Da,
+            Self::BabylonEots(_) => AnchorFamily::BabylonEots,
         }
     }
 
@@ -586,6 +620,12 @@ impl PinnedExternalAnchor {
                 if committee.members.is_empty() {
                     return Err("the pinned DA committee has no members".into());
                 }
+            }
+            Self::BabylonEots(pinned) => {
+                // The pin's own shape check is the whole validation: a pin that
+                // does not validate cannot certify a vote, and `PinnedBabylonEots::validate`
+                // names the offending field.
+                pinned.validate()?;
             }
         }
         Ok(())
@@ -1276,6 +1316,18 @@ impl IntakeState {
         self.pinned_bitvm_anchors.insert(network.into(), anchor);
     }
 
+    /// Installs or updates the consensus-pinned Babylon EOTS epoch-key table
+    /// for `network`. WIRING: governance/genesis EOTS pin paired with
+    /// `register_domain`'s admission and `adjudicate_babylon_eots_equivocation`.
+    pub fn pin_babylon_eots_anchor(
+        &mut self,
+        network: impl Into<String>,
+        pinned: crate::cross_domain::external::babylon_eots::PinnedBabylonEots,
+    ) {
+        self.pinned_babylon_eots_anchors
+            .insert(network.into(), pinned);
+    }
+
     /// Installs or replaces a family's trust anchor for `network`.
     ///
     /// The consensus door: `GovernanceAction::PinExternalAnchor` in block
@@ -1302,6 +1354,10 @@ impl IntakeState {
             PinnedExternalAnchor::Da(committee) => {
                 self.pinned_da_committees
                     .insert(network.to_string(), committee);
+            }
+            PinnedExternalAnchor::BabylonEots(pinned) => {
+                self.pinned_babylon_eots_anchors
+                    .insert(network.to_string(), pinned);
             }
         }
     }
@@ -1339,6 +1395,11 @@ impl IntakeState {
                 .get(network)
                 .cloned()
                 .map(PinnedExternalAnchor::Da),
+            AnchorFamily::BabylonEots => self
+                .pinned_babylon_eots_anchors
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::BabylonEots),
         }
     }
 
@@ -1514,6 +1575,17 @@ impl IntakeState {
                 return Err(IntakeError::CommitteeNotPinned);
             };
             if anchor.as_ref() != Some(pinned) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // BabylonEots admission requires a governance-pinned epoch-key table and
+        // Bitcoin weak-subjectivity anchor for `network`; a permissionless
+        // registrant cannot announce its own EOTS keys and certify finality.
+        if let AdapterSpec::BabylonEots { network, pinned } = &spec {
+            let Some(installed) = self.pinned_babylon_eots_anchors.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if pinned.as_ref() != Some(installed) {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
@@ -2564,6 +2636,58 @@ impl IntakeState {
             )
             .map_err(IntakeError::Registry)?;
         Ok(verdict)
+    }
+
+    /// Verify an objective Babylon EOTS equivocation proof (one provider
+    /// signing two conflicting epoch votes) against the domain's
+    /// governance-pinned epoch-key table and chain id, record an adverse
+    /// round, and freeze the domain (`DomainState::Faulted`).
+    ///
+    /// WIRING: objective Babylon EOTS equivocation door freezing
+    /// `AdapterSpec::BabylonEots` domains (wired via
+    /// `ExternalDomainTx::SubmitFaultProof`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] if `key` is unknown, not serving, not a
+    /// `BabylonEots` domain, unpinned, or if the proof does not bind to the
+    /// pinned key table.
+    pub fn adjudicate_babylon_eots_equivocation(
+        &mut self,
+        key: &DomainKey,
+        proof: &crate::cross_domain::external::babylon_eots::EotsEquivocationProof,
+    ) -> Result<([u8; 32], u64), IntakeError> {
+        let (entry, expected_name) = self.serving_entry(key)?;
+        let AdapterSpec::BabylonEots { pinned, .. } = &entry.spec else {
+            return Err(IntakeError::Registry(RegistryError::DescriptorMismatch {
+                expected: expected_name.to_string(),
+                found: crate::cross_domain::external::babylon_eots::EOTS_ADAPTER_NAME.to_string(),
+            }));
+        };
+        let Some(pinned) = pinned else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        crate::cross_domain::external::babylon_eots::verify_eots_equivocation(pinned, proof)
+            .map_err(|reason| {
+                IntakeError::Registry(RegistryError::Adapter(
+                    crate::cross_domain::external::spec::AdapterError::ConsensusRule {
+                        rule: reason,
+                    },
+                ))
+            })?;
+        let local_height = self.registry.height();
+        let _ = self.guard.record_adverse_round(*key, local_height);
+        self.registry
+            .mark_faulted(
+                key,
+                &format!(
+                    "Babylon EOTS provider {} equivocated (key={})",
+                    hex::encode(proof.provider),
+                    hex::encode(proof.eots_key)
+                ),
+            )
+            .map_err(IntakeError::Registry)?;
+        Ok((proof.provider, 0))
     }
 
     /// Verify an objective ICS-07 `Tendermint`/`CometBFT` misbehaviour proof
@@ -4918,5 +5042,222 @@ mod tests {
             !shown.contains("header-flip"),
             "a passing probe must not be blamed: {shown}"
         );
+    }
+
+    /// The Babylon registration under the fixture pin, with the policy and
+    /// economics every Babylon test in this module shares.
+    fn babylon_request(
+        pinned: Option<crate::cross_domain::external::babylon_eots::PinnedBabylonEots>,
+        economics: DomainEconomics,
+        poster: Address,
+    ) -> RegistrationRequest {
+        use crate::cross_domain::external::babylon_eots::test_support;
+        let spec = AdapterSpec::BabylonEots {
+            network: test_support::NETWORK.to_string(),
+            pinned,
+        };
+        let mut policy = VerificationPolicy::strict(0);
+        policy.require_slashable = false;
+        let golden = test_support::golden_evidence();
+        RegistrationRequest {
+            versions: VersionPolicy::single(golden.adapter, golden.evidence_version, 0),
+            spec,
+            policy,
+            economics,
+            bond_atoms: economics.required_bond_atoms(),
+            poster,
+            golden,
+        }
+    }
+
+    #[test]
+    fn babylon_eots_admission_requires_the_governance_pin_and_honest_economics() {
+        use crate::cross_domain::external::babylon_eots::test_support;
+
+        let mut intake = IntakeState::new();
+        intake.on_block_committed(50);
+        let economics = IntakeState::conservative_economics(1_000);
+        let econ = DomainEconomics {
+            routing_ceiling_atoms: 1_000,
+            fee: ProverFee {
+                base_atoms: 10_000,
+                value_bps: 0,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 500,
+                floor_atoms: 1,
+            },
+            unbonding_heights: 10,
+        };
+
+        // Nobody has installed a pin for the network: a registrant cannot
+        // announce its own EOTS keys, whether it carries a table or none.
+        assert_eq!(
+            intake
+                .register_domain(
+                    babylon_request(Some(test_support::pinned()), economics, addr(9)),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        assert_eq!(
+            intake
+                .register_domain(babylon_request(None, economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+
+        // A pin is installed, but the registration carries a different
+        // table: refused. The spec must equal the governance value.
+        let mut foreign = test_support::pinned();
+        foreign.epoch_keys[0].1 = test_support::public_key_for(0x5C);
+        intake.pin_babylon_eots_anchor(test_support::NETWORK, test_support::pinned());
+        assert_eq!(
+            intake
+                .register_domain(babylon_request(None, economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        assert_eq!(
+            intake
+                .register_domain(babylon_request(Some(foreign), economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        // The door compares the registration's table to the installed one by
+        // equality; validity is enforced at install (governance) and at
+        // admission. An invalid pin the registration echoes exactly therefore
+        // passes the door and is refused by the admission circuit instead: the
+        // golden vote cannot verify under an empty key table.
+        let mut malformed = test_support::pinned();
+        malformed.epoch_keys.clear();
+        intake.pin_babylon_eots_anchor(test_support::NETWORK, malformed.clone());
+        assert!(
+            matches!(
+                intake.register_domain(babylon_request(Some(malformed), economics, addr(9)), None),
+                Err(IntakeError::AdmissionRefused {
+                    golden_verified: false,
+                    ..
+                })
+            ),
+            "an empty key table cannot certify the golden vote"
+        );
+
+        // The governance pin, echoed exactly: admitted. Economics under
+        // which lying pays are still refused before admission runs.
+        intake.pin_babylon_eots_anchor(test_support::NETWORK, test_support::pinned());
+        assert_eq!(
+            intake
+                .register_domain(
+                    babylon_request(Some(test_support::pinned()), econ, addr(9)),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::DishonestEconomics
+        );
+        let key = intake
+            .register_domain(
+                babylon_request(Some(test_support::pinned()), economics, addr(9)),
+                None,
+            )
+            .expect("a pinned Babylon registration is admitted");
+        assert_eq!(
+            key,
+            DomainKey::from_parts(
+                &crate::cross_domain::external::babylon_eots::eots_adapter_id(),
+                test_support::NETWORK
+            )
+        );
+        let entry = intake.entries.get(&key).expect("entry");
+        let AdapterSpec::BabylonEots {
+            pinned: Some(stored),
+            ..
+        } = &entry.spec
+        else {
+            panic!("the stored spec keeps the pin it was admitted under");
+        };
+        assert_eq!(stored, &test_support::pinned());
+    }
+
+    #[test]
+    fn babylon_eots_equivocation_door_freezes_the_domain_and_refuses_a_foreign_provider() {
+        use crate::cross_domain::external::babylon_eots::test_support;
+        use crate::cross_domain::external::profile::DomainState;
+
+        let mut intake = IntakeState::new();
+        intake.on_block_committed(50);
+        let economics = IntakeState::conservative_economics(1_000);
+        let pin = test_support::pinned();
+        intake.pin_babylon_eots_anchor(test_support::NETWORK, pin.clone());
+        let key = intake
+            .register_domain(babylon_request(Some(pin.clone()), economics, addr(9)), None)
+            .expect("register babylon");
+        assert_eq!(
+            intake.registry.domain(&key).expect("dom").record.state,
+            DomainState::Admitted
+        );
+
+        // A real equivocation by a provider the pinned table does not name is
+        // internally valid (both signatures verify under its own key) and is
+        // still refused: it is not this domain's provider.
+        let foreign = test_support::foreign_equivocation_proof(0x5C);
+        foreign
+            .check()
+            .expect("the foreign proof is self-consistent");
+        let refused = intake
+            .adjudicate_babylon_eots_equivocation(&key, &foreign)
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("does not name"),
+            "refusal names the binding: {refused}"
+        );
+        assert_eq!(
+            intake.registry.domain(&key).expect("dom").record.state,
+            DomainState::Admitted
+        );
+        assert_eq!(
+            intake
+                .guard
+                .record_of(&key)
+                .map(|r| r.adverse_round_blocks.len())
+                .unwrap_or(0),
+            0,
+            "a refused proof records no adverse round"
+        );
+
+        // The pinned provider's equivocation: adverse round recorded, the
+        // domain frozen, and the door refuses a replay.
+        let proof = test_support::equivocation_proof(&pin, test_support::PINNED_SEED);
+        let (provider, _epoch) = intake
+            .adjudicate_babylon_eots_equivocation(&key, &proof)
+            .expect("the pinned provider's equivocation freezes the domain");
+        assert_eq!(provider, proof.provider);
+        assert_eq!(
+            intake.registry.domain(&key).expect("dom").record.state,
+            DomainState::Faulted
+        );
+        assert_eq!(
+            intake
+                .guard
+                .record_of(&key)
+                .expect("guard")
+                .adverse_round_blocks
+                .len(),
+            1
+        );
+        assert!(matches!(
+            intake.adjudicate_babylon_eots_equivocation(&key, &proof),
+            Err(IntakeError::Registry(RegistryError::NotServing { .. }))
+        ));
+
+        // A door for another family refuses by name rather than by shape.
+        let eth_key = register(&mut intake);
+        assert!(matches!(
+            intake.adjudicate_babylon_eots_equivocation(&eth_key, &proof),
+            Err(IntakeError::Registry(
+                RegistryError::DescriptorMismatch { .. }
+            ))
+        ));
     }
 }

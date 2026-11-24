@@ -165,6 +165,13 @@ pub enum ObjectiveFaultProof {
         params: crate::cross_domain::external::tendermint::TendermintLightParams,
         evidence: Box<crate::cross_domain::external::tendermint::TendermintMisbehaviour>,
     },
+    /// Objective Babylon EOTS equivocation proof (one provider signing two
+    /// conflicting epoch votes) bound to the domain's governance-pinned
+    /// epoch-key table for an `AdapterSpec::BabylonEots` domain.
+    /// APPENDED (tag `6`).
+    BabylonEotsEquivocation(
+        Box<crate::cross_domain::external::babylon_eots::EotsEquivocationProof>,
+    ),
 }
 
 /// What the executor hands the door: the signer, the chain, the fee the
@@ -794,6 +801,9 @@ fn submit_fault_proof(
             evidence,
         } => intake
             .adjudicate_tendermint_misbehaviour(domain, trusted, params, evidence, now_secs)
+            .map(|_| ()),
+        ObjectiveFaultProof::BabylonEotsEquivocation(proof) => intake
+            .adjudicate_babylon_eots_equivocation(domain, proof)
             .map(|_| ()),
     }
     .map_err(ExternalDomainTxError::from)
@@ -2018,6 +2028,83 @@ mod tests {
             headers.push(hdr);
         }
         headers
+    }
+
+    #[test]
+    fn submit_fault_proof_freezes_babylon_eots_and_refuses_an_unrelated_provider() {
+        use crate::cross_domain::external::babylon_eots::test_support;
+
+        let poster = addr(41);
+        let challenger = addr(42);
+        let mut state = AccountState::new();
+        state.settlement.external_intake.on_block_committed(50);
+        state.add_balance(&poster, 50_000_000);
+        let pin = test_support::pinned();
+        state
+            .settlement
+            .external_intake
+            .pin_babylon_eots_anchor(test_support::NETWORK, pin.clone());
+
+        let mut non_slash = VerificationPolicy::strict(0);
+        non_slash.require_slashable = false;
+        let econ = IntakeState::conservative_economics(1_000);
+        let key = register_fault_test_domain(
+            &mut state,
+            AdapterSpec::BabylonEots {
+                network: test_support::NETWORK.to_string(),
+                pinned: Some(pin.clone()),
+            },
+            &non_slash,
+            econ,
+            test_support::golden_evidence(),
+            poster,
+        );
+        assert_fault_domain_state(&state, &key, DomainState::Admitted);
+
+        // A self-consistent equivocation by a provider the pinned table does
+        // not name: refused, the domain keeps serving, no fee leaves the
+        // challenger for a proof that binds to nobody.
+        let foreign = test_support::foreign_equivocation_proof(0x5C);
+        let before = state.get_balance(&challenger);
+        let refused = execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::SubmitFaultProof {
+                domain: key,
+                proof: ObjectiveFaultProof::BabylonEotsEquivocation(Box::new(foreign)),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            refused.to_string().contains("does not name"),
+            "refusal names the binding: {refused}"
+        );
+        assert_fault_domain_state(&state, &key, DomainState::Admitted);
+        assert_eq!(state.get_balance(&challenger), before);
+
+        // The pinned provider's equivocation freezes the domain.
+        let proof = test_support::equivocation_proof(&pin, test_support::PINNED_SEED);
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::SubmitFaultProof {
+                domain: key,
+                proof: ObjectiveFaultProof::BabylonEotsEquivocation(Box::new(proof.clone())),
+            },
+        )
+        .expect("babylon SubmitFaultProof freezes serving domain");
+        assert_fault_domain_state(&state, &key, DomainState::Faulted);
+
+        // Replay against a frozen domain is refused, not silently accepted.
+        assert!(execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::SubmitFaultProof {
+                domain: key,
+                proof: ObjectiveFaultProof::BabylonEotsEquivocation(Box::new(proof)),
+            },
+        )
+        .is_err());
     }
 
     #[test]

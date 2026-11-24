@@ -545,6 +545,38 @@ impl FinalityGuarantee {
                     fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
+            AdapterSpec::BabylonEots { pinned, .. } => {
+                let (valid, pq_all) = pinned.as_ref().map_or((false, false), |p| {
+                    let ok = p.validate().is_ok();
+                    let pq = ok
+                        && !p.epoch_pq_keys.is_empty()
+                        && p.epoch_keys.iter().all(|(epoch, _)| {
+                            p.epoch_pq_keys
+                                .iter()
+                                .any(|(pq_epoch, _)| pq_epoch == epoch)
+                        });
+                    (ok, pq)
+                });
+                Self {
+                    // EOTS finality is economic: a conflicting pair is a
+                    // slashable equivocation, but a single finality provider
+                    // has no Byzantine fault tolerance to speak of.
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if pq_all {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: false,
+                        event_root: false,
+                        parent: false,
+                    },
+                    slashable_backing: valid,
+                    fault_tolerance_bps: 0,
+                }
+            }
         }
     }
 
@@ -2711,5 +2743,77 @@ mod external_backing_tests {
                  the external guarantee must be derived from the observed backing only"
             );
         }
+    }
+
+    /// Babylon / BTC-restaking EOTS: a valid pinned epoch-key table is
+    /// economically slashable but carries no BFT fault tolerance, so it admits
+    /// cross-domain value only under the observed-backing path and admits
+    /// nothing at all without the pin. An epoch-key table with post-quantum
+    /// keys for every epoch moves the quantum posture to `Lattice`; one
+    /// without them stays `Classical`.
+    #[test]
+    fn babylon_eots_pinned_table_is_slashable_without_fault_tolerance() {
+        use crate::cross_domain::external::babylon_eots::{test_support, EotsPublicKey};
+        use crate::cross_domain::external::AdapterSpec;
+
+        // No pin: the closed admission state. Nothing attested, nothing
+        // admitted, no posture claimed.
+        let closed = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::BabylonEots {
+            network: test_support::NETWORK.to_string(),
+            pinned: None,
+        });
+        assert_eq!(closed.attestation.state_root, false);
+        assert!(!closed.slashable_backing);
+        assert!(!closed.admits_cross_domain_value());
+        assert_eq!(closed.fault_tolerance_bps, 0);
+        assert_eq!(closed.quantum_posture, QuantumClass::Classical);
+        assert!(matches!(
+            closed.reversibility,
+            FinalityReversibility::DeterministicQuorum
+        ));
+
+        // A pinned classical table: the state root is attested by the pinned
+        // anchor, the backing is slashable, and there is no BFT bound to
+        // promise - a single EOTS provider is not a Byzantine quorum.
+        let classical = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::BabylonEots {
+            network: test_support::NETWORK.to_string(),
+            pinned: Some(test_support::pinned()),
+        });
+        assert_eq!(classical.attestation.state_root, true);
+        assert_eq!(classical.attestation.tx_root, false);
+        assert_eq!(classical.attestation.event_root, false);
+        assert_eq!(classical.attestation.parent, false);
+        assert!(classical.slashable_backing);
+        assert_eq!(classical.fault_tolerance_bps, 0);
+        assert_eq!(classical.quantum_posture, QuantumClass::Classical);
+
+        // The same table with a PQ key for the epoch the classical key
+        // belongs to moves the posture to `Lattice` without changing the
+        // backing shape.
+        let mut with_pq = test_support::pinned();
+        with_pq
+            .epoch_pq_keys
+            .push((test_support::EPOCH, vec![0x42; 1_952]));
+        let lattice = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::BabylonEots {
+            network: test_support::NETWORK.to_string(),
+            pinned: Some(with_pq),
+        });
+        assert_eq!(lattice.quantum_posture, QuantumClass::Lattice);
+        assert!(lattice.slashable_backing);
+
+        // A pinned table whose keys are not on the curve is not a valid pin:
+        // it does not attest anything, so the posture claims nothing either.
+        let mut malformed = test_support::pinned();
+        malformed
+            .epoch_keys
+            .push((test_support::EPOCH + 1, EotsPublicKey { x_only: [0; 32] }));
+        assert!(malformed.validate().is_err());
+        let broken = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::BabylonEots {
+            network: test_support::NETWORK.to_string(),
+            pinned: Some(malformed),
+        });
+        assert_eq!(broken.attestation.state_root, false);
+        assert!(!broken.slashable_backing);
+        assert!(!broken.admits_cross_domain_value());
     }
 }
