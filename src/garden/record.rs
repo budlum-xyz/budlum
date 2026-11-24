@@ -109,6 +109,10 @@ impl GardenRecord {
     /// Build a record and sign it with the key of the validator handing it
     /// out. The owner is taken from the key rather than passed in, so a
     /// record can never name somebody else as the one who opened the door.
+    // A record carries exactly these fields (section 5), so the argument list
+    // is the record's shape: folding any two into a struct would invent a type
+    // the wire format does not have.
+    #[allow(clippy::too_many_arguments)]
     pub fn issue(
         chain_id: u64,
         genesis_hash: Hash32,

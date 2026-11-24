@@ -1786,7 +1786,7 @@ impl Node {
             // the joiner reads it, before any chain state is exchanged.
             let no_room = !self.ledger.state.has_room()
                 && !self.is_seated_validator(key)
-                && self.ledger.state.validators.get(key).is_none();
+                && !self.ledger.state.validators.contains_key(key);
             let known_validator = self.is_seated_validator(key);
             let unjoined_count = self
                 .peers
