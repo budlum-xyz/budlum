@@ -49,7 +49,7 @@ permissions:
 
 concurrency:
   group: ddc-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 jobs:
   compile-with:

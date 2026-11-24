@@ -16,7 +16,7 @@ permissions:
 
 concurrency:
   group: mobile-android-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 jobs:
   android-validator-and-log-analyzer:

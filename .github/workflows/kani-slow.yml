@@ -18,7 +18,7 @@ permissions:
 
 concurrency:
   group: kani-slow-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 jobs:
   # The measured fact: these three harnesses call `penalty_for` twice and relate
