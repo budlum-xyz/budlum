@@ -226,6 +226,21 @@ pub fn self_test() -> Result<String, String> {
             "name: flow\non: [push, workflow_dispatch]\njobs:\n  verify:\n    steps:\n      - run: cargo test\n",
             "a flow-style dispatch trigger",
         )?;
+        // A comment after `on:` is not a value. Without comment stripping the
+        // line reads as `on: <text>`, which is neither a block nor a flow
+        // list, and a correct workflow is refused (mutation M2, 2026-11-24:
+        // the reader with comments kept as text passed every other canary).
+        expect_pass(
+            &good.replace("on:\n", "on: # triggers, dispatch included\n"),
+            "a comment after the on key",
+        )?;
+        expect_pass(
+            &good.replace(
+                "  workflow_dispatch:\n",
+                "  workflow_dispatch: # the evidence-window owner dispatches\n",
+            ),
+            "a comment after the dispatch key",
+        )?;
 
         expect_fail(
             &good.replace("  workflow_dispatch:\n", ""),
@@ -234,6 +249,10 @@ pub fn self_test() -> Result<String, String> {
         expect_fail(
             &good.replace("  workflow_dispatch:\n", "  # workflow_dispatch:\n"),
             "a commented-out dispatch trigger",
+        )?;
+        expect_fail(
+            &good.replace("  workflow_dispatch:\n", "  push: # workflow_dispatch:\n"),
+            "the key inside a trailing comment of another trigger",
         )?;
         expect_fail(
             &good.replace("  workflow_dispatch:\n", "    workflow_dispatch:\n"),
@@ -274,7 +293,7 @@ pub fn self_test() -> Result<String, String> {
             return Err(String::from("canary: an empty workflow directory passed"));
         }
         Ok(String::from(
-            "workflows-are-dispatchable canary OK: live dispatch passes; missing, commented, nested, misplaced, flow-without-dispatch, no-on and empty-directory fail",
+            "workflows-are-dispatchable canary OK: live dispatch (block, inputs, flow, trailing comments) passes; missing, commented, comment-only, nested, misplaced, flow-without-dispatch, no-on and empty-directory fail",
         ))
     })();
     let _ = std::fs::remove_dir_all(&dir);

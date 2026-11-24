@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: 6f7df8e62fd127972231b9e47e2daa34ec56575d0b3db3ae82a45d8333822d33
+digest: e1a76cc6cc1bc0d0ef5258163b146143fbfbe5b1f62d5b3807bcaeef2698c527
 files: 201
 Cargo.lock	7a2830ec9206a455ad5bbaef19dcedd3e88df2aa4eedaca3b5861a2107138856
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
@@ -194,7 +194,7 @@ src/gates/wire_fields_are_signed.rs	bd67a0e4aac725883ec226913676e6b51ffa55e46f03
 src/gates/workflow_red_keeps_its_words.rs	5ddc9f4f5167ad9974be3eade5a5a8f8a19cd1596580605911a63b771b25a01f
 src/gates/workflow_secrets_need_an_environment.rs	5df6ef32d64a7f87fcd3aab3380f56b2fe4898821aab7163f85f0e9c69df63ab
 src/gates/workflow_trigger_promises.rs	bc0814de604f48d5491189f9ddff8bb0fc873e2036c102d43429e7109b75afb7
-src/gates/workflows_are_dispatchable.rs	f5cd594526188a03c69094a2f31fce177a38682dd2a8764451590a691c94e578
+src/gates/workflows_are_dispatchable.rs	8d56272ab67e76ef4de272699ffb496f9e4c1bd3fd3d8017f9ea8957b3c1d1d2
 src/gates/workflows_cover_every_workspace.rs	8838d647d0dcfd4b0ce786630a22e7caa66abd68c04bc37f12d6420fe8a3d689
 src/gates/workflows_produce_jobs.rs	ad3bda2f4cc1134a08a1976905c9d51e66f24d82c7841a89dbfd70feec601fca
 src/gates/zero_address_sender_is_verified.rs	d1cb2d5b79b6f2af032edb0faf47d93f31edfd1c394ffb756334b5daac65a579
