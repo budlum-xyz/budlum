@@ -225,9 +225,9 @@ pub fn group_answers(answers: &[Answer]) -> (Vec<AnswerGroup>, usize) {
 /// Decides.
 ///
 /// The order of the checks matters and is the substance of this module:
-/// infrastructure exclusion first, then low-participants, then threshold, then
-/// ties, then the dispute policy. Reordering them changes what "agreement"
-/// means.
+/// capacity bound first, then infrastructure exclusion, low-participants,
+/// threshold, ties, and finally the dispute policy. Reordering them changes
+/// what "agreement" means.
 #[must_use]
 pub fn decide(answers: &[Answer], policy: &QuorumPolicy) -> QuorumOutcome {
     if answers.len() > policy.max_participants {
