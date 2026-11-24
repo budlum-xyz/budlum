@@ -179,6 +179,16 @@ impl PinnedHoneyBadgerCommittee {
                     ),
                 });
             }
+            if val.mldsa65_pubkey.iter().fold(0u8, |acc, &b| acc | b) == 0 {
+                return Err(AdapterError::ConsensusRule {
+                    rule: format!("HoneyBadgerBFT validator {idx} has all-zero ML-DSA-65 pubkey"),
+                });
+            }
+            PqKeyPair::validate_public_key(&val.mldsa65_pubkey).map_err(|_| {
+                AdapterError::ConsensusRule {
+                    rule: format!("HoneyBadgerBFT validator {idx} invalid ML-DSA-65 pubkey"),
+                }
+            })?;
             if !seen_keys.insert(val.mldsa65_pubkey.as_slice()) {
                 return Err(AdapterError::ConsensusRule {
                     rule: format!("HoneyBadgerBFT duplicate ML-DSA-65 pubkey at index {idx}"),
@@ -654,7 +664,13 @@ impl ExternalFinalityAdapter for HoneyBadgerBftAdapter {
             });
         }
         if policy.max_age > 0 {
-            let age = policy.now.saturating_sub(ev.acs_epoch);
+            if ev.acs_epoch > policy.now {
+                return Err(AdapterError::Stale {
+                    age: ev.acs_epoch - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - ev.acs_epoch;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
                     age,
@@ -1137,6 +1153,51 @@ mod tests {
             adapter2.verify(&raw2, &policy),
             Err(AdapterError::ConsensusRule { .. })
         ));
+
+        // Regression 1: All-zero 1952-byte ML-DSA-65 public key must be rejected by
+        // PinnedHoneyBadgerCommittee::validate.
+        let (_keys3, mut zero_pk_committee, _ev3, _raw3) = fixture();
+        zero_pk_committee.validators[0].mldsa65_pubkey = vec![0x00; ML_DSA_65_PUBKEY_LEN];
+        assert!(
+            zero_pk_committee.validate().is_err(),
+            "all-zero 1952-byte ML-DSA-65 pubkey must be rejected by committee validation"
+        );
+
+        // Regression 2: Future acs_epoch > policy.now (e.g. u64::MAX height-exhaustion attack)
+        // when policy.max_age > 0 must NOT bypass freshness via saturating_sub(u64::MAX) == 0.
+        let (keys4, pinned4, mut future_ev, mut future_raw) = fixture();
+        future_ev.acs_epoch = u64::MAX;
+        let (f_acs, f_tx) = derive_acs_roots(
+            &future_ev.genesis_hash,
+            future_ev.committee_epoch,
+            future_ev.acs_epoch,
+            &future_ev.contributions,
+        );
+        future_ev.acs_root = f_acs;
+        future_ev.tx_root = f_tx;
+        let fd = acs_certificate_digest("hbbft-testnet", &future_ev);
+        future_ev.votes = [0u16, 1, 3]
+            .into_iter()
+            .map(|i| AcsValidatorVote {
+                voter_index: i,
+                mldsa65_sig: keys4[usize::from(i)]
+                    .sign(CROSS_DOMAIN_V1, &fd)
+                    .expect("signs"),
+            })
+            .collect();
+        future_raw.declared_height = u64::MAX;
+        future_raw.payload = encode_honeybadger_evidence(&future_ev).expect("encodes");
+        let adapter4 = HoneyBadgerBftAdapter::new("hbbft-testnet", Some(pinned4));
+        let mut bounded_policy = VerificationPolicy::strict(15);
+        bounded_policy.require_slashable = false;
+        bounded_policy.max_age = 10;
+        assert!(
+            matches!(
+                adapter4.verify(&future_raw, &bounded_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future acs_epoch = u64::MAX must not bypass max_age via saturating_sub underflow"
+        );
     }
 
     #[test]
