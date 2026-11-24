@@ -1,0 +1,49 @@
+[package]
+name = "budlum-garden-ffi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "UniFFI bindings of the Budlum Garden validator for the phone"
+publish = false
+
+# Why this is a crate of its own, and not a module of mobile/ffi:
+# budlum-mobile-core pins ml-dsa to =0.1.1 and budlum-core pins it to
+# =0.1.2. Both pins are exact, so one dependency graph cannot hold both.
+# The testnet custody surface and the Garden surface are separate duties
+# anyway, so they are separate libraries rather than one library with a
+# version conflict in it.
+
+[lib]
+name = "budlum_garden_ffi"
+# cdylib for Android jniLibs, staticlib for an iOS XCFramework later, lib so
+# the Rust tests can reach it.
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+# Generates the Kotlin sources from the built library:
+# cargo run --features cli --bin uniffi-bindgen -- generate --library <lib>
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["uniffi/cli", "uniffi/cargo-metadata"]
+
+[dependencies]
+# Section 9.1: the APK carries the same core the testnet node carries. The
+# Garden the phone runs is budlum-core's own garden module, not a copy of
+# it written for the app.
+budlum-core = { path = "../.." }
+uniffi = { version = "=0.32.2", default-features = false }
+# The Garden surface is async and a Kotlin call is not; one runtime bridges
+# the two.
+tokio = { version = "1", features = ["rt-multi-thread"] }
+# The Garden RPC answers in JSON, and the screens read those same fields.
+serde_json = "1"
+thiserror = "2"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"

@@ -1,0 +1,156 @@
+name: Garden APK
+
+# One APK, one file (section 3.1). The phone that installs it is a full
+# validator (section 1.2, 6.1), so this workflow cross compiles the node's
+# own core for both Android ABIs and packs it into the app. There is no
+# second download, no companion server and no host computer in the picture.
+#
+# It is heavy, so it does not run on every push. A dispatch only workflow
+# has to sit on the default branch to be dispatchable and this one does
+# not, so instead it is driven by a push to a branch kept for cutting the
+# APK.
+on:
+  push:
+    branches: [garden-apk-build]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: garden-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Build the Garden APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install JDK 17
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4, 2026-08-04
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Gradle
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4, 2025-09-09
+        with:
+          gradle-version: "8.11.1"
+          cache-read-only: true
+
+      - name: Install Android SDK and NDK
+        run: |
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+          set +o pipefail
+          yes | sdkmanager --licenses > /dev/null
+          set -o pipefail
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
+
+      - name: Install protoc
+        run: |
+          VERSION=29.3
+          curl -sSLo /tmp/protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${VERSION}/protoc-${VERSION}-linux-x86_64.zip"
+          unzip -q /tmp/protoc.zip -d "$HOME/protoc"
+          echo "PROTOC=$HOME/protoc/bin/protoc" >> "$GITHUB_ENV"
+          chmod +x "$HOME/protoc/bin/protoc"
+
+      - name: Install the Android Rust targets
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+
+      - name: Point cargo at the NDK linkers
+        run: |
+          NDK="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$TC/aarch64-linux-android29-clang"
+          {
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TC/aarch64-linux-android29-clang"
+            echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$TC/x86_64-linux-android29-clang"
+            echo "CC_aarch64_linux_android=$TC/aarch64-linux-android29-clang"
+            echo "CC_x86_64_linux_android=$TC/x86_64-linux-android29-clang"
+            echo "AR_aarch64_linux_android=$TC/llvm-ar"
+            echo "AR_x86_64_linux_android=$TC/llvm-ar"
+          } >> "$GITHUB_ENV"
+
+      # The core itself, for both ABIs of section 3.1. This is the same
+      # library the Linux validators run; nothing Garden specific is built
+      # for the phone (section 9.1).
+      - name: Build the core for arm64-v8a
+        run: |
+          cargo build --locked --manifest-path mobile/garden-ffi/Cargo.toml \
+            --target aarch64-linux-android --release --lib
+
+      - name: Build the core for x86_64
+        run: |
+          cargo build --locked --manifest-path mobile/garden-ffi/Cargo.toml \
+            --target x86_64-linux-android --release --lib
+
+      - name: Generate the Kotlin bindings
+        run: |
+          PROFILE_DIR="release"
+          cargo run --locked --manifest-path mobile/garden-ffi/Cargo.toml --features cli \
+            --bin uniffi-bindgen -- generate \
+            --library "mobile/garden-ffi/target/aarch64-linux-android/${PROFILE_DIR}/libbudlum_garden_ffi.so" \
+            --language kotlin \
+            --out-dir mobile/android/app/src/main/java
+
+      - name: Put the libraries where Gradle looks for them
+        run: |
+          PROFILE_DIR="release"
+          for pair in "aarch64-linux-android:arm64-v8a" "x86_64-linux-android:x86_64"; do
+            TRIPLE="${pair%%:*}"
+            ABI="${pair##*:}"
+            DEST="mobile/android/app/src/main/jniLibs/${ABI}"
+            mkdir -p "$DEST"
+            cp "mobile/garden-ffi/target/${TRIPLE}/${PROFILE_DIR}/libbudlum_garden_ffi.so" "$DEST/"
+            ls -la "$DEST"
+          done
+
+      - name: Assemble the APK
+        working-directory: mobile/android
+        run: |
+          for attempt in 1 2 3; do
+            if gradle assembleDebug --no-daemon; then break; fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "gradle assembleDebug attempt ${attempt} failed; backing off" >&2
+              sleep $((attempt * 45))
+            else
+              echo "gradle assembleDebug failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+          done
+
+      # Section 3.1 asks for one file. A split build would hand a person two.
+      - name: Check that it is one file carrying both ABIs
+        run: |
+          APK=$(find mobile/android/app/build/outputs/apk -name "*.apk" | head -1)
+          test -n "$APK" || { echo "no APK was produced" >&2; exit 1; }
+          echo "APK: $APK"
+          ls -la "$APK"
+          sha256sum "$APK"
+          python3 - "$APK" <<'PY'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          libs = sorted(n for n in names if n.endswith("libbudlum_garden_ffi.so"))
+          print("libraries inside the APK:")
+          for name in libs:
+              print("  " + name)
+          wanted = {"lib/arm64-v8a/libbudlum_garden_ffi.so", "lib/x86_64/libbudlum_garden_ffi.so"}
+          missing = wanted - set(libs)
+          if missing:
+              raise SystemExit("the APK is missing: " + ", ".join(sorted(missing)))
+          print("one APK carries both ABIs")
+          PY
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: garden-apk
+          path: mobile/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 30

@@ -50,3 +50,46 @@ pub use service::{GardenOptions, GardenService};
 #[cfg(test)]
 pub(crate) use types::garden_domain_id;
 pub(crate) use types::is_garden_domain_id;
+
+/// Put one small object down the B.U.D. 3.0 path and read it back.
+///
+/// Section 4 of the optimisation directive asks the first run of the phone
+/// to prove it can carry an object before it joins anything, and to prove
+/// it locally: no peer, no network. That is what this does. It codes the
+/// object the way a real publication codes it, then rebuilds it from the
+/// coded symbols rather than from the stored bytes, because reading the
+/// bytes back would pass even if the coding path were dead.
+///
+/// It lives here, beside the Garden it tests, so the phone runs the same
+/// object layer a Linux validator runs (9.1) instead of a copy made for
+/// the app.
+///
+/// # Errors
+///
+/// Returns what failed, in words a person can read on a phone screen.
+/// WIRING: wired - the caller is `mobile/garden-ffi`, the phone's UniFFI
+/// library, which runs this as the B.U.D. 3.0 step of the section 4 self
+/// test before a Garden is created or joined. That crate builds against
+/// this one by path but sits outside the directories this gate reads, so
+/// the call it makes is invisible here.
+pub fn self_test_object_round_trip() -> Result<(), String> {
+    // Big enough to become more than one symbol, small enough that a
+    // phone finishes it well inside the fifteen seconds section 4 allows.
+    let object: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
+    let mut store = storage::GardenContentStore::open(None, 1 << 20)
+        .map_err(|e| format!("the object store did not open: {e}"))?;
+    let content_id = store
+        .put(&object)
+        .map_err(|e| format!("the object was not stored: {e}"))?;
+    let rebuilt = store
+        .get_coded(&content_id)
+        .ok_or_else(|| "the object did not come back from its coded symbols".to_string())?;
+    if rebuilt != object {
+        return Err(format!(
+            "the object came back changed: {} bytes in, {} bytes out",
+            object.len(),
+            rebuilt.len()
+        ));
+    }
+    Ok(())
+}

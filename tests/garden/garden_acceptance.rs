@@ -2,8 +2,8 @@
 //! 11.1, run the way that section says they run: under `tests/garden/`, named
 //! `garden_*`, against real nodes in separate processes.
 //!
-//! Section 11.1 opens with: "Testler `tests/garden/` altinda, `garden_*`
-//! adlariyla kosar. Testler ayri sureclerde calisan gercek dugumlerle calisir."
+//! Section 11.1 opens by requiring that the tests run under `tests/garden/`
+//! with `garden_*` names, against real nodes running in separate processes.
 //! Eight of the nine lived only as unit tests inside `src/garden/`, so the
 //! checks never ran against a node anyone could have deployed: a unit test
 //! holds the pieces together in one address space and cannot see a node refuse
