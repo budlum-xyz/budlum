@@ -76,8 +76,14 @@ pub fn self_test_object_round_trip() -> Result<(), String> {
     // Big enough to become more than one symbol, small enough that a
     // phone finishes it well inside the fifteen seconds section 4 allows.
     let object: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
-    let mut store = storage::GardenContentStore::open(None, 1 << 20)
-        .map_err(|e| format!("the object store did not open: {e}"))?;
+    // `open` is the tests-only shortcut; production carries its own ceiling,
+    // so this takes the ceiling the Garden itself uses.
+    let mut store = storage::GardenContentStore::open_with_limit(
+        None,
+        1 << 20,
+        storage::MAX_LOCAL_GARDEN_BYTES,
+    )
+    .map_err(|e| format!("the object store did not open: {e}"))?;
     let content_id = store
         .put(&object)
         .map_err(|e| format!("the object was not stored: {e}"))?;
