@@ -3706,3 +3706,7 @@ jobs:
           set -euo pipefail
           cargo test --test garden_scenario -- --test-threads=1 2>&1 | tee /tmp/garden-scenario.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- garden-scenario /tmp/garden-scenario.txt
+      - name: Garden acceptance (directive section 9 and 11 names, real nodes)
+        run: |
+          set -euo pipefail
+          cargo test --test garden_acceptance -- --test-threads=1 2>&1 | tee /tmp/garden-acceptance.txt

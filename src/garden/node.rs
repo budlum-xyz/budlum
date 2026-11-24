@@ -742,6 +742,7 @@ pub async fn spawn(
     }
 
     let mut peers = BTreeMap::new();
+    let joining = matches!(entry, GardenEntry::Invite(_));
     let (ledger, token, seeds) = match entry {
         GardenEntry::Create { title, limits } => {
             if address.is_empty() {
@@ -913,11 +914,54 @@ pub async fn spawn(
         stopped: false,
     };
     tokio::spawn(node.run(garden_net.events, command_rx, deposit_rx));
-    Ok(GardenHandle {
+    let handle = GardenHandle {
         commands,
         chain_id,
         genesis_hash,
-    })
+    };
+    if joining {
+        wait_at_the_door(&handle).await?;
+    }
+    Ok(handle)
+}
+
+/// Longest a joiner waits for the door before it gives up.
+const JOIN_ENTER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wait until this key is in the Garden's record.
+///
+/// A join is a request, not a membership: the chain places the key in a
+/// block. Returning a handle before that block would tell the caller it is a
+/// validator while it holds no seat, and a Frozen Garden - which writes no
+/// blocks - would look like a Garden that admitted everyone. The answer is
+/// therefore the record: `Active` for a seat, `Waiting` under host approval
+/// (the host answers with no deadline), and a refusal when the Garden turned
+/// the key away, retired, or never reached the door.
+async fn wait_at_the_door(handle: &GardenHandle) -> Result<(), String> {
+    let started = Instant::now();
+    loop {
+        let status = handle.status().await?;
+        let member = status.pointer("/me/member").and_then(Value::as_str);
+        if member == Some("Active") || member == Some("Waiting") {
+            return Ok(());
+        }
+        if status.get("turned_away") == Some(&Value::Bool(true)) {
+            return Err("the Garden turned this key away".into());
+        }
+        if status.get("status").and_then(Value::as_str) == Some("Retired") {
+            return Err("the Garden was retired before this key could join".into());
+        }
+        if status.pointer("/me/stopped") == Some(&Value::Bool(true)) {
+            return Err("this node stopped before the Garden placed its key".into());
+        }
+        if started.elapsed() >= JOIN_ENTER_TIMEOUT {
+            let _ = handle.leave().await;
+            return Err(
+                "the Garden did not admit this key in time; it may be frozen or full".into(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Fetch and verify the genesis and the finalized chain from the peers an
@@ -1737,6 +1781,12 @@ impl Node {
             let peer_cap = (self.limits().max_validators as usize)
                 .saturating_mul(2)
                 .saturating_add(8);
+            // A Garden with no room does not hand a newcomer a welcome it
+            // can never redeem: the refusal names the reason, in the place
+            // the joiner reads it, before any chain state is exchanged.
+            let no_room = !self.ledger.state.has_room()
+                && !self.is_seated_validator(key)
+                && self.ledger.state.validators.get(key).is_none();
             let known_validator = self.is_seated_validator(key);
             let unjoined_count = self
                 .peers
@@ -1746,7 +1796,9 @@ impl Node {
             let unjoined_grace = self.unjoined_grace();
             let already = self.peers.contains_key(&peer);
             let mut admit = false;
-            let response = if *chain_id != self.chain_id() {
+            let response = if no_room {
+                GardenResponse::Refused("the Garden has no seat for this key".into())
+            } else if *chain_id != self.chain_id() {
                 GardenResponse::Refused("this node runs another Garden".into())
             } else if !self.holds_invite(peer, key, invite_signature) {
                 GardenResponse::Refused("the invite does not match this Garden".into())
@@ -3735,10 +3787,22 @@ impl Node {
                 peers.push(validator.address.clone());
             }
         }
+        // A seed is where a validator was, not where it is. Once the record
+        // places that key, the record wins: keeping the old address in the
+        // list would hand a newcomer a door that no longer opens.
+        let placed: BTreeSet<GardenKey> = state.validators.keys().copied().collect();
         for seed in &self.seeds {
-            if !peers.contains(seed) {
-                peers.push(seed.clone());
+            if peers.contains(seed) {
+                continue;
             }
+            if net::dial_address(seed).is_ok_and(|(_, id)| {
+                placed
+                    .iter()
+                    .any(|key| peer_id_of(key).is_ok_and(|own| own == id))
+            }) {
+                continue;
+            }
+            peers.push(seed.clone());
         }
         peers
     }
@@ -4019,6 +4083,7 @@ impl Node {
                     }),
                 "turned_away": self.turned_away,
                 "leaving": self.leaving.is_some(),
+                "stopped": self.stopped,
             },
             "validators": validators,
             "active_validators": state.active().len(),
