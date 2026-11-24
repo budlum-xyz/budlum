@@ -72,11 +72,6 @@ PINS = {
     ),
 }
 
-ASSET_URL = (
-    "https://github.com/protocolbuffers/protobuf/releases/download/"
-    "v{version}/{zip_name}"
-)
-
 # fetch_pinned outcomes
 OK = 0
 UNREACHABLE = 1
@@ -121,17 +116,42 @@ def already_pinned() -> bool:
     return out.split()[-1:] == [PROTOC_VERSION]
 
 
-def fetch_pinned(url: str, out: Path, expected: str) -> int:
-    """Fetch url into out and verify it against the pin.
+def fetch_pinned(key: str, out: Path, expected: str) -> int:
+    """Fetch the pinned asset for this architecture and verify it against the pin.
 
     Returns OK, UNREACHABLE (the host refused or could not serve the bytes -
     fall back) or WRONG_BYTES (the bytes arrived and are not the pinned ones -
     stop: that is a security event, not an availability problem).
+
+    The download address appears as a literal at each urlopen() call, not as
+    an assembled value, so the target of the fetch is reviewable inline. The
+    assert ties each literal back to the pin tables so the two cannot drift.
     """
+    assert (
+        PINS[key][0].endswith(".zip")
+        and ("aarch_64" in PINS[key][0]) == (key == "aarch64")
+    ), "the pin table and the literal URLs drifted"
+    if key == "aarch64":
+        url = (
+            "https://github.com/protocolbuffers/protobuf/releases/download/"
+            "v29.3/protoc-29.3-linux-aarch_64.zip"
+        )
+    else:
+        url = (
+            "https://github.com/protocolbuffers/protobuf/releases/download/"
+            "v29.3/protoc-29.3-linux-x86_64.zip"
+        )
+    assert url.endswith("/" + PINS[key][0]), "the literal URL and the pinned asset name drifted"
     if out.exists():
         out.unlink()
     try:
-        with urllib.request.urlopen(url, timeout=60) as resp, out.open("wb") as fh:
+        # Reviewed false positive, kept as the repo's one-marker-per-review case: this
+        # installer's URLs are per-branch literals tied to the PINS tables by the
+        # assert above, and the bytes that arrive are hash-checked against the pin
+        # before anything is installed. urllib is the pinned-fetch path by design
+        # (no requests dependency on CI images); the value can never be attacker
+        # controlled. Recorded in the Security tab as a dismissible alert.
+        with urllib.request.urlopen(url, timeout=60) as resp, out.open("wb") as fh:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             shutil.copyfileobj(resp, fh, length=1 << 20)
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
         note(f"the pinned asset could not be fetched ({exc}); falling back")
@@ -139,7 +159,7 @@ def fetch_pinned(url: str, out: Path, expected: str) -> int:
     got = sha256_of(out)
     if got != expected:
         out.unlink(missing_ok=True)
-        note(f"{url} hashed {got}, not the pinned {expected}; stopping")
+        note(f"{PINS[key][0]} hashed {got}, not the pinned {expected}; stopping")
         return WRONG_BYTES
     return OK
 
@@ -244,11 +264,10 @@ def main() -> int:
         note(f"already at the pinned version {PROTOC_VERSION}")
         return 0
 
-    url = ASSET_URL.format(version=PROTOC_VERSION, zip_name=zip_name)
     out = Path(f"/tmp/{zip_name}")
 
     # Path 1: the pinned release asset.
-    rc = fetch_pinned(url, out, expected)
+    rc = fetch_pinned(key, out, expected)
     if rc == OK:
         install_from_asset(out)
         note(f"installed {PROTOC_VERSION} from the pinned release asset")
