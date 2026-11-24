@@ -672,3 +672,125 @@ fn garden_storage_shrink() -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Section 11.1 item 8: one Garden run calls every part of B.U.D. 3.0 through
+/// the production path, and the test reads the call count for each part.
+///
+/// This runs against a real node in its own process, the way section 11.1
+/// opens: the counters are the node's own, reported in `work.bud3`, and they
+/// only move when a real publication and a real read drive the object layer.
+/// A part that never runs reads zero and the test names it.
+#[test]
+fn garden_storage_all_parts() -> Result<(), String> {
+    let host = Node::start("host")?;
+    host.create("Room")?;
+    host.wait_status("Active")?;
+
+    // Nothing has been published, so no part of the object layer has run.
+    let before = host.garden()?.get("work").cloned().unwrap_or(Value::Null);
+    let bud3_before = before.get("bud3").cloned().unwrap_or(Value::Null);
+    ensure(
+        bud3_before.get("objects_coded").and_then(Value::as_u64) == Some(0),
+        format!("a fresh Garden cannot have coded anything: {bud3_before}"),
+    )?;
+
+    // Publish bytes that do not fall on a symbol boundary, so segmentation and
+    // padding are both exercised.
+    let words = "a garden stores what it grows ".repeat(301);
+    let published = host.rpc("bud_gardenPublish", &json!(["message", words]))?;
+    let content_id = published
+        .get("content_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("the publication names no content id: {published}"))?
+        .to_string();
+
+    // Wait for the coding to be counted, then read the counters.
+    let started = Instant::now();
+    let mut bud3 = Value::Null;
+    while started.elapsed() < PATIENCE {
+        let work = host.garden()?.get("work").cloned().unwrap_or(Value::Null);
+        bud3 = work.get("bud3").cloned().unwrap_or(Value::Null);
+        if bud3.get("objects_coded").and_then(Value::as_u64) == Some(1) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let count = |name: &str| bud3.get(name).and_then(Value::as_u64).unwrap_or(0);
+    ensure(
+        count("objects_coded") == 1,
+        format!("the object was never coded by B.U.D. 3.0: {bud3}"),
+    )?;
+    ensure(
+        count("segments_coded") >= 1,
+        format!("bof1 produced no segment: {bud3}"),
+    )?;
+    ensure(
+        count("symbols_made") > count("segments_coded"),
+        format!("the fountain made no repair symbols: {bud3}"),
+    )?;
+    ensure(
+        count("symbol_roots") == count("segments_coded"),
+        format!("custody must root every segment: {bud3}"),
+    )?;
+    ensure(
+        count("objects_viewed") == 0,
+        format!("publishing must not need the view path: {bud3}"),
+    )?;
+
+    // Read it back. The resolve path prefers the object layer, so the bytes
+    // come from the symbols and the view counter moves.
+    let seen = host.rpc("bud_gardenResolve", &json!([content_id]))?;
+    ensure(
+        seen.get("verified").and_then(Value::as_bool) == Some(true),
+        format!("the object did not verify on read: {seen}"),
+    )?;
+    ensure(
+        seen.get("text").and_then(Value::as_str) == Some(words.as_str()),
+        "B.U.D. 3.0 returned different bytes from the ones published",
+    )?;
+
+    let started = Instant::now();
+    let mut after = Value::Null;
+    while started.elapsed() < PATIENCE {
+        let work = host.garden()?.get("work").cloned().unwrap_or(Value::Null);
+        after = work.get("bud3").cloned().unwrap_or(Value::Null);
+        if after.get("objects_viewed").and_then(Value::as_u64) == Some(1) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let now = |name: &str| after.get(name).and_then(Value::as_u64).unwrap_or(0);
+    let made = count("symbols_made");
+    ensure(
+        now("objects_viewed") == 1,
+        format!("the read did not go through the view path: {after}"),
+    )?;
+    ensure(
+        now("symbols_used") == made,
+        format!(
+            "the view must consume the {made} symbols the upload made, it used {}: {after}",
+            now("symbols_used")
+        ),
+    )?;
+
+    // Every part named above ran. The list is what a silent part would show up
+    // in, so it is spelled out rather than folded into one number.
+    let parts: [(&str, u64); 6] = [
+        ("objects_coded", now("objects_coded")),
+        ("segments_coded", now("segments_coded")),
+        ("symbols_made", now("symbols_made")),
+        ("symbol_roots", now("symbol_roots")),
+        ("objects_viewed", now("objects_viewed")),
+        ("symbols_used", now("symbols_used")),
+    ];
+    let silent: Vec<&str> = parts
+        .iter()
+        .filter(|(_, value)| *value == 0)
+        .map(|(name, _)| *name)
+        .collect();
+    ensure(
+        silent.is_empty(),
+        format!("these B.U.D. 3.0 parts never ran: {} in {after}", silent.join(", ")),
+    )?;
+    Ok(())
+}
