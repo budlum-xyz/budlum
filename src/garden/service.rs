@@ -84,6 +84,7 @@ impl GardenOptions {
 }
 
 /// What this node needs to take its place in a Garden again.
+#[derive(Clone)]
 struct Seat {
     secret: [u8; 32],
     config: GardenNodeConfig,
@@ -269,10 +270,24 @@ impl GardenService {
             secret: random_bytes(),
             config: self.config(name, &options),
         };
-        let (handle, seat, status) = self.enter(GardenEntry::Invite(invite), seat).await?;
-        *slot = Slot::Running(handle, seat);
-        drop(slot);
-        Ok(json!({ "garden": status }))
+        // The seat is kept for the failure arm too, so a refused door leaves
+        // the same key able to try again rather than a stranger's.
+        let kept = seat.clone();
+        match self.enter(GardenEntry::Invite(invite.clone()), seat).await {
+            Ok((handle, seat, status)) => {
+                *slot = Slot::Running(handle, seat);
+                drop(slot);
+                Ok(json!({ "garden": status }))
+            }
+            Err(e) => {
+                // The node reached the Garden's door and was not let in - it
+                // may be frozen or full. That is a step out, not a forgotten
+                // Garden: `return` tries the same door again.
+                *slot = Slot::Away(kept, invite);
+                drop(slot);
+                Err(e)
+            }
+        }
     }
 
     /// Leave the Garden. The node wipes the Garden data from its disk and

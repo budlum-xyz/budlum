@@ -303,8 +303,9 @@ impl Node {
             std::thread::sleep(Duration::from_millis(100));
         }
         Err(format!(
-            "[{}] the Garden never reached {wanted} active validators, it has {last}\n{}",
+            "[{}] the Garden never reached {wanted} active validators, it has {last}: {:?}\n{}",
             self.name,
+            self.validators().unwrap_or_default(),
             self.log_tail()
         ))
     }
@@ -356,6 +357,14 @@ fn ensure(condition: bool, message: impl Into<String>) -> Result<(), String> {
 
 /// Section 11.1 item 5: the invite a host hands out after a join names the
 /// same Garden record as the one it was created with.
+/// The host's own peer address, as the link carries it.
+fn first_peer(link: &str) -> Result<String, String> {
+    link.split('&')
+        .find_map(|part| part.strip_prefix("peer="))
+        .map(str::to_string)
+        .ok_or_else(|| format!("the invite names no peer: {link}"))
+}
+
 #[test]
 fn garden_invite_same_record() -> Result<(), String> {
     let host = Node::start("host")?;
@@ -370,11 +379,31 @@ fn garden_invite_same_record() -> Result<(), String> {
     second.join(&first, true)?;
     host.wait_validators(2)?;
 
-    // Asking again gives the same record: one Garden, one invite.
+    // Asking again gives the same record. The record names the Garden - the
+    // chain, the genesis and the token - and those do not move when a
+    // member joins. The routing half may grow: the new validator is now a
+    // door too, and directive 5.1 says every validator hands out invites.
     let again = host.invite()?;
+    let identity = |link: &str| {
+        link.split('&')
+            .filter(|part| {
+                part.starts_with("budlum-garden:")
+                    || part.starts_with("chain=")
+                    || part.starts_with("genesis=")
+                    || part.starts_with("token=")
+            })
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
     ensure(
-        again == first,
-        format!("the invite changed once a validator joined:\n  before {first}\n  after  {again}"),
+        identity(&again) == identity(&first),
+        format!(
+            "the invite stopped naming the same Garden after a validator joined:\n  before {first}\n  after  {again}"
+        ),
+    )?;
+    ensure(
+        again.contains(&first_peer(&first)?),
+        format!("the invite dropped the host it was handed out for:\n  {again}"),
     )?;
 
     // And the joiner read the same record, or it could not have joined: the
@@ -404,11 +433,17 @@ fn garden_invite_size() -> Result<(), String> {
     // Section 3: the record is at most 512 bytes and the QR at most 640.
     ensure(
         invite.len() <= 512,
-        format!("the invite is {} bytes, over the 512-byte record ceiling: {invite}", invite.len()),
+        format!(
+            "the invite is {} bytes, over the 512-byte record ceiling: {invite}",
+            invite.len()
+        ),
     )?;
     ensure(
         invite.len() <= 640,
-        format!("the invite is {} bytes, over the 640-byte QR ceiling", invite.len()),
+        format!(
+            "the invite is {} bytes, over the 640-byte QR ceiling",
+            invite.len()
+        ),
     )?;
     ensure(
         invite.starts_with("budlum"),
@@ -508,7 +543,12 @@ fn garden_invite_host_moves() -> Result<(), String> {
     host.wait_status("Active")?;
 
     // The host leaves and comes back at a different address. A person keeps
-    // the record they were given; it has to keep working.
+    // the record they were given; it has to keep working. Somebody else has
+    // to stay: the last validator out retires the Garden (directive 3.7),
+    // and a retired Garden has nothing to return to.
+    let stayer = Node::start("stayer")?;
+    stayer.join(&before, true)?;
+    host.wait_validators(2)?;
     host.rpc("bud_gardenLeave", &json!([]))?;
     let returned = host.rpc("bud_gardenReturn", &json!([]))?;
     ensure(
@@ -541,7 +581,10 @@ fn garden_invite_while_frozen() -> Result<(), String> {
     // Kill the host so the Garden freezes for everyone left.
     let host_pid = host.child.as_ref().map(Child::id);
     if let Some(pid) = host_pid {
-        let _ = Command::new("kill").arg("-KILL").arg(pid.to_string()).status();
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(pid.to_string())
+            .status();
     }
     std::thread::sleep(Duration::from_secs(4));
 
@@ -601,14 +644,21 @@ fn garden_every_validator_works() -> Result<(), String> {
             let garden = match node.garden() {
                 Ok(garden) => garden,
                 Err(e) => {
+                    // A node in the middle of its first sync answers nothing
+                    // for a moment; the step has time, so wait instead of
+                    // failing on the first empty body.
                     last = e;
                     all = false;
+                    std::thread::sleep(Duration::from_millis(200));
+                    let _ = node.rpc("bud_gardenStatus", &json!([]));
                     break;
                 }
             };
             let work = garden.get("work").cloned().unwrap_or(Value::Null);
             let count = |name: &str| work.get(name).and_then(Value::as_u64).unwrap_or(0);
-            if count("parts_held") == 0 || count("blocks_executed") == 0 || count("parts_served") == 0
+            if count("parts_held") == 0
+                || count("blocks_executed") == 0
+                || count("parts_served") == 0
             {
                 last = format!("[{}] counters not moving yet: {work}", node.name);
                 all = false;
