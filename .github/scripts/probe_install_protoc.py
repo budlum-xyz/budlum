@@ -161,6 +161,29 @@ def probe_http_error_is_unreachable_not_tamper(mod, workdir):
     return "safe", f"404 -> {rc} (not OK; main() falls back or stops by branch)"
 
 
+def probe_non_web_scheme_is_not_a_download(mod, workdir):
+    """S8: only a web scheme is a download; file:// is a local read.
+
+    `urllib.request.urlopen` honours file://, ftp:// and data: as well as
+    http(s). A URL that ever stops being the pinned constant could then read
+    a local file into the "download", and the hash check would bless it if the
+    file carries the pinned bytes. A non-web scheme must stop the job before
+    any byte is read.
+    """
+    local = workdir / "local-asset.zip"
+    local.write_bytes(b"bytes already on this machine")
+    expected = hashlib.sha256(local.read_bytes()).hexdigest()
+    out = workdir / "scheme.zip"
+    rc = mod.fetch_pinned(local.as_uri(), out, expected)
+    if rc == mod.OK:
+        return "vulnerable", f"{local.as_uri()} was accepted as the pinned asset"
+    if rc != mod.WRONG_BYTES:
+        return "vulnerable", f"file:// -> {rc}; a non-web scheme must stop (WRONG_BYTES), not fall back"
+    if out.exists():
+        return "vulnerable", "file:// was refused, but its bytes were copied first"
+    return "safe", "file:// -> WRONG_BYTES before any byte is read"
+
+
 def probe_pin_table_is_pinned_to_one_version(mod):
     """S7: both architectures resolve to the same version and a 64-hex pin."""
     xs = mod.PINS["x86_64"]
@@ -455,6 +478,7 @@ def main() -> int:
     record(probe_connection_refused_falls_back, mod, workdir)
     record(probe_redirect_is_followed_and_verified, mod, workdir)
     record(probe_http_error_is_unreachable_not_tamper, mod, workdir)
+    record(probe_non_web_scheme_is_not_a_download, mod, workdir)
     record(probe_path_hijack_of_the_target_dir, mod, workdir, TARGET)
     record(probe_shadowed_protoc_on_path_short_circuits, mod, workdir)
     record(probe_source_tree_is_verified, mod, TARGET)
