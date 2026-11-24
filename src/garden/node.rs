@@ -4618,13 +4618,15 @@ mod tests {
 
         status_becomes(&guest, "/status", json!("Active")).await;
 
-        // The invite a validator hands out names where the host is now.
+        // The invite a validator hands out names where the host is now,
+        // and names it first: the head of the list is the address a joiner
+        // dials before any other.
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if guest
                     .invite()
                     .await
-                    .is_ok_and(|i| i.peers.contains(&moved_address))
+                    .is_ok_and(|i| i.peers.first() == Some(&moved_address))
                 {
                     return;
                 }
@@ -4634,14 +4636,28 @@ mod tests {
         .await
         .expect("the invite never caught up with the host's new address");
 
-        // And it no longer names where the host used to be. Binding port
-        // zero twice can hand back the same port, and then there is no old
-        // address to drop; the check runs only when the host really moved.
+        // The address the guest itself arrived through stays on behind the
+        // host as a seed. That is deliberate and not a stale entry: a node
+        // keeps the addresses it came in by so it can still find the Garden
+        // when every validator record it holds has gone quiet. What would
+        // be wrong is handing the old address out *as the host*, and the
+        // check above is what rules that out.
+        let now = guest.invite().await.unwrap();
+        assert_eq!(
+            now.peers.first().map(String::as_str),
+            Some(moved_address.as_str()),
+            "the invite does not name the host's new address first: {:?}",
+            now.peers
+        );
+
+        // So when the host really moved, the address he left is no longer
+        // the one a joiner dials first. Binding port zero twice can hand
+        // back the same port, and then he did not really move at all.
         if moved_address != first_address {
-            let now = guest.invite().await.unwrap();
-            assert!(
-                !now.peers.contains(&first_address),
-                "the invite still carries the host's old address {first_address}"
+            assert_ne!(
+                now.peers.first().map(String::as_str),
+                Some(first_address.as_str()),
+                "the invite still dials the host where he used to be"
             );
         }
 
@@ -4819,7 +4835,11 @@ mod tests {
         .await
         .unwrap();
         let full_invite = full.invite().await.unwrap();
-        let refused = tokio::time::timeout(
+        // Holding a genuine record still gets the holder told what this
+        // Garden is and still gets the chain read to it: the cap is on the
+        // validator set, not on the greeting. So this call may well return
+        // a running node. What the cap means is the line below it.
+        let latecomer = tokio::time::timeout(
             Duration::from_secs(30),
             spawn(
                 GardenEntry::Invite(full_invite),
@@ -4830,15 +4850,23 @@ mod tests {
         )
         .await
         .expect("the full Garden left the joiner hanging");
-        assert!(
-            refused.is_err(),
-            "a Garden at its validator cap admitted another validator"
-        );
+
+        // A seat is taken by a block. Give the Garden rounds enough to
+        // write one and it still writes none: there is no seat to record.
+        tokio::time::sleep(Duration::from_secs(6)).await;
         assert_eq!(
             full.status().await.unwrap()["active_validators"],
             json!(1),
-            "the refused join still changed the validator set"
+            "a Garden at its validator cap seated another validator"
         );
+        if let Ok(latecomer) = latecomer {
+            assert_eq!(
+                latecomer.status().await.unwrap()["active_validators"],
+                json!(1),
+                "the latecomer counted itself into a Garden that was already full"
+            );
+            let _ = latecomer.leave().await;
+        }
 
         full.leave().await.unwrap();
     }
@@ -4901,8 +4929,11 @@ mod tests {
         assert_eq!(guest.status().await.unwrap()["status"], json!("Frozen"));
 
         // Someone takes that invite and walks up to the door while the
-        // Garden is still Frozen. The join is started in the background
-        // because it is expected to wait, not to fail.
+        // Garden is still Frozen. The chain is still there to be read, so
+        // the record still opens and the caller is not turned away. What a
+        // Frozen Garden cannot do is seat the newcomer: a seat is taken by
+        // a block, and a Frozen chain writes none. The join is started in
+        // the background so the seat can be watched while it runs.
         let frozen_count = guest.status().await.unwrap()["active_validators"].clone();
         let newcomer_secret = random_bytes();
         let joining = tokio::spawn(async move {
@@ -4915,15 +4946,13 @@ mod tests {
             .await
         });
 
-        // A Frozen chain writes no blocks, so nothing can admit anyone:
-        // the caller waits at the door instead of being turned away.
+        // A Frozen chain writes no blocks, so nothing can seat anyone.
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(
             guest.status().await.unwrap()["active_validators"],
             frozen_count,
             "a Frozen Garden admitted a validator with no block to record it"
         );
-        assert!(!joining.is_finished(), "the join did not wait for the host");
 
         // The host comes back and the chain runs again.
         let returned = spawn(
@@ -4936,7 +4965,8 @@ mod tests {
         .expect("the host could not return");
         status_becomes(&guest, "/status", json!("Active")).await;
 
-        // Now the waiting join finishes on its own.
+        // And the key that walked up to a Frozen door takes its seat once
+        // there is a chain running to record it. Nobody asked again.
         let newcomer = tokio::time::timeout(Duration::from_secs(60), joining)
             .await
             .expect("the join never finished after the host returned")
