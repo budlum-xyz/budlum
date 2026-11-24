@@ -4548,13 +4548,7 @@ mod tests {
         )
         .await
         .unwrap();
-        tokio::time::timeout(Duration::from_secs(20), async {
-            while guest.status().await.unwrap()["active_validators"] != 2 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("the guest never became a validator");
+        status_becomes(&guest, "/active_validators", json!(2)).await;
 
         // A record handed out while two validators are up names both of
         // them. This is the invite that has to survive the move: a door
@@ -4586,13 +4580,7 @@ mod tests {
             .unwrap()
             .to_string();
 
-        tokio::time::timeout(Duration::from_secs(30), async {
-            while guest.status().await.unwrap()["status"] != json!("Active") {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("the Garden did not run again after the host returned");
+        status_becomes(&guest, "/status", json!("Active")).await;
 
         // The invite a validator hands out names where the host is now.
         tokio::time::timeout(Duration::from_secs(30), async {
@@ -4632,13 +4620,7 @@ mod tests {
         )
         .await
         .expect("the invite from before the move was refused");
-        tokio::time::timeout(Duration::from_secs(30), async {
-            while latecomer.status().await.unwrap()["active_validators"] != 3 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("the invite from before the move no longer admits anyone");
+        status_becomes(&latecomer, "/active_validators", json!(3)).await;
 
         latecomer.leave().await.unwrap();
         returned.leave().await.unwrap();
@@ -4859,24 +4841,12 @@ mod tests {
         )
         .await
         .unwrap();
-        tokio::time::timeout(Duration::from_secs(20), async {
-            while guest.status().await.unwrap()["active_validators"] != 2 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("the guest never became a validator");
+        status_becomes(&guest, "/active_validators", json!(2)).await;
 
         // The host goes. With the host silent past host_timeout_ms, every
         // remaining validator observes Frozen.
         let outcome = host_handle.leave().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(30), async {
-            while guest.status().await.unwrap()["status"] != json!("Frozen") {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("the Garden never froze after the host left");
+        status_becomes(&guest, "/status", json!("Frozen")).await;
 
         // Frozen, and still able to say which Garden this is.
         let frozen_invite = guest
@@ -4928,13 +4898,7 @@ mod tests {
         )
         .await
         .expect("the host could not return");
-        tokio::time::timeout(Duration::from_secs(30), async {
-            while guest.status().await.unwrap()["status"] != json!("Active") {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("the Garden did not run again after the host returned");
+        status_becomes(&guest, "/status", json!("Active")).await;
 
         // Now the waiting join finishes on its own.
         let newcomer = tokio::time::timeout(Duration::from_secs(60), joining)
@@ -4942,13 +4906,7 @@ mod tests {
             .expect("the join never finished after the host returned")
             .expect("the joining task panicked")
             .expect("the invite opened while Frozen was refused in the end");
-        tokio::time::timeout(Duration::from_secs(30), async {
-            while newcomer.status().await.unwrap()["active_validators"] != 3 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("the newcomer never became a validator");
+        status_becomes(&newcomer, "/active_validators", json!(3)).await;
 
         newcomer.leave().await.unwrap();
         returned.leave().await.unwrap();
