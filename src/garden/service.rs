@@ -9,8 +9,9 @@
 
 use super::invite::GardenInvite;
 use super::node::{
-    random_bytes, spawn, GardenEntry, GardenHandle, GardenLeaveOutcome, GardenNodeConfig,
+    now_ms, random_bytes, spawn, GardenEntry, GardenHandle, GardenLeaveOutcome, GardenNodeConfig,
 };
+use super::record::GardenRecord;
 use super::settlement::GardenBudlumLink;
 use super::types::{status_label, GardenAdmission, GardenContentKind, GardenLimits};
 use crate::chain::chain_actor::ChainHandle;
@@ -429,10 +430,47 @@ impl GardenService {
     /// Refuses when the node is not running in a Garden, and when it has no
     /// address another node can dial.
     pub async fn invite(&self) -> Result<Value, String> {
-        let invite = self.running().await?.invite().await?;
+        let handle = self.running().await?;
+        let invite = handle.invite().await?;
         let link = invite.to_link();
         let qr = invite.qr_content()?;
-        Ok(json!({ "invite": link, "qr": qr }))
+        // The record says the same thing the line says and more: who
+        // opened the door, until when, and for how many.
+        let record = handle.record().await?;
+        Ok(json!({
+            "invite": link,
+            "qr": qr,
+            "record": record.to_link(),
+            "record_qr": record.to_qr(None)?,
+            "owner": hex::encode(record.owner),
+            "host": hex::encode(record.host),
+            "expires_at_ms": record.expires_at_ms,
+            "uses": record.uses,
+        }))
+    }
+
+    /// Read an invite record and say what is inside it.
+    ///
+    /// Any validator can do this: the proof is checked against the key of
+    /// the validator the record names, which the chain already carries.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a record that is malformed, that has expired, that has run
+    /// out of uses, or whose proof does not match the owner it names.
+    pub fn read_record(record: &str) -> Result<Value, String> {
+        let parsed = GardenRecord::parse(record)?;
+        parsed.check(now_ms())?;
+        Ok(json!({
+            "version": parsed.version,
+            "chain_id": format!("{:016x}", parsed.chain_id),
+            "genesis_hash": hex::encode(parsed.genesis_hash),
+            "owner": hex::encode(parsed.owner),
+            "host": hex::encode(parsed.host),
+            "expires_at_ms": parsed.expires_at_ms,
+            "uses": parsed.uses,
+            "peers": parsed.peers,
+        }))
     }
 
     /// Answer a key that waits for the host. `key` is the validator key as

@@ -21,6 +21,7 @@
 //! and it does that with a transaction like any other.
 
 use super::invite::{fit_peers, GardenInvite};
+use super::record::{GardenRecord, DEFAULT_RECORD_TTL_MS};
 use super::net::{
     self, announced_address, peer_id_of, validator_dial_address, BudgetedFrame, FramePermits,
     GardenGossip, GardenNet, GardenRequest, GardenResponse, NetCommand, NetEvent, MAX_GOSSIP_BATCH,
@@ -184,6 +185,7 @@ pub struct GardenLeaveOutcome {
 enum GardenCommand {
     Status(oneshot::Sender<Value>),
     Invite(oneshot::Sender<Result<GardenInvite, String>>),
+    Record(oneshot::Sender<Result<GardenRecord, String>>),
     Publish {
         kind: GardenContentKind,
         bytes: Vec<u8>,
@@ -243,6 +245,11 @@ impl GardenHandle {
         self.ask(GardenCommand::Invite).await?
     }
 
+    /// The invite record this validator signs and hands out.
+    pub async fn record(&self) -> Result<GardenRecord, String> {
+        self.ask(GardenCommand::Record).await?
+    }
+
     /// Publish a message, a post or an image.
     pub async fn publish(
         &self,
@@ -295,7 +302,7 @@ impl GardenHandle {
     }
 }
 
-fn now_ms() -> u64 {
+pub(super) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -3631,6 +3638,9 @@ impl Node {
             GardenCommand::Invite(reply) => {
                 let _ = reply.send(self.invite());
             }
+            GardenCommand::Record(reply) => {
+                let _ = reply.send(self.record());
+            }
             GardenCommand::Publish {
                 kind,
                 bytes,
@@ -3697,7 +3707,9 @@ impl Node {
         }))
     }
 
-    fn invite(&self) -> Result<GardenInvite, String> {
+    /// Where an invite tells a joiner to knock, best first: the host, then
+    /// the validators this node has checked itself, then the seeds.
+    fn invite_peers(&self) -> Vec<String> {
         let state = &self.ledger.state;
         let host = state.host();
         let mut peers: Vec<String> = Vec::new();
@@ -3728,12 +3740,42 @@ impl Node {
                 peers.push(seed.clone());
             }
         }
+        peers
+    }
+
+    fn invite(&self) -> Result<GardenInvite, String> {
         // The list is already in the order that matters: the host first,
         // then the validators this node has verified, then the seeds. The
-        // record keeps as many of them as it has room for, so a Garden that
-        // outgrows the record still hands out an invite that works.
-        let peers = fit_peers(peers);
-        GardenInvite::new(&state.genesis, self.token, peers)
+        // invite keeps as many of them as it has room for, so a Garden that
+        // outgrows the line still hands out an invite that works.
+        let peers = fit_peers(self.invite_peers());
+        GardenInvite::new(&self.ledger.state.genesis, self.token, peers)
+    }
+
+    /// The invite record this validator hands out.
+    ///
+    /// Any validator may issue one: inviting is not a host privilege. The
+    /// record is signed with this node's own key, so whoever receives it
+    /// can see who opened the door and check that claim against the chain.
+    fn record(&self) -> Result<GardenRecord, String> {
+        let state = &self.ledger.state;
+        let peers = self.invite_peers();
+        if peers.is_empty() {
+            return Err("this node knows no address a joiner could reach".into());
+        }
+        // A record may not admit more keys than the Garden has seats for.
+        let uses = u16::try_from(state.genesis.limits.max_validators).unwrap_or(u16::MAX);
+        GardenRecord::issue(
+            state.genesis.chain_id,
+            state.genesis.hash(),
+            self.token,
+            state.host(),
+            peers,
+            now_ms(),
+            DEFAULT_RECORD_TTL_MS,
+            uses,
+            &self.key,
+        )
     }
 
     async fn publish(

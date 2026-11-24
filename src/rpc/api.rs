@@ -2155,6 +2155,14 @@ pub trait BudlumApi {
     #[method(name = "bud_gardenInvite")]
     async fn garden_invite(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Read an invite record and say what is in it, without joining. The
+    /// proof, the expiry and the remaining uses are all checked.
+    #[method(name = "bud_gardenReadRecord")]
+    async fn garden_read_record(
+        &self,
+        record: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Join a Garden with its invite link or QR content. No account and no
     /// earlier setup is needed: the node makes a validator key of its own.
     #[method(name = "bud_gardenJoin")]

@@ -37,6 +37,7 @@
 mod invite;
 mod net;
 mod node;
+mod record;
 mod service;
 mod settlement;
 mod state;
