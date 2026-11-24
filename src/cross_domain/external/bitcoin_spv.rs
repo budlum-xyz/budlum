@@ -1162,6 +1162,15 @@ impl BitcoinSpvAdapter {
             });
         }
 
+        // Accumulated work is not slashable: no Bitcoin miner has a bond that
+        // Budlum can confiscate. A caller that demands slashable backing is
+        // refused here, as every other work-weighted adapter refuses it, so a
+        // direct `verify_chain` caller cannot read `Work` as if it were a
+        // bonded signature set.
+        if policy.require_slashable {
+            return Err(AdapterError::UnslashableBacking);
+        }
+
         let work_bits = min_difficulty_bits.max(cumulative_work.log2_floor());
         let attestation = FinalityAttestation {
             adapter: self.descriptor.id,

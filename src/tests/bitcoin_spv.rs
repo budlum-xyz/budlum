@@ -262,27 +262,38 @@ fn a_broken_parent_link_is_refused_by_the_bridge() {
     );
 }
 
-/// Work backing is the first producer of `SecurityBacking::Work`. The bridge
-/// already treats accumulated work as clearing a slashability demand; the
-/// adapter must agree, or that branch of the shared model stays dead.
+/// Work backing is not slashable: nothing on the Bitcoin side is bonded where
+/// Budlum could confiscate it. A caller that demands slashable backing must be
+/// refused by the adapter itself - the answer the other work-weighted adapters
+/// (NiPoPoW, GHOSTDAG, AuxPoW, PoSpace) already give - and by the bridge, so
+/// neither door promotes accumulated work to a slashable signature set.
 #[test]
-fn work_backing_clears_the_bridges_slashability_demand() {
+fn work_backing_does_not_clear_a_slashability_demand() {
+    use crate::cross_domain::external::spec::AdapterError;
     let mut strict = policy();
     strict.require_slashable = true;
     let evidence = golden();
+    assert_eq!(
+        adapter().verify(&evidence, &strict),
+        Err(AdapterError::UnslashableBacking)
+    );
+
+    // Without the demand the same evidence is work-backed and admitted, so
+    // the refusal above is the policy and not a broken fixture.
     let attestation = adapter()
-        .verify(&evidence, &strict)
-        .expect("work clears the demand");
+        .verify(&evidence, &policy())
+        .expect("work backs the claim when slashability is not demanded");
     assert!(matches!(attestation.security, SecurityBacking::Work { .. }));
 
     let proof = encode_external_evidence(&evidence).expect("evidence encodes");
     let (domain, commitment) = domain_and_commitment(&evidence, &proof);
     let bridge = ExternalDomainFinalityBridge::new(Box::new(adapter()), strict);
-    assert_eq!(
-        bridge
-            .verify_finality(&domain, &commitment, &proof)
-            .expect("bridge verifies"),
-        FinalityStatus::Finalized
+    let result = bridge.verify_finality(&domain, &commitment, &proof);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| { format!("{error:?}").contains("requires slashable backing") }),
+        "result: {result:?}"
     );
 }
 
