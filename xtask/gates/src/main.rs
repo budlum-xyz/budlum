@@ -227,6 +227,7 @@ mod gates {
     pub mod wallet_node_address_agree;
     pub mod wire_fields_are_signed;
     pub mod workflow_red_keeps_its_words;
+    pub mod workflow_secrets_need_an_environment;
     pub mod workflow_trigger_promises;
     pub mod workflows_are_dispatchable;
     pub mod workflows_cover_every_workspace;
@@ -543,6 +544,14 @@ const GATES: &[Gate] = &[
         run: gates::workflows_are_dispatchable::run,
         run_args: None,
         self_test: gates::workflows_are_dispatchable::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "workflow-secrets-need-an-environment",
+        replaces: None,
+        run: gates::workflow_secrets_need_an_environment::run,
+        run_args: None,
+        self_test: gates::workflow_secrets_need_an_environment::self_test,
         run_log: None,
     },
     Gate {

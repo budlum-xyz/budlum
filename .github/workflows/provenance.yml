@@ -37,6 +37,15 @@ jobs:
     name: SBOM + a signed attestation
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The release seed is read below. A repository secret is handed to every
+    # run of every workflow, and `workflow_dispatch` takes any ref, so a branch
+    # that rewrites `xtask/release` (or this file) would otherwise sign with
+    # the real key. The `release` environment is the control GitHub evaluates
+    # against the ref itself: its deployment branch policy admits `main` only,
+    # and `PQ_RELEASE_SEED` is stored on the environment, not the repository,
+    # so a job that does not name it never receives the seed. The gate
+    # `workflow-secrets-need-an-environment` keeps the name on this job.
+    environment: release
     permissions:
       contents: read
       # Required for attestation: id-token provides the OIDC identity and
