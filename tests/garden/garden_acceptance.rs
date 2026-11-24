@@ -309,27 +309,25 @@ impl Node {
         ))
     }
 
-    /// Every file this node keeps for the Garden, wherever it put it.
+    /// Every file this node keeps under its Garden directory. The directory
+    /// is the one the node itself names, so an empty answer means the node
+    /// wiped it rather than that this walk looked in the wrong place.
     fn garden_files(&self) -> Vec<PathBuf> {
-        fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
+        let mut found = Vec::new();
+        let mut stack = vec![self.dir.path().join("db").join("garden")];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
             };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    walk(&path, found);
-                } else if path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.contains("garden"))
-                {
+                    stack.push(path);
+                } else {
                     found.push(path);
                 }
             }
         }
-        let mut found = Vec::new();
-        walk(self.dir.path(), &mut found);
         found
     }
 }
@@ -379,11 +377,17 @@ fn garden_invite_same_record() -> Result<(), String> {
         format!("the invite changed once a validator joined:\n  before {first}\n  after  {again}"),
     )?;
 
-    // And the joiner read the same record, or it could not have joined.
+    // And the joiner read the same record, or it could not have joined: the
+    // Garden is named by its genesis hash, which both nodes must agree on.
     let joined = second.garden()?;
-    let host_id = host.garden()?.get("id").cloned();
+    let host_genesis = host
+        .garden()?
+        .get("genesis_hash")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| String::from("the host Garden names no genesis hash"))?;
     ensure(
-        joined.get("id") == host_id.as_ref(),
+        joined.get("genesis_hash").and_then(Value::as_str) == Some(host_genesis.as_str()),
         format!("the joiner is in another Garden: {joined}"),
     )?;
     Ok(())
