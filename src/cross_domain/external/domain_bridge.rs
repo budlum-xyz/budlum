@@ -222,18 +222,18 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
 
         // The policy's `require_slashable` is enforced at
         // the BRIDGE, for every adapter - not only the one adapter that
-        // happened to check it. A validity proof is at least as strong as a
-        // slashable set; an unslashable signature set is not.
+        // happened to check it. Slashability is a property of a signature
+        // set with an explicit local confiscation claim; proof-carrying,
+        // work-weighted, authority and empty backing are different security
+        // classes and must not be promoted to slashable here.
         if self.policy.require_slashable {
-            let slashable = match &attestation.security {
-                SecurityBacking::SignatureSet { slashable, .. } => *slashable,
-                // A validity proof cannot lie and accumulated work costs
-                // real money - both clear a slashability demand.
-                SecurityBacking::Zk { .. } | SecurityBacking::Work { .. } => true,
-                // A permissioned set and "no backing" are exactly what the
-                // demand excludes.
-                SecurityBacking::Authority { .. } | SecurityBacking::None => false,
-            };
+            let slashable = matches!(
+                &attestation.security,
+                SecurityBacking::SignatureSet {
+                    slashable: true,
+                    ..
+                }
+            );
             if !slashable {
                 return Ok(FinalityStatus::Rejected(
                     "the policy requires slashable backing; this attestation is not slashable"
@@ -354,7 +354,8 @@ mod tests {
     use super::*;
     use crate::core::address::Address;
     use crate::cross_domain::external::spec::{
-        AdapterDescriptor, FinalityAttestation, FinalityKind, SecurityBacking, TimeUnit, TrustModel,
+        AdapterDescriptor, FinalityAttestation, FinalityKind, ProofSystem, SecurityBacking,
+        TimeUnit, TrustModel,
     };
     use crate::domain::types::{ConsensusKind, DomainStatus, RootScheme};
 
@@ -712,6 +713,63 @@ mod tests {
         fn fault_probes(&self) -> Vec<crate::cross_domain::external::selftest::FaultProbe> {
             Vec::new()
         }
+    }
+
+    #[test]
+    fn work_backing_does_not_satisfy_a_slashable_policy() {
+        let (mut base, domain, mut commitment) = fixture();
+        base.descriptor.finality_kind = FinalityKind::Probabilistic;
+        let proof = encode_external_evidence(&base.evidence).expect("encode");
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+        let adapter = CustomBackingAdapter {
+            descriptor: base.descriptor,
+            evidence: base.evidence,
+            security: SecurityBacking::Work { difficulty_bits: 1 },
+            attestation_time_unit: TimeUnit::Height,
+        };
+        let mut policy = VerificationPolicy::proven(100);
+        policy.require_slashable = true;
+        let bridge = ExternalDomainFinalityBridge::new(Box::new(adapter), policy);
+        let status = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .unwrap();
+        assert!(
+            matches!(
+                status,
+                FinalityStatus::Rejected(ref message) if message.contains("slashable")
+            ),
+            "proof-of-work backing must not satisfy a slashable-only policy: {status:?}"
+        );
+    }
+
+    #[test]
+    fn validity_backing_does_not_satisfy_a_slashable_policy() {
+        let (mut base, domain, mut commitment) = fixture();
+        base.descriptor.finality_kind = FinalityKind::Proven;
+        let proof = encode_external_evidence(&base.evidence).expect("encode");
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+        let adapter = CustomBackingAdapter {
+            descriptor: base.descriptor,
+            evidence: base.evidence,
+            security: SecurityBacking::Zk {
+                system: ProofSystem::BudlumZkVm,
+                public_inputs_digest: [0; 32],
+            },
+            attestation_time_unit: TimeUnit::Height,
+        };
+        let mut policy = VerificationPolicy::proven(100);
+        policy.require_slashable = true;
+        let bridge = ExternalDomainFinalityBridge::new(Box::new(adapter), policy);
+        let status = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .unwrap();
+        assert!(
+            matches!(
+                status,
+                FinalityStatus::Rejected(ref message) if message.contains("slashable")
+            ),
+            "validity-proof backing must not satisfy a slashable-only policy: {status:?}"
+        );
     }
 
     fn empty_security_backing_is_rejected_even_without_slashable_policy() {
