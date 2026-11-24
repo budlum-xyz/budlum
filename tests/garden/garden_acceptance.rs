@@ -591,19 +591,16 @@ fn garden_invite_while_frozen() -> Result<(), String> {
     // A newcomer holding a real record may join, but it cannot become active
     // while nobody hosts.
     let joiner = Node::start("joiner")?;
-    match joiner.join(&invite, true) {
-        Ok(_) => {
-            let state = joiner
-                .garden()
-                .ok()
-                .and_then(|g| g.get("status").and_then(Value::as_str).map(str::to_string));
-            ensure(
-                state.as_deref() != Some("Active"),
-                format!("a Garden with no host reports Active: {state:?}"),
-            )?;
-        }
-        // Refusing outright is also correct: there is no host to admit it.
-        Err(_) => {}
+    // Refusing outright is also correct: there is no host to admit it.
+    if joiner.join(&invite, true).is_ok() {
+        let state = joiner
+            .garden()
+            .ok()
+            .and_then(|g| g.get("status").and_then(Value::as_str).map(str::to_string));
+        ensure(
+            state.as_deref() != Some("Active"),
+            format!("a Garden with no host reports Active: {state:?}"),
+        )?;
     }
     Ok(())
 }
