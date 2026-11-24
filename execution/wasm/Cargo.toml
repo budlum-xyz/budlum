@@ -25,7 +25,9 @@ hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
-wasmi = { version = "=2.0.2", default-features = false, features = [
+# 2.0.2 was yanked from crates.io, and an exact pin on a yanked version
+# cannot resolve at all. 2.0.3 is the patch release that replaced it.
+wasmi = { version = "=2.0.3", default-features = false, features = [
     "std",
     "validate",
     "portable-dispatch",
