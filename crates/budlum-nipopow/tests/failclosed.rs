@@ -13,10 +13,9 @@ fn anchor() -> Hash32 {
 }
 
 fn params(m: usize) -> SecurityParams {
-    SecurityParams {
-        m,
-        superblock_level: 2,
-        max_level: 8,
+    match SecurityParams::new(m, 2, 8) {
+        Some(params) => params,
+        None => panic!("the fixture parameters are valid"),
     }
 }
 

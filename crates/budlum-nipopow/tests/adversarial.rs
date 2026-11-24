@@ -1,9 +1,9 @@
 //! Adversarial tests: each one is a forgery the verifier used to accept.
 //!
-//! These are the five findings of the Strix review recorded in the workspace as
-//! `denetim/bulgular/2026-11-24-sarmal-nipopow-strix.md`. Every test here fails
-//! against the verifier as it was merged (`5603e703`), and each fails for the
-//! reason its name gives, not because a fixture is malformed.
+//! Every test here fails against the verifier as first merged, and each fails for
+//! the reason its name gives, not because a fixture is malformed. A verifier is
+//! only as strong as the fields its proof cannot choose, so each test rewrites
+//! one of those fields and demands a refusal.
 //!
 //! The suite is written from the adversary's side: it forges a proof, then asks
 //! the verifier to reject it. A test that passes because the honest path is
@@ -20,10 +20,9 @@ fn anchor() -> Hash32 {
 }
 
 fn params(m: usize) -> SecurityParams {
-    SecurityParams {
-        m,
-        superblock_level: 2,
-        max_level: 4,
+    match SecurityParams::new(m, 2, 4) {
+        Some(params) => params,
+        None => panic!("the fixture parameters are valid"),
     }
 }
 
@@ -208,4 +207,90 @@ fn the_honest_path_still_verifies() {
     let proof = builder.build_proof(6);
     assert!(proof.verify(&builder.trusted_anchor(), &params(6)));
     assert!(!proof.verify(&builder.trusted_anchor(), &params(1000)));
+}
+
+/// A height of `u64::MAX` is attacker input and must not turn into an abort.
+///
+/// `prev.height + 1` panics in a build with overflow checks on, and the release
+/// profile (overflow checks on, `panic = "abort"`) turns that panic into a
+/// process abort, so a single malformed proof could stop a node.
+#[test]
+fn a_height_at_the_u64_ceiling_is_rejected_not_panicked() {
+    let first = mine(anchor(), u64::MAX, 1, vec![[0u8; 32]]);
+    let second = mine(first.id, u64::MAX, 1, vec![[0u8; 32]]);
+    let proof = NipopowProof {
+        prefix: vec![first, second],
+        suffix: Vec::new(),
+        anchor: anchor(),
+    };
+    assert!(!proof.verify(&TrustedAnchor::genesis(anchor()), &params(1)));
+}
+
+/// An anchor at the ceiling cannot accept a child it could never have.
+#[test]
+fn an_anchor_at_the_u64_ceiling_rejects_a_ceiling_height_child() {
+    let header = mine(anchor(), u64::MAX, 2, vec![[0u8; 32], [0u8; 32]]);
+    let proof = NipopowProof {
+        prefix: vec![header],
+        suffix: Vec::new(),
+        anchor: anchor(),
+    };
+    let anchor_at_ceiling = TrustedAnchor {
+        id: anchor(),
+        height: u64::MAX,
+    };
+    assert!(
+        !proof.verify(&anchor_at_ceiling, &params(1)),
+        "saturating addition would accept a child one past the ceiling"
+    );
+}
+
+/// The cost of a forgery is the difficulty the caller pins, and nothing else.
+///
+/// A single proof cannot tell a fabricated low-difficulty chain from a real one:
+/// both are internally consistent, and the verifier sees only the second. What
+/// bounds the adversary is `SecurityParams::superblock_level`, because a
+/// superblock must really carry that many leading zero bits. This test records
+/// the boundary instead of claiming it away: the same forged chain that
+/// satisfies a level-two bound is refused when the caller pins level twelve, and
+/// level twelve costs 4096 hash evaluations per superblock.
+#[test]
+fn a_forged_chain_cannot_satisfy_a_pinned_difficulty() {
+    let (forged, anchor_at) = forged_low_difficulty_chain(6);
+    let cheap = match SecurityParams::new(6, 2, 4) {
+        Some(params) => params,
+        None => panic!("level two is a valid bound"),
+    };
+    assert!(
+        forged.verify(&anchor_at, &cheap),
+        "the forgery is internally consistent: this is the documented boundary"
+    );
+    let pinned = match SecurityParams::new(6, 12, 12) {
+        Some(params) => params,
+        None => panic!("level twelve is a valid bound"),
+    };
+    assert!(
+        !forged.verify(&anchor_at, &pinned),
+        "a forged chain cannot carry six blocks at twelve leading zero bits"
+    );
+}
+
+/// A chain an adversary can mine from nothing, attached to the anchor.
+fn forged_low_difficulty_chain(superblocks: usize) -> (NipopowProof, TrustedAnchor) {
+    let mut headers: Vec<PowHeader> = Vec::new();
+    let mut parent = anchor();
+    for index in 0..superblocks {
+        let height = index as u64 + 1;
+        let header = mine(parent, height, 2, vec![[0u8; 32], [0u8; 32]]);
+        parent = header.id;
+        headers.push(header);
+    }
+    (
+        NipopowProof {
+            prefix: headers,
+            suffix: Vec::new(),
+            anchor: anchor(),
+        },
+        TrustedAnchor::genesis(anchor()),
+    )
 }

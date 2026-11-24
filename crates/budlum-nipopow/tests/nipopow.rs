@@ -15,10 +15,9 @@ fn anchor() -> Hash32 {
 /// Parameters for the fixture chains below: m superblocks at level two or
 /// above, and no header above level four.
 fn params(m: usize) -> SecurityParams {
-    SecurityParams {
-        m,
-        superblock_level: 2,
-        max_level: 4,
+    match SecurityParams::new(m, 2, 4) {
+        Some(params) => params,
+        None => panic!("the fixture parameters are valid"),
     }
 }
 

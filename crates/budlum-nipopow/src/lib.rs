@@ -97,12 +97,9 @@ impl TrustedAnchor {
 /// refuses every combination that would make the bound vacuous.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SecurityParams {
-    /// Superblocks the proof must carry.
-    pub m: usize,
-    /// Level at which a header counts as a superblock.
-    pub superblock_level: u8,
-    /// Highest level any header in the proof may declare.
-    pub max_level: u8,
+    m: usize,
+    superblock_level: u8,
+    max_level: u8,
 }
 
 impl SecurityParams {
@@ -126,6 +123,30 @@ impl SecurityParams {
             superblock_level,
             max_level,
         })
+    }
+
+    /// Superblocks the proof must carry.
+    #[must_use]
+    pub const fn m(self) -> usize {
+        self.m
+    }
+
+    /// Level at which a header counts as a superblock.
+    ///
+    /// This is the one parameter that decides what a forgery costs: an
+    /// adversary must mine `m` headers with at least this many leading zero
+    /// bits, so the price of the proof is `m * 2^superblock_level` hash
+    /// evaluations. It is therefore the adapter's job to pin it to the target
+    /// chain's real difficulty, not the prover's.
+    #[must_use]
+    pub const fn superblock_level(self) -> u8 {
+        self.superblock_level
+    }
+
+    /// Highest level any header in the proof may declare.
+    #[must_use]
+    pub const fn max_level(self) -> u8 {
+        self.max_level
     }
 }
 
@@ -206,16 +227,25 @@ impl NipopowProof {
         for w in 1..self.prefix.len() {
             let prev = &self.prefix[w - 1];
             let cur = &self.prefix[w];
-            if cur.height != prev.height + 1 || cur.parent != prev.id {
+            // `+ 1` on a u64 height is attacker input: at `u64::MAX` it panics in
+            // a build with overflow checks on, and the release profile turns
+            // that panic into an abort.
+            let expected = match prev.height.checked_add(1) {
+                Some(expected) => expected,
+                None => return false,
+            };
+            if cur.height != expected || cur.parent != prev.id {
                 return false;
             }
         }
 
         // (c) Junction between prefix and suffix.
         if let Some(first_suffix) = self.suffix.first() {
-            if self.prefix[0].parent != first_suffix.id
-                || self.prefix[0].height != first_suffix.height + 1
-            {
+            let expected = match first_suffix.height.checked_add(1) {
+                Some(expected) => expected,
+                None => return false,
+            };
+            if self.prefix[0].parent != first_suffix.id || self.prefix[0].height != expected {
                 return false;
             }
         }
@@ -251,7 +281,13 @@ impl NipopowProof {
         if oldest.parent != anchor.id {
             return false;
         }
-        if oldest.height != anchor.height.saturating_add(1) {
+        // `saturating_add` would let a `u64::MAX` anchor accept a `u64::MAX`
+        // child, which is exactly the binding this check exists to make.
+        let expected = match anchor.height.checked_add(1) {
+            Some(expected) => expected,
+            None => return false,
+        };
+        if oldest.height != expected {
             return false;
         }
 
@@ -309,8 +345,7 @@ pub fn hash_block(
 }
 
 /// The proof-of-work commitment of a whole header.
-#[must_use]
-pub fn hash_header(header: &PowHeader) -> Hash32 {
+fn hash_header(header: &PowHeader) -> Hash32 {
     hash_block(
         &header.parent,
         header.height,
@@ -511,6 +546,13 @@ mod tests {
         assert!(SecurityParams::new(4, 1, 8).is_none());
         assert!(SecurityParams::new(4, 5, 4).is_none());
         assert!(SecurityParams::new(4, 2, 33).is_none());
-        assert!(SecurityParams::new(4, 2, 8).is_some());
+        match SecurityParams::new(4, 2, 8) {
+            Some(params) => {
+                assert_eq!(params.m(), 4);
+                assert_eq!(params.superblock_level(), 2);
+                assert_eq!(params.max_level(), 8);
+            }
+            None => panic!("(4, 2, 8) is a valid parameter set"),
+        }
     }
 }
