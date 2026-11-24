@@ -7500,9 +7500,6 @@ mod tests {
             leaving: None,
             turned_away: false,
             stopped: false,
-            parts_held: 0,
-            blocks_executed: 0,
-            parts_served: 0,
         };
 
         // Forged TurnedAway from a non-host peer is ignored; host's is honored.
@@ -7754,9 +7751,6 @@ mod tests {
             leaving: None,
             turned_away: false,
             stopped: false,
-            parts_held: 0,
-            blocks_executed: 0,
-            parts_served: 0,
         };
 
         // Forged proposal sharing exact block.hash() (bad signature + stripped body)
@@ -8012,9 +8006,6 @@ mod tests {
             leaving: None,
             turned_away: false,
             stopped: false,
-            parts_held: 0,
-            blocks_executed: 0,
-            parts_served: 0,
         };
 
         // Track all four independent checks so a single run reports every failure.
