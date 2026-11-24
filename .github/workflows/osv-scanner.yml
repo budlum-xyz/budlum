@@ -48,6 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'schedule' && 'refs/heads/testnet' || github.ref }}
           persist-credentials: false
 
       - name: Install osv-scanner v2.4.0 (version + sha256 pinned)
