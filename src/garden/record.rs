@@ -388,15 +388,15 @@ fn fit_record_peers(peers: Vec<String>) -> Vec<String> {
 
 /// How many characters `n` bytes take in base64url without padding.
 const fn base64url_len(n: usize) -> usize {
-    n / 3 * 4 + match n % 3 {
-        0 => 0,
-        1 => 2,
-        _ => 3,
-    }
+    n / 3 * 4
+        + match n % 3 {
+            0 => 0,
+            1 => 2,
+            _ => 3,
+        }
 }
 
-const ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// base64url without padding, as the link format asks for.
 fn base64url_encode(bytes: &[u8]) -> String {
@@ -582,7 +582,9 @@ mod tests {
     #[test]
     fn a_record_naming_a_primary_budlum_chain_is_refused() {
         let wrong = GardenRecord::issue(
-            crate::core::chain_config::Network::Testnet.chain_id().value(),
+            crate::core::chain_config::Network::Testnet
+                .chain_id()
+                .value(),
             [0xab; 32],
             [0xcd; 32],
             key(9).public_key_bytes(),

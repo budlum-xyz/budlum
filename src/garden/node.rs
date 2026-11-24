@@ -21,12 +21,12 @@
 //! and it does that with a transaction like any other.
 
 use super::invite::{fit_peers, GardenInvite};
-use super::record::{GardenRecord, DEFAULT_RECORD_TTL_MS};
 use super::net::{
     self, announced_address, peer_id_of, validator_dial_address, BudgetedFrame, FramePermits,
     GardenGossip, GardenNet, GardenRequest, GardenResponse, NetCommand, NetEvent, MAX_GOSSIP_BATCH,
     MAX_SYNC_COMMITS,
 };
+use super::record::{GardenRecord, DEFAULT_RECORD_TTL_MS};
 use super::settlement::{GardenBudlumLink, GardenDomainView};
 use super::state::{quorum, GardenLedger, GardenObject, GardenState};
 use super::storage::{Bud3PartCounts, GardenContentStore};

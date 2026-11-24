@@ -840,7 +840,10 @@ fn garden_storage_all_parts() -> Result<(), String> {
         .collect();
     ensure(
         silent.is_empty(),
-        format!("these B.U.D. 3.0 parts never ran: {} in {after}", silent.join(", ")),
+        format!(
+            "these B.U.D. 3.0 parts never ran: {} in {after}",
+            silent.join(", ")
+        ),
     )?;
     Ok(())
 }
