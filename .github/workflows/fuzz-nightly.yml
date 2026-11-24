@@ -78,6 +78,10 @@ jobs:
           - evm_mpt_verify
           - evm_deployment_proof
           - uel_foreign_envelopes
+          # The Garden invite decoder takes the quick gate in ci.yml; here a
+          # structured mutator gets four hours against the re-encode and
+          # byte-budget assertions.
+          - garden_invite_record_decode
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

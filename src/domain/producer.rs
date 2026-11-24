@@ -456,6 +456,8 @@ fn pospace_commitment_block_hash(spec: &QuorumBlockSpec) -> Hash32 {
 /// # Errors
 ///
 /// Whatever [`build_bft_commitment`] refuses with.
+///
+/// WIRING: domain surface - the producer door that reads it lands with its wiring.
 pub fn build_poh_certificate_commitment(
     spec: &QuorumBlockSpec,
     hashes_per_slot: u64,
@@ -481,6 +483,8 @@ pub fn build_poh_certificate_commitment(
 /// # Errors
 ///
 /// Whatever [`build_bft_commitment`] refuses with.
+///
+/// WIRING: domain surface - the producer door that reads it lands with its wiring.
 pub fn build_pospace_certificate_commitment(
     spec: &QuorumBlockSpec,
     chain_id: u64,

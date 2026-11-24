@@ -3529,9 +3529,10 @@ impl DomainFinalityAdapter for PospaceFinalityAdapter {
         }
         // The quorum arm's plot half used to compute
         // `compute_plot_response(block_hash, state_root)` and hand that value
-        // back to `verify_plot_response(block_hash, state_root, ..)`, which is
-        // `H(x, y) == H(x, y)` - true for every non-zero pair and therefore no
-        // check at all: any height, any roots, any parent finalized.
+        // back to a verifier that recomputed the same digest from the same
+        // pair - `H(x, y) == H(x, y)`, true for every non-zero pair and
+        // therefore no check at all: any height, any roots, any parent
+        // finalized. That tautological door is gone; the check below stands.
         //
         // What is checked here is the binding the `pospace-plot-v1` adapter must
         // make and can check from the commitment alone: the block hash is the

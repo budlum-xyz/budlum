@@ -69,6 +69,9 @@ fn contains_unmasked_secret(text: &str) -> bool {
 
 /// The byte ceiling for a single example (a raw check before truncation; the
 /// real truncation happens in the tokenizer through `cutoff_len`).
+///
+/// WIRING: `validate_records` applies it on the corpus door; the tokenizer's
+/// `cutoff_len` is the second enforcement of the same ceiling.
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 
 /// Validate the record list. It returns the first error and names the line it

@@ -45,8 +45,14 @@ use crate::domain::types::Hash32;
 /// Protocol version this build speaks.
 pub const INVITE_RECORD_VERSION: u8 = 1;
 /// Longest record accepted, in bytes (directive 5.4).
+///
+/// WIRING: enforced inside `encode` and `qr`, the doors every transport -
+/// link, QR, clipboard - goes through; no second call site exists by design.
 pub const MAX_RECORD_BYTES: usize = 512;
 /// Longest QR content accepted, in bytes (directive 5.4).
+///
+/// WIRING: enforced inside `qr`, the phone-facing door; the link form is
+/// shorter than the QR form by construction.
 pub const MAX_QR_BYTES: usize = 640;
 /// Most relays one record carries.
 pub const MAX_RELAYS: usize = 8;
@@ -106,7 +112,11 @@ fn base64url_encode(bytes: &[u8]) -> String {
         let b2 = chunk.get(2).map_or(0, |b| u32::from(*b));
         let triple = (b0 << 16) | (b1 << 8) | b2;
         let mut push = |index: u32| {
-            out.push(char::from(ALPHABET[index as usize & 0x3f]));
+            // The mask keeps the shift result inside the 64-letter table:
+            // the widest input is `0xffffff >> 6`, and `& 0x3f` lands 0..=63.
+            if let Some(&letter) = ALPHABET.get((index & 0x3f) as usize) {
+                out.push(char::from(letter));
+            }
         };
         push(triple >> 18);
         push(triple >> 12);
@@ -411,8 +421,8 @@ impl GardenInviteRecord {
         let text = text.trim();
         let encoded = if let Some(rest) = text.strip_prefix(LINK_PREFIX) {
             rest
-        } else if let Some(index) = text.find(QR_FRAGMENT) {
-            &text[index + QR_FRAGMENT.len()..]
+        } else if let Some((_, rest)) = text.split_once(QR_FRAGMENT) {
+            rest
         } else {
             text
         };

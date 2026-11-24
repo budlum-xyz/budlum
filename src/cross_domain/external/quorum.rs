@@ -587,6 +587,10 @@ mod tests {
             &[claim(0xaa), claim(0xaa), claim(0xbb)],
             &QuorumPolicy::strict(2, 2),
         );
+        assert!(
+            !outcome.decided(),
+            "an over-capacity round must never reach a decision"
+        );
         assert_eq!(
             outcome,
             QuorumOutcome::TooManyParticipants {

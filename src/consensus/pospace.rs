@@ -276,10 +276,10 @@ pub fn registration_challenge(address: &str, plot_id: &[u8; 32], size_bytes: u64
 
 /// Derive the canonical expected challenge response for `(plot_id, challenge)`.
 ///
-/// Crate-internal: the doors onto this response are
-/// [`verify_plot_response`] (the engine's per-block check) and
-/// [`commitment_plot_response`] (what a settlement commitment must carry). A
-/// further caller would be another unreviewed way to accept a plot response.
+/// Crate-internal: the door onto this response is
+/// [`commitment_plot_response`] (what a settlement commitment must carry) and
+/// the per-leaf path below. A further caller would be another unreviewed way
+/// to accept a plot response.
 #[must_use]
 fn compute_plot_response(plot_id: &[u8; 32], challenge: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -309,20 +309,6 @@ fn compute_leaf_bound_response(
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
     out
-}
-
-/// Verify a `PoSpace` challenge response against `(plot_id, challenge)`.
-#[must_use]
-pub fn verify_plot_response(plot_id: &[u8; 32], challenge: &[u8; 32], response: &[u8; 32]) -> bool {
-    let zero = [0u8; 32];
-    if bool::from(plot_id.ct_eq(&zero))
-        || bool::from(challenge.ct_eq(&zero))
-        || bool::from(response.ct_eq(&zero))
-    {
-        return false;
-    }
-    let expected = compute_plot_response(plot_id, challenge);
-    bool::from(expected.ct_eq(response))
 }
 
 fn encode_pospace_witness(

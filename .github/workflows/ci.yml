@@ -2524,6 +2524,11 @@ jobs:
             # Light-client header segment linking: one hash per header and at
             # most 32 headers per input.
             light_client_header_chain
+            # The Garden invite decoder reads phone-facing text: a version,
+            # fixed-width fields, then lengths the body itself declares. One
+            # decode is cheap, so the sixty-second budget fits it beside the
+            # other fast parsers.
+            garden_invite_record_decode
           )
           # evm_rlp_decode and evm_mpt_verify run in fuzz-nightly.yml. This
           # comment used to say "nightly/manual" while the nightly matrix did

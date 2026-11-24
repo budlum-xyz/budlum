@@ -58,6 +58,9 @@ pub const STORAGE_MIN_OPERATOR_BOND: u64 = 1_000_000;
 /// the doors so the day the schedule flips, this one constant moves and both
 /// doors enforce it. The registry-level gate itself is live and tested under
 /// `storage_deal::tests::deal_open_rejects_missing_merkle_proof`.
+///
+/// WIRING: the in-block open/accept doors read this on the day the Merkle
+/// verifier lands; until then the schedule ships `false` everywhere.
 pub const STORAGE_REQUIRE_MERKLE_PROOF: bool = false;
 
 /// Per-domain parameters for a `StorageAttestation` domain.
