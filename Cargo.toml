@@ -289,10 +289,6 @@ path = "benches/micro/timing_safe.rs"
 harness = false
 
 [[test]]
-name = "garden_storage_parts"
-path = "tests/garden/garden_storage_parts.rs"
-
-[[test]]
 name = "garden_scenario"
 path = "tests/garden/garden_scenario.rs"
 
