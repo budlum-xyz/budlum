@@ -15,8 +15,13 @@
 //! here from the bytes. No caller-provided string reaches the file system.
 
 use crate::domain::types::Hash32;
+use crate::storage::bud3::fountain::Symbol;
+use crate::storage::bud3::limits::{Bud3Limits, Profile};
+use crate::storage::bud3::pipeline::{
+    prepare_public_upload, view_public, ObjectRecord, PipelineError, MAX_SYMBOLS_PER_SEGMENT,
+};
 use crate::storage::content_id::ContentId;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -45,6 +50,50 @@ const fn charged_bytes(len: u64) -> u64 {
     }
 }
 
+/// How many times each B.U.D. 3.0 part ran on this node's production path.
+///
+/// A Garden that merely links the object layer proves nothing: the question
+/// is whether the bytes people publish actually travel through it. Each
+/// field counts one part doing its work for a real publication or a real
+/// read, so a test can read the counts instead of trusting a call graph.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Bud3PartCounts {
+    /// Objects encoded by BOF-1 and committed (`bof1`, `segment`).
+    pub objects_coded: u64,
+    /// Segments the object was cut into (`segment`).
+    pub segments_coded: u64,
+    /// RFC 6330 symbols produced (`fountain`).
+    pub symbols_made: u64,
+    /// Per-segment symbol roots built (`custody`).
+    pub symbol_roots: u64,
+    /// Objects read back through the view path (`pipeline::view_public`).
+    pub objects_viewed: u64,
+    /// Symbols consumed to decode those reads (`fountain` decode).
+    pub symbols_used: u64,
+}
+
+/// How many bytes of coded symbols this node keeps in memory.
+///
+/// Symbols are the object layer's own form of the content, and keeping them
+/// lets a read come back through B.U.D. 3.0 rather than through the byte
+/// cache. The budget is deliberately small: the plain bytes are the durable
+/// copy, so forgetting symbols costs a node nothing but the shortcut.
+const CODED_SYMBOL_BUDGET: u64 = 8 * 1024 * 1024;
+
+/// What B.U.D. 3.0 made of one object.
+#[derive(Debug)]
+struct CodedObject {
+    record: ObjectRecord,
+    segments: Vec<Vec<Symbol>>,
+    /// Bytes the symbols occupy, for the memory budget.
+    footprint: u64,
+}
+
+/// A count as a `u64`, saturating instead of casting.
+fn count_of(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
+}
+
 /// Where the objects of one Garden live on this node.
 #[derive(Debug)]
 pub struct GardenContentStore {
@@ -53,6 +102,15 @@ pub struct GardenContentStore {
     max_object_bytes: usize,
     max_total_bytes: u64,
     total_bytes: u64,
+    /// The B.U.D. 3.0 coding of the objects this node accepted, bounded by
+    /// `CODED_SYMBOL_BUDGET` and dropped oldest first.
+    coded: BTreeMap<Hash32, CodedObject>,
+    /// Coding order, so the budget evicts the oldest symbols first.
+    coded_order: VecDeque<Hash32>,
+    /// Bytes the kept symbols occupy.
+    coded_bytes: u64,
+    /// What the parts did, for `bud_gardenStatus`.
+    parts: Bud3PartCounts,
 }
 
 fn scan_disk_bytes(root: &Path) -> u64 {
@@ -111,6 +169,10 @@ impl GardenContentStore {
             max_object_bytes,
             max_total_bytes,
             total_bytes,
+            coded: BTreeMap::new(),
+            coded_order: VecDeque::new(),
+            coded_bytes: 0,
+            parts: Bud3PartCounts::default(),
         })
     }
 
@@ -140,6 +202,25 @@ impl GardenContentStore {
             ));
         }
         let content_id = ContentId::of(bytes).0;
+        // Code the object with B.U.D. 3.0 before a single byte is written.
+        // The Garden keeps the plain bytes as its cache, but the object it
+        // claims to hold is the coded one: if BOF-1 cannot represent it,
+        // this node does not get to say it stored it.
+        self.code_and_count(content_id, bytes)?;
+        // A node that cannot keep the bytes must not keep the coding
+        // either: `get_coded` would otherwise answer for an object this
+        // node does not hold.
+        match self.store_bytes(content_id, bytes) {
+            Ok(()) => Ok(content_id),
+            Err(e) => {
+                self.drop_coding(&content_id);
+                Err(e)
+            }
+        }
+    }
+
+    /// Write the bytes themselves, once the object layer has accepted them.
+    fn store_bytes(&mut self, content_id: Hash32, bytes: &[u8]) -> Result<(), String> {
         let len = charged_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         match self.path_of(&content_id) {
             Some(path) => {
@@ -179,7 +260,7 @@ impl GardenContentStore {
                 }
             }
         }
-        Ok(content_id)
+        Ok(())
     }
 
     /// Reserve local byte budget and return a standalone blocking writer closure
@@ -197,6 +278,27 @@ impl GardenContentStore {
                 self.max_object_bytes
             ));
         }
+        // A deposit pushed by a peer takes the same road as a local one: it
+        // is coded by B.U.D. 3.0 before the node reserves room for it, so a
+        // background write cannot smuggle an object past the object layer.
+        self.code_and_count(content_id, bytes)?;
+        // Same rule as `put`: a reservation that fails leaves no coding
+        // behind for an object this node will not hold.
+        match self.reserve_room(content_id, bytes) {
+            Ok(room) => Ok(room),
+            Err(e) => {
+                self.drop_coding(&content_id);
+                Err(e)
+            }
+        }
+    }
+
+    /// Account for the bytes of a deposit and say where they go.
+    fn reserve_room(
+        &mut self,
+        content_id: Hash32,
+        bytes: &[u8],
+    ) -> Result<Option<(PathBuf, u64)>, String> {
         let len = charged_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         if let Some(path) = self.path_of(&content_id) {
             if self.contains(&content_id) {
@@ -283,6 +385,122 @@ impl GardenContentStore {
         self.put(bytes).map(|_| ())
     }
 
+    /// Code an object once and record what the parts did.
+    fn code_and_count(&mut self, content_id: Hash32, bytes: &[u8]) -> Result<(), String> {
+        if self.coded.contains_key(&content_id) {
+            return Ok(());
+        }
+        let coded = Self::code_object(bytes)?;
+        let segments = count_of(coded.segments.len());
+        let symbols = coded
+            .segments
+            .iter()
+            .map(|segment| count_of(segment.len()))
+            .fold(0u64, u64::saturating_add);
+        let roots = count_of(coded.record.symbol_roots.len());
+        self.parts.objects_coded = self.parts.objects_coded.saturating_add(1);
+        self.parts.segments_coded = self.parts.segments_coded.saturating_add(segments);
+        self.parts.symbols_made = self.parts.symbols_made.saturating_add(symbols);
+        self.parts.symbol_roots = self.parts.symbol_roots.saturating_add(roots);
+        self.coded_bytes = self.coded_bytes.saturating_add(coded.footprint);
+        self.coded.insert(content_id, coded);
+        self.coded_order.push_back(content_id);
+        // Keep the newest coding even when it alone exceeds the budget: a
+        // node that just coded an object should be able to serve it once.
+        while self.coded_bytes > CODED_SYMBOL_BUDGET && self.coded_order.len() > 1 {
+            let Some(old) = self.coded_order.pop_front() else {
+                break;
+            };
+            self.forget_coding(&old);
+        }
+        Ok(())
+    }
+
+    /// Drop one coding entirely, symbols and its place in the order.
+    fn drop_coding(&mut self, content_id: &Hash32) {
+        self.forget_coding(content_id);
+        self.coded_order.retain(|id| id != content_id);
+    }
+
+    /// Drop the symbols of one object, keeping the counters as they are.
+    fn forget_coding(&mut self, content_id: &Hash32) {
+        if let Some(old) = self.coded.remove(content_id) {
+            self.coded_bytes = self.coded_bytes.saturating_sub(old.footprint);
+        }
+    }
+
+    /// Run the bytes through the B.U.D. 3.0 upload pipeline.
+    ///
+    /// The Garden uses profile P0 and the testnet limits, and asks for one
+    /// segment's worth of symbols, because a Garden object is small by
+    /// construction: the ceiling is `max_object_bytes`, far under the
+    /// segment capacity, so the usual result is a single segment.
+    fn code_object(bytes: &[u8]) -> Result<CodedObject, String> {
+        let profile = Profile::P0;
+        let limits = Bud3Limits::TESTNET_DEFAULT;
+        // The pipeline does not code the content, it codes the object built
+        // from it: a codec may shrink the bytes and a header grows them, so
+        // the source-symbol count `k` is only known inside. Guess from the
+        // content, and when the guess is short the error carries the real
+        // `k`; the second call is then exact. The pipeline wants at least
+        // `k + 2` so every segment also carries repair symbols.
+        let guess = u32::try_from(bytes.len().div_ceil(usize::from(profile.symbol_size)))
+            .unwrap_or(profile.k_max)
+            .saturating_add(2);
+        let prepared = match prepare_public_upload(bytes, &profile, &limits, guess) {
+            Err(PipelineError::TooFewSymbols { k, .. }) => prepare_public_upload(
+                bytes,
+                &profile,
+                &limits,
+                k.saturating_add(2).min(MAX_SYMBOLS_PER_SEGMENT),
+            ),
+            first => first,
+        }
+        .map_err(|e| format!("garden object cannot be coded by B.U.D. 3.0: {e:?}"))?;
+        let footprint = prepared
+            .segments
+            .iter()
+            .flatten()
+            .map(|symbol| count_of(symbol.data.len()))
+            .fold(0u64, u64::saturating_add);
+        Ok(CodedObject {
+            record: prepared.record,
+            segments: prepared.segments,
+            footprint,
+        })
+    }
+
+    /// Rebuild an object from its B.U.D. 3.0 symbols instead of from the
+    /// cached bytes.
+    ///
+    /// This is the read that proves the object layer is real: it ignores the
+    /// stored copy, decodes the symbols that `put` produced, and checks the
+    /// result against the content id the chain carries.
+    pub fn get_coded(&mut self, content_id: &Hash32) -> Option<Vec<u8>> {
+        let coded = self.coded.get(content_id)?;
+        let symbols: Vec<Symbol> = coded.segments.iter().flatten().cloned().collect();
+        let used = count_of(symbols.len());
+        let bytes = view_public(&coded.record, symbols).ok()?;
+        if ContentId::of(&bytes).0 != *content_id {
+            return None;
+        }
+        self.parts.objects_viewed = self.parts.objects_viewed.saturating_add(1);
+        self.parts.symbols_used = self.parts.symbols_used.saturating_add(used);
+        Some(bytes)
+    }
+
+    /// The B.U.D. 3.0 record of a held object, if this node coded it.
+    #[must_use]
+    pub fn record_of(&self, content_id: &Hash32) -> Option<&ObjectRecord> {
+        self.coded.get(content_id).map(|c| &c.record)
+    }
+
+    /// What the B.U.D. 3.0 parts have done on this node.
+    #[must_use]
+    pub const fn part_counts(&self) -> Bud3PartCounts {
+        self.parts
+    }
+
     /// Read an object and check it against its content id.
     pub fn get(&self, content_id: &Hash32) -> Option<Vec<u8>> {
         let bytes = match self.path_of(content_id) {
@@ -318,6 +536,10 @@ impl GardenContentStore {
 
     /// Drop one object, when this node no longer holds it.
     pub fn remove(&mut self, content_id: &Hash32) {
+        // The coding goes with the object. The counters do not move: they
+        // record work this node did, and dropping the result later does not
+        // undo it.
+        self.drop_coding(content_id);
         match self.path_of(content_id) {
             Some(path) => {
                 let len = fs::metadata(&path)
@@ -344,6 +566,16 @@ impl GardenContentStore {
         let mut removed = 0usize;
         let before = self.memory.len();
         self.memory.retain(|id, _| keep.contains(id));
+        let dropped: Vec<Hash32> = self
+            .coded
+            .keys()
+            .filter(|id| !keep.contains(*id))
+            .copied()
+            .collect();
+        for id in dropped {
+            self.forget_coding(&id);
+        }
+        self.coded_order.retain(|id| keep.contains(id));
         removed = removed.saturating_add(before.saturating_sub(self.memory.len()));
         if let Some(root) = &self.root {
             if let Ok(entries) = fs::read_dir(root) {
@@ -377,6 +609,9 @@ impl GardenContentStore {
     /// Delete every object and the directory itself.
     pub fn wipe(&mut self) -> Result<(), String> {
         self.memory.clear();
+        self.coded.clear();
+        self.coded_order.clear();
+        self.coded_bytes = 0;
         self.total_bytes = 0;
         if let Some(root) = &self.root {
             if root.exists() {
@@ -538,5 +773,54 @@ mod tests {
             "existing valid object need not schedule another disk write"
         );
         assert_eq!(store.total_bytes(), floor);
+    }
+
+    #[test]
+    fn put_codes_the_object_and_get_coded_rebuilds_it_from_symbols() {
+        let mut store = GardenContentStore::open(None, 1024 * 1024).unwrap();
+        // Not a round number of symbols, and compressible, so the coded
+        // object is genuinely a different length from the content.
+        let payload: Vec<u8> = (0..9_001u32)
+            .map(|i| u8::try_from(i % 7).unwrap_or(0))
+            .collect();
+        let id = store.put(&payload).unwrap();
+
+        let parts = store.part_counts();
+        assert_eq!(parts.objects_coded, 1, "put must code the object once");
+        assert!(parts.segments_coded >= 1, "the object must be segmented");
+        assert!(
+            parts.symbols_made > parts.segments_coded,
+            "every segment must carry repair symbols beyond its source ones"
+        );
+        assert_eq!(
+            parts.symbol_roots, parts.segments_coded,
+            "custody must build one symbol root per segment"
+        );
+
+        let record = store.record_of(&id).expect("a coded object has a record");
+        assert_eq!(
+            record.content_id.len,
+            u64::try_from(payload.len()).unwrap(),
+            "the record must name the content length"
+        );
+
+        // The read goes through the fountain decoder, not the cached bytes.
+        let seen = store.get_coded(&id).expect("the symbols must decode");
+        assert_eq!(seen, payload, "B.U.D. 3.0 must return the original bytes");
+        let after = store.part_counts();
+        assert_eq!(after.objects_viewed, 1, "the view path must be counted");
+        assert_eq!(
+            after.symbols_used, parts.symbols_made,
+            "the decode must consume the symbols the upload produced"
+        );
+
+        // Dropping the object drops its coding, but not the record of work.
+        store.remove(&id);
+        assert!(store.get_coded(&id).is_none(), "the coding must go too");
+        assert_eq!(
+            store.part_counts().objects_coded,
+            1,
+            "counters record work done, so removal must not rewind them"
+        );
     }
 }

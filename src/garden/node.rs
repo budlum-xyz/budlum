@@ -28,7 +28,7 @@ use super::net::{
 };
 use super::settlement::{GardenBudlumLink, GardenDomainView};
 use super::state::{quorum, GardenLedger, GardenObject, GardenState};
-use super::storage::GardenContentStore;
+use super::storage::{Bud3PartCounts, GardenContentStore};
 use super::types::{
     garden_domain_id, invite_keypair, join_message, status_label, GardenAdmission,
     GardenAdmissionState, GardenBlock, GardenCommit, GardenContentKind, GardenFounding,
@@ -1961,7 +1961,15 @@ impl Node {
                     return;
                 }
                 budget.1 = budget.1.saturating_add(1);
-                if let Some(bytes) = self.store.get(&content_id) {
+                // Serve from the object layer first. When this node coded the
+                // object, the bytes a peer receives are the ones B.U.D. 3.0
+                // rebuilt from its own symbols and checked against the content
+                // id, not a loose copy that merely sits in a file.
+                let served = self
+                    .store
+                    .get_coded(&content_id)
+                    .or_else(|| self.store.get(&content_id));
+                if let Some(bytes) = served {
                     self.parts_served = self.parts_served.saturating_add(1);
                     let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                     if let Some(entry) = self.object_budget.get_mut(&peer) {
@@ -3596,6 +3604,25 @@ impl Node {
         }
     }
 
+    /// Read an object this node holds, through the object layer when it can.
+    ///
+    /// The coded copy is only trusted when its record agrees with the bytes
+    /// it rebuilt; otherwise the plain cache answers. Either way the caller
+    /// gets bytes that hash to `content_id`, because both roads check it.
+    fn resolve_locally(&mut self, content_id: &Hash32) -> Option<Vec<u8>> {
+        // `object_len` is the length of the coded object, header and all.
+        // The bytes handed back are the content, so the content length in
+        // the record is the one to compare against.
+        let coded_len = self
+            .store
+            .record_of(content_id)
+            .map(|record| record.content_id.len);
+        self.store
+            .get_coded(content_id)
+            .filter(|bytes| coded_len == Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX)))
+            .or_else(|| self.store.get(content_id))
+    }
+
     async fn on_command(&mut self, command: GardenCommand) {
         match command {
             GardenCommand::Status(reply) => {
@@ -3613,7 +3640,7 @@ impl Node {
             } => {
                 let _ = reply.send(self.publish(kind, bytes, mime, caption).await);
             }
-            GardenCommand::Resolve(content_id, reply) => match self.store.get(&content_id) {
+            GardenCommand::Resolve(content_id, reply) => match self.resolve_locally(&content_id) {
                 Some(bytes) => {
                     let _ = reply.send(Ok(bytes));
                 }
@@ -3915,6 +3942,7 @@ impl Node {
             })
             .collect();
         let genesis_hash = state.genesis.hash();
+        let bud3: Bud3PartCounts = self.store.part_counts();
         let budlum = match &self.link {
             Some(link) => link
                 .view_for_genesis(self.chain_id(), genesis_hash)
@@ -3963,6 +3991,14 @@ impl Node {
                 "parts_held": self.parts_held,
                 "blocks_executed": self.blocks_executed,
                 "parts_served": self.parts_served,
+                "bud3": {
+                    "objects_coded": bud3.objects_coded,
+                    "segments_coded": bud3.segments_coded,
+                    "symbols_made": bud3.symbols_made,
+                    "symbol_roots": bud3.symbol_roots,
+                    "objects_viewed": bud3.objects_viewed,
+                    "symbols_used": bud3.symbols_used,
+                },
             },
             "limits": {
                 "max_validators": limits.max_validators,
@@ -6403,6 +6439,88 @@ mod tests {
                 String::new(),
             )
             .await
+    }
+
+    /// Section 11.8: the Garden does not merely sit next to B.U.D. 3.0, it
+    /// publishes through it. One node creates a Garden, publishes bytes, and
+    /// the status must show every part of the object layer having done its
+    /// work: the object coded, cut into segments, turned into RFC 6330
+    /// symbols, each segment given a custody root. Then the same bytes are
+    /// read back and the view path must be the one that answered.
+    #[tokio::test]
+    async fn garden_storage_all_parts() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 200,
+                    presence_interval_ms: 100,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Nothing has been published, so no part of the object layer has run.
+        let before = handle.status().await.unwrap();
+        assert_eq!(
+            before.pointer("/work/bud3/objects_coded"),
+            Some(&json!(0)),
+            "a fresh Garden cannot have coded anything"
+        );
+
+        // Bytes that do not fall on a symbol boundary, so the segmentation
+        // and the padding are both exercised.
+        let words = "a garden stores what it grows ".repeat(301);
+        let published = say(&handle, &words).await.expect("the publication failed");
+        let content_id: Hash32 = hex::decode(published["content_id"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        let status = status_becomes(&handle, "/work/bud3/objects_coded", json!(1)).await;
+        let bud3 = status.pointer("/work/bud3").unwrap().clone();
+        let count = |name: &str| bud3[name].as_u64().unwrap_or_default();
+        assert!(count("segments_coded") >= 1, "bof1 produced no segment");
+        assert!(
+            count("symbols_made") > count("segments_coded"),
+            "the fountain made no repair symbols: {bud3}"
+        );
+        assert_eq!(
+            count("symbol_roots"),
+            count("segments_coded"),
+            "custody must root every segment: {bud3}"
+        );
+        assert_eq!(
+            count("objects_viewed"),
+            0,
+            "publishing must not need the view path: {bud3}"
+        );
+
+        // Read it back. The resolve path prefers the object layer, so the
+        // bytes must come from the symbols and the view counter must move.
+        let seen = handle
+            .resolve(content_id)
+            .await
+            .expect("the object did not resolve");
+        assert_eq!(
+            String::from_utf8(seen).unwrap(),
+            words,
+            "B.U.D. 3.0 returned different bytes from the ones published"
+        );
+        let after = status_becomes(&handle, "/work/bud3/objects_viewed", json!(1)).await;
+        let used = after.pointer("/work/bud3/symbols_used").unwrap().as_u64();
+        assert_eq!(
+            used,
+            Some(count("symbols_made")),
+            "the view must consume the symbols the upload made"
+        );
+
+        handle.leave().await.unwrap();
     }
 
     /// Wait until `handle` reports `wanted` at `pointer` of its status.
