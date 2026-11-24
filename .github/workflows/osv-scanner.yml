@@ -128,6 +128,7 @@ jobs:
             --lockfile=kani/Cargo.lock \
             --lockfile=mobile/core/Cargo.lock \
             --lockfile=mobile/ffi/Cargo.lock \
+            --lockfile=mobile/garden-ffi/Cargo.lock \
             --lockfile=mobile/tools/log-analyzer/Cargo.lock \
             --lockfile=xtask/gates/Cargo.lock \
             --lockfile=xtask/release/Cargo.lock \
@@ -163,6 +164,7 @@ jobs:
             --lockfile=kani/Cargo.lock \
             --lockfile=mobile/core/Cargo.lock \
             --lockfile=mobile/ffi/Cargo.lock \
+            --lockfile=mobile/garden-ffi/Cargo.lock \
             --lockfile=mobile/tools/log-analyzer/Cargo.lock \
             --lockfile=xtask/gates/Cargo.lock \
             --lockfile=xtask/release/Cargo.lock \
