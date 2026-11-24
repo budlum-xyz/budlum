@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: 5c71e18812a2d46817ec1ff764711e5e0c5d0815548b8803c53bbca2d0ee34fc
+digest: e4cb131ab6f6a25e3a27787bff7c6a05d84e118ceb9fc0a6ae2278b883d4583e
 files: 196
 Cargo.lock	7e8ca4b31fc0795bb139134686126f1d552e1e75e9ffbc2089fbc52944a48a1f
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
@@ -38,7 +38,7 @@ src/gates/bud3_repair_fires.rs	46b7bb2d192d539c90f1c14de610cb80777d2ca490e547a52
 src/gates/bud3_sealed_and_deletion.rs	798af464623cd703abdd87f65b6272b4e9706a5dea9e94e059ccce9dc0c818d5
 src/gates/bud_e2e.rs	83c25de10d7915f0b1c3c000f3c6edcf8bd31de1140869b5ef5a6416dbf91b69
 src/gates/canonical_programs_reproduce.rs	17b045669d179197f0d06b613cfb8a66bd3059ee9779b1e2cd7e3290da43b896
-src/gates/capability_modules_are_wired.rs	2f0a0224cb09f681546d6a59939283db5ca0fe49f6e5941f814afe2afd7f1c08
+src/gates/capability_modules_are_wired.rs	ccd926050b45b397f35a5ce922b2bf1fafab65c3eb9b53d5311069bbd4eb2c1c
 src/gates/cargo_vet.rs	8ac579e36d1dc89aa323c535d7a0e1d8c2b93eb4f0c35ee747d8d0ea41b145b7
 src/gates/chain_id_is_not_hardcoded.rs	95805869beb0f8b420ba9b0505a978721b132475e6b42f1be536fbe1ffb48fcb
 src/gates/ci_fanout_budget.rs	5aba779330894d7d558f6fcc208b2682309a9018eae93f29c7be3582df23361d

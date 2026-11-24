@@ -698,12 +698,9 @@ fn occurrence_qualifies(
                     }
                 }
             }
-            if j < chars.len() && chars[j] == '(' {
-                return true;
-            }
-            return false;
+            return j < chars.len() && chars[j] == '(';
         }
-        return true;
+        true
     }
 }
 
