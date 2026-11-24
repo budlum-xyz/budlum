@@ -148,9 +148,11 @@ fn base64url_decode(text: &str) -> Result<Vec<u8>, String> {
 }
 
 fn parse_hash_field(label: &str, value: &str) -> Result<Hash32, String> {
-    if value.len() != 43 || !value.bytes().all(|b| {
-        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')
-    }) {
+    if value.len() != 43
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
         return Err(format!(
             "invite record field '{label}' must be 43 base64url characters"
         ));
@@ -316,9 +318,11 @@ impl GardenInviteRecord {
             list => list.split(',').map(str::to_string).collect(),
         };
         let sig_field = take("sig")?;
-        if sig_field.len() != 86 || !sig_field.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')
-        }) {
+        if sig_field.len() != 86
+            || !sig_field
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        {
             return Err("invite record signature must be 86 base64url characters".to_string());
         }
         let raw = base64url_decode(&sig_field)
@@ -378,10 +382,12 @@ impl GardenInviteRecord {
                 if !is_plain_address(address) {
                     return Err("invite QR address must be plain and short".to_string());
                 }
-                format!(
-                    "http://{address}{QR_FRAGMENT}{}",
-                    base64url_encode(self.encode()?.as_bytes())
-                )
+                // The fragment carries the canonical record itself, not a
+                // second base64url layer: the record already fits the QR
+                // bound and `parse_any` reads the bare form. Wrapping it again
+                // added 4/3 of its length and made real listener addresses
+                // unscannable, which silently disabled the invite RPC.
+                format!("http://{address}{QR_FRAGMENT}{}", self.encode()?)
             }
             None => self.link()?,
         };
@@ -538,6 +544,36 @@ mod tests {
             qr.len() <= MAX_QR_BYTES,
             "QR content is {} bytes, over {MAX_QR_BYTES}",
             qr.len()
+        );
+
+        // A host address learned from a real listener is much longer than the
+        // fixture above. The local-address QR form must still fit a phone
+        // camera and must still parse back to the very same record.
+        let listener_address = format!("/ip4/10.0.0.5/tcp/47001/p2p/{}", "A".repeat(90));
+        let listener_record = GardenInviteRecord::new(
+            0x7a11_0000_0000_0001,
+            [7u8; 32],
+            [9u8; 32],
+            &owner,
+            host.public_key_bytes(),
+            &listener_address,
+            Vec::new(),
+            u64::MAX / 2,
+            8,
+        )
+        .expect("a record with a real listener address");
+        let listener_qr = listener_record
+            .qr(Some(&listener_record.host_address))
+            .expect("a reachable Garden must produce a scannable QR");
+        assert!(
+            listener_qr.len() <= MAX_QR_BYTES,
+            "QR content is {} bytes, over {MAX_QR_BYTES}",
+            listener_qr.len()
+        );
+        assert_eq!(
+            GardenInviteRecord::parse_any(&listener_qr).expect("qr parses"),
+            listener_record,
+            "the QR must carry the record it was built from"
         );
 
         let long_address = "a".repeat(MAX_ADDRESS_BYTES);

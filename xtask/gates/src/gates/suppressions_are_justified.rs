@@ -573,6 +573,12 @@ const BUDGETS: &[Budget] = &[
         count: 1,
         reason: "an integration test whose helpers sit outside a `#[test]` body, so `allow-expect-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
     },
+    Budget {
+        file: "src/garden/invite_record.rs",
+        lint: "clippy::too_many_arguments",
+        count: 1,
+        reason: "GardenInviteRecord::new takes the chain id, four 32-byte identifiers, an address, a relay, an expiry and a use count as separate arguments because every field is independently signed and checked; grouping them would hide which values the signature covers",
+    },
 ];
 
 /// Lints that may never be suppressed anywhere.
