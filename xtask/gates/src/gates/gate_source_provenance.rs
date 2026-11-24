@@ -402,8 +402,25 @@ pub fn self_test() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn self_test_passes() {
         super::self_test().expect("gate-source-provenance self-test");
+    }
+
+    /// The committed pin is not a claim about a past tree: it must describe
+    /// the gate sources in the checkout that compiled this binary. A stale pin
+    /// turns every gate verdict into a measurement artefact, so a red unit test
+    /// is the cheapest place to catch it before CI runs the whole suite.
+    #[test]
+    fn committed_baseline_describes_this_tree() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let report =
+            review(&root).expect("the committed gate source baseline must describe this tree");
+        assert!(
+            report.contains("binary and tree agree"),
+            "unexpected gate report: {report}"
+        );
     }
 }
