@@ -157,7 +157,14 @@ impl GardenRecord {
         for peer in self.peers.iter().take(usize::from(count)) {
             let len = u8::try_from(peer.len()).unwrap_or(u8::MAX);
             out.push(len);
-            out.extend_from_slice(&peer.as_bytes()[..usize::from(len)]);
+            // `len` was clamped to the byte length above, but the gate wants
+            // the absence decided rather than indexed: a peer shorter than its
+            // own length prefix writes what it has, never a panic.
+            let bytes = peer.as_bytes();
+            let take = usize::from(len).min(bytes.len());
+            if let Some(prefix) = bytes.get(..take) {
+                out.extend_from_slice(prefix);
+            }
         }
         out
     }

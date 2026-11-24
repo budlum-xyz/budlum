@@ -460,17 +460,20 @@ impl GardenService {
         let mut answer = json!({ "invite": link, "qr": qr });
         match handle.record().await {
             Ok(record) => {
-                let fields = &mut answer;
-                fields["record"] = json!(record.to_link());
-                fields["record_qr"] = json!(record.to_qr(None)?);
-                fields["owner"] = json!(hex::encode(record.owner));
-                fields["host"] = json!(hex::encode(record.host));
-                fields["expires_at_ms"] = json!(record.expires_at_ms);
-                fields["uses"] = json!(record.uses);
+                if let Some(fields) = answer.as_object_mut() {
+                    fields.insert("record".into(), json!(record.to_link()));
+                    fields.insert("record_qr".into(), json!(record.to_qr(None)?));
+                    fields.insert("owner".into(), json!(hex::encode(record.owner)));
+                    fields.insert("host".into(), json!(hex::encode(record.host)));
+                    fields.insert("expires_at_ms".into(), json!(record.expires_at_ms));
+                    fields.insert("uses".into(), json!(record.uses));
+                }
             }
             Err(reason) => {
-                answer["record"] = Value::Null;
-                answer["record_refused"] = json!(reason);
+                if let Some(fields) = answer.as_object_mut() {
+                    fields.insert("record".into(), Value::Null);
+                    fields.insert("record_refused".into(), json!(reason));
+                }
             }
         }
         Ok(answer)
