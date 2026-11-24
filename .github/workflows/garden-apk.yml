@@ -17,10 +17,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: garden-apk-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   apk:
     name: Build the Garden APK
