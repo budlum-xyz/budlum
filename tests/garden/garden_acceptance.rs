@@ -21,10 +21,12 @@
 //! where that call point is.
 
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// How long a join, a publication or a status change may take.
@@ -66,7 +68,35 @@ fn free_ports() -> Result<[u16; 4], String> {
     Ok(ports)
 }
 
+/// The operator listener serves 120 requests a minute to one address, and
+/// this suite drives three or four nodes from one test process. Polling at
+/// 100 ms spends that budget in under a minute: the listener then answers
+/// the poll with a rate-limit refusal, which reads as "the Garden never
+/// reached N validators" and hides the real state. The scenario suite paces
+/// its calls for the same reason; this one did not, so a step that was
+/// merely slow was reported as a step that was wrong.
+static LAST_CALL: Mutex<Option<BTreeMap<u16, Instant>>> = Mutex::new(None);
+/// One call per listener this often keeps every poll under the limit.
+const CALL_SPACING: Duration = Duration::from_millis(600);
+
+fn pace(port: u16) {
+    let wait = {
+        let mut table = LAST_CALL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let last = table.get_or_insert_with(BTreeMap::new);
+        let now = Instant::now();
+        let at = last
+            .get(&port)
+            .map_or(now, |previous| (*previous + CALL_SPACING).max(now));
+        last.insert(port, at);
+        at.saturating_duration_since(now)
+    };
+    std::thread::sleep(wait);
+}
+
 fn call(port: u16, method: &str, params: &Value) -> Result<Value, String> {
+    pace(port);
     let body = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -562,7 +592,10 @@ fn garden_invite_host_moves() -> Result<(), String> {
     let after = host.invite()?;
     let joiner = Node::start("joiner")?;
     joiner.join(&after, true)?;
-    host.wait_validators(2)?;
+    // Three seats now: the stayer, the returned host and the joiner. The
+    // count is the record's, and the record keeps a seat for a key that
+    // stepped out, so nothing here is replaced - the Garden grew.
+    host.wait_validators(3)?;
     ensure(
         before.starts_with("budlum") && after.starts_with("budlum"),
         "the invite stopped being a link",
@@ -621,11 +654,21 @@ fn garden_every_validator_works() -> Result<(), String> {
     }
     nodes[0].wait_validators(3)?;
 
-    // Publish something, so blocks run and parts are held and served.
+    // Every validator publishes, so every validator has content of its own to
+    // hold and to hand to the peers that keep a copy. One publication by the
+    // host would leave the two joiners holding bytes they never served: the
+    // serving counter moves when a node pushes what it published or answers
+    // for it, and a node that only received never does either.
     let published = nodes[0].rpc(
         "bud_gardenPublish",
         &json!(["message", "a garden stores what it grows"]),
     )?;
+    for node in &nodes[1..] {
+        node.rpc(
+            "bud_gardenPublish",
+            &json!(["message", format!("{} grows its own row", node.name)]),
+        )?;
+    }
     let tx = published
         .get("tx_id")
         .and_then(Value::as_str)
