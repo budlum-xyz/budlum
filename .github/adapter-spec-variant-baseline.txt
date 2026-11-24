@@ -1,0 +1,22 @@
+# AdapterSpec variant order, append-only.
+#
+# `AdapterSpec` is persisted in consensus state through bincode, so its variant
+# order is a wire format: a variant that moves, disappears or is inserted rather
+# than appended reinterprets every stored registration. The gate
+# `finality-acceptance-surface-is-append-only` reads this file and requires the
+# tree to declare exactly these variants, in exactly this order.
+#
+# Appending a family is the intended growth. Do it in one change:
+#   1. add the variant at the END of `AdapterSpec` in
+#      `src/cross_domain/external/intake.rs`;
+#   2. append the same name here.
+EthereumSync
+ZkVm
+BitcoinSpv
+TendermintCommit
+DataAvailability
+HotStuffQc
+DagCertificate
+CasperFfg
+MysticetiDag
+BitVmCovenant

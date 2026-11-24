@@ -103,6 +103,7 @@ mod gates {
     pub mod exact_named_tests;
     pub mod explorer_parity;
     pub mod explorer_patchset;
+    pub mod finality_acceptance_surface_is_append_only;
     pub mod fixture_integrity;
     pub mod forgery_tests;
     pub mod fork_choice_gate;
@@ -1842,6 +1843,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::no_internal_ids::self_test,
+    },
+    Gate {
+        name: "finality-acceptance-surface-is-append-only",
+        replaces: None,
+        run: gates::finality_acceptance_surface_is_append_only::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::finality_acceptance_surface_is_append_only::self_test,
     },
 ];
 
