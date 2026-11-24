@@ -166,7 +166,11 @@ jobs:
           fi
       - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
         with:
-          persona: regular
+          # The same persona and floor as the `zizmor` gate in xtask/gates:
+          # the regular persona hid `secrets-outside-env` on the release
+          # signing job (measured 2026-11-24); medium and above is binding.
+          persona: auditor
+          min-severity: medium
 
   codeql:
     name: CodeQL (Rust SAST)

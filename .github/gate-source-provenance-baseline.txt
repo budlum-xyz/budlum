@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: bbbc38c92f0c4e5a6f41e7742c3b164946ca6c0c359482d5f4edcf9813370372
+digest: 6f7df8e62fd127972231b9e47e2daa34ec56575d0b3db3ae82a45d8333822d33
 files: 201
 Cargo.lock	7a2830ec9206a455ad5bbaef19dcedd3e88df2aa4eedaca3b5861a2107138856
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
@@ -200,7 +200,7 @@ src/gates/workflows_produce_jobs.rs	ad3bda2f4cc1134a08a1976905c9d51e66f24d82c784
 src/gates/zero_address_sender_is_verified.rs	d1cb2d5b79b6f2af032edb0faf47d93f31edfd1c394ffb756334b5daac65a579
 src/gates/zero_storage_frozen.rs	3185f6028c58c7bfb87f3da9da66298e584dbe35316d21884910c97bd4671019
 src/gates/zero_tests_witness.rs	5979c6d1308c86119d83bc1997c3165579e29cc10603637a7b1b748860f18f35
-src/gates/zizmor.rs	ce74e736b69d80d711a9c8a61b79f357a0a278a56201af8a19f7dc6f3b5ccbe9
+src/gates/zizmor.rs	df49a37ab73c479d8990bcdda31673959ca202d93d101266b45e731eaae4408f
 src/gates/zkvm_refuses_untrusted_proofs.rs	dfca412c7a6bbc72aba195ebaffcd9f759406bfca4531ab535ae60748af88520
 src/main.rs	89a10b650f0437a4b4aa420fb71fe24d39818d011cf8d48531eed3747de52640
 src/sha256.rs	b43ece6c2d4936308d742266930a3d598dfd3175722856b7e4924f5439d35eb5
