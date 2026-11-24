@@ -506,6 +506,7 @@ impl QuorumRounds {
             QuorumOutcome::LowParticipants { .. } | QuorumOutcome::NoValidParticipants { .. } => {
                 RoundState::Open
             }
+            QuorumOutcome::TooManyParticipants { .. } => RoundState::Disputed,
         };
         Ok(round.state.clone())
     }

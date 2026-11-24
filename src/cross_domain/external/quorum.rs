@@ -173,6 +173,10 @@ pub enum QuorumOutcome {
     /// "the provers are all down" is an operational alarm and "we asked two
     /// and needed three" is a configuration problem.
     NoValidParticipants { infrastructure_failures: usize },
+    /// The caller supplied more answers than the policy permits. This is an
+    /// invalid round boundary, never a quorum: accepting the prefix or
+    /// silently truncating it would make the result depend on caller order.
+    TooManyParticipants { observed: usize, max: usize },
 }
 
 impl QuorumOutcome {
@@ -226,6 +230,12 @@ pub fn group_answers(answers: &[Answer]) -> (Vec<AnswerGroup>, usize) {
 /// means.
 #[must_use]
 pub fn decide(answers: &[Answer], policy: &QuorumPolicy) -> QuorumOutcome {
+    if answers.len() > policy.max_participants {
+        return QuorumOutcome::TooManyParticipants {
+            observed: answers.len(),
+            max: policy.max_participants,
+        };
+    }
     let (groups, infrastructure) = group_answers(answers);
     let valid: usize = groups.iter().map(|g| g.count).sum();
 
@@ -569,6 +579,22 @@ mod tests {
             "refusal:crypto"
         );
         assert_eq!(Answer::Infrastructure.group_key(), "infrastructure");
+    }
+
+    #[test]
+    fn answers_over_the_policy_cap_are_refused_fail_closed() {
+        let outcome = decide(
+            &[claim(0xaa), claim(0xaa), claim(0xbb)],
+            &QuorumPolicy::strict(2, 2),
+        );
+        assert_eq!(
+            outcome,
+            QuorumOutcome::TooManyParticipants {
+                observed: 3,
+                max: 2,
+            },
+            "the standalone decision boundary must not accept more answers than policy allows"
+        );
     }
 
     #[test]
