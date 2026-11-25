@@ -42,7 +42,11 @@ class GardenModel(
     context: Context,
     private val scope: CoroutineScope,
 ) {
-    private val phone: GardenPhone = GardenPhone(context.filesDir.resolve("garden").absolutePath)
+    private val app: Context = context.applicationContext
+
+    // One validator per process, shared with the service that keeps it
+    // running while no screen is up.
+    private val phone: GardenPhone = GardenHolder.phone(context)
     private val name: String = android.os.Build.MODEL ?: "phone"
 
     var state by mutableStateOf(GardenState())
@@ -74,6 +78,9 @@ class GardenModel(
         val answer = phone.create(title, name)
         readInvite(phone.invite())
         state = state.copy(status = answer.json)
+        // From here the phone owes the Garden its presence, so the duty
+        // leaves the screen and goes to the service that outlives it.
+        GardenValidatorService.start(app)
     }
 
     fun refreshInvite() = background {
@@ -104,6 +111,7 @@ class GardenModel(
         val answer = phone.join(record.trim(), name)
         state = state.copy(status = answer.json, preview = "")
         readInvite(phone.invite())
+        GardenValidatorService.start(app)
     }
 
     fun refreshStatus() = background {
@@ -121,15 +129,37 @@ class GardenModel(
         val answer = phone.rejoin()
         state = state.copy(status = answer.json, preview = "")
         readInvite(phone.invite())
+        GardenValidatorService.start(app)
     }
 
     fun leave() = background {
         val answer = phone.leave()
+        // Stepping out keeps the seat and the way back; retiring gives the
+        // Garden up. Only the second ends the duty, so only the second
+        // takes the notification away.
+        if (!answer.json.contains("\"can_return\":true")) {
+            GardenValidatorService.stop(app)
+        }
         state = GardenState(
             status = answer.json,
             selfTest = state.selfTest,
             selfTestMs = state.selfTestMs,
         )
+    }
+
+    /**
+     * Pick up a Garden this phone already belongs to.
+     *
+     * The seat survives the process, so opening the app after it was
+     * closed - or after the phone was switched off - finds the Garden
+     * still there and puts the validator back on the network without
+     * asking for the invite again.
+     */
+    fun resumeIfSeated() = background {
+        if (!GardenHolder.hasGarden(app)) return@background
+        GardenValidatorService.start(app)
+        state = state.copy(status = phone.status().json)
+        runCatching { readInvite(phone.invite()) }
     }
 
     /** Hand the scan off to the activity, which owns the camera. */

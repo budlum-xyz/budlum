@@ -5,7 +5,6 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.lifecycle.lifecycleScope
 
@@ -35,9 +34,13 @@ class GardenActivity : ComponentActivity() {
         // Section 4: the self test runs at first open, before the person is
         // offered anything to join.
         model.runSelfTest()
+        // A seat survives the process. If this phone is already in a
+        // Garden, the validator goes back on the network as the app opens
+        // rather than waiting to be asked.
+        model.resumeIfSeated()
         handle(intent)
         setContent {
-            MaterialTheme {
+            GardenTheme {
                 Surface { GardenApp(model) }
             }
         }

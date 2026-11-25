@@ -17,7 +17,7 @@ use super::types::{status_label, GardenAdmission, GardenContentKind, GardenLimit
 use crate::chain::chain_actor::ChainHandle;
 use crate::crypto::primitives::KeyPair;
 use crate::domain::types::Hash32;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -27,6 +27,10 @@ use tokio::sync::Mutex;
 /// unspecified, so the validator is treated as not reachable from outside
 /// and is reached through the peers it dialed.
 const DEFAULT_LISTEN: &str = "/ip4/0.0.0.0/tcp/0";
+/// Where the seat is kept between runs. It sits beside the content rather
+/// than inside it: content is thrown away and fetched again, a seat cannot
+/// be.
+const SEAT_FILE: &str = "seat.json";
 /// How long entering a Garden may take.
 const ENTER_TIMEOUT: Duration = Duration::from_mins(1);
 /// Largest payload a publish request may carry as text, in bytes.
@@ -90,6 +94,99 @@ struct Seat {
     config: GardenNodeConfig,
 }
 
+/// The seat as it survives a restart.
+///
+/// A validator that forgets its Garden when its process ends is not a
+/// validator; it is a visitor. The phone is closed and reopened and the
+/// device is rebooted, and in both cases the chain still holds the seat,
+/// so the node has to be able to take it back. Only what cannot be
+/// derived again is written: the key, the way back in, and the name and
+/// addresses this node answered to.
+#[derive(Serialize, Deserialize)]
+struct StoredSeat {
+    version: u8,
+    /// The validator key seed, hex.
+    secret: String,
+    /// The invite line that leads back to this Garden.
+    invite: String,
+    name: String,
+    listen: String,
+    announce: Option<String>,
+}
+
+/// Version of the seat file. A file of any other version is ignored rather
+/// than guessed at.
+const STORED_SEAT_VERSION: u8 = 1;
+
+/// The seat left behind by an earlier run, as a slot to start from.
+///
+/// Anything unreadable is left where it is and reported, not deleted: a
+/// seat file that cannot be parsed today may be the only copy of a key.
+fn stored_seat(path: &PathBuf, content_dir: Option<PathBuf>) -> Option<Slot> {
+    let raw = std::fs::read(path).ok()?;
+    let stored: StoredSeat = match serde_json::from_slice(&raw) {
+        Ok(stored) => stored,
+        Err(e) => {
+            tracing::warn!(error = %e, "the kept seat could not be read");
+            return None;
+        }
+    };
+    if stored.version != STORED_SEAT_VERSION {
+        tracing::warn!(
+            version = stored.version,
+            "the kept seat is of another version and was left alone"
+        );
+        return None;
+    }
+    let secret = decode_secret(&stored.secret)?;
+    let invite = GardenInvite::parse(&stored.invite)
+        .inspect_err(|e| tracing::warn!(error = %e, "the kept seat names no Garden"))
+        .ok()?;
+    Some(Slot::Away(
+        Seat {
+            secret,
+            config: GardenNodeConfig {
+                name: stored.name,
+                listen: stored.listen,
+                announce: stored.announce,
+                content_dir,
+            },
+        },
+        invite,
+    ))
+}
+
+/// The validator seed as it is written down.
+fn decode_secret(text: &str) -> Option<[u8; 32]> {
+    let bytes = hex::decode(text).ok()?;
+    <[u8; 32]>::try_from(bytes.as_slice()).ok()
+}
+
+/// Write a file only this user can read.
+///
+/// The seat holds a validator key. On the phone the directory is already
+/// private to the app, and this says the same thing about the file for
+/// every other place the node runs.
+fn write_private(path: &PathBuf, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)
+    }
+}
+
 enum Slot {
     Empty,
     Running(GardenHandle, Seat),
@@ -100,6 +197,7 @@ enum Slot {
 /// The Garden of this node.
 pub struct GardenService {
     chain: Option<ChainHandle>,
+    data_dir: Option<PathBuf>,
     content_dir: Option<PathBuf>,
     slot: Mutex<Slot>,
 }
@@ -127,7 +225,8 @@ impl GardenService {
     /// survives a restart, so anything a stopped process left there belongs
     /// to no one and is removed.
     pub fn new(chain: Option<ChainHandle>, data_dir: Option<PathBuf>) -> Self {
-        let content_dir = data_dir.map(|dir| dir.join("garden"));
+        let content_dir = data_dir.as_ref().map(|dir| dir.join("garden"));
+        // Content is dropped and fetched again; the seat beside it is not.
         if let Some(dir) = &content_dir {
             if dir.exists() {
                 if let Err(e) = std::fs::remove_dir_all(dir) {
@@ -135,10 +234,53 @@ impl GardenService {
                 }
             }
         }
+        // A seat found on disk is taken as stepped out, not as running: the
+        // network is not touched here. Returning is an act of its own, so
+        // the caller decides when, and a caller that never returns leaves
+        // the seat exactly as it found it.
+        let slot = data_dir
+            .as_ref()
+            .and_then(|dir| stored_seat(&dir.join(SEAT_FILE), content_dir.clone()))
+            .unwrap_or(Slot::Empty);
         Self {
             chain,
+            data_dir,
             content_dir,
-            slot: Mutex::new(Slot::Empty),
+            slot: Mutex::new(slot),
+        }
+    }
+
+    /// Where the seat file lives, when this node keeps one.
+    fn seat_path(&self) -> Option<PathBuf> {
+        self.data_dir.as_ref().map(|dir| dir.join(SEAT_FILE))
+    }
+
+    /// Write the seat down, so the next run can take it back.
+    fn keep_seat(&self, seat: &Seat, invite: &GardenInvite) {
+        let Some(path) = self.seat_path() else { return };
+        let stored = StoredSeat {
+            version: STORED_SEAT_VERSION,
+            secret: hex::encode(seat.secret),
+            invite: invite.to_link(),
+            name: seat.config.name.clone(),
+            listen: seat.config.listen.clone(),
+            announce: seat.config.announce.clone(),
+        };
+        let written = serde_json::to_vec(&stored)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| write_private(&path, &bytes).map_err(|e| e.to_string()));
+        if let Err(e) = written {
+            tracing::warn!(error = %e, "the seat could not be kept");
+        }
+    }
+
+    /// Drop the kept seat. Called where the Garden is given up for good.
+    fn drop_seat(&self) {
+        let Some(path) = self.seat_path() else { return };
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(error = %e, "the kept seat could not be dropped");
+            }
         }
     }
 
@@ -183,6 +325,7 @@ impl GardenService {
 
     /// Drop the link of an earlier Garden the node walked away from.
     async fn forget(&self, seat: &Seat, invite: &GardenInvite) {
+        self.drop_seat();
         if let (Some(link), Ok(key)) = (self.link(), KeyPair::from_seed(&seat.secret)) {
             if let Err(e) = link.retire(invite.chain_id, key.public_key_bytes()).await {
                 tracing::warn!(error = %e, "garden domain could not be retired");
@@ -233,6 +376,7 @@ impl GardenService {
         let invite = handle.invite().await?;
         let link = invite.to_link();
         let qr = invite.qr_content()?;
+        self.keep_seat(&seat, &invite);
         *slot = Slot::Running(handle, seat);
         drop(slot);
         Ok(json!({ "garden": status, "invite": link, "qr": qr }))
@@ -285,6 +429,7 @@ impl GardenService {
         let kept = seat.clone();
         match self.enter(GardenEntry::Invite(invite.clone()), seat).await {
             Ok((handle, seat, status)) => {
+                self.keep_seat(&seat, &invite);
                 *slot = Slot::Running(handle, seat);
                 drop(slot);
                 Ok(json!({ "garden": status }))
@@ -292,7 +437,9 @@ impl GardenService {
             Err(e) => {
                 // The node reached the Garden's door and was not let in - it
                 // may be frozen or full. That is a step out, not a forgotten
-                // Garden: `return` tries the same door again.
+                // Garden: `return` tries the same door again, and keeping
+                // the seat on disk means a later run can try it too.
+                self.keep_seat(&kept, &invite);
                 *slot = Slot::Away(kept, invite);
                 drop(slot);
                 Err(e)
@@ -329,7 +476,11 @@ impl GardenService {
                     "chain_id": format!("{:016x}", outcome.chain_id),
                     "height": outcome.height,
                 });
-                if !outcome.retired {
+                if outcome.retired {
+                    // Retiring gives the Garden up for good; nothing is
+                    // kept for a return that cannot happen.
+                    self.drop_seat();
+                } else {
                     *slot = Slot::Away(seat, outcome.invite);
                 }
                 drop(slot);

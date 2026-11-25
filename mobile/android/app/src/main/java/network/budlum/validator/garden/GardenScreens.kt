@@ -34,6 +34,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
+import org.json.JSONObject
 
 /**
  * The three screens of section 2.4: Invite, Join and Status. Nothing else
@@ -213,12 +214,7 @@ private fun StatusScreen(model: GardenModel) {
                 )
             }
         }
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Text("Garden", style = MaterialTheme.typography.titleMedium)
-                Text(state.status, style = MaterialTheme.typography.bodySmall)
-            }
-        }
+        GardenCard(state.status)
         Spacer(modifier = Modifier.height(4.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(
@@ -253,6 +249,71 @@ private fun StatusScreen(model: GardenModel) {
  * Draw the QR a scanner reads. The content is whatever the core handed
  * back, so the phone never invents an invite of its own.
  */
+/**
+ * The Garden as a person reads it, not as the core writes it.
+ *
+ * The answer is JSON because the core speaks one language to the app, the
+ * node and the tests alike. A screen is not a log: the fields that say
+ * whether this phone is doing its job are pulled out and named, and the
+ * raw answer stays available underneath for when something is wrong.
+ */
+@Composable
+private fun GardenCard(status: String) {
+    val garden = remember(status) {
+        runCatching { JSONObject(status).optJSONObject("garden") }.getOrNull()
+    }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (garden == null) {
+                Text("GARDEN", style = MaterialTheme.typography.labelSmall)
+                Text("This phone is in no Garden.", style = MaterialTheme.typography.bodyMedium)
+                return@Column
+            }
+            Text(
+                garden.optString("title").ifBlank { "GARDEN" }.uppercase(),
+                style = MaterialTheme.typography.labelSmall,
+            )
+            val state = garden.optString("status")
+            Text(
+                when (state) {
+                    "Away" -> "Stepped out. The seat is kept."
+                    "" -> "This phone is in no Garden."
+                    else -> "Validating in the background."
+                },
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            if (state != "Away" && state.isNotEmpty()) {
+                Line("Block", garden.optLong("height", 0).toString())
+                Line("Validators", garden.optInt("active_validators", 0).toString())
+                Line("Connected", garden.optInt("connected_peers", 0).toString())
+                val work = garden.optJSONObject("work")
+                Line("Parts held", (work?.optLong("parts_held", 0) ?: 0).toString())
+                Line("Blocks checked", (work?.optLong("blocks_executed", 0) ?: 0).toString())
+                val me = garden.optJSONObject("me")
+                if (me != null) {
+                    Line("This phone", me.optString("name") + " - " + me.optString("member"))
+                }
+            }
+            Line("Chain", garden.optString("chain_id"))
+        }
+    }
+}
+
+/** One named value, the way the design file sets a label against a row. */
+@Composable
+private fun Line(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(label.uppercase(), style = MaterialTheme.typography.labelSmall)
+        Text(value, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
 private fun qrBitmap(content: String): Bitmap? {
     if (content.isEmpty()) {
         return null
