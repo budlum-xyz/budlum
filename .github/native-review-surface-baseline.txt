@@ -2,8 +2,8 @@
 # The surface is enumerated from the tree; growth and silent removal
 # both fail the gate. Re-measure in the same change that moves it:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- native-security-review --print-surface
-digest: 6755dd675b516d504622668231e0745cdbe26ad25b99dfb8b1f7fab4953f4a52
-entries: 105
+digest: 919bda8f8b3dd02392c069c64ec11ada3cb5f35dd17c576efb235cdb83bb5d73
+entries: 106
 bin	src/bin/bud-migrate.rs
 bin	src/bin/bud.rs
 bin	src/bin/budlum-domain-producer.rs
@@ -85,6 +85,7 @@ workflow	.github/workflows/docker-smoke.yml
 workflow	.github/workflows/extra-tooling.yml
 workflow	.github/workflows/fmt-diff-surface.yml
 workflow	.github/workflows/fuzz-nightly.yml
+workflow	.github/workflows/garden-apk-nightly.yml
 workflow	.github/workflows/garden-apk.yml
 workflow	.github/workflows/garden-nat-nightly.yml
 workflow	.github/workflows/garden-node.yml

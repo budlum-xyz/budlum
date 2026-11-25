@@ -108,6 +108,7 @@ mod gates {
     pub mod fork_choice_gate;
     pub mod fsf_import_boundaries;
     pub mod fuzz_targets_wired;
+    pub mod garden_apk;
     pub mod garden_nat;
     pub mod garden_scenario;
     pub mod gas_calibration;
@@ -1831,6 +1832,18 @@ const GATES: &[Gate] = &[
         run_log: Some(gates::garden_scenario::run),
         run_args: None,
         self_test: gates::garden_scenario::self_test,
+    },
+    Gate {
+        name: "garden-apk",
+        replaces: None,
+        run: |_| {
+            Err(String::from(
+                "garden-apk reads a cargo test log; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::garden_apk::run),
+        run_args: None,
+        self_test: gates::garden_apk::self_test,
     },
     Gate {
         name: "garden-nat",

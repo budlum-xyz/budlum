@@ -300,6 +300,12 @@ path = "tests/garden/garden_acceptance.rs"
 name = "garden_nat"
 path = "tests/garden/garden_nat.rs"
 
+[[test]]
+# Section 9.1: the ten APK acceptance checks, run against the phone's real
+# Garden library (`garden-phone`) and a real node. Needs both binaries built.
+name = "garden_apk"
+path = "tests/garden/garden_apk.rs"
+
 # Ratio-pipeline packing throughput, serial against rayon. Runs in CI as the
 # `Ratio rayon vs serial throughput` step; its numbers belong to the host that ran
 # the step, so nothing in the tree pins them.
