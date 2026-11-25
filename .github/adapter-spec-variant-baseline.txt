@@ -20,3 +20,6 @@ DagCertificate
 CasperFfg
 MysticetiDag
 BitVmCovenant
+# Appended upstream in 5cd24e6 (Babylon EOTS wired to intake) before this gate
+# existed; pinned here in the same change that introduces the gate.
+BabylonEots
