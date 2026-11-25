@@ -19,6 +19,10 @@ on:
   # including clean rebuilds; daily fan-out was starving live PR gates.
   schedule:
     - cron: "23 0 * * 4" # Thursday 00:23 UTC
+  # On demand: an operator can start this battery on a branch without
+  # pushing to it, which is how a blocked stack gets its heavy evidence
+  # when the queue is empty enough to take one more run.
+  workflow_dispatch:
 
 concurrency:
   group: determinism-${{ github.ref }}

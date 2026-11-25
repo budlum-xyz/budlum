@@ -13,6 +13,10 @@ on:
   # more work than the shared runner pool can finish before the next push cancels it.
   pull_request:
     branches: [main, consensus-of-consensuses]
+  # On demand: an operator can start this battery on a branch without
+  # pushing to it, which is how a blocked stack gets its heavy evidence
+  # when the queue is empty enough to take one more run.
+  workflow_dispatch:
 
 concurrency:
   group: benchmark-${{ github.ref }}
