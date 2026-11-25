@@ -35,7 +35,10 @@
 //!   own disk; when the last validator leaves nothing is left anywhere.
 
 mod invite;
-mod invite_record;
+// The fuzz harness reads this decoder directly: it takes untrusted text off
+// a link, a QR code, a clipboard line and a local announcement, so its parser
+// is fuzzed as its own input surface rather than through a service.
+pub mod invite_record;
 mod net;
 mod node;
 mod service;
