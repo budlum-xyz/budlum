@@ -939,6 +939,10 @@ impl ExternalFinalityAdapter for HeterogeneousMultiProverAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned.is_some()
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,

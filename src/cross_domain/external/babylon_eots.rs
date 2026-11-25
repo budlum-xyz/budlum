@@ -1011,6 +1011,13 @@ impl ExternalFinalityAdapter for BabylonEotsAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.anchor
+            .as_ref()
+            .is_some_and(|a| a.required_confirmations > 0)
+            && !self.epoch_keys.is_empty()
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,

@@ -6716,4 +6716,108 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn all_eleven_new_adapters_report_pinned_trust_anchor_honestly() {
+        use crate::cross_domain::external::babylon_eots::test_support as babylon_ts;
+
+        let mut pinned_specs = additional_family_specs_with_pins();
+        pinned_specs.push(AdapterSpec::BabylonEots {
+            network: babylon_ts::NETWORK.to_string(),
+            pinned: Some(babylon_ts::pinned()),
+        });
+        let (nipopow_pin, _, nipopow_golden) =
+            crate::cross_domain::external::nipopow::tests::make_golden_fixture();
+        pinned_specs.push(AdapterSpec::NipopowSuperblock {
+            network: nipopow_golden.network,
+            genesis: Some(nipopow_pin),
+        });
+        let (ghostdag_pin, _, ghostdag_golden) =
+            crate::cross_domain::external::ghostdag::tests::make_golden_fixture();
+        pinned_specs.push(AdapterSpec::Ghostdag {
+            network: ghostdag_golden.network,
+            anchor: Some(ghostdag_pin),
+        });
+        let (_hb_keys, hb_pin, _hb_ev, hb_golden) =
+            crate::cross_domain::external::honeybadger_bft::tests::fixture();
+        pinned_specs.push(AdapterSpec::HoneyBadgerBft {
+            network: hb_golden.network,
+            committee: Some(hb_pin),
+        });
+
+        assert_eq!(pinned_specs.len(), 11);
+        for spec in &pinned_specs {
+            assert!(
+                spec.build(None, None).has_pinned_trust_anchor(),
+                "pinned {} adapter must report has_pinned_trust_anchor() == true",
+                spec.network()
+            );
+        }
+
+        let unpinned_specs = [
+            AdapterSpec::SolanaTowerBft {
+                network: "solana-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::PoSpaceVdf {
+                network: "chia-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::AptosJolteonBft {
+                network: "aptos-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::NearDoomslugBft {
+                network: "near-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::ChainKeyNiDkg {
+                network: "ic-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::BabylonEots {
+                network: babylon_ts::NETWORK.to_string(),
+                pinned: None,
+            },
+            AdapterSpec::NipopowSuperblock {
+                network: "pow-mainnet".to_string(),
+                genesis: None,
+            },
+            AdapterSpec::Ghostdag {
+                network: "kaspa-mainnet".to_string(),
+                anchor: None,
+            },
+            AdapterSpec::HoneyBadgerBft {
+                network: "hb-mainnet".to_string(),
+                committee: None,
+            },
+            AdapterSpec::HeterogeneousMultiProver {
+                network: "multiprover-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::StarkValidityRollup {
+                network: "starknet-mainnet".to_string(),
+                pinned: None,
+            },
+        ];
+        for spec in &unpinned_specs {
+            assert!(
+                !spec.build(None, None).has_pinned_trust_anchor(),
+                "unpinned {} adapter must remain fail-closed (has_pinned_trust_anchor() == false)",
+                spec.network()
+            );
+        }
+
+        let mut no_keys_babylon = babylon_ts::pinned();
+        no_keys_babylon.epoch_keys.clear();
+        assert!(
+            !AdapterSpec::BabylonEots {
+                network: babylon_ts::NETWORK.to_string(),
+                pinned: Some(no_keys_babylon),
+            }
+            .build(None, None)
+            .has_pinned_trust_anchor(),
+            "BabylonEots without epoch keys must remain fail-closed"
+        );
+    }
 }
