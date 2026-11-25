@@ -238,69 +238,6 @@ pub enum AdapterSpec {
         #[serde(default)]
         anchor: Option<crate::cross_domain::external::bitvm_covenant::PinnedBitVmAnchor>,
     },
-    /// Babylon / BTC-restaking EOTS finality bound to one network and one
-    /// governance-pinned epoch-key table plus Bitcoin weak-subjectivity
-    /// anchor. APPENDED LAST (tag `15`): the wire tag is the first free slot
-    /// after the reserved 10..14 (Sekstant / ScheduleFork). A spec without a
-    /// pin is the closed admission state: `register_domain` refuses it.
-    BabylonEots {
-        network: String,
-        #[serde(default)]
-        pinned: Option<crate::cross_domain::external::babylon_eots::PinnedBabylonEots>,
-    },
-    /// Sublinear `NIPoPoW` superblock finality (Kiayias-Miller-Zindros,
-    /// EUROCRYPT 2020) for a `PoW` chain, bound to a governance-pinned genesis
-    /// and KMZ `(m, k)` parameters. APPENDED LAST (tag `16`): the bincode
-    /// discriminant is this variant's declaration position, and the manual
-    /// `encode_adapter_spec` tag is the first free slot after Babylon's 15.
-    ///
-    /// Why this family and not a linear SPV one: the promise a `PoW` chain
-    /// makes is work, and `NIPoPoW` verifies genesis-to-tip work in
-    /// `O(m log|C| + k)` headers under pure SHA-256 - the one primitive here
-    /// Shor's algorithm does not touch. A spec without a genesis anchor is the
-    /// closed admission state: `register_domain` refuses it, because a
-    /// superblock proof says nothing about *which* chain it is a proof of
-    /// until a genesis is pinned.
-    NipopowSuperblock {
-        network: String,
-        #[serde(default)]
-        genesis: Option<crate::cross_domain::external::nipopow::PinnedNipopowGenesis>,
-    },
-    /// PHANTOM-GHOSTDAG `k`-cluster blockDAG `PoW` finality (Kaspa family).
-    ///
-    /// `encode_adapter_spec` tag is the first free slot after NIPoPoW's 16.
-    ///
-    /// A blockDAG is where sublinear `PoW` stops being enough on its own: a
-    /// `NIPoPoW` superchain is a proof about one chain, and the ledger here is
-    /// a DAG whose finality is a blue-score depth over a `k`-cluster coloring.
-    /// So this family is anchored by a pruning-point checkpoint carrying the
-    /// anchor's `blue_score` and `blue_work`, and the pin also fixes `k`, the
-    /// parent bound, the merge-depth bound and the required blue depth. A spec
-    /// without that anchor is the closed admission state: `register_domain`
-    /// refuses it, because a DAG certificate says nothing about which DAG it
-    /// belongs to until a checkpoint is pinned.
-    Ghostdag {
-        network: String,
-        #[serde(default)]
-        anchor: Option<crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor>,
-    },
-    /// Leaderless asynchronous AC S BFT finality (`HoneyBadgerBFT`).
-    ///
-    /// `encode_adapter_spec` tag is the first free slot after GHOSTDAG's 17.
-    ///
-    /// This is the first family here whose finality is *protocol* finality
-    /// under an honest majority rather than a work bound: an epoch's
-    /// asynchronous common subset is decided by an `N - f` ML-DSA-65 quorum, so
-    /// the pin that matters is the committee (genesis, epoch, validator keys)
-    /// and not a difficulty. A spec without that committee is the closed
-    /// admission state: a certificate signed by keys nobody pinned certifies
-    /// nothing.
-    HoneyBadgerBft {
-        network: String,
-        #[serde(default)]
-        committee:
-            Option<crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee>,
-    },
     /// `Solana Tower-BFT` epoch-slot finality bound to a governance-pinned
     /// epoch (`encode_adapter_spec` tag `10`).
     SolanaTowerBft {
@@ -335,6 +272,64 @@ pub enum AdapterSpec {
         network: String,
         #[serde(default)]
         pinned: Option<crate::cross_domain::external::chain_key_ni_dkg::PinnedChainKeyRoot>,
+    },
+    /// Babylon / BTC-restaking EOTS finality bound to one network and one
+    /// governance-pinned epoch-key table plus Bitcoin weak-subjectivity
+    /// anchor (`encode_adapter_spec` tag `15`). A spec without a pin is the
+    /// closed admission state: `register_domain` refuses it.
+    BabylonEots {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::babylon_eots::PinnedBabylonEots>,
+    },
+    /// Sublinear `NIPoPoW` superblock finality (Kiayias-Miller-Zindros,
+    /// EUROCRYPT 2020) for a `PoW` chain, bound to a governance-pinned genesis
+    /// and KMZ `(m, k)` parameters (`encode_adapter_spec` tag `16`).
+    ///
+    /// Why this family and not a linear SPV one: the promise a `PoW` chain
+    /// makes is work, and `NIPoPoW` verifies genesis-to-tip work in
+    /// `O(m log|C| + k)` headers under pure SHA-256 - the one primitive here
+    /// Shor's algorithm does not touch. A spec without a genesis anchor is the
+    /// closed admission state: `register_domain` refuses it, because a
+    /// superblock proof says nothing about *which* chain it is a proof of
+    /// until a genesis is pinned.
+    NipopowSuperblock {
+        network: String,
+        #[serde(default)]
+        genesis: Option<crate::cross_domain::external::nipopow::PinnedNipopowGenesis>,
+    },
+    /// PHANTOM-GHOSTDAG `k`-cluster blockDAG `PoW` finality (Kaspa family,
+    /// `encode_adapter_spec` tag `17`).
+    ///
+    /// A blockDAG is where sublinear `PoW` stops being enough on its own: a
+    /// `NIPoPoW` superchain is a proof about one chain, and the ledger here is
+    /// a DAG whose finality is a blue-score depth over a `k`-cluster coloring.
+    /// So this family is anchored by a pruning-point checkpoint carrying the
+    /// anchor's `blue_score` and `blue_work`, and the pin also fixes `k`, the
+    /// parent bound, the merge-depth bound and the required blue depth. A spec
+    /// without that anchor is the closed admission state: `register_domain`
+    /// refuses it, because a DAG certificate says nothing about which DAG it
+    /// belongs to until a checkpoint is pinned.
+    Ghostdag {
+        network: String,
+        #[serde(default)]
+        anchor: Option<crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor>,
+    },
+    /// Leaderless asynchronous AC S BFT finality (`HoneyBadgerBFT`,
+    /// `encode_adapter_spec` tag `18`).
+    ///
+    /// This is the first family here whose finality is *protocol* finality
+    /// under an honest majority rather than a work bound: an epoch's
+    /// asynchronous common subset is decided by an `N - f` ML-DSA-65 quorum, so
+    /// the pin that matters is the committee (genesis, epoch, validator keys)
+    /// and not a difficulty. A spec without that committee is the closed
+    /// admission state: a certificate signed by keys nobody pinned certifies
+    /// nothing.
+    HoneyBadgerBft {
+        network: String,
+        #[serde(default)]
+        committee:
+            Option<crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee>,
     },
     /// Heterogeneous multi-prover (STARK + PQ leg) fault-proof finality bound
     /// to a governance-pinned config (`encode_adapter_spec` tag `19`).

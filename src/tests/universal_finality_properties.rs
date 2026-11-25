@@ -869,8 +869,8 @@ fn preauthorized_spend_account_verifies_pq_hybrid_offline_vouchers_and_blocks_re
 #[test]
 fn canonical_payment_request_uri_roundtrips_and_refund_registry_blocks_double_refund() {
     use crate::unification::payment_router::{
-        universal_asset_id, RefundIntent, RefundRegistry, UniversalPaymentReceipt,
-        UniversalPaymentRequestUri,
+        universal_asset_id, DomainTokenBalance, PaymentRail, RefundIntent, RefundRegistry,
+        UniversalPaymentIntent, UniversalPaymentRequestUri, UniversalPaymentRouter,
     };
 
     let req = UniversalPaymentRequestUri {
@@ -892,16 +892,26 @@ fn canonical_payment_request_uri_roundtrips_and_refund_registry_blocks_double_re
     assert!(UniversalPaymentRequestUri::decode_canonical("budlum:pay/v2?amount=1").is_err());
     assert!(UniversalPaymentRequestUri::decode_canonical(&format!("{encoded}&evil=1")).is_err());
 
-    let receipt = UniversalPaymentReceipt {
-        intent_id: [0x55; 32],
+    let intent = UniversalPaymentIntent {
+        payer_id: [0x56; 32],
+        merchant_id: [0x12; 32],
+        nonce: 1,
         target_domain: 1,
         target_asset_id: universal_asset_id(1, b"USDC"),
-        target_amount_delivered: 25_000_000,
-        legs: Vec::new(),
-        legs_merkle_root: [0x66; 32],
-        pos_auth_code: Some(String::from("BDLM12345678")),
-        receipt_hash: [0x77; 32],
+        target_amount: 25_000_000,
+        max_slippage_bps: 100,
+        deadline_unix_secs: 1_800_000_000,
+        invoice_hash: [0x34; 32],
+        rail: PaymentRail::OnChain,
     };
+    let balances = vec![DomainTokenBalance {
+        domain_id: 1,
+        asset_id: intent.target_asset_id,
+        symbol: String::from("USDC"),
+        available_amount: intent.target_amount,
+    }];
+    let receipt = UniversalPaymentRouter::quote_payment(&intent, &balances, &[], 1_700_000_000)
+        .expect("canonical receipt");
     let refund = RefundIntent {
         original_intent_id: receipt.intent_id,
         original_receipt_hash: receipt.receipt_hash,

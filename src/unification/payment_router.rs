@@ -295,6 +295,123 @@ pub struct UniversalPaymentReceipt {
     pub receipt_hash: Hash32,
 }
 
+fn derive_pos_auth_code(
+    intent_id: &Hash32,
+    legs_merkle_root: &Hash32,
+    rail: &PaymentRail,
+) -> Option<String> {
+    match rail {
+        PaymentRail::OnChain => None,
+        PaymentRail::PosTerminal { .. } | PaymentRail::CardNetwork { .. } => {
+            let code_hash =
+                hash_domain_fields(b"BDLM_POS_AUTH_CODE_V1", &[intent_id, legs_merkle_root]);
+            let prefix = code_hash.get(..6).unwrap_or(&code_hash);
+            Some(hex::encode(prefix).to_ascii_uppercase())
+        }
+    }
+}
+
+fn derive_payment_receipt_hash(
+    intent_id: &Hash32,
+    target_domain: DomainId,
+    target_asset_id: &Hash32,
+    target_amount_delivered: u128,
+    legs_merkle_root: &Hash32,
+) -> Hash32 {
+    let dom_bytes = target_domain.to_le_bytes();
+    let amt_bytes = target_amount_delivered.to_le_bytes();
+    hash_domain_fields(
+        b"BDLM_PAYMENT_RECEIPT_V1",
+        &[
+            intent_id,
+            &dom_bytes,
+            target_asset_id,
+            &amt_bytes,
+            legs_merkle_root,
+        ],
+    )
+}
+
+fn locate_source_balance(balances: &[DomainTokenBalance], leg: &SplitTenderLeg) -> Option<usize> {
+    balances.iter().position(|balance| {
+        balance.domain_id == leg.source_domain
+            && balance.asset_id == leg.source_asset_id
+            && balance.symbol == leg.source_symbol
+    })
+}
+
+fn verify_leg_shape(leg: &SplitTenderLeg) -> Result<(), PaymentError> {
+    if leg.source_debited == 0 || leg.target_delivered == 0 {
+        return Err(PaymentError::InvalidIntent(String::from(
+            "split-tender legs must debit and deliver non-zero amounts",
+        )));
+    }
+    Ok(())
+}
+
+impl UniversalPaymentReceipt {
+    fn recomputed_legs_merkle_root(&self) -> Hash32 {
+        let hashes: Vec<Hash32> = self
+            .legs
+            .iter()
+            .map(SplitTenderLeg::commitment_hash)
+            .collect();
+        unification_merkle_root(b"BDLM_PAYMENT_LEGS_V1", &hashes)
+    }
+
+    fn recomputed_pos_auth_code(&self, rail: &PaymentRail) -> Option<String> {
+        derive_pos_auth_code(&self.intent_id, &self.legs_merkle_root, rail)
+    }
+
+    fn recomputed_receipt_hash(&self) -> Hash32 {
+        derive_payment_receipt_hash(
+            &self.intent_id,
+            self.target_domain,
+            &self.target_asset_id,
+            self.target_amount_delivered,
+            &self.legs_merkle_root,
+        )
+    }
+
+    fn verify_self_consistent(&self, rail: Option<&PaymentRail>) -> Result<(), PaymentError> {
+        if self.legs.is_empty() || self.legs.len() > MAX_SPLIT_TENDER_LEGS {
+            return Err(PaymentError::InvalidIntent(format!(
+                "payment receipt must carry 1..={MAX_SPLIT_TENDER_LEGS} legs"
+            )));
+        }
+        let mut delivered = 0u128;
+        for leg in &self.legs {
+            verify_leg_shape(leg)?;
+            delivered = delivered
+                .checked_add(leg.target_delivered)
+                .ok_or(PaymentError::ArithmeticOverflow)?;
+        }
+        if delivered != self.target_amount_delivered {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment receipt leg delivery does not equal its target amount",
+            )));
+        }
+        if self.legs_merkle_root != self.recomputed_legs_merkle_root() {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment receipt legs_merkle_root does not match its legs",
+            )));
+        }
+        if rail.is_some_and(|expected_rail| {
+            self.pos_auth_code != self.recomputed_pos_auth_code(expected_rail)
+        }) {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment receipt POS authorization does not match its rail",
+            )));
+        }
+        if self.receipt_hash != self.recomputed_receipt_hash() {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment receipt hash is not canonical",
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Errors returned while planning or settling a universal multi-token payment.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PaymentError {
@@ -509,26 +626,13 @@ impl UniversalPaymentRouter {
         let intent_id = intent.intent_id();
         let leg_hashes: Vec<Hash32> = legs.iter().map(SplitTenderLeg::commitment_hash).collect();
         let legs_merkle_root = unification_merkle_root(b"BDLM_PAYMENT_LEGS_V1", &leg_hashes);
-        let pos_auth_code = match &intent.rail {
-            PaymentRail::OnChain => None,
-            PaymentRail::PosTerminal { .. } | PaymentRail::CardNetwork { .. } => {
-                let code_hash =
-                    hash_domain_fields(b"BDLM_POS_AUTH_CODE_V1", &[&intent_id, &legs_merkle_root]);
-                let prefix = code_hash.get(..6).unwrap_or(&code_hash);
-                Some(hex::encode(prefix).to_ascii_uppercase())
-            }
-        };
-        let dom_bytes = intent.target_domain.to_le_bytes();
-        let amt_bytes = intent.target_amount.to_le_bytes();
-        let receipt_hash = hash_domain_fields(
-            b"BDLM_PAYMENT_RECEIPT_V1",
-            &[
-                &intent_id,
-                &dom_bytes,
-                &intent.target_asset_id,
-                &amt_bytes,
-                &legs_merkle_root,
-            ],
+        let pos_auth_code = derive_pos_auth_code(&intent_id, &legs_merkle_root, &intent.rail);
+        let receipt_hash = derive_payment_receipt_hash(
+            &intent_id,
+            intent.target_domain,
+            &intent.target_asset_id,
+            intent.target_amount,
+            &legs_merkle_root,
         );
 
         Ok(UniversalPaymentReceipt {
@@ -586,13 +690,8 @@ impl UniversalPaymentRouter {
         let mut source_total_value = 0u128;
         let mut total_fees = 0u128;
         for leg in &receipt.legs {
-            let (idx, _) = balances
-                .iter()
-                .enumerate()
-                .find(|(_, b)| {
-                    b.domain_id == leg.source_domain && b.asset_id == leg.source_asset_id
-                })
-                .ok_or(PaymentError::ArithmeticOverflow)?;
+            let idx =
+                locate_source_balance(balances, leg).ok_or(PaymentError::ArithmeticOverflow)?;
             let entry = cumulative_debits.entry(idx).or_insert(0);
             *entry = entry
                 .checked_add(leg.source_debited)
@@ -802,7 +901,7 @@ fn verify_receipt_settles_intent(
             "the receipt does not settle the intent it was planned for",
         )));
     }
-    Ok(())
+    receipt.verify_self_consistent(Some(&intent.rail))
 }
 
 /// Check one split-tender leg against the quote it draws on and return the
@@ -1971,6 +2070,7 @@ impl RefundRegistry {
         original: &UniversalPaymentReceipt,
         refund: &RefundIntent,
     ) -> Result<Hash32, PaymentError> {
+        original.verify_self_consistent(None)?;
         if refund.original_intent_id != original.intent_id
             || refund.original_receipt_hash != original.receipt_hash
         {
@@ -2622,16 +2722,14 @@ mod tests {
             deadline_unix_secs: 2_000,
             nonce: 78,
         };
-        let honest = UniversalPaymentReceipt {
-            intent_id: intent.intent_id(),
-            target_domain: 1,
-            target_asset_id: [0x01; 32],
-            target_amount_delivered: 400,
-            legs: Vec::new(),
-            legs_merkle_root: [0; 32],
-            pos_auth_code: None,
-            receipt_hash: [0; 32],
-        };
+        let balances = vec![DomainTokenBalance {
+            domain_id: 1,
+            asset_id: [0x01; 32],
+            symbol: String::from("BUD"),
+            available_amount: 400,
+        }];
+        let honest = UniversalPaymentRouter::quote_payment(&intent, &balances, &[], 1_500)
+            .expect("honest receipt");
         assert_eq!(verify_receipt_settles_intent(&honest, &intent), Ok(()));
         let drifted = [
             UniversalPaymentReceipt {
@@ -2657,6 +2755,141 @@ mod tests {
                 "a receipt for another target must be refused: {receipt:?}"
             );
         }
+
+        let mut wrong_root = honest.clone();
+        wrong_root.legs_merkle_root[0] ^= 0x01;
+        wrong_root.receipt_hash = wrong_root.recomputed_receipt_hash();
+        assert!(verify_receipt_settles_intent(&wrong_root, &intent).is_err());
+        let mut wrong_hash = honest.clone();
+        wrong_hash.receipt_hash[0] ^= 0x01;
+        assert!(verify_receipt_settles_intent(&wrong_hash, &intent).is_err());
+
+        let pos_intent = UniversalPaymentIntent {
+            nonce: 79,
+            rail: PaymentRail::PosTerminal {
+                terminal_id: String::from("POS-01"),
+                merchant_code: String::from("MCC5411"),
+                iso_currency_code: String::from("USD"),
+            },
+            ..intent.clone()
+        };
+        let pos_receipt = UniversalPaymentRouter::quote_payment(&pos_intent, &balances, &[], 1_500)
+            .expect("honest POS receipt");
+        assert!(pos_receipt.pos_auth_code.is_some());
+        let mut missing_auth = pos_receipt;
+        missing_auth.pos_auth_code = None;
+        assert!(verify_receipt_settles_intent(&missing_auth, &pos_intent).is_err());
+
+        let refund_for = |receipt: &UniversalPaymentReceipt| RefundIntent {
+            original_intent_id: receipt.intent_id,
+            original_receipt_hash: receipt.receipt_hash,
+            merchant_id: [0xB2; 32],
+            refund_recipient: [0xA1; 32],
+            refund_amount: 400,
+            reason_code: 1,
+        };
+        let mut registry = RefundRegistry::default();
+        registry
+            .record_refund(&honest, &refund_for(&honest))
+            .expect("first refund");
+        let mut relabeled = honest.clone();
+        relabeled.receipt_hash[0] ^= 0x80;
+        assert!(registry
+            .record_refund(&relabeled, &refund_for(&relabeled))
+            .is_err());
+    }
+
+    #[test]
+    fn zero_value_and_over_limit_legs_are_refused_even_when_rehashed() {
+        let intent = UniversalPaymentIntent {
+            payer_id: [0xA1; 32],
+            merchant_id: [0xB2; 32],
+            target_domain: 1,
+            target_asset_id: [0x01; 32],
+            target_amount: 400,
+            max_slippage_bps: 200,
+            rail: PaymentRail::OnChain,
+            invoice_hash: [0xC3; 32],
+            deadline_unix_secs: 2_000,
+            nonce: 80,
+        };
+        let balances = vec![DomainTokenBalance {
+            domain_id: 1,
+            asset_id: [0x01; 32],
+            symbol: String::from("BUD"),
+            available_amount: 400,
+        }];
+        let honest = UniversalPaymentRouter::quote_payment(&intent, &balances, &[], 1_500)
+            .expect("honest receipt");
+        let rehash = |receipt: &mut UniversalPaymentReceipt| {
+            let hashes: Vec<Hash32> = receipt
+                .legs
+                .iter()
+                .map(SplitTenderLeg::commitment_hash)
+                .collect();
+            receipt.legs_merkle_root = unification_merkle_root(b"BDLM_PAYMENT_LEGS_V1", &hashes);
+            receipt.receipt_hash = derive_payment_receipt_hash(
+                &receipt.intent_id,
+                receipt.target_domain,
+                &receipt.target_asset_id,
+                receipt.target_amount_delivered,
+                &receipt.legs_merkle_root,
+            );
+        };
+
+        let mut ghosted = honest.clone();
+        ghosted.legs.push(SplitTenderLeg {
+            source_domain: 1,
+            source_asset_id: [0x01; 32],
+            source_symbol: String::from("BUD"),
+            source_debited: 0,
+            target_delivered: 0,
+            fee_bps: 0,
+            direct_same_domain: true,
+            quote_id: None,
+        });
+        rehash(&mut ghosted);
+        assert!(verify_receipt_settles_intent(&ghosted, &intent).is_err());
+
+        let mut oversized = honest;
+        oversized.legs = (0..=MAX_SPLIT_TENDER_LEGS)
+            .map(|idx| {
+                let amount = if idx == MAX_SPLIT_TENDER_LEGS { 32 } else { 23 };
+                SplitTenderLeg {
+                    source_domain: 1,
+                    source_asset_id: [0x01; 32],
+                    source_symbol: String::from("BUD"),
+                    source_debited: amount,
+                    target_delivered: amount,
+                    fee_bps: 0,
+                    direct_same_domain: true,
+                    quote_id: None,
+                }
+            })
+            .collect();
+        rehash(&mut oversized);
+        assert!(verify_receipt_settles_intent(&oversized, &intent).is_err());
+    }
+
+    #[test]
+    fn source_symbol_must_match_the_debited_balance() {
+        let balances = vec![DomainTokenBalance {
+            domain_id: 1,
+            asset_id: [0x01; 32],
+            symbol: String::from("BUD"),
+            available_amount: 400,
+        }];
+        let mislabeled = SplitTenderLeg {
+            source_domain: 1,
+            source_asset_id: [0x01; 32],
+            source_symbol: String::from("NOT-BUD"),
+            source_debited: 400,
+            target_delivered: 400,
+            fee_bps: 0,
+            direct_same_domain: true,
+            quote_id: None,
+        };
+        assert!(locate_source_balance(&balances, &mislabeled).is_none());
     }
 
     /// A leg planned without its quote's fee balances under conservation alone,

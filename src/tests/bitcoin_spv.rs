@@ -322,14 +322,13 @@ fn adapter_spec_variant_indices_stay_pinned() {
     assert_eq!(u32::from_le_bytes(eth_bytes[0..4].try_into().unwrap()), 0);
     assert_eq!(u32::from_le_bytes(zk_bytes[0..4].try_into().unwrap()), 1);
     assert_eq!(u32::from_le_bytes(btc_bytes[0..4].try_into().unwrap()), 2);
-    // The bincode discriminant is the variant's declaration position, not the
-    // manual wire tag `encode_adapter_spec` writes into the transaction
-    // preimage (that tag is 15, the first free slot after the reserved 10..14,
-    // and is pinned by the signing-preimage test). Appending `BabylonEots`
-    // last gives it position 10 and leaves every earlier variant untouched.
+    // Slots 0..9 stay pinned in declaration order for persisted testnet state.
+    // The five reserved slots 10..14 are occupied by SolanaTowerBft..ChainKeyNiDkg,
+    // so `BabylonEots` lands at position 15, matching its `encode_adapter_spec`
+    // signing wire tag 15 one-to-one.
     assert_eq!(
         u32::from_le_bytes(babylon_bytes[0..4].try_into().unwrap()),
-        10
+        15
     );
 }
 

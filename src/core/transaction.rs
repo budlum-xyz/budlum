@@ -5690,109 +5690,9 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
-        AdapterSpec::BabylonEots { network, pinned } => {
-            put_u8(out, 15);
-            put_string(out, network);
-            match pinned {
-                Some(pin) => {
-                    put_u8(out, 1);
-                    put_u64(out, pin.chain_id);
-                    put_fixed(out, &pin.anchor.tip_block_hash);
-                    put_u64(out, pin.anchor.tip_height);
-                    put_u64(out, pin.anchor.required_confirmations);
-                    put_u64(out, pin.epoch_keys.len() as u64);
-                    for (epoch, key) in &pin.epoch_keys {
-                        put_u64(out, *epoch);
-                        put_fixed(out, &key.x_only);
-                    }
-                    put_u64(out, pin.epoch_pq_keys.len() as u64);
-                    for (epoch, key) in &pin.epoch_pq_keys {
-                        put_u64(out, *epoch);
-                        put_bytes(out, key);
-                    }
-                }
-                None => put_u8(out, 0),
-            }
-        }
-        // Tag 16: sublinear NIPoPoW superblock adapter, appended last.
-        //
-        // Every pinned field reaches the preimage: a relay that could lower
-        // `min_superblocks_m` or widen `pow_target` on a signed registration
-        // would be choosing how much work its own evidence must prove.
-        AdapterSpec::NipopowSuperblock { network, genesis } => {
-            put_u8(out, 16);
-            put_string(out, network);
-            match genesis {
-                Some(pin) => {
-                    put_u8(out, 1);
-                    put_fixed(out, &pin.genesis_id);
-                    put_u64(out, pin.genesis_height);
-                    put_fixed(out, &pin.pow_target);
-                    put_u32(out, pin.min_superblocks_m);
-                    put_u8(out, pin.min_superblock_level);
-                    put_u32(out, pin.min_suffix_k);
-                }
-                None => put_u8(out, 0),
-            }
-        }
-        // Tag 17: PHANTOM-GHOSTDAG blockDAG adapter, appended last.
-        //
-        // The whole checkpoint reaches the preimage, not just its hash: a
-        // relay that could lower `required_blue_depth`, widen `k`, or raise the
-        // merge-depth bound on a signed registration would be choosing how much
-        // parallelism and how much depth its own DAG certificate must survive.
-        AdapterSpec::Ghostdag { network, anchor } => {
-            put_u8(out, 17);
-            put_string(out, network);
-            match anchor {
-                Some(pin) => {
-                    put_u8(out, 1);
-                    put_fixed(out, &pin.anchor_hash);
-                    put_u64(out, pin.anchor_daa_score);
-                    put_u64(out, pin.anchor_blue_score);
-                    for limb in pin.anchor_blue_work {
-                        put_u64(out, limb);
-                    }
-                    put_u64(out, pin.anchor_timestamp_secs);
-                    put_u8(out, pin.k);
-                    put_u8(out, pin.max_parents);
-                    put_u64(out, pin.merge_depth_bound);
-                    put_u32(out, pin.max_target_bits);
-                    put_u64(out, pin.required_blue_depth);
-                    put_u64(out, pin.max_future_drift_secs);
-                }
-                None => put_u8(out, 0),
-            }
-        }
-        // Tag 18: leaderless asynchronous HoneyBadgerBFT adapter, appended last.
-        //
-        // The full committee reaches the preimage: every validator id, ML-DSA-65
-        // key and weight, plus the genesis, the epoch and the lowest accepted
-        // ACS epoch. A relay able to swap one key on a signed registration
-        // would be choosing the quorum its own certificate must satisfy.
-        AdapterSpec::HoneyBadgerBft { network, committee } => {
-            put_u8(out, 18);
-            put_string(out, network);
-            match committee {
-                Some(pin) => {
-                    put_u8(out, 1);
-                    put_string(out, &pin.network_id);
-                    put_fixed(out, &pin.genesis_hash);
-                    put_u64(out, pin.committee_epoch);
-                    put_u64(out, pin.min_acs_epoch);
-                    put_u64(out, pin.validators.len() as u64);
-                    for v in &pin.validators {
-                        put_fixed(out, &v.validator_id);
-                        put_bytes(out, &v.mldsa65_pubkey);
-                        put_u64(out, v.weight);
-                    }
-                }
-                None => put_u8(out, 0),
-            }
-        }
-        // Tags 10..14 and 19..20: append-only additional consensus families,
-        // encoded explicitly field-by-field with destructuring so adding any
-        // field to a pinned anchor fails to compile until signed.
+        // Tags 10..14: append-only additional consensus families, encoded
+        // explicitly field-by-field with destructuring so adding any field to
+        // a pinned anchor fails to compile until signed.
         AdapterSpec::SolanaTowerBft { network, pinned } => {
             put_u8(out, 10);
             put_string(out, network);
@@ -5939,6 +5839,106 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                     put_bytes(out, root_pq_pubkey);
                     put_u64(out, *dkg_interval_length);
                     put_u64(out, *min_registry_version);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::BabylonEots { network, pinned } => {
+            put_u8(out, 15);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.chain_id);
+                    put_fixed(out, &pin.anchor.tip_block_hash);
+                    put_u64(out, pin.anchor.tip_height);
+                    put_u64(out, pin.anchor.required_confirmations);
+                    put_u64(out, pin.epoch_keys.len() as u64);
+                    for (epoch, key) in &pin.epoch_keys {
+                        put_u64(out, *epoch);
+                        put_fixed(out, &key.x_only);
+                    }
+                    put_u64(out, pin.epoch_pq_keys.len() as u64);
+                    for (epoch, key) in &pin.epoch_pq_keys {
+                        put_u64(out, *epoch);
+                        put_bytes(out, key);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 16: sublinear NIPoPoW superblock adapter.
+        //
+        // Every pinned field reaches the preimage: a relay that could lower
+        // `min_superblocks_m` or widen `pow_target` on a signed registration
+        // would be choosing how much work its own evidence must prove.
+        AdapterSpec::NipopowSuperblock { network, genesis } => {
+            put_u8(out, 16);
+            put_string(out, network);
+            match genesis {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.genesis_id);
+                    put_u64(out, pin.genesis_height);
+                    put_fixed(out, &pin.pow_target);
+                    put_u32(out, pin.min_superblocks_m);
+                    put_u8(out, pin.min_superblock_level);
+                    put_u32(out, pin.min_suffix_k);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 17: PHANTOM-GHOSTDAG blockDAG adapter.
+        //
+        // The whole checkpoint reaches the preimage, not just its hash: a
+        // relay that could lower `required_blue_depth`, widen `k`, or raise the
+        // merge-depth bound on a signed registration would be choosing how much
+        // parallelism and how much depth its own DAG certificate must survive.
+        AdapterSpec::Ghostdag { network, anchor } => {
+            put_u8(out, 17);
+            put_string(out, network);
+            match anchor {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.anchor_hash);
+                    put_u64(out, pin.anchor_daa_score);
+                    put_u64(out, pin.anchor_blue_score);
+                    for limb in pin.anchor_blue_work {
+                        put_u64(out, limb);
+                    }
+                    put_u64(out, pin.anchor_timestamp_secs);
+                    put_u8(out, pin.k);
+                    put_u8(out, pin.max_parents);
+                    put_u64(out, pin.merge_depth_bound);
+                    put_u32(out, pin.max_target_bits);
+                    put_u64(out, pin.required_blue_depth);
+                    put_u64(out, pin.max_future_drift_secs);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 18: leaderless asynchronous HoneyBadgerBFT adapter.
+        //
+        // The full committee reaches the preimage: every validator id, ML-DSA-65
+        // key and weight, plus the genesis, the epoch and the lowest accepted
+        // ACS epoch. A relay able to swap one key on a signed registration
+        // would be choosing the quorum its own certificate must satisfy.
+        AdapterSpec::HoneyBadgerBft { network, committee } => {
+            put_u8(out, 18);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_string(out, &pin.network_id);
+                    put_fixed(out, &pin.genesis_hash);
+                    put_u64(out, pin.committee_epoch);
+                    put_u64(out, pin.min_acs_epoch);
+                    put_u64(out, pin.validators.len() as u64);
+                    for v in &pin.validators {
+                        put_fixed(out, &v.validator_id);
+                        put_bytes(out, &v.mldsa65_pubkey);
+                        put_u64(out, v.weight);
+                    }
                 }
                 None => put_u8(out, 0),
             }
