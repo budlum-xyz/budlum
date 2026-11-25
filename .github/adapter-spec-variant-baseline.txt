@@ -23,3 +23,9 @@ BitVmCovenant
 # Appended upstream in 5cd24e6 (Babylon EOTS wired to intake) before this gate
 # existed; pinned here in the same change that introduces the gate.
 BabylonEots
+# Appended upstream on the delivery branch before this gate landed there
+# (7dd2f7e7 NIPoPoW, 3f11f808 GHOSTDAG, 144f40ec HoneyBadgerBFT); measured in
+# order after BabylonEots, pinned here in the same change that re-bases the gate.
+NipopowSuperblock
+Ghostdag
+HoneyBadgerBft
