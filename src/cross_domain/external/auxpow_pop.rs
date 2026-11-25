@@ -1802,7 +1802,7 @@ mod tests {
     /// backing is refused with the same `UnslashableBacking` red meaning as
     /// every other work-weighted adapter. AuxPoW+PoP without a local Budlum
     /// confiscation arm is accumulated PoW work, so `require_slashable = true`
-    /// must fail closed here — locking the STRX-194-01 red meaning across the
+    /// must fail closed here, locking the STRX-194-01 red meaning across the
     /// Work adapter family so a direct caller cannot read `Work` as if it were
     /// a bonded signature set.
     #[test]
