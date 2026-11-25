@@ -787,13 +787,39 @@ pub fn is_unspecified(address: &Multiaddr) -> bool {
 /// Open a swarm with the validator key as its identity and listen on
 /// `listen`.
 pub(super) async fn start(secret_key: [u8; 32], listen: &str) -> Result<GardenNet, String> {
-    start_with(
-        secret_key,
-        listen,
-        MAX_CONNECTIONS,
-        libp2p::dns::tokio::Transport::system,
-    )
-    .await
+    start_with(secret_key, listen, MAX_CONNECTIONS, system_dns).await
+}
+
+/// The system resolver, where there is one this library may read.
+///
+/// On Android there is not. There is no `/etc/resolv.conf`, and the
+/// resolver config lives behind the connectivity service, which hickory
+/// reaches for through a JNI handle that only a NativeActivity sets up.
+/// A library loaded from an ordinary activity has no such handle, so the
+/// read does not fail - it panics, with "Android context was not
+/// initialized", and a panic is not something the caller's `match` can
+/// catch. That panic is what met a person opening the app.
+///
+/// A Garden does not need names to work: invites carry `/ip4` and `/ip6`
+/// multiaddrs, and a phone finds its Garden on the network it is on. So
+/// the resolving layer is simply not built there, which is the honest
+/// version of what the fallback arm was already trying to say.
+#[cfg(target_os = "android")]
+fn system_dns(
+    _tcp: tcp::tokio::Transport,
+) -> std::io::Result<libp2p::dns::tokio::Transport<tcp::tokio::Transport>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Android keeps its resolver behind a JNI handle this library is not given; \
+         Garden dials the /ip4 and /ip6 addresses an invite carries",
+    ))
+}
+
+#[cfg(not(target_os = "android"))]
+fn system_dns(
+    tcp: tcp::tokio::Transport,
+) -> std::io::Result<libp2p::dns::tokio::Transport<tcp::tokio::Transport>> {
+    libp2p::dns::tokio::Transport::system(tcp)
 }
 
 /// [`start`] with the number of connections the swarm keeps.

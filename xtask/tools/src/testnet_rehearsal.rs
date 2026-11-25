@@ -1910,7 +1910,6 @@ impl ImagePhase {
 
 /// Phrases only an upstream registry, a proxy or the network produces.
 const UPSTREAM_MARKERS: &[&str] = &[
-    "unexpected status from head request",
     "toomanyrequests",
     "pull rate limit",
     "tls handshake timeout",
@@ -1921,21 +1920,11 @@ const UPSTREAM_MARKERS: &[&str] = &[
     "502 bad gateway",
     "503 service unavailable",
     "504 gateway timeout",
-    // Measured 2026-11-23: the first re-run of the same job said "unexpected
-    // status from HEAD request" and the second said "unexpected status code".
-    // Both are the registry refusing a manifest; neither is a line of `ops/`.
-    // `pull access denied` is the daemon's word for the same class (the image
-    // exists but this runner may not read it), and the second phrasing repeats
-    // it because a marker set that matches one wording of one refusal will
-    // call the next refusal a drift.
-    //
-    // Deliberately absent: a bare `404 not found` or `manifest unknown`. A
-    // digest that 404s is ambiguous - it is either a pin the registry dropped
-    // or a pin this tree wrote down wrong - and ambiguity resolves to
-    // `Repository`, per the fail-closed rule below.
-    "unexpected status code",
-    "pull access denied",
-    "denied: requested access to the resource is denied",
+    // Deliberately absent: generic HEAD/status failures, a bare 404 or
+    // `manifest unknown`, and generic pull-access denial. A registry outage,
+    // a private image and a misspelled or nonexistent image can produce the
+    // same wording. Without a rate, network or explicit 5xx marker, ambiguity
+    // resolves to `Repository` per the fail-closed rule below.
     "too many connections",
 ];
 
@@ -1954,11 +1943,10 @@ const REPOSITORY_MARKERS: &[&str] = &[
     "error: could not compile",
     // Docker BuildKit wraps every image-resolution failure - including this
     // tree's own broken `FROM` pins - in the same "failed to resolve source
-    // metadata" preamble. These phrases are the resolution failure naming a
-    // defect inside this repository, and they win over any outage marker that
-    // also appears. A bare 404 or `pull access denied` stays upstream on
-    // purpose; a `: not found` after a digest is this tree naming the pin it
-    // wrote down wrong.
+    // metadata" preamble. These phrases name a defect inside this repository
+    // and win over any distinguishing outage marker in the same output. A
+    // generic 404, status failure or access denial falls through to the
+    // fail-closed `Repository` default below.
     "manifest unknown",
     "manifest invalid",
     ": not found",
@@ -2595,77 +2583,73 @@ FAIL: `docker compose -f ops/testnet-local.yml up -d --build` exited with code 1
         assert!(tail.contains("to-err"), "{tail}");
     }
 
-    /// The verbatim artifact-download line from the rehearsal's own CI log:
-    /// the runner pulled an image by digest and the registry answered 404 for
-    /// that manifest. Measured 2026-11-23 on `testnet`: the same class of
-    /// failure the first re-run showed as a 500 ("too many connections") comes
-    /// back as a 404 when the digest is gone, and it is still upstream.
-    const ARTIFACT_GONE: &str = "\
-#4 [auth] library/rust:pull token for registry-1.docker.io\n\
+    /// A measured 404 shape is still ambiguous: a registry may have dropped the
+    /// digest, or this repository may have written a nonexistent digest.
+    const AMBIGUOUS_STATUS_404: &str = "\
+#4 [auth] library/rust:pull token for registry-1.docker.io
+\
 #5 ERROR: failed to copy: httpReadSeeker: failed open: unexpected status code \
 https://registry-1.docker.io/v2/library/rust/manifests/sha256:0e2bcaef: \
-404 Not Found: failed to resolve source metadata for docker.io/library/rust:1.97.1\n";
+404 Not Found: failed to resolve source metadata for docker.io/library/rust:1.97.1
+";
+
+    /// Docker uses this same denial for a private image and a misspelled or
+    /// nonexistent image. The wording does not distinguish outage from drift.
+    const AMBIGUOUS_PULL_DENIAL: &str = "\
+Error response from daemon: pull access denied for budlum/validatr, \
+repository does not exist or may require 'docker login': denied: requested \
+access to the resource is denied
+";
 
     #[test]
-    fn a_pinned_digest_the_registry_dropped_is_upstream_when_the_log_says_so() {
-        // `ARTIFACT_GONE` is the measured *shape* of a dropped artifact: the
-        // 404 alone is ambiguous (a pin written down wrong looks the same),
-        // so the classification comes from the resolution failure the registry
-        // states, and the detail line quotes the 404 that was measured.
-        assert_eq!(classify_image_phase(ARTIFACT_GONE).label(), "ARIZA");
-        let ImagePhase::Upstream { detail } = classify_image_phase(ARTIFACT_GONE) else {
-            panic!("a registry that cannot resolve its own artifact is not this tree's drift");
-        };
-        assert!(detail.contains("404"), "{detail}");
-    }
-
-    #[test]
-    fn a_bare_404_is_ambiguous_and_that_is_drift() {
-        // Fail-closed has a direction. A 404 with nothing else in the tail can
-        // be a pin the registry dropped *or* a pin this tree wrote down wrong,
-        // and the second one is a defect here. An unproven outage is not a
-        // defence, so the bare 404 is reported as drift and the reader is told
-        // to look at the pin.
-        let bare = "ERROR: failed to copy: unexpected status code https://registry.example/v2/x/manifests/sha256:00: 404 Not Found\n";
-        // `unexpected status code` is the measured registry-refusal phrase, so
-        // this line is still upstream - the test pins that the *bare* 404
-        // shape without that phrase is not.
-        let only_404 = "ERROR: x manifests/sha256:00: 404 Not Found\n";
-        assert_eq!(classify_image_phase(bare).label(), "ARIZA");
+    fn generic_unexpected_status_code_is_ambiguous_and_drift() {
+        assert_eq!(
+            classify_image_phase(AMBIGUOUS_STATUS_404),
+            ImagePhase::Repository
+        );
+        let only_404 = "ERROR: x manifests/sha256:00: 404 Not Found
+";
         assert_eq!(classify_image_phase(only_404), ImagePhase::Repository);
     }
 
-    /// `pull access denied` names the other upstream-side refusal: the image
-    /// exists but this runner may not read it (private namespace, expired
-    /// token). No line of `ops/` can grant the runner that access either.
-    const PULL_ACCESS_DENIED: &str = "\
-Error response from daemon: pull access denied for budlum/validator, \
-repository does not exist or may require 'docker login': denied: requested \
-access to the resource is denied\n";
+    #[test]
+    fn generic_head_request_status_is_ambiguous_and_drift() {
+        let ambiguous = "failed to resolve: unexpected status from HEAD request: 404 Not Found
+";
+        assert_eq!(classify_image_phase(ambiguous), ImagePhase::Repository);
+    }
 
     #[test]
-    fn a_refused_pull_is_upstream_not_a_rehearsal_drift() {
-        // This refusal does not contain "unexpected status code" and does not
-        // have to: the class is "the registry will not serve this runner",
-        // not "the registry answered with a status this code knows". The
-        // second phrasing of `pull access denied` is what kills a mutation
-        // that deletes the marker the first phrasing would still catch.
-        let denied = "Error response from daemon: pull access denied for budlum/validator\n";
-        let denied_again = "denied: requested access to the resource is denied\n";
-        for out in [PULL_ACCESS_DENIED, denied, denied_again] {
+    fn generic_pull_access_denial_is_ambiguous_and_drift() {
+        let denied = "Error response from daemon: pull access denied for budlum/validatr
+";
+        let denied_again = "denied: requested access to the resource is denied
+";
+        for output in [AMBIGUOUS_PULL_DENIAL, denied, denied_again] {
             assert_eq!(
-                classify_image_phase(out).label(),
-                "ARIZA",
-                "a registry that will not serve this runner is not this tree's defect: {out}"
+                classify_image_phase(output),
+                ImagePhase::Repository,
+                "generic denial is not distinguishing outage evidence: {output}"
             );
         }
+    }
+
+    #[test]
+    fn an_explicit_500_remains_an_upstream_failure() {
+        let outage = "unexpected status code: 500 Internal Server Error
+";
+        let ImagePhase::Upstream { detail } = classify_image_phase(outage) else {
+            panic!("an explicit registry 500 is distinguishing outage evidence");
+        };
+        assert!(detail.contains("500"), "{detail}");
     }
 
     #[test]
     fn a_404_does_not_hide_a_repository_fault_in_the_same_output() {
         // The precedence rule is unchanged by the new markers: a build-context
         // defect in the same log still wins.
-        let mixed = format!("{ARTIFACT_GONE}\nCOPY failed: file not found in build context\n");
+        let mixed =
+            format!("{AMBIGUOUS_STATUS_404}\nCOPY failed: file not found in build context\n");
         assert_eq!(classify_image_phase(&mixed), ImagePhase::Repository);
     }
 
@@ -2739,14 +2723,12 @@ cgr.dev/chainguard/wolfi-base@sha256:0000: not found\n";
     }
 
     #[test]
-    fn a_denied_pull_stays_the_registries_refusal() {
-        // Deliberate call, kept from the 2026-11-23 review: "pull access
-        // denied" means the registry would not serve this runner (private
-        // namespace or expired token), and no line of `ops/` grants the
-        // runner that access. It stays upstream; the residual ambiguity is
-        // recorded, not hidden.
+    fn a_denied_pull_without_outage_evidence_is_drift() {
+        // The same daemon wording covers a private image and a misspelled or
+        // nonexistent image. Neither possibility proves an upstream outage,
+        // so the fail-closed default keeps the reader on this repository.
         let denied = "Error response from daemon: pull access denied for budlum/validator\n";
-        assert_eq!(classify_image_phase(denied).label(), "ARIZA");
+        assert_eq!(classify_image_phase(denied), ImagePhase::Repository);
     }
 
     #[test]

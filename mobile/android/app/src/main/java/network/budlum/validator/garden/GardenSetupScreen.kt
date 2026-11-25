@@ -166,14 +166,38 @@ fun SetupScreen(model: GardenModel, onReady: () -> Unit) {
             }
         }
 
+        // The gate says which of the two things is missing rather than
+        // sitting there greyed out. A disabled button with no reason on
+        // it is the thing that made this screen feel broken.
+        val checksDone = state.selfTest.isNotEmpty()
+        val checksPassed = checksDone && state.selfTest.all { it.passed }
         Button(
             onClick = onReady,
-            enabled = ready.canValidate && state.selfTest.all { it.passed } &&
-                state.selfTest.isNotEmpty(),
+            enabled = checksPassed && ready.canValidate,
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text(
-                if (ready.canValidate) "Continue" else "Allow notifications to continue",
+                when {
+                    !checksDone -> "Running the checks..."
+                    !checksPassed -> "This phone cannot validate"
+                    !ready.notifications -> "Allow notifications to continue"
+                    else -> "Continue"
+                },
+            )
+        }
+        if (checksPassed && !ready.notifications) {
+            Text(
+                "Android needs this one before background work is allowed. " +
+                    "If the dialog does not appear, the switch is in notification " +
+                    "settings above.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        if (checksDone && !checksPassed) {
+            Text(
+                "One of the four checks failed, so this phone will not be " +
+                    "offered a seat. The failing line above says which.",
+                style = MaterialTheme.typography.bodySmall,
             )
         }
         if (state.message.isNotEmpty()) {

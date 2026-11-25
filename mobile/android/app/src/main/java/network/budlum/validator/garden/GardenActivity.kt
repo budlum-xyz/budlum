@@ -49,7 +49,16 @@ class GardenActivity : ComponentActivity() {
         handle(intent)
         setContent {
             GardenTheme {
-                Surface { GardenApp(model) }
+                Surface {
+                    GardenApp(model) {
+                        // The testnet is the other duty a validator can
+                        // take on, reached by choosing it rather than by
+                        // being dropped into it.
+                        startActivity(
+                            Intent(this, network.budlum.validator.ui.MainActivity::class.java),
+                        )
+                    }
+                }
             }
         }
     }
