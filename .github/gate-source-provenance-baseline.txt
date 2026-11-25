@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: a4920296c565a263cbdba3b6309396ab49ee5bf4bcbf833dc9d598c370754fa9
+digest: 1d578165604e3b8f46c1177caafdb0d860f3512f3b29408dbca40ed6a48d9eff
 files: 194
 Cargo.lock	7e8ca4b31fc0795bb139134686126f1d552e1e75e9ffbc2089fbc52944a48a1f
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
@@ -118,7 +118,7 @@ src/gates/no_new_shell_gates.rs	a35bae10dd7cdbb5b19529a0d9657f96be572f602977eb08
 src/gates/no_orphan_source_files.rs	0f8fb447d5d17d8e14915ec6ecdc2f819b3fc66a2c244730f4d9a9fa235f203c
 src/gates/no_out_of_block_consensus_writes.rs	41eed601b1fad659268ecaece25bde44723e68dbe28899799015eb035d5880f6
 src/gates/no_pairing_snark_in_verification_path.rs	5e7e8423c359a5a65f44eb1eb235f17445afd314e82f97ffd2998c20672a29f3
-src/gates/no_unicode_dashes.rs	73c9cceab43a40521995d1ac5ced5603e985565530400090e4e5dee101a5f083
+src/gates/no_unicode_dashes.rs	654a3b4f15fde1f7374b4d2b0237335f9831b2ef53b45e1769624102ead595c8
 src/gates/no_upstream_brands.rs	2dabb472e3ba94268a5191431c652835b28229d0c47bd4a0a9df958a22171da1
 src/gates/node_classification_gate.rs	62aa115f5522de37635709e8d8380c3b6a13cb0dfb07fe6161361a53be9dc022
 src/gates/offline_never_slashes.rs	4f826e1654b352776881ddd5bd0962474d8fa3d8dfda0ec909caf7e7898ff827
