@@ -146,6 +146,17 @@ impl GardenPhone {
         )
     }
 
+    /// Return to the Garden this phone already belongs to.
+    ///
+    /// An app is closed and opened again, a phone is carried out of range
+    /// and back. The seat is kept in either case, so the Status screen
+    /// calls this on the way up rather than asking for the invite a
+    /// second time. The core keeps the key and the Garden on disk; this
+    /// only puts the validator back on the network.
+    pub fn rejoin(&self) -> Result<GardenAnswer, GardenError> {
+        answer(self.runtime.block_on(self.service.rejoin()))
+    }
+
     /// The Garden as this phone sees it: its status and its validators.
     pub fn status(&self) -> Result<GardenAnswer, GardenError> {
         answer(self.runtime.block_on(self.service.status()))
