@@ -545,6 +545,184 @@ impl FinalityGuarantee {
                     fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
+            // Tags 10..18: appended orphan families. A registration is a
+            // declaration, not an accepted proof: `sealed` is true only when
+            // the spec carries its governance pin. The WITH_BACKING entry
+            // point still lowers this ceiling to the observed backing of the
+            // last accepted attestation, so no declaration can create
+            // finality out of nothing.
+            AdapterSpec::SolanaTowerBft { pinned, .. } => {
+                let sealed = pinned.is_some();
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: QuantumClass::Classical,
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: sealed,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::PoSpaceVdf { pinned, .. } => {
+                let sealed = pinned.is_some();
+                let confirmations = pinned.as_ref().map_or(0, |p| u64::from(p.required_depth));
+                let pq = pinned
+                    .as_ref()
+                    .is_some_and(|p| p.require_pq_attestation || p.pq_attestor_pubkey.is_some());
+                Self {
+                    reversibility: FinalityReversibility::ProbabilisticWork { confirmations },
+                    quantum_posture: if pq {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: false,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { POW_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::AptosJolteonBft { pinned, .. } => {
+                let sealed = pinned.is_some();
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: QuantumClass::Classical,
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: sealed,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::NearDoomslugBft { pinned, .. } => {
+                let sealed = pinned.is_some();
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: QuantumClass::Classical,
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: false,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::ChainKeyNiDkg { pinned, .. } => {
+                let sealed = pinned.is_some();
+                let pq = pinned
+                    .as_ref()
+                    .is_some_and(|p| !p.root_pq_pubkey.is_empty());
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if pq {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: false,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::GhostdagPow { pinned, .. } => {
+                let sealed = pinned.is_some();
+                let confirmations = pinned.as_ref().map_or(0, |p| p.required_blue_depth);
+                Self {
+                    reversibility: FinalityReversibility::ProbabilisticWork { confirmations },
+                    quantum_posture: QuantumClass::Hash,
+                    attestation: CommitmentAttestation {
+                        state_root: false,
+                        tx_root: sealed,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { POW_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::HeterogeneousMultiProver { pinned, .. } => {
+                let sealed = pinned.is_some();
+                let pq = pinned.as_ref().is_some_and(|p| p.require_pq_leg);
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if pq {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: sealed,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::HoneyBadgerBft { pinned, .. } => {
+                let sealed = pinned.is_some();
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if sealed {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: sealed,
+                        event_root: true,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::StarkValidityRollup { pinned, .. } => {
+                let sealed = pinned.is_some();
+                Self {
+                    reversibility: if sealed {
+                        FinalityReversibility::CryptographicValidity
+                    } else {
+                        FinalityReversibility::ProbabilisticWork { confirmations: 0 }
+                    },
+                    quantum_posture: if sealed {
+                        QuantumClass::Hash
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: false,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed {
+                        VALIDITY_PROOF_FAULT_TOLERANCE_BPS
+                    } else {
+                        0
+                    },
+                }
+            }
         }
     }
 
@@ -2709,6 +2887,99 @@ mod external_backing_tests {
                 outside.is_empty(),
                 "{path} calls the spec-only derivation at line(s) {outside:?}; \
                  the external guarantee must be derived from the observed backing only"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unpinned_appended_spec_declares_no_finality() {
+        use crate::cross_domain::external::AdapterSpec;
+        let cases: [(&str, AdapterSpec); 9] = [
+            (
+                "solana",
+                AdapterSpec::SolanaTowerBft {
+                    network: "solana".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                "pospace",
+                AdapterSpec::PoSpaceVdf {
+                    network: "chia".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                "aptos",
+                AdapterSpec::AptosJolteonBft {
+                    network: "aptos".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                "near",
+                AdapterSpec::NearDoomslugBft {
+                    network: "near".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                "chain-key",
+                AdapterSpec::ChainKeyNiDkg {
+                    network: "ic".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                "ghostdag",
+                AdapterSpec::GhostdagPow {
+                    network: "kaspa".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                "multi-prover",
+                AdapterSpec::HeterogeneousMultiProver {
+                    network: "rollup".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                "honey-badger",
+                AdapterSpec::HoneyBadgerBft {
+                    network: "hbbft".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                "stark-rollup",
+                AdapterSpec::StarkValidityRollup {
+                    network: "starknet".into(),
+                    pinned: None,
+                },
+            ),
+        ];
+        for (name, spec) in cases {
+            let guarantee = FinalityGuarantee::for_external_spec_declared(&spec);
+            assert_eq!(
+                guarantee.fault_tolerance_bps, 0,
+                "{name}: no pinned trust anchor means no fault tolerance"
+            );
+            assert!(
+                !guarantee.slashable_backing,
+                "{name}: a declaration cannot create slashable backing"
+            );
+            assert!(
+                !guarantee.attestation.state_root,
+                "{name}: an unpinned spec attests to no state"
+            );
+            assert!(
+                matches!(
+                    guarantee.reversibility,
+                    FinalityReversibility::ProbabilisticWork { confirmations: 0 }
+                        | FinalityReversibility::DeterministicQuorum
+                ),
+                "{name}: an unpinned declaration must not claim a strong class"
             );
         }
     }

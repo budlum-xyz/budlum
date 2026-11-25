@@ -285,7 +285,9 @@ pub enum AdapterSpec {
     HeterogeneousMultiProver {
         network: String,
         #[serde(default)]
-        pinned: Option<crate::cross_domain::external::heterogeneous_multiprover::PinnedMultiProverConfig>,
+        pinned: Option<
+            crate::cross_domain::external::heterogeneous_multiprover::PinnedMultiProverConfig,
+        >,
     },
     /// `HoneyBadger BFT` asynchronous threshold-signature finality bound to a
     /// governance-pinned committee. APPENDED LAST (tag `17`).
@@ -299,7 +301,8 @@ pub enum AdapterSpec {
     StarkValidityRollup {
         network: String,
         #[serde(default)]
-        pinned: Option<crate::cross_domain::external::stark_validity_rollup::PinnedStarkRollupConfig>,
+        pinned:
+            Option<crate::cross_domain::external::stark_validity_rollup::PinnedStarkRollupConfig>,
     },
 }
 
@@ -344,8 +347,8 @@ impl AdapterSpec {
         golden: Option<RawConsensusEvidence>,
     ) -> Box<dyn ExternalFinalityAdapter> {
         use crate::cross_domain::external::{
-            aptos_jolteon_bft::AptosJolteonAdapter,
-            bitvm_covenant::BitVmCovenantAdapter, casper_ffg::CasperFfgAdapter,
+            aptos_jolteon_bft::AptosJolteonAdapter, bitvm_covenant::BitVmCovenantAdapter,
+            casper_ffg::CasperFfgAdapter, chain_key_ni_dkg::ChainKeyNiDkgAdapter,
             da_sampling::DataAvailabilityAdapter, dag_bft::BullsharkDagAdapter,
             ghostdag::GhostdagPowAdapter,
             heterogeneous_multiprover::HeterogeneousMultiProverAdapter,
@@ -353,7 +356,6 @@ impl AdapterSpec {
             mysticeti_dag::MysticetiDagAdapter, near_doomslug::NearDoomslugAdapter,
             pospace_vdf::PoSpaceVdfAdapter, solana_tower_bft::SolanaTowerBftAdapter,
             stark_validity_rollup::StarkValidityRollupAdapter,
-            chain_key_ni_dkg::ChainKeyNiDkgAdapter,
         };
         match self {
             Self::EthereumSync { network, committee } => box_with_golden(
@@ -5222,10 +5224,7 @@ mod tests {
         // korur. Variantlar yoksa bu test derleme RED (komut hatasi) olur.
         for spec in orphan_family_specs_with_pins() {
             let expected_network = spec.network().to_string();
-            let desc = spec
-                .build(None, None)
-                .descriptor()
-                .id;
+            let desc = spec.build(None, None).descriptor().id;
             let adapter = spec.build(None, None);
             assert_eq!(adapter.descriptor().id, desc, "stable descriptor id");
             let round: AdapterSpec = bincode::deserialize(&bincode::serialize(&spec).unwrap())
@@ -5282,16 +5281,18 @@ mod tests {
         for spec in unpinned {
             let mut state = IntakeState::new();
             let economics = IntakeState::conservative_economics(1_000_000);
+            let versions = versions_for(&spec);
+            let golden = golden_for(&spec);
             let err = state
                 .register_domain(
                     RegistrationRequest {
                         spec,
                         policy: VerificationPolicy::strict(1_000),
                         economics,
-                        versions: versions_for(&spec),
+                        versions,
                         bond_atoms: economics.required_bond_atoms(),
                         poster: addr(9),
-                        golden: golden_for(&spec),
+                        golden,
                     },
                     None,
                 )
@@ -5303,5 +5304,4 @@ mod tests {
             );
         }
     }
-
 }

@@ -5366,6 +5366,22 @@ fn encode_tendermint_commit_evidence(
     }
 }
 
+/// Encode a governance pin as a fixed-order JSON byte string, or as the
+/// closed, unpinned state when the pin cannot be represented. The canonical
+/// signing bytes of a registration must never depend on a serde failure.
+fn encode_optional_pin<T: serde::Serialize>(pin: &Option<T>, out: &mut Vec<u8>) {
+    match pin {
+        Some(pin) => match serde_json::to_vec(pin) {
+            Ok(bytes) => {
+                put_u8(out, 1);
+                put_bytes(out, &bytes);
+            }
+            Err(_) => put_u8(out, 0),
+        },
+        None => put_u8(out, 0),
+    }
+}
+
 fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &mut Vec<u8>) {
     use crate::cross_domain::external::AdapterSpec;
     match spec {
@@ -5566,6 +5582,56 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 }
                 None => put_u8(out, 0),
             }
+        }
+        // Tags 10..18: appended, never inserted. Earlier tags keep their
+        // bytes so every registration signed under them stays verifiable.
+        // Each pin is a self-contained governance anchor carried by the spec;
+        // JSON struct order is fixed and vectors are ordered, so the bytes
+        // are deterministic across nodes and platforms.
+        AdapterSpec::SolanaTowerBft { network, pinned } => {
+            put_u8(out, 10);
+            put_string(out, network);
+            encode_optional_pin(pinned, out);
+        }
+        AdapterSpec::PoSpaceVdf { network, pinned } => {
+            put_u8(out, 11);
+            put_string(out, network);
+            encode_optional_pin(pinned, out);
+        }
+        AdapterSpec::AptosJolteonBft { network, pinned } => {
+            put_u8(out, 12);
+            put_string(out, network);
+            encode_optional_pin(pinned, out);
+        }
+        AdapterSpec::NearDoomslugBft { network, pinned } => {
+            put_u8(out, 13);
+            put_string(out, network);
+            encode_optional_pin(pinned, out);
+        }
+        AdapterSpec::ChainKeyNiDkg { network, pinned } => {
+            put_u8(out, 14);
+            put_string(out, network);
+            encode_optional_pin(pinned, out);
+        }
+        AdapterSpec::GhostdagPow { network, pinned } => {
+            put_u8(out, 15);
+            put_string(out, network);
+            encode_optional_pin(pinned, out);
+        }
+        AdapterSpec::HeterogeneousMultiProver { network, pinned } => {
+            put_u8(out, 16);
+            put_string(out, network);
+            encode_optional_pin(pinned, out);
+        }
+        AdapterSpec::HoneyBadgerBft { network, pinned } => {
+            put_u8(out, 17);
+            put_string(out, network);
+            encode_optional_pin(pinned, out);
+        }
+        AdapterSpec::StarkValidityRollup { network, pinned } => {
+            put_u8(out, 18);
+            put_string(out, network);
+            encode_optional_pin(pinned, out);
         }
     }
 }
@@ -7708,6 +7774,92 @@ mod recovery_tests {
             unique.len(),
             hashes.len(),
             "every DagEquivocation and TendermintMisbehaviour field must move signing_hash"
+        );
+    }
+
+    #[test]
+    fn appended_adapter_specs_have_distinct_append_only_signing_bytes() {
+        use crate::cross_domain::external::AdapterSpec;
+        let cases: [(u8, AdapterSpec); 9] = [
+            (
+                10,
+                AdapterSpec::SolanaTowerBft {
+                    network: "solana".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                11,
+                AdapterSpec::PoSpaceVdf {
+                    network: "chia".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                12,
+                AdapterSpec::AptosJolteonBft {
+                    network: "aptos".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                13,
+                AdapterSpec::NearDoomslugBft {
+                    network: "near".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                14,
+                AdapterSpec::ChainKeyNiDkg {
+                    network: "ic".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                15,
+                AdapterSpec::GhostdagPow {
+                    network: "kaspa".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                16,
+                AdapterSpec::HeterogeneousMultiProver {
+                    network: "rollup".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                17,
+                AdapterSpec::HoneyBadgerBft {
+                    network: "hbbft".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                18,
+                AdapterSpec::StarkValidityRollup {
+                    network: "starknet".into(),
+                    pinned: None,
+                },
+            ),
+        ];
+        let mut encoded = Vec::with_capacity(cases.len());
+        for (tag, spec) in cases {
+            let mut first = Vec::new();
+            let mut second = Vec::new();
+            encode_adapter_spec(&spec, &mut first);
+            encode_adapter_spec(&spec, &mut second);
+            assert_eq!(first, second, "signing bytes must be deterministic");
+            assert_eq!(first.first().copied(), Some(tag), "tags are append-only");
+            encoded.push(first);
+        }
+        let unique: std::collections::BTreeSet<Vec<u8>> = encoded.into_iter().collect();
+        assert_eq!(
+            unique.len(),
+            9,
+            "every appended family must have its own signing bytes"
         );
     }
 }
