@@ -266,6 +266,24 @@ pub enum AdapterSpec {
         #[serde(default)]
         genesis: Option<crate::cross_domain::external::nipopow::PinnedNipopowGenesis>,
     },
+    /// PHANTOM-GHOSTDAG `k`-cluster blockDAG `PoW` finality (Kaspa family).
+    ///
+    /// `encode_adapter_spec` tag is the first free slot after NIPoPoW's 16.
+    ///
+    /// A blockDAG is where sublinear `PoW` stops being enough on its own: a
+    /// `NIPoPoW` superchain is a proof about one chain, and the ledger here is
+    /// a DAG whose finality is a blue-score depth over a `k`-cluster coloring.
+    /// So this family is anchored by a pruning-point checkpoint carrying the
+    /// anchor's `blue_score` and `blue_work`, and the pin also fixes `k`, the
+    /// parent bound, the merge-depth bound and the required blue depth. A spec
+    /// without that anchor is the closed admission state: `register_domain`
+    /// refuses it, because a DAG certificate says nothing about which DAG it
+    /// belongs to until a checkpoint is pinned.
+    Ghostdag {
+        network: String,
+        #[serde(default)]
+        anchor: Option<crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor>,
+    },
 }
 
 impl AdapterSpec {
@@ -285,7 +303,8 @@ impl AdapterSpec {
             | Self::MysticetiDag { network, .. }
             | Self::BitVmCovenant { network, .. }
             | Self::BabylonEots { network, .. }
-            | Self::NipopowSuperblock { network, .. } => network,
+            | Self::NipopowSuperblock { network, .. }
+            | Self::Ghostdag { network, .. } => network,
         }
     }
 
@@ -387,6 +406,16 @@ impl AdapterSpec {
                 },
                 golden,
                 crate::cross_domain::external::nipopow::NipopowAdapter::with_golden,
+            ),
+            Self::Ghostdag { network, anchor } => box_with_golden(
+                || {
+                    crate::cross_domain::external::ghostdag::GhostdagPowAdapter::new(
+                        network,
+                        anchor.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::ghostdag::GhostdagPowAdapter::with_golden,
             ),
         }
     }
@@ -543,6 +572,17 @@ pub struct IntakeState {
         String,
         crate::cross_domain::external::nipopow::PinnedNipopowGenesis,
     >,
+    /// Governance-pinned `PHANTOM-GHOSTDAG` checkpoint anchors and `k`-cluster
+    /// parameters keyed by external network.
+    ///
+    /// Inside [`Self::state_digest`] like every other pin map: only a block may
+    /// write it. A registrant that could choose its own pruning point would be
+    /// certifying its own finality.
+    #[serde(default)]
+    pub pinned_ghostdag_anchors: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor,
+    >,
     /// Deterministic, admin-keyless intake circuit breaker and contradiction
     /// tombstone ledger, folded into [`Self::state_digest`].
     #[serde(default)]
@@ -570,6 +610,9 @@ pub enum AnchorFamily {
     BabylonEots,
     /// Sublinear `PoW` superblock (`NIPoPoW`) genesis and KMZ parameters.
     PoWSuccinct,
+    /// BlockDAG `PoW` (`PHANTOM-GHOSTDAG`) pruning-point checkpoint and
+    /// `k`-cluster parameters.
+    Ghostdag,
 }
 
 impl AnchorFamily {
@@ -583,6 +626,7 @@ impl AnchorFamily {
             Self::Da => "da",
             Self::BabylonEots => "babylon-eots",
             Self::PoWSuccinct => "pow-succinct",
+            Self::Ghostdag => "ghostdag",
         }
     }
 }
@@ -607,6 +651,9 @@ pub enum PinnedExternalAnchor {
     BabylonEots(crate::cross_domain::external::babylon_eots::PinnedBabylonEots),
     /// Genesis and KMZ `(m, k)` parameters for a `NIPoPoW` superblock domain.
     Nipopow(crate::cross_domain::external::nipopow::PinnedNipopowGenesis),
+    /// Pruning-point checkpoint and `k`-cluster parameters for a
+    /// `PHANTOM-GHOSTDAG` blockDAG domain.
+    Ghostdag(crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor),
 }
 
 impl PinnedExternalAnchor {
@@ -620,6 +667,7 @@ impl PinnedExternalAnchor {
             Self::Da(_) => AnchorFamily::Da,
             Self::BabylonEots(_) => AnchorFamily::BabylonEots,
             Self::Nipopow(_) => AnchorFamily::PoWSuccinct,
+            Self::Ghostdag(_) => AnchorFamily::Ghostdag,
         }
     }
 
@@ -692,6 +740,30 @@ impl PinnedExternalAnchor {
                 }
                 if genesis.min_suffix_k == 0 {
                     return Err("the pinned NIPoPoW suffix stability parameter k is zero".into());
+                }
+            }
+            Self::Ghostdag(anchor) => {
+                // The same argument as the NIPoPoW pin: a zero field is the
+                // shape of an anchor, not a weak one. A zero checkpoint anchors
+                // no DAG, `k = 0` deletes the anticone bound the coloring is
+                // defined by, and a zero blue depth finalizes the tip itself.
+                if anchor.anchor_hash == [0u8; 32] {
+                    return Err("the pinned GHOSTDAG checkpoint hash is all zeroes".into());
+                }
+                if anchor.k == 0 {
+                    return Err("the pinned GHOSTDAG anticone parameter k is zero".into());
+                }
+                if anchor.max_parents == 0 {
+                    return Err("the pinned GHOSTDAG parent bound is zero".into());
+                }
+                if anchor.merge_depth_bound == 0 {
+                    return Err("the pinned GHOSTDAG merge-depth bound is zero".into());
+                }
+                if anchor.required_blue_depth == 0 {
+                    return Err("the pinned GHOSTDAG blue confirmation depth is zero".into());
+                }
+                if anchor.max_target_bits == 0 {
+                    return Err("the pinned GHOSTDAG difficulty target is zero".into());
                 }
             }
         }
@@ -1429,6 +1501,39 @@ impl IntakeState {
         Ok(())
     }
 
+    /// Installs or updates the consensus-pinned `PHANTOM-GHOSTDAG` checkpoint
+    /// and `k`-cluster parameters for `network`. WIRING: genesis/test
+    /// initializer; the production door is
+    /// `GovernanceAction::PinExternalAnchor` -> [`Self::install_pinned_anchor`].
+    pub fn pin_ghostdag_anchor(
+        &mut self,
+        network: impl Into<String>,
+        anchor: crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor,
+    ) {
+        self.pinned_ghostdag_anchors.insert(network.into(), anchor);
+    }
+
+    /// Installs the GHOSTDAG pin for `network` only if it is a real trust root.
+    ///
+    /// The raw setter above takes whatever it is given; this is the checked
+    /// door for a value the caller did not construct itself. A zero checkpoint
+    /// hash, `k = 0`, a zero parent or merge-depth bound, a zero blue depth, or
+    /// a zero difficulty target is the shape of an anchor with none of its
+    /// force, and installing one would delete the invariant it names.
+    ///
+    /// # Errors
+    ///
+    /// The named zero field.
+    pub fn install_ghostdag_anchor(
+        &mut self,
+        network: impl Into<String>,
+        anchor: crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor,
+    ) -> Result<(), String> {
+        PinnedExternalAnchor::Ghostdag(anchor.clone()).validate()?;
+        self.pinned_ghostdag_anchors.insert(network.into(), anchor);
+        Ok(())
+    }
+
     /// Installs or replaces a family's trust anchor for `network`.
     ///
     /// The consensus door: `GovernanceAction::PinExternalAnchor` in block
@@ -1463,6 +1568,10 @@ impl IntakeState {
             PinnedExternalAnchor::Nipopow(genesis) => {
                 self.pinned_nipopow_genesis
                     .insert(network.to_string(), genesis);
+            }
+            PinnedExternalAnchor::Ghostdag(anchor) => {
+                self.pinned_ghostdag_anchors
+                    .insert(network.to_string(), anchor);
             }
         }
     }
@@ -1510,6 +1619,11 @@ impl IntakeState {
                 .get(network)
                 .cloned()
                 .map(PinnedExternalAnchor::Nipopow),
+            AnchorFamily::Ghostdag => self
+                .pinned_ghostdag_anchors
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Ghostdag),
         }
     }
 
@@ -1708,6 +1822,19 @@ impl IntakeState {
                 return Err(IntakeError::CommitteeNotPinned);
             };
             if genesis.as_ref() != Some(installed) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // Ghostdag admission requires a governance-pinned pruning-point
+        // checkpoint and `k`-cluster parameters for `network`, echoed exactly
+        // by the spec: a registrant that could choose its own checkpoint could
+        // start the DAG wherever it liked, and one that could widen `k` would
+        // be choosing how much parallelism its own coloring must survive.
+        if let AdapterSpec::Ghostdag { network, anchor } = &spec {
+            let Some(installed) = self.pinned_ghostdag_anchors.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if anchor.as_ref() != Some(installed) {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
@@ -5564,6 +5691,200 @@ mod tests {
                 Some(&crate::cross_domain::external::spec::SecurityBacking::Work {
                     difficulty_bits: 96,
                 }),
+            );
+        assert_eq!(
+            unpinned.reversibility,
+            crate::settlement::universal_finality::FinalityReversibility::ProbabilisticWork {
+                confirmations: 0
+            },
+            "an unpinned spec promises no depth at all"
+        );
+    }
+
+    /// The GHOSTDAG registration under the fixture checkpoint pin. Same shape
+    /// as the NIPoPoW door: a blockDAG certificate proves finality inside *one*
+    /// DAG, so the DAG's start point and its `k`-cluster parameters have to be
+    /// governance values, echoed exactly.
+    fn ghostdag_request(
+        anchor: Option<crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor>,
+        economics: DomainEconomics,
+        poster: Address,
+    ) -> RegistrationRequest {
+        let (_, _, golden) = crate::cross_domain::external::ghostdag::tests::make_golden_fixture();
+        let spec = AdapterSpec::Ghostdag {
+            network: golden.network.clone(),
+            anchor,
+        };
+        // The fixture DAG is mined at `1_700_000_00x`; a policy anchored at
+        // wall-clock zero would refuse it as a future timestamp, which is the
+        // clock rule doing its job rather than the door under test.
+        let mut policy = VerificationPolicy::strict(1_700_000_100);
+        policy.require_slashable = false;
+        policy.min_depth = 3;
+        policy.max_age = 3_600;
+        RegistrationRequest {
+            versions: VersionPolicy::single(golden.adapter, golden.evidence_version, 0),
+            spec,
+            policy,
+            economics,
+            bond_atoms: economics.required_bond_atoms(),
+            poster,
+            golden,
+        }
+    }
+
+    #[test]
+    fn ghostdag_admission_requires_the_governance_checkpoint_pin() {
+        let mut intake = IntakeState::new();
+        intake.on_block_committed(50);
+        let (pinned, _, golden) =
+            crate::cross_domain::external::ghostdag::tests::make_golden_fixture();
+        let network = golden.network.clone();
+        let econ = DomainEconomics {
+            routing_ceiling_atoms: 1_000,
+            fee: ProverFee {
+                base_atoms: 10_000,
+                value_bps: 0,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 500,
+                floor_atoms: 1,
+            },
+            unbonding_heights: 10,
+        };
+        let economics = IntakeState::conservative_economics(1_000);
+
+        // No checkpoint installed: a registrant cannot nominate its own DAG
+        // start point and then certify finality against it.
+        assert_eq!(
+            intake
+                .register_domain(ghostdag_request(None, economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        assert_eq!(
+            intake
+                .register_domain(
+                    ghostdag_request(Some(pinned.clone()), economics, addr(9)),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+
+        // Installed, but the registration carries a different checkpoint, a
+        // wider `k`, or a shallower blue depth: all refused before admission.
+        intake.pin_ghostdag_anchor(network.clone(), pinned.clone());
+        let mut other_checkpoint = pinned.clone();
+        other_checkpoint.anchor_hash = [0xB7; 32];
+        assert_eq!(
+            intake
+                .register_domain(
+                    ghostdag_request(Some(other_checkpoint), economics, addr(9)),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        let mut wider_k = pinned.clone();
+        wider_k.k += 1;
+        assert_eq!(
+            intake
+                .register_domain(ghostdag_request(Some(wider_k), economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        let mut shallower = pinned.clone();
+        shallower.required_blue_depth = 1;
+        assert_eq!(
+            intake
+                .register_domain(ghostdag_request(Some(shallower), economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+
+        // The governance pin, echoed exactly: past the door, then the honest
+        // economics admits and the lying one is refused.
+        assert_eq!(
+            intake
+                .register_domain(ghostdag_request(Some(pinned.clone()), econ, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::DishonestEconomics
+        );
+        let key = intake
+            .register_domain(
+                ghostdag_request(Some(pinned.clone()), economics, addr(9)),
+                None,
+            )
+            .expect("the governance checkpoint pin admits the GHOSTDAG domain");
+        assert_eq!(
+            intake
+                .registry
+                .domain(&key)
+                .expect("dom")
+                .record
+                .descriptor
+                .id,
+            crate::cross_domain::external::AdapterId::from_name(
+                crate::cross_domain::external::ghostdag::GHOSTDAG_ADAPTER_NAME
+            )
+        );
+        assert_eq!(
+            intake
+                .pinned_anchor(AnchorFamily::Ghostdag, &network)
+                .map(|a| a.family()),
+            Some(AnchorFamily::Ghostdag)
+        );
+
+        // The checked install door names the zero field and leaves the good pin
+        // in place.
+        let mut zeroed = pinned.clone();
+        zeroed.k = 0;
+        assert_eq!(
+            intake
+                .install_ghostdag_anchor(network.clone(), zeroed)
+                .unwrap_err(),
+            "the pinned GHOSTDAG anticone parameter k is zero"
+        );
+        let mut zeroed = pinned.clone();
+        zeroed.required_blue_depth = 0;
+        assert_eq!(
+            intake
+                .install_ghostdag_anchor(network.clone(), zeroed)
+                .unwrap_err(),
+            "the pinned GHOSTDAG blue confirmation depth is zero"
+        );
+        assert_eq!(
+            intake.pinned_ghostdag_anchors.get(&network).cloned(),
+            Some(pinned.clone())
+        );
+
+        // Settlement reads the same pin: blue depth, never a slashable quorum.
+        let observed = crate::cross_domain::external::spec::SecurityBacking::Work {
+            difficulty_bits: 96,
+        };
+        let guarantee =
+            crate::settlement::universal_finality::FinalityGuarantee::for_external_spec_with_backing(
+                &AdapterSpec::Ghostdag {
+                    network: network.clone(),
+                    anchor: Some(pinned.clone()),
+                },
+                Some(&observed),
+            );
+        assert_eq!(
+            guarantee.reversibility,
+            crate::settlement::universal_finality::FinalityReversibility::ProbabilisticWork {
+                confirmations: pinned.required_blue_depth
+            }
+        );
+        assert!(!guarantee.slashable_backing);
+        let unpinned =
+            crate::settlement::universal_finality::FinalityGuarantee::for_external_spec_with_backing(
+                &AdapterSpec::Ghostdag {
+                    network,
+                    anchor: None,
+                },
+                Some(&observed),
             );
         assert_eq!(
             unpinned.reversibility,

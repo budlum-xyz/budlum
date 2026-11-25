@@ -45,10 +45,13 @@
 //!    `attested_event_root = None` because UTXO blockDAG headers commit no
 //!    cross-domain event tree.
 //!
-//! WIRING: unwired - implements [`ExternalFinalityAdapter`] for
-//! [`super::ExternalDomainRegistry`], verified by
-//! [`super::selftest::admit_observed`]; `AdapterSpec` variant joins
-//! `intake.rs` in the follow-up intake merge.
+//! WIRING: wired - `AdapterSpec::Ghostdag { network, anchor }` (wire tag 17)
+//! builds this adapter from an intake registration whose checkpoint anchor and
+//! `k`-cluster parameters must equal the governance pin
+//! (`IntakeState::pin_ghostdag_anchor`, reachable in production through
+//! `GovernanceAction::PinExternalAnchor`), and
+//! `FinalityGuarantee::for_external_spec_declared` maps the pinned blue depth to
+//! probabilistic-work finality.
 
 use std::collections::BTreeMap;
 
@@ -1369,7 +1372,7 @@ impl ExternalFinalityAdapter for GhostdagPowAdapter {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::core::address::Address;
     use crate::cross_domain::external::selftest::admit_observed;
@@ -1380,7 +1383,7 @@ mod tests {
     const TEST_BITS: u32 = 0x207f_ffff;
     const NETWORK: &str = "kaspa-testnet-11";
 
-    fn test_anchor(k: u8, required_blue_depth: u64) -> PinnedGhostdagAnchor {
+    pub(crate) fn test_anchor(k: u8, required_blue_depth: u64) -> PinnedGhostdagAnchor {
         PinnedGhostdagAnchor {
             anchor_hash: [0xA0; 32],
             anchor_daa_score: 1_000,
@@ -1499,6 +1502,41 @@ mod tests {
             self.headers.push(hdr.clone());
             hdr
         }
+    }
+
+    /// A complete golden fixture: the pinned anchor, the DAG evidence and the
+    /// raw evidence envelope an intake registration would carry.
+    ///
+    /// Shared with `intake.rs`'s tests so the fail-closed pin door is exercised
+    /// against evidence that actually verifies, not against a shape.
+    pub(crate) fn make_golden_fixture(
+    ) -> (PinnedGhostdagAnchor, GhostdagEvidence, RawConsensusEvidence) {
+        let pinned = test_anchor(2, 4);
+        let mut dag = TestDagBuilder::new(pinned.clone());
+        let anchor = pinned.anchor_hash;
+        let b1 = dag.mine_block(vec![anchor], 0x11, 0x21, 1, TEST_BITS);
+        let b2 = dag.mine_block(vec![anchor], 0x12, 0x22, 2, TEST_BITS);
+        let b3 = dag.mine_block(vec![anchor], 0x13, 0x23, 3, TEST_BITS);
+        let b4 = dag.mine_block(vec![anchor], 0x14, 0x24, 4, TEST_BITS);
+        let merge = dag.mine_block(
+            vec![b1.block_hash, b2.block_hash, b3.block_hash, b4.block_hash],
+            0x30,
+            0x40,
+            5,
+            TEST_BITS,
+        );
+        let c1 = dag.mine_block(vec![merge.block_hash], 0x31, 0x41, 6, TEST_BITS);
+        let c2 = dag.mine_block(vec![merge.block_hash], 0x32, 0x42, 7, TEST_BITS);
+        let c3 = dag.mine_block(vec![c1.block_hash, c2.block_hash], 0x33, 0x43, 8, TEST_BITS);
+        let tip = dag.mine_block(vec![c3.block_hash], 0x34, 0x44, 9, TEST_BITS);
+        let ev = GhostdagEvidence {
+            headers: dag.headers.clone(),
+            finalized_hash: merge.block_hash,
+            tip_hash: tip.block_hash,
+        };
+        let base = GhostdagPowAdapter::new(NETWORK, Some(pinned.clone()));
+        let raw = wrap_evidence(&base, &ev, merge.daa_score, merge.utxo_commitment);
+        (pinned, ev, raw)
     }
 
     fn wrap_evidence(

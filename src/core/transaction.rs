@@ -5637,6 +5637,35 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
+        // Tag 17: PHANTOM-GHOSTDAG blockDAG adapter, appended last.
+        //
+        // The whole checkpoint reaches the preimage, not just its hash: a
+        // relay that could lower `required_blue_depth`, widen `k`, or raise the
+        // merge-depth bound on a signed registration would be choosing how much
+        // parallelism and how much depth its own DAG certificate must survive.
+        AdapterSpec::Ghostdag { network, anchor } => {
+            put_u8(out, 17);
+            put_string(out, network);
+            match anchor {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.anchor_hash);
+                    put_u64(out, pin.anchor_daa_score);
+                    put_u64(out, pin.anchor_blue_score);
+                    for limb in pin.anchor_blue_work {
+                        put_u64(out, limb);
+                    }
+                    put_u64(out, pin.anchor_timestamp_secs);
+                    put_u8(out, pin.k);
+                    put_u8(out, pin.max_parents);
+                    put_u64(out, pin.merge_depth_bound);
+                    put_u32(out, pin.max_target_bits);
+                    put_u64(out, pin.required_blue_depth);
+                    put_u64(out, pin.max_future_drift_secs);
+                }
+                None => put_u8(out, 0),
+            }
+        }
     }
 }
 
@@ -5837,6 +5866,93 @@ mod v29_signing_tests {
         assert_dag_and_bitvm_fault_proof_preimages();
         assert_babylon_preimages();
         assert_nipopow_preimages();
+        assert_ghostdag_preimages();
+    }
+
+    /// The GHOSTDAG registration carries its checkpoint and `k`-cluster
+    /// parameters under family tag 17 (16 is NIPoPoW's, 15 Babylon's, 10..14
+    /// are spoken for), and every pinned field reaches the signing preimage.
+    fn assert_ghostdag_preimages() {
+        use crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor;
+        use crate::cross_domain::external::AdapterSpec;
+
+        let base = PinnedGhostdagAnchor {
+            anchor_hash: [0xA0; 32],
+            anchor_daa_score: 1_000,
+            anchor_blue_score: 5_000,
+            anchor_blue_work: [100, 0, 0, 0],
+            anchor_timestamp_secs: 1_700_000_000,
+            k: 2,
+            max_parents: 8,
+            merge_depth_bound: 64,
+            max_target_bits: 0x207F_FFFF,
+            required_blue_depth: 4,
+            max_future_drift_secs: 120,
+        };
+        let encode = |anchor: Option<PinnedGhostdagAnchor>| {
+            let mut out = Vec::new();
+            encode_adapter_spec(
+                &AdapterSpec::Ghostdag {
+                    network: "kaspa-mainnet".to_string(),
+                    anchor,
+                },
+                &mut out,
+            );
+            out
+        };
+        let base_bytes = encode(Some(base.clone()));
+        assert_eq!(
+            base_bytes.first().copied(),
+            Some(17),
+            "the GHOSTDAG spec must keep wire tag 17; renumbering rewrites the signed meaning of every stored registration"
+        );
+        assert_ne!(
+            encode(None),
+            base_bytes,
+            "the presence of the pin must be signed"
+        );
+
+        let mut variants = Vec::new();
+        let mut v = base.clone();
+        v.anchor_hash = [0xA1; 32];
+        variants.push(("anchor_hash", v));
+        let mut v = base.clone();
+        v.anchor_daa_score += 1;
+        variants.push(("anchor_daa_score", v));
+        let mut v = base.clone();
+        v.anchor_blue_score += 1;
+        variants.push(("anchor_blue_score", v));
+        let mut v = base.clone();
+        v.anchor_blue_work = [101, 0, 0, 0];
+        variants.push(("anchor_blue_work", v));
+        let mut v = base.clone();
+        v.anchor_timestamp_secs += 1;
+        variants.push(("anchor_timestamp_secs", v));
+        let mut v = base.clone();
+        v.k += 1;
+        variants.push(("k", v));
+        let mut v = base.clone();
+        v.max_parents += 1;
+        variants.push(("max_parents", v));
+        let mut v = base.clone();
+        v.merge_depth_bound += 1;
+        variants.push(("merge_depth_bound", v));
+        let mut v = base.clone();
+        v.max_target_bits += 1;
+        variants.push(("max_target_bits", v));
+        let mut v = base.clone();
+        v.required_blue_depth += 1;
+        variants.push(("required_blue_depth", v));
+        let mut v = base;
+        v.max_future_drift_secs += 1;
+        variants.push(("max_future_drift_secs", v));
+        for (field, changed) in variants {
+            assert_ne!(
+                encode(Some(changed)),
+                base_bytes,
+                "pinned field {field} is not covered by the signing preimage"
+            );
+        }
     }
 
     /// The NIPoPoW registration carries its pinned genesis and KMZ `(m, k)`

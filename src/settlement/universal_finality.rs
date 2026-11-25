@@ -585,6 +585,47 @@ impl FinalityGuarantee {
                     fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
+            AdapterSpec::Ghostdag { anchor, .. } => {
+                // A GHOSTDAG ledger finalizes by blue score, not by block
+                // count: the depth that matters is `required_blue_depth`, and
+                // the pin carries its own `k`-cluster bound. Unpinned, the spec
+                // promises nothing at all.
+                let (valid, depth) = anchor.as_ref().map_or((false, 0), |a| {
+                    let zero_field = a.anchor_hash == [0u8; 32]
+                        || a.k == 0
+                        || a.max_parents == 0
+                        || a.merge_depth_bound == 0
+                        || a.required_blue_depth == 0
+                        || a.max_target_bits == 0;
+                    (
+                        !zero_field,
+                        if zero_field { 0 } else { a.required_blue_depth },
+                    )
+                });
+                Self {
+                    reversibility: FinalityReversibility::ProbabilisticWork {
+                        confirmations: depth,
+                    },
+                    // SHA-256d work is outside Shor's reach: the posture is
+                    // lattice-grade even though nothing here is a signature.
+                    quantum_posture: if valid {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        event_root: false,
+                        parent: valid,
+                    },
+                    // A blockDAG's work is committed by miners Budlum cannot
+                    // slash; claiming otherwise would let a high-value route
+                    // read "slashable" off a proof that carries no bond.
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
             AdapterSpec::BabylonEots { pinned, .. } => {
                 let (valid, pq_all) = pinned.as_ref().map_or((false, false), |p| {
                     let ok = p.validate().is_ok();
