@@ -153,6 +153,7 @@ pub mod stellar_fba;
 pub mod symbiotic_vault;
 pub mod tendermint;
 pub mod ton_catchain;
+pub mod unified;
 pub mod versioning;
 pub mod zkvm_proof;
 
@@ -317,6 +318,7 @@ pub use stark_validity_rollup::{
 };
 pub use stellar_fba::{PinnedScpTier, ScpQuorumSet, ScpValidatorNode, StellarScpAdapter};
 pub use symbiotic_vault::{SymbioticVaultAdapter, SymbioticVaultEvidence};
+pub use unified::{NetworkCatalog, NetworkFamily};
 pub use tendermint::{
     quorum_threshold, validator_address_of, validator_set_commitment, validator_set_hash,
     vote_sign_bytes, PinnedTendermintAnchor, TendermintCommitEvidence, TendermintFinalityAdapter,

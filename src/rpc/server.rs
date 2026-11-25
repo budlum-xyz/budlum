@@ -3563,6 +3563,45 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn unified_networks(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_unifiedNetworks")?;
+        let catalog = crate::cross_domain::external::NetworkCatalog::with_builtin_families();
+        let families: Vec<serde_json::Value> = catalog
+            .families()
+            .into_iter()
+            .map(|family| {
+                serde_json::json!({
+                    "family": family.family,
+                    "networks": family.networks,
+                    "consensusKind": family.consensus_kind,
+                    "trustModel": family.trust_model,
+                    "requiredDepth": family.required_depth,
+                    "adapterVersion": family.adapter_version,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "adapters": catalog.len(),
+            "families": families,
+            "refused": catalog.refused(),
+        }))
+    }
+
+    async fn unified_selftest(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_unifiedSelftest")?;
+        let catalog = crate::cross_domain::external::NetworkCatalog::with_builtin_families();
+        match catalog.selftest() {
+            Ok(()) => Ok(serde_json::json!({
+                "adapters": catalog.len(),
+                "problems": Vec::<String>::new(),
+            })),
+            Err(problems) => Ok(serde_json::json!({
+                "adapters": catalog.len(),
+                "problems": problems,
+            })),
+        }
+    }
+
     async fn get_external_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let profiles = self.chain.get_external_domain_profiles().await;
         let items: Vec<serde_json::Value> = profiles

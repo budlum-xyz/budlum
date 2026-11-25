@@ -3935,6 +3935,34 @@ mod rpc_tests {
             .is_err());
     }
 
+    /// The unified surface names the chains this build can read, and proves
+    /// every adapter it names still answers. A unifier that lists a chain it
+    /// cannot verify is worse than one that lists nothing.
+    #[tokio::test]
+    async fn unified_surface_lists_the_chains_and_proves_them() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45270, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node = Node::new(chain.clone()).expect("node");
+        let server = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node.get_client(),
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Operator,
+        );
+        let listed = server.unified_networks().await.unwrap();
+        let adapters = listed.get("adapters").and_then(|v| v.as_u64()).unwrap();
+        assert!(adapters >= 25, "the surface carries {adapters} adapters");
+        let families = listed.get("families").and_then(|v| v.as_array()).unwrap();
+        assert!(!families.is_empty());
+        let proven = server.unified_selftest().await.unwrap();
+        let problems = proven.get("problems").and_then(|v| v.as_array()).unwrap();
+        assert!(problems.is_empty(), "the surface failed: {problems:?}");
+    }
+
     /// `read_record` answers with the fields the invite carries: the phone
     /// shows who invited it before it acts. The refusing half lives in the
     /// operator-only listener test below. This walks the public RPC surface
@@ -4021,6 +4049,11 @@ mod rpc_tests {
         // Reading a record is a Garden surface too, and the public listener
         // refuses it for the same reason it refuses every other one.
         assert!(public.garden_read_record("not a record".into()).await.is_err());
+        // The unified surface is refused where every other read is refused on
+        // a public listener: it is a local read, and a public listener does not
+        // answer local reads.
+        assert!(public.unified_networks().await.is_err());
+        assert!(public.unified_selftest().await.is_err());
         assert!(public.garden_trace("00".repeat(32)).await.is_err());
         assert!(public.garden_feed(Some(5)).await.is_err());
 

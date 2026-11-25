@@ -519,6 +519,10 @@ pub enum AdapterError {
     /// The declared height or root disagrees with the derived one.
     #[error("declared {field} does not match what the payload derives")]
     DeclarationMismatch { field: &'static str },
+    /// The caller named an adapter that no registry holds. A surface that
+    /// guesses a neighbour for an unknown id answers for the wrong chain.
+    #[error("no adapter answers to {0}")]
+    UnknownAdapter(String),
     /// Not deep enough for the caller's policy.
     #[error("depth {observed} is below the required {required}")]
     InsufficientDepth { observed: u64, required: u64 },

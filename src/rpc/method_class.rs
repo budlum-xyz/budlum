@@ -109,6 +109,11 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     // refused; the door is `ExternalDomainTx::SubmitEvidence`.
     row("bud_submitExternalEvidence", Operator, Refused),
     row("bud_getExternalDomainProfile", Public, Read),
+    // The unified surface answers what this node's build can read. That is a
+    // local property of the binary, so it sits with the other local reads on
+    // the operator listener.
+    row("bud_unifiedNetworks", Operator, Read),
+    row("bud_unifiedSelftest", Operator, Read),
     row("bud_getExternalDomains", Public, Read),
     row("bud_getExternalIntakeDigest", Public, Read),
     // refused; the doors are `ExternalDomainTx::Readmit` and

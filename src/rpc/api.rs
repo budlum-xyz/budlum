@@ -201,6 +201,21 @@ pub trait BudlumApi {
         domain_key_hex: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Every chain family Budlum can read, on one surface, with the
+    /// consensus kind each one carries and the depth it insists on.
+    ///
+    /// This is the unifier's own answer to "what am I joining?": the external
+    /// domains a node has admitted are one thing, and the adapters it could
+    /// verify against are another, and a caller that tries to bridge into a
+    /// chain the build cannot read needs to hear that before it builds.
+    #[method(name = "bud_unifiedNetworks")]
+    async fn unified_networks(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Proves the unified surface is not vacuous: every adapter answers its
+    /// own descriptor and accepts its own golden evidence.
+    #[method(name = "bud_unifiedSelftest")]
+    async fn unified_selftest(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Lists every registered external domain's profile, each with the
     /// one-line summary the profile module renders.
     #[method(name = "bud_getExternalDomains")]
