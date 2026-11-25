@@ -22,6 +22,7 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
+import com.google.zxing.LuminanceSource
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
@@ -193,7 +194,7 @@ class QrScanActivity : ComponentActivity() {
         val rows = bytes.size / stride
         val height = minOf(image.height, rows)
         if (height <= 0) return null
-        var source = PlanarYUVLuminanceSource(
+        var source: LuminanceSource = PlanarYUVLuminanceSource(
             bytes,
             stride,
             height,
