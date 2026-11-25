@@ -63,7 +63,6 @@ jobs:
           BIN=target/release/budlum-core
           echo "size: $(du -h $BIN | cut -f1)"
           sha256sum "$BIN"
-          file "$BIN" || true
 
       # The phone's own library, as a terminal program. An emulator cannot
       # be run where this is developed, so this is how the path the app
