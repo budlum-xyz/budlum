@@ -2141,6 +2141,36 @@ mod tests {
         assert_eq!(attestation.evidence_digest, evidence.digest());
     }
 
+    /// STRX consistency gate: a caller that demands slashable backing is
+    /// refused with the same `UnslashableBacking` red meaning as every other
+    /// work-weighted adapter. Bitcoin SPV backing is accumulated header-chain
+    /// proof of work with no bonded stake to confiscate, so `require_slashable
+    /// = true` must fail closed here exactly as it does in the other Work
+    /// producers. This locks the STRX-194-01 red meaning across the Work
+    /// adapter family so one adapter cannot silently read `Work` as a bonded
+    /// signature set.
+    #[test]
+    fn bitcoin_spv_require_slashable_policy_refuses_work_backing() {
+        let adapter = adapter();
+        let evidence = golden(&adapter);
+        let mut slash_policy = policy();
+        slash_policy.require_slashable = true;
+        assert!(
+            matches!(
+                adapter.verify(&evidence, &slash_policy),
+                Err(AdapterError::UnslashableBacking)
+            ),
+            "require_slashable=true must fail closed with UnslashableBacking for SPV work backing"
+        );
+
+        // Sanity: the same golden passes when slashability is not demanded.
+        slash_policy.require_slashable = false;
+        assert!(
+            adapter.verify(&evidence, &slash_policy).is_ok(),
+            "the golden SPV chain must verify when slashability is not required"
+        );
+    }
+
     #[test]
     fn verify_spv_tx_inclusion_accepts_honest_branch_and_refuses_cve_2012_2459_duplicate() {
         let pair = |l: [u8; 32], r: [u8; 32]| {
