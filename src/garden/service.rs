@@ -890,6 +890,8 @@ mod tests {
                 "{title:?} / {name:?} was accepted"
             );
         }
+        // A refused create writes no content: nothing was created, so there
+        // is nothing to keep.
         assert!(files_under(dir.path()).is_empty());
 
         let created = service
@@ -917,13 +919,9 @@ mod tests {
         assert_eq!(left["retired"], json!(true));
         // Leaving drops the content this node held. The seat outlives the
         // process, so it outlives the leave too; returning is a separate act.
-        let after = files_under(guest_dir.path());
-        assert!(after.contains(&guest_dir.path().join(SEAT_FILE)));
-        assert_eq!(
-            after.len(),
-            1,
-            "content survived the leave: {after:?}"
-        );
+        let after = files_under(dir.path());
+        assert!(after.contains(&seat));
+        assert_eq!(after.len(), 1, "content survived the leave: {after:?}");
     }
 
     #[tokio::test]
@@ -976,10 +974,14 @@ mod tests {
         assert_eq!(text(&resolved, "/content_id"), content_id);
         assert!(!files_under(host_dir.path()).is_empty());
 
-        // The guest steps out: its disk is clean and it may come back.
+        // The guest steps out: its content is gone, its seat remains, and it
+        // may come back. The seat has to survive the process for that to be
+        // true, so it is the one file this node keeps.
         let left = guest.leave().await.unwrap();
         assert_eq!(left["can_return"], json!(true));
-        assert!(files_under(guest_dir.path()).is_empty());
+        let guest_after = files_under(guest_dir.path());
+        assert!(guest_after.contains(&guest_dir.path().join(SEAT_FILE)));
+        assert_eq!(guest_after.len(), 1, "content left on the guest: {guest_after:?}");
         assert_eq!(
             text(&guest.status().await.unwrap(), "/garden/status"),
             "Away"
@@ -1016,8 +1018,13 @@ mod tests {
         let left = host.leave().await.unwrap();
         assert_eq!(left["retired"], json!(true));
         assert_eq!(host.status().await.unwrap()["garden"], Value::Null);
-        assert!(files_under(host_dir.path()).is_empty());
-        assert!(files_under(guest_dir.path()).is_empty());
+        // The Garden is over, so no content is kept. The seat file is a
+        // record of a place this node once held, not Garden content, and it
+        // is the only thing either directory still carries.
+        let host_after = files_under(host_dir.path());
+        let guest_after = files_under(guest_dir.path());
+        assert_eq!(host_after, vec![host_dir.path().join(SEAT_FILE)]);
+        assert_eq!(guest_after, vec![guest_dir.path().join(SEAT_FILE)]);
         assert!(host.rejoin().await.is_err());
     }
 
