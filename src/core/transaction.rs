@@ -5616,6 +5616,27 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
+        // Tag 16: sublinear NIPoPoW superblock adapter, appended last.
+        //
+        // Every pinned field reaches the preimage: a relay that could lower
+        // `min_superblocks_m` or widen `pow_target` on a signed registration
+        // would be choosing how much work its own evidence must prove.
+        AdapterSpec::NipopowSuperblock { network, genesis } => {
+            put_u8(out, 16);
+            put_string(out, network);
+            match genesis {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.genesis_id);
+                    put_u64(out, pin.genesis_height);
+                    put_fixed(out, &pin.pow_target);
+                    put_u32(out, pin.min_superblocks_m);
+                    put_u8(out, pin.min_superblock_level);
+                    put_u32(out, pin.min_suffix_k);
+                }
+                None => put_u8(out, 0),
+            }
+        }
     }
 }
 
@@ -5815,6 +5836,75 @@ mod v29_signing_tests {
         assert_bft_fault_proof_preimages();
         assert_dag_and_bitvm_fault_proof_preimages();
         assert_babylon_preimages();
+        assert_nipopow_preimages();
+    }
+
+    /// The NIPoPoW registration carries its pinned genesis and KMZ `(m, k)`
+    /// parameters under family tag 16 (15 is Babylon's, 10..14 are spoken
+    /// for), and every pinned field reaches the signing preimage: a relay that
+    /// could move one of them would be choosing how much work its own evidence
+    /// has to prove.
+    fn assert_nipopow_preimages() {
+        use crate::cross_domain::external::nipopow::PinnedNipopowGenesis;
+        use crate::cross_domain::external::AdapterSpec;
+
+        let base = PinnedNipopowGenesis {
+            genesis_id: [0x11; 32],
+            genesis_height: 7,
+            pow_target: [0x7F; 32],
+            min_superblocks_m: 3,
+            min_superblock_level: 3,
+            min_suffix_k: 4,
+        };
+        let encode = |genesis: Option<PinnedNipopowGenesis>| {
+            let mut out = Vec::new();
+            encode_adapter_spec(
+                &AdapterSpec::NipopowSuperblock {
+                    network: "ergo-mainnet".to_string(),
+                    genesis,
+                },
+                &mut out,
+            );
+            out
+        };
+        let base_bytes = encode(Some(base.clone()));
+        assert_eq!(
+            base_bytes.first().copied(),
+            Some(16),
+            "the NIPoPoW spec must keep wire tag 16; renumbering rewrites the \n             signed meaning of every stored registration"
+        );
+        assert_ne!(
+            encode(None),
+            base_bytes,
+            "the presence of the pin must be signed"
+        );
+
+        let mut variants = Vec::new();
+        let mut v = base.clone();
+        v.genesis_id = [0x12; 32];
+        variants.push(("genesis_id", v));
+        let mut v = base.clone();
+        v.genesis_height += 1;
+        variants.push(("genesis_height", v));
+        let mut v = base.clone();
+        v.pow_target = [0x7E; 32];
+        variants.push(("pow_target", v));
+        let mut v = base.clone();
+        v.min_superblocks_m += 1;
+        variants.push(("min_superblocks_m", v));
+        let mut v = base.clone();
+        v.min_superblock_level += 1;
+        variants.push(("min_superblock_level", v));
+        let mut v = base;
+        v.min_suffix_k += 1;
+        variants.push(("min_suffix_k", v));
+        for (field, changed) in variants {
+            assert_ne!(
+                encode(Some(changed)),
+                base_bytes,
+                "pinned field {field} is not covered by the signing preimage"
+            );
+        }
     }
 
     /// The Babylon registration carries the pinned epoch-key table under family

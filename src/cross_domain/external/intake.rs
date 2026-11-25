@@ -248,6 +248,24 @@ pub enum AdapterSpec {
         #[serde(default)]
         pinned: Option<crate::cross_domain::external::babylon_eots::PinnedBabylonEots>,
     },
+    /// Sublinear `NIPoPoW` superblock finality (Kiayias-Miller-Zindros,
+    /// EUROCRYPT 2020) for a `PoW` chain, bound to a governance-pinned genesis
+    /// and KMZ `(m, k)` parameters. APPENDED LAST (tag `16`): the bincode
+    /// discriminant is this variant's declaration position, and the manual
+    /// `encode_adapter_spec` tag is the first free slot after Babylon's 15.
+    ///
+    /// Why this family and not a linear SPV one: the promise a `PoW` chain
+    /// makes is work, and `NIPoPoW` verifies genesis-to-tip work in
+    /// `O(m log|C| + k)` headers under pure SHA-256 - the one primitive here
+    /// Shor's algorithm does not touch. A spec without a genesis anchor is the
+    /// closed admission state: `register_domain` refuses it, because a
+    /// superblock proof says nothing about *which* chain it is a proof of
+    /// until a genesis is pinned.
+    NipopowSuperblock {
+        network: String,
+        #[serde(default)]
+        genesis: Option<crate::cross_domain::external::nipopow::PinnedNipopowGenesis>,
+    },
 }
 
 impl AdapterSpec {
@@ -266,7 +284,8 @@ impl AdapterSpec {
             | Self::CasperFfg { network, .. }
             | Self::MysticetiDag { network, .. }
             | Self::BitVmCovenant { network, .. }
-            | Self::BabylonEots { network, .. } => network,
+            | Self::BabylonEots { network, .. }
+            | Self::NipopowSuperblock { network, .. } => network,
         }
     }
 
@@ -358,6 +377,16 @@ impl AdapterSpec {
                 },
                 golden,
                 BabylonEotsAdapter::with_golden,
+            ),
+            Self::NipopowSuperblock { network, genesis } => box_with_golden(
+                || {
+                    crate::cross_domain::external::nipopow::NipopowAdapter::new(
+                        network,
+                        genesis.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::nipopow::NipopowAdapter::with_golden,
             ),
         }
     }
@@ -503,6 +532,17 @@ pub struct IntakeState {
         String,
         crate::cross_domain::external::babylon_eots::PinnedBabylonEots,
     >,
+    /// Governance-pinned `NIPoPoW` genesis anchors and KMZ `(m, k)` parameters
+    /// keyed by external network.
+    ///
+    /// Inside [`Self::state_digest`] like every other pin map: only a block may
+    /// write it. A registrant that could supply its own genesis would be
+    /// certifying its own finality.
+    #[serde(default)]
+    pub pinned_nipopow_genesis: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::nipopow::PinnedNipopowGenesis,
+    >,
     /// Deterministic, admin-keyless intake circuit breaker and contradiction
     /// tombstone ledger, folded into [`Self::state_digest`].
     #[serde(default)]
@@ -528,6 +568,8 @@ pub enum AnchorFamily {
     Tendermint,
     Da,
     BabylonEots,
+    /// Sublinear `PoW` superblock (`NIPoPoW`) genesis and KMZ parameters.
+    PoWSuccinct,
 }
 
 impl AnchorFamily {
@@ -540,6 +582,7 @@ impl AnchorFamily {
             Self::Tendermint => "tendermint",
             Self::Da => "da",
             Self::BabylonEots => "babylon-eots",
+            Self::PoWSuccinct => "pow-succinct",
         }
     }
 }
@@ -562,6 +605,8 @@ pub enum PinnedExternalAnchor {
     Tendermint(crate::cross_domain::external::tendermint::PinnedTendermintAnchor),
     Da(crate::cross_domain::external::da_sampling::PinnedDaCommittee),
     BabylonEots(crate::cross_domain::external::babylon_eots::PinnedBabylonEots),
+    /// Genesis and KMZ `(m, k)` parameters for a `NIPoPoW` superblock domain.
+    Nipopow(crate::cross_domain::external::nipopow::PinnedNipopowGenesis),
 }
 
 impl PinnedExternalAnchor {
@@ -574,6 +619,7 @@ impl PinnedExternalAnchor {
             Self::Tendermint(_) => AnchorFamily::Tendermint,
             Self::Da(_) => AnchorFamily::Da,
             Self::BabylonEots(_) => AnchorFamily::BabylonEots,
+            Self::Nipopow(_) => AnchorFamily::PoWSuccinct,
         }
     }
 
@@ -626,6 +672,27 @@ impl PinnedExternalAnchor {
                 // does not validate cannot certify a vote, and `PinnedBabylonEots::validate`
                 // names the offending field.
                 pinned.validate()?;
+            }
+            Self::Nipopow(genesis) => {
+                // A zero field here is not a weak anchor, it is the shape of
+                // one: a zero genesis id anchors nothing, a zero target makes
+                // every hash a superblock, and `m = 0` / `k = 0` delete the KMZ
+                // predicate the proof is supposed to satisfy.
+                if genesis.genesis_id == [0u8; 32] {
+                    return Err("the pinned NIPoPoW genesis id is all zeroes".into());
+                }
+                if genesis.pow_target == [0u8; 32] {
+                    return Err("the pinned NIPoPoW difficulty target is all zeroes".into());
+                }
+                if genesis.min_superblocks_m == 0 {
+                    return Err("the pinned NIPoPoW superblock count m is zero".into());
+                }
+                if genesis.min_superblock_level == 0 {
+                    return Err("the pinned NIPoPoW superblock level is zero".into());
+                }
+                if genesis.min_suffix_k == 0 {
+                    return Err("the pinned NIPoPoW suffix stability parameter k is zero".into());
+                }
             }
         }
         Ok(())
@@ -1328,6 +1395,40 @@ impl IntakeState {
             .insert(network.into(), pinned);
     }
 
+    /// Installs or updates the consensus-pinned `NIPoPoW` genesis anchor and
+    /// KMZ parameters for `network`. WIRING: genesis/test initializer; the
+    /// production door is `GovernanceAction::PinExternalAnchor` ->
+    /// [`Self::install_pinned_anchor`].
+    pub fn pin_nipopow_genesis(
+        &mut self,
+        network: impl Into<String>,
+        genesis: crate::cross_domain::external::nipopow::PinnedNipopowGenesis,
+    ) {
+        self.pinned_nipopow_genesis.insert(network.into(), genesis);
+    }
+
+    /// Installs the NIPoPoW pin for `network` only if it is a real trust root.
+    ///
+    /// `pin_nipopow_genesis` is the raw setter a genesis/test initializer uses;
+    /// this is the checked door for anything that reaches the pin from a value
+    /// it did not itself construct. A zeroed genesis id, a zero difficulty
+    /// target, or `m = 0` / `k = 0` is the *shape* of an anchor with none of
+    /// its force, and installing one would silently delete the KMZ predicate
+    /// every proof against it is supposed to satisfy.
+    ///
+    /// # Errors
+    ///
+    /// The named zero field.
+    pub fn install_nipopow_genesis(
+        &mut self,
+        network: impl Into<String>,
+        genesis: crate::cross_domain::external::nipopow::PinnedNipopowGenesis,
+    ) -> Result<(), String> {
+        PinnedExternalAnchor::Nipopow(genesis.clone()).validate()?;
+        self.pinned_nipopow_genesis.insert(network.into(), genesis);
+        Ok(())
+    }
+
     /// Installs or replaces a family's trust anchor for `network`.
     ///
     /// The consensus door: `GovernanceAction::PinExternalAnchor` in block
@@ -1358,6 +1459,10 @@ impl IntakeState {
             PinnedExternalAnchor::BabylonEots(pinned) => {
                 self.pinned_babylon_eots_anchors
                     .insert(network.to_string(), pinned);
+            }
+            PinnedExternalAnchor::Nipopow(genesis) => {
+                self.pinned_nipopow_genesis
+                    .insert(network.to_string(), genesis);
             }
         }
     }
@@ -1400,6 +1505,11 @@ impl IntakeState {
                 .get(network)
                 .cloned()
                 .map(PinnedExternalAnchor::BabylonEots),
+            AnchorFamily::PoWSuccinct => self
+                .pinned_nipopow_genesis
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Nipopow),
         }
     }
 
@@ -1586,6 +1696,18 @@ impl IntakeState {
                 return Err(IntakeError::CommitteeNotPinned);
             };
             if pinned.as_ref() != Some(installed) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // NipopowSuperblock admission requires a governance-pinned genesis and
+        // KMZ `(m, k)` set for `network`, and the spec must carry exactly that
+        // pin: a registrant may not bring its own genesis and certify the
+        // superblock proof against it.
+        if let AdapterSpec::NipopowSuperblock { network, genesis } = &spec {
+            let Some(installed) = self.pinned_nipopow_genesis.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if genesis.as_ref() != Some(installed) {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
@@ -5259,5 +5381,196 @@ mod tests {
                 RegistryError::DescriptorMismatch { .. }
             ))
         ));
+    }
+
+    /// The NIPoPoW registration under the fixture genesis pin, with the policy
+    /// and economics the NIPoPoW tests in this module share. Probabilistic-work
+    /// finality is not slashable by Budlum, so `require_slashable` is off.
+    fn nipopow_request(
+        genesis: Option<crate::cross_domain::external::nipopow::PinnedNipopowGenesis>,
+        economics: DomainEconomics,
+        poster: Address,
+    ) -> RegistrationRequest {
+        let (_, _, golden) = crate::cross_domain::external::nipopow::tests::make_golden_fixture();
+        let spec = AdapterSpec::NipopowSuperblock {
+            network: golden.network.clone(),
+            genesis,
+        };
+        let mut policy = VerificationPolicy::strict(0);
+        policy.require_slashable = false;
+        RegistrationRequest {
+            versions: VersionPolicy::single(golden.adapter, golden.evidence_version, 0),
+            spec,
+            policy,
+            economics,
+            bond_atoms: economics.required_bond_atoms(),
+            poster,
+            golden,
+        }
+    }
+
+    #[test]
+    fn nipopow_admission_requires_the_governance_genesis_pin() {
+        let mut intake = IntakeState::new();
+        intake.on_block_committed(50);
+        let (pinned, _, golden) =
+            crate::cross_domain::external::nipopow::tests::make_golden_fixture();
+        let network = golden.network.clone();
+        let econ = DomainEconomics {
+            routing_ceiling_atoms: 1_000,
+            fee: ProverFee {
+                base_atoms: 10_000,
+                value_bps: 0,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 500,
+                floor_atoms: 1,
+            },
+            unbonding_heights: 10,
+        };
+        let economics = IntakeState::conservative_economics(1_000);
+
+        // No genesis is installed: a registrant cannot nominate its own
+        // genesis block and then certify superblocks against it, whether it
+        // carries a pin or none.
+        assert_eq!(
+            intake
+                .register_domain(nipopow_request(None, economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        assert_eq!(
+            intake
+                .register_domain(
+                    nipopow_request(Some(pinned.clone()), economics, addr(9)),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+
+        // The pin is installed, but the registration carries a different
+        // genesis: refused before admission. Even a pin whose *only*
+        // difference is a tightened `k` is a different consensus statement and
+        // does not pass the door by resembling the installed one.
+        intake.pin_nipopow_genesis(network.clone(), pinned.clone());
+        let mut foreign = pinned.clone();
+        foreign.genesis_id = [0x5D; 32];
+        assert_eq!(
+            intake
+                .register_domain(nipopow_request(None, economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        assert_eq!(
+            intake
+                .register_domain(nipopow_request(Some(foreign), economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        let mut tightened = pinned.clone();
+        tightened.min_suffix_k += 1;
+        assert_eq!(
+            intake
+                .register_domain(nipopow_request(Some(tightened), economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+
+        // The governance pin, echoed exactly: past the door, and then the
+        // economically honest registration is admitted while a lying
+        // fee/penalty shape is refused.
+        assert_eq!(
+            intake
+                .register_domain(nipopow_request(Some(pinned.clone()), econ, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::DishonestEconomics
+        );
+        let key = intake
+            .register_domain(
+                nipopow_request(Some(pinned.clone()), economics, addr(9)),
+                None,
+            )
+            .expect("the governance genesis pin admits the NIPoPoW domain");
+        assert_eq!(
+            intake
+                .registry
+                .domain(&key)
+                .expect("dom")
+                .record
+                .descriptor
+                .id,
+            crate::cross_domain::external::AdapterId::from_name(
+                crate::cross_domain::external::nipopow::ADAPTER_NAME
+            )
+        );
+
+        // The pin reaches the generic anchor door as well: it resolves by
+        // family, and a zeroed field is refused at install rather than
+        // installed as a genesis no evidence could ever clear.
+        assert_eq!(
+            intake
+                .pinned_anchor(AnchorFamily::PoWSuccinct, &golden.network)
+                .map(|a| a.family()),
+            Some(AnchorFamily::PoWSuccinct)
+        );
+        let mut zeroed = pinned.clone();
+        zeroed.pow_target = [0u8; 32];
+        assert_eq!(
+            intake
+                .install_nipopow_genesis(golden.network.clone(), zeroed)
+                .unwrap_err(),
+            "the pinned NIPoPoW difficulty target is all zeroes"
+        );
+        let mut zeroed = pinned.clone();
+        zeroed.min_suffix_k = 0;
+        assert_eq!(
+            intake
+                .install_nipopow_genesis(golden.network.clone(), zeroed)
+                .unwrap_err(),
+            "the pinned NIPoPoW suffix stability parameter k is zero"
+        );
+        // A refused install leaves the good pin in place.
+        assert_eq!(
+            intake.pinned_nipopow_genesis.get(&golden.network).cloned(),
+            Some(pinned.clone())
+        );
+
+        // And the settlement layer reads the same pin: probabilistic work with
+        // the pinned suffix depth, never a slashable quorum.
+        let guarantee =
+            crate::settlement::universal_finality::FinalityGuarantee::for_external_spec_with_backing(
+                &AdapterSpec::NipopowSuperblock {
+                    network: network.clone(),
+                    genesis: Some(pinned.clone()),
+                },
+                Some(&crate::cross_domain::external::spec::SecurityBacking::Work {
+                    difficulty_bits: 96,
+                }),
+            );
+        assert_eq!(
+            guarantee.reversibility,
+            crate::settlement::universal_finality::FinalityReversibility::ProbabilisticWork {
+                confirmations: pinned.min_suffix_k as u64
+            }
+        );
+        assert!(!guarantee.slashable_backing);
+        let unpinned =
+            crate::settlement::universal_finality::FinalityGuarantee::for_external_spec_with_backing(
+                &AdapterSpec::NipopowSuperblock {
+                    network,
+                    genesis: None,
+                },
+                Some(&crate::cross_domain::external::spec::SecurityBacking::Work {
+                    difficulty_bits: 96,
+                }),
+            );
+        assert_eq!(
+            unpinned.reversibility,
+            crate::settlement::universal_finality::FinalityReversibility::ProbabilisticWork {
+                confirmations: 0
+            },
+            "an unpinned spec promises no depth at all"
+        );
     }
 }

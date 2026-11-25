@@ -545,6 +545,46 @@ impl FinalityGuarantee {
                     fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
+            AdapterSpec::NipopowSuperblock { genesis, .. } => {
+                // Sublinear PoW finality is probabilistic work, never a
+                // quorum: the promise is "a chain with this much committed
+                // work would have to be rewritten", and the confirmation depth
+                // is the pinned stability parameter `k` the proof's own suffix
+                // must reach. An unpinned spec promises nothing, so the depth
+                // is zero and any route that composes it inherits the weakness.
+                let (valid, confs) = genesis.as_ref().map_or((false, 0), |g| {
+                    let zero_field = g.genesis_id == [0u8; 32]
+                        || g.pow_target == [0u8; 32]
+                        || g.min_superblocks_m == 0
+                        || g.min_superblock_level == 0
+                        || g.min_suffix_k == 0;
+                    (!zero_field, if zero_field { 0 } else { g.min_suffix_k })
+                });
+                Self {
+                    reversibility: FinalityReversibility::ProbabilisticWork {
+                        confirmations: u64::from(confs),
+                    },
+                    // SHA-256 work is the one primitive here Shor's algorithm
+                    // does not touch: the posture is lattice-grade even though
+                    // nothing on this path is a signature.
+                    quantum_posture: if valid {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        event_root: false,
+                        parent: valid,
+                    },
+                    // Budlum cannot slash a foreign chain's miners. Claiming
+                    // otherwise would let a high-value route read "slashable"
+                    // off a proof that carries no Budlum-side bond.
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
             AdapterSpec::BabylonEots { pinned, .. } => {
                 let (valid, pq_all) = pinned.as_ref().map_or((false, false), |p| {
                     let ok = p.validate().is_ok();

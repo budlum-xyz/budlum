@@ -1,13 +1,11 @@
-//! WIRING: unwired - external `NIPoPoW` superblock adapter awaits `AdapterSpec` variant registration in `external_tx`.
+//! WIRING: wired - `AdapterSpec::NipopowSuperblock` (wire tag 16) builds this
+//! adapter from an intake registration whose genesis and KMZ `(m, k)` must
+//! equal the governance pin (`IntakeState::pin_nipopow_genesis`, reachable in
+//! production through `GovernanceAction::PinExternalAnchor`), and
+//! `FinalityGuarantee::for_external_spec_declared` maps the pin to
+//! probabilistic-work finality at depth `min_suffix_k`.
 //! Non-Interactive Proofs of Proof-of-Work (`NIPoPoW`, Kiayias-Miller-Zindros
 //! EUROCRYPT 2020) sublinear genesis-anchored external finality adapter.
-//!
-//! WIRING: unwired - the superblock verifier and its interlink checks are
-//! re-exported by `crate::cross_domain::external` but no production path
-//! constructs the adapter yet: sublinear sync is admitted only once an intake
-//! registration pins a genesis anchor for it, and admitting it before that
-//! would let an unpinned verifier answer for a chain nobody anchored. Until
-//! then this module's test suite is its only caller.
 //!
 //! Whereas linear SPV downloads every block header `O(|C|)`, `NIPoPoW` exploits
 //! rare high-work superblocks satisfying `id <= target >> mu` and per-header
@@ -740,7 +738,7 @@ impl ExternalFinalityAdapter for NipopowAdapter {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::cross_domain::external::selftest::admit;
     use crate::crypto::facts::CryptoFacts;
@@ -803,7 +801,8 @@ mod tests {
         (root, proof)
     }
 
-    fn make_golden_fixture() -> (PinnedNipopowGenesis, NipopowEvidence, RawConsensusEvidence) {
+    pub(crate) fn make_golden_fixture(
+    ) -> (PinnedNipopowGenesis, NipopowEvidence, RawConsensusEvidence) {
         let target = test_target();
         let genesis = mine_header(
             0,
