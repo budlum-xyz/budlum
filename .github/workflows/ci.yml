@@ -1143,7 +1143,13 @@ jobs:
           exit 1
 
       - name: Canary surface (annotations)
-        if: failure()
+        # A tally can only surface a verdict that was already cast: the
+        # self-test below runs the whole suite a second time, and on a machine
+        # without actionlint or typos it fails on the tools and reports that as
+        # a gate defect. Measured 2026-11-25: a green suite went red only
+        # because this step ran its self-test on a runner where those two
+        # binaries are absent. So it runs when a gate step actually failed.
+        if: failure() && steps.build.outcome == 'success'
         run: |
           set +o pipefail
           tmp=$(mktemp)
@@ -3706,7 +3712,11 @@ jobs:
           set -euo pipefail
           cargo test --test garden_scenario -- --test-threads=1 2>&1 | tee /tmp/garden-scenario.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- garden-scenario /tmp/garden-scenario.txt
-      - name: Garden acceptance (directive section 9 and 11 names, real nodes)
+      # Directive section 11 names six more acceptance steps than the eleven of
+      # section 9. They live in their own file because they start their own
+      # Gardens; running them here is what makes the directive's list a
+      # measurement rather than a description.
+      - name: Garden acceptance (directive section 11 names, real nodes)
         run: |
           set -euo pipefail
           cargo test --test garden_acceptance -- --test-threads=1 2>&1 | tee /tmp/garden-acceptance.txt
