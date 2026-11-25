@@ -905,12 +905,25 @@ mod tests {
         let files = files_under(dir.path());
         assert!(!files.is_empty());
         let root = dir.path().join("garden").join(&chain_id);
-        for file in &files {
+        // The seat is the one thing that sits at the top of the directory on
+        // purpose: a process that dies with a seat still has to find it on
+        // the way back, and the Garden's own content lives under its chain.
+        let seat = dir.path().join(SEAT_FILE);
+        assert!(files.contains(&seat), "the seat is not on disk: {files:?}");
+        for file in files.iter().filter(|file| **file != seat) {
             assert!(file.starts_with(&root), "{file:?} is outside {root:?}");
         }
         let left = service.leave().await.unwrap();
         assert_eq!(left["retired"], json!(true));
-        assert!(files_under(dir.path()).is_empty());
+        // Leaving drops the content this node held. The seat outlives the
+        // process, so it outlives the leave too; returning is a separate act.
+        let after = files_under(guest_dir.path());
+        assert!(after.contains(&guest_dir.path().join(SEAT_FILE)));
+        assert_eq!(
+            after.len(),
+            1,
+            "content survived the leave: {after:?}"
+        );
     }
 
     #[tokio::test]
