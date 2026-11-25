@@ -10559,6 +10559,14 @@ impl BudlumApiServer for RpcServer {
         self.garden.invite().await.map_err(Self::garden_refusal)
     }
 
+    async fn garden_read_record(
+        &self,
+        record: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_gardenReadRecord")?;
+        crate::garden::GardenService::read_record(&record).map_err(Self::garden_refusal)
+    }
+
     async fn garden_join(
         &self,
         invite: String,

@@ -1,49 +1,50 @@
 name: Determinism
 
 on:
+  pull_request:
+    # Pull requests into the product branch still pay the full battery; the
+    # daily integration pull request into `main` does not - that path is
+    # budgeted by `ci-pull-request-fanout-is-budgeted` and the evidence-window
+    # owner dispatches this workflow on the wave head instead.
+    branches: [consensus-of-consensuses]
+  workflow_dispatch:
   push:
     branches: [main]
-  # Heavy battery. It runs on pull requests to `main` (the PR that merges the
-  # stack), on the schedule and on demand. A stacked pull request (base
-  # `testnet-quantum` or `testnet`) runs the PR gates in ci.yml,
-  # security-audit.yml, semgrep.yml and the other light workflows, and skips the
-  # jobs of this file through the job-level condition: GitHub evaluates the
-  # `branches` filter of a stacked pull request against the root of the stack,
-  # so the filter alone does not keep it out. This keeps one push from queueing
-  # more work than the shared runner pool can finish before the next push cancels it.
-  pull_request:
-    branches: [main, consensus-of-consensuses]
-  # Section 16.2 puts this workflow on pull requests and on a periodic run.
+  # Heavy battery. It runs on the schedule, on demand (the evidence-window
+  # owner dispatches it on the wave head) and on pushes to `main`. It is out
+  # of the pull-request path on purpose: one push was queueing more work than
+  # the shared runner pool could finish, and the budget gate
+  # `ci-pull-request-fanout-is-budgeted` pins that path's size.
+  # Section 16.2 put this workflow on pull requests; the fan-out budget moved
+  # that evidence to dispatched runs per evidence window and the periodic run.
   # The periodic half catches runner-image or toolchain drift with no commit in
   # front of it. It is staggered weekly because this file launches five jobs,
   # including clean rebuilds; daily fan-out was starving live PR gates.
   schedule:
     - cron: "23 0 * * 4" # Thursday 00:23 UTC
-  # On demand: an operator can start this battery on a branch without
-  # pushing to it, which is how a blocked stack gets its heavy evidence
-  # when the queue is empty enough to take one more run.
-  workflow_dispatch:
 
 concurrency:
   group: determinism-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 permissions:
   contents: read
 
 jobs:
   genesis-reproducibility:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
     # CI Expansion item 1: genesis reproducibility check.
     # Build twice, it must produce the same genesis hash.
     name: Genesis Reproducibility (item 1)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'schedule' && 'refs/heads/testnet' || github.ref }}
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
@@ -53,29 +54,13 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Build (run 1)
         run: |
           set -euo pipefail
-          cargo build --release 2>&1 | tail -5
+          # The whole rustc output reaches the job log: a red build whose reason
+          # lives only in a truncated tail is a red build nobody can diagnose.
+          cargo build --release 2>&1 | tee /tmp/build-run1.log; exit "${PIPESTATUS[0]}"
       - name: Genesis hash (run 1)
         run: |
           set -euo pipefail
@@ -89,7 +74,7 @@ jobs:
       - name: Build (run 2)
         run: |
           set -euo pipefail
-          cargo build --release 2>&1 | tail -5
+          cargo build --release 2>&1 | tee /tmp/build-run2.log; exit "${PIPESTATUS[0]}"
       - name: Genesis hash (run 2)
         run: |
           set -euo pipefail
@@ -110,9 +95,8 @@ jobs:
           echo "OK: Genesis hashes match."
 
   cross-platform-determinism:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
     # CI Expansion item 2: cross-platform determinism matrix.
     #
     # Hardening (2026-07-21):
@@ -133,10 +117,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 150
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'schedule' && 'refs/heads/testnet' || github.ref }}
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
@@ -147,25 +134,7 @@ jobs:
           shared-key: budlum-core
       - name: Install protoc (Linux)
         if: runner.os == 'Linux'
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
         run: brew install protobuf
@@ -238,9 +207,8 @@ jobs:
           retention-days: 30
 
   consensus-digest-compare:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
     # The complement of item 2: the three platform digests must be byte-equal.
     name: Consensus Digest Compare (Linux = macOS = Windows)
     needs: cross-platform-determinism
@@ -280,9 +248,8 @@ jobs:
           echo "OK: the consensus output is BYTE-EQUAL on all three platforms."
 
   pq-vector-determinism:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
     # the ML-DSA and SLH-DSA vectors (NIST ACVP, Wycheproof, the explicit bug
     # vectors) give every vector the same verdict on every platform. The wallet crate
     # mounts the node's own PQ source files (`crates/wallet-core/src/crypto.rs`), so
@@ -310,6 +277,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'schedule' && 'refs/heads/testnet' || github.ref }}
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
@@ -351,9 +319,8 @@ jobs:
           retention-days: 30
 
   pq-digest-compare:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
     # The complement of pq-vector-determinism: the four platform digests are byte-equal.
     name: PQ Digest Compare (x86_64 = native = aarch64 = wasm32)
     needs: pq-vector-determinism

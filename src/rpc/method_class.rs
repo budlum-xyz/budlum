@@ -388,6 +388,7 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     // operator listener only. Never mutates canonical consensus state.
     row("bud_gardenCreate", Operator, LocalAdmin),
     row("bud_gardenInvite", Operator, Read),
+    row("bud_gardenReadRecord", Operator, Read),
     row("bud_gardenJoin", Operator, LocalAdmin),
     row("bud_gardenAdmit", Operator, LocalAdmin),
     row("bud_gardenLeave", Operator, LocalAdmin),

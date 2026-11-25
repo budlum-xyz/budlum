@@ -458,7 +458,7 @@ fn verify_jolteon_bundle_chain(
         };
         if tc.epoch != pinned.epoch
             || Some(b0.round) != tc.skipped_round.checked_add(1)
-            || tc.highest_qc_round < b0.parent_round
+            || tc.highest_qc_round != b0.parent_round
             || tc.highest_qc_round >= tc.skipped_round
         {
             return Err(AdapterError::ConsensusRule {
@@ -1004,6 +1004,66 @@ mod tests {
             adapter.verify(&ev, &VerificationPolicy::strict(0)),
             Err(AdapterError::ConsensusRule { .. })
         ));
+
+        // Jolteon SafeNode TC lock invariant: when round_skip_tc certifies
+        // highest_qc_round = 11 (skipped_round = 12, b0.round = 13), a Byzantine
+        // leader proposing b0 with stale parent_round = 10 (< highest_qc_round)
+        // rolls back past a locked QC and MUST be refused.
+        let mut rollback_bundle =
+            decode_jolteon_evidence(&adapter.golden_evidence().unwrap().payload).unwrap();
+        rollback_bundle.ordered_block.round = 13;
+        rollback_bundle.ordered_block.parent_round = 10;
+        rollback_bundle.ordered_block.block_hash =
+            rollback_bundle.ordered_block.compute_hash("aptos-mainnet");
+        rollback_bundle.commit_block.round = 14;
+        rollback_bundle.commit_block.parent_round = 13;
+        rollback_bundle.commit_block.parent_hash = rollback_bundle.ordered_block.block_hash;
+        rollback_bundle.commit_block.block_hash =
+            rollback_bundle.commit_block.compute_hash("aptos-mainnet");
+        let rollback_tc_digest = jolteon_tc_sign_bytes("aptos-mainnet", 4, 12, 11);
+        rollback_bundle.round_skip_tc = Some(JolteonTimeoutCert {
+            epoch: 4,
+            skipped_round: 12,
+            highest_qc_round: 11,
+            signatures: sign_digest(&signers, &rollback_tc_digest),
+        });
+        let rd0 = jolteon_vote_sign_bytes(
+            "aptos-mainnet",
+            4,
+            13,
+            &rollback_bundle.ordered_block.block_hash,
+            &rollback_bundle.ordered_block.state_root,
+        );
+        let rd1 = jolteon_vote_sign_bytes(
+            "aptos-mainnet",
+            4,
+            14,
+            &rollback_bundle.commit_block.block_hash,
+            &rollback_bundle.commit_block.state_root,
+        );
+        rollback_bundle.ordered_qc = JolteonQuorumCert {
+            epoch: 4,
+            round: 13,
+            block_hash: rollback_bundle.ordered_block.block_hash,
+            certified_state_root: rollback_bundle.ordered_block.state_root,
+            signatures: sign_digest(&signers, &rd0),
+        };
+        rollback_bundle.commit_qc = JolteonQuorumCert {
+            epoch: 4,
+            round: 14,
+            block_hash: rollback_bundle.commit_block.block_hash,
+            certified_state_root: rollback_bundle.commit_block.state_root,
+            signatures: sign_digest(&signers, &rd1),
+        };
+        let mut rollback_ev = adapter.golden_evidence().unwrap();
+        rollback_ev.payload = encode_jolteon_evidence(&rollback_bundle).unwrap();
+        assert!(
+            matches!(
+                adapter.verify(&rollback_ev, &VerificationPolicy::strict(0)),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "Jolteon round-skip block with parent_round < tc.highest_qc_round must be refused"
+        );
 
         // Double-vote slashing proof in (epoch = 4, round = 12).
         let t1 = ([0xA1; 32], [0xB1; 32]);

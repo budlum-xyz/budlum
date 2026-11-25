@@ -3935,6 +3935,52 @@ mod rpc_tests {
             .is_err());
     }
 
+    /// `read_record` answers with the fields the invite carries: the phone
+    /// shows who invited it before it acts. The refusing half lives in the
+    /// operator-only listener test below. This walks the public RPC surface
+    /// only, so it touches no Garden module a caller could not reach.
+    #[tokio::test]
+    async fn garden_read_record_answers_with_the_fields_it_carries() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45269, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node = Node::new(chain.clone()).expect("node");
+        let garden = Arc::new(crate::garden::GardenService::new(Some(chain.clone()), None));
+        let operator = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node.get_client(),
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Operator,
+        )
+        .with_garden(garden);
+        operator
+            .garden_create(
+                "Room".into(),
+                "host".into(),
+                Some(crate::garden::GardenOptions {
+                    listen: Some("/ip4/127.0.0.1/tcp/0".into()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("a garden is opened before an invite exists");
+        let invite = operator.garden_invite().await.unwrap();
+        let record = invite
+            .get("record")
+            .and_then(|v| v.as_str())
+            .expect("an invite carries the record the phone reads");
+        let answer = operator.garden_read_record(record.into()).await.unwrap();
+        assert_eq!(answer.get("version").and_then(|v| v.as_u64()), Some(1));
+        assert!(answer.get("host").and_then(|v| v.as_str()).is_some());
+        assert_eq!(
+            answer.get("peers").and_then(|v| v.as_array()).map(Vec::len),
+            Some(1)
+        );
+    }
+
     #[tokio::test]
     async fn garden_rpc_methods_are_operator_only_and_serve_lifecycle() {
         let consensus = Arc::new(PoWEngine::new(0));
@@ -3979,6 +4025,12 @@ mod rpc_tests {
             .await
             .is_err());
         assert!(public.garden_resolve("00".repeat(32)).await.is_err());
+        // Reading a record is a Garden surface too, and the public listener
+        // refuses it for the same reason it refuses every other one.
+        assert!(public
+            .garden_read_record("not a record".into())
+            .await
+            .is_err());
         assert!(public.garden_trace("00".repeat(32)).await.is_err());
         assert!(public.garden_feed(Some(5)).await.is_err());
 

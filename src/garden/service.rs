@@ -9,15 +9,15 @@
 
 use super::invite::GardenInvite;
 use super::node::{
-    random_bytes, spawn, GardenEntry, GardenHandle, GardenLeaveOutcome, GardenNodeConfig,
+    now_ms, random_bytes, spawn, GardenEntry, GardenHandle, GardenLeaveOutcome, GardenNodeConfig,
 };
+use super::record::{GardenRecord, RECORD_LINK_PREFIX};
 use super::settlement::GardenBudlumLink;
 use super::types::{status_label, GardenAdmission, GardenContentKind, GardenLimits};
 use crate::chain::chain_actor::ChainHandle;
 use crate::crypto::primitives::KeyPair;
 use crate::domain::types::Hash32;
-use crate::garden::invite_record::GardenInviteRecord;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -27,6 +27,10 @@ use tokio::sync::Mutex;
 /// unspecified, so the validator is treated as not reachable from outside
 /// and is reached through the peers it dialed.
 const DEFAULT_LISTEN: &str = "/ip4/0.0.0.0/tcp/0";
+/// Where the seat is kept between runs. It sits beside the content rather
+/// than inside it: content is thrown away and fetched again, a seat cannot
+/// be.
+const SEAT_FILE: &str = "seat.json";
 /// How long entering a Garden may take.
 const ENTER_TIMEOUT: Duration = Duration::from_mins(1);
 /// Largest payload a publish request may carry as text, in bytes.
@@ -84,9 +88,103 @@ impl GardenOptions {
 }
 
 /// What this node needs to take its place in a Garden again.
+#[derive(Clone)]
 struct Seat {
     secret: [u8; 32],
     config: GardenNodeConfig,
+}
+
+/// The seat as it survives a restart.
+///
+/// A validator that forgets its Garden when its process ends is not a
+/// validator; it is a visitor. The phone is closed and reopened and the
+/// device is rebooted, and in both cases the chain still holds the seat,
+/// so the node has to be able to take it back. Only what cannot be
+/// derived again is written: the key, the way back in, and the name and
+/// addresses this node answered to.
+#[derive(Serialize, Deserialize)]
+struct StoredSeat {
+    version: u8,
+    /// The validator key seed, hex.
+    secret: String,
+    /// The invite line that leads back to this Garden.
+    invite: String,
+    name: String,
+    listen: String,
+    announce: Option<String>,
+}
+
+/// Version of the seat file. A file of any other version is ignored rather
+/// than guessed at.
+const STORED_SEAT_VERSION: u8 = 1;
+
+/// The seat left behind by an earlier run, as a slot to start from.
+///
+/// Anything unreadable is left where it is and reported, not deleted: a
+/// seat file that cannot be parsed today may be the only copy of a key.
+fn stored_seat(path: &PathBuf, content_dir: Option<PathBuf>) -> Option<Slot> {
+    let raw = std::fs::read(path).ok()?;
+    let stored: StoredSeat = match serde_json::from_slice(&raw) {
+        Ok(stored) => stored,
+        Err(e) => {
+            tracing::warn!(error = %e, "the kept seat could not be read");
+            return None;
+        }
+    };
+    if stored.version != STORED_SEAT_VERSION {
+        tracing::warn!(
+            version = stored.version,
+            "the kept seat is of another version and was left alone"
+        );
+        return None;
+    }
+    let secret = decode_secret(&stored.secret)?;
+    let invite = GardenInvite::parse(&stored.invite)
+        .inspect_err(|e| tracing::warn!(error = %e, "the kept seat names no Garden"))
+        .ok()?;
+    Some(Slot::Away(
+        Seat {
+            secret,
+            config: GardenNodeConfig {
+                name: stored.name,
+                listen: stored.listen,
+                announce: stored.announce,
+                content_dir,
+            },
+        },
+        invite,
+    ))
+}
+
+/// The validator seed as it is written down.
+fn decode_secret(text: &str) -> Option<[u8; 32]> {
+    let bytes = hex::decode(text).ok()?;
+    <[u8; 32]>::try_from(bytes.as_slice()).ok()
+}
+
+/// Write a file only this user can read.
+///
+/// The seat holds a validator key. On the phone the directory is already
+/// private to the app, and this says the same thing about the file for
+/// every other place the node runs.
+fn write_private(path: &PathBuf, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)
+    }
 }
 
 enum Slot {
@@ -99,6 +197,7 @@ enum Slot {
 /// The Garden of this node.
 pub struct GardenService {
     chain: Option<ChainHandle>,
+    data_dir: Option<PathBuf>,
     content_dir: Option<PathBuf>,
     slot: Mutex<Slot>,
 }
@@ -109,13 +208,6 @@ impl std::fmt::Debug for GardenService {
             .field("content_dir", &self.content_dir)
             .finish_non_exhaustive()
     }
-}
-
-/// Wall-clock milliseconds, used to judge an invite record's expiry.
-fn now_unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 fn parse_id(label: &str, value: &str) -> Result<Hash32, String> {
@@ -133,7 +225,8 @@ impl GardenService {
     /// survives a restart, so anything a stopped process left there belongs
     /// to no one and is removed.
     pub fn new(chain: Option<ChainHandle>, data_dir: Option<PathBuf>) -> Self {
-        let content_dir = data_dir.map(|dir| dir.join("garden"));
+        let content_dir = data_dir.as_ref().map(|dir| dir.join("garden"));
+        // Content is dropped and fetched again; the seat beside it is not.
         if let Some(dir) = &content_dir {
             if dir.exists() {
                 if let Err(e) = std::fs::remove_dir_all(dir) {
@@ -141,10 +234,53 @@ impl GardenService {
                 }
             }
         }
+        // A seat found on disk is taken as stepped out, not as running: the
+        // network is not touched here. Returning is an act of its own, so
+        // the caller decides when, and a caller that never returns leaves
+        // the seat exactly as it found it.
+        let slot = data_dir
+            .as_ref()
+            .and_then(|dir| stored_seat(&dir.join(SEAT_FILE), content_dir.clone()))
+            .unwrap_or(Slot::Empty);
         Self {
             chain,
+            data_dir,
             content_dir,
-            slot: Mutex::new(Slot::Empty),
+            slot: Mutex::new(slot),
+        }
+    }
+
+    /// Where the seat file lives, when this node keeps one.
+    fn seat_path(&self) -> Option<PathBuf> {
+        self.data_dir.as_ref().map(|dir| dir.join(SEAT_FILE))
+    }
+
+    /// Write the seat down, so the next run can take it back.
+    fn keep_seat(&self, seat: &Seat, invite: &GardenInvite) {
+        let Some(path) = self.seat_path() else { return };
+        let stored = StoredSeat {
+            version: STORED_SEAT_VERSION,
+            secret: hex::encode(seat.secret),
+            invite: invite.to_link(),
+            name: seat.config.name.clone(),
+            listen: seat.config.listen.clone(),
+            announce: seat.config.announce.clone(),
+        };
+        let written = serde_json::to_vec(&stored)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| write_private(&path, &bytes).map_err(|e| e.to_string()));
+        if let Err(e) = written {
+            tracing::warn!(error = %e, "the seat could not be kept");
+        }
+    }
+
+    /// Drop the kept seat. Called where the Garden is given up for good.
+    fn drop_seat(&self) {
+        let Some(path) = self.seat_path() else { return };
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(error = %e, "the kept seat could not be dropped");
+            }
         }
     }
 
@@ -189,6 +325,7 @@ impl GardenService {
 
     /// Drop the link of an earlier Garden the node walked away from.
     async fn forget(&self, seat: &Seat, invite: &GardenInvite) {
+        self.drop_seat();
         if let (Some(link), Ok(key)) = (self.link(), KeyPair::from_seed(&seat.secret)) {
             if let Err(e) = link.retire(invite.chain_id, key.public_key_bytes()).await {
                 tracing::warn!(error = %e, "garden domain could not be retired");
@@ -236,10 +373,13 @@ impl GardenService {
         let (handle, seat, status) = self
             .enter(GardenEntry::Create { title, limits }, seat)
             .await?;
-        let link = handle.invite().await?.to_link();
+        let invite = handle.invite().await?;
+        let link = invite.to_link();
+        let qr = invite.qr_content()?;
+        self.keep_seat(&seat, &invite);
         *slot = Slot::Running(handle, seat);
         drop(slot);
-        Ok(json!({ "garden": status, "invite": link, "qr": link }))
+        Ok(json!({ "garden": status, "invite": link, "qr": qr }))
     }
 
     /// Join a Garden with an invite link or QR content.
@@ -255,20 +395,16 @@ impl GardenService {
         name: String,
         options: GardenOptions,
     ) -> Result<Value, String> {
-        // A joiner may arrive with the old line, with the record link, with the
-        // local-address QR content, or with the bare record a clipboard held.
-        // The record forms are verified before anything else happens: a forged,
-        // expired or spent record is refused with its reason.
-        let invite = match GardenInviteRecord::parse_any(&invite) {
-            Ok(record) => {
-                record.verify_join(
-                    now_unix_ms(),
-                    0,
-                    crate::garden::invite_record::INVITE_RECORD_VERSION,
-                )?;
-                record.to_invite()?
-            }
-            Err(_) => GardenInvite::parse(&invite)?,
+        // A phone scans one code. Section 5.8 allows that code to be
+        // either the invite line or the signed record, so both are taken
+        // here rather than making the reader know which one it was handed.
+        // The record is verified before its contents are trusted.
+        let invite = if invite.trim().starts_with(RECORD_LINK_PREFIX) {
+            let record = GardenRecord::parse(&invite)?;
+            record.check(now_ms())?;
+            GardenInvite::parse(&record.to_invite_link())?
+        } else {
+            GardenInvite::parse(&invite)?
         };
         let mut slot = self.slot.lock().await;
         match &*slot {
@@ -288,10 +424,27 @@ impl GardenService {
             secret: random_bytes(),
             config: self.config(name, &options),
         };
-        let (handle, seat, status) = self.enter(GardenEntry::Invite(invite), seat).await?;
-        *slot = Slot::Running(handle, seat);
-        drop(slot);
-        Ok(json!({ "garden": status }))
+        // The seat is kept for the failure arm too, so a refused door leaves
+        // the same key able to try again rather than a stranger's.
+        let kept = seat.clone();
+        match self.enter(GardenEntry::Invite(invite.clone()), seat).await {
+            Ok((handle, seat, status)) => {
+                self.keep_seat(&seat, &invite);
+                *slot = Slot::Running(handle, seat);
+                drop(slot);
+                Ok(json!({ "garden": status }))
+            }
+            Err(e) => {
+                // The node reached the Garden's door and was not let in - it
+                // may be frozen or full. That is a step out, not a forgotten
+                // Garden: `return` tries the same door again, and keeping
+                // the seat on disk means a later run can try it too.
+                self.keep_seat(&kept, &invite);
+                *slot = Slot::Away(kept, invite);
+                drop(slot);
+                Err(e)
+            }
+        }
     }
 
     /// Leave the Garden. The node wipes the Garden data from its disk and
@@ -323,7 +476,11 @@ impl GardenService {
                     "chain_id": format!("{:016x}", outcome.chain_id),
                     "height": outcome.height,
                 });
-                if !outcome.retired {
+                if outcome.retired {
+                    // Retiring gives the Garden up for good; nothing is
+                    // kept for a return that cannot happen.
+                    self.drop_seat();
+                } else {
                     *slot = Slot::Away(seat, outcome.invite);
                 }
                 drop(slot);
@@ -444,29 +601,66 @@ impl GardenService {
 
     /// The invite link of the running Garden. It is also the QR content.
     ///
-    /// The answer also carries the invite *record* the optimisation directive
-    /// asks for: one record, four transports. `record` is the canonical text a
-    /// clipboard or a local announcement carries, `record_link` is
-    /// `budlum://garden/join#<record>`, and `record_qr` is the local-address
-    /// form `http://<address>/g#<record>`. `invite` and `qr` keep answering
-    /// the line they have always answered, so an older client keeps working.
-    ///
     /// # Errors
     ///
     /// Refuses when the node is not running in a Garden, and when it has no
     /// address another node can dial.
     pub async fn invite(&self) -> Result<Value, String> {
         let handle = self.running().await?;
-        let link = handle.invite().await?.to_link();
-        let record = handle.invite_record().await?;
+        let invite = handle.invite().await?;
+        let link = invite.to_link();
+        let qr = invite.qr_content()?;
+        // The record says the same thing the line says and more: who
+        // opened the door, until when, and for how many.
+        //
+        // The line is what every caller already relies on, so a record
+        // this node cannot build does not take the invite down with it.
+        // The reason is reported rather than swallowed: an address long
+        // enough to push the record past its ceiling is a thing an
+        // operator has to be able to see.
+        let mut answer = json!({ "invite": link, "qr": qr });
+        match handle.record().await {
+            Ok(record) => {
+                if let Some(fields) = answer.as_object_mut() {
+                    fields.insert("record".into(), json!(record.to_link()));
+                    fields.insert("record_qr".into(), json!(record.to_qr(None)?));
+                    fields.insert("owner".into(), json!(hex::encode(record.owner)));
+                    fields.insert("host".into(), json!(hex::encode(record.host)));
+                    fields.insert("expires_at_ms".into(), json!(record.expires_at_ms));
+                    fields.insert("uses".into(), json!(record.uses));
+                }
+            }
+            Err(reason) => {
+                if let Some(fields) = answer.as_object_mut() {
+                    fields.insert("record".into(), Value::Null);
+                    fields.insert("record_refused".into(), json!(reason));
+                }
+            }
+        }
+        Ok(answer)
+    }
+
+    /// Read an invite record and say what is inside it.
+    ///
+    /// Any validator can do this: the proof is checked against the key of
+    /// the validator the record names, which the chain already carries.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a record that is malformed, that has expired, that has run
+    /// out of uses, or whose proof does not match the owner it names.
+    pub fn read_record(record: &str) -> Result<Value, String> {
+        let parsed = GardenRecord::parse(record)?;
+        parsed.check(now_ms())?;
         Ok(json!({
-            "invite": link,
-            "qr": link,
-            "record": record.encode()?,
-            "record_link": record.link()?,
-            "record_qr": record.qr(Some(&record.host_address))?,
-            "record_expires_unix_ms": record.expires_unix_ms,
-            "record_max_uses": record.max_uses,
+            "version": parsed.version,
+            "chain_id": format!("{:016x}", parsed.chain_id),
+            "genesis_hash": hex::encode(parsed.genesis_hash),
+            "owner": hex::encode(parsed.owner),
+            "host": hex::encode(parsed.host),
+            "expires_at_ms": parsed.expires_at_ms,
+            "uses": parsed.uses,
+            "peers": parsed.peers,
         }))
     }
 
@@ -696,6 +890,8 @@ mod tests {
                 "{title:?} / {name:?} was accepted"
             );
         }
+        // A refused create writes no content: nothing was created, so there
+        // is nothing to keep.
         assert!(files_under(dir.path()).is_empty());
 
         let created = service
@@ -711,12 +907,23 @@ mod tests {
         let files = files_under(dir.path());
         assert!(!files.is_empty());
         let root = dir.path().join("garden").join(&chain_id);
-        for file in &files {
+        // The seat is the one thing that sits at the top of the directory on
+        // purpose: a process that dies with a seat still has to find it on
+        // the way back, and the Garden's own content lives under its chain.
+        let seat = dir.path().join(SEAT_FILE);
+        assert!(files.contains(&seat), "the seat is not on disk: {files:?}");
+        for file in files.iter().filter(|file| **file != seat) {
             assert!(file.starts_with(&root), "{file:?} is outside {root:?}");
         }
         let left = service.leave().await.unwrap();
         assert_eq!(left["retired"], json!(true));
-        assert!(files_under(dir.path()).is_empty());
+        // Retiring gives the Garden up for good, so both its content and its
+        // seat file are wiped.
+        assert!(
+            files_under(dir.path()).is_empty(),
+            "files survived retirement: {:?}",
+            files_under(dir.path())
+        );
     }
 
     #[tokio::test]
@@ -769,10 +976,18 @@ mod tests {
         assert_eq!(text(&resolved, "/content_id"), content_id);
         assert!(!files_under(host_dir.path()).is_empty());
 
-        // The guest steps out: its disk is clean and it may come back.
+        // The guest steps out: its content is gone, its seat remains, and it
+        // may come back. The seat has to survive the process for that to be
+        // true, so it is the one file this node keeps.
         let left = guest.leave().await.unwrap();
         assert_eq!(left["can_return"], json!(true));
-        assert!(files_under(guest_dir.path()).is_empty());
+        let guest_after = files_under(guest_dir.path());
+        assert!(guest_after.contains(&guest_dir.path().join(SEAT_FILE)));
+        assert_eq!(
+            guest_after.len(),
+            1,
+            "content left on the guest: {guest_after:?}"
+        );
         assert_eq!(
             text(&guest.status().await.unwrap(), "/garden/status"),
             "Away"
@@ -809,8 +1024,16 @@ mod tests {
         let left = host.leave().await.unwrap();
         assert_eq!(left["retired"], json!(true));
         assert_eq!(host.status().await.unwrap()["garden"], Value::Null);
-        assert!(files_under(host_dir.path()).is_empty());
-        assert!(files_under(guest_dir.path()).is_empty());
+        // Retiring drops the host's seat too; the guest stepped out while the
+        // Garden was still alive, so its seat file is the only file left in
+        // its directory and no Garden content survives on either disk.
+        let host_after = files_under(host_dir.path());
+        let guest_after = files_under(guest_dir.path());
+        assert!(
+            host_after.is_empty(),
+            "files survived host retirement: {host_after:?}"
+        );
+        assert_eq!(guest_after, vec![guest_dir.path().join(SEAT_FILE)]);
         assert!(host.rejoin().await.is_err());
     }
 

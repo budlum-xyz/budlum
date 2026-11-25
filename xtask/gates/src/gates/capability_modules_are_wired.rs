@@ -602,18 +602,47 @@ fn mentions(
 ) -> bool {
     let chars: Vec<char> = haystack.chars().collect();
     let pat: Vec<char> = needle.chars().collect();
-    let own: Vec<char> = format!("{own_module}::").chars().collect();
     let mut i = 0;
     while i + pat.len() <= chars.len() {
-        if !chars[i..].starts_with(&pat) {
-            i += 1;
-            continue;
+        if chars[i..].starts_with(&pat)
+            && occurrence_qualifies(
+                &chars,
+                i,
+                i + pat.len(),
+                own_module,
+                require_call,
+                own_types,
+            )
+        {
+            return true;
         }
-        let after = i + pat.len();
+        i += 1;
+    }
+    false
+}
+
+/// Whether the identifier occurrence at `start..end` of `chars` is a use of
+/// another module's name under the rules this gate keeps.
+///
+/// Split out of [`mentions`] so that the pair loop can scan one body once and
+/// ask the same question of every identifier in it: the loop used to call
+/// `mentions` once per exported name per module pair, and each call collected
+/// the whole body into a `Vec<char>` again. On the current tree that is
+/// millions of full-body copies, and the gate took longer than every other
+/// gate in the repository put together.
+fn occurrence_qualifies(
+    chars: &[char],
+    i: usize,
+    after: usize,
+    own_module: &str,
+    require_call: bool,
+    own_types: &BTreeSet<String>,
+) -> bool {
+    let own: Vec<char> = format!("{own_module}::").chars().collect();
+    {
         // Must not run into a longer identifier.
         if after < chars.len() && is_ident_char(chars[after]) {
-            i += 1;
-            continue;
+            return false;
         }
         // Preceded by `::` means it is a member of something else, unless
         // that something else is this module.
@@ -643,12 +672,10 @@ fn mentions(
             let looks_like_a_type = qualifier.chars().next().is_some_and(char::is_uppercase);
             qualified_elsewhere = !(by_module || by_own_type) && looks_like_a_type;
         } else if i > 0 && is_ident_char(chars[i - 1]) {
-            i += 1;
-            continue;
+            return false;
         }
         if qualified_elsewhere {
-            i += 1;
-            continue;
+            return false;
         }
         if require_call {
             // Skip whitespace, an optional turbofish, then require `(`.
@@ -671,13 +698,45 @@ fn mentions(
                     }
                 }
             }
-            if j < chars.len() && chars[j] == '(' {
-                return true;
-            }
+            return j < chars.len() && chars[j] == '(';
+        }
+        true
+    }
+}
+
+/// Whether `hay` uses any of `needles` under the rules [`mentions`] applies.
+///
+/// `needles` maps an exported name to whether it must be followed by a call
+/// (`true` for functions, `false` for types). The body is scanned once and
+/// each identifier occurrence is looked up, so the pair loop no longer copies
+/// and re-walks the whole body once per exported name.
+fn mentions_any(
+    hay: &[char],
+    needles: &BTreeMap<&str, bool>,
+    own_module: &str,
+    own_types: &BTreeSet<String>,
+) -> bool {
+    let mut i = 0;
+    while i < hay.len() {
+        if !is_ident_char(hay[i]) {
             i += 1;
             continue;
         }
-        return true;
+        let mut end = i;
+        while end < hay.len() && is_ident_char(hay[end]) {
+            end += 1;
+        }
+        // The needle set only holds identifier-shaped names, so an occurrence
+        // inside a longer identifier (`alphabet` for `alpha`) is one
+        // identifier here and simply misses the map - the same verdict
+        // `mentions` reaches by rejecting the trailing identifier character.
+        let ident: String = hay[i..end].iter().collect();
+        if let Some(&require_call) = needles.get(ident.as_str()) {
+            if occurrence_qualifies(hay, i, end, own_module, require_call, own_types) {
+                return true;
+            }
+        }
+        i = end;
     }
     false
 }
@@ -783,6 +842,14 @@ fn measure(root: &Path) -> Result<Outcome, String> {
         })
         .collect();
 
+    // The same evidence as `char` slices, built once. The pair loop asks the
+    // same question of every identifier in each body, and re-collecting here
+    // per call was the gate's whole cost.
+    let evidence_chars: BTreeMap<PathBuf, Vec<char>> = evidence
+        .iter()
+        .map(|(p, b)| (p.clone(), b.chars().collect()))
+        .collect();
+
     let ambiguous = ambiguous_names(&production, &bodies);
 
     let ubiquitous: BTreeSet<String> = UBIQUITOUS.iter().map(|s| (*s).to_string()).collect();
@@ -831,23 +898,23 @@ fn measure(root: &Path) -> Result<Outcome, String> {
             })
             .collect();
 
+        // One needle map per module, one scan per candidate body: the same
+        // predicate as before, without a full-body copy per exported name.
+        let mut needles: BTreeMap<&str, bool> = BTreeMap::new();
+        for n in &identifying {
+            needles.insert(n.as_str(), fns.contains(n));
+        }
+        for n in &crate_fns {
+            needles.insert(n.as_str(), true);
+        }
         let mut wired = false;
-        'outer: for other in &production {
+        for other in &production {
             if other == path {
                 continue;
             }
-            let hay = &evidence[other];
-            for n in &identifying {
-                if mentions(hay, n, &mod_name, fns.contains(n), &own_types) {
-                    wired = true;
-                    break 'outer;
-                }
-            }
-            for n in &crate_fns {
-                if mentions(hay, n, &mod_name, true, &own_types) {
-                    wired = true;
-                    break 'outer;
-                }
+            if mentions_any(&evidence_chars[other], &needles, &mod_name, &own_types) {
+                wired = true;
+                break;
             }
         }
 

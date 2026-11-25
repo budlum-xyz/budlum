@@ -94,7 +94,7 @@ RUN PROTOC=/usr/bin/protoc cargo build --release --locked && \
     cp target/release/budlum-indexer /usr/local/bin/budlum-indexer
 
 # ── Stage 2: Runtime ────────────────────────────────────────
-FROM cgr.dev/chainguard/wolfi-base@sha256:580c9ae79c0229cc381475fbfbed0d91fab5d6606e57cd78732f9836de109e90
+FROM cgr.dev/chainguard/wolfi-base@sha256:be019c1c74fe69204a42c4e10bc4d886a49bf5403ffa74374ef7baa408fc9a26
 
 # Runtime stage migrated from debian:bookworm-slim (which carried 305 unfixed
 # Debian no-dsa Trivy OS advisories) to digest-pinned Chainguard Wolfi glibc

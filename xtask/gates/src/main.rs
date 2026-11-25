@@ -78,6 +78,7 @@ mod gates {
     pub mod chain_id_is_not_hardcoded;
     pub mod ci_fanout_budget;
     pub mod ci_jobs_end_on_cancel;
+    pub mod ci_trigger_coverage;
     pub mod ci_workflow_guards;
     pub mod classical_crypto_is_paired;
     pub mod clippy_extra;
@@ -90,6 +91,7 @@ mod gates {
     pub mod coverage;
     pub mod cross_table_checks;
     pub mod dead_pub_api;
+    pub mod delivery_presence;
     pub mod derived_content;
     pub mod docker_toolchain;
     pub mod domain_tags;
@@ -223,6 +225,7 @@ mod gates {
     pub mod wallet_node_address_agree;
     pub mod wire_fields_are_signed;
     pub mod workflow_red_keeps_its_words;
+    pub mod workflow_trigger_promises;
     pub mod workflows_cover_every_workspace;
     pub mod workflows_produce_jobs;
     pub mod zero_address_sender_is_verified;
@@ -508,6 +511,14 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
+        name: "workflow-trigger-promises",
+        replaces: None,
+        run: gates::workflow_trigger_promises::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::workflow_trigger_promises::self_test,
+    },
+    Gate {
         name: "workflows-produce-jobs",
         replaces: None,
         run: gates::workflows_produce_jobs::run,
@@ -601,6 +612,22 @@ const GATES: &[Gate] = &[
         run: gates::wallet_node_address_agree::run,
         run_args: None,
         self_test: gates::wallet_node_address_agree::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "ci-trigger-coverage",
+        replaces: None,
+        run: gates::ci_trigger_coverage::run,
+        run_args: None,
+        self_test: gates::ci_trigger_coverage::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "delivery-presence",
+        replaces: None,
+        run: gates::delivery_presence::run,
+        run_args: None,
+        self_test: gates::delivery_presence::self_test,
         run_log: None,
     },
     Gate {

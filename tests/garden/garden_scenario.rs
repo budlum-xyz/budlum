@@ -1374,3 +1374,120 @@ fn garden_rpc_is_refused_on_the_public_listener() -> Result<(), String> {
         "a refused call left a Garden behind",
     )
 }
+
+/// A Garden that loses seven of its eight validators, one at a time, and
+/// still holds everything it was given.
+///
+/// This is the shape a real Garden ends in. People do not resign from a
+/// room; their phone dies, they walk out of range, they close the lid. Each
+/// of those is a validator that stops answering with no departure block, and
+/// after each one the placement table names fewer holders for every object,
+/// so the nodes left have to fetch what they are now responsible for. If
+/// repair lagged behind departures the Garden would look healthy right up to
+/// the moment the last copy of something walked out of the door.
+///
+/// The test insists on three things after every single departure: the chain
+/// still makes blocks, repair finishes (nothing is left wanted), and every
+/// object published by anyone - including the ones published by validators
+/// that are already gone - still reads back byte for byte. At the end the
+/// host is alone with all eight objects, and when the host leaves too there
+/// is nothing left on its disk.
+#[test]
+fn garden_storage_shrink() -> Result<(), String> {
+    let _guard = NETWORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let host = Node::start("host")?;
+    let invite = text(&host.create("Shrinking Room")?, "/invite")?;
+    let mut validators = Vec::new();
+    for index in 1..=7 {
+        let node = Node::start(&format!("validator-{index}"))?;
+        node.join(&invite, true)?;
+        validators.push(node);
+    }
+    let active = |wanted: u64| {
+        wait_for(&format!("{wanted} active validators"), STEP_TIMEOUT, || {
+            Ok((number(&host.garden()?, "/active_validators")? == wanted).then_some(()))
+        })
+    };
+    active(8)?;
+
+    // Eight uploads, one from each validator, so no single departure can
+    // take every author with it.
+    let mut objects: Vec<(String, String)> = Vec::new();
+    let (tx, id) = host.publish_text("message", "object from the host")?;
+    objects.push((tx, id));
+    for (index, node) in validators.iter().enumerate() {
+        let (tx, id) = node.publish_text("message", &format!("object from validator {index}"))?;
+        objects.push((tx, id));
+    }
+    for (tx, _) in &objects {
+        host.wait_final(tx)?;
+        for node in &validators {
+            node.wait_final(tx)?;
+        }
+    }
+
+    // One by one, without a word. `drop` kills the process.
+    while !validators.is_empty() {
+        let gone = validators.remove(0);
+        let gone_name = gone.name.clone();
+        drop(gone);
+        let left = u64::try_from(validators.len()).map_err(|e| e.to_string())? + 1;
+
+        // A silent validator still counts in the active set until the
+        // others agree to suspend it, and the chain needs those blocks to
+        // get there, so the host keeps writing while it waits.
+        let mut tick = 0u32;
+        wait_for(
+            &format!("the Garden to settle after {gone_name} vanished"),
+            STEP_TIMEOUT,
+            || {
+                tick += 1;
+                host.publish_text("message", &format!("tick after {gone_name} {tick}"))?;
+                std::thread::sleep(Duration::from_millis(ROUND_MS));
+                Ok((number(&host.garden()?, "/active_validators")? == left).then_some(()))
+            },
+        )?;
+
+        // Repair finishes: nobody is still waiting for bytes it is now
+        // supposed to hold.
+        for node in std::iter::once(&host).chain(validators.iter()) {
+            wait_for(
+                &format!("[{}] repair to finish after {gone_name}", node.name),
+                STEP_TIMEOUT,
+                || Ok((number(&node.garden()?, "/objects_wanted_here")? == 0).then_some(())),
+            )?;
+        }
+
+        // And everything ever published still reads back, on every node
+        // that is left.
+        for node in std::iter::once(&host).chain(validators.iter()) {
+            for (_, content_id) in &objects {
+                let resolved = node.rpc("bud_gardenResolve", &json!([content_id]))?;
+                ensure(
+                    text(&resolved, "/content_id")? == *content_id,
+                    format!("[{}] lost {content_id} after {gone_name} left", node.name),
+                )?;
+            }
+        }
+    }
+
+    // The host is the Garden now, and it still has all eight.
+    active(1)?;
+    for (_, content_id) in &objects {
+        host.rpc("bud_gardenResolve", &json!([content_id]))?;
+    }
+
+    // The last one out takes nothing with it.
+    let left = host.rpc("bud_gardenLeave", &json!([]))?;
+    ensure(
+        left.get("retired") == Some(&json!(true)),
+        format!("the last validator out did not retire the Garden: {left}"),
+    )?;
+    let files = host.garden_files();
+    ensure(
+        files.is_empty(),
+        format!("Garden data stayed on the host's disk: {files:?}"),
+    )
+}

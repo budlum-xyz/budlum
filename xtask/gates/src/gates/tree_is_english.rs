@@ -145,6 +145,8 @@ const ENGLISH_COLLISIONS: &[&str] = &[
     "satirize",
     "satirized",
     "icing",
+    "hanging",
+    "hangings",
 ];
 
 /// Turkish-specific characters. Their presence is unambiguous.
@@ -1013,6 +1015,8 @@ fn collision_canaries(clean: &Path, tmp: &Path) -> Result<usize, String> {
         "/// The satirical reading of the specification.\n",
         "/// A satirist reviewed the design document.\n",
         "/// The icing on the cake is the second gate.\n",
+        "/// The joiner hanging off the edge of the network.\n",
+        "/// Two nodes hanging off the same anchor.\n",
     ]
     .iter()
     .enumerate()
@@ -1251,7 +1255,7 @@ const CANARY_GROUPS: [CanaryGroup; 5] = [
 /// Hard-coded on purpose. A group that stops testing anything still returns
 /// `Ok`, so the only way to notice is to know the number beforehand. Raise it
 /// deliberately when a canary is added; a drop is a defect.
-const EXPECTED_CANARIES: usize = 74;
+const EXPECTED_CANARIES: usize = 76;
 
 pub fn self_test() -> Result<String, String> {
     let tmp = scratch_dir()?;

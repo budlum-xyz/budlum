@@ -538,9 +538,9 @@ pub enum AdapterError {
     Unavailable { reason: String },
 }
 
-/// The interface itself. Four required methods and one optional, and the
-/// optional one is the reason a third-party adapter can be admitted without
-/// anybody reading its source.
+/// The interface itself. Three methods are required. Optional methods default
+/// to claims that are safe when an implementation says nothing: no golden
+/// sample, no parent binding, and no pinned trust anchor.
 pub trait ExternalFinalityAdapter: Send + Sync {
     /// Who this adapter says it is. Read at registration and compared on every
     /// call, so an adapter cannot be swapped under a domain that already
@@ -621,10 +621,12 @@ pub trait ExternalFinalityAdapter: Send + Sync {
     /// Returns `true` when this adapter instance holds a pinned trust anchor
     /// (validator committee, PoW checkpoint header, or ZK program/chain pin).
     ///
-    /// Adapters that can be constructed in a closed unpinned state override
-    /// this method so [`crate::cross_domain::external::ExternalDomainFinalityBridge`]
-    /// fails closed with `MissingTrustAnchor` before evaluating untrusted bytes.
+    /// The default is deliberately closed: a new or third-party adapter cannot
+    /// claim an anchor merely by omitting this method. An implementation must
+    /// derive `true` from its own instance state so
+    /// [`crate::cross_domain::external::ExternalDomainFinalityBridge`] refuses
+    /// unanchored evidence before evaluating untrusted bytes.
     fn has_pinned_trust_anchor(&self) -> bool {
-        true
+        false
     }
 }

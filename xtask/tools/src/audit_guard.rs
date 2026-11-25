@@ -430,6 +430,33 @@ fn subject_has_identity(subject: &str) -> bool {
         .contains(&review_identity().to_lowercase())
 }
 
+/// True when every occurrence of the review identity in this subject is the
+/// first segment of a branch path (`<identity>/...`) rather than the identity
+/// standing on its own.
+///
+/// A merge commit has to name the branch it merges, and the delivery branch is
+/// named after the identity, so its subject contains the word no matter who
+/// writes it. That is a path, not an attribution: the guard exists to keep the
+/// identity out of *authored* text, and `merge(testnet): bring testnet into
+/// <identity>/ajan-teslim` says nothing about who reviewed what. The caller
+/// applies this only to two-parent commits, so an ordinary commit cannot use a
+/// branch name to smuggle the identity past the check.
+fn identity_only_in_branch_paths(subject: &str) -> bool {
+    let needle = review_identity().to_lowercase();
+    let lower = subject.to_lowercase();
+    let mut rest = lower.as_str();
+    let mut found = false;
+    while let Some(at) = rest.find(&needle) {
+        found = true;
+        let after = &rest[at + needle.len()..];
+        if !after.starts_with('/') {
+            return false;
+        }
+        rest = after;
+    }
+    found
+}
+
 /// Recognize GitHub's generated merge subject so a branch path is not mistaken
 /// for authored commit text. The caller also requires a two-parent commit.
 fn is_generated_merge_subject(subject: &str) -> bool {
@@ -561,7 +588,8 @@ fn commit_subject_audit(
         let (parents, subject) = remainder.split_once('\t').unwrap_or((remainder, ""));
         let is_merge_commit = parents.split_whitespace().count() == 2;
         let generated_merge = is_merge_commit && is_generated_merge_subject(subject);
-        if subject_has_identity(subject) && !generated_merge {
+        let merge_naming_a_branch_path = is_merge_commit && identity_only_in_branch_paths(subject);
+        if subject_has_identity(subject) && !generated_merge && !merge_naming_a_branch_path {
             if quarantine.iter().any(|id| id == &sha.to_lowercase()) {
                 carried += 1;
                 continue;
@@ -954,6 +982,31 @@ mod tests {
         assert!(!is_generated_merge_subject(
             "Merge pull request #6 from example/branch feature"
         ));
+    }
+
+    #[test]
+    fn identity_in_a_merge_subject_is_a_branch_path_and_not_an_attribution() {
+        let name = review_identity().to_lowercase();
+        // A branch path: the identity is a path segment, followed by a slash.
+        assert!(identity_only_in_branch_paths(&format!(
+            "merge(testnet): bring testnet into {name}/ajan-teslim"
+        )));
+        assert!(identity_only_in_branch_paths(&format!(
+            "Merge remote-tracking branch 'origin/{name}/ajan-teslim' into {name}/ajan-teslim"
+        )));
+        // The identity standing alone is an attribution and stays a violation.
+        assert!(!identity_only_in_branch_paths(&format!(
+            "fix: {name} approved this"
+        )));
+        assert!(!identity_only_in_branch_paths(&format!(
+            "{name} reviewed the finality path"
+        )));
+        // Mixed: one path segment does not excuse the standalone mention.
+        assert!(!identity_only_in_branch_paths(&format!(
+            "merge {name}/x: reviewed by {name}"
+        )));
+        // A subject without the identity is not a path mention either.
+        assert!(!identity_only_in_branch_paths("merge: garden into testnet"));
     }
 
     fn run_git(root: &Path, args: &[&str]) {

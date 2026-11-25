@@ -1,14 +1,12 @@
-//! WIRING: unwired - external 2-of-3 multi-prover adapter awaits `AdapterSpec` variant registration in `external_tx`.
+//! WIRING: wired via `AdapterSpec::HeterogeneousMultiProver` in `intake.rs` and
+//! `FinalityGuarantee::for_external_spec_declared` in `universal_finality.rs`.
 //!
 //! Endgame `2-of-3` Heterogeneous Multi-Prover external finality adapter
 //! (`multiprover-2of3-v1`).
 //!
-//! WIRING: unwired - the 2-of-3 agreement check is re-exported by
-//! `crate::cross_domain::external` but no production path constructs the
-//! adapter yet: a multi-prover quorum is only meaningful once the individual
-//! prover registries it combines are themselves pinned by intake, and
-//! accepting a quorum over unpinned provers would weaken every domain it
-//! aggregates. Until then this module's test suite is its only caller.
+//! The 2-of-3 agreement check is re-exported by `crate::cross_domain::external`
+//! and constructed through `AdapterSpec::HeterogeneousMultiProver::build` when
+//! a governance-pinned multi-prover configuration is supplied.
 //!
 //! Single-prover ZK rollups suffer catastrophic total-value loss from a single
 //! under-constrained AIR circuit bug, while single-prover optimistic rollups

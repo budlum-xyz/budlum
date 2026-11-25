@@ -2,12 +2,8 @@
 # The surface is enumerated from the tree; growth and silent removal
 # both fail the gate. Re-measure in the same change that moves it:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- native-security-review --print-surface
-# Native security review attack-surface baseline (step 1).
-# The surface is enumerated from the tree; growth and silent removal
-# both fail the gate. Re-measure in the same change that moves it:
-#   cargo run --release --manifest-path xtask/gates/Cargo.toml -- native-security-review --print-surface
-digest: 014535a9686054f15ad32749d794d063343ca364a213cf9b04c303d25bdba754
-entries: 101
+digest: 6755dd675b516d504622668231e0745cdbe26ad25b99dfb8b1f7fab4953f4a52
+entries: 105
 bin	src/bin/bud-migrate.rs
 bin	src/bin/bud.rs
 bin	src/bin/budlum-domain-producer.rs
@@ -44,6 +40,7 @@ manifest	crates/ai-inference/crates/ai-tune/Cargo.toml
 manifest	crates/bpqs/Cargo.toml
 manifest	crates/bud-codec/Cargo.toml
 manifest	crates/budlum-explorer/Cargo.toml
+manifest	crates/budlum-nipopow/Cargo.toml
 manifest	crates/budlum-types/Cargo.toml
 manifest	crates/note-packing/Cargo.toml
 manifest	crates/uel-abi/Cargo.toml
@@ -66,6 +63,7 @@ manifest	fuzz/Cargo.toml
 manifest	kani/Cargo.toml
 manifest	mobile/core/Cargo.toml
 manifest	mobile/ffi/Cargo.toml
+manifest	mobile/garden-ffi/Cargo.toml
 manifest	mobile/tools/log-analyzer/Cargo.toml
 manifest	xtask/gates/Cargo.toml
 manifest	xtask/release/Cargo.toml
@@ -87,7 +85,9 @@ workflow	.github/workflows/docker-smoke.yml
 workflow	.github/workflows/extra-tooling.yml
 workflow	.github/workflows/fmt-diff-surface.yml
 workflow	.github/workflows/fuzz-nightly.yml
+workflow	.github/workflows/garden-apk.yml
 workflow	.github/workflows/garden-nat-nightly.yml
+workflow	.github/workflows/garden-node.yml
 workflow	.github/workflows/grype.yml
 workflow	.github/workflows/kani-slow.yml
 workflow	.github/workflows/miri-storage-weekly.yml

@@ -36,9 +36,9 @@
 //!    farmer or timelord signing two distinct block hashes at the exact same
 //!    `(network, sub_slot, signage_index)` for permissionless slashing.
 //!
-//! WIRING: unwired - implements [`ExternalFinalityAdapter`] for
-//! [`super::ExternalDomainRegistry`], verified by [`super::selftest::admit`];
-//! `AdapterSpec` variant joins `intake.rs` in the follow-up intake merge.
+//! WIRING: implements [`ExternalFinalityAdapter`] for
+//! [`super::ExternalDomainRegistry`], wired via `AdapterSpec::PoSpaceVdf` in
+//! `intake.rs` and verified by [`super::selftest::admit`].
 
 use bincode::Options;
 use serde::{Deserialize, Serialize};

@@ -96,11 +96,16 @@ pub const SCHNORR_SIGNATURE_LEN: usize = 64;
 /// An x-only secp256k1 public key is 32 bytes.
 pub const SCHNORR_PUBLIC_KEY_LEN: usize = 32;
 
+/// The adapter's canonical name. Single source of truth for both the
+/// [`AdapterId`] a registration names and the descriptor's `name`, so a
+/// reader can check the two agree.
+pub const EOTS_ADAPTER_NAME: &str = "babylon-eots-restaking-finality";
+
 /// The adapter id, derived from its name so anybody can check that a
 /// registration means what it says.
 #[must_use]
 pub fn eots_adapter_id() -> AdapterId {
-    AdapterId::from_name("babylon-eots-restaking-finality")
+    AdapterId::from_name(EOTS_ADAPTER_NAME)
 }
 
 /// The evidence version this adapter reads.
@@ -670,7 +675,7 @@ impl BabylonEotsAdapter {
         Self {
             descriptor: AdapterDescriptor {
                 id: eots_adapter_id(),
-                name: "babylon-eots-restaking-finality".to_string(),
+                name: EOTS_ADAPTER_NAME.to_string(),
                 adapter_version: ADAPTER_VERSION,
                 accepted_evidence_versions: vec![EVIDENCE_VERSION],
                 consensus_kind: "babylon-btc-restaking-eots".to_string(),
@@ -1150,6 +1155,315 @@ fn equivocation_proof(first: &EotsVote, second: &EotsVote) -> EotsEquivocationPr
 fn rule(reason: impl Into<String>) -> AdapterError {
     AdapterError::ConsensusRule {
         rule: reason.into(),
+    }
+}
+
+/// The governance-pinned trust anchor a Babylon EOTS domain is registered
+/// under: the chain id, the Bitcoin weak-subjectivity anchor, and the epoch
+/// EOTS (and optional post-quantum) key tables the provider announced.
+///
+/// This is the data a registration carries and a slasher's proof is checked
+/// against. It is deliberately a plain, serialisable value: a domain whose
+/// adapter cannot be rebuilt from its stored pin is a domain that silently
+/// stops serving on restart, so the pin must round-trip through consensus.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedBabylonEots {
+    /// The chain id every vote in the domain is bound to.
+    pub chain_id: u64,
+    /// The Bitcoin weak-subjectivity anchor the checkpoints must be buried
+    /// under.
+    pub anchor: BtcWeakSubjectivityAnchor,
+    /// The `(epoch, EOTS key)` table the provider announced.
+    pub epoch_keys: Vec<(u64, EotsPublicKey)>,
+    /// The `(epoch, ML-DSA-65 public key)` table, when the provider announced
+    /// post-quantum keys. An epoch may carry an EOTS key without a PQ key; the
+    /// reverse is rejected.
+    #[serde(default)]
+    pub epoch_pq_keys: Vec<(u64, Vec<u8>)>,
+}
+
+/// Largest epoch-key table a registration may carry. A table is governance
+/// data, not a free-form blob; an unbounded one is a vector a hostile
+/// registration could use to inflate the domain record.
+pub const MAX_PINNED_EPOCHS: usize = 4096;
+
+impl PinnedBabylonEots {
+    /// Check the pin's shape. Every field must be well-formed for the pin to
+    /// be a trust anchor at all: a pin that does not validate cannot certify a
+    /// single vote, and refusing it at install time is the only place the
+    /// shape is enforced once.
+    ///
+    /// # Errors
+    ///
+    /// A reason naming the field that is wrong.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.chain_id == 0 {
+            return Err("the pinned chain id is zero".to_string());
+        }
+        if self.anchor.required_confirmations == 0 {
+            return Err("the anchor requires zero confirmations".to_string());
+        }
+        if self.anchor.tip_height < self.anchor.required_confirmations {
+            return Err("the anchor tip is shallower than its confirmation depth".to_string());
+        }
+        if self.anchor.tip_block_hash.iter().all(|b| *b == 0) {
+            return Err("the anchor tip block hash is all zero".to_string());
+        }
+        if self.epoch_keys.is_empty() {
+            return Err("the pinned epoch-key table is empty".to_string());
+        }
+        if self.epoch_keys.len() > MAX_PINNED_EPOCHS {
+            return Err(format!(
+                "the pinned epoch-key table has {} entries, over the {MAX_PINNED_EPOCHS} cap",
+                self.epoch_keys.len()
+            ));
+        }
+        let mut previous: Option<u64> = None;
+        for (epoch, key) in &self.epoch_keys {
+            if *epoch == 0 {
+                return Err("an epoch in the pinned table is zero".to_string());
+            }
+            if Some(*epoch) <= previous {
+                return Err(format!(
+                    "the pinned epoch-key table is not strictly increasing at epoch {epoch}"
+                ));
+            }
+            if !key.is_on_curve() {
+                return Err(format!(
+                    "the EOTS key for epoch {epoch} is not a curve point"
+                ));
+            }
+            previous = Some(*epoch);
+        }
+        let mut previous_pq: Option<u64> = None;
+        for (epoch, key) in &self.epoch_pq_keys {
+            if *epoch == 0 {
+                return Err("a post-quantum epoch in the pinned table is zero".to_string());
+            }
+            if Some(*epoch) <= previous_pq {
+                return Err(format!(
+                    "the pinned post-quantum table is not strictly increasing at epoch {epoch}"
+                ));
+            }
+            if key.is_empty() {
+                return Err(format!("the post-quantum key for epoch {epoch} is empty"));
+            }
+            if !self.epoch_keys.iter().any(|(e, _)| *e == *epoch) {
+                return Err(format!(
+                    "a post-quantum key is pinned for epoch {epoch}, which has no EOTS key"
+                ));
+            }
+            previous_pq = Some(*epoch);
+        }
+        Ok(())
+    }
+
+    /// The EOTS key announced for `epoch`, if the table names it.
+    #[must_use]
+    pub fn epoch_key(&self, epoch: u64) -> Option<&EotsPublicKey> {
+        self.epoch_keys
+            .iter()
+            .find(|(announced, _)| *announced == epoch)
+            .map(|(_, key)| key)
+    }
+
+    /// Rebuild the adapter this pin describes, bound to `network`.
+    ///
+    /// The adapter is reconstructed from the pin on every verification, so a
+    /// restart and live operation derive the same trust root from the same
+    /// stored data.
+    #[must_use]
+    pub fn build_adapter(&self, network: &str) -> BabylonEotsAdapter {
+        let mut adapter = BabylonEotsAdapter::new(network, self.chain_id).with_anchor(self.anchor);
+        for (epoch, key) in &self.epoch_keys {
+            adapter = adapter.with_epoch_key(*epoch, *key);
+        }
+        for (epoch, key) in &self.epoch_pq_keys {
+            adapter = adapter.with_epoch_pq_key(*epoch, key.clone());
+        }
+        adapter
+    }
+}
+
+/// Verify an EOTS equivocation proof against a governance-pinned trust anchor.
+///
+/// The proof is first checked with nothing but itself ([`EotsEquivocationProof::check`]:
+/// both signatures verify under the named key, the messages differ, the
+/// digest is the one the fields produce). Then the proof is bound to *this*
+/// domain: its votes must name the pinned chain id, and the EOTS key they are
+/// signed under must be the one the pin announced for that epoch. A proof that
+/// is internally consistent but signed under a key governance never announced
+/// is refused - it is a valid equivocation, by somebody who is not this
+/// domain's provider.
+///
+/// # Errors
+///
+/// The reason the proof does not bind to the pin.
+pub fn verify_eots_equivocation(
+    pinned: &PinnedBabylonEots,
+    proof: &EotsEquivocationProof,
+) -> Result<(), String> {
+    proof.check()?;
+    let first = parse_epoch_vote_message(&proof.first_message)?;
+    if first.chain_id != pinned.chain_id {
+        return Err(format!(
+            "the equivocation votes name chain id {} but the pinned chain id is {}",
+            first.chain_id, pinned.chain_id
+        ));
+    }
+    let Some(announced) = pinned.epoch_key(first.epoch) else {
+        return Err(format!(
+            "the equivocation votes name epoch {} and no EOTS key was announced for it",
+            first.epoch
+        ));
+    };
+    if announced.x_only != proof.eots_key {
+        return Err(format!(
+            "the equivocation proof is signed under a key the epoch {} announcement does not name",
+            first.epoch
+        ));
+    }
+    Ok(())
+}
+
+/// Test-only fixtures shared with the intake and transaction-door tests.
+///
+/// The intake tests need a real signed vote and a real conflicting pair; the
+/// private helpers below `mod tests` are not visible outside this module.
+/// This surface exists only under `cfg(test)`, and it builds the same bytes a
+/// registration and a slasher would build.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use k256::schnorr::signature::Signer;
+
+    pub(crate) const CHAIN_ID: u64 = 45_261;
+    pub(crate) const NETWORK: &str = "babylon-mainnet";
+    pub(crate) const EPOCH: u64 = 19_004;
+    pub(crate) const HEIGHT: u64 = 884_213;
+    /// The seed of the one provider the pinned table names.
+    pub(crate) const PINNED_SEED: u8 = 0x5B;
+
+    fn signing_key(seed: u8) -> k256::schnorr::SigningKey {
+        k256::schnorr::SigningKey::from_slice(&[seed; 32]).expect("the seed is a valid scalar")
+    }
+
+    pub(crate) fn public_key_for(seed: u8) -> EotsPublicKey {
+        let bytes = signing_key(seed).verifying_key().to_bytes();
+        let mut x_only = [0u8; SCHNORR_PUBLIC_KEY_LEN];
+        x_only.copy_from_slice(bytes.as_slice());
+        EotsPublicKey { x_only }
+    }
+
+    fn checkpoint(btc_height: u64, salt: u8) -> BtcCheckpoint {
+        BtcCheckpoint {
+            block_hash: [salt; 32],
+            btc_height,
+            mmr_root: [salt.wrapping_add(1); 32],
+        }
+    }
+
+    fn vote(
+        seed: u8,
+        height: u64,
+        epoch: u64,
+        state_root: [u8; 32],
+        checkpoint: BtcCheckpoint,
+    ) -> EotsVote {
+        let key = public_key_for(seed);
+        let message = epoch_vote_message(CHAIN_ID, height, epoch, &state_root, &checkpoint, &key);
+        let signature: SchnorrSignature = signing_key(seed).sign(&message);
+        EotsVote {
+            provider: [0x11; 32],
+            chain_id: CHAIN_ID,
+            height,
+            epoch,
+            state_root,
+            checkpoint,
+            eots_key: key,
+            signature: signature.to_bytes().to_vec(),
+            post_quantum: None,
+        }
+    }
+
+    fn envelope(votes: Vec<EotsVote>) -> RawConsensusEvidence {
+        let payload = EotsEvidence {
+            chain_id: CHAIN_ID,
+            votes,
+        }
+        .encode()
+        .expect("encodes");
+        let decoded = EotsEvidence::decode(&payload).expect("decodes");
+        let first = decoded.votes.first().expect("one vote");
+        RawConsensusEvidence {
+            adapter: eots_adapter_id(),
+            evidence_version: EVIDENCE_VERSION,
+            network: NETWORK.to_string(),
+            payload,
+            declared_height: first.height,
+            declared_root: first.state_root,
+            submitter: Address::from([0x2A; 32]),
+        }
+    }
+
+    fn first_vote(seed: u8) -> EotsVote {
+        vote(seed, HEIGHT, EPOCH, [0x91; 32], checkpoint(870_000, 0x33))
+    }
+
+    /// The pin governance installs for `NETWORK`: the one announced key and
+    /// a Bitcoin anchor that buries the fixture checkpoints.
+    pub(crate) fn pinned() -> PinnedBabylonEots {
+        PinnedBabylonEots {
+            chain_id: CHAIN_ID,
+            anchor: BtcWeakSubjectivityAnchor {
+                tip_block_hash: [0xC4; 32],
+                tip_height: 870_010,
+                required_confirmations: DEFAULT_REQUIRED_BTC_CONFIRMATIONS,
+            },
+            epoch_keys: vec![(EPOCH, public_key_for(PINNED_SEED))],
+            epoch_pq_keys: Vec::new(),
+        }
+    }
+
+    /// A single well-formed vote by the pinned provider, for registration.
+    pub(crate) fn golden_evidence() -> RawConsensusEvidence {
+        envelope(vec![first_vote(PINNED_SEED)])
+    }
+
+    /// Two conflicting votes by `seed`'s provider at one height and epoch.
+    pub(crate) fn conflicting_evidence(seed: u8) -> RawConsensusEvidence {
+        let second = vote(seed, HEIGHT, EPOCH, [0x91; 32], checkpoint(869_000, 0x44));
+        envelope(vec![first_vote(seed), second])
+    }
+
+    /// The equivocation proof a slasher carries, derived exactly as the
+    /// adapter derives it from the evidence: verify the pair against `pinned`
+    /// and take the proof it yields.
+    pub(crate) fn equivocation_proof(
+        pinned: &PinnedBabylonEots,
+        seed: u8,
+    ) -> EotsEquivocationProof {
+        let mut policy = VerificationPolicy::strict(0);
+        policy.require_slashable = false;
+        pinned
+            .build_adapter(NETWORK)
+            .verify_evidence(&conflicting_evidence(seed), &policy)
+            .expect("a conflicting pair verifies and yields a proof")
+            .1
+            .expect("the pair yields a proof")
+    }
+
+    /// An equivocation proof by a provider the pinned table does NOT name.
+    ///
+    /// The adapter refuses votes signed under a key it never announced, so
+    /// this cannot come out of [`Self::equivocation_proof`]; it is built
+    /// straight from the two conflicting votes. The proof is internally
+    /// consistent - [`EotsEquivocationProof::check`] passes - and is refused
+    /// only because the key it names is not the one governance announced.
+    pub(crate) fn foreign_equivocation_proof(seed: u8) -> EotsEquivocationProof {
+        let first = vote(seed, HEIGHT, EPOCH, [0x91; 32], checkpoint(870_000, 0x33));
+        let second = vote(seed, HEIGHT, EPOCH, [0x91; 32], checkpoint(869_000, 0x44));
+        super::equivocation_proof(&first, &second)
     }
 }
 

@@ -41,7 +41,9 @@
 //!    the trusted `(batch_number, state_root, expected_forced_queue_head)` only
 //!    from a cryptographically verified batch.
 //!
-//! WIRING: unwired - implements `ExternalFinalityAdapter` for `ExternalDomainRegistry`, verified by `selftest::admit_observed`; `AdapterSpec` joins `intake.rs` in the follow-up merge.
+//! WIRING: implements `ExternalFinalityAdapter` for `ExternalDomainRegistry`,
+//! wired via `AdapterSpec::StarkValidityRollup` in `intake.rs` and verified by
+//! `selftest::admit_observed`.
 
 use bincode::Options;
 use bud_proof::{ExecutionPublicInputs, ProofEnvelope, ProverAdapter};
@@ -312,6 +314,7 @@ pub fn compute_batch_da_binding(header: &StarkRollupBatchHeader) -> Hash32 {
     h.update(header.da_blob_count.to_le_bytes());
     update_len_prefixed(&mut h, &header.prev_forced_queue_head);
     update_len_prefixed(&mut h, &header.next_forced_queue_head);
+    h.update(header.oldest_pending_forced_lag.to_le_bytes());
     update_len_prefixed(&mut h, &header.withdrawal_root);
     update_len_prefixed(&mut h, &header.batch_block_hash);
     h.finalize().into()
@@ -1136,15 +1139,45 @@ mod tests {
         ));
 
         // 3. Omitting a consumed forced-inclusion tx breaks next_forced_queue_head.
-        let mut skipped = ev;
+        let mut skipped = ev.clone();
         skipped.forced_inclusions.clear();
         let raw_skipped = RawConsensusEvidence {
             payload: encode_stark_rollup_evidence(&skipped).expect("encodes"),
-            ..raw_censored
+            ..raw_censored.clone()
         };
         assert!(matches!(
             adapter.verify(&raw_skipped, &policy),
             Err(AdapterError::ConsensusRule { .. })
         ));
+
+        // 4. Regression: oldest_pending_forced_lag MUST be bound inside compute_batch_da_binding
+        // (and thus inside the Plonky3 STARK public inputs). Otherwise a censoring sequencer
+        // that proved a batch with oldest_pending_forced_lag = 99 (> max_forced_inclusion_lag_batches)
+        // can overwrite header.oldest_pending_forced_lag = 0 in plaintext without re-proving!
+        let pinned_for_lag = base_config();
+        let (mut lag_forged_ev, mut lag_forged_raw) = prove_rollup_batch(
+            &pinned_for_lag,
+            vec![ContractStateDiff {
+                contract_address: [0x02; 32],
+                storage_key: [0x01; 32],
+                previous_value: [0x00; 32],
+                new_value: [0x11; 32],
+            }],
+            vec![ForcedInclusionEntry {
+                l1_sequence: 1,
+                sender: [0xB1; 32],
+                tx_hash: [0xB2; 32],
+            }],
+            99,
+        );
+        lag_forged_ev.header.oldest_pending_forced_lag = 0;
+        lag_forged_raw.payload = encode_stark_rollup_evidence(&lag_forged_ev).expect("encodes");
+        assert!(
+            matches!(
+                adapter.verify(&lag_forged_raw, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "plaintext downgrade of oldest_pending_forced_lag without re-proving STARK must be refused"
+        );
     }
 }

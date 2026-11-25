@@ -238,6 +238,121 @@ pub enum AdapterSpec {
         #[serde(default)]
         anchor: Option<crate::cross_domain::external::bitvm_covenant::PinnedBitVmAnchor>,
     },
+    /// Babylon / BTC-restaking EOTS finality bound to one network and one
+    /// governance-pinned epoch-key table plus Bitcoin weak-subjectivity
+    /// anchor. APPENDED LAST (tag `15`): the wire tag is the first free slot
+    /// after the reserved 10..14 (Sekstant / ScheduleFork). A spec without a
+    /// pin is the closed admission state: `register_domain` refuses it.
+    BabylonEots {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::babylon_eots::PinnedBabylonEots>,
+    },
+    /// Sublinear `NIPoPoW` superblock finality (Kiayias-Miller-Zindros,
+    /// EUROCRYPT 2020) for a `PoW` chain, bound to a governance-pinned genesis
+    /// and KMZ `(m, k)` parameters. APPENDED LAST (tag `16`): the bincode
+    /// discriminant is this variant's declaration position, and the manual
+    /// `encode_adapter_spec` tag is the first free slot after Babylon's 15.
+    ///
+    /// Why this family and not a linear SPV one: the promise a `PoW` chain
+    /// makes is work, and `NIPoPoW` verifies genesis-to-tip work in
+    /// `O(m log|C| + k)` headers under pure SHA-256 - the one primitive here
+    /// Shor's algorithm does not touch. A spec without a genesis anchor is the
+    /// closed admission state: `register_domain` refuses it, because a
+    /// superblock proof says nothing about *which* chain it is a proof of
+    /// until a genesis is pinned.
+    NipopowSuperblock {
+        network: String,
+        #[serde(default)]
+        genesis: Option<crate::cross_domain::external::nipopow::PinnedNipopowGenesis>,
+    },
+    /// PHANTOM-GHOSTDAG `k`-cluster blockDAG `PoW` finality (Kaspa family).
+    ///
+    /// `encode_adapter_spec` tag is the first free slot after NIPoPoW's 16.
+    ///
+    /// A blockDAG is where sublinear `PoW` stops being enough on its own: a
+    /// `NIPoPoW` superchain is a proof about one chain, and the ledger here is
+    /// a DAG whose finality is a blue-score depth over a `k`-cluster coloring.
+    /// So this family is anchored by a pruning-point checkpoint carrying the
+    /// anchor's `blue_score` and `blue_work`, and the pin also fixes `k`, the
+    /// parent bound, the merge-depth bound and the required blue depth. A spec
+    /// without that anchor is the closed admission state: `register_domain`
+    /// refuses it, because a DAG certificate says nothing about which DAG it
+    /// belongs to until a checkpoint is pinned.
+    Ghostdag {
+        network: String,
+        #[serde(default)]
+        anchor: Option<crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor>,
+    },
+    /// Leaderless asynchronous AC S BFT finality (`HoneyBadgerBFT`).
+    ///
+    /// `encode_adapter_spec` tag is the first free slot after GHOSTDAG's 17.
+    ///
+    /// This is the first family here whose finality is *protocol* finality
+    /// under an honest majority rather than a work bound: an epoch's
+    /// asynchronous common subset is decided by an `N - f` ML-DSA-65 quorum, so
+    /// the pin that matters is the committee (genesis, epoch, validator keys)
+    /// and not a difficulty. A spec without that committee is the closed
+    /// admission state: a certificate signed by keys nobody pinned certifies
+    /// nothing.
+    HoneyBadgerBft {
+        network: String,
+        #[serde(default)]
+        committee:
+            Option<crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee>,
+    },
+    /// `Solana Tower-BFT` epoch-slot finality bound to a governance-pinned
+    /// epoch (`encode_adapter_spec` tag `10`).
+    SolanaTowerBft {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch>,
+    },
+    /// `Proof-of-Space+VDF` plot-chain finality bound to a governance-pinned
+    /// anchor (`encode_adapter_spec` tag `11`).
+    PoSpaceVdf {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::pospace_vdf::PinnedPoSpaceAnchor>,
+    },
+    /// `Aptos Jolteon/Dumbo-NG` epoch-BFT finality bound to a governance-pinned
+    /// epoch state (`encode_adapter_spec` tag `12`).
+    AptosJolteonBft {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::aptos_jolteon_bft::PinnedJolteonEpochState>,
+    },
+    /// `Near Doomslug` epoch block-producer finality bound to a
+    /// governance-pinned epoch (`encode_adapter_spec` tag `13`).
+    NearDoomslugBft {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::near_doomslug::PinnedNearEpoch>,
+    },
+    /// Chain-Key NI-DKG subnet root finality bound to a governance-pinned
+    /// chain-key root (`encode_adapter_spec` tag `14`).
+    ChainKeyNiDkg {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::chain_key_ni_dkg::PinnedChainKeyRoot>,
+    },
+    /// Heterogeneous multi-prover (STARK + PQ leg) fault-proof finality bound
+    /// to a governance-pinned config (`encode_adapter_spec` tag `19`).
+    HeterogeneousMultiProver {
+        network: String,
+        #[serde(default)]
+        pinned: Option<
+            crate::cross_domain::external::heterogeneous_multiprover::PinnedMultiProverConfig,
+        >,
+    },
+    /// `Stark validity rollup` state-transition finality bound to a
+    /// governance-pinned program and trusted batch (`encode_adapter_spec` tag `20`).
+    StarkValidityRollup {
+        network: String,
+        #[serde(default)]
+        pinned:
+            Option<crate::cross_domain::external::stark_validity_rollup::PinnedStarkRollupConfig>,
+    },
 }
 
 impl AdapterSpec {
@@ -255,7 +370,18 @@ impl AdapterSpec {
             | Self::DagCertificate { network, .. }
             | Self::CasperFfg { network, .. }
             | Self::MysticetiDag { network, .. }
-            | Self::BitVmCovenant { network, .. } => network,
+            | Self::BitVmCovenant { network, .. }
+            | Self::BabylonEots { network, .. }
+            | Self::NipopowSuperblock { network, .. }
+            | Self::Ghostdag { network, .. }
+            | Self::HoneyBadgerBft { network, .. }
+            | Self::SolanaTowerBft { network, .. }
+            | Self::PoSpaceVdf { network, .. }
+            | Self::AptosJolteonBft { network, .. }
+            | Self::NearDoomslugBft { network, .. }
+            | Self::ChainKeyNiDkg { network, .. }
+            | Self::HeterogeneousMultiProver { network, .. }
+            | Self::StarkValidityRollup { network, .. } => network,
         }
     }
 
@@ -272,9 +398,10 @@ impl AdapterSpec {
         golden: Option<RawConsensusEvidence>,
     ) -> Box<dyn ExternalFinalityAdapter> {
         use crate::cross_domain::external::{
-            bitvm_covenant::BitVmCovenantAdapter, casper_ffg::CasperFfgAdapter,
-            da_sampling::DataAvailabilityAdapter, dag_bft::BullsharkDagAdapter,
-            hotstuff::HotStuffThreeChainAdapter, mysticeti_dag::MysticetiDagAdapter,
+            babylon_eots::BabylonEotsAdapter, bitvm_covenant::BitVmCovenantAdapter,
+            casper_ffg::CasperFfgAdapter, da_sampling::DataAvailabilityAdapter,
+            dag_bft::BullsharkDagAdapter, hotstuff::HotStuffThreeChainAdapter,
+            mysticeti_dag::MysticetiDagAdapter,
         };
         match self {
             Self::EthereumSync { network, committee } => box_with_golden(
@@ -334,6 +461,118 @@ impl AdapterSpec {
                 || BitVmCovenantAdapter::new(network, anchor.clone()),
                 golden,
                 BitVmCovenantAdapter::with_golden,
+            ),
+            Self::BabylonEots { network, pinned } => box_with_golden(
+                || match pinned {
+                    Some(pinned) => pinned.build_adapter(network),
+                    // `None` is the closed admission state: `register_domain`
+                    // refuses it before this is ever built, and a spec that
+                    // somehow reaches here verifies nothing (chain id 0, no
+                    // keys, no anchor).
+                    None => BabylonEotsAdapter::new(network, 0),
+                },
+                golden,
+                BabylonEotsAdapter::with_golden,
+            ),
+            Self::NipopowSuperblock { network, genesis } => box_with_golden(
+                || {
+                    crate::cross_domain::external::nipopow::NipopowAdapter::new(
+                        network,
+                        genesis.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::nipopow::NipopowAdapter::with_golden,
+            ),
+            Self::Ghostdag { network, anchor } => box_with_golden(
+                || {
+                    crate::cross_domain::external::ghostdag::GhostdagPowAdapter::new(
+                        network,
+                        anchor.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::ghostdag::GhostdagPowAdapter::with_golden,
+            ),
+            Self::HoneyBadgerBft { network, committee } => box_with_golden(
+                || {
+                    crate::cross_domain::external::honeybadger_bft::HoneyBadgerBftAdapter::new(
+                        network,
+                        committee.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::honeybadger_bft::HoneyBadgerBftAdapter::with_golden,
+            ),
+            Self::SolanaTowerBft { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::solana_tower_bft::SolanaTowerBftAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::solana_tower_bft::SolanaTowerBftAdapter::with_golden,
+            ),
+            Self::PoSpaceVdf { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::pospace_vdf::PoSpaceVdfAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::pospace_vdf::PoSpaceVdfAdapter::with_golden,
+            ),
+            Self::AptosJolteonBft { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::aptos_jolteon_bft::AptosJolteonAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::aptos_jolteon_bft::AptosJolteonAdapter::with_golden,
+            ),
+            Self::NearDoomslugBft { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::near_doomslug::NearDoomslugAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::near_doomslug::NearDoomslugAdapter::with_golden,
+            ),
+            Self::ChainKeyNiDkg { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::chain_key_ni_dkg::ChainKeyNiDkgAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::chain_key_ni_dkg::ChainKeyNiDkgAdapter::with_golden,
+            ),
+            Self::HeterogeneousMultiProver { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::heterogeneous_multiprover::HeterogeneousMultiProverAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::heterogeneous_multiprover::HeterogeneousMultiProverAdapter::with_golden,
+            ),
+            Self::StarkValidityRollup { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::stark_validity_rollup::StarkValidityRollupAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::stark_validity_rollup::StarkValidityRollupAdapter::with_golden,
             ),
         }
     }
@@ -473,6 +712,44 @@ pub struct IntakeState {
         String,
         crate::cross_domain::external::bitvm_covenant::PinnedBitVmAnchor,
     >,
+    /// Governance-pinned Babylon EOTS epoch-key tables keyed by external network.
+    #[serde(default)]
+    pub pinned_babylon_eots_anchors: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::babylon_eots::PinnedBabylonEots,
+    >,
+    /// Governance-pinned `NIPoPoW` genesis anchors and KMZ `(m, k)` parameters
+    /// keyed by external network.
+    ///
+    /// Inside [`Self::state_digest`] like every other pin map: only a block may
+    /// write it. A registrant that could supply its own genesis would be
+    /// certifying its own finality.
+    #[serde(default)]
+    pub pinned_nipopow_genesis: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::nipopow::PinnedNipopowGenesis,
+    >,
+    /// Governance-pinned `PHANTOM-GHOSTDAG` checkpoint anchors and `k`-cluster
+    /// parameters keyed by external network.
+    ///
+    /// Inside [`Self::state_digest`] like every other pin map: only a block may
+    /// write it. A registrant that could choose its own pruning point would be
+    /// certifying its own finality.
+    #[serde(default)]
+    pub pinned_ghostdag_anchors: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor,
+    >,
+    /// Governance-pinned `HoneyBadgerBFT` epoch committees keyed by external
+    /// network.
+    ///
+    /// Inside [`Self::state_digest`] like every other pin map: only a block may
+    /// write it.
+    #[serde(default)]
+    pub pinned_honeybadger_committees: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee,
+    >,
     /// Deterministic, admin-keyless intake circuit breaker and contradiction
     /// tombstone ledger, folded into [`Self::state_digest`].
     #[serde(default)]
@@ -497,6 +774,14 @@ pub enum AnchorFamily {
     Bitcoin,
     Tendermint,
     Da,
+    BabylonEots,
+    /// Sublinear `PoW` superblock (`NIPoPoW`) genesis and KMZ parameters.
+    PoWSuccinct,
+    /// BlockDAG `PoW` (`PHANTOM-GHOSTDAG`) pruning-point checkpoint and
+    /// `k`-cluster parameters.
+    Ghostdag,
+    /// Leaderless asynchronous BFT (`HoneyBadgerBFT`) epoch committee.
+    HoneyBadger,
 }
 
 impl AnchorFamily {
@@ -508,6 +793,10 @@ impl AnchorFamily {
             Self::Bitcoin => "bitcoin",
             Self::Tendermint => "tendermint",
             Self::Da => "da",
+            Self::BabylonEots => "babylon-eots",
+            Self::PoWSuccinct => "pow-succinct",
+            Self::Ghostdag => "ghostdag",
+            Self::HoneyBadger => "honeybadger",
         }
     }
 }
@@ -529,6 +818,14 @@ pub enum PinnedExternalAnchor {
     Bitcoin(PinnedBitcoinAnchor),
     Tendermint(crate::cross_domain::external::tendermint::PinnedTendermintAnchor),
     Da(crate::cross_domain::external::da_sampling::PinnedDaCommittee),
+    BabylonEots(crate::cross_domain::external::babylon_eots::PinnedBabylonEots),
+    /// Genesis and KMZ `(m, k)` parameters for a `NIPoPoW` superblock domain.
+    Nipopow(crate::cross_domain::external::nipopow::PinnedNipopowGenesis),
+    /// Pruning-point checkpoint and `k`-cluster parameters for a
+    /// `PHANTOM-GHOSTDAG` blockDAG domain.
+    Ghostdag(crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor),
+    /// Epoch committee for a leaderless asynchronous `HoneyBadgerBFT` domain.
+    HoneyBadger(crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee),
 }
 
 impl PinnedExternalAnchor {
@@ -540,6 +837,10 @@ impl PinnedExternalAnchor {
             Self::Bitcoin(_) => AnchorFamily::Bitcoin,
             Self::Tendermint(_) => AnchorFamily::Tendermint,
             Self::Da(_) => AnchorFamily::Da,
+            Self::BabylonEots(_) => AnchorFamily::BabylonEots,
+            Self::Nipopow(_) => AnchorFamily::PoWSuccinct,
+            Self::Ghostdag(_) => AnchorFamily::Ghostdag,
+            Self::HoneyBadger(_) => AnchorFamily::HoneyBadger,
         }
     }
 
@@ -586,6 +887,65 @@ impl PinnedExternalAnchor {
                 if committee.members.is_empty() {
                     return Err("the pinned DA committee has no members".into());
                 }
+            }
+            Self::BabylonEots(pinned) => {
+                // The pin's own shape check is the whole validation: a pin that
+                // does not validate cannot certify a vote, and `PinnedBabylonEots::validate`
+                // names the offending field.
+                pinned.validate()?;
+            }
+            Self::Nipopow(genesis) => {
+                // A zero field here is not a weak anchor, it is the shape of
+                // one: a zero genesis id anchors nothing, a zero target makes
+                // every hash a superblock, and `m = 0` / `k = 0` delete the KMZ
+                // predicate the proof is supposed to satisfy.
+                if genesis.genesis_id == [0u8; 32] {
+                    return Err("the pinned NIPoPoW genesis id is all zeroes".into());
+                }
+                if genesis.pow_target == [0u8; 32] {
+                    return Err("the pinned NIPoPoW difficulty target is all zeroes".into());
+                }
+                if genesis.min_superblocks_m == 0 {
+                    return Err("the pinned NIPoPoW superblock count m is zero".into());
+                }
+                if genesis.min_superblock_level == 0 {
+                    return Err("the pinned NIPoPoW superblock level is zero".into());
+                }
+                if genesis.min_suffix_k == 0 {
+                    return Err("the pinned NIPoPoW suffix stability parameter k is zero".into());
+                }
+            }
+            Self::Ghostdag(anchor) => {
+                // The same argument as the NIPoPoW pin: a zero field is the
+                // shape of an anchor, not a weak one. A zero checkpoint anchors
+                // no DAG, `k = 0` deletes the anticone bound the coloring is
+                // defined by, and a zero blue depth finalizes the tip itself.
+                if anchor.anchor_hash == [0u8; 32] {
+                    return Err("the pinned GHOSTDAG checkpoint hash is all zeroes".into());
+                }
+                if anchor.k == 0 {
+                    return Err("the pinned GHOSTDAG anticone parameter k is zero".into());
+                }
+                if anchor.max_parents == 0 {
+                    return Err("the pinned GHOSTDAG parent bound is zero".into());
+                }
+                if anchor.merge_depth_bound == 0 {
+                    return Err("the pinned GHOSTDAG merge-depth bound is zero".into());
+                }
+                if anchor.required_blue_depth == 0 {
+                    return Err("the pinned GHOSTDAG blue confirmation depth is zero".into());
+                }
+                if anchor.max_target_bits == 0 {
+                    return Err("the pinned GHOSTDAG difficulty target is zero".into());
+                }
+            }
+            Self::HoneyBadger(committee) => {
+                // The committee's own validator is the whole check: it names
+                // the offending field (empty network id, zero genesis, a
+                // validator count outside `4..=MAX`, a duplicate id, a key of
+                // the wrong length, zero weight). A pin that does not validate
+                // cannot certify a single epoch.
+                committee.validate().map_err(|e| e.to_string())?;
             }
         }
         Ok(())
@@ -1276,6 +1636,115 @@ impl IntakeState {
         self.pinned_bitvm_anchors.insert(network.into(), anchor);
     }
 
+    /// Installs or updates the consensus-pinned Babylon EOTS epoch-key table
+    /// for `network`. WIRING: governance/genesis EOTS pin paired with
+    /// `register_domain`'s admission and `adjudicate_babylon_eots_equivocation`.
+    pub fn pin_babylon_eots_anchor(
+        &mut self,
+        network: impl Into<String>,
+        pinned: crate::cross_domain::external::babylon_eots::PinnedBabylonEots,
+    ) {
+        self.pinned_babylon_eots_anchors
+            .insert(network.into(), pinned);
+    }
+
+    /// Installs or updates the consensus-pinned `NIPoPoW` genesis anchor and
+    /// KMZ parameters for `network`. WIRING: genesis/test initializer; the
+    /// production door is `GovernanceAction::PinExternalAnchor` ->
+    /// [`Self::install_pinned_anchor`].
+    pub fn pin_nipopow_genesis(
+        &mut self,
+        network: impl Into<String>,
+        genesis: crate::cross_domain::external::nipopow::PinnedNipopowGenesis,
+    ) {
+        self.pinned_nipopow_genesis.insert(network.into(), genesis);
+    }
+
+    /// Installs the NIPoPoW pin for `network` only if it is a real trust root.
+    ///
+    /// `pin_nipopow_genesis` is the raw setter a genesis/test initializer uses;
+    /// this is the checked door for anything that reaches the pin from a value
+    /// it did not itself construct. A zeroed genesis id, a zero difficulty
+    /// target, or `m = 0` / `k = 0` is the *shape* of an anchor with none of
+    /// its force, and installing one would silently delete the KMZ predicate
+    /// every proof against it is supposed to satisfy.
+    ///
+    /// # Errors
+    ///
+    /// The named zero field.
+    fn install_nipopow_genesis(
+        &mut self,
+        network: impl Into<String>,
+        genesis: crate::cross_domain::external::nipopow::PinnedNipopowGenesis,
+    ) -> Result<(), String> {
+        PinnedExternalAnchor::Nipopow(genesis.clone()).validate()?;
+        self.pinned_nipopow_genesis.insert(network.into(), genesis);
+        Ok(())
+    }
+
+    /// Installs or updates the consensus-pinned `PHANTOM-GHOSTDAG` checkpoint
+    /// and `k`-cluster parameters for `network`. WIRING: genesis/test
+    /// initializer; the production door is
+    /// `GovernanceAction::PinExternalAnchor` -> [`Self::install_pinned_anchor`].
+    pub fn pin_ghostdag_anchor(
+        &mut self,
+        network: impl Into<String>,
+        anchor: crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor,
+    ) {
+        self.pinned_ghostdag_anchors.insert(network.into(), anchor);
+    }
+
+    /// Installs the GHOSTDAG pin for `network` only if it is a real trust root.
+    ///
+    /// The raw setter above takes whatever it is given; this is the checked
+    /// door for a value the caller did not construct itself. A zero checkpoint
+    /// hash, `k = 0`, a zero parent or merge-depth bound, a zero blue depth, or
+    /// a zero difficulty target is the shape of an anchor with none of its
+    /// force, and installing one would delete the invariant it names.
+    ///
+    /// # Errors
+    ///
+    /// The named zero field.
+    fn install_ghostdag_anchor(
+        &mut self,
+        network: impl Into<String>,
+        anchor: crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor,
+    ) -> Result<(), String> {
+        PinnedExternalAnchor::Ghostdag(anchor.clone()).validate()?;
+        self.pinned_ghostdag_anchors.insert(network.into(), anchor);
+        Ok(())
+    }
+
+    /// Installs or updates the consensus-pinned `HoneyBadgerBFT` epoch
+    /// committee for `network`. WIRING: genesis/test initializer; the
+    /// production door is `GovernanceAction::PinExternalAnchor` ->
+    /// [`Self::install_pinned_anchor`].
+    pub fn pin_honeybadger_committee(
+        &mut self,
+        network: impl Into<String>,
+        committee: crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee,
+    ) {
+        self.pinned_honeybadger_committees
+            .insert(network.into(), committee);
+    }
+
+    /// Installs the HoneyBadgerBFT committee for `network` only if it is a
+    /// real trust root.
+    ///
+    /// # Errors
+    ///
+    /// The committee's own verdict, naming the offending field.
+    fn install_honeybadger_committee(
+        &mut self,
+        network: impl Into<String>,
+        committee: crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee,
+    ) -> Result<(), String> {
+        PinnedExternalAnchor::HoneyBadger(committee.clone()).validate()?;
+        self.pinned_honeybadger_committees
+            .insert(network.into(), committee);
+        Ok(())
+    }
+
     /// Installs or replaces a family's trust anchor for `network`.
     ///
     /// The consensus door: `GovernanceAction::PinExternalAnchor` in block
@@ -1302,6 +1771,40 @@ impl IntakeState {
             PinnedExternalAnchor::Da(committee) => {
                 self.pinned_da_committees
                     .insert(network.to_string(), committee);
+            }
+            PinnedExternalAnchor::BabylonEots(pinned) => {
+                self.pinned_babylon_eots_anchors
+                    .insert(network.to_string(), pinned);
+            }
+            PinnedExternalAnchor::Nipopow(genesis) => {
+                // Defense in depth: route through the checked install door so a
+                // malformed pin can never overwrite an installed root even if a
+                // caller skipped pre-validation.
+                if let Err(err) = self.install_nipopow_genesis(network, genesis) {
+                    tracing::error!(
+                        network,
+                        %err,
+                        "refused to install malformed NIPoPoW genesis pin"
+                    );
+                }
+            }
+            PinnedExternalAnchor::Ghostdag(anchor) => {
+                if let Err(err) = self.install_ghostdag_anchor(network, anchor) {
+                    tracing::error!(
+                        network,
+                        %err,
+                        "refused to install malformed GHOSTDAG anchor pin"
+                    );
+                }
+            }
+            PinnedExternalAnchor::HoneyBadger(committee) => {
+                if let Err(err) = self.install_honeybadger_committee(network, committee) {
+                    tracing::error!(
+                        network,
+                        %err,
+                        "refused to install malformed HoneyBadgerBFT committee pin"
+                    );
+                }
             }
         }
     }
@@ -1339,6 +1842,26 @@ impl IntakeState {
                 .get(network)
                 .cloned()
                 .map(PinnedExternalAnchor::Da),
+            AnchorFamily::BabylonEots => self
+                .pinned_babylon_eots_anchors
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::BabylonEots),
+            AnchorFamily::PoWSuccinct => self
+                .pinned_nipopow_genesis
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Nipopow),
+            AnchorFamily::Ghostdag => self
+                .pinned_ghostdag_anchors
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Ghostdag),
+            AnchorFamily::HoneyBadger => self
+                .pinned_honeybadger_committees
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::HoneyBadger),
         }
     }
 
@@ -1516,6 +2039,70 @@ impl IntakeState {
             if anchor.as_ref() != Some(pinned) {
                 return Err(IntakeError::CommitteeNotPinned);
             }
+        }
+        // BabylonEots admission requires a governance-pinned epoch-key table and
+        // Bitcoin weak-subjectivity anchor for `network`; a permissionless
+        // registrant cannot announce its own EOTS keys and certify finality.
+        if let AdapterSpec::BabylonEots { network, pinned } = &spec {
+            let Some(installed) = self.pinned_babylon_eots_anchors.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if pinned.as_ref() != Some(installed) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // NipopowSuperblock admission requires a governance-pinned genesis and
+        // KMZ `(m, k)` set for `network`, and the spec must carry exactly that
+        // pin: a registrant may not bring its own genesis and certify the
+        // superblock proof against it.
+        if let AdapterSpec::NipopowSuperblock { network, genesis } = &spec {
+            let Some(installed) = self.pinned_nipopow_genesis.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if genesis.as_ref() != Some(installed) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // Ghostdag admission requires a governance-pinned pruning-point
+        // checkpoint and `k`-cluster parameters for `network`, echoed exactly
+        // by the spec: a registrant that could choose its own checkpoint could
+        // start the DAG wherever it liked, and one that could widen `k` would
+        // be choosing how much parallelism its own coloring must survive.
+        if let AdapterSpec::Ghostdag { network, anchor } = &spec {
+            let Some(installed) = self.pinned_ghostdag_anchors.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if anchor.as_ref() != Some(installed) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // HoneyBadgerBFT admission requires a governance-pinned epoch
+        // committee for `network`, echoed exactly by the spec: an asynchronous
+        // ACS certificate is a theorem about whoever signed it, so a
+        // registrant that could bring its own validator table would be
+        // certifying its own quorum.
+        if let AdapterSpec::HoneyBadgerBft { network, committee } = &spec {
+            let Some(installed) = self.pinned_honeybadger_committees.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if committee.as_ref() != Some(installed) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // Fail-closed admission for inline-pinned adapter families: each of
+        // these variants carries its governance anchor in the spec itself, and
+        // an omitted anchor is the closed admission state refused at the door.
+        if matches!(
+            &spec,
+            AdapterSpec::SolanaTowerBft { pinned: None, .. }
+                | AdapterSpec::PoSpaceVdf { pinned: None, .. }
+                | AdapterSpec::AptosJolteonBft { pinned: None, .. }
+                | AdapterSpec::NearDoomslugBft { pinned: None, .. }
+                | AdapterSpec::ChainKeyNiDkg { pinned: None, .. }
+                | AdapterSpec::HeterogeneousMultiProver { pinned: None, .. }
+                | AdapterSpec::StarkValidityRollup { pinned: None, .. }
+        ) {
+            return Err(IntakeError::CommitteeNotPinned);
         }
         // Economics under which lying pays are refused at the door. The
         // framework checks the bond amount; whether the fee/penalty shape
@@ -2564,6 +3151,206 @@ impl IntakeState {
             )
             .map_err(IntakeError::Registry)?;
         Ok(verdict)
+    }
+
+    /// Verify an objective Babylon EOTS equivocation proof (one provider
+    /// signing two conflicting epoch votes) against the domain's
+    /// governance-pinned epoch-key table and chain id, record an adverse
+    /// round, and freeze the domain (`DomainState::Faulted`).
+    ///
+    /// WIRING: objective Babylon EOTS equivocation door freezing
+    /// `AdapterSpec::BabylonEots` domains (wired via
+    /// `ExternalDomainTx::SubmitFaultProof`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] if `key` is unknown, not serving, not a
+    /// `BabylonEots` domain, unpinned, or if the proof does not bind to the
+    /// pinned key table.
+    pub fn adjudicate_babylon_eots_equivocation(
+        &mut self,
+        key: &DomainKey,
+        proof: &crate::cross_domain::external::babylon_eots::EotsEquivocationProof,
+    ) -> Result<([u8; 32], u64), IntakeError> {
+        let (entry, expected_name) = self.serving_entry(key)?;
+        let AdapterSpec::BabylonEots { pinned, .. } = &entry.spec else {
+            return Err(IntakeError::Registry(RegistryError::DescriptorMismatch {
+                expected: expected_name.to_string(),
+                found: crate::cross_domain::external::babylon_eots::EOTS_ADAPTER_NAME.to_string(),
+            }));
+        };
+        let Some(pinned) = pinned else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        crate::cross_domain::external::babylon_eots::verify_eots_equivocation(pinned, proof)
+            .map_err(|reason| {
+                IntakeError::Registry(RegistryError::Adapter(
+                    crate::cross_domain::external::spec::AdapterError::ConsensusRule {
+                        rule: reason,
+                    },
+                ))
+            })?;
+        let local_height = self.registry.height();
+        let _ = self.guard.record_adverse_round(*key, local_height);
+        self.registry
+            .mark_faulted(
+                key,
+                &format!(
+                    "Babylon EOTS provider {} equivocated (key={})",
+                    hex::encode(proof.provider),
+                    hex::encode(proof.eots_key)
+                ),
+            )
+            .map_err(IntakeError::Registry)?;
+        Ok((proof.provider, 0))
+    }
+
+    /// Verify an objective `HoneyBadgerBFT` Bracha RBC double-root equivocation
+    /// proof against the domain's pinned committee and freeze the domain.
+    ///
+    /// WIRING: objective `HoneyBadgerBFT` equivocation door freezing
+    /// `AdapterSpec::HoneyBadgerBft` domains (wired via
+    /// `ExternalDomainTx::SubmitFaultProof`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] if `key` is unknown, not serving, not a
+    /// `HoneyBadgerBft` domain, unpinned, or `proof` fails cryptographic
+    /// equivocation verification.
+    pub fn adjudicate_honeybadger_rbc_equivocation(
+        &mut self,
+        key: &DomainKey,
+        proof: &crate::cross_domain::external::honeybadger_bft::RbcEquivocationProof,
+    ) -> Result<([u8; 32], u64), IntakeError> {
+        let (entry, expected_name) = self.serving_entry(key)?;
+        let AdapterSpec::HoneyBadgerBft { committee, .. } = &entry.spec else {
+            return Err(IntakeError::Registry(RegistryError::DescriptorMismatch {
+                expected: expected_name.to_string(),
+                found: crate::cross_domain::external::honeybadger_bft::ADAPTER_NAME.to_string(),
+            }));
+        };
+        let Some(pinned) = committee else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        let (offender, weight) =
+            crate::cross_domain::external::honeybadger_bft::verify_rbc_equivocation(pinned, proof)
+                .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let local_height = self.registry.height();
+        let _ = self.guard.record_adverse_round(*key, local_height);
+        self.registry
+            .mark_faulted(
+                key,
+                &format!(
+                    "HoneyBadgerBFT validator {} equivocated in ACS epoch {} (weight={weight})",
+                    hex::encode(offender),
+                    proof.acs_epoch
+                ),
+            )
+            .map_err(IntakeError::Registry)?;
+        Ok((offender, weight))
+    }
+
+    /// Verify an objective NEAR Doomslug double-vote or surround-vote approval
+    /// slashing proof against the domain's pinned epoch and freeze the domain.
+    ///
+    /// WIRING: objective NEAR Doomslug equivocation door freezing
+    /// `AdapterSpec::NearDoomslugBft` domains (wired via
+    /// `ExternalDomainTx::SubmitFaultProof`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] if `key` is unknown, not serving, not a
+    /// `NearDoomslugBft` domain, unpinned, or `proof` fails verification.
+    pub fn adjudicate_near_doomslug_slash(
+        &mut self,
+        key: &DomainKey,
+        proof: &crate::cross_domain::external::near_doomslug::NearApprovalSlashProof,
+    ) -> Result<(String, u128), IntakeError> {
+        let (entry, expected_name) = self.serving_entry(key)?;
+        let AdapterSpec::NearDoomslugBft { network, pinned } = &entry.spec else {
+            return Err(IntakeError::Registry(RegistryError::DescriptorMismatch {
+                expected: expected_name.to_string(),
+                found: crate::cross_domain::external::near_doomslug::ADAPTER_NAME.to_string(),
+            }));
+        };
+        let Some(pinned) = pinned else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        let (account_id, stake, kind) =
+            crate::cross_domain::external::near_doomslug::verify_near_approval_slash(
+                network, pinned, proof,
+            )
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let local_height = self.registry.height();
+        let _ = self.guard.record_adverse_round(*key, local_height);
+        self.registry
+            .mark_faulted(
+                key,
+                &format!("NEAR producer {account_id} equivocated ({kind:?}, stake={stake})"),
+            )
+            .map_err(IntakeError::Registry)?;
+        Ok((account_id, stake))
+    }
+
+    /// Verify an objective `PoSpace+VDF` double-signage equivocation proof
+    /// against the domain's network and optional pinned attestor key, then
+    /// freeze the domain.
+    ///
+    /// WIRING: objective `PoSpace+VDF` double-signage door freezing
+    /// `AdapterSpec::PoSpaceVdf` domains (wired via
+    /// `ExternalDomainTx::SubmitFaultProof`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError`] if `key` is unknown, not serving, not a
+    /// `PoSpaceVdf` domain, unpinned, signed by a key other than the pinned
+    /// attestor when one is configured, or fails cryptographic verification.
+    pub fn adjudicate_pospace_double_signage(
+        &mut self,
+        key: &DomainKey,
+        first: &crate::cross_domain::external::pospace_vdf::SignedPoSpaceSignage,
+        second: &crate::cross_domain::external::pospace_vdf::SignedPoSpaceSignage,
+    ) -> Result<[u8; 32], IntakeError> {
+        let (entry, expected_name) = self.serving_entry(key)?;
+        let AdapterSpec::PoSpaceVdf { network, pinned } = &entry.spec else {
+            return Err(IntakeError::Registry(RegistryError::DescriptorMismatch {
+                expected: expected_name.to_string(),
+                found: crate::cross_domain::external::pospace_vdf::POSPACE_VDF_ADAPTER_NAME
+                    .to_string(),
+            }));
+        };
+        let Some(pinned) = pinned else {
+            return Err(IntakeError::CommitteeNotPinned);
+        };
+        if let Some(expected_pk) = &pinned.pq_attestor_pubkey {
+            if &first.signer_pq_pubkey != expected_pk {
+                return Err(IntakeError::Registry(RegistryError::Adapter(
+                    crate::cross_domain::external::spec::AdapterError::ConsensusRule {
+                        rule: "PoSpace double-signage signer does not match pinned attestor"
+                            .to_string(),
+                    },
+                )));
+            }
+        }
+        let verified =
+            crate::cross_domain::external::pospace_vdf::verify_double_signage_equivocation(
+                network, first, second,
+            )
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        let local_height = self.registry.height();
+        let _ = self.guard.record_adverse_round(*key, local_height);
+        self.registry
+            .mark_faulted(
+                key,
+                &format!(
+                    "PoSpace+VDF attestor {} double-signed sub-slot {} signage {}",
+                    hex::encode(verified.offender_key_digest),
+                    verified.sub_slot,
+                    verified.signage_index
+                ),
+            )
+            .map_err(IntakeError::Registry)?;
+        Ok(verified.offender_key_digest)
     }
 
     /// Verify an objective ICS-07 `Tendermint`/`CometBFT` misbehaviour proof
@@ -4918,5 +5705,1020 @@ mod tests {
             !shown.contains("header-flip"),
             "a passing probe must not be blamed: {shown}"
         );
+    }
+
+    /// The Babylon registration under the fixture pin, with the policy and
+    /// economics every Babylon test in this module shares.
+    fn babylon_request(
+        pinned: Option<crate::cross_domain::external::babylon_eots::PinnedBabylonEots>,
+        economics: DomainEconomics,
+        poster: Address,
+    ) -> RegistrationRequest {
+        use crate::cross_domain::external::babylon_eots::test_support;
+        let spec = AdapterSpec::BabylonEots {
+            network: test_support::NETWORK.to_string(),
+            pinned,
+        };
+        let mut policy = VerificationPolicy::strict(0);
+        policy.require_slashable = false;
+        let golden = test_support::golden_evidence();
+        RegistrationRequest {
+            versions: VersionPolicy::single(golden.adapter, golden.evidence_version, 0),
+            spec,
+            policy,
+            economics,
+            bond_atoms: economics.required_bond_atoms(),
+            poster,
+            golden,
+        }
+    }
+
+    #[test]
+    fn babylon_eots_admission_requires_the_governance_pin_and_honest_economics() {
+        use crate::cross_domain::external::babylon_eots::test_support;
+
+        let mut intake = IntakeState::new();
+        intake.on_block_committed(50);
+        let economics = IntakeState::conservative_economics(1_000);
+        let econ = DomainEconomics {
+            routing_ceiling_atoms: 1_000,
+            fee: ProverFee {
+                base_atoms: 10_000,
+                value_bps: 0,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 500,
+                floor_atoms: 1,
+            },
+            unbonding_heights: 10,
+        };
+
+        // Nobody has installed a pin for the network: a registrant cannot
+        // announce its own EOTS keys, whether it carries a table or none.
+        assert_eq!(
+            intake
+                .register_domain(
+                    babylon_request(Some(test_support::pinned()), economics, addr(9)),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        assert_eq!(
+            intake
+                .register_domain(babylon_request(None, economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+
+        // A pin is installed, but the registration carries a different
+        // table: refused. The spec must equal the governance value.
+        let mut foreign = test_support::pinned();
+        foreign.epoch_keys[0].1 = test_support::public_key_for(0x5C);
+        intake.pin_babylon_eots_anchor(test_support::NETWORK, test_support::pinned());
+        assert_eq!(
+            intake
+                .register_domain(babylon_request(None, economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        assert_eq!(
+            intake
+                .register_domain(babylon_request(Some(foreign), economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        // The door compares the registration's table to the installed one by
+        // equality; validity is enforced at install (governance) and at
+        // admission. An invalid pin the registration echoes exactly therefore
+        // passes the door and is refused by the admission circuit instead: the
+        // golden vote cannot verify under an empty key table.
+        let mut malformed = test_support::pinned();
+        malformed.epoch_keys.clear();
+        intake.pin_babylon_eots_anchor(test_support::NETWORK, malformed.clone());
+        assert!(
+            matches!(
+                intake.register_domain(babylon_request(Some(malformed), economics, addr(9)), None),
+                Err(IntakeError::AdmissionRefused {
+                    golden_verified: false,
+                    ..
+                })
+            ),
+            "an empty key table cannot certify the golden vote"
+        );
+
+        // The governance pin, echoed exactly: admitted. Economics under
+        // which lying pays are still refused before admission runs.
+        intake.pin_babylon_eots_anchor(test_support::NETWORK, test_support::pinned());
+        assert_eq!(
+            intake
+                .register_domain(
+                    babylon_request(Some(test_support::pinned()), econ, addr(9)),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::DishonestEconomics
+        );
+        let key = intake
+            .register_domain(
+                babylon_request(Some(test_support::pinned()), economics, addr(9)),
+                None,
+            )
+            .expect("a pinned Babylon registration is admitted");
+        assert_eq!(
+            key,
+            DomainKey::from_parts(
+                &crate::cross_domain::external::babylon_eots::eots_adapter_id(),
+                test_support::NETWORK
+            )
+        );
+        let entry = intake.entries.get(&key).expect("entry");
+        let AdapterSpec::BabylonEots {
+            pinned: Some(stored),
+            ..
+        } = &entry.spec
+        else {
+            panic!("the stored spec keeps the pin it was admitted under");
+        };
+        assert_eq!(stored, &test_support::pinned());
+    }
+
+    #[test]
+    fn babylon_eots_equivocation_door_freezes_the_domain_and_refuses_a_foreign_provider() {
+        use crate::cross_domain::external::babylon_eots::test_support;
+        use crate::cross_domain::external::profile::DomainState;
+
+        let mut intake = IntakeState::new();
+        intake.on_block_committed(50);
+        let economics = IntakeState::conservative_economics(1_000);
+        let pin = test_support::pinned();
+        intake.pin_babylon_eots_anchor(test_support::NETWORK, pin.clone());
+        let key = intake
+            .register_domain(babylon_request(Some(pin.clone()), economics, addr(9)), None)
+            .expect("register babylon");
+        assert_eq!(
+            intake.registry.domain(&key).expect("dom").record.state,
+            DomainState::Admitted
+        );
+
+        // A real equivocation by a provider the pinned table does not name is
+        // internally valid (both signatures verify under its own key) and is
+        // still refused: it is not this domain's provider.
+        let foreign = test_support::foreign_equivocation_proof(0x5C);
+        foreign
+            .check()
+            .expect("the foreign proof is self-consistent");
+        let refused = intake
+            .adjudicate_babylon_eots_equivocation(&key, &foreign)
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("does not name"),
+            "refusal names the binding: {refused}"
+        );
+        assert_eq!(
+            intake.registry.domain(&key).expect("dom").record.state,
+            DomainState::Admitted
+        );
+        assert_eq!(
+            intake
+                .guard
+                .record_of(&key)
+                .map(|r| r.adverse_round_blocks.len())
+                .unwrap_or(0),
+            0,
+            "a refused proof records no adverse round"
+        );
+
+        // The pinned provider's equivocation: adverse round recorded, the
+        // domain frozen, and the door refuses a replay.
+        let proof = test_support::equivocation_proof(&pin, test_support::PINNED_SEED);
+        let (provider, _epoch) = intake
+            .adjudicate_babylon_eots_equivocation(&key, &proof)
+            .expect("the pinned provider's equivocation freezes the domain");
+        assert_eq!(provider, proof.provider);
+        assert_eq!(
+            intake.registry.domain(&key).expect("dom").record.state,
+            DomainState::Faulted
+        );
+        assert_eq!(
+            intake
+                .guard
+                .record_of(&key)
+                .expect("guard")
+                .adverse_round_blocks
+                .len(),
+            1
+        );
+        assert!(matches!(
+            intake.adjudicate_babylon_eots_equivocation(&key, &proof),
+            Err(IntakeError::Registry(RegistryError::NotServing { .. }))
+        ));
+
+        // A door for another family refuses by name rather than by shape.
+        let eth_key = register(&mut intake);
+        assert!(matches!(
+            intake.adjudicate_babylon_eots_equivocation(&eth_key, &proof),
+            Err(IntakeError::Registry(
+                RegistryError::DescriptorMismatch { .. }
+            ))
+        ));
+    }
+
+    /// The NIPoPoW registration under the fixture genesis pin, with the policy
+    /// and economics the NIPoPoW tests in this module share. Probabilistic-work
+    /// finality is not slashable by Budlum, so `require_slashable` is off.
+    fn nipopow_request(
+        genesis: Option<crate::cross_domain::external::nipopow::PinnedNipopowGenesis>,
+        economics: DomainEconomics,
+        poster: Address,
+    ) -> RegistrationRequest {
+        let (_, _, golden) = crate::cross_domain::external::nipopow::tests::make_golden_fixture();
+        let spec = AdapterSpec::NipopowSuperblock {
+            network: golden.network.clone(),
+            genesis,
+        };
+        let mut policy = VerificationPolicy::strict(0);
+        policy.require_slashable = false;
+        RegistrationRequest {
+            versions: VersionPolicy::single(golden.adapter, golden.evidence_version, 0),
+            spec,
+            policy,
+            economics,
+            bond_atoms: economics.required_bond_atoms(),
+            poster,
+            golden,
+        }
+    }
+
+    #[test]
+    fn nipopow_admission_requires_the_governance_genesis_pin() {
+        let mut intake = IntakeState::new();
+        intake.on_block_committed(50);
+        let (pinned, _, golden) =
+            crate::cross_domain::external::nipopow::tests::make_golden_fixture();
+        let network = golden.network.clone();
+        let econ = DomainEconomics {
+            routing_ceiling_atoms: 1_000,
+            fee: ProverFee {
+                base_atoms: 10_000,
+                value_bps: 0,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 500,
+                floor_atoms: 1,
+            },
+            unbonding_heights: 10,
+        };
+        let economics = IntakeState::conservative_economics(1_000);
+
+        // No genesis is installed: a registrant cannot nominate its own
+        // genesis block and then certify superblocks against it, whether it
+        // carries a pin or none.
+        assert_eq!(
+            intake
+                .register_domain(nipopow_request(None, economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        assert_eq!(
+            intake
+                .register_domain(
+                    nipopow_request(Some(pinned.clone()), economics, addr(9)),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+
+        // The pin is installed, but the registration carries a different
+        // genesis: refused before admission. Even a pin whose *only*
+        // difference is a tightened `k` is a different consensus statement and
+        // does not pass the door by resembling the installed one.
+        intake.pin_nipopow_genesis(network.clone(), pinned.clone());
+        let mut foreign = pinned.clone();
+        foreign.genesis_id = [0x5D; 32];
+        assert_eq!(
+            intake
+                .register_domain(nipopow_request(None, economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        assert_eq!(
+            intake
+                .register_domain(nipopow_request(Some(foreign), economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        let mut tightened = pinned.clone();
+        tightened.min_suffix_k += 1;
+        assert_eq!(
+            intake
+                .register_domain(nipopow_request(Some(tightened), economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+
+        // The governance pin, echoed exactly: past the door, and then the
+        // economically honest registration is admitted while a lying
+        // fee/penalty shape is refused.
+        assert_eq!(
+            intake
+                .register_domain(nipopow_request(Some(pinned.clone()), econ, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::DishonestEconomics
+        );
+        let key = intake
+            .register_domain(
+                nipopow_request(Some(pinned.clone()), economics, addr(9)),
+                None,
+            )
+            .expect("the governance genesis pin admits the NIPoPoW domain");
+        assert_eq!(
+            intake
+                .registry
+                .domain(&key)
+                .expect("dom")
+                .record
+                .descriptor
+                .id,
+            crate::cross_domain::external::AdapterId::from_name(
+                crate::cross_domain::external::nipopow::ADAPTER_NAME
+            )
+        );
+
+        // The pin reaches the generic anchor door as well: it resolves by
+        // family, and a zeroed field is refused at install rather than
+        // installed as a genesis no evidence could ever clear.
+        assert_eq!(
+            intake
+                .pinned_anchor(AnchorFamily::PoWSuccinct, &golden.network)
+                .map(|a| a.family()),
+            Some(AnchorFamily::PoWSuccinct)
+        );
+        let mut zeroed = pinned.clone();
+        zeroed.pow_target = [0u8; 32];
+        assert_eq!(
+            intake
+                .install_nipopow_genesis(golden.network.clone(), zeroed)
+                .unwrap_err(),
+            "the pinned NIPoPoW difficulty target is all zeroes"
+        );
+        let mut zeroed = pinned.clone();
+        zeroed.min_suffix_k = 0;
+        assert_eq!(
+            intake
+                .install_nipopow_genesis(golden.network.clone(), zeroed)
+                .unwrap_err(),
+            "the pinned NIPoPoW suffix stability parameter k is zero"
+        );
+        // A refused install leaves the good pin in place.
+        assert_eq!(
+            intake.pinned_nipopow_genesis.get(&golden.network).cloned(),
+            Some(pinned.clone())
+        );
+
+        // And the settlement layer reads the same pin: probabilistic work with
+        // the pinned suffix depth, never a slashable quorum.
+        let guarantee =
+            crate::settlement::universal_finality::FinalityGuarantee::for_external_spec_with_backing(
+                &AdapterSpec::NipopowSuperblock {
+                    network: network.clone(),
+                    genesis: Some(pinned.clone()),
+                },
+                Some(&crate::cross_domain::external::spec::SecurityBacking::Work {
+                    difficulty_bits: 96,
+                }),
+            );
+        assert_eq!(
+            guarantee.reversibility,
+            crate::settlement::universal_finality::FinalityReversibility::ProbabilisticWork {
+                confirmations: pinned.min_suffix_k as u64
+            }
+        );
+        assert!(!guarantee.slashable_backing);
+        let unpinned =
+            crate::settlement::universal_finality::FinalityGuarantee::for_external_spec_with_backing(
+                &AdapterSpec::NipopowSuperblock {
+                    network,
+                    genesis: None,
+                },
+                Some(&crate::cross_domain::external::spec::SecurityBacking::Work {
+                    difficulty_bits: 96,
+                }),
+            );
+        assert_eq!(
+            unpinned.reversibility,
+            crate::settlement::universal_finality::FinalityReversibility::ProbabilisticWork {
+                confirmations: 0
+            },
+            "an unpinned spec promises no depth at all"
+        );
+    }
+
+    /// The GHOSTDAG registration under the fixture checkpoint pin. Same shape
+    /// as the NIPoPoW door: a blockDAG certificate proves finality inside *one*
+    /// DAG, so the DAG's start point and its `k`-cluster parameters have to be
+    /// governance values, echoed exactly.
+    fn ghostdag_request(
+        anchor: Option<crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor>,
+        economics: DomainEconomics,
+        poster: Address,
+    ) -> RegistrationRequest {
+        let (_, _, golden) = crate::cross_domain::external::ghostdag::tests::make_golden_fixture();
+        let spec = AdapterSpec::Ghostdag {
+            network: golden.network.clone(),
+            anchor,
+        };
+        // The fixture DAG is mined at `1_700_000_00x`; a policy anchored at
+        // wall-clock zero would refuse it as a future timestamp, which is the
+        // clock rule doing its job rather than the door under test.
+        let mut policy = VerificationPolicy::strict(1_700_000_100);
+        policy.require_slashable = false;
+        policy.min_depth = 3;
+        policy.max_age = 3_600;
+        RegistrationRequest {
+            versions: VersionPolicy::single(golden.adapter, golden.evidence_version, 0),
+            spec,
+            policy,
+            economics,
+            bond_atoms: economics.required_bond_atoms(),
+            poster,
+            golden,
+        }
+    }
+
+    #[test]
+    fn ghostdag_admission_requires_the_governance_checkpoint_pin() {
+        let mut intake = IntakeState::new();
+        intake.on_block_committed(50);
+        let (pinned, _, golden) =
+            crate::cross_domain::external::ghostdag::tests::make_golden_fixture();
+        let network = golden.network.clone();
+        let econ = DomainEconomics {
+            routing_ceiling_atoms: 1_000,
+            fee: ProverFee {
+                base_atoms: 10_000,
+                value_bps: 0,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 500,
+                floor_atoms: 1,
+            },
+            unbonding_heights: 10,
+        };
+        let economics = IntakeState::conservative_economics(1_000);
+
+        // No checkpoint installed: a registrant cannot nominate its own DAG
+        // start point and then certify finality against it.
+        assert_eq!(
+            intake
+                .register_domain(ghostdag_request(None, economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        assert_eq!(
+            intake
+                .register_domain(
+                    ghostdag_request(Some(pinned.clone()), economics, addr(9)),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+
+        // Installed, but the registration carries a different checkpoint, a
+        // wider `k`, or a shallower blue depth: all refused before admission.
+        intake.pin_ghostdag_anchor(network.clone(), pinned.clone());
+        let mut other_checkpoint = pinned.clone();
+        other_checkpoint.anchor_hash = [0xB7; 32];
+        assert_eq!(
+            intake
+                .register_domain(
+                    ghostdag_request(Some(other_checkpoint), economics, addr(9)),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        let mut wider_k = pinned.clone();
+        wider_k.k += 1;
+        assert_eq!(
+            intake
+                .register_domain(ghostdag_request(Some(wider_k), economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        let mut shallower = pinned.clone();
+        shallower.required_blue_depth = 1;
+        assert_eq!(
+            intake
+                .register_domain(ghostdag_request(Some(shallower), economics, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+
+        // The governance pin, echoed exactly: past the door, then the honest
+        // economics admits and the lying one is refused.
+        assert_eq!(
+            intake
+                .register_domain(ghostdag_request(Some(pinned.clone()), econ, addr(9)), None)
+                .unwrap_err(),
+            IntakeError::DishonestEconomics
+        );
+        let key = intake
+            .register_domain(
+                ghostdag_request(Some(pinned.clone()), economics, addr(9)),
+                None,
+            )
+            .expect("the governance checkpoint pin admits the GHOSTDAG domain");
+        assert_eq!(
+            intake
+                .registry
+                .domain(&key)
+                .expect("dom")
+                .record
+                .descriptor
+                .id,
+            crate::cross_domain::external::AdapterId::from_name(
+                crate::cross_domain::external::ghostdag::GHOSTDAG_ADAPTER_NAME
+            )
+        );
+        assert_eq!(
+            intake
+                .pinned_anchor(AnchorFamily::Ghostdag, &network)
+                .map(|a| a.family()),
+            Some(AnchorFamily::Ghostdag)
+        );
+
+        // The checked install door names the zero field and leaves the good pin
+        // in place.
+        let mut zeroed = pinned.clone();
+        zeroed.k = 0;
+        assert_eq!(
+            intake
+                .install_ghostdag_anchor(network.clone(), zeroed)
+                .unwrap_err(),
+            "the pinned GHOSTDAG anticone parameter k is zero"
+        );
+        let mut zeroed = pinned.clone();
+        zeroed.required_blue_depth = 0;
+        assert_eq!(
+            intake
+                .install_ghostdag_anchor(network.clone(), zeroed)
+                .unwrap_err(),
+            "the pinned GHOSTDAG blue confirmation depth is zero"
+        );
+        assert_eq!(
+            intake.pinned_ghostdag_anchors.get(&network).cloned(),
+            Some(pinned.clone())
+        );
+
+        // Settlement reads the same pin: blue depth, never a slashable quorum.
+        let observed = crate::cross_domain::external::spec::SecurityBacking::Work {
+            difficulty_bits: 96,
+        };
+        let guarantee =
+            crate::settlement::universal_finality::FinalityGuarantee::for_external_spec_with_backing(
+                &AdapterSpec::Ghostdag {
+                    network: network.clone(),
+                    anchor: Some(pinned.clone()),
+                },
+                Some(&observed),
+            );
+        assert_eq!(
+            guarantee.reversibility,
+            crate::settlement::universal_finality::FinalityReversibility::ProbabilisticWork {
+                confirmations: pinned.required_blue_depth
+            }
+        );
+        assert!(!guarantee.slashable_backing);
+        let unpinned =
+            crate::settlement::universal_finality::FinalityGuarantee::for_external_spec_with_backing(
+                &AdapterSpec::Ghostdag {
+                    network,
+                    anchor: None,
+                },
+                Some(&observed),
+            );
+        assert_eq!(
+            unpinned.reversibility,
+            crate::settlement::universal_finality::FinalityReversibility::ProbabilisticWork {
+                confirmations: 0
+            },
+            "an unpinned spec promises no depth at all"
+        );
+    }
+
+    /// The HoneyBadgerBFT registration under the fixture committee pin. This
+    /// family's finality is a protocol quorum, so the pin that matters is the
+    /// validator table: an ACS certificate is a theorem about its signers, and
+    /// a registrant may not nominate its own signers.
+    fn honeybadger_request(
+        committee: Option<
+            crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee,
+        >,
+        economics: DomainEconomics,
+        poster: Address,
+        golden: crate::cross_domain::external::RawConsensusEvidence,
+    ) -> RegistrationRequest {
+        use crate::cross_domain::external::honeybadger_bft::tests::FIXTURE_NETWORK;
+        let spec = AdapterSpec::HoneyBadgerBft {
+            network: FIXTURE_NETWORK.to_string(),
+            committee,
+        };
+        let mut policy = VerificationPolicy::strict(15);
+        policy.require_slashable = false;
+        policy.max_age = 10;
+        RegistrationRequest {
+            versions: VersionPolicy::single(golden.adapter, golden.evidence_version, 0),
+            spec,
+            policy,
+            economics,
+            bond_atoms: economics.required_bond_atoms(),
+            poster,
+            golden,
+        }
+    }
+
+    #[test]
+    fn honeybadger_admission_requires_the_governance_committee_pin() {
+        use crate::cross_domain::external::honeybadger_bft::tests::FIXTURE_NETWORK;
+
+        let mut intake = IntakeState::new();
+        intake.on_block_committed(50);
+        let (_keys, pinned, _ev, golden) =
+            crate::cross_domain::external::honeybadger_bft::tests::fixture();
+        let econ = DomainEconomics {
+            routing_ceiling_atoms: 1_000,
+            fee: ProverFee {
+                base_atoms: 10_000,
+                value_bps: 0,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 500,
+                floor_atoms: 1,
+            },
+            unbonding_heights: 10,
+        };
+        let economics = IntakeState::conservative_economics(1_000);
+
+        // No committee installed: a quorum nobody pinned certifies nothing.
+        assert_eq!(
+            intake
+                .register_domain(
+                    honeybadger_request(None, economics, addr(9), golden.clone()),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        assert_eq!(
+            intake
+                .register_domain(
+                    honeybadger_request(Some(pinned.clone()), economics, addr(9), golden.clone()),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+
+        // Installed, but the registration carries a different genesis, a
+        // swapped validator key, or a lower minimum ACS epoch: refused.
+        intake.pin_honeybadger_committee(FIXTURE_NETWORK.to_string(), pinned.clone());
+        let mut foreign_genesis = pinned.clone();
+        foreign_genesis.genesis_hash = [0x43; 32];
+        assert_eq!(
+            intake
+                .register_domain(
+                    honeybadger_request(Some(foreign_genesis), economics, addr(9), golden.clone()),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        let mut swapped = pinned.clone();
+        let first_key = swapped.validators[0].mldsa65_pubkey.clone();
+        swapped.validators[0].mldsa65_pubkey = swapped.validators[1].mldsa65_pubkey.clone();
+        assert_ne!(swapped.validators[0].mldsa65_pubkey, first_key);
+        assert_eq!(
+            intake
+                .register_domain(
+                    honeybadger_request(Some(swapped), economics, addr(9), golden.clone()),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        let mut relaxed = pinned.clone();
+        relaxed.min_acs_epoch = 0;
+        assert_eq!(
+            intake
+                .register_domain(
+                    honeybadger_request(Some(relaxed), economics, addr(9), golden.clone()),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+
+        // The governance pin, echoed exactly: past the door, and then the
+        // honest economics admits while the lying one is refused.
+        assert_eq!(
+            intake
+                .register_domain(
+                    honeybadger_request(Some(pinned.clone()), econ, addr(9), golden.clone()),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::DishonestEconomics
+        );
+        let key = intake
+            .register_domain(
+                honeybadger_request(Some(pinned.clone()), economics, addr(9), golden.clone()),
+                None,
+            )
+            .expect("the governance committee pin admits the HoneyBadgerBFT domain");
+        assert_eq!(
+            intake
+                .registry
+                .domain(&key)
+                .expect("dom")
+                .record
+                .descriptor
+                .id,
+            crate::cross_domain::external::AdapterId::from_name(
+                crate::cross_domain::external::honeybadger_bft::ADAPTER_NAME
+            )
+        );
+        assert_eq!(
+            intake
+                .pinned_anchor(AnchorFamily::HoneyBadger, FIXTURE_NETWORK)
+                .map(|a| a.family()),
+            Some(AnchorFamily::HoneyBadger)
+        );
+
+        // The checked install door refuses a degenerate committee by name and
+        // leaves the good pin in place.
+        let mut empty = pinned.clone();
+        empty.validators.clear();
+        assert!(
+            intake
+                .install_honeybadger_committee(FIXTURE_NETWORK.to_string(), empty)
+                .unwrap_err()
+                .contains("validator count"),
+            "an empty validator table is not a quorum"
+        );
+        let mut zero_genesis = pinned.clone();
+        zero_genesis.genesis_hash = [0u8; 32];
+        assert!(
+            intake
+                .install_honeybadger_committee(FIXTURE_NETWORK.to_string(), zero_genesis)
+                .unwrap_err()
+                .ends_with("HoneyBadgerBFT pinned genesis_hash is zero"),
+            "the install door names the zero field"
+        );
+        assert_eq!(
+            intake
+                .pinned_honeybadger_committees
+                .get(FIXTURE_NETWORK)
+                .cloned(),
+            Some(pinned.clone())
+        );
+
+        // Settlement reads the same pin: deterministic quorum finality, not a
+        // depth, and no Budlum-side slashability over a foreign committee.
+        let guarantee =
+            crate::settlement::universal_finality::FinalityGuarantee::for_external_spec_with_backing(
+                &AdapterSpec::HoneyBadgerBft {
+                    network: FIXTURE_NETWORK.to_string(),
+                    committee: Some(pinned.clone()),
+                },
+                Some(&crate::cross_domain::external::spec::SecurityBacking::SignatureSet {
+                    scheme: crate::crypto::facts::ObservedScheme::Scheme(
+                        crate::crypto::scheme::SchemeId::ML_DSA_65,
+                    ),
+                    signers: 3,
+                    required: 3,
+                    total_weight: 100,
+                    slashable: true,
+                }),
+            );
+        assert_eq!(
+            guarantee.reversibility,
+            crate::settlement::universal_finality::FinalityReversibility::DeterministicQuorum
+        );
+        assert!(
+            !guarantee.slashable_backing,
+            "a foreign committee is never slashable from Budlum"
+        );
+        let unpinned =
+            crate::settlement::universal_finality::FinalityGuarantee::for_external_spec_with_backing(
+                &AdapterSpec::HoneyBadgerBft {
+                    network: FIXTURE_NETWORK.to_string(),
+                    committee: None,
+                },
+                Some(&crate::cross_domain::external::spec::SecurityBacking::SignatureSet {
+                    scheme: crate::crypto::facts::ObservedScheme::Scheme(
+                        crate::crypto::scheme::SchemeId::ML_DSA_65,
+                    ),
+                    signers: 3,
+                    required: 3,
+                    total_weight: 100,
+                    slashable: true,
+                }),
+            );
+        assert_eq!(
+            unpinned.fault_tolerance_bps, 0,
+            "no pinned committee means no fault tolerance at all"
+        );
+    }
+
+    fn additional_family_specs_with_pins() -> Vec<AdapterSpec> {
+        use crate::cross_domain::external::{
+            aptos_jolteon_bft::{JolteonValidator, PinnedJolteonEpochState},
+            chain_key_ni_dkg::PinnedChainKeyRoot,
+            heterogeneous_multiprover::{
+                MultiProverCommitteeMember, PinnedFaultProposer, PinnedMultiProverConfig,
+            },
+            near_doomslug::{NearBlockProducer, PinnedNearEpoch},
+            pospace_vdf::PinnedPoSpaceAnchor,
+            solana_tower_bft::{PinnedSolEpoch, SolanaValidator},
+            stark_validity_rollup::PinnedStarkRollupConfig,
+        };
+        let h = |b: u8| [b; 32];
+        vec![
+            AdapterSpec::SolanaTowerBft {
+                network: "solana-mainnet".to_string(),
+                pinned: Some(PinnedSolEpoch {
+                    genesis_hash_hex: "4w4".repeat(20),
+                    epoch: 1,
+                    first_slot: 0,
+                    last_slot: 432_000,
+                    has_bonded_slash_escrow: true,
+                    validators: vec![SolanaValidator {
+                        vote_account: h(1),
+                        stake_lamports: 10,
+                        ed25519_pubkey: h(2),
+                        pq_pubkey: vec![0x01],
+                    }],
+                }),
+            },
+            AdapterSpec::PoSpaceVdf {
+                network: "chia-mainnet".to_string(),
+                pinned: Some(PinnedPoSpaceAnchor {
+                    genesis_challenge: h(3),
+                    min_plot_k: 20,
+                    min_iterations_per_block: 1,
+                    max_iterations_per_block: 1_000_000,
+                    required_depth: 2000,
+                    min_cumulative_weight: 2_000,
+                    require_pq_attestation: false,
+                    pq_attestor_pubkey: None,
+                }),
+            },
+            AdapterSpec::AptosJolteonBft {
+                network: "aptos-mainnet".to_string(),
+                pinned: Some(PinnedJolteonEpochState {
+                    epoch: 5,
+                    validators: vec![JolteonValidator {
+                        ed25519_pubkey: h(4),
+                        voting_power: 1,
+                        pq_pubkey: vec![0x02],
+                    }],
+                }),
+            },
+            AdapterSpec::NearDoomslugBft {
+                network: "near-mainnet".to_string(),
+                pinned: Some(PinnedNearEpoch {
+                    epoch_id: h(5),
+                    next_epoch_id: h(6),
+                    next_bp_hash: h(7),
+                    block_producers: vec![NearBlockProducer {
+                        account_id: "prod.near".to_string(),
+                        ed25519_pubkey: h(8),
+                        stake: 100,
+                        pq_pubkey: Vec::new(),
+                    }],
+                }),
+            },
+            AdapterSpec::ChainKeyNiDkg {
+                network: "ic-mainnet".to_string(),
+                pinned: Some(PinnedChainKeyRoot {
+                    subnet_id: h(9),
+                    root_bls_pubkey: vec![0x0a],
+                    root_pq_pubkey: vec![0x0b],
+                    dkg_interval_length: 100,
+                    min_registry_version: 1,
+                }),
+            },
+            AdapterSpec::HeterogeneousMultiProver {
+                network: "multiprover-mainnet".to_string(),
+                pinned: Some(PinnedMultiProverConfig {
+                    stark_program_hash: h(0x0d),
+                    chain_id: 1,
+                    challenge_window_secs: 3600,
+                    min_fault_bond_atoms: 100,
+                    fault_proposers: vec![PinnedFaultProposer {
+                        ed25519_pk: h(0x0e),
+                        pq_pk: vec![0x0f],
+                    }],
+                    expected_measurement: h(0x10),
+                    committee: vec![MultiProverCommitteeMember {
+                        ed25519_pk: h(0x11),
+                        pq_pk: vec![0x12],
+                        weight: 1,
+                    }],
+                    require_canonical_stark_set: true,
+                    require_pq_leg: false,
+                }),
+            },
+            AdapterSpec::StarkValidityRollup {
+                network: "starknet-mainnet".to_string(),
+                pinned: Some(PinnedStarkRollupConfig {
+                    network_id: "starknet-mainnet".to_string(),
+                    chain_id: 534_352,
+                    pinned_program_hash: h(0x16),
+                    trusted_batch_number: 100,
+                    trusted_state_root: h(0x17),
+                    expected_forced_queue_head: h(0x18),
+                    max_forced_inclusion_lag_batches: 128,
+                    require_canonical_program: true,
+                }),
+            },
+        ]
+    }
+
+    #[test]
+    fn additional_family_specs_build_report_their_network_and_roundtrip() {
+        for spec in additional_family_specs_with_pins() {
+            let expected_network = spec.network().to_string();
+            let desc = spec.build(None, None).descriptor().id;
+            let adapter = spec.build(None, None);
+            assert_eq!(adapter.descriptor().id, desc, "stable descriptor id");
+            let round: AdapterSpec = bincode::deserialize(&bincode::serialize(&spec).unwrap())
+                .expect("bincode roundtrip");
+            assert_eq!(round, spec, "bincode roundtrip equality");
+            assert_eq!(round.network(), expected_network);
+            assert!(!expected_network.is_empty());
+        }
+    }
+
+    #[test]
+    fn additional_family_specs_refuse_unpinned_registration() {
+        let unpinned = [
+            AdapterSpec::SolanaTowerBft {
+                network: "solana-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::PoSpaceVdf {
+                network: "chia-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::AptosJolteonBft {
+                network: "aptos-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::NearDoomslugBft {
+                network: "near-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::ChainKeyNiDkg {
+                network: "ic-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::HeterogeneousMultiProver {
+                network: "multiprover-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::StarkValidityRollup {
+                network: "starknet-mainnet".to_string(),
+                pinned: None,
+            },
+        ];
+        for spec in unpinned {
+            let mut state = IntakeState::new();
+            let economics = IntakeState::conservative_economics(1_000_000);
+            let versions = versions_for(&spec);
+            let golden = golden_for(&spec);
+            let err = state
+                .register_domain(
+                    RegistrationRequest {
+                        spec,
+                        policy: VerificationPolicy::strict(1_000),
+                        economics,
+                        versions,
+                        bond_atoms: economics.required_bond_atoms(),
+                        poster: addr(9),
+                        golden,
+                    },
+                    None,
+                )
+                .unwrap_err();
+            assert_eq!(
+                err,
+                IntakeError::CommitteeNotPinned,
+                "an unpinned additional-family spec must be refused closed"
+            );
+        }
     }
 }

@@ -8,7 +8,7 @@
 
 use crate::core::address::Address;
 use crate::cross_domain::external::bitcoin_spv::{
-    sha256d, spv_evidence, BitcoinSpvAdapter, PinnedBitcoinAnchor, HEADER_LEN,
+    sha256d, spv_evidence, BitcoinSpvAdapter, ChainWork256, PinnedBitcoinAnchor, HEADER_LEN,
 };
 use crate::cross_domain::external::spec::{
     ExternalFinalityAdapter, FinalityAttestation, RawConsensusEvidence, SecurityBacking,
@@ -262,27 +262,38 @@ fn a_broken_parent_link_is_refused_by_the_bridge() {
     );
 }
 
-/// Work backing is the first producer of `SecurityBacking::Work`. The bridge
-/// already treats accumulated work as clearing a slashability demand; the
-/// adapter must agree, or that branch of the shared model stays dead.
+/// Work backing is not slashable: nothing on the Bitcoin side is bonded where
+/// Budlum could confiscate it. A caller that demands slashable backing must be
+/// refused by the adapter itself - the answer the other work-weighted adapters
+/// (NiPoPoW, GHOSTDAG, AuxPoW, PoSpace) already give - and by the bridge, so
+/// neither door promotes accumulated work to a slashable signature set.
 #[test]
-fn work_backing_clears_the_bridges_slashability_demand() {
+fn work_backing_does_not_clear_a_slashability_demand() {
+    use crate::cross_domain::external::spec::AdapterError;
     let mut strict = policy();
     strict.require_slashable = true;
     let evidence = golden();
+    assert_eq!(
+        adapter().verify(&evidence, &strict),
+        Err(AdapterError::UnslashableBacking)
+    );
+
+    // Without the demand the same evidence is work-backed and admitted, so
+    // the refusal above is the policy and not a broken fixture.
     let attestation = adapter()
-        .verify(&evidence, &strict)
-        .expect("work clears the demand");
+        .verify(&evidence, &policy())
+        .expect("work backs the claim when slashability is not demanded");
     assert!(matches!(attestation.security, SecurityBacking::Work { .. }));
 
     let proof = encode_external_evidence(&evidence).expect("evidence encodes");
     let (domain, commitment) = domain_and_commitment(&evidence, &proof);
     let bridge = ExternalDomainFinalityBridge::new(Box::new(adapter()), strict);
-    assert_eq!(
-        bridge
-            .verify_finality(&domain, &commitment, &proof)
-            .expect("bridge verifies"),
-        FinalityStatus::Finalized
+    let result = bridge.verify_finality(&domain, &commitment, &proof);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| { format!("{error:?}").contains("requires slashable backing") }),
+        "result: {result:?}"
     );
 }
 
@@ -300,12 +311,26 @@ fn adapter_spec_variant_indices_stay_pinned() {
         program_hash: None,
         chain_id: None,
     };
+    let babylon = Spec::BabylonEots {
+        network: "babylon-mainnet".to_string(),
+        pinned: None,
+    };
     let eth_bytes = bincode::serialize(&eth).expect("eth spec serializes");
     let zk_bytes = bincode::serialize(&zk).expect("zk spec serializes");
     let btc_bytes = bincode::serialize(&bitcoin_spec()).expect("btc spec serializes");
+    let babylon_bytes = bincode::serialize(&babylon).expect("babylon spec serializes");
     assert_eq!(u32::from_le_bytes(eth_bytes[0..4].try_into().unwrap()), 0);
     assert_eq!(u32::from_le_bytes(zk_bytes[0..4].try_into().unwrap()), 1);
     assert_eq!(u32::from_le_bytes(btc_bytes[0..4].try_into().unwrap()), 2);
+    // The bincode discriminant is the variant's declaration position, not the
+    // manual wire tag `encode_adapter_spec` writes into the transaction
+    // preimage (that tag is 15, the first free slot after the reserved 10..14,
+    // and is pinned by the signing-preimage test). Appending `BabylonEots`
+    // last gives it position 10 and leaves every earlier variant untouched.
+    assert_eq!(
+        u32::from_le_bytes(babylon_bytes[0..4].try_into().unwrap()),
+        10
+    );
 }
 
 /// The declared height and root are derived from the headers, not believed
@@ -1459,4 +1484,143 @@ fn unix_seconds_live_policy_clock_advances_from_accepted_attestation_timestamps(
         );
     assert_eq!(second.height, 907);
     assert_eq!(second.finalized_at, 1_730_011_000);
+}
+
+// ---------------------------------------------------------------------------
+// B-10206: exact 256-bit chainwork must fail closed on overflow instead of
+// saturating at `ChainWork256::MAX`. A saturated total makes every later
+// `cumulative_work` compare equal, so the "strictly more work than the pinned
+// anchor" invariant stops separating a real header batch from an empty one and
+// the reported `difficulty_bits` freezes at the saturation point.
+// ---------------------------------------------------------------------------
+
+/// Six regtest headers mined on top of `anchor`, with the anchor's own accrued
+/// work optionally pinned, so a test can drive the running total into the
+/// 256-bit ceiling without mining 2^256 work.
+fn regtest_six_headers(
+    anchor: &PinnedBitcoinAnchor,
+    anchor_chainwork: Option<ChainWork256>,
+    tag: u8,
+) -> (BitcoinSpvAdapter, Vec<[u8; HEADER_LEN]>, VerificationPolicy) {
+    use crate::cross_domain::external::bitcoin_spv::REGTEST_POW_LIMIT_BITS;
+
+    let ts_open = 1_712_000_000u32;
+    let prior: [u32; 11] = std::array::from_fn(|i| ts_open + 300_000 + (i as u32) * 600);
+    let mut adapter = BitcoinSpvAdapter::new("regtest", Some(anchor.clone()))
+        .with_epoch_start_timestamp(ts_open)
+        .with_prior_timestamps(prior);
+    if let Some(work) = anchor_chainwork {
+        adapter = adapter.with_anchor_chainwork(work);
+    }
+    let mut headers = Vec::new();
+    let mut prev = anchor.block_hash;
+    for i in 0..6u32 {
+        let h = mine_regtest_header(
+            prev,
+            sha256d(&[tag, i as u8]),
+            prior[10] + 600 * (i + 1),
+            REGTEST_POW_LIMIT_BITS,
+        );
+        prev = sha256d(&h);
+        headers.push(h);
+    }
+    let policy = VerificationPolicy {
+        min_depth: 6,
+        require_declared_match: true,
+        max_age: 0,
+        now: u64::from(prior[10]) + 20_000,
+        require_slashable: false,
+    };
+    (adapter, headers, policy)
+}
+
+#[test]
+fn anchor_chainwork_with_headroom_still_accretes_exactly() {
+    use crate::cross_domain::external::bitcoin_spv::REGTEST_POW_LIMIT_BITS;
+
+    let anchor = PinnedBitcoinAnchor {
+        height: 1_000,
+        block_hash: sha256d(b"regtest-room-anchor"),
+        bits: REGTEST_POW_LIMIT_BITS,
+    };
+    let per_block = ChainWork256::from_bits(REGTEST_POW_LIMIT_BITS).expect("block work");
+    let base = ChainWork256::from_bits(0x1d00_ffff).expect("genesis-sized base work");
+    let (adapter, headers, policy) = regtest_six_headers(&anchor, Some(base), 0xC0);
+
+    let refs: Vec<&[u8; HEADER_LEN]> = headers.iter().collect();
+    let evidence = spv_evidence(&adapter, "regtest", &refs, Address::from([9u8; 32]));
+    let chain = adapter
+        .verify_chain(&evidence, &policy)
+        .expect("a chain with headroom must verify");
+
+    // Six exact additions on top of the pinned base, no saturation anywhere.
+    let mut expected = base;
+    for _ in 0..6 {
+        expected = expected
+            .checked_add(per_block)
+            .expect("test headroom is exact");
+    }
+    assert_eq!(chain.total_chainwork, expected);
+    assert_eq!(chain.headers.last().expect("tip").cumulative_work, expected);
+    assert!(chain.total_chainwork > base);
+}
+
+#[test]
+fn anchor_chainwork_overflow_is_refused_instead_of_saturating() {
+    use crate::cross_domain::external::bitcoin_spv::REGTEST_POW_LIMIT_BITS;
+    use crate::cross_domain::external::spec::AdapterError;
+
+    let anchor = PinnedBitcoinAnchor {
+        height: 1_000,
+        block_hash: sha256d(b"regtest-overflow-anchor"),
+        bits: REGTEST_POW_LIMIT_BITS,
+    };
+    // Five blocks of headroom for six blocks of work: the sixth addition leaves
+    // the 256-bit range. Bitcoin's own `nChainWork` never wraps and never
+    // clamps, so the only honest answers are "exact" or "refuse".
+    let per_block = ChainWork256::from_bits(REGTEST_POW_LIMIT_BITS).expect("block work");
+    // `ChainWork256` exposes no subtraction; build `MAX - 5*per_block` by
+    // counting down from MAX through `to_be_bytes`/`from_be_bytes`, which are
+    // both public.
+    let mut raw = ChainWork256::MAX.to_be_bytes();
+    for _ in 0..5 {
+        raw = sub_be_bytes(raw, per_block.to_be_bytes());
+    }
+    let base = ChainWork256::from_be_bytes(raw);
+
+    let (adapter, headers, policy) = regtest_six_headers(&anchor, Some(base), 0xD0);
+    let refs: Vec<&[u8; HEADER_LEN]> = headers.iter().collect();
+    let evidence = spv_evidence(&adapter, "regtest", &refs, Address::from([10u8; 32]));
+
+    match adapter.verify_chain(&evidence, &policy) {
+        Err(AdapterError::ConsensusRule { rule }) => {
+            assert!(
+                rule.to_lowercase().contains("chainwork"),
+                "refusal must name chainwork, got: {rule}"
+            );
+        }
+        Err(other) => panic!("expected a chainwork ConsensusRule refusal, got {other:?}"),
+        Ok(chain) => panic!(
+            "overflowing anchor chainwork must be refused, but the chain verified with total {:?}",
+            chain.total_chainwork.to_le_words()
+        ),
+    }
+}
+
+/// Byte-wise big-endian subtraction, used only by the tests to build the
+/// `MAX - k*work` anchor without adding a production subtraction helper for a
+/// value the production path never sees.
+fn sub_be_bytes(mut a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
+    let mut borrow = 0i16;
+    for i in (0..32).rev() {
+        let d = i16::from(a[i]) - i16::from(b[i]) - borrow;
+        if d < 0 {
+            a[i] = (d + 256) as u8;
+            borrow = 1;
+        } else {
+            a[i] = d as u8;
+            borrow = 0;
+        }
+    }
+    a
 }

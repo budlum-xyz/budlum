@@ -330,6 +330,8 @@ impl SolanaTowerBftAdapter {
             });
         }
         let mut index = BTreeMap::new();
+        let mut seen_ed25519 = BTreeSet::new();
+        let mut seen_pq = BTreeSet::new();
         let mut total_stake: u128 = 0;
         for (idx, validator) in pinned.validators.iter().enumerate() {
             if validator.vote_account == [0u8; 32] {
@@ -347,11 +349,21 @@ impl SolanaTowerBftAdapter {
                     rule: "Solana validator Ed25519 public key cannot be all-zero".into(),
                 });
             }
+            if !seen_ed25519.insert(validator.ed25519_pubkey) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "duplicate Ed25519 authorized voter key in pinned Solana epoch".into(),
+                });
+            }
             if !validator.pq_pubkey.is_empty() {
                 crate::crypto::pq::validate_public_key(SchemeId::ML_DSA_65, &validator.pq_pubkey)
                     .map_err(|_| AdapterError::ConsensusRule {
                     rule: "invalid ML-DSA-65 public key in pinned Solana epoch".into(),
                 })?;
+                if !seen_pq.insert(validator.pq_pubkey.as_slice()) {
+                    return Err(AdapterError::ConsensusRule {
+                        rule: "duplicate ML-DSA-65 public key in pinned Solana epoch".into(),
+                    });
+                }
             }
             if index.insert(validator.vote_account, idx).is_some() {
                 return Err(AdapterError::ConsensusRule {
@@ -917,6 +929,31 @@ mod tests {
             adapter.verify(&weak_ev, &policy),
             Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("supermajority")
         ));
+
+        // Cross-vote-account signature replay defence: if two vote accounts share an
+        // Ed25519 verifying key in PinnedSolEpoch, a single vote signature for VA_0
+        // (40% stake) could be replayed verbatim under VA_1 (30% stake) to reach 70% > 2/3.
+        let mut aliased_pinned = pinned.clone();
+        aliased_pinned.validators[1].ed25519_pubkey = aliased_pinned.validators[0].ed25519_pubkey;
+        aliased_pinned.validators[1].pq_pubkey = aliased_pinned.validators[0].pq_pubkey.clone();
+        let single_vote =
+            nodes[0].sign_vote(&net_hash, SLOT, &bundle_a.bank.bank_hash, 32, SLOT - 32);
+        let mut replayed_vote = single_vote.clone();
+        replayed_vote.vote_account = aliased_pinned.validators[1].vote_account;
+        let replay_bundle = SolanaTowerEvidence {
+            bank: bundle_a.bank.clone(),
+            votes: vec![single_vote, replayed_vote],
+        };
+        let mut replay_ev = ev_a.clone();
+        replay_ev.payload = encode_sol_evidence(&replay_bundle).unwrap();
+        let aliased_adapter = SolanaTowerBftAdapter::new(NETWORK, Some(aliased_pinned));
+        assert!(
+            matches!(
+                aliased_adapter.verify(&replay_ev, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "replaying one voter key signature across two vote accounts must be refused"
+        );
 
         // Registry lifecycle: submit rooted certificate, contradiction submit
         // must fail, mark_faulted freezes, slash pays challenger.

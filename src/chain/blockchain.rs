@@ -2501,7 +2501,11 @@ impl Blockchain {
             },
             checkpoint_height: block.index,
             external_intake_root: if state.settlement.has_external_intake() {
-                state.settlement.external_intake_digest().ok()
+                // Three states, not two: an intake that cannot be encoded is
+                // not an absent intake (B-10108 #1/#2).
+                crate::settlement::registries::SettlementRegistries::intake_root_for_header(
+                    state.settlement.external_intake_digest(),
+                )
             } else {
                 None
             },
@@ -2800,17 +2804,7 @@ impl Blockchain {
     /// from its own header archive, with the class the anchor was signed
     /// with (the current class when this node did not record it).
     /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::settlement::AnchorError`] when the window has leaves but the
-    /// aggregation refuses them - a zero digest, or a root that derives to
-    /// zero. That is an encoding failure, not an absence, and it must not
-    /// reach a recovery tick dressed as one.
-    pub fn local_anchor_root(
-        &self,
-        height: u64,
-    ) -> Result<Option<[u8; 32]>, crate::settlement::AnchorError> {
+    pub(crate) fn local_anchor_root(&self, height: u64) -> AnchorWindowOutcome {
         let class = self
             .anchor_classes
             .get(&height)
@@ -2821,7 +2815,7 @@ impl Blockchain {
             .iter()
             .map(crate::settlement::anchor_leaf_digest)
             .collect();
-        aggregate_local_anchor_root(&digests)
+        AnchorWindowOutcome::from_leaves(&digests)
     }
 
     /// What the state recovery tick needs about one stage and height: the
@@ -2844,16 +2838,26 @@ impl Blockchain {
                 .and_then(|at| self.chain.get(at))
                 .and_then(|block| hex::decode(&block.hash).ok())
                 .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()),
-            Stage::Ephyra => match self.local_anchor_root(height) {
-                Ok(root) => root,
-                Err(err) => {
-                    tracing::error!(
-                        "this node cannot recompute the anchor root at {height}: {err}; \
-                         the stage reads as unproven here, not as absent"
-                    );
-                    None
+            Stage::Ephyra => {
+                let window = self.local_anchor_root(height);
+                // One place reads the outcome, so "not reached" and "unsound"
+                // cannot drift apart at two call sites: a fault is logged and
+                // yields nothing to observe; an unreached window is silent.
+                match window {
+                    AnchorWindowOutcome::Root(root) => Some(root),
+                    // Not reached is not a fault, and it is not logged.
+                    AnchorWindowOutcome::NotYet => None,
+                    // An unsound window must not read as "nothing to observe".
+                    AnchorWindowOutcome::Fault(ref reason) => {
+                        tracing::error!(
+                            height,
+                            %reason,
+                            "anchor window is unsound; the tick has nothing valid to observe"
+                        );
+                        None
+                    }
                 }
-            },
+            }
             Stage::Polyp => self
                 .anchor_emission
                 .seals
@@ -3034,7 +3038,11 @@ impl Blockchain {
             },
             checkpoint_height: self.chain.last().map_or(0, |b| b.index),
             external_intake_root: if self.state.settlement.has_external_intake() {
-                self.state.settlement.external_intake_digest().ok()
+                // Three states, not two: an intake that cannot be encoded is
+                // not an absent intake (B-10108 #1/#2).
+                crate::settlement::registries::SettlementRegistries::intake_root_for_header(
+                    self.state.settlement.external_intake_digest(),
+                )
             } else {
                 None
             },
@@ -16024,5 +16032,42 @@ mod bond_and_reorg_tests {
             .list_bud3_symbol_objects()
             .expect("list after restart")
             .is_empty());
+    }
+}
+
+/// What an anchor window produced: not yet reached, a root, or a fault.
+///
+/// `aggregate_finality_roots` answers with one `Result`, but its two error
+/// arms mean opposite things: `EmptyAggregation` is a fact about where the
+/// chain is, and `ZeroDigest` is a fault in this node. A caller that reads both
+/// as `None` cannot tell "nothing to anchor yet" from "cannot form a sound
+/// anchor", and the second one is the state a node must not sign from.
+///
+/// WIRING: the Ephyra stage of `pq_stage_observation` is the caller; the
+/// downstream tick that reports an unsound window instead of an absent one
+/// lands with the recovery wiring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AnchorWindowOutcome {
+    /// The window holds no global headers yet. Nothing to anchor is correct.
+    NotYet,
+    /// The folded root over the window's leaves.
+    Root([u8; 32]),
+    /// The window exists but is unsound; the string names the field found zero.
+    Fault(String),
+}
+
+/// WIRING: `local_anchor_root` is the door - it folds a window through
+/// `from_leaves` and hands the outcome to the Ephyra stage of
+/// `pq_stage_observation`.
+impl AnchorWindowOutcome {
+    /// Fold a window's leaves the same way the settlement side folds them, and
+    /// keep the two error arms apart.
+    #[must_use]
+    pub fn from_leaves(leaves: &[[u8; 32]]) -> Self {
+        match aggregate_local_anchor_root(leaves) {
+            Ok(Some(root)) => Self::Root(root),
+            Ok(None) => Self::NotYet,
+            Err(err) => Self::Fault(format!("{err:?}")),
+        }
     }
 }

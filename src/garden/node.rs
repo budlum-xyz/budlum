@@ -20,16 +20,16 @@
 //! founded with host approval it also answers the keys that ask to join,
 //! and it does that with a transaction like any other.
 
-use super::invite::{GardenInvite, MAX_INVITE_PEERS};
-use super::invite_record::GardenInviteRecord;
+use super::invite::{fit_peers, GardenInvite};
 use super::net::{
     self, announced_address, peer_id_of, validator_dial_address, BudgetedFrame, FramePermits,
     GardenGossip, GardenNet, GardenRequest, GardenResponse, NetCommand, NetEvent, MAX_GOSSIP_BATCH,
     MAX_SYNC_COMMITS,
 };
+use super::record::{GardenRecord, DEFAULT_RECORD_TTL_MS};
 use super::settlement::{GardenBudlumLink, GardenDomainView};
 use super::state::{quorum, GardenLedger, GardenObject, GardenState};
-use super::storage::GardenContentStore;
+use super::storage::{Bud3PartCounts, GardenContentStore};
 use super::types::{
     garden_domain_id, invite_keypair, join_message, status_label, GardenAdmission,
     GardenAdmissionState, GardenBlock, GardenCommit, GardenContentKind, GardenFounding,
@@ -185,7 +185,7 @@ pub struct GardenLeaveOutcome {
 enum GardenCommand {
     Status(oneshot::Sender<Value>),
     Invite(oneshot::Sender<Result<GardenInvite, String>>),
-    InviteRecord(oneshot::Sender<Result<GardenInviteRecord, String>>),
+    Record(oneshot::Sender<Result<GardenRecord, String>>),
     Publish {
         kind: GardenContentKind,
         bytes: Vec<u8>,
@@ -245,10 +245,9 @@ impl GardenHandle {
         self.ask(GardenCommand::Invite).await?
     }
 
-    /// The invite record of this Garden: one record that the link, the QR
-    /// content, the clipboard line and the local announcement all carry.
-    pub async fn invite_record(&self) -> Result<GardenInviteRecord, String> {
-        self.ask(GardenCommand::InviteRecord).await?
+    /// The invite record this validator signs and hands out.
+    pub async fn record(&self) -> Result<GardenRecord, String> {
+        self.ask(GardenCommand::Record).await?
     }
 
     /// Publish a message, a post or an image.
@@ -303,11 +302,7 @@ impl GardenHandle {
     }
 }
 
-/// How long an invite record may be used, in milliseconds: the directive's
-/// twenty-four hours.
-const INVITE_RECORD_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
-
-fn now_ms() -> u64 {
+pub(super) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -522,6 +517,15 @@ struct Node {
     seeds: Vec<String>,
     ledger: GardenLedger,
     store: GardenContentStore,
+    /// Work this node has done since it started, for `status`.
+    ///
+    /// Three counters, because a validator that only sits in the list is
+    /// not taking part: it has to hold content, run blocks and answer
+    /// other nodes asking for content. They only ever go up, so "greater
+    /// than zero" means this node did the thing at least once.
+    parts_held: u64,
+    blocks_executed: u64,
+    parts_served: u64,
     net: mpsc::Sender<NetCommand>,
     link: Option<GardenBudlumLink>,
     reported: u64,
@@ -738,6 +742,7 @@ pub async fn spawn(
     }
 
     let mut peers = BTreeMap::new();
+    let joining = matches!(entry, GardenEntry::Invite(_));
     let (ledger, token, seeds) = match entry {
         GardenEntry::Create { title, limits } => {
             if address.is_empty() {
@@ -849,6 +854,9 @@ pub async fn spawn(
         outbox: BTreeMap::new(),
         gossip_in_flight: BTreeMap::new(),
         held_elsewhere,
+        parts_held: 0,
+        blocks_executed: 0,
+        parts_served: 0,
         mempool: BTreeMap::new(),
         my_next_nonce,
         proposals: BTreeMap::new(),
@@ -906,11 +914,54 @@ pub async fn spawn(
         stopped: false,
     };
     tokio::spawn(node.run(garden_net.events, command_rx, deposit_rx));
-    Ok(GardenHandle {
+    let handle = GardenHandle {
         commands,
         chain_id,
         genesis_hash,
-    })
+    };
+    if joining {
+        wait_at_the_door(&handle).await?;
+    }
+    Ok(handle)
+}
+
+/// Longest a joiner waits for the door before it gives up.
+const JOIN_ENTER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wait until this key is in the Garden's record.
+///
+/// A join is a request, not a membership: the chain places the key in a
+/// block. Returning a handle before that block would tell the caller it is a
+/// validator while it holds no seat, and a Frozen Garden - which writes no
+/// blocks - would look like a Garden that admitted everyone. The answer is
+/// therefore the record: `Active` for a seat, `Waiting` under host approval
+/// (the host answers with no deadline), and a refusal when the Garden turned
+/// the key away, retired, or never reached the door.
+async fn wait_at_the_door(handle: &GardenHandle) -> Result<(), String> {
+    let started = Instant::now();
+    loop {
+        let status = handle.status().await?;
+        let member = status.pointer("/me/member").and_then(Value::as_str);
+        if member == Some("Active") || member == Some("Waiting") {
+            return Ok(());
+        }
+        if status.get("turned_away") == Some(&Value::Bool(true)) {
+            return Err("the Garden turned this key away".into());
+        }
+        if status.get("status").and_then(Value::as_str) == Some("Retired") {
+            return Err("the Garden was retired before this key could join".into());
+        }
+        if status.pointer("/me/stopped") == Some(&Value::Bool(true)) {
+            return Err("this node stopped before the Garden placed its key".into());
+        }
+        if started.elapsed() >= JOIN_ENTER_TIMEOUT {
+            let _ = handle.leave().await;
+            return Err(
+                "the Garden did not admit this key in time; it may be frozen or full".into(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Fetch and verify the genesis and the finalized chain from the peers an
@@ -1220,7 +1271,11 @@ impl Node {
         }
         let response = match done.outcome {
             Ok(wrote_new) => {
-                if !wrote_new {
+                if wrote_new {
+                    // A deposit that landed is content this node now holds
+                    // for the Garden, same as one it fetched itself.
+                    self.parts_held = self.parts_held.saturating_add(1);
+                } else {
                     self.store.release_background_charge(done.charged_len);
                 }
                 self.finish_deposit(done.sender, done.content_id, done.already_published_for_me)
@@ -1726,6 +1781,12 @@ impl Node {
             let peer_cap = (self.limits().max_validators as usize)
                 .saturating_mul(2)
                 .saturating_add(8);
+            // A Garden with no room does not hand a newcomer a welcome it
+            // can never redeem: the refusal names the reason, in the place
+            // the joiner reads it, before any chain state is exchanged.
+            let no_room = !self.ledger.state.has_room()
+                && !self.is_seated_validator(key)
+                && !self.ledger.state.validators.contains_key(key);
             let known_validator = self.is_seated_validator(key);
             let unjoined_count = self
                 .peers
@@ -1735,7 +1796,9 @@ impl Node {
             let unjoined_grace = self.unjoined_grace();
             let already = self.peers.contains_key(&peer);
             let mut admit = false;
-            let response = if *chain_id != self.chain_id() {
+            let response = if no_room {
+                GardenResponse::Refused("the Garden has no seat for this key".into())
+            } else if *chain_id != self.chain_id() {
                 GardenResponse::Refused("this node runs another Garden".into())
             } else if !self.holds_invite(peer, key, invite_signature) {
                 GardenResponse::Refused("the invite does not match this Garden".into())
@@ -1957,7 +2020,16 @@ impl Node {
                     return;
                 }
                 budget.1 = budget.1.saturating_add(1);
-                if let Some(bytes) = self.store.get(&content_id) {
+                // Serve from the object layer first. When this node coded the
+                // object, the bytes a peer receives are the ones B.U.D. 3.0
+                // rebuilt from its own symbols and checked against the content
+                // id, not a loose copy that merely sits in a file.
+                let served = self
+                    .store
+                    .get_coded(&content_id)
+                    .or_else(|| self.store.get(&content_id));
+                if let Some(bytes) = served {
+                    self.parts_served = self.parts_served.saturating_add(1);
                     let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                     if let Some(entry) = self.object_budget.get_mut(&peer) {
                         entry.2 = entry.2.saturating_add(len);
@@ -2446,6 +2518,7 @@ impl Node {
                 }
                 self.measured.remove(&content_id);
                 if fetch.keep && self.store.put_verified(&content_id, &bytes).is_ok() {
+                    self.parts_held = self.parts_held.saturating_add(1);
                     self.wanted.remove(&content_id);
                 }
                 for waiter in fetch.waiters {
@@ -3026,6 +3099,7 @@ impl Node {
             tracing::debug!(error = %e, "garden commit refused");
             return false;
         }
+        self.blocks_executed = self.blocks_executed.saturating_add(1);
         self.first_sight(Seen::Commit(commit.block.hash()));
         if from.is_some_and(|peer| {
             self.peers
@@ -3589,6 +3663,25 @@ impl Node {
         }
     }
 
+    /// Read an object this node holds, through the object layer when it can.
+    ///
+    /// The coded copy is only trusted when its record agrees with the bytes
+    /// it rebuilt; otherwise the plain cache answers. Either way the caller
+    /// gets bytes that hash to `content_id`, because both roads check it.
+    fn resolve_locally(&mut self, content_id: &Hash32) -> Option<Vec<u8>> {
+        // `object_len` is the length of the coded object, header and all.
+        // The bytes handed back are the content, so the content length in
+        // the record is the one to compare against.
+        let coded_len = self
+            .store
+            .record_of(content_id)
+            .map(|record| record.content_id.len);
+        self.store
+            .get_coded(content_id)
+            .filter(|bytes| coded_len == Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX)))
+            .or_else(|| self.store.get(content_id))
+    }
+
     async fn on_command(&mut self, command: GardenCommand) {
         match command {
             GardenCommand::Status(reply) => {
@@ -3597,8 +3690,8 @@ impl Node {
             GardenCommand::Invite(reply) => {
                 let _ = reply.send(self.invite());
             }
-            GardenCommand::InviteRecord(reply) => {
-                let _ = reply.send(self.invite_record());
+            GardenCommand::Record(reply) => {
+                let _ = reply.send(self.record());
             }
             GardenCommand::Publish {
                 kind,
@@ -3609,7 +3702,7 @@ impl Node {
             } => {
                 let _ = reply.send(self.publish(kind, bytes, mime, caption).await);
             }
-            GardenCommand::Resolve(content_id, reply) => match self.store.get(&content_id) {
+            GardenCommand::Resolve(content_id, reply) => match self.resolve_locally(&content_id) {
                 Some(bytes) => {
                     let _ = reply.send(Ok(bytes));
                 }
@@ -3666,7 +3759,9 @@ impl Node {
         }))
     }
 
-    fn invite(&self) -> Result<GardenInvite, String> {
+    /// Where an invite tells a joiner to knock, best first: the host, then
+    /// the validators this node has checked itself, then the seeds.
+    fn invite_peers(&self) -> Vec<String> {
         let state = &self.ledger.state;
         let host = state.host();
         let mut peers: Vec<String> = Vec::new();
@@ -3692,51 +3787,58 @@ impl Node {
                 peers.push(validator.address.clone());
             }
         }
+        // A seed is where a validator was, not where it is. Once the record
+        // places that key, the record wins: keeping the old address in the
+        // list would hand a newcomer a door that no longer opens.
+        let placed: BTreeSet<GardenKey> = state.validators.keys().copied().collect();
         for seed in &self.seeds {
-            if !peers.contains(seed) {
-                peers.push(seed.clone());
+            if peers.contains(seed) {
+                continue;
             }
+            if net::dial_address(seed).is_ok_and(|(_, id)| {
+                placed
+                    .iter()
+                    .any(|key| peer_id_of(key).is_ok_and(|own| own == id))
+            }) {
+                continue;
+            }
+            peers.push(seed.clone());
         }
-        peers.truncate(MAX_INVITE_PEERS);
-        GardenInvite::new(&state.genesis, self.token, peers)
+        peers
     }
 
-    /// Build the invite record from the same state the invite line comes from.
+    fn invite(&self) -> Result<GardenInvite, String> {
+        // The list is already in the order that matters: the host first,
+        // then the validators this node has verified, then the seeds. The
+        // invite keeps as many of them as it has room for, so a Garden that
+        // outgrows the line still hands out an invite that works.
+        let peers = fit_peers(self.invite_peers());
+        GardenInvite::new(&self.ledger.state.genesis, self.token, peers)
+    }
+
+    /// The invite record this validator hands out.
     ///
-    /// The proof is signed by the invite key, which is derived from the token
-    /// every validator already holds, so any validator may hand out an invite:
-    /// the host does not have to be the one who invites (optimisation
-    /// directive 5.1). The record expires after a day and may admit as many
-    /// joiners as the Garden has validator seats.
-    fn invite_record(&self) -> Result<GardenInviteRecord, String> {
-        let invite = self.invite()?;
+    /// Any validator may issue one: inviting is not a host privilege. The
+    /// record is signed with this node's own key, so whoever receives it
+    /// can see who opened the door and check that claim against the chain.
+    fn record(&self) -> Result<GardenRecord, String> {
         let state = &self.ledger.state;
-        let keypair = crate::garden::types::invite_keypair(&self.token)?;
-        let host = state.host();
-        let host_address = state
-            .validators
-            .get(&host)
-            .map(|validator| validator.address.clone())
-            .or_else(|| invite.peers.first().cloned())
-            .ok_or_else(|| "the host has no address a joiner could dial".to_string())?;
-        let relays: Vec<String> = invite
-            .peers
-            .iter()
-            .filter(|peer| **peer != host_address)
-            .take(super::invite_record::MAX_RELAYS)
-            .cloned()
-            .collect();
-        let seats = u16::try_from(state.genesis.limits.max_validators).unwrap_or(u16::MAX);
-        GardenInviteRecord::new(
-            invite.chain_id,
-            invite.genesis_hash,
-            invite.token,
-            &keypair,
-            host,
-            &host_address,
-            relays,
-            now_ms().saturating_add(INVITE_RECORD_LIFETIME_MS),
-            seats,
+        let peers = self.invite_peers();
+        if peers.is_empty() {
+            return Err("this node knows no address a joiner could reach".into());
+        }
+        // A record may not admit more keys than the Garden has seats for.
+        let uses = u16::try_from(state.genesis.limits.max_validators).unwrap_or(u16::MAX);
+        GardenRecord::issue(
+            state.genesis.chain_id,
+            state.genesis.hash(),
+            self.token,
+            state.host(),
+            peers,
+            now_ms(),
+            DEFAULT_RECORD_TTL_MS,
+            uses,
+            &self.key,
         )
     }
 
@@ -3796,6 +3898,7 @@ impl Node {
             return Err("this node has too many pending transactions".into());
         }
         self.store.put(&bytes)?;
+        self.parts_held = self.parts_held.saturating_add(1);
         // Hand the bytes to the validators that will hold them before the
         // chain names them, so a sudden departure of this node loses nothing.
         let holders = self.holders(&content_id);
@@ -3806,6 +3909,10 @@ impl Node {
             .map(|(peer, _)| *peer)
             .collect();
         for peer in targets {
+            // Pushing the bytes to a holder is serving them too: the
+            // other node ends up with content it did not have, which is
+            // the whole point of the counter.
+            self.parts_served = self.parts_served.saturating_add(1);
             self.send(
                 peer,
                 GardenRequest::PutObject {
@@ -3941,6 +4048,7 @@ impl Node {
             })
             .collect();
         let genesis_hash = state.genesis.hash();
+        let bud3: Bud3PartCounts = self.store.part_counts();
         let budlum = match &self.link {
             Some(link) => link
                 .view_for_genesis(self.chain_id(), genesis_hash)
@@ -3975,6 +4083,7 @@ impl Node {
                     }),
                 "turned_away": self.turned_away,
                 "leaving": self.leaving.is_some(),
+                "stopped": self.stopped,
             },
             "validators": validators,
             "active_validators": state.active().len(),
@@ -3985,6 +4094,19 @@ impl Node {
             "objects": state.objects.len(),
             "objects_wanted_here": self.wanted.len(),
             "stored_object_bytes": self.store.total_bytes(),
+            "work": {
+                "parts_held": self.parts_held,
+                "blocks_executed": self.blocks_executed,
+                "parts_served": self.parts_served,
+                "bud3": {
+                    "objects_coded": bud3.objects_coded,
+                    "segments_coded": bud3.segments_coded,
+                    "symbols_made": bud3.symbols_made,
+                    "symbol_roots": bud3.symbol_roots,
+                    "objects_viewed": bud3.objects_viewed,
+                    "symbols_used": bud3.symbols_used,
+                },
+            },
             "limits": {
                 "max_validators": limits.max_validators,
                 "max_object_bytes": limits.max_object_bytes,
@@ -4102,11 +4224,18 @@ impl Node {
                 tracing::warn!(error = %e, "garden domain status could not be settled");
             }
         }
+        // The fallback is reached when this node can no longer name a
+        // dialable validator, so it falls back to the seeds it started
+        // from. It builds the record directly, which means it does not go
+        // through `check`, so the peer list is cut to the record's budget
+        // here. Without that cut this one path could hand out a record
+        // longer than the ceiling every other path enforces, and the
+        // leaver's parting invite would be the one invite nobody can read.
         let invite = self.invite().unwrap_or_else(|_| GardenInvite {
             chain_id,
             genesis_hash: self.ledger.state.genesis.hash(),
             token: self.token,
-            peers: self.seeds.clone(),
+            peers: fit_peers(self.seeds.clone()),
         });
         let outcome = GardenLeaveOutcome {
             chain_id,
@@ -4452,6 +4581,509 @@ mod tests {
         })
         .await
         .expect("the guest never became a validator");
+    }
+
+    /// Inviting is not a host privilege. Any seated validator produces a
+    /// record for the same Garden, and someone joins with it.
+    ///
+    /// This matters for what a Garden is: the host's only standing power is
+    /// liveness. If only the host could invite, a host who stepped away
+    /// would close the door behind them, and the Garden would be the host's
+    /// property rather than its members'.
+    #[tokio::test]
+    async fn garden_invite_any_validator() {
+        let host_handle = host().await;
+        let from_host = host_handle.invite().await.unwrap();
+
+        let guest = spawn(
+            GardenEntry::Invite(from_host.clone()),
+            config("guest", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while guest.status().await.unwrap()["active_validators"] != 2 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the guest never became a validator");
+
+        // The guest is not the host, and it hands out a record of its own.
+        assert_eq!(
+            guest.status().await.unwrap()["me"]["host"],
+            json!(false),
+            "the guest must not be the host for this test to mean anything"
+        );
+        let from_guest = guest.invite().await.unwrap();
+
+        // It names the same Garden, not a new one.
+        assert_eq!(from_guest.chain_id, from_host.chain_id);
+        assert_eq!(from_guest.genesis_hash, from_host.genesis_hash);
+        assert_eq!(from_guest.token, from_host.token);
+
+        // It is a record, so it obeys the record's rules. Both of these
+        // refuse an oversized record, so a round trip through them is the
+        // ceiling being enforced, checked as behaviour rather than against
+        // a number copied out of the module that owns it.
+        let link = from_guest.to_link();
+        assert_eq!(GardenInvite::parse(&link).unwrap(), from_guest);
+        assert_eq!(from_guest.qr_content().unwrap(), link);
+
+        // And it works: a third node joins on the guest's invite alone.
+        let latecomer = spawn(
+            GardenEntry::Invite(from_guest),
+            config("latecomer", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .expect("a validator's invite did not admit anyone");
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while latecomer.status().await.unwrap()["active_validators"] != 3 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the latecomer never became a validator");
+
+        latecomer.leave().await.unwrap();
+        guest.leave().await.unwrap();
+        host_handle.leave().await.unwrap();
+    }
+
+    /// The invite follows the host when the host moves.
+    ///
+    /// A host that reconnects from another network comes back with the same
+    /// key and a new address. The invite other validators hand out has to
+    /// name where the host is now; an invite that still points at the old
+    /// address is a door with the wrong number on it, and the person
+    /// holding it dials a host that is not there any more.
+    #[tokio::test]
+    async fn garden_invite_host_moves() {
+        // The same secret twice is the same validator: the host leaves and
+        // the node that returns is that host, not a newcomer.
+        let host_secret = random_bytes();
+        let host_handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits::testnet_default(),
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            host_secret,
+            None,
+        )
+        .await
+        .unwrap();
+        let first_invite = host_handle.invite().await.unwrap();
+        let first_address = host_handle.status().await.unwrap()["me"]["address"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let guest = spawn(
+            GardenEntry::Invite(first_invite.clone()),
+            config("guest", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        status_becomes(&guest, "/active_validators", json!(2)).await;
+
+        // A record handed out while two validators are up names both of
+        // them. This is the invite that has to survive the move: a door
+        // that only ever named the host would shut the moment he walked.
+        let stable_invite = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let candidate = host_handle.invite().await.unwrap();
+                if candidate.peers.len() >= 2 {
+                    return candidate;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the invite never named both validators");
+
+        // The host goes and comes back on a fresh listener.
+        let outcome = host_handle.leave().await.unwrap();
+        let returned = spawn(
+            GardenEntry::Invite(outcome.invite),
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            host_secret,
+            None,
+        )
+        .await
+        .expect("the host could not return");
+        let moved_address = returned.status().await.unwrap()["me"]["address"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        status_becomes(&guest, "/status", json!("Active")).await;
+
+        // The invite a validator hands out names where the host is now,
+        // and names it first: the head of the list is the address a joiner
+        // dials before any other.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if guest
+                    .invite()
+                    .await
+                    .is_ok_and(|i| i.peers.first() == Some(&moved_address))
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the invite never caught up with the host's new address");
+
+        // The address the guest itself arrived through stays on behind the
+        // host as a seed. That is deliberate and not a stale entry: a node
+        // keeps the addresses it came in by so it can still find the Garden
+        // when every validator record it holds has gone quiet. What would
+        // be wrong is handing the old address out *as the host*, and the
+        // check above is what rules that out.
+        let now = guest.invite().await.unwrap();
+        assert_eq!(
+            now.peers.first().map(String::as_str),
+            Some(moved_address.as_str()),
+            "the invite does not name the host's new address first: {:?}",
+            now.peers
+        );
+
+        // So when the host really moved, the address he left is no longer
+        // the one a joiner dials first. Binding port zero twice can hand
+        // back the same port, and then he did not really move at all.
+        if moved_address != first_address {
+            assert_ne!(
+                now.peers.first().map(String::as_str),
+                Some(first_address.as_str()),
+                "the invite still dials the host where he used to be"
+            );
+        }
+
+        // The point of the section: the record handed out before the move
+        // still opens the door after it. Nobody reissued it and nobody told
+        // the holder the host had moved.
+        let latecomer = spawn(
+            GardenEntry::Invite(stable_invite),
+            config("latecomer", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .expect("the invite from before the move was refused");
+        status_becomes(&latecomer, "/active_validators", json!(3)).await;
+
+        latecomer.leave().await.unwrap();
+        returned.leave().await.unwrap();
+        guest.leave().await.unwrap();
+    }
+
+    /// Every validator carries the Garden, not just the host.
+    ///
+    /// A Garden has no stake and no reward, so nothing but the code makes
+    /// a validator do its share. The three counters are the share: content
+    /// held on this disk, blocks this node ran itself, and content handed
+    /// to somebody else. A node that joined, sat in the validator list and
+    /// did none of those is a passenger, and the list would still call it
+    /// a validator. This test refuses that reading of the word.
+    #[tokio::test]
+    async fn garden_every_validator_works() {
+        let host_handle = host().await;
+        let invite = host_handle.invite().await.unwrap();
+        let first = spawn(
+            GardenEntry::Invite(invite.clone()),
+            config("first", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let second = spawn(
+            GardenEntry::Invite(invite),
+            config("second", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        for handle in [&host_handle, &first, &second] {
+            status_becomes(handle, "/active_validators", json!(3)).await;
+        }
+
+        // Each one publishes, so each one has content of its own to hold
+        // and to hand to the validators that will keep a copy.
+        say(&host_handle, "from the host").await.unwrap();
+        say(&first, "from the first guest").await.unwrap();
+        say(&second, "from the second guest").await.unwrap();
+
+        // The counters are reached by doing the work, which takes a few
+        // rounds: blocks have to be proposed, voted and applied, and the
+        // copies have to arrive. Waiting beats sleeping a fixed time.
+        for (name, handle) in [
+            ("host", &host_handle),
+            ("first", &first),
+            ("second", &second),
+        ] {
+            tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    let work = handle.status().await.unwrap()["work"].clone();
+                    if work["parts_held"].as_u64().unwrap_or(0) > 0
+                        && work["blocks_executed"].as_u64().unwrap_or(0) > 0
+                        && work["parts_served"].as_u64().unwrap_or(0) > 0
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{name} never did all three kinds of work");
+            });
+        }
+
+        second.leave().await.unwrap();
+        first.leave().await.unwrap();
+        host_handle.leave().await.unwrap();
+    }
+
+    /// A record that is not the Garden's own record opens nothing.
+    ///
+    /// An invite is the whole credential: whoever holds the line can join.
+    /// That only holds up if every other line is refused, so this walks the
+    /// ways a line can be wrong and insists on a refusal for each. The
+    /// refusals live in different places on purpose - the parser turns away
+    /// a line from another protocol version before any network call, the
+    /// joiner checks genesis against the hash the line claims, the token is
+    /// checked by signature against the key genesis carries, and the
+    /// validator cap is enforced by the chain itself - and a test that only
+    /// covered one of them would leave the others free to rot.
+    #[tokio::test]
+    async fn garden_invite_rejected() {
+        let host_handle = host().await;
+        let invite = host_handle.invite().await.unwrap();
+
+        // A line from another protocol version is refused by the parser,
+        // before anything is dialled.
+        let link = invite.to_link();
+        let other_version = link.replace("budlum-garden:1?", "budlum-garden:2?");
+        assert_ne!(other_version, link, "the link did not carry the version");
+        assert!(
+            GardenInvite::parse(&other_version).is_err(),
+            "a line from another protocol version was accepted"
+        );
+
+        // A forged token. Genesis carries the public key derived from the
+        // real token, so a join signed by anything else does not verify.
+        let mut forged_token = invite.clone();
+        forged_token.token = random_bytes();
+        assert_ne!(forged_token.token, invite.token);
+        let refused = tokio::time::timeout(
+            Duration::from_secs(30),
+            spawn(
+                GardenEntry::Invite(forged_token),
+                config("forger", "/ip4/127.0.0.1/tcp/0"),
+                random_bytes(),
+                None,
+            ),
+        )
+        .await
+        .expect("the forged token left the joiner hanging");
+        assert!(
+            refused.is_err(),
+            "a forged invite token was admitted to the Garden"
+        );
+
+        // A forged genesis hash. The joiner fetches genesis from a peer and
+        // refuses it unless it hashes to what the line claims.
+        let mut forged_genesis = invite.clone();
+        forged_genesis.genesis_hash = random_bytes();
+        let refused = tokio::time::timeout(
+            Duration::from_secs(30),
+            spawn(
+                GardenEntry::Invite(forged_genesis),
+                config("stranger", "/ip4/127.0.0.1/tcp/0"),
+                random_bytes(),
+                None,
+            ),
+        )
+        .await
+        .expect("the forged genesis left the joiner hanging");
+        assert!(
+            refused.is_err(),
+            "an invite naming a genesis the Garden does not have was admitted"
+        );
+
+        host_handle.leave().await.unwrap();
+
+        // A Garden with room for one validator is full the moment it is
+        // created. The line is genuine here: it is the Garden, not the
+        // record, that has nothing left to give.
+        let full = spawn(
+            GardenEntry::Create {
+                title: "Full".into(),
+                limits: GardenLimits {
+                    max_validators: 1,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let full_invite = full.invite().await.unwrap();
+        // Holding a genuine record still gets the holder told what this
+        // Garden is and still gets the chain read to it: the cap is on the
+        // validator set, not on the greeting. So this call may well return
+        // a running node. What the cap means is the line below it.
+        let latecomer = tokio::time::timeout(
+            Duration::from_secs(30),
+            spawn(
+                GardenEntry::Invite(full_invite),
+                config("latecomer", "/ip4/127.0.0.1/tcp/0"),
+                random_bytes(),
+                None,
+            ),
+        )
+        .await
+        .expect("the full Garden left the joiner hanging");
+
+        // A seat is taken by a block. Give the Garden rounds enough to
+        // write one and it still writes none: there is no seat to record.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        assert_eq!(
+            full.status().await.unwrap()["active_validators"],
+            json!(1),
+            "a Garden at its validator cap seated another validator"
+        );
+        if let Ok(latecomer) = latecomer {
+            assert_eq!(
+                latecomer.status().await.unwrap()["active_validators"],
+                json!(1),
+                "the latecomer counted itself into a Garden that was already full"
+            );
+            let _ = latecomer.leave().await;
+        }
+
+        full.leave().await.unwrap();
+    }
+
+    /// A Frozen Garden still hands out its invite.
+    ///
+    /// Freezing stops new blocks, not the Garden's identity. The record a
+    /// validator hands out names the chain, the genesis and the token; none
+    /// of those move while the host is away. If freezing also silenced the
+    /// invite, a host who lost their phone would take the door with them,
+    /// and the members left behind could not even tell anyone which Garden
+    /// they are in.
+    #[tokio::test]
+    async fn garden_invite_while_frozen() {
+        // Spawned by hand rather than through host(): this test needs the
+        // host's secret so the same validator can come back later.
+        let host_secret = random_bytes();
+        let host_handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits::testnet_default(),
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            host_secret,
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = host_handle.invite().await.unwrap();
+
+        let guest = spawn(
+            GardenEntry::Invite(invite.clone()),
+            config("guest", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        status_becomes(&guest, "/active_validators", json!(2)).await;
+
+        // The host goes. With the host silent past host_timeout_ms, every
+        // remaining validator observes Frozen.
+        let outcome = host_handle.leave().await.unwrap();
+        status_becomes(&guest, "/status", json!("Frozen")).await;
+
+        // Frozen, and still able to say which Garden this is.
+        let frozen_invite = guest
+            .invite()
+            .await
+            .expect("a Frozen Garden refused to hand out its invite");
+        assert_eq!(frozen_invite.chain_id, invite.chain_id);
+        assert_eq!(frozen_invite.genesis_hash, invite.genesis_hash);
+        assert_eq!(frozen_invite.token, invite.token);
+
+        let link = frozen_invite.to_link();
+        assert_eq!(GardenInvite::parse(&link).unwrap(), frozen_invite);
+        assert_eq!(frozen_invite.qr_content().unwrap(), link);
+
+        // Still Frozen: reading the invite did not restart anything.
+        assert_eq!(guest.status().await.unwrap()["status"], json!("Frozen"));
+
+        // Someone takes that invite and walks up to the door while the
+        // Garden is still Frozen. The chain is still there to be read, so
+        // the record still opens and the caller is not turned away. What a
+        // Frozen Garden cannot do is seat the newcomer: a seat is taken by
+        // a block, and a Frozen chain writes none. The join is started in
+        // the background so the seat can be watched while it runs.
+        let frozen_count = guest.status().await.unwrap()["active_validators"].clone();
+        let newcomer_secret = random_bytes();
+        let joining = tokio::spawn(async move {
+            spawn(
+                GardenEntry::Invite(frozen_invite),
+                config("newcomer", "/ip4/127.0.0.1/tcp/0"),
+                newcomer_secret,
+                None,
+            )
+            .await
+        });
+
+        // A Frozen chain writes no blocks, so nothing can seat anyone.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(
+            guest.status().await.unwrap()["active_validators"],
+            frozen_count,
+            "a Frozen Garden admitted a validator with no block to record it"
+        );
+
+        // The host comes back and the chain runs again.
+        let returned = spawn(
+            GardenEntry::Invite(outcome.invite),
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            host_secret,
+            None,
+        )
+        .await
+        .expect("the host could not return");
+        status_becomes(&guest, "/status", json!("Active")).await;
+
+        // And the key that walked up to a Frozen door takes its seat once
+        // there is a chain running to record it. Nobody asked again.
+        let newcomer = tokio::time::timeout(Duration::from_secs(60), joining)
+            .await
+            .expect("the join never finished after the host returned")
+            .expect("the joining task panicked")
+            .expect("the invite opened while Frozen was refused in the end");
+        status_becomes(&newcomer, "/active_validators", json!(3)).await;
+
+        newcomer.leave().await.unwrap();
+        returned.leave().await.unwrap();
+        guest.leave().await.unwrap();
     }
 
     /// One peer of the invite refuses. The join goes on with the next one:
@@ -5946,6 +6578,88 @@ mod tests {
             .await
     }
 
+    /// Section 11.8: the Garden does not merely sit next to B.U.D. 3.0, it
+    /// publishes through it. One node creates a Garden, publishes bytes, and
+    /// the status must show every part of the object layer having done its
+    /// work: the object coded, cut into segments, turned into RFC 6330
+    /// symbols, each segment given a custody root. Then the same bytes are
+    /// read back and the view path must be the one that answered.
+    #[tokio::test]
+    async fn garden_storage_all_parts() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 200,
+                    presence_interval_ms: 100,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Nothing has been published, so no part of the object layer has run.
+        let before = handle.status().await.unwrap();
+        assert_eq!(
+            before.pointer("/work/bud3/objects_coded"),
+            Some(&json!(0)),
+            "a fresh Garden cannot have coded anything"
+        );
+
+        // Bytes that do not fall on a symbol boundary, so the segmentation
+        // and the padding are both exercised.
+        let words = "a garden stores what it grows ".repeat(301);
+        let published = say(&handle, &words).await.expect("the publication failed");
+        let content_id: Hash32 = hex::decode(published["content_id"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        let status = status_becomes(&handle, "/work/bud3/objects_coded", json!(1)).await;
+        let bud3 = status.pointer("/work/bud3").unwrap().clone();
+        let count = |name: &str| bud3[name].as_u64().unwrap_or_default();
+        assert!(count("segments_coded") >= 1, "bof1 produced no segment");
+        assert!(
+            count("symbols_made") > count("segments_coded"),
+            "the fountain made no repair symbols: {bud3}"
+        );
+        assert_eq!(
+            count("symbol_roots"),
+            count("segments_coded"),
+            "custody must root every segment: {bud3}"
+        );
+        assert_eq!(
+            count("objects_viewed"),
+            0,
+            "publishing must not need the view path: {bud3}"
+        );
+
+        // Read it back. The resolve path prefers the object layer, so the
+        // bytes must come from the symbols and the view counter must move.
+        let seen = handle
+            .resolve(content_id)
+            .await
+            .expect("the object did not resolve");
+        assert_eq!(
+            String::from_utf8(seen).unwrap(),
+            words,
+            "B.U.D. 3.0 returned different bytes from the ones published"
+        );
+        let after = status_becomes(&handle, "/work/bud3/objects_viewed", json!(1)).await;
+        let used = after.pointer("/work/bud3/symbols_used").unwrap().as_u64();
+        assert_eq!(
+            used,
+            Some(count("symbols_made")),
+            "the view must consume the symbols the upload made"
+        );
+
+        handle.leave().await.unwrap();
+    }
+
     /// Wait until `handle` reports `wanted` at `pointer` of its status.
     async fn status_becomes(handle: &GardenHandle, pointer: &str, wanted: Value) -> Value {
         tokio::time::timeout(Duration::from_secs(30), async {
@@ -6711,7 +7425,19 @@ mod tests {
 
         // Dial each validator's own announced address directly (with 5 active
         // validators and 3 holders, exactly 2 validators are non-holders).
-        let peer_addrs = host_handle.invite().await.unwrap().peers;
+        //
+        // The addresses come from the status, which is the node's own list
+        // of validators, and not from the invite. An invite is a record a
+        // person carries, so it is held to a byte ceiling and names only as
+        // many peers as fit; it is not a directory of the Garden and must
+        // not be read as one.
+        let host_status = host_handle.status().await.unwrap();
+        let peer_addrs: Vec<String> = host_status["validators"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["address"].as_str().unwrap().to_string())
+            .collect();
         assert_eq!(peer_addrs.len(), 5, "expected all 5 validator addresses");
         let mut refused_non_holders = 0usize;
         for addr in &peer_addrs {
@@ -6813,6 +7539,9 @@ mod tests {
             seeds: Vec::new(),
             ledger,
             store: GardenContentStore::open(None, 1024 * 1024).unwrap(),
+            parts_held: 0,
+            blocks_executed: 0,
+            parts_served: 0,
             net: net_tx,
             link: None,
             reported: 0,
@@ -7061,6 +7790,9 @@ mod tests {
             seeds: Vec::new(),
             ledger: ref_ledger,
             store: GardenContentStore::open(None, 1024 * 1024).unwrap(),
+            parts_held: 0,
+            blocks_executed: 0,
+            parts_served: 0,
             net: net_tx,
             link: None,
             reported: 0,
@@ -7313,6 +8045,9 @@ mod tests {
             seeds: Vec::new(),
             ledger,
             store,
+            parts_held: 0,
+            blocks_executed: 0,
+            parts_served: 0,
             net: net_tx,
             link: None,
             reported: 0,

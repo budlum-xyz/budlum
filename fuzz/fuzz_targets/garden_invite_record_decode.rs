@@ -15,34 +15,34 @@
 //!      record and must answer a short record with the field it lacks, not
 //!      with an index past the end (`panic = "abort"` in the node profile
 //!      turns either into a dead validator).
-//!   2. An accepted record that does not re-encode to the exact text it came
-//!      from. One record has one encoding: the signature is over the fields,
-//!      so a record two nodes re-encode differently is a record they will
-//!      disagree about later.
-//!   3. An accepted record longer than the byte budget directive 5.4 sets
-//!      (`MAX_RECORD_BYTES`), which no phone could scan and no link could
-//!      carry.
+//!   2. An accepted record that does not round-trip cleanly to its canonical
+//!      link form. One record has one canonical link encoding: the signature
+//!      is over the fields, so a record two nodes re-encode differently is a
+//!      record they will disagree about later.
+//!   3. An accepted record whose canonical link exceeds the byte budget
+//!      directive 5.4 sets (`MAX_RECORD_LINK_BYTES`), which no phone could
+//!      scan and no link could carry.
 
+use budlum_core::garden::record::{GardenRecord, MAX_RECORD_LINK_BYTES};
 use libfuzzer_sys::fuzz_target;
-use budlum_core::garden::invite_record::{GardenInviteRecord, MAX_RECORD_BYTES};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };
-    if let Ok(record) = GardenInviteRecord::decode(text) {
-        let re_encoded = record
-            .encode()
-            .expect("an accepted record must re-encode inside the budget");
-        assert_eq!(
-            re_encoded, text,
-            "an accepted record must re-encode to itself"
-        );
+    if let Ok(record) = GardenRecord::parse(text) {
+        let re_encoded = record.to_link();
         assert!(
-            re_encoded.len() <= MAX_RECORD_BYTES,
+            re_encoded.len() <= MAX_RECORD_LINK_BYTES,
             "an accepted record must sit inside the {} byte budget, got {}",
-            MAX_RECORD_BYTES,
+            MAX_RECORD_LINK_BYTES,
             re_encoded.len()
+        );
+        let reparsed = GardenRecord::parse(&re_encoded)
+            .expect("an accepted record's canonical link must parse back");
+        assert_eq!(
+            reparsed, record,
+            "an accepted record must round-trip cleanly through its canonical link"
         );
     }
 });

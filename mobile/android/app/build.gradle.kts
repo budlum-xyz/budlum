@@ -128,6 +128,12 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("net.java.dev.jna:jna:5.15.0@aar")
+    // Section 2.5 draws a QR and section 2.6 reads one. zxing core is the
+    // encoder and decoder only: no activity, no camera code of its own.
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("androidx.camera:camera-camera2:1.4.0")
+    implementation("androidx.camera:camera-lifecycle:1.4.0")
+    implementation("androidx.camera:camera-view:1.4.0")
 
     testImplementation("junit:junit:4.13.2")
     // Android's org.json API is stubbed in local JVM unit tests.

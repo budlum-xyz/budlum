@@ -5323,7 +5323,130 @@ fn encode_objective_fault_proof(
                 None => put_u8(out, 0),
             }
         }
+        ObjectiveFaultProof::BabylonEotsEquivocation(proof) => {
+            use crate::cross_domain::external::babylon_eots::EotsEquivocationProof;
+            put_u8(out, 6);
+            put_fixed(out, &proof.provider);
+            put_fixed(out, &proof.eots_key);
+            put_bytes(out, &proof.first_message);
+            put_bytes(out, &proof.second_message);
+            put_bytes(out, &proof.first_signature);
+            put_bytes(out, &proof.second_signature);
+            put_fixed(out, &proof.first_state_root);
+            put_fixed(out, &proof.second_state_root);
+            let EotsEquivocationProof {
+                first_checkpoint,
+                second_checkpoint,
+                proof_digest,
+                ..
+            } = proof.as_ref();
+            put_fixed(out, &first_checkpoint.block_hash);
+            put_u64(out, first_checkpoint.btc_height);
+            put_fixed(out, &first_checkpoint.mmr_root);
+            put_fixed(out, &second_checkpoint.block_hash);
+            put_u64(out, second_checkpoint.btc_height);
+            put_fixed(out, &second_checkpoint.mmr_root);
+            put_fixed(out, proof_digest);
+        }
+        ObjectiveFaultProof::HoneyBadgerRbcEquivocation(proof) => {
+            let crate::cross_domain::external::honeybadger_bft::RbcEquivocationProof {
+                genesis_hash,
+                committee_epoch,
+                acs_epoch,
+                proposer_index,
+                first_root,
+                first_sig,
+                second_root,
+                second_sig,
+            } = proof.as_ref();
+            put_u8(out, 7);
+            put_fixed(out, genesis_hash);
+            put_u64(out, *committee_epoch);
+            put_u64(out, *acs_epoch);
+            put_u64(out, u64::from(*proposer_index));
+            put_fixed(out, first_root);
+            put_bytes(out, first_sig);
+            put_fixed(out, second_root);
+            put_bytes(out, second_sig);
+        }
+        ObjectiveFaultProof::NearDoomslugSlash(proof) => {
+            let crate::cross_domain::external::near_doomslug::NearApprovalSlashProof {
+                inner_a,
+                target_a,
+                sig_a,
+                inner_b,
+                target_b,
+                sig_b,
+            } = proof.as_ref();
+            put_u8(out, 8);
+            encode_near_approval_inner(inner_a, out);
+            put_u64(out, *target_a);
+            encode_near_approval_sig(sig_a, out);
+            encode_near_approval_inner(inner_b, out);
+            put_u64(out, *target_b);
+            encode_near_approval_sig(sig_b, out);
+        }
+        ObjectiveFaultProof::PoSpaceDoubleSignage { first, second } => {
+            put_u8(out, 9);
+            encode_signed_pospace_signage(first, out);
+            encode_signed_pospace_signage(second, out);
+        }
     }
+}
+
+fn encode_near_approval_inner(
+    inner: &crate::cross_domain::external::near_doomslug::NearApprovalInner,
+    out: &mut Vec<u8>,
+) {
+    use crate::cross_domain::external::near_doomslug::NearApprovalInner;
+    match inner {
+        NearApprovalInner::Endorsement {
+            parent_hash,
+            parent_height,
+        } => {
+            put_u8(out, 0);
+            put_fixed(out, parent_hash);
+            put_u64(out, *parent_height);
+        }
+        NearApprovalInner::Skip { source_height } => {
+            put_u8(out, 1);
+            put_u64(out, *source_height);
+        }
+    }
+}
+
+fn encode_near_approval_sig(
+    sig: &crate::cross_domain::external::near_doomslug::NearApprovalSig,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::near_doomslug::NearApprovalSig {
+        signer_pubkey,
+        ed25519_sig,
+        pq_sig,
+    } = sig;
+    put_fixed(out, signer_pubkey);
+    put_bytes(out, ed25519_sig);
+    put_bytes(out, pq_sig);
+}
+
+fn encode_signed_pospace_signage(
+    signage: &crate::cross_domain::external::pospace_vdf::SignedPoSpaceSignage,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::pospace_vdf::SignedPoSpaceSignage {
+        network,
+        sub_slot,
+        signage_index,
+        infusion_block_hash,
+        signer_pq_pubkey,
+        signature,
+    } = signage;
+    put_string(out, network);
+    put_u64(out, *sub_slot);
+    put_u8(out, *signage_index);
+    put_fixed(out, infusion_block_hash);
+    put_bytes(out, signer_pq_pubkey);
+    put_bytes(out, signature);
 }
 
 fn encode_tendermint_commit_evidence(
@@ -5567,6 +5690,335 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
+        AdapterSpec::BabylonEots { network, pinned } => {
+            put_u8(out, 15);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.chain_id);
+                    put_fixed(out, &pin.anchor.tip_block_hash);
+                    put_u64(out, pin.anchor.tip_height);
+                    put_u64(out, pin.anchor.required_confirmations);
+                    put_u64(out, pin.epoch_keys.len() as u64);
+                    for (epoch, key) in &pin.epoch_keys {
+                        put_u64(out, *epoch);
+                        put_fixed(out, &key.x_only);
+                    }
+                    put_u64(out, pin.epoch_pq_keys.len() as u64);
+                    for (epoch, key) in &pin.epoch_pq_keys {
+                        put_u64(out, *epoch);
+                        put_bytes(out, key);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 16: sublinear NIPoPoW superblock adapter, appended last.
+        //
+        // Every pinned field reaches the preimage: a relay that could lower
+        // `min_superblocks_m` or widen `pow_target` on a signed registration
+        // would be choosing how much work its own evidence must prove.
+        AdapterSpec::NipopowSuperblock { network, genesis } => {
+            put_u8(out, 16);
+            put_string(out, network);
+            match genesis {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.genesis_id);
+                    put_u64(out, pin.genesis_height);
+                    put_fixed(out, &pin.pow_target);
+                    put_u32(out, pin.min_superblocks_m);
+                    put_u8(out, pin.min_superblock_level);
+                    put_u32(out, pin.min_suffix_k);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 17: PHANTOM-GHOSTDAG blockDAG adapter, appended last.
+        //
+        // The whole checkpoint reaches the preimage, not just its hash: a
+        // relay that could lower `required_blue_depth`, widen `k`, or raise the
+        // merge-depth bound on a signed registration would be choosing how much
+        // parallelism and how much depth its own DAG certificate must survive.
+        AdapterSpec::Ghostdag { network, anchor } => {
+            put_u8(out, 17);
+            put_string(out, network);
+            match anchor {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.anchor_hash);
+                    put_u64(out, pin.anchor_daa_score);
+                    put_u64(out, pin.anchor_blue_score);
+                    for limb in pin.anchor_blue_work {
+                        put_u64(out, limb);
+                    }
+                    put_u64(out, pin.anchor_timestamp_secs);
+                    put_u8(out, pin.k);
+                    put_u8(out, pin.max_parents);
+                    put_u64(out, pin.merge_depth_bound);
+                    put_u32(out, pin.max_target_bits);
+                    put_u64(out, pin.required_blue_depth);
+                    put_u64(out, pin.max_future_drift_secs);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 18: leaderless asynchronous HoneyBadgerBFT adapter, appended last.
+        //
+        // The full committee reaches the preimage: every validator id, ML-DSA-65
+        // key and weight, plus the genesis, the epoch and the lowest accepted
+        // ACS epoch. A relay able to swap one key on a signed registration
+        // would be choosing the quorum its own certificate must satisfy.
+        AdapterSpec::HoneyBadgerBft { network, committee } => {
+            put_u8(out, 18);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_string(out, &pin.network_id);
+                    put_fixed(out, &pin.genesis_hash);
+                    put_u64(out, pin.committee_epoch);
+                    put_u64(out, pin.min_acs_epoch);
+                    put_u64(out, pin.validators.len() as u64);
+                    for v in &pin.validators {
+                        put_fixed(out, &v.validator_id);
+                        put_bytes(out, &v.mldsa65_pubkey);
+                        put_u64(out, v.weight);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tags 10..14 and 19..20: append-only additional consensus families,
+        // encoded explicitly field-by-field with destructuring so adding any
+        // field to a pinned anchor fails to compile until signed.
+        AdapterSpec::SolanaTowerBft { network, pinned } => {
+            put_u8(out, 10);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    let crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch {
+                        genesis_hash_hex,
+                        epoch,
+                        first_slot,
+                        last_slot,
+                        has_bonded_slash_escrow,
+                        validators,
+                    } = pin;
+                    put_u8(out, 1);
+                    put_string(out, genesis_hash_hex);
+                    put_u64(out, *epoch);
+                    put_u64(out, *first_slot);
+                    put_u64(out, *last_slot);
+                    put_u8(out, u8::from(*has_bonded_slash_escrow));
+                    put_u64(out, validators.len() as u64);
+                    for v in validators {
+                        let crate::cross_domain::external::solana_tower_bft::SolanaValidator {
+                            vote_account,
+                            stake_lamports,
+                            ed25519_pubkey,
+                            pq_pubkey,
+                        } = v;
+                        put_fixed(out, vote_account);
+                        put_u64(out, *stake_lamports);
+                        put_fixed(out, ed25519_pubkey);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::PoSpaceVdf { network, pinned } => {
+            put_u8(out, 11);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    let crate::cross_domain::external::pospace_vdf::PinnedPoSpaceAnchor {
+                        genesis_challenge,
+                        min_plot_k,
+                        min_iterations_per_block,
+                        max_iterations_per_block,
+                        required_depth,
+                        min_cumulative_weight,
+                        require_pq_attestation,
+                        pq_attestor_pubkey,
+                    } = pin;
+                    put_u8(out, 1);
+                    put_fixed(out, genesis_challenge);
+                    put_u8(out, *min_plot_k);
+                    put_u64(out, *min_iterations_per_block);
+                    put_u64(out, *max_iterations_per_block);
+                    put_u32(out, *required_depth);
+                    put_u128(out, *min_cumulative_weight);
+                    put_u8(out, u8::from(*require_pq_attestation));
+                    match pq_attestor_pubkey {
+                        Some(pk) => {
+                            put_u8(out, 1);
+                            put_bytes(out, pk);
+                        }
+                        None => put_u8(out, 0),
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::AptosJolteonBft { network, pinned } => {
+            put_u8(out, 12);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    let crate::cross_domain::external::aptos_jolteon_bft::PinnedJolteonEpochState {
+                        epoch,
+                        validators,
+                    } = pin;
+                    put_u8(out, 1);
+                    put_u64(out, *epoch);
+                    put_u64(out, validators.len() as u64);
+                    for v in validators {
+                        let crate::cross_domain::external::aptos_jolteon_bft::JolteonValidator {
+                            ed25519_pubkey,
+                            voting_power,
+                            pq_pubkey,
+                        } = v;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_power);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::NearDoomslugBft { network, pinned } => {
+            put_u8(out, 13);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    let crate::cross_domain::external::near_doomslug::PinnedNearEpoch {
+                        epoch_id,
+                        next_epoch_id,
+                        next_bp_hash,
+                        block_producers,
+                    } = pin;
+                    put_u8(out, 1);
+                    put_fixed(out, epoch_id);
+                    put_fixed(out, next_epoch_id);
+                    put_fixed(out, next_bp_hash);
+                    put_u64(out, block_producers.len() as u64);
+                    for bp in block_producers {
+                        let crate::cross_domain::external::near_doomslug::NearBlockProducer {
+                            account_id,
+                            ed25519_pubkey,
+                            stake,
+                            pq_pubkey,
+                        } = bp;
+                        put_string(out, account_id);
+                        put_fixed(out, ed25519_pubkey);
+                        put_u128(out, *stake);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::ChainKeyNiDkg { network, pinned } => {
+            put_u8(out, 14);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    let crate::cross_domain::external::chain_key_ni_dkg::PinnedChainKeyRoot {
+                        subnet_id,
+                        root_bls_pubkey,
+                        root_pq_pubkey,
+                        dkg_interval_length,
+                        min_registry_version,
+                    } = pin;
+                    put_u8(out, 1);
+                    put_fixed(out, subnet_id);
+                    put_bytes(out, root_bls_pubkey);
+                    put_bytes(out, root_pq_pubkey);
+                    put_u64(out, *dkg_interval_length);
+                    put_u64(out, *min_registry_version);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::HeterogeneousMultiProver { network, pinned } => {
+            put_u8(out, 19);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    let crate::cross_domain::external::heterogeneous_multiprover::PinnedMultiProverConfig {
+                        stark_program_hash,
+                        chain_id,
+                        challenge_window_secs,
+                        min_fault_bond_atoms,
+                        fault_proposers,
+                        expected_measurement,
+                        committee,
+                        require_canonical_stark_set,
+                        require_pq_leg,
+                    } = pin;
+                    put_u8(out, 1);
+                    put_fixed(out, stark_program_hash);
+                    put_u64(out, *chain_id);
+                    put_u64(out, *challenge_window_secs);
+                    put_u128(out, *min_fault_bond_atoms);
+                    put_u64(out, fault_proposers.len() as u64);
+                    for p in fault_proposers {
+                        let crate::cross_domain::external::heterogeneous_multiprover::PinnedFaultProposer {
+                            ed25519_pk,
+                            pq_pk,
+                        } = p;
+                        put_fixed(out, ed25519_pk);
+                        put_bytes(out, pq_pk);
+                    }
+                    put_fixed(out, expected_measurement);
+                    put_u64(out, committee.len() as u64);
+                    for member in committee {
+                        let crate::cross_domain::external::heterogeneous_multiprover::MultiProverCommitteeMember {
+                            ed25519_pk,
+                            pq_pk,
+                            weight,
+                        } = member;
+                        put_fixed(out, ed25519_pk);
+                        put_bytes(out, pq_pk);
+                        put_u64(out, *weight);
+                    }
+                    put_u8(out, u8::from(*require_canonical_stark_set));
+                    put_u8(out, u8::from(*require_pq_leg));
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::StarkValidityRollup { network, pinned } => {
+            put_u8(out, 20);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    let crate::cross_domain::external::stark_validity_rollup::PinnedStarkRollupConfig {
+                        network_id,
+                        chain_id,
+                        pinned_program_hash,
+                        trusted_batch_number,
+                        trusted_state_root,
+                        expected_forced_queue_head,
+                        max_forced_inclusion_lag_batches,
+                        require_canonical_program,
+                    } = pin;
+                    put_u8(out, 1);
+                    put_string(out, network_id);
+                    put_u64(out, *chain_id);
+                    put_fixed(out, pinned_program_hash);
+                    put_u64(out, *trusted_batch_number);
+                    put_fixed(out, trusted_state_root);
+                    put_fixed(out, expected_forced_queue_head);
+                    put_u64(out, *max_forced_inclusion_lag_batches);
+                    put_u8(out, u8::from(*require_canonical_program));
+                }
+                None => put_u8(out, 0),
+            }
+        }
     }
 }
 
@@ -5765,6 +6217,379 @@ mod v29_signing_tests {
 
         assert_bft_fault_proof_preimages();
         assert_dag_and_bitvm_fault_proof_preimages();
+        assert_babylon_preimages();
+        assert_nipopow_preimages();
+        assert_ghostdag_preimages();
+        assert_honeybadger_preimages();
+    }
+
+    /// The HoneyBadgerBFT registration carries its whole epoch committee under
+    /// family tag 18 (17 GHOSTDAG, 16 NIPoPoW, 15 Babylon, 10..14 spoken for),
+    /// and each committee field reaches the signing preimage.
+    fn assert_honeybadger_preimages() {
+        use crate::cross_domain::external::honeybadger_bft::{
+            HoneyBadgerValidator, PinnedHoneyBadgerCommittee,
+        };
+        use crate::cross_domain::external::AdapterSpec;
+
+        let validator = |id: u8| HoneyBadgerValidator {
+            validator_id: [id; 32],
+            mldsa65_pubkey: vec![id; 1952],
+            weight: 25,
+        };
+        let base = PinnedHoneyBadgerCommittee {
+            network_id: "hbbft-mainnet".to_string(),
+            genesis_hash: [0x42; 32],
+            committee_epoch: 3,
+            min_acs_epoch: 10,
+            validators: vec![validator(1), validator(2), validator(3), validator(4)],
+        };
+        let encode = |committee: Option<PinnedHoneyBadgerCommittee>| {
+            let mut out = Vec::new();
+            encode_adapter_spec(
+                &AdapterSpec::HoneyBadgerBft {
+                    network: "hbbft-mainnet".to_string(),
+                    committee,
+                },
+                &mut out,
+            );
+            out
+        };
+        let base_bytes = encode(Some(base.clone()));
+        assert_eq!(
+            base_bytes.first().copied(),
+            Some(18),
+            "the HoneyBadgerBFT spec must keep wire tag 18"
+        );
+        assert_ne!(
+            encode(None),
+            base_bytes,
+            "the presence of the pin must be signed"
+        );
+
+        let mut variants = Vec::new();
+        let mut v = base.clone();
+        v.network_id = "hbbft-other".to_string();
+        variants.push(("network_id", v));
+        let mut v = base.clone();
+        v.genesis_hash = [0x43; 32];
+        variants.push(("genesis_hash", v));
+        let mut v = base.clone();
+        v.committee_epoch += 1;
+        variants.push(("committee_epoch", v));
+        let mut v = base.clone();
+        v.min_acs_epoch += 1;
+        variants.push(("min_acs_epoch", v));
+        let mut v = base.clone();
+        v.validators[0].weight += 1;
+        variants.push(("validator weight", v));
+        let mut v = base.clone();
+        v.validators[3].validator_id = [0x99; 32];
+        variants.push(("validator id", v));
+        let mut v = base.clone();
+        v.validators[2].mldsa65_pubkey[0] ^= 0xFF;
+        variants.push(("validator key", v));
+        let mut v = base.clone();
+        v.validators.truncate(3);
+        variants.push(("validator count", v));
+        for (field, changed) in variants {
+            assert_ne!(
+                encode(Some(changed)),
+                base_bytes,
+                "committee field {field} is not covered by the signing preimage"
+            );
+        }
+    }
+
+    /// The GHOSTDAG registration carries its checkpoint and `k`-cluster
+    /// parameters under family tag 17 (16 is NIPoPoW's, 15 Babylon's, 10..14
+    /// are spoken for), and every pinned field reaches the signing preimage.
+    fn assert_ghostdag_preimages() {
+        use crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor;
+        use crate::cross_domain::external::AdapterSpec;
+
+        let base = PinnedGhostdagAnchor {
+            anchor_hash: [0xA0; 32],
+            anchor_daa_score: 1_000,
+            anchor_blue_score: 5_000,
+            anchor_blue_work: [100, 0, 0, 0],
+            anchor_timestamp_secs: 1_700_000_000,
+            k: 2,
+            max_parents: 8,
+            merge_depth_bound: 64,
+            max_target_bits: 0x207F_FFFF,
+            required_blue_depth: 4,
+            max_future_drift_secs: 120,
+        };
+        let encode = |anchor: Option<PinnedGhostdagAnchor>| {
+            let mut out = Vec::new();
+            encode_adapter_spec(
+                &AdapterSpec::Ghostdag {
+                    network: "kaspa-mainnet".to_string(),
+                    anchor,
+                },
+                &mut out,
+            );
+            out
+        };
+        let base_bytes = encode(Some(base.clone()));
+        assert_eq!(
+            base_bytes.first().copied(),
+            Some(17),
+            "the GHOSTDAG spec must keep wire tag 17; renumbering rewrites the signed meaning of every stored registration"
+        );
+        assert_ne!(
+            encode(None),
+            base_bytes,
+            "the presence of the pin must be signed"
+        );
+
+        let mut variants = Vec::new();
+        let mut v = base.clone();
+        v.anchor_hash = [0xA1; 32];
+        variants.push(("anchor_hash", v));
+        let mut v = base.clone();
+        v.anchor_daa_score += 1;
+        variants.push(("anchor_daa_score", v));
+        let mut v = base.clone();
+        v.anchor_blue_score += 1;
+        variants.push(("anchor_blue_score", v));
+        let mut v = base.clone();
+        v.anchor_blue_work = [101, 0, 0, 0];
+        variants.push(("anchor_blue_work", v));
+        let mut v = base.clone();
+        v.anchor_timestamp_secs += 1;
+        variants.push(("anchor_timestamp_secs", v));
+        let mut v = base.clone();
+        v.k += 1;
+        variants.push(("k", v));
+        let mut v = base.clone();
+        v.max_parents += 1;
+        variants.push(("max_parents", v));
+        let mut v = base.clone();
+        v.merge_depth_bound += 1;
+        variants.push(("merge_depth_bound", v));
+        let mut v = base.clone();
+        v.max_target_bits += 1;
+        variants.push(("max_target_bits", v));
+        let mut v = base.clone();
+        v.required_blue_depth += 1;
+        variants.push(("required_blue_depth", v));
+        let mut v = base;
+        v.max_future_drift_secs += 1;
+        variants.push(("max_future_drift_secs", v));
+        for (field, changed) in variants {
+            assert_ne!(
+                encode(Some(changed)),
+                base_bytes,
+                "pinned field {field} is not covered by the signing preimage"
+            );
+        }
+    }
+
+    /// The NIPoPoW registration carries its pinned genesis and KMZ `(m, k)`
+    /// parameters under family tag 16 (15 is Babylon's, 10..14 are spoken
+    /// for), and every pinned field reaches the signing preimage: a relay that
+    /// could move one of them would be choosing how much work its own evidence
+    /// has to prove.
+    fn assert_nipopow_preimages() {
+        use crate::cross_domain::external::nipopow::PinnedNipopowGenesis;
+        use crate::cross_domain::external::AdapterSpec;
+
+        let base = PinnedNipopowGenesis {
+            genesis_id: [0x11; 32],
+            genesis_height: 7,
+            pow_target: [0x7F; 32],
+            min_superblocks_m: 3,
+            min_superblock_level: 3,
+            min_suffix_k: 4,
+        };
+        let encode = |genesis: Option<PinnedNipopowGenesis>| {
+            let mut out = Vec::new();
+            encode_adapter_spec(
+                &AdapterSpec::NipopowSuperblock {
+                    network: "ergo-mainnet".to_string(),
+                    genesis,
+                },
+                &mut out,
+            );
+            out
+        };
+        let base_bytes = encode(Some(base.clone()));
+        assert_eq!(
+            base_bytes.first().copied(),
+            Some(16),
+            "the NIPoPoW spec must keep wire tag 16; renumbering rewrites the \n             signed meaning of every stored registration"
+        );
+        assert_ne!(
+            encode(None),
+            base_bytes,
+            "the presence of the pin must be signed"
+        );
+
+        let mut variants = Vec::new();
+        let mut v = base.clone();
+        v.genesis_id = [0x12; 32];
+        variants.push(("genesis_id", v));
+        let mut v = base.clone();
+        v.genesis_height += 1;
+        variants.push(("genesis_height", v));
+        let mut v = base.clone();
+        v.pow_target = [0x7E; 32];
+        variants.push(("pow_target", v));
+        let mut v = base.clone();
+        v.min_superblocks_m += 1;
+        variants.push(("min_superblocks_m", v));
+        let mut v = base.clone();
+        v.min_superblock_level += 1;
+        variants.push(("min_superblock_level", v));
+        let mut v = base;
+        v.min_suffix_k += 1;
+        variants.push(("min_suffix_k", v));
+        for (field, changed) in variants {
+            assert_ne!(
+                encode(Some(changed)),
+                base_bytes,
+                "pinned field {field} is not covered by the signing preimage"
+            );
+        }
+    }
+
+    /// The Babylon registration carries the pinned epoch-key table under family
+    /// tag 15 (10..14 are spoken for), and every field of an EOTS equivocation
+    /// proof reaches the signing preimage: the pinned key, either signature,
+    /// either checkpoint, and the digest itself.
+    fn assert_babylon_preimages() {
+        use crate::cross_domain::external::babylon_eots::{
+            test_support, BtcCheckpoint, BtcWeakSubjectivityAnchor, EotsEquivocationProof,
+            PinnedBabylonEots,
+        };
+        use crate::cross_domain::external::{
+            AdapterSpec, DomainKey, ExternalDomainTx, IntakeState, ObjectiveFaultProof,
+            RegistrationRequest, VersionPolicy,
+        };
+
+        let pin = test_support::pinned();
+        let request = |spec: AdapterSpec| {
+            let golden = test_support::golden_evidence();
+            let mut policy = crate::cross_domain::external::VerificationPolicy::strict(0);
+            policy.require_slashable = false;
+            let economics = IntakeState::conservative_economics(1_000);
+            RegistrationRequest {
+                versions: VersionPolicy::single(golden.adapter, golden.evidence_version, 0),
+                spec,
+                policy,
+                economics,
+                bond_atoms: economics.required_bond_atoms(),
+                poster: test_addr_from_byte(1u8),
+                golden,
+            }
+        };
+        let register = |spec: AdapterSpec| {
+            TransactionType::ExternalDomain(ExternalDomainTx::Register(Box::new(request(spec))))
+        };
+        let network = test_support::NETWORK.to_string();
+        let base = signed_variant(register(AdapterSpec::BabylonEots {
+            network: network.clone(),
+            pinned: Some(pin.clone()),
+        }))
+        .signing_hash();
+
+        // Family tag: the byte after the tx-type byte and before the network
+        // string is 15, and a tag-9 reading of the same bytes is impossible.
+        let mut bytes = Vec::new();
+        encode_external_domain_tx(
+            &ExternalDomainTx::Register(Box::new(request(AdapterSpec::BabylonEots {
+                network: network.clone(),
+                pinned: Some(pin.clone()),
+            }))),
+            &mut bytes,
+        );
+        assert_eq!(bytes[0], 0, "Register is external tx 0");
+        assert_eq!(bytes[1], 15, "BabylonEots is adapter family 15");
+
+        let variants = [
+            AdapterSpec::BabylonEots {
+                network: "babylon-testnet".to_string(),
+                pinned: Some(pin.clone()),
+            },
+            AdapterSpec::BabylonEots {
+                network: network.clone(),
+                pinned: None,
+            },
+            AdapterSpec::BabylonEots {
+                network: network.clone(),
+                pinned: Some(PinnedBabylonEots {
+                    anchor: BtcWeakSubjectivityAnchor {
+                        tip_block_hash: pin.anchor.tip_block_hash,
+                        tip_height: pin.anchor.tip_height + 1,
+                        required_confirmations: pin.anchor.required_confirmations,
+                    },
+                    ..pin.clone()
+                }),
+            },
+            AdapterSpec::BabylonEots {
+                network: network.clone(),
+                pinned: Some(PinnedBabylonEots {
+                    epoch_pq_keys: vec![(test_support::EPOCH, vec![9, 9])],
+                    ..pin.clone()
+                }),
+            },
+        ];
+        for (i, variant) in variants.into_iter().enumerate() {
+            assert_ne!(
+                signed_variant(register(variant)).signing_hash(),
+                base,
+                "Babylon registration field {i} is not signed"
+            );
+        }
+
+        let proof = test_support::equivocation_proof(&pin, test_support::PINNED_SEED);
+        let submit_fault = |proof: EotsEquivocationProof| {
+            TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof {
+                domain: DomainKey([6u8; 32]),
+                proof: ObjectiveFaultProof::BabylonEotsEquivocation(Box::new(proof)),
+            })
+        };
+        let proof_base = signed_variant(submit_fault(proof.clone())).signing_hash();
+        let mut proof_bytes = Vec::new();
+        encode_objective_fault_proof(
+            &ObjectiveFaultProof::BabylonEotsEquivocation(Box::new(proof.clone())),
+            &mut proof_bytes,
+        );
+        assert_eq!(
+            proof_bytes[0], 6,
+            "BabylonEotsEquivocation is fault proof 6"
+        );
+
+        let mut second_sig = proof.clone();
+        second_sig.second_signature.push(0);
+        assert_ne!(
+            signed_variant(submit_fault(second_sig)).signing_hash(),
+            proof_base
+        );
+        let mut second_checkpoint = proof.clone();
+        second_checkpoint.second_checkpoint = BtcCheckpoint {
+            block_hash: [0x77; 32],
+            btc_height: proof.second_checkpoint.btc_height + 1,
+            mmr_root: [0x78; 32],
+        };
+        assert_ne!(
+            signed_variant(submit_fault(second_checkpoint)).signing_hash(),
+            proof_base
+        );
+        let mut second_root = proof.clone();
+        second_root.second_state_root[0] ^= 1;
+        assert_ne!(
+            signed_variant(submit_fault(second_root)).signing_hash(),
+            proof_base
+        );
+        let mut digest = proof;
+        digest.proof_digest[31] ^= 1;
+        assert_ne!(
+            signed_variant(submit_fault(digest)).signing_hash(),
+            proof_base
+        );
     }
 
     fn assert_bft_fault_proof_preimages() {
@@ -7708,6 +8533,106 @@ mod recovery_tests {
             unique.len(),
             hashes.len(),
             "every DagEquivocation and TendermintMisbehaviour field must move signing_hash"
+        );
+    }
+
+    #[test]
+    fn appended_adapter_specs_have_distinct_append_only_signing_bytes() {
+        use crate::cross_domain::external::AdapterSpec;
+        let cases: [(u8, AdapterSpec); 11] = [
+            (
+                10,
+                AdapterSpec::SolanaTowerBft {
+                    network: "solana".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                11,
+                AdapterSpec::PoSpaceVdf {
+                    network: "chia".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                12,
+                AdapterSpec::AptosJolteonBft {
+                    network: "aptos".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                13,
+                AdapterSpec::NearDoomslugBft {
+                    network: "near".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                14,
+                AdapterSpec::ChainKeyNiDkg {
+                    network: "ic".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                15,
+                AdapterSpec::BabylonEots {
+                    network: "babylon".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                16,
+                AdapterSpec::NipopowSuperblock {
+                    network: "nipopow".into(),
+                    genesis: None,
+                },
+            ),
+            (
+                17,
+                AdapterSpec::Ghostdag {
+                    network: "kaspa".into(),
+                    anchor: None,
+                },
+            ),
+            (
+                18,
+                AdapterSpec::HoneyBadgerBft {
+                    network: "hbbft".into(),
+                    committee: None,
+                },
+            ),
+            (
+                19,
+                AdapterSpec::HeterogeneousMultiProver {
+                    network: "rollup".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                20,
+                AdapterSpec::StarkValidityRollup {
+                    network: "starknet".into(),
+                    pinned: None,
+                },
+            ),
+        ];
+        let mut encoded = Vec::with_capacity(cases.len());
+        for (tag, spec) in cases {
+            let mut first = Vec::new();
+            let mut second = Vec::new();
+            encode_adapter_spec(&spec, &mut first);
+            encode_adapter_spec(&spec, &mut second);
+            assert_eq!(first, second, "signing bytes must be deterministic");
+            assert_eq!(first.first().copied(), Some(tag), "tags are append-only");
+            encoded.push(first);
+        }
+        let unique: std::collections::BTreeSet<Vec<u8>> = encoded.into_iter().collect();
+        assert_eq!(
+            unique.len(),
+            11,
+            "every appended family must have distinct canonical signing bytes"
         );
     }
 }

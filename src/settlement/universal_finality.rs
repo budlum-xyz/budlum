@@ -545,6 +545,292 @@ impl FinalityGuarantee {
                     fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
+            AdapterSpec::NipopowSuperblock { genesis, .. } => {
+                // Sublinear PoW finality is probabilistic work, never a
+                // quorum: the promise is "a chain with this much committed
+                // work would have to be rewritten", and the confirmation depth
+                // is the pinned stability parameter `k` the proof's own suffix
+                // must reach. An unpinned spec promises nothing, so the depth
+                // is zero and any route that composes it inherits the weakness.
+                let (valid, confs) = genesis.as_ref().map_or((false, 0), |g| {
+                    let zero_field = g.genesis_id == [0u8; 32]
+                        || g.pow_target == [0u8; 32]
+                        || g.min_superblocks_m == 0
+                        || g.min_superblock_level == 0
+                        || g.min_suffix_k == 0;
+                    (!zero_field, if zero_field { 0 } else { g.min_suffix_k })
+                });
+                Self {
+                    reversibility: FinalityReversibility::ProbabilisticWork {
+                        confirmations: u64::from(confs),
+                    },
+                    // SHA-256 work is the one primitive here Shor's algorithm
+                    // does not touch: the posture is lattice-grade even though
+                    // nothing on this path is a signature.
+                    quantum_posture: if valid {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        event_root: false,
+                        parent: valid,
+                    },
+                    // Budlum cannot slash a foreign chain's miners. Claiming
+                    // otherwise would let a high-value route read "slashable"
+                    // off a proof that carries no Budlum-side bond.
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::Ghostdag { anchor, .. } => {
+                // A GHOSTDAG ledger finalizes by blue score, not by block
+                // count: the depth that matters is `required_blue_depth`, and
+                // the pin carries its own `k`-cluster bound. Unpinned, the spec
+                // promises nothing at all.
+                let (valid, depth) = anchor.as_ref().map_or((false, 0), |a| {
+                    let zero_field = a.anchor_hash == [0u8; 32]
+                        || a.k == 0
+                        || a.max_parents == 0
+                        || a.merge_depth_bound == 0
+                        || a.required_blue_depth == 0
+                        || a.max_target_bits == 0;
+                    (
+                        !zero_field,
+                        if zero_field { 0 } else { a.required_blue_depth },
+                    )
+                });
+                Self {
+                    reversibility: FinalityReversibility::ProbabilisticWork {
+                        confirmations: depth,
+                    },
+                    // SHA-256d work is outside Shor's reach: the posture is
+                    // lattice-grade even though nothing here is a signature.
+                    quantum_posture: if valid {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        event_root: false,
+                        parent: valid,
+                    },
+                    // A blockDAG's work is committed by miners Budlum cannot
+                    // slash; claiming otherwise would let a high-value route
+                    // read "slashable" off a proof that carries no bond.
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::HoneyBadgerBft { committee, .. } => {
+                // Asynchronous ACS finality is protocol finality under an
+                // honest supermajority: one decided epoch is final, and the
+                // reversibility class is a quorum, not a depth. The guarantee
+                // is slashable only if the committee actually validates - a
+                // committee whose weights or keys are degenerate cannot lose
+                // anything, so it cannot back a value promise.
+                let valid = committee.as_ref().is_some_and(|c| c.validate().is_ok());
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    // ML-DSA-65 is the only assumption on the verify path.
+                    quantum_posture: if valid {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        // An ACS subset commits the event root too; the
+                        // adapter attests it when the evidence carries one.
+                        event_root: valid,
+                        parent: valid,
+                    },
+                    // The committee is a foreign chain's validators. Budlum
+                    // holds no bond over them, so the promise is honest about
+                    // being unslashable from here.
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::BabylonEots { pinned, .. } => {
+                let (valid, pq_all) = pinned.as_ref().map_or((false, false), |p| {
+                    let ok = p.validate().is_ok();
+                    let pq = ok
+                        && !p.epoch_pq_keys.is_empty()
+                        && p.epoch_keys.iter().all(|(epoch, _)| {
+                            p.epoch_pq_keys
+                                .iter()
+                                .any(|(pq_epoch, _)| pq_epoch == epoch)
+                        });
+                    (ok, pq)
+                });
+                Self {
+                    // EOTS finality is economic: a conflicting pair is a
+                    // slashable equivocation, but a single finality provider
+                    // has no Byzantine fault tolerance to speak of.
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if pq_all {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: false,
+                        event_root: false,
+                        parent: false,
+                    },
+                    slashable_backing: valid,
+                    fault_tolerance_bps: 0,
+                }
+            }
+            // Tags 10..14 and 19..20: additional consensus families. A
+            // registration is a declaration, not an accepted proof: `sealed`
+            // is true only when the spec carries its governance pin, and
+            // `for_external_spec_with_backing` still lowers this ceiling to
+            // the observed backing of the last accepted attestation.
+            AdapterSpec::SolanaTowerBft { pinned, .. } => {
+                let sealed = pinned.is_some();
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: QuantumClass::Classical,
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: sealed,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::PoSpaceVdf { pinned, .. } => {
+                let sealed = pinned.is_some();
+                let confirmations = pinned.as_ref().map_or(0, |p| u64::from(p.required_depth));
+                let pq = pinned
+                    .as_ref()
+                    .is_some_and(|p| p.require_pq_attestation || p.pq_attestor_pubkey.is_some());
+                Self {
+                    reversibility: FinalityReversibility::ProbabilisticWork { confirmations },
+                    quantum_posture: if pq {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: false,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { POW_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::AptosJolteonBft { pinned, .. } => {
+                let sealed = pinned.is_some();
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: QuantumClass::Classical,
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: sealed,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::NearDoomslugBft { pinned, .. } => {
+                let sealed = pinned.is_some();
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: QuantumClass::Classical,
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: false,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::ChainKeyNiDkg { pinned, .. } => {
+                let sealed = pinned.is_some();
+                let pq = pinned
+                    .as_ref()
+                    .is_some_and(|p| !p.root_pq_pubkey.is_empty());
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if pq {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: false,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::HeterogeneousMultiProver { pinned, .. } => {
+                let sealed = pinned.is_some();
+                let pq = pinned.as_ref().is_some_and(|p| p.require_pq_leg);
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if pq {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: sealed,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::StarkValidityRollup { pinned, .. } => {
+                let sealed = pinned.is_some();
+                Self {
+                    reversibility: if sealed {
+                        FinalityReversibility::CryptographicValidity
+                    } else {
+                        FinalityReversibility::ProbabilisticWork { confirmations: 0 }
+                    },
+                    quantum_posture: if sealed {
+                        QuantumClass::Hash
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: false,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed {
+                        VALIDITY_PROOF_FAULT_TOLERANCE_BPS
+                    } else {
+                        0
+                    },
+                }
+            }
         }
     }
 
@@ -2709,6 +2995,157 @@ mod external_backing_tests {
                 outside.is_empty(),
                 "{path} calls the spec-only derivation at line(s) {outside:?}; \
                  the external guarantee must be derived from the observed backing only"
+            );
+        }
+    }
+
+    /// Babylon / BTC-restaking EOTS: a valid pinned epoch-key table is
+    /// economically slashable but carries no BFT fault tolerance, so it admits
+    /// cross-domain value only under the observed-backing path and admits
+    /// nothing at all without the pin. An epoch-key table with post-quantum
+    /// keys for every epoch moves the quantum posture to `Lattice`; one
+    /// without them stays `Classical`.
+    #[test]
+    fn babylon_eots_pinned_table_is_slashable_without_fault_tolerance() {
+        use crate::cross_domain::external::babylon_eots::{test_support, EotsPublicKey};
+        use crate::cross_domain::external::AdapterSpec;
+
+        // No pin: the closed admission state. Nothing attested, nothing
+        // admitted, no posture claimed.
+        let closed = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::BabylonEots {
+            network: test_support::NETWORK.to_string(),
+            pinned: None,
+        });
+        assert!(!closed.attestation.state_root);
+        assert!(!closed.slashable_backing);
+        assert!(!closed.admits_cross_domain_value());
+        assert_eq!(closed.fault_tolerance_bps, 0);
+        assert_eq!(closed.quantum_posture, QuantumClass::Classical);
+        assert!(matches!(
+            closed.reversibility,
+            FinalityReversibility::DeterministicQuorum
+        ));
+
+        // A pinned classical table: the state root is attested by the pinned
+        // anchor, the backing is slashable, and there is no BFT bound to
+        // promise - a single EOTS provider is not a Byzantine quorum.
+        let classical = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::BabylonEots {
+            network: test_support::NETWORK.to_string(),
+            pinned: Some(test_support::pinned()),
+        });
+        assert!(classical.attestation.state_root);
+        assert!(!classical.attestation.tx_root);
+        assert!(!classical.attestation.event_root);
+        assert!(!classical.attestation.parent);
+        assert!(classical.slashable_backing);
+        assert_eq!(classical.fault_tolerance_bps, 0);
+        assert_eq!(classical.quantum_posture, QuantumClass::Classical);
+
+        // The same table with a PQ key for the epoch the classical key
+        // belongs to moves the posture to `Lattice` without changing the
+        // backing shape.
+        let mut with_pq = test_support::pinned();
+        with_pq
+            .epoch_pq_keys
+            .push((test_support::EPOCH, vec![0x42; 1_952]));
+        let lattice = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::BabylonEots {
+            network: test_support::NETWORK.to_string(),
+            pinned: Some(with_pq),
+        });
+        assert_eq!(lattice.quantum_posture, QuantumClass::Lattice);
+        assert!(lattice.slashable_backing);
+
+        // A pinned table whose keys are not on the curve is not a valid pin:
+        // it does not attest anything, so the posture claims nothing either.
+        let mut malformed = test_support::pinned();
+        malformed
+            .epoch_keys
+            .push((test_support::EPOCH + 1, EotsPublicKey { x_only: [0; 32] }));
+        assert!(malformed.validate().is_err());
+        let broken = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::BabylonEots {
+            network: test_support::NETWORK.to_string(),
+            pinned: Some(malformed),
+        });
+        assert!(!broken.attestation.state_root);
+        assert!(!broken.slashable_backing);
+        assert!(!broken.admits_cross_domain_value());
+    }
+
+    #[test]
+    fn an_unpinned_appended_spec_declares_no_finality() {
+        use crate::cross_domain::external::AdapterSpec;
+        let cases: [(&str, AdapterSpec); 7] = [
+            (
+                "solana",
+                AdapterSpec::SolanaTowerBft {
+                    network: "solana".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                "pospace",
+                AdapterSpec::PoSpaceVdf {
+                    network: "chia".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                "aptos",
+                AdapterSpec::AptosJolteonBft {
+                    network: "aptos".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                "near",
+                AdapterSpec::NearDoomslugBft {
+                    network: "near".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                "chain-key",
+                AdapterSpec::ChainKeyNiDkg {
+                    network: "ic".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                "multi-prover",
+                AdapterSpec::HeterogeneousMultiProver {
+                    network: "rollup".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                "stark-rollup",
+                AdapterSpec::StarkValidityRollup {
+                    network: "starknet".into(),
+                    pinned: None,
+                },
+            ),
+        ];
+        for (name, spec) in cases {
+            let guarantee = FinalityGuarantee::for_external_spec_declared(&spec);
+            assert_eq!(
+                guarantee.fault_tolerance_bps, 0,
+                "{name}: no pinned trust anchor means no fault tolerance"
+            );
+            assert!(
+                !guarantee.slashable_backing,
+                "{name}: a declaration cannot create slashable backing"
+            );
+            assert!(
+                !guarantee.attestation.state_root,
+                "{name}: an unpinned spec attests to no state"
+            );
+            assert!(
+                matches!(
+                    guarantee.reversibility,
+                    FinalityReversibility::ProbabilisticWork { confirmations: 0 }
+                        | FinalityReversibility::DeterministicQuorum
+                ),
+                "{name}: an unpinned declaration must not claim a strong class"
             );
         }
     }
