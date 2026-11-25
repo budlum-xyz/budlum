@@ -2762,7 +2762,7 @@ mod external_backing_tests {
             network: test_support::NETWORK.to_string(),
             pinned: None,
         });
-        assert_eq!(closed.attestation.state_root, false);
+        assert!(!closed.attestation.state_root);
         assert!(!closed.slashable_backing);
         assert!(!closed.admits_cross_domain_value());
         assert_eq!(closed.fault_tolerance_bps, 0);
@@ -2779,10 +2779,10 @@ mod external_backing_tests {
             network: test_support::NETWORK.to_string(),
             pinned: Some(test_support::pinned()),
         });
-        assert_eq!(classical.attestation.state_root, true);
-        assert_eq!(classical.attestation.tx_root, false);
-        assert_eq!(classical.attestation.event_root, false);
-        assert_eq!(classical.attestation.parent, false);
+        assert!(classical.attestation.state_root);
+        assert!(!classical.attestation.tx_root);
+        assert!(!classical.attestation.event_root);
+        assert!(!classical.attestation.parent);
         assert!(classical.slashable_backing);
         assert_eq!(classical.fault_tolerance_bps, 0);
         assert_eq!(classical.quantum_posture, QuantumClass::Classical);
@@ -2812,7 +2812,7 @@ mod external_backing_tests {
             network: test_support::NETWORK.to_string(),
             pinned: Some(malformed),
         });
-        assert_eq!(broken.attestation.state_root, false);
+        assert!(!broken.attestation.state_root);
         assert!(!broken.slashable_backing);
         assert!(!broken.admits_cross_domain_value());
     }
