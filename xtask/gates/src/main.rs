@@ -223,6 +223,7 @@ mod gates {
     pub mod wallet_node_address_agree;
     pub mod wire_fields_are_signed;
     pub mod workflow_red_keeps_its_words;
+    pub mod workflow_trigger_promises;
     pub mod workflows_cover_every_workspace;
     pub mod workflows_produce_jobs;
     pub mod zero_address_sender_is_verified;
@@ -506,6 +507,14 @@ const GATES: &[Gate] = &[
         run_args: None,
         self_test: gates::threshold_rates::self_test,
         run_log: None,
+    },
+    Gate {
+        name: "workflow-trigger-promises",
+        replaces: None,
+        run: gates::workflow_trigger_promises::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::workflow_trigger_promises::self_test,
     },
     Gate {
         name: "workflows-produce-jobs",
