@@ -27,10 +27,18 @@ class GardenActivity : ComponentActivity() {
         }
     }
 
+    // Android shows a permission prompt for an activity, never for a
+    // model, so the activity owns the asking and the model owns the why.
+    private val ask = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        model.readPermissions()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         model = GardenModel(this, lifecycleScope)
         model.scanner = { scan.launch(Intent(this, QrScanActivity::class.java)) }
+        model.permissionAsker = { permission -> ask.launch(permission) }
+        model.readPermissions()
         // Section 4: the self test runs at first open, before the person is
         // offered anything to join.
         model.runSelfTest()
@@ -44,6 +52,14 @@ class GardenActivity : ComponentActivity() {
                 Surface { GardenApp(model) }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // The person may have changed any of this in settings and walked
+        // back, so what Android allows is read again rather than
+        // remembered from the last time the app looked.
+        model.readPermissions()
     }
 
     override fun onNewIntent(intent: Intent) {

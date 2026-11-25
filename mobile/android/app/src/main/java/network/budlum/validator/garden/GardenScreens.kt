@@ -44,6 +44,15 @@ import org.json.JSONObject
 @Composable
 fun GardenApp(model: GardenModel) {
     var tab by remember { mutableStateOf(0) }
+    // Setup is the way in to the three screens, not a fourth one. It
+    // stands aside the moment the phone is allowed to do the work, and a
+    // phone that is already in a Garden never sees it.
+    var setupDone by remember { mutableStateOf(false) }
+    val seated = model.state.status.contains("\"chain_id\"")
+    if (!setupDone && !seated && !model.state.readiness.canValidate) {
+        SetupScreen(model) { setupDone = true }
+        return
+    }
     val titles = listOf("Invite", "Join", "Status")
     Column(modifier = Modifier.fillMaxSize()) {
         TabRow(selectedTabIndex = tab) {
@@ -56,7 +65,7 @@ fun GardenApp(model: GardenModel) {
             }
         }
         when (tab) {
-            0 -> InviteScreen(model)
+            0 -> InviteScreen(model) { tab = 1 }
             1 -> JoinScreen(model)
             else -> StatusScreen(model)
         }
@@ -67,7 +76,7 @@ fun GardenApp(model: GardenModel) {
  * Section 2.5: the link, the QR and a way to share them.
  */
 @Composable
-private fun InviteScreen(model: GardenModel) {
+private fun InviteScreen(model: GardenModel, onJoinInstead: () -> Unit) {
     val context = LocalContext.current
     val state = model.state
     Column(
@@ -78,19 +87,53 @@ private fun InviteScreen(model: GardenModel) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         if (state.record.isEmpty()) {
+            // The old version of this screen opened on an empty box
+            // labelled "Name of the Garden" and nothing else. There was no
+            // way to know that the name is simply what you decide to call
+            // a group you are starting, or that somebody who was invited
+            // should not be here at all.
             Text("This phone is in no Garden yet.", style = MaterialTheme.typography.bodyLarge)
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text("WERE YOU INVITED?", style = MaterialTheme.typography.labelSmall)
+                    Text(
+                        "Then you do not need to name anything. Go to Join, scan " +
+                            "the code you were sent or paste the invite, and this " +
+                            "phone joins the Garden that already exists.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    OutlinedButton(
+                        onClick = onJoinInstead,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("I have an invite") }
+                }
+            }
+            Text("OR START ONE", style = MaterialTheme.typography.labelSmall)
+            Text(
+                "A Garden is a group of phones that run a small chain together. " +
+                    "Starting one makes this phone its first validator and its " +
+                    "host. The name is only how the group recognises it - pick " +
+                    "anything, like the place you are in. You can then invite " +
+                    "others from this screen.",
+                style = MaterialTheme.typography.bodySmall,
+            )
             var title by remember { mutableStateOf("") }
             OutlinedTextField(
                 value = title,
                 onValueChange = { title = it },
-                label = { Text("Name of the Garden") },
+                label = { Text("Call it something") },
+                placeholder = { Text("Kitchen table") },
+                singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
             Button(
-                onClick = { model.create(title) },
+                onClick = { model.create(title.trim()) },
                 enabled = title.isNotBlank() && !state.busy,
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Start a Garden") }
+            ) { Text(if (state.busy) "Starting..." else "Start a Garden") }
         } else {
             Text("Anyone who has this can join.", style = MaterialTheme.typography.bodyLarge)
             qrBitmap(state.recordQr)?.let { bitmap ->
@@ -215,6 +258,7 @@ private fun StatusScreen(model: GardenModel) {
             }
         }
         GardenCard(state.status)
+        PermissionCard(model)
         Spacer(modifier = Modifier.height(4.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(
@@ -249,6 +293,64 @@ private fun StatusScreen(model: GardenModel) {
  * Draw the QR a scanner reads. The content is whatever the core handed
  * back, so the phone never invents an invite of its own.
  */
+/**
+ * What Android is allowing, after the way in.
+ *
+ * Permissions are not a thing you grant once at the start: a person
+ * revokes notifications a week later, or a manufacturer's cleaner app
+ * restricts the battery on its own. The validator would then go quiet
+ * with nothing on screen to say why, so the state stays visible and
+ * fixable from the screen that reports the work.
+ */
+@Composable
+private fun PermissionCard(model: GardenModel) {
+    val context = LocalContext.current
+    val ready = model.state.readiness
+    if (ready.notifications && ready.batteryUnrestricted) {
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("ANDROID", style = MaterialTheme.typography.labelSmall)
+                Text(
+                    "Notifications allowed, background work not restricted.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+        return
+    }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("ANDROID IS IN THE WAY", style = MaterialTheme.typography.labelSmall)
+            if (!ready.notifications) {
+                Text(
+                    "Notifications are off, so the validator cannot keep running " +
+                        "once you leave the app.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Button(
+                    onClick = { model.askForNotifications() },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Allow notifications") }
+            }
+            if (!ready.batteryUnrestricted) {
+                Text(
+                    "Background work is restricted for this app. The Garden will " +
+                        "suspend this seat if the phone keeps going absent.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(ready.batteryPath, style = MaterialTheme.typography.bodySmall)
+                OutlinedButton(
+                    onClick = { context.startActivity(GardenReadiness.batterySettings(context)) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Open battery settings") }
+            }
+        }
+    }
+}
+
 /**
  * The Garden as a person reads it, not as the core writes it.
  *

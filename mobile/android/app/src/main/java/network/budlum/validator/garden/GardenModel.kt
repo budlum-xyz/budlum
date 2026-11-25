@@ -28,6 +28,14 @@ data class GardenState(
     val busy: Boolean = false,
     val selfTest: List<SelfTestStep> = emptyList(),
     val selfTestMs: Long = 0,
+    /** What Android still has to be told to allow. */
+    val readiness: Readiness = Readiness(
+        notifications = false,
+        batteryUnrestricted = true,
+        camera = false,
+        batteryPath = "",
+        batteryFamily = "",
+    ),
 )
 
 /**
@@ -80,7 +88,7 @@ class GardenModel(
         state = state.copy(status = answer.json)
         // From here the phone owes the Garden its presence, so the duty
         // leaves the screen and goes to the service that outlives it.
-        GardenValidatorService.start(app)
+        startValidating()
     }
 
     fun refreshInvite() = background {
@@ -111,7 +119,7 @@ class GardenModel(
         val answer = phone.join(record.trim(), name)
         state = state.copy(status = answer.json, preview = "")
         readInvite(phone.invite())
-        GardenValidatorService.start(app)
+        startValidating()
     }
 
     fun refreshStatus() = background {
@@ -129,7 +137,7 @@ class GardenModel(
         val answer = phone.rejoin()
         state = state.copy(status = answer.json, preview = "")
         readInvite(phone.invite())
-        GardenValidatorService.start(app)
+        startValidating()
     }
 
     fun leave() = background {
@@ -157,7 +165,7 @@ class GardenModel(
      */
     fun resumeIfSeated() = background {
         if (!GardenHolder.hasGarden(app)) return@background
-        GardenValidatorService.start(app)
+        startValidating()
         state = state.copy(status = phone.status().json)
         runCatching { readInvite(phone.invite()) }
     }
@@ -169,6 +177,50 @@ class GardenModel(
 
     /** Set by the activity so the model does not reach for an Activity. */
     var scanner: (() -> Unit)? = null
+
+    /**
+     * Set by the activity, which owns the permission dialog.
+     *
+     * The model asks; the activity is the only thing Android will show a
+     * permission prompt for.
+     */
+    var permissionAsker: ((String) -> Unit)? = null
+
+    /** Ask Android for the one permission the background work needs. */
+    fun askForNotifications() {
+        val permission = GardenReadiness.notificationPermission()
+        if (permission == null) {
+            // Before Android 13 there is nothing to ask for; the switch in
+            // settings is the only thing that can be off.
+            readPermissions()
+            return
+        }
+        permissionAsker?.invoke(permission)
+    }
+
+    /** Read what Android currently allows. Cheap, so it runs on every resume. */
+    fun readPermissions() {
+        state = state.copy(readiness = GardenReadiness.read(app))
+    }
+
+    /**
+     * Hand the duty to the service that outlives the screen.
+     *
+     * Android refuses to start a foreground service in more cases every
+     * release. A refusal here does not undo the Garden this phone just
+     * joined, so it is reported as what it is - the validator is seated
+     * but not running in the background - instead of being thrown over
+     * the join itself or, worse, swallowed.
+     */
+    private fun startValidating() {
+        val failure = runCatching { GardenValidatorService.start(app) }.exceptionOrNull()
+            ?: return
+        state = state.copy(
+            message = "In the Garden, but Android would not let the background " +
+                "validator start: " + (failure.message ?: failure.toString()) +
+                " - check notifications and battery in setup.",
+        )
+    }
 
     /** Section 5.12: a scanned invite joins without a second detour. */
     fun scanned(record: String) {
