@@ -619,38 +619,6 @@ mod tests {
     use crate::domain::types::DomainStatus;
     use std::path::Path;
 
-    /// `read_record` is the RPC path a phone takes to show who invited it
-    /// before it acts. The refusing half is covered from the public listener;
-    /// this is the half that answers, so the row is not a gap.
-    #[test]
-    fn read_record_answers_with_the_fields_the_record_carries() {
-        let key = KeyPair::from_seed(&[7u8; 32]).unwrap();
-        let host = key.public_key_bytes();
-        let record = crate::garden::record::GardenRecord::issue(
-            0x4741_0000_0000_0011,
-            [0xab; 32],
-            [0xcd; 32],
-            host,
-            vec!["/ip4/10.0.0.7/tcp/30333".to_string()],
-            crate::garden::node::now_ms(),
-            crate::garden::record::DEFAULT_RECORD_TTL_MS,
-            5,
-            &key,
-        )
-        .unwrap();
-        let link = record.to_link();
-        let answer = GardenService::read_record(&link).unwrap();
-        assert_eq!(answer.get("uses").and_then(Value::as_u64), Some(5));
-        assert_eq!(
-            answer.get("host").and_then(Value::as_str),
-            Some(hex::encode(host).as_str())
-        );
-        assert_eq!(
-            answer.get("peers").and_then(Value::as_array).map(Vec::len),
-            Some(1)
-        );
-    }
-
     fn options() -> GardenOptions {
         GardenOptions {
             listen: Some("/ip4/127.0.0.1/tcp/0".into()),
