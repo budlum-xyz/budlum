@@ -355,6 +355,26 @@ fn serve(dir: &Path, record: Option<&str>) -> Result<(Serving, Value), String> {
     Ok((serving, status))
 }
 
+/// Ask a `serve` door one path and read its JSON answer.
+fn get_path(port: u16, path: &str) -> Result<Value, String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .map_err(|e| e.to_string())?;
+    stream
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).map_err(|e| e.to_string())?;
+    let Some((_, payload)) = raw.split_once("\r\n\r\n") else {
+        return Err(format!("no body from {path}: {raw}"));
+    };
+    serde_json::from_str(payload).map_err(|e| e.to_string())
+}
+
 fn status_over(port: u16) -> Result<Value, String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
     stream
@@ -518,20 +538,43 @@ fn garden_apk_share() -> Result<(), String> {
     Ok(())
 }
 
-/// 9.1 item 7: what one member puts into the Garden comes back out of the
-/// Garden's own feed on another member.
+/// 9.1 item 7: what one member sends into the Garden comes back out of the
+/// Garden on another member, byte for byte.
+///
+/// The earlier draft had the host publish and the host read the answer back,
+/// which proves a node can talk to itself. Here the phone is the reader: it
+/// joins over the invite, the host puts an object into the Garden, and the
+/// phone lists it and fetches the bytes back by content id - from the
+/// Garden's copies, verified against the chain, not from the sender.
+///
+/// Reading needs a phone that is still *live*, so the phone is held open by
+/// `serve` and asked through its own door (`/feed`, `/fetch/<id>`). A command
+/// that joins keeps its seat and ends, and a second process would only get as
+/// far as returning through that seat.
 #[test]
 fn garden_apk_clipboard_join() -> Result<(), String> {
     let node = Node::start()?;
     let invite = node.create("apk clipboard")?;
     let record = invite.line.clone();
-    let guest = tempfile::TempDir::new().map_err(|e| e.to_string())?;
-    let (ok, log) = phone_verb(guest.path(), "join", &[&record, "Guest"])?;
-    assert!(ok, "the guest did not join: {log}");
+    let phone = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let (serving, status) = serve(phone.path(), Some(&record))?;
+    assert_eq!(
+        status.pointer("/garden/status").and_then(Value::as_str),
+        Some("Active"),
+        "the phone is not an active validator: {status}"
+    );
 
+    // Something goes into the Garden that the phone did not write. Both the
+    // text and its caption carry a token unique to this run, so a Garden this
+    // check meets with an object already in it cannot satisfy the read with
+    // the wrong bytes - and the feed, which lists captions, can be matched
+    // without depending on how a body is rendered in a listing.
+    let token = format!("clipboard-{}-{}", invite.line.len(), node.operator);
+    let sent = format!("the clipboard of {token}");
+    let caption = format!("caption of {token}");
     let published = node.rpc(
         "bud_gardenPublish",
-        &json!(["message", "from the clipboard"]),
+        &json!(["message", sent, "utf8", "text/plain", caption]),
     )?;
     let content_id = text(&published, "/content_id")?;
     let tx = text(&published, "/tx_id")?;
@@ -542,12 +585,30 @@ fn garden_apk_clipboard_join() -> Result<(), String> {
             _ => Ok(None),
         }
     })?;
-    let resolved = node.rpc("bud_gardenResolve", &json!([content_id]))?;
-    assert_eq!(
-        resolved.get("text").and_then(Value::as_str),
-        Some("from the clipboard"),
-        "the guest resolved different content: {resolved}"
+
+    // The live phone lists it...
+    let feed = wait_for("the publication to reach the phone's feed", || {
+        let feed = get_path(serving.port, "/feed/10")?;
+        Ok(feed.to_string().contains(&caption).then_some(feed))
+    })?;
+    assert!(
+        feed.to_string().contains(&caption),
+        "the phone's feed does not carry what the Garden holds: {feed}"
     );
+
+    // ...and fetches the bytes back out by content id.
+    let fetched = get_path(serving.port, &format!("/fetch/{content_id}"))?;
+    assert_eq!(
+        fetched.get("text").and_then(Value::as_str),
+        Some(sent.as_str()),
+        "the phone got different content back: {fetched}"
+    );
+    assert_eq!(
+        fetched.get("verified").and_then(Value::as_bool),
+        Some(true),
+        "the phone did not verify what it fetched: {fetched}"
+    );
+    drop(serving);
     Ok(())
 }
 

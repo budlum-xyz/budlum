@@ -13,6 +13,9 @@
 //!   garden-phone serve <dir> <port> [record] [name]
 //!   garden-phone return-check <dir> <record> [name]
 //!   garden-phone status <dir>
+//!   garden-phone send <dir> <text> [caption]
+//!   garden-phone feed <dir> [limit]
+//!   garden-phone fetch <dir> <content id>
 //!   garden-phone leave <dir>
 
 use std::io::{BufRead, BufReader, Write};
@@ -28,7 +31,7 @@ fn main() -> ExitCode {
     let dir = args.get(2).cloned().unwrap_or_default();
     if command.is_empty() || dir.is_empty() {
         eprintln!(
-            "usage: garden-phone <self-test|read|join|serve|return-check|status|leave> <dir> [...]"
+            "usage: garden-phone <self-test|read|join|serve|return-check|status|send|feed|fetch|leave> <dir> [...]"
         );
         return ExitCode::from(2);
     }
@@ -147,6 +150,51 @@ fn main() -> ExitCode {
             }
         }
         "status" => say(phone.status().map_err(|e| e.to_string())),
+        // The Data screen's three taps. A Garden is a group that sends
+        // data over its own chain and reads it back verified, so the phone
+        // has to be able to do all three from the command line the app's
+        // own library answers.
+        // Each of these is one command in one process, and a phone that
+        // closed its process has stepped out of its Garden with its seat
+        // kept. So the door does what the Status screen does on the way up:
+        // it returns first, then acts. A phone with no seat is told so.
+        "send" => {
+            let text = match args.get(3) {
+                Some(text) => text.clone(),
+                None => {
+                    eprintln!("usage: garden-phone send <dir> <text> [caption]");
+                    return ExitCode::from(2);
+                }
+            };
+            let caption = args.get(4).cloned().unwrap_or_default();
+            if !gate(&phone) || !return_first(&phone) {
+                return ExitCode::FAILURE;
+            }
+            say(phone.send(text, caption).map_err(|e| e.to_string()))
+        }
+        "feed" => {
+            let limit = args
+                .get(3)
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or(20);
+            if !return_first(&phone) {
+                return ExitCode::FAILURE;
+            }
+            say(phone.feed(limit).map_err(|e| e.to_string()))
+        }
+        "fetch" => {
+            let content_id = match args.get(3) {
+                Some(id) => id.clone(),
+                None => {
+                    eprintln!("usage: garden-phone fetch <dir> <content id>");
+                    return ExitCode::from(2);
+                }
+            };
+            if !return_first(&phone) {
+                return ExitCode::FAILURE;
+            }
+            say(phone.fetch(content_id).map_err(|e| e.to_string()))
+        }
         "leave" => say(phone.leave().map_err(|e| e.to_string())),
         other => {
             eprintln!("no such command: {other}");
@@ -165,6 +213,30 @@ fn gate(phone: &Arc<GardenPhone>) -> bool {
         }
     }
     report.passed
+}
+
+/// Put a phone that stepped out back into its Garden, and say plainly when
+/// there is no Garden to return to.
+///
+/// A phone command is one process. The process that joined kept a seat and
+/// ended, so the seat is "away" until something returns it; the app does this
+/// on the way up, and a data command has to do the same. A phone that never
+/// joined is refused rather than left to fail deeper in with a less useful
+/// message.
+fn return_first(phone: &Arc<GardenPhone>) -> bool {
+    match phone.rejoin() {
+        Ok(answer) => {
+            println!(
+                "returned to the Garden: {}",
+                one_line(&answer.json, "status")
+            );
+            true
+        }
+        Err(back) => {
+            eprintln!("no Garden to return to: {back}");
+            false
+        }
+    }
 }
 
 /// Join, leave, and return - the three taps the Status screen allows.
@@ -221,13 +293,26 @@ fn serve(phone: &Arc<GardenPhone>, port: u16) -> ExitCode {
 }
 
 fn answer_one(phone: &Arc<GardenPhone>, mut stream: TcpStream) {
-    // The request line is read and discarded past its first word: every
-    // path answers the same thing, and the body is never written to.
+    // The first line names what is being asked for. Nothing here writes to
+    // the Garden: `status` is the phone's view, `feed` is what the Garden
+    // holds and `fetch` reads one object back out by content id. A path this
+    // door does not know answers the status, which is what it always did.
     let mut first = String::new();
     if BufReader::new(&stream).read_line(&mut first).is_err() {
         return;
     }
-    let body = match phone.status() {
+    let path = first.split_whitespace().nth(1).unwrap_or("/");
+    let answer = if let Some(rest) = path.strip_prefix("/feed/") {
+        rest.parse::<u32>()
+            .map_or_else(|_| phone.feed(50), |limit| phone.feed(limit))
+    } else if let Some(content_id) = path.strip_prefix("/fetch/") {
+        phone.fetch(content_id.to_string())
+    } else if path.starts_with("/feed") {
+        phone.feed(50)
+    } else {
+        phone.status()
+    };
+    let body = match answer {
         Ok(answer) => answer.json,
         Err(e) => format!("{{\"error\":{}}}", json_string(&e.to_string())),
     };
