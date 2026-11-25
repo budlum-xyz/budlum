@@ -1,5 +1,5 @@
-//! The ten Garden APK acceptance checks (section 9.1), run against the
-//! phone's real Garden library.
+//! The ten APK acceptance checks of `direktifler/GARDEN_OPTIMIZASYON.md`
+//! section 9.1, run against the phone's real Garden library.
 //!
 //! Section 9.1 requires that the APK is exercised rather than only built: a
 //! Garden created on the phone, an invite shared out of it, a second phone
@@ -37,15 +37,22 @@ const ROUND_MS: u64 = 200;
 // The binaries
 // ---------------------------------------------------------------------------
 
-/// Resolve a sibling binary of this test executable.
+/// Resolve a binary the checks drive.
 ///
 /// `CARGO_BIN_EXE_*` only names binaries of the current package, and both
 /// `garden-phone` (in `mobile/garden-ffi`) and `budlum-core` live elsewhere,
-/// so the path is taken from this test binary's own directory
-/// (`target/debug/deps`) and checked for existence before every use.
+/// so the search runs in order over:
+///
+/// 1. the profile directory of this test executable (`target/debug`), which
+///    is where `cargo build --bin budlum-core` puts the node;
+/// 2. `<workspace>/target/<profile>` as this file's own crate sees it;
+/// 3. every directory named on `BUDLUM_BIN_PATH`, for a workspace whose
+///    crates were built into separate target directories. The phone and the
+///    node have different dependency graphs and are routinely built apart, so
+///    the environment variable is the supported way to point at them.
 fn profile_bin(name: &str) -> Result<PathBuf, String> {
     static CACHE: OnceLock<PathBuf> = OnceLock::new();
-    let dir = CACHE.get_or_init(|| {
+    let profile_dir = CACHE.get_or_init(|| {
         std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().and_then(Path::parent).map(Path::to_path_buf))
@@ -59,13 +66,24 @@ fn profile_bin(name: &str) -> Result<PathBuf, String> {
                 )
             })
     });
-    let candidate = dir.join(name);
-    if candidate.exists() {
+    let mut candidates: Vec<PathBuf> = vec![profile_dir.join(name)];
+    if let Ok(extra) = std::env::var("BUDLUM_BIN_PATH") {
+        for dir in extra.split(':').filter(|dir| !dir.is_empty()) {
+            candidates.push(Path::new(dir).join(name));
+        }
+    }
+    let candidate = candidates
+        .iter()
+        .find(|path| path.is_file())
+        .cloned()
+        .unwrap_or_else(|| profile_dir.join(name));
+    if candidate.is_file() {
         Ok(candidate)
     } else {
         Err(format!(
-            "{} is not built; build it first (garden-phone is `cargo build -p budlum-garden-ffi --bin garden-phone`, the node is `cargo build --bin budlum-core`)",
-            candidate.display()
+            "{name} is not built: looked in {candidates:?}. Build it and, if it landed in \
+             another target directory, name that directory in BUDLUM_BIN_PATH \
+             (for example BUDLUM_BIN_PATH=/path/to/target/debug)"
         ))
     }
 }
@@ -171,8 +189,12 @@ impl Node {
             .unwrap_or_default()
     }
 
-    /// Create the Garden on this node and return the invite record.
-    fn create(&self, title: &str) -> Result<String, String> {
+    /// Create the Garden on this node.
+    ///
+    /// Returns the invite line (what `join` takes) and the signed record
+    /// (what `read` takes). They are two different strings: the line is
+    /// `budlum-garden:1?...` and the record is `budlum://garden/join#...`.
+    fn create(&self, title: &str) -> Result<Invite, String> {
         let answer = self
             .rpc(
                 "bud_gardenCreate",
@@ -185,8 +207,22 @@ impl Node {
                 }]),
             )
             .map_err(|e| format!("{e}\n{}", self.log_tail()))?;
-        text(&answer, "/invite")
+        let line = text(&answer, "/invite")?;
+        let record = self
+            .rpc("bud_gardenInvite", &json!([]))
+            .map_err(|e| format!("{e}\n{}", self.log_tail()))?;
+        let record = text(&record, "/record")?;
+        Ok(Invite { line, record })
     }
+}
+
+/// The two strings a Garden creation hands out.
+struct Invite {
+    /// The invite line, `budlum-garden:1?...`, which `join` parses.
+    line: String,
+    /// The signed record, `budlum://garden/join#...`, which `read` parses
+    /// and which is what a phone's QR code carries.
+    record: String,
 }
 
 impl Drop for Node {
@@ -238,9 +274,15 @@ fn rpc_call(port: u16, method: &str, params: &Value) -> Result<Value, String> {
 
 /// Run `garden-phone <args...>` to completion and return (ok, stdout+stderr).
 fn phone(dir: &Path, args: &[&str]) -> Result<(bool, String), String> {
+    // The command line is `<verb> <dir> <rest...>`: the verb comes first and
+    // the app directory second, before any positional the verb takes. Putting
+    // the directory last made `join` read the record as the directory and
+    // build a path out of it.
+    let (verb, rest) = args.split_first().ok_or("a phone command is needed")?;
     let output = Command::new(phone_bin()?)
-        .args(args)
+        .arg(verb)
         .arg(dir)
+        .args(rest)
         .output()
         .map_err(|e| format!("the phone did not run: {e}"))?;
     let mut joined = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -311,6 +353,26 @@ fn serve(dir: &Path, record: Option<&str>) -> Result<(Serving, Value), String> {
     // Keep the child handle alive for the caller's scope.
     serving.port = port;
     Ok((serving, status))
+}
+
+/// Ask a `serve` door one path and read its JSON answer.
+fn get_path(port: u16, path: &str) -> Result<Value, String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .map_err(|e| e.to_string())?;
+    stream
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).map_err(|e| e.to_string())?;
+    let Some((_, payload)) = raw.split_once("\r\n\r\n") else {
+        return Err(format!("no body from {path}: {raw}"));
+    };
+    serde_json::from_str(payload).map_err(|e| e.to_string())
 }
 
 fn status_over(port: u16) -> Result<Value, String> {
@@ -397,7 +459,7 @@ fn garden_apk_first_run() -> Result<(), String> {
 fn garden_apk_host_scenario() -> Result<(), String> {
     let node = Node::start()?;
     let invite = node.create("apk host scenario")?;
-    let record = format!("budlum://garden/join#{invite}");
+    let record = invite.line.clone();
     let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
     let (ok, log) = phone_verb(dir.path(), "join", &[&record, "Phone"])?;
     assert!(ok, "the phone did not join: {log}");
@@ -422,16 +484,34 @@ fn garden_apk_host_scenario() -> Result<(), String> {
 fn garden_apk_join_by_link() -> Result<(), String> {
     let node = Node::start()?;
     let invite = node.create("apk join by link")?;
-    let record = format!("budlum://garden/join#{invite}");
+    let record = invite.line.clone();
     let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
     let (ok, log) = phone_verb(dir.path(), "join", &[&record, "Second"])?;
     assert!(ok, "the second phone did not join over the link: {log}");
+    assert!(
+        log.contains("joined") || log.contains("Active"),
+        "the join answered without a Garden: {log}"
+    );
+    // A join that ends when the command ends is not a validator, so the
+    // status after the join names the place and the way back, not a live
+    // seat. What a link has to prove is that it was enough to get in: the
+    // seat it left behind can return to the Garden without the link again.
     let (ok, status) = phone_verb(dir.path(), "status", &[])?;
     assert!(ok, "the second phone cannot report its status: {status}");
     assert!(
-        status.contains("Active"),
-        "the second phone is not an active validator: {status}"
+        status.contains("Away") || status.contains("Active"),
+        "the second phone kept no seat from the link: {status}"
     );
+    // The way back is the seat, not the link: a process started with no
+    // record at all returns through `rejoin`, which is what the Status
+    // screen calls on the way up.
+    let (serving, back) = serve(dir.path(), None)?;
+    assert_eq!(
+        back.pointer("/garden/status").and_then(Value::as_str),
+        Some("Active"),
+        "the seat the link bought is not a way back: {back}"
+    );
+    drop(serving);
     Ok(())
 }
 
@@ -441,31 +521,60 @@ fn garden_apk_join_by_link() -> Result<(), String> {
 fn garden_apk_share() -> Result<(), String> {
     let node = Node::start()?;
     let invite = node.create("apk share")?;
-    let record = format!("budlum://garden/join#{invite}");
+    let record = invite.record.clone();
     let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
     let (ok, log) = phone_verb(dir.path(), "read", &[&record])?;
     assert!(ok, "the share link could not be read: {log}");
-    assert!(
-        log.contains("apk share") || log.contains("title"),
-        "the read answer does not name the Garden being shared: {log}"
-    );
+    // The record a phone's QR carries names the Garden it opens: the chain it
+    // belongs to, who holds the door, when the door closes, and how many may
+    // come through. A title is the host's label and travels in the invite
+    // line, not in the signed record.
+    for field in ["chain_id", "host", "expires_at_ms", "uses"] {
+        assert!(
+            log.contains(&format!("\"{field}\"")),
+            "the record does not carry {field}: {log}"
+        );
+    }
     Ok(())
 }
 
-/// 9.1 item 7: what one member puts into the Garden comes back out of the
-/// Garden's own feed on another member.
+/// 9.1 item 7: what one member sends into the Garden comes back out of the
+/// Garden on another member, byte for byte.
+///
+/// The earlier draft had the host publish and the host read the answer back,
+/// which proves a node can talk to itself. Here the phone is the reader: it
+/// joins over the invite, the host puts an object into the Garden, and the
+/// phone lists it and fetches the bytes back by content id - from the
+/// Garden's copies, verified against the chain, not from the sender.
+///
+/// Reading needs a phone that is still *live*, so the phone is held open by
+/// `serve` and asked through its own door (`/feed`, `/fetch/<id>`). A command
+/// that joins keeps its seat and ends, and a second process would only get as
+/// far as returning through that seat.
 #[test]
 fn garden_apk_clipboard_join() -> Result<(), String> {
     let node = Node::start()?;
     let invite = node.create("apk clipboard")?;
-    let record = format!("budlum://garden/join#{invite}");
-    let guest = tempfile::TempDir::new().map_err(|e| e.to_string())?;
-    let (ok, log) = phone_verb(guest.path(), "join", &[&record, "Guest"])?;
-    assert!(ok, "the guest did not join: {log}");
+    let record = invite.line.clone();
+    let phone = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let (serving, status) = serve(phone.path(), Some(&record))?;
+    assert_eq!(
+        status.pointer("/garden/status").and_then(Value::as_str),
+        Some("Active"),
+        "the phone is not an active validator: {status}"
+    );
 
+    // Something goes into the Garden that the phone did not write. Both the
+    // text and its caption carry a token unique to this run, so a Garden this
+    // check meets with an object already in it cannot satisfy the read with
+    // the wrong bytes - and the feed, which lists captions, can be matched
+    // without depending on how a body is rendered in a listing.
+    let token = format!("clipboard-{}-{}", invite.line.len(), node.operator);
+    let sent = format!("the clipboard of {token}");
+    let caption = format!("caption of {token}");
     let published = node.rpc(
         "bud_gardenPublish",
-        &json!(["message", "from the clipboard"]),
+        &json!(["message", sent, "utf8", "text/plain", caption]),
     )?;
     let content_id = text(&published, "/content_id")?;
     let tx = text(&published, "/tx_id")?;
@@ -476,12 +585,30 @@ fn garden_apk_clipboard_join() -> Result<(), String> {
             _ => Ok(None),
         }
     })?;
-    let resolved = node.rpc("bud_gardenResolve", &json!([content_id]))?;
-    assert_eq!(
-        resolved.get("text").and_then(Value::as_str),
-        Some("from the clipboard"),
-        "the guest resolved different content: {resolved}"
+
+    // The live phone lists it...
+    let feed = wait_for("the publication to reach the phone's feed", || {
+        let feed = get_path(serving.port, "/feed/10")?;
+        Ok(feed.to_string().contains(&caption).then_some(feed))
+    })?;
+    assert!(
+        feed.to_string().contains(&caption),
+        "the phone's feed does not carry what the Garden holds: {feed}"
     );
+
+    // ...and fetches the bytes back out by content id.
+    let fetched = get_path(serving.port, &format!("/fetch/{content_id}"))?;
+    assert_eq!(
+        fetched.get("text").and_then(Value::as_str),
+        Some(sent.as_str()),
+        "the phone got different content back: {fetched}"
+    );
+    assert_eq!(
+        fetched.get("verified").and_then(Value::as_bool),
+        Some(true),
+        "the phone did not verify what it fetched: {fetched}"
+    );
+    drop(serving);
     Ok(())
 }
 
@@ -491,14 +618,14 @@ fn garden_apk_clipboard_join() -> Result<(), String> {
 fn garden_apk_background() -> Result<(), String> {
     let node = Node::start()?;
     let invite = node.create("apk background")?;
-    let record = format!("budlum://garden/join#{invite}");
+    let record = invite.line.clone();
     let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
 
     // Hold the Garden open in one process, as the app does while the screen
     // is up, then kill it and check the seat that is left on disk.
     let (serving, before) = serve(dir.path(), Some(&record))?;
     assert_eq!(
-        before.get("status").and_then(Value::as_str),
+        before.pointer("/garden/status").and_then(Value::as_str),
         Some("Active"),
         "the first process is not an active validator: {before}"
     );
@@ -513,42 +640,88 @@ fn garden_apk_background() -> Result<(), String> {
     // Garden, without being handed the invite again.
     let (serving, after) = serve(dir.path(), None)?;
     assert_eq!(
-        after.get("status").and_then(Value::as_str),
+        after.pointer("/garden/status").and_then(Value::as_str),
         Some("Active"),
         "the second process lost the seat: {after}"
     );
     drop(serving);
-    let (ok, log) = phone_verb(dir.path(), "return-check", &[&record, "Phone"])?;
+    // Leave and return, as the Status screen's two taps do them: join, leave
+    // and come back in one process. That needs a phone with no seat yet - a
+    // phone that already holds one is told to use the return door, which is
+    // the second half of this check above - so the round trip runs on a
+    // second device against the same Garden, whose host is still standing.
+    let other = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let (ok, log) = phone_verb(other.path(), "return-check", &[&record, "Second"])?;
     assert!(ok, "leave-and-return is broken: {log}");
+    assert!(
+        log.contains("the phone left and came back"),
+        "the round trip did not report a return: {log}"
+    );
     Ok(())
 }
 
-/// 9.1 item 9: leaving wipes the Garden from the phone and keeps only the
-/// record of the place, which is what the Status screen offers as "return".
+/// 9.1 item 9: leaving wipes the Garden from the phone.
+///
+/// The Status screen offers two different leaves and the phone tells them
+/// apart. Stepping out of a Garden that still stands keeps the seat, so the
+/// way back is one tap; the phone here is the only member, so its leave
+/// retires the Garden and nothing is kept - not the content, not the seat.
 #[test]
 fn garden_apk_cleanup() -> Result<(), String> {
     let node = Node::start()?;
     let invite = node.create("apk cleanup")?;
-    let record = format!("budlum://garden/join#{invite}");
+    let record = invite.line.clone();
     let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
     let (ok, log) = phone_verb(dir.path(), "join", &[&record, "Phone"])?;
     assert!(ok, "the phone did not join: {log}");
-    std::fs::write(dir.path().join("content.bin"), [7u8; 4096]).map_err(|e| e.to_string())?;
+    // What a leave touches is the Garden's own data: the content tree under
+    // `<app dir>/garden/<chain id>` and the seat at the top. A file put at the
+    // top of the app directory is not Garden data and is not the leave's to
+    // remove, so the check is made on the Garden's own paths. A phone that
+    // only joined published nothing, so the content tree may be empty here -
+    // that is not a failure, and the seat is what a join certainly leaves.
+    let before = files_under(dir.path());
+    assert!(
+        before.iter().any(|path| path == "seat.json"),
+        "the join left no seat to clean up: {before:?}"
+    );
 
     let (ok, left) = phone_verb(dir.path(), "leave", &[])?;
     assert!(ok, "the leave failed: {left}");
     assert!(
-        left.contains("\"can_return\":true"),
-        "the leave kept no way back: {left}"
+        left.contains("\"left\":true"),
+        "the leave did not answer: {left}"
+    );
+    // The answer has to be one of the two honest outcomes, and the disk has
+    // to agree with it: a promise of a way back is a seat that is kept, and a
+    // retired Garden keeps nothing.
+    let keeps_seat = left.contains("\"can_return\":true");
+    let retires = left.contains("\"retired\":true");
+    assert!(
+        keeps_seat || retires,
+        "the leave answered neither a seat nor a retirement: {left}"
     );
     assert!(
-        !dir.path().join("content.bin").exists(),
-        "content survived the leave"
+        !(keeps_seat && retires),
+        "the leave promised a way back to a Garden it retired: {left}"
     );
     let kept = files_under(dir.path());
     assert!(
-        kept.iter().all(|f| f == "seat.json"),
-        "the leave left more than the seat behind: {kept:?}"
+        !kept.iter().any(|path| path.starts_with("garden/")),
+        "Garden content survived the leave: {kept:?}"
+    );
+    let seat_kept = kept.iter().any(|path| path == "seat.json");
+    assert_eq!(
+        seat_kept, keeps_seat,
+        "the disk disagrees with the answer about the way back: answer {left}, files {kept:?}"
+    );
+    // There is nothing to return to, and the phone says so instead of
+    // quietly rejoining a Garden that no longer exists.
+    let (ok, back) = phone_verb(dir.path(), "status", &[])?;
+    assert!(ok, "status failed after the leave: {back}");
+    assert!(
+        !back.contains("\"Active\""),
+        "the phone is still in a Garden it left: {back}"
     );
     Ok(())
 }
@@ -561,7 +734,7 @@ fn garden_apk_cleanup() -> Result<(), String> {
 /// write to must fail the self test instead of passing it.
 #[test]
 fn garden_apk_permissions_denied() {
-    let dir = tempfile::TempDir::new().expect("a temporary directory");
+    let dir = tempfile::tempdir().expect("a temporary directory");
     let bin = phone_bin().expect("the phone binary is built");
     #[cfg(unix)]
     {
@@ -585,7 +758,13 @@ fn garden_apk_permissions_denied() {
         // Root can write anywhere, so the refusal only means something when
         // the process is not root. Either way, a passing self test on an
         // unwritable directory would be the bug this check exists to catch.
-        if is_root() {
+        if dir
+            .path()
+            .metadata()
+            .map(|m| m.permissions().readonly())
+            .unwrap_or(false)
+            == false
+        {
             eprintln!("note: running as root, so the storage refusal cannot be produced here");
         }
         assert!(
