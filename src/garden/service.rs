@@ -1017,9 +1017,18 @@ mod tests {
         let left = host.leave().await.unwrap();
         assert_eq!(left["retired"], json!(true));
         assert_eq!(host.status().await.unwrap()["garden"], Value::Null);
-        // The Garden is over, so nothing is kept on either disk. The host
-        // retired it, and a retired Garden has no way back to offer.
+        // The host retired the Garden, so it keeps no seat: a retired Garden
+        // has no way back to offer.
         assert!(files_under(host_dir.path()).is_empty());
+        // The guest left one step earlier, while the Garden still stood, so
+        // its leave answered `can_return: true` and its seat is the record of
+        // that promise. The seat is not content; it is the one file the
+        // guest keeps, and it is dropped when the guest leaves again.
+        assert_eq!(
+            files_under(guest_dir.path()),
+            vec![guest_dir.path().join(SEAT_FILE)]
+        );
+        guest.leave().await.unwrap();
         assert!(files_under(guest_dir.path()).is_empty());
         assert!(host.rejoin().await.is_err());
     }
