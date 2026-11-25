@@ -167,6 +167,40 @@ impl GardenPhone {
         answer(self.runtime.block_on(self.service.leave()))
     }
 
+    /// Send data into the Garden.
+    ///
+    /// This is what the Garden is for. The group is not a currency and
+    /// there is nothing to pay: a validator's work is checking blocks and
+    /// holding a share of what the group stores, and what the group
+    /// stores is this - a note, a file, a reading from something. The
+    /// bytes go down the B.U.D. 3.0 path, so what comes back out is
+    /// verified against the chain rather than trusted.
+    pub fn send(&self, text: String, caption: String) -> Result<GardenAnswer, GardenError> {
+        let caption = if caption.trim().is_empty() {
+            None
+        } else {
+            Some(caption)
+        };
+        answer(self.runtime.block_on(self.service.publish(
+            "message".to_owned(),
+            text,
+            Some("utf8".to_owned()),
+            None,
+            caption,
+        )))
+    }
+
+    /// What the Garden has been sent, newest first.
+    pub fn feed(&self, limit: u32) -> Result<GardenAnswer, GardenError> {
+        answer(self.runtime.block_on(self.service.feed(Some(limit))))
+    }
+
+    /// Fetch one piece of data back out by its content id, rebuilt from
+    /// the parts the validators hold and checked against the chain.
+    pub fn fetch(&self, content_id: String) -> Result<GardenAnswer, GardenError> {
+        answer(self.runtime.block_on(self.service.resolve(content_id)))
+    }
+
     /// The section 4 self test, run before a Garden is created or joined.
     ///
     /// It tries the four things the phone has to be able to do, and it

@@ -49,25 +49,31 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
     var step by remember { mutableStateOf(Step.Setup) }
     var tab by remember { mutableStateOf(0) }
 
-    // Every step can be left the way it was entered. Before this the app
-    // went forward only: a person who reached the Garden screens had no
-    // way back to the requirements, and the system gesture closed the app
-    // instead of stepping back.
+    // Every step can be left the way it was entered.
     BackHandler(enabled = step != Step.Setup) {
-        step = if (step == Step.Garden) Step.Choose else Step.Setup
+        step = if (step == Step.Setup) Step.Setup else
+            if (step == Step.Choose) Step.Setup else Step.Choose
     }
 
     when (step) {
         Step.Setup -> SetupScreen(model) { step = Step.Choose }
         Step.Choose -> ChooseScreen(
             model = model,
-            onGarden = { step = Step.Garden },
+            onStartOwn = { step = Step.Garden; tab = 0 },
+            onHaveInvite = { step = Step.Join },
             onTestnet = onTestnet,
             onBack = { step = Step.Setup },
         )
+        Step.Join -> Column(modifier = Modifier.fillMaxSize()) {
+            TopBar("Join a network") { step = Step.Choose }
+            JoinScreen(model)
+        }
         Step.Garden -> Column(modifier = Modifier.fillMaxSize()) {
-            TopBar("Garden") { step = Step.Choose }
-            val titles = listOf("Invite", "Join", "Status")
+            TopBar("My network") { step = Step.Choose }
+            // Sending data is the first tab because it is the reason the
+            // network exists; the invite and the state of the group come
+            // after it.
+            val titles = listOf("Data", "Invite", "Status")
             TabRow(selectedTabIndex = tab) {
                 titles.forEachIndexed { index, title ->
                     Tab(
@@ -78,8 +84,12 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
                 }
             }
             when (tab) {
-                0 -> InviteScreen(model) { tab = 1 }
-                1 -> JoinScreen(model)
+                0 -> if (model.state.status.contains("\"chain_id\"")) {
+                    DataScreen(model)
+                } else {
+                    InviteScreen(model) { step = Step.Join }
+                }
+                1 -> InviteScreen(model) { step = Step.Join }
                 else -> StatusScreen(model)
             }
         }
@@ -120,7 +130,7 @@ private fun InviteScreen(model: GardenModel, onJoinInstead: () -> Unit) {
             // way to know that the name is simply what you decide to call
             // a group you are starting, or that somebody who was invited
             // should not be here at all.
-            Text("This phone is in no Garden yet.", style = MaterialTheme.typography.bodyLarge)
+            Text("This phone is in no network yet.", style = MaterialTheme.typography.bodyLarge)
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier.padding(12.dp),
@@ -141,11 +151,16 @@ private fun InviteScreen(model: GardenModel, onJoinInstead: () -> Unit) {
             }
             Text("OR START ONE", style = MaterialTheme.typography.labelSmall)
             Text(
-                "A Garden is a group of phones that run a small chain together. " +
-                    "Starting one makes this phone its first validator and its " +
-                    "host. The name is only how the group recognises it - pick " +
-                    "anything, like the place you are in. You can then invite " +
-                    "others from this screen.",
+                "Your network is a group of phones carrying data for each " +
+                    "other. Starting one makes this phone the first validator " +
+                    "and the host; the others join by invite. Nothing is " +
+                    "issued and nothing is owed - the group checks blocks and " +
+                    "holds a share of what it sends.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                "The name is only how the group recognises it. Pick anything, " +
+                    "like the place you are in.",
                 style = MaterialTheme.typography.bodySmall,
             )
             var title by remember { mutableStateOf("") }
@@ -161,7 +176,7 @@ private fun InviteScreen(model: GardenModel, onJoinInstead: () -> Unit) {
                 onClick = { model.create(title.trim()) },
                 enabled = title.isNotBlank() && !state.busy,
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text(if (state.busy) "Starting..." else "Start a Garden") }
+            ) { Text(if (state.busy) "Starting..." else "Start my network") }
         } else {
             Text("Anyone who has this can join.", style = MaterialTheme.typography.bodyLarge)
             qrBitmap(state.recordQr)?.let { bitmap ->

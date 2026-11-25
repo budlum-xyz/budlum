@@ -27,6 +27,10 @@ data class GardenState(
     val message: String = "",
     val busy: Boolean = false,
     val selfTest: List<SelfTestStep> = emptyList(),
+    /** What the group has sent, as the core reports it. */
+    val feed: String = "",
+    /** One piece of data pulled back out and checked. */
+    val fetched: String = "",
     val selfTestMs: Long = 0,
     /** What Android still has to be told to allow. */
     val readiness: Readiness = Readiness(
@@ -86,9 +90,48 @@ class GardenModel(
         val answer = phone.create(title, name)
         readInvite(phone.invite())
         state = state.copy(status = answer.json)
-        // From here the phone owes the Garden its presence, so the duty
-        // leaves the screen and goes to the service that outlives it.
-        startValidating()
+        // The network exists the moment the core says so. Whether Android
+        // also allows the ongoing notice is a separate question, and a
+        // refusal there must not be reported as a network that failed to
+        // start - it is a network running without its notice.
+        val refused = runCatching { startValidating() }.exceptionOrNull()
+        state = state.copy(
+            message = if (refused == null) {
+                "Your network is running. Invite someone from this screen."
+            } else {
+                "Your network is running, but Android refused the ongoing " +
+                    "notice: " + (refused.message ?: "no reason given") +
+                    ". The Garden keeps working while this screen is open."
+            },
+        )
+    }
+
+    /**
+     * Send data into the Garden.
+     *
+     * This is the point of the thing. There is no token and nothing to
+     * pay; the validators' work is checking blocks and holding a share of
+     * what is sent, and this is what gets sent.
+     */
+    fun send(text: String, caption: String) = background {
+        if (text.isBlank()) {
+            state = state.copy(message = "There is nothing to send yet.")
+            return@background
+        }
+        val answer = phone.send(text, caption)
+        state = state.copy(message = "Sent. " + answer.json)
+        refreshFeed()
+    }
+
+    /** What the Garden has been sent. */
+    fun refreshFeed() = background {
+        state = state.copy(feed = phone.feed(FEED_LIMIT).json)
+    }
+
+    /** Pull one piece of data back out and check it against the chain. */
+    fun fetch(contentId: String) = background {
+        if (contentId.isBlank()) return@background
+        state = state.copy(fetched = phone.fetch(contentId.trim()).json)
     }
 
     fun refreshInvite() = background {
@@ -272,6 +315,9 @@ class GardenModel(
 
     private companion object {
         /** Section 5.7 asks the share text to say where the app comes from. */
+        /** Enough of the feed to see what the group has sent. */
+        const val FEED_LIMIT = 50u
+
         const val APK_SOURCE = "https://github.com/budlum-xyz/budlum/releases"
     }
 }
