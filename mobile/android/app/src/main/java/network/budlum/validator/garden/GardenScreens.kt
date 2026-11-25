@@ -3,6 +3,7 @@ package network.budlum.validator.garden
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -23,12 +24,14 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -42,33 +45,58 @@ import org.json.JSONObject
  * of the app, so there is no screen for them.
  */
 @Composable
-fun GardenApp(model: GardenModel) {
+fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
+    var step by remember { mutableStateOf(Step.Setup) }
     var tab by remember { mutableStateOf(0) }
-    // Setup is the way in to the three screens, not a fourth one. It
-    // stands aside the moment the phone is allowed to do the work, and a
-    // phone that is already in a Garden never sees it.
-    var setupDone by remember { mutableStateOf(false) }
-    val seated = model.state.status.contains("\"chain_id\"")
-    if (!setupDone && !seated && !model.state.readiness.canValidate) {
-        SetupScreen(model) { setupDone = true }
-        return
+
+    // Every step can be left the way it was entered. Before this the app
+    // went forward only: a person who reached the Garden screens had no
+    // way back to the requirements, and the system gesture closed the app
+    // instead of stepping back.
+    BackHandler(enabled = step != Step.Setup) {
+        step = if (step == Step.Garden) Step.Choose else Step.Setup
     }
-    val titles = listOf("Invite", "Join", "Status")
-    Column(modifier = Modifier.fillMaxSize()) {
-        TabRow(selectedTabIndex = tab) {
-            titles.forEachIndexed { index, title ->
-                Tab(
-                    selected = tab == index,
-                    onClick = { tab = index },
-                    text = { Text(title) },
-                )
+
+    when (step) {
+        Step.Setup -> SetupScreen(model) { step = Step.Choose }
+        Step.Choose -> ChooseScreen(
+            model = model,
+            onGarden = { step = Step.Garden },
+            onTestnet = onTestnet,
+            onBack = { step = Step.Setup },
+        )
+        Step.Garden -> Column(modifier = Modifier.fillMaxSize()) {
+            TopBar("Garden") { step = Step.Choose }
+            val titles = listOf("Invite", "Join", "Status")
+            TabRow(selectedTabIndex = tab) {
+                titles.forEachIndexed { index, title ->
+                    Tab(
+                        selected = tab == index,
+                        onClick = { tab = index },
+                        text = { Text(title) },
+                    )
+                }
+            }
+            when (tab) {
+                0 -> InviteScreen(model) { tab = 1 }
+                1 -> JoinScreen(model)
+                else -> StatusScreen(model)
             }
         }
-        when (tab) {
-            0 -> InviteScreen(model) { tab = 1 }
-            1 -> JoinScreen(model)
-            else -> StatusScreen(model)
-        }
+    }
+}
+
+/** A title with the way back next to it, on every screen that has one. */
+@Composable
+private fun TopBar(title: String, onBack: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(onClick = onBack) { Text("Back") }
+        Text(title.uppercase(), style = MaterialTheme.typography.labelSmall)
     }
 }
 
