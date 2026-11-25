@@ -65,10 +65,30 @@ jobs:
           sha256sum "$BIN"
           file "$BIN" || true
 
+      # The phone's own library, as a terminal program. An emulator cannot
+      # be run where this is developed, so this is how the path the app
+      # takes is actually exercised against a running Garden.
+      - name: Build the phone's Garden library
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+        run: |
+          cargo build --locked --release \
+            --manifest-path mobile/garden-ffi/Cargo.toml --bin garden-phone
+          ls -la mobile/garden-ffi/target/release/garden-phone
+
       - name: Upload the node
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: budlum-core-linux-x86_64
           path: target/release/budlum-core
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the phone library
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: garden-phone-linux-x86_64
+          path: mobile/garden-ffi/target/release/garden-phone
           if-no-files-found: error
           retention-days: 30

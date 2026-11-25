@@ -27,6 +27,12 @@ name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
 required-features = ["cli"]
 
+[[bin]]
+# The same GardenPhone the app calls, driven from a terminal so the phone's
+# path can be run where an emulator cannot.
+name = "garden-phone"
+path = "src/bin/garden-phone.rs"
+
 [features]
 cli = ["uniffi/cli", "uniffi/cargo-metadata"]
 
