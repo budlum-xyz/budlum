@@ -35,8 +35,23 @@ pub const CLAIM_PATH: &str = ".github/workflows/ci-trigger-branches.txt";
 
 /// Prefixes whose branches are working branches, not PR targets.
 const WORKING_PREFIXES: &[&str] = &[
-    "ajan/", "arena/", "baskul/", "snapshot/", "dependabot/", "ci-snapshot", "fix/", "feature/",
-    "security/", "diag/", "teslim/", "strix/", "tmp/", "wip/", "test/", "hotfix/", "revert/",
+    "ajan/",
+    "arena/",
+    "baskul/",
+    "snapshot/",
+    "dependabot/",
+    "ci-snapshot",
+    "fix/",
+    "feature/",
+    "security/",
+    "diag/",
+    "teslim/",
+    "strix/",
+    "tmp/",
+    "wip/",
+    "test/",
+    "hotfix/",
+    "revert/",
 ];
 
 /// Is this branch name a working branch (short-lived, not a PR target)?
@@ -136,7 +151,9 @@ pub fn pull_request_branches(workflow: &str) -> Option<Vec<String>> {
 #[must_use]
 pub fn runs_all_gates(workflow: &str) -> bool {
     let text = workflow;
-    let has_pr = text.lines().any(|l| l.trim_start().starts_with("pull_request:"));
+    let has_pr = text
+        .lines()
+        .any(|l| l.trim_start().starts_with("pull_request:"));
     let has_all = text.contains("budlum-gates --all") || text.contains("--all ");
     has_pr && has_all
 }
@@ -170,8 +187,12 @@ pub fn uncovered(branches: &[String], workflows: &[(String, String)]) -> Vec<Str
 
 pub fn run(root: &Path) -> Result<String, String> {
     let wf_dir = root.join(".github/workflows");
-    let entries = std::fs::read_dir(&wf_dir)
-        .map_err(|e| format!("ci-trigger-coverage: {} is unreadable: {e}", wf_dir.display()))?;
+    let entries = std::fs::read_dir(&wf_dir).map_err(|e| {
+        format!(
+            "ci-trigger-coverage: {} is unreadable: {e}",
+            wf_dir.display()
+        )
+    })?;
     let mut workflows: Vec<(String, String)> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| format!("ci-trigger-coverage: read_dir failed: {e}"))?;
@@ -180,8 +201,9 @@ pub fn run(root: &Path) -> Result<String, String> {
             let name = path
                 .file_name()
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-            let src = std::fs::read_to_string(&path)
-                .map_err(|e| format!("ci-trigger-coverage: {} is unreadable: {e}", path.display()))?;
+            let src = std::fs::read_to_string(&path).map_err(|e| {
+                format!("ci-trigger-coverage: {} is unreadable: {e}", path.display())
+            })?;
             workflows.push((name, src));
         }
     }
@@ -289,7 +311,10 @@ pub fn self_test() -> Result<String, String> {
     let wf = ("ci.yml".to_string(), String::from(
         "on:\n  pull_request:\n    branches:\n      - main\njobs:\n  g:\n    steps:\n      - run: budlum-gates --all\n",
     ));
-    let uncovered_here = uncovered(&["main".into(), "ortak-teslim".into()], std::slice::from_ref(&wf));
+    let uncovered_here = uncovered(
+        &["main".into(), "ortak-teslim".into()],
+        std::slice::from_ref(&wf),
+    );
     if uncovered_here != vec![String::from("ortak-teslim")] {
         return Err(format!(
             "canary: an unnamed integration branch must be reported, got {uncovered_here:?}"
@@ -297,9 +322,14 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // A working branch is not a PR target and must not be reported.
-    let none = uncovered(&["ajan/yildiz/x".into(), "snapshot/abc".into()], std::slice::from_ref(&wf));
+    let none = uncovered(
+        &["ajan/yildiz/x".into(), "snapshot/abc".into()],
+        std::slice::from_ref(&wf),
+    );
     if !none.is_empty() {
-        return Err(format!("canary: working branches must be skipped, got {none:?}"));
+        return Err(format!(
+            "canary: working branches must be skipped, got {none:?}"
+        ));
     }
 
     // A workflow that runs only one gate does not cover a branch.
@@ -323,9 +353,12 @@ pub fn self_test() -> Result<String, String> {
 
     // A workflow whose pull_request has no branch list gates every branch, so
     // nothing is uncovered - and the gate must not invent a failure there.
-    let any = ("ci.yml".to_string(), String::from(
-        "on:\n  pull_request:\njobs:\n  g:\n    steps:\n      - run: budlum-gates --all\n",
-    ));
+    let any = (
+        "ci.yml".to_string(),
+        String::from(
+            "on:\n  pull_request:\njobs:\n  g:\n    steps:\n      - run: budlum-gates --all\n",
+        ),
+    );
     if !uncovered(&["ortak-teslim".into()], &[any]).is_empty() {
         return Err(String::from(
             "canary: an unrestricted pull_request trigger already covers every branch",

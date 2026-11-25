@@ -78,6 +78,7 @@ mod gates {
     pub mod chain_id_is_not_hardcoded;
     pub mod ci_fanout_budget;
     pub mod ci_jobs_end_on_cancel;
+    pub mod ci_trigger_coverage;
     pub mod ci_workflow_guards;
     pub mod classical_crypto_is_paired;
     pub mod clippy_extra;
@@ -90,6 +91,7 @@ mod gates {
     pub mod coverage;
     pub mod cross_table_checks;
     pub mod dead_pub_api;
+    pub mod delivery_presence;
     pub mod derived_content;
     pub mod docker_toolchain;
     pub mod domain_tags;
@@ -146,8 +148,6 @@ mod gates {
     pub mod no_conflict_markers;
     pub mod no_constant_security_verdicts;
     pub mod no_float_in_consensus_paths;
-    pub mod ci_trigger_coverage;
-    pub mod delivery_presence;
     pub mod no_idle_code;
     pub mod no_internal_ids;
     pub mod no_legacy_storage;

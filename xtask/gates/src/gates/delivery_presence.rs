@@ -70,7 +70,10 @@ pub fn claims_in(body: &str) -> Vec<Claim> {
         }
         let ends_block = trimmed.is_empty()
             || (trimmed.ends_with(':')
-                && trimmed.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && trimmed
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_uppercase())
                 && !trimmed.contains(' '));
         if ends_block {
             if let Some(names) = current.take() {
@@ -203,25 +206,34 @@ fn canary_accepts() -> Result<(), String> {
     let err = run_on_body("DELIVERS:\nsymbol_that_is_not_there\n", &present)
         .expect_err("canary: a missing claim must fail");
     if !err.contains("symbol_that_is_not_there") {
-        return Err(String::from("canary: the failure must name the missing symbol"));
+        return Err(String::from(
+            "canary: the failure must name the missing symbol",
+        ));
     }
 
     // A substring of a real name is not a match: the claim is for the item.
     let err = run_on_body("DELIVERS:\nintake_root\n", &present)
         .expect_err("canary: a prefix of a real name is not the real name");
     if !err.contains("intake_root") {
-        return Err(String::from("canary: a partial name must be reported as missing"));
+        return Err(String::from(
+            "canary: a partial name must be reported as missing",
+        ));
     }
 
     // An empty claim block is a mistake that reads as a satisfied check.
     let err = run_on_body("DELIVERS:\n\nrest of the message\n", &present)
         .expect_err("canary: an empty claim must fail");
     if !err.contains("names nothing") {
-        return Err(String::from("canary: an empty block must say it names nothing"));
+        return Err(String::from(
+            "canary: an empty block must say it names nothing",
+        ));
     }
 
     // The block ends at the next section header, so a header line is not a name.
-    run_on_body("DELIVERS:\nintake_root_for_header\n\nSCOPE:\nnot-a-name\n", &present)?;
+    run_on_body(
+        "DELIVERS:\nintake_root_for_header\n\nSCOPE:\nnot-a-name\n",
+        &present,
+    )?;
 
     // Case is part of the name.
     if name_present(tree, "INTAKE_ROOT_FOR_HEADER") {
