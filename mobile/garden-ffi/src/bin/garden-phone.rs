@@ -9,6 +9,7 @@
 //! Usage:
 //!   garden-phone self-test <dir>
 //!   garden-phone read <dir> <record>
+//!   garden-phone create <dir> <title> [name]
 //!   garden-phone join <dir> <record> <name>
 //!   garden-phone serve <dir> <port> [record] [name]
 //!   garden-phone return-check <dir> <record> [name]
@@ -31,7 +32,8 @@ fn main() -> ExitCode {
     let dir = args.get(2).cloned().unwrap_or_default();
     if command.is_empty() || dir.is_empty() {
         eprintln!(
-            "usage: garden-phone <self-test|read|join|serve|return-check|status|send|feed|fetch|leave> <dir> [...]"
+            "usage: garden-phone \
+<self-test|read|create|join|serve|return-check|status|send|feed|fetch|leave> <dir> [...]"
         );
         return ExitCode::from(2);
     }
@@ -78,6 +80,23 @@ fn main() -> ExitCode {
             || Err("a record is needed".to_string()),
             |record| phone.read_record(record.clone()).map_err(|e| e.to_string()),
         )),
+        // Founding a Garden from the phone's own library. The app runs
+        // this when somebody taps "Start my own network", and nothing
+        // outside the app had ever run it, so a person reporting that
+        // starting a network does not work could not be answered with
+        // anything but a guess.
+        "create" => {
+            let title = args.get(3).cloned().unwrap_or_default();
+            let name = args.get(4).cloned().unwrap_or_else(|| "Phone".to_string());
+            if title.is_empty() {
+                eprintln!("usage: garden-phone create <dir> <title> [name]");
+                return ExitCode::from(2);
+            }
+            if !gate(&phone) {
+                return ExitCode::FAILURE;
+            }
+            say(phone.create(title, name).map_err(|e| e.to_string()))
+        }
         "join" => {
             let record = args.get(3).cloned().unwrap_or_default();
             let name = args.get(4).cloned().unwrap_or_else(|| "Phone".to_string());
