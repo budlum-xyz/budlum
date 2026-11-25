@@ -5666,6 +5666,32 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
+        // Tag 18: leaderless asynchronous HoneyBadgerBFT adapter, appended last.
+        //
+        // The full committee reaches the preimage: every validator id, ML-DSA-65
+        // key and weight, plus the genesis, the epoch and the lowest accepted
+        // ACS epoch. A relay able to swap one key on a signed registration
+        // would be choosing the quorum its own certificate must satisfy.
+        AdapterSpec::HoneyBadgerBft { network, committee } => {
+            put_u8(out, 18);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_string(out, &pin.network_id);
+                    put_fixed(out, &pin.genesis_hash);
+                    put_u64(out, pin.committee_epoch);
+                    put_u64(out, pin.min_acs_epoch);
+                    put_u64(out, pin.validators.len() as u64);
+                    for v in &pin.validators {
+                        put_fixed(out, &v.validator_id);
+                        put_bytes(out, &v.mldsa65_pubkey);
+                        put_u64(out, v.weight);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
     }
 }
 
@@ -5867,6 +5893,85 @@ mod v29_signing_tests {
         assert_babylon_preimages();
         assert_nipopow_preimages();
         assert_ghostdag_preimages();
+        assert_honeybadger_preimages();
+    }
+
+    /// The HoneyBadgerBFT registration carries its whole epoch committee under
+    /// family tag 18 (17 GHOSTDAG, 16 NIPoPoW, 15 Babylon, 10..14 spoken for),
+    /// and each committee field reaches the signing preimage.
+    fn assert_honeybadger_preimages() {
+        use crate::cross_domain::external::honeybadger_bft::{
+            HoneyBadgerValidator, PinnedHoneyBadgerCommittee,
+        };
+        use crate::cross_domain::external::AdapterSpec;
+
+        let validator = |id: u8| HoneyBadgerValidator {
+            validator_id: [id; 32],
+            mldsa65_pubkey: vec![id; 1952],
+            weight: 25,
+        };
+        let base = PinnedHoneyBadgerCommittee {
+            network_id: "hbbft-mainnet".to_string(),
+            genesis_hash: [0x42; 32],
+            committee_epoch: 3,
+            min_acs_epoch: 10,
+            validators: vec![validator(1), validator(2), validator(3), validator(4)],
+        };
+        let encode = |committee: Option<PinnedHoneyBadgerCommittee>| {
+            let mut out = Vec::new();
+            encode_adapter_spec(
+                &AdapterSpec::HoneyBadgerBft {
+                    network: "hbbft-mainnet".to_string(),
+                    committee,
+                },
+                &mut out,
+            );
+            out
+        };
+        let base_bytes = encode(Some(base.clone()));
+        assert_eq!(
+            base_bytes.first().copied(),
+            Some(18),
+            "the HoneyBadgerBFT spec must keep wire tag 18"
+        );
+        assert_ne!(
+            encode(None),
+            base_bytes,
+            "the presence of the pin must be signed"
+        );
+
+        let mut variants = Vec::new();
+        let mut v = base.clone();
+        v.network_id = "hbbft-other".to_string();
+        variants.push(("network_id", v));
+        let mut v = base.clone();
+        v.genesis_hash = [0x43; 32];
+        variants.push(("genesis_hash", v));
+        let mut v = base.clone();
+        v.committee_epoch += 1;
+        variants.push(("committee_epoch", v));
+        let mut v = base.clone();
+        v.min_acs_epoch += 1;
+        variants.push(("min_acs_epoch", v));
+        let mut v = base.clone();
+        v.validators[0].weight += 1;
+        variants.push(("validator weight", v));
+        let mut v = base.clone();
+        v.validators[3].validator_id = [0x99; 32];
+        variants.push(("validator id", v));
+        let mut v = base.clone();
+        v.validators[2].mldsa65_pubkey[0] ^= 0xFF;
+        variants.push(("validator key", v));
+        let mut v = base.clone();
+        v.validators.truncate(3);
+        variants.push(("validator count", v));
+        for (field, changed) in variants {
+            assert_ne!(
+                encode(Some(changed)),
+                base_bytes,
+                "committee field {field} is not covered by the signing preimage"
+            );
+        }
     }
 
     /// The GHOSTDAG registration carries its checkpoint and `k`-cluster

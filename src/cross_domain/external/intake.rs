@@ -284,6 +284,23 @@ pub enum AdapterSpec {
         #[serde(default)]
         anchor: Option<crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor>,
     },
+    /// Leaderless asynchronous AC S BFT finality (`HoneyBadgerBFT`).
+    ///
+    /// `encode_adapter_spec` tag is the first free slot after GHOSTDAG's 17.
+    ///
+    /// This is the first family here whose finality is *protocol* finality
+    /// under an honest majority rather than a work bound: an epoch's
+    /// asynchronous common subset is decided by an `N - f` ML-DSA-65 quorum, so
+    /// the pin that matters is the committee (genesis, epoch, validator keys)
+    /// and not a difficulty. A spec without that committee is the closed
+    /// admission state: a certificate signed by keys nobody pinned certifies
+    /// nothing.
+    HoneyBadgerBft {
+        network: String,
+        #[serde(default)]
+        committee:
+            Option<crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee>,
+    },
 }
 
 impl AdapterSpec {
@@ -304,7 +321,8 @@ impl AdapterSpec {
             | Self::BitVmCovenant { network, .. }
             | Self::BabylonEots { network, .. }
             | Self::NipopowSuperblock { network, .. }
-            | Self::Ghostdag { network, .. } => network,
+            | Self::Ghostdag { network, .. }
+            | Self::HoneyBadgerBft { network, .. } => network,
         }
     }
 
@@ -416,6 +434,16 @@ impl AdapterSpec {
                 },
                 golden,
                 crate::cross_domain::external::ghostdag::GhostdagPowAdapter::with_golden,
+            ),
+            Self::HoneyBadgerBft { network, committee } => box_with_golden(
+                || {
+                    crate::cross_domain::external::honeybadger_bft::HoneyBadgerBftAdapter::new(
+                        network,
+                        committee.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::honeybadger_bft::HoneyBadgerBftAdapter::with_golden,
             ),
         }
     }
@@ -583,6 +611,16 @@ pub struct IntakeState {
         String,
         crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor,
     >,
+    /// Governance-pinned `HoneyBadgerBFT` epoch committees keyed by external
+    /// network.
+    ///
+    /// Inside [`Self::state_digest`] like every other pin map: only a block may
+    /// write it.
+    #[serde(default)]
+    pub pinned_honeybadger_committees: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee,
+    >,
     /// Deterministic, admin-keyless intake circuit breaker and contradiction
     /// tombstone ledger, folded into [`Self::state_digest`].
     #[serde(default)]
@@ -613,6 +651,8 @@ pub enum AnchorFamily {
     /// BlockDAG `PoW` (`PHANTOM-GHOSTDAG`) pruning-point checkpoint and
     /// `k`-cluster parameters.
     Ghostdag,
+    /// Leaderless asynchronous BFT (`HoneyBadgerBFT`) epoch committee.
+    HoneyBadger,
 }
 
 impl AnchorFamily {
@@ -627,6 +667,7 @@ impl AnchorFamily {
             Self::BabylonEots => "babylon-eots",
             Self::PoWSuccinct => "pow-succinct",
             Self::Ghostdag => "ghostdag",
+            Self::HoneyBadger => "honeybadger",
         }
     }
 }
@@ -654,6 +695,8 @@ pub enum PinnedExternalAnchor {
     /// Pruning-point checkpoint and `k`-cluster parameters for a
     /// `PHANTOM-GHOSTDAG` blockDAG domain.
     Ghostdag(crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor),
+    /// Epoch committee for a leaderless asynchronous `HoneyBadgerBFT` domain.
+    HoneyBadger(crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee),
 }
 
 impl PinnedExternalAnchor {
@@ -668,6 +711,7 @@ impl PinnedExternalAnchor {
             Self::BabylonEots(_) => AnchorFamily::BabylonEots,
             Self::Nipopow(_) => AnchorFamily::PoWSuccinct,
             Self::Ghostdag(_) => AnchorFamily::Ghostdag,
+            Self::HoneyBadger(_) => AnchorFamily::HoneyBadger,
         }
     }
 
@@ -765,6 +809,14 @@ impl PinnedExternalAnchor {
                 if anchor.max_target_bits == 0 {
                     return Err("the pinned GHOSTDAG difficulty target is zero".into());
                 }
+            }
+            Self::HoneyBadger(committee) => {
+                // The committee's own validator is the whole check: it names
+                // the offending field (empty network id, zero genesis, a
+                // validator count outside `4..=MAX`, a duplicate id, a key of
+                // the wrong length, zero weight). A pin that does not validate
+                // cannot certify a single epoch.
+                committee.validate().map_err(|e| e.to_string())?;
             }
         }
         Ok(())
@@ -1534,6 +1586,36 @@ impl IntakeState {
         Ok(())
     }
 
+    /// Installs or updates the consensus-pinned `HoneyBadgerBFT` epoch
+    /// committee for `network`. WIRING: genesis/test initializer; the
+    /// production door is `GovernanceAction::PinExternalAnchor` ->
+    /// [`Self::install_pinned_anchor`].
+    pub fn pin_honeybadger_committee(
+        &mut self,
+        network: impl Into<String>,
+        committee: crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee,
+    ) {
+        self.pinned_honeybadger_committees
+            .insert(network.into(), committee);
+    }
+
+    /// Installs the HoneyBadgerBFT committee for `network` only if it is a
+    /// real trust root.
+    ///
+    /// # Errors
+    ///
+    /// The committee's own verdict, naming the offending field.
+    pub fn install_honeybadger_committee(
+        &mut self,
+        network: impl Into<String>,
+        committee: crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee,
+    ) -> Result<(), String> {
+        PinnedExternalAnchor::HoneyBadger(committee.clone()).validate()?;
+        self.pinned_honeybadger_committees
+            .insert(network.into(), committee);
+        Ok(())
+    }
+
     /// Installs or replaces a family's trust anchor for `network`.
     ///
     /// The consensus door: `GovernanceAction::PinExternalAnchor` in block
@@ -1572,6 +1654,10 @@ impl IntakeState {
             PinnedExternalAnchor::Ghostdag(anchor) => {
                 self.pinned_ghostdag_anchors
                     .insert(network.to_string(), anchor);
+            }
+            PinnedExternalAnchor::HoneyBadger(committee) => {
+                self.pinned_honeybadger_committees
+                    .insert(network.to_string(), committee);
             }
         }
     }
@@ -1624,6 +1710,11 @@ impl IntakeState {
                 .get(network)
                 .cloned()
                 .map(PinnedExternalAnchor::Ghostdag),
+            AnchorFamily::HoneyBadger => self
+                .pinned_honeybadger_committees
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::HoneyBadger),
         }
     }
 
@@ -1835,6 +1926,19 @@ impl IntakeState {
                 return Err(IntakeError::CommitteeNotPinned);
             };
             if anchor.as_ref() != Some(installed) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // HoneyBadgerBFT admission requires a governance-pinned epoch
+        // committee for `network`, echoed exactly by the spec: an asynchronous
+        // ACS certificate is a theorem about whoever signed it, so a
+        // registrant that could bring its own validator table would be
+        // certifying its own quorum.
+        if let AdapterSpec::HoneyBadgerBft { network, committee } = &spec {
+            let Some(installed) = self.pinned_honeybadger_committees.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if committee.as_ref() != Some(installed) {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
@@ -5892,6 +5996,230 @@ mod tests {
                 confirmations: 0
             },
             "an unpinned spec promises no depth at all"
+        );
+    }
+
+    /// The HoneyBadgerBFT registration under the fixture committee pin. This
+    /// family's finality is a protocol quorum, so the pin that matters is the
+    /// validator table: an ACS certificate is a theorem about its signers, and
+    /// a registrant may not nominate its own signers.
+    fn honeybadger_request(
+        committee: Option<
+            crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee,
+        >,
+        economics: DomainEconomics,
+        poster: Address,
+        golden: crate::cross_domain::external::RawConsensusEvidence,
+    ) -> RegistrationRequest {
+        use crate::cross_domain::external::honeybadger_bft::tests::FIXTURE_NETWORK;
+        let spec = AdapterSpec::HoneyBadgerBft {
+            network: FIXTURE_NETWORK.to_string(),
+            committee,
+        };
+        let mut policy = VerificationPolicy::strict(15);
+        policy.require_slashable = false;
+        policy.max_age = 10;
+        RegistrationRequest {
+            versions: VersionPolicy::single(golden.adapter, golden.evidence_version, 0),
+            spec,
+            policy,
+            economics,
+            bond_atoms: economics.required_bond_atoms(),
+            poster,
+            golden,
+        }
+    }
+
+    #[test]
+    fn honeybadger_admission_requires_the_governance_committee_pin() {
+        use crate::cross_domain::external::honeybadger_bft::tests::FIXTURE_NETWORK;
+
+        let mut intake = IntakeState::new();
+        intake.on_block_committed(50);
+        let (_keys, pinned, _ev, golden) =
+            crate::cross_domain::external::honeybadger_bft::tests::fixture();
+        let econ = DomainEconomics {
+            routing_ceiling_atoms: 1_000,
+            fee: ProverFee {
+                base_atoms: 10_000,
+                value_bps: 0,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 500,
+                floor_atoms: 1,
+            },
+            unbonding_heights: 10,
+        };
+        let economics = IntakeState::conservative_economics(1_000);
+
+        // No committee installed: a quorum nobody pinned certifies nothing.
+        assert_eq!(
+            intake
+                .register_domain(
+                    honeybadger_request(None, economics, addr(9), golden.clone()),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        assert_eq!(
+            intake
+                .register_domain(
+                    honeybadger_request(Some(pinned.clone()), economics, addr(9), golden.clone()),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+
+        // Installed, but the registration carries a different genesis, a
+        // swapped validator key, or a lower minimum ACS epoch: refused.
+        intake.pin_honeybadger_committee(FIXTURE_NETWORK.to_string(), pinned.clone());
+        let mut foreign_genesis = pinned.clone();
+        foreign_genesis.genesis_hash = [0x43; 32];
+        assert_eq!(
+            intake
+                .register_domain(
+                    honeybadger_request(Some(foreign_genesis), economics, addr(9), golden.clone()),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        let mut swapped = pinned.clone();
+        let first_key = swapped.validators[0].mldsa65_pubkey.clone();
+        swapped.validators[0].mldsa65_pubkey = swapped.validators[1].mldsa65_pubkey.clone();
+        assert_ne!(swapped.validators[0].mldsa65_pubkey, first_key);
+        assert_eq!(
+            intake
+                .register_domain(
+                    honeybadger_request(Some(swapped), economics, addr(9), golden.clone()),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+        let mut relaxed = pinned.clone();
+        relaxed.min_acs_epoch = 0;
+        assert_eq!(
+            intake
+                .register_domain(
+                    honeybadger_request(Some(relaxed), economics, addr(9), golden.clone()),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::CommitteeNotPinned
+        );
+
+        // The governance pin, echoed exactly: past the door, and then the
+        // honest economics admits while the lying one is refused.
+        assert_eq!(
+            intake
+                .register_domain(
+                    honeybadger_request(Some(pinned.clone()), econ, addr(9), golden.clone()),
+                    None
+                )
+                .unwrap_err(),
+            IntakeError::DishonestEconomics
+        );
+        let key = intake
+            .register_domain(
+                honeybadger_request(Some(pinned.clone()), economics, addr(9), golden.clone()),
+                None,
+            )
+            .expect("the governance committee pin admits the HoneyBadgerBFT domain");
+        assert_eq!(
+            intake
+                .registry
+                .domain(&key)
+                .expect("dom")
+                .record
+                .descriptor
+                .id,
+            crate::cross_domain::external::AdapterId::from_name(
+                crate::cross_domain::external::honeybadger_bft::ADAPTER_NAME
+            )
+        );
+        assert_eq!(
+            intake
+                .pinned_anchor(AnchorFamily::HoneyBadger, FIXTURE_NETWORK)
+                .map(|a| a.family()),
+            Some(AnchorFamily::HoneyBadger)
+        );
+
+        // The checked install door refuses a degenerate committee by name and
+        // leaves the good pin in place.
+        let mut empty = pinned.clone();
+        empty.validators.clear();
+        assert!(
+            intake
+                .install_honeybadger_committee(FIXTURE_NETWORK.to_string(), empty)
+                .unwrap_err()
+                .contains("validator count"),
+            "an empty validator table is not a quorum"
+        );
+        let mut zero_genesis = pinned.clone();
+        zero_genesis.genesis_hash = [0u8; 32];
+        assert!(
+            intake
+                .install_honeybadger_committee(FIXTURE_NETWORK.to_string(), zero_genesis)
+                .unwrap_err()
+                .ends_with("HoneyBadgerBFT pinned genesis_hash is zero"),
+            "the install door names the zero field"
+        );
+        assert_eq!(
+            intake
+                .pinned_honeybadger_committees
+                .get(FIXTURE_NETWORK)
+                .cloned(),
+            Some(pinned.clone())
+        );
+
+        // Settlement reads the same pin: deterministic quorum finality, not a
+        // depth, and no Budlum-side slashability over a foreign committee.
+        let guarantee =
+            crate::settlement::universal_finality::FinalityGuarantee::for_external_spec_with_backing(
+                &AdapterSpec::HoneyBadgerBft {
+                    network: FIXTURE_NETWORK.to_string(),
+                    committee: Some(pinned.clone()),
+                },
+                Some(&crate::cross_domain::external::spec::SecurityBacking::SignatureSet {
+                    scheme: crate::crypto::facts::ObservedScheme::Scheme(
+                        crate::crypto::scheme::SchemeId::ML_DSA_65,
+                    ),
+                    signers: 3,
+                    required: 3,
+                    total_weight: 100,
+                    slashable: true,
+                }),
+            );
+        assert_eq!(
+            guarantee.reversibility,
+            crate::settlement::universal_finality::FinalityReversibility::DeterministicQuorum
+        );
+        assert!(
+            !guarantee.slashable_backing,
+            "a foreign committee is never slashable from Budlum"
+        );
+        let unpinned =
+            crate::settlement::universal_finality::FinalityGuarantee::for_external_spec_with_backing(
+                &AdapterSpec::HoneyBadgerBft {
+                    network: FIXTURE_NETWORK.to_string(),
+                    committee: None,
+                },
+                Some(&crate::cross_domain::external::spec::SecurityBacking::SignatureSet {
+                    scheme: crate::crypto::facts::ObservedScheme::Scheme(
+                        crate::crypto::scheme::SchemeId::ML_DSA_65,
+                    ),
+                    signers: 3,
+                    required: 3,
+                    total_weight: 100,
+                    slashable: true,
+                }),
+            );
+        assert_eq!(
+            unpinned.fault_tolerance_bps, 0,
+            "no pinned committee means no fault tolerance at all"
         );
     }
 }

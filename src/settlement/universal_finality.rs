@@ -626,6 +626,37 @@ impl FinalityGuarantee {
                     fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
+            AdapterSpec::HoneyBadgerBft { committee, .. } => {
+                // Asynchronous ACS finality is protocol finality under an
+                // honest supermajority: one decided epoch is final, and the
+                // reversibility class is a quorum, not a depth. The guarantee
+                // is slashable only if the committee actually validates - a
+                // committee whose weights or keys are degenerate cannot lose
+                // anything, so it cannot back a value promise.
+                let valid = committee.as_ref().is_some_and(|c| c.validate().is_ok());
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    // ML-DSA-65 is the only assumption on the verify path.
+                    quantum_posture: if valid {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        // An ACS subset commits the event root too; the
+                        // adapter attests it when the evidence carries one.
+                        event_root: valid,
+                        parent: valid,
+                    },
+                    // The committee is a foreign chain's validators. Budlum
+                    // holds no bond over them, so the promise is honest about
+                    // being unslashable from here.
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
             AdapterSpec::BabylonEots { pinned, .. } => {
                 let (valid, pq_all) = pinned.as_ref().map_or((false, false), |p| {
                     let ok = p.validate().is_ok();

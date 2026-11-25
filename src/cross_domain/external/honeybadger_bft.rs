@@ -40,7 +40,13 @@
 //!    commitments signed by the same validator for the same `(genesis_hash,
 //!    committee_epoch, acs_epoch, proposer_index)`.
 //!
-//! WIRING: unwired - implements `ExternalFinalityAdapter` for `ExternalDomainRegistry`, verified by `selftest::admit_observed`; `AdapterSpec` joins `intake.rs` in the follow-up merge.
+//! WIRING: wired - `AdapterSpec::HoneyBadgerBft { network, committee }` (wire
+//! tag 18) builds this adapter from an intake registration whose epoch
+//! committee must equal the governance pin
+//! (`IntakeState::pin_honeybadger_committee`, reachable in production through
+//! `GovernanceAction::PinExternalAnchor`), and
+//! `FinalityGuarantee::for_external_spec_declared` maps the pinned committee to
+//! deterministic-quorum finality.
 
 use std::collections::BTreeSet;
 
@@ -968,13 +974,16 @@ impl ExternalFinalityAdapter for HoneyBadgerBftAdapter {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::core::address::Address;
     use crate::cross_domain::external::selftest::admit_observed;
     use crate::crypto::facts::{CryptoFacts, QuantumClass};
 
-    fn fixture() -> (
+    /// The fixture committee's network name, shared with `intake.rs`'s tests.
+    pub(crate) const FIXTURE_NETWORK: &str = "hbbft-testnet";
+
+    pub(crate) fn fixture() -> (
         Vec<PqKeyPair>,
         PinnedHoneyBadgerCommittee,
         HoneyBadgerEvidence,
