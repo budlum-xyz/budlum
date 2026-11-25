@@ -110,6 +110,19 @@ class GardenModel(
         state = state.copy(status = phone.status().json)
     }
 
+    /**
+     * Return to the Garden this phone stepped out of.
+     *
+     * Leaving keeps the seat unless it was the second leave, and the answer
+     * says so in can_return. Without this the only way back was the invite
+     * again, which the person who left may no longer have.
+     */
+    fun returnToGarden() = background {
+        val answer = phone.rejoin()
+        state = state.copy(status = answer.json, preview = "")
+        readInvite(phone.invite())
+    }
+
     fun leave() = background {
         val answer = phone.leave()
         state = GardenState(

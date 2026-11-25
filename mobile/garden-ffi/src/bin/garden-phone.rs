@@ -11,6 +11,7 @@
 //!   garden-phone read <dir> <record>
 //!   garden-phone join <dir> <record> <name>
 //!   garden-phone serve <dir> <port> [record] [name]
+//!   garden-phone return-check <dir> <record> [name]
 //!   garden-phone status <dir>
 //!   garden-phone leave <dir>
 
@@ -26,7 +27,9 @@ fn main() -> ExitCode {
     let command = args.get(1).map(String::as_str).unwrap_or("");
     let dir = args.get(2).cloned().unwrap_or_default();
     if command.is_empty() || dir.is_empty() {
-        eprintln!("usage: garden-phone <self-test|read|join|serve|status|leave> <dir> [...]");
+        eprintln!(
+            "usage: garden-phone <self-test|read|join|serve|return-check|status|leave> <dir> [...]"
+        );
         return ExitCode::from(2);
     }
 
@@ -119,6 +122,30 @@ fn main() -> ExitCode {
             }
             serve(&phone, port)
         }
+        // The Status screen offers Leave, and then a way back. Both are
+        // one tap on the phone, so both are run here in one process -
+        // against the real Garden, in the order a person would tap them.
+        "return-check" => {
+            let record = args.get(3).cloned().unwrap_or_default();
+            let name = args.get(4).cloned().unwrap_or_else(|| "Phone".to_string());
+            if record.is_empty() {
+                eprintln!("a record is needed");
+                return ExitCode::from(2);
+            }
+            if !gate(&phone) {
+                return ExitCode::FAILURE;
+            }
+            match round_trip(&phone, record, name) {
+                Ok(()) => {
+                    println!("the phone left and came back");
+                    ExitCode::SUCCESS
+                }
+                Err(reason) => {
+                    eprintln!("the way back is broken: {reason}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         "status" => say(phone.status().map_err(|e| e.to_string())),
         "leave" => say(phone.leave().map_err(|e| e.to_string())),
         other => {
@@ -138,6 +165,37 @@ fn gate(phone: &Arc<GardenPhone>) -> bool {
         }
     }
     report.passed
+}
+
+/// Join, leave, and return - the three taps the Status screen allows.
+fn round_trip(phone: &Arc<GardenPhone>, record: String, name: String) -> Result<(), String> {
+    let joined = phone.join(record, name).map_err(|e| e.to_string())?;
+    println!("joined:   {}", one_line(&joined.json, "status"));
+    let left = phone.leave().map_err(|e| e.to_string())?;
+    println!("left:     {}", left.json);
+    if !left.json.contains("\"can_return\":true") {
+        return Err("the seat was not kept, so there is nothing to return to".into());
+    }
+    let back = phone.rejoin().map_err(|e| e.to_string())?;
+    println!("returned: {}", one_line(&back.json, "status"));
+    let now = phone.status().map_err(|e| e.to_string())?;
+    if !now.json.contains("\"status\":\"Active\"") {
+        return Err("the phone came back to something that is not an active Garden".into());
+    }
+    Ok(())
+}
+
+/// The one field worth printing out of a long status answer.
+fn one_line(json: &str, field: &str) -> String {
+    let needle = format!("\"{field}\":");
+    json.find(&needle).map_or_else(
+        || format!("{} bytes", json.len()),
+        |at| {
+            let rest = &json[at + needle.len()..];
+            let end = rest.find(',').unwrap_or(rest.len());
+            format!("{field} {}", rest[..end].trim_matches('"'))
+        },
+    )
 }
 
 /// Hold the Garden open and answer the phone's own status on `port`.

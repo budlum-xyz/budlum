@@ -232,6 +232,17 @@ private fun StatusScreen(model: GardenModel) {
                 modifier = Modifier.weight(1f),
             ) { Text("Leave") }
         }
+        // A phone that left keeps its seat until it leaves a second time,
+        // and the answer says so. The way back belongs on the screen that
+        // said goodbye, not in another scan of an invite the person who
+        // left may no longer have.
+        if (state.status.contains("\"can_return\":true")) {
+            Button(
+                onClick = { model.returnToGarden() },
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Return to the Garden") }
+        }
         if (state.message.isNotEmpty()) {
             Text(state.message, style = MaterialTheme.typography.bodySmall)
         }
