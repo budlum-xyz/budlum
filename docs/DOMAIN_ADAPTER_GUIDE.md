@@ -72,7 +72,11 @@ admitted.
    Evidence the registry refuses for a registered domain is still an
    accepted transaction: the refusal is recorded.
 4. A faulted domain returns with `Readmit`, which reruns admission from the
-   stored spec and golden sample.
+   stored spec and golden sample. Readmission is refused while the freeze
+   stands: for the resolution period (the intake guard's first-strike
+   cooldown, counted from the block that froze the domain), or until the
+   guard's own cooldown ends when that is later. The refusal names the
+   block at which the door opens, and writes nothing.
 5. A new evidence format is introduced with `ScheduleFork`; a multi-prover
    rule with `SetQuorumPolicy`. Only the registrant changes the rules.
 

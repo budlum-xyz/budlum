@@ -22,6 +22,10 @@
 //!   account that posted the registration bond. Those are rules of one
 //!   registration, decided by the bond that backs it; no other key holds
 //!   them, and there is no network-wide key at all.
+//!   Readmission is also held to a clock no key moves: a frozen domain is
+//!   refused until the freeze has run its resolution period, counted from
+//!   the block that froze it, and until the intake guard's cooldown has
+//!   ended when that is later. The refusal names the block the door opens.
 //!
 //! - contradiction challenge: any non-self challenger supplying a second
 //!   cryptographically verified finality proof at the same external
@@ -35,6 +39,7 @@ use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::cross_domain::external::ethereum::BlsVerifier;
 use crate::cross_domain::external::intake::{AdapterSpec, IntakeError, RegistrationRequest};
+use crate::cross_domain::external::intake_guard::BASE_COOLDOWN_BLOCKS;
 use crate::cross_domain::external::quorum::QuorumPolicy;
 use crate::cross_domain::external::spec::{DomainKey, RawConsensusEvidence};
 use crate::cross_domain::external::versioning::ForkError;
@@ -43,6 +48,18 @@ use serde::{Deserialize, Serialize};
 /// The longest readmission reason a transaction may carry. The reason is
 /// stored in the domain's history, which is consensus state.
 const MAX_READMIT_REASON_BYTES: usize = 256;
+
+/// Blocks a frozen domain waits before it can be readmitted, counted from the
+/// block that froze it.
+///
+/// A freeze is a finding about the external network or its carrier: a proven
+/// contradiction, an objective fault, a quorum that could not agree, a
+/// reorganisation deeper than the registered depth. Readmission re-runs the
+/// adapter's self-test, which answers none of those, so without a floor the
+/// registrant could reopen the domain in the block after it froze. The floor
+/// is the intake guard's first strike; a domain with more strikes waits out
+/// the guard's own, longer cooldown.
+const FREEZE_RESOLUTION_BLOCKS: u64 = BASE_COOLDOWN_BLOCKS;
 
 /// One external-domain write. The actor of every variant is `tx.from`,
 /// already signed; a variant that names an account (the poster, the
@@ -236,6 +253,13 @@ pub enum ExternalDomainTxError {
     Intake(String),
     #[error("refused by the version policy: {0}")]
     Fork(String),
+    #[error(
+        "the freeze on this domain still stands at block {current_block}; readmission opens at block {resolves_at}"
+    )]
+    FreezeUnresolved {
+        current_block: u64,
+        resolves_at: u64,
+    },
 }
 
 impl From<IntakeError> for ExternalDomainTxError {
@@ -634,6 +658,43 @@ fn bond_prover(
     Ok(())
 }
 
+/// The first block at which nothing holds `domain` back from readmission, or
+/// `None` when no freeze and no guard cooldown is on record.
+///
+/// Two clocks are read and the later one wins. The intake guard's cooldown
+/// is armed by a proven contradiction or a burst of adverse rounds and grows
+/// with every strike. The freeze floor covers the freezes that arm no
+/// cooldown: it counts [`FREEZE_RESOLUTION_BLOCKS`] from the block the domain
+/// last became `Faulted`, read from the domain's own history. A `Faulted`
+/// domain whose history names no such block never resolves: the door does not
+/// guess when a freeze began.
+fn freeze_resolves_at(
+    intake: &crate::cross_domain::external::intake::IntakeState,
+    domain: &DomainKey,
+) -> Option<u64> {
+    use crate::cross_domain::external::profile::DomainState;
+    let guard_until = intake
+        .guard
+        .record_of(domain)
+        .map_or(0, |record| record.cooldown_until_block);
+    let freeze_until = intake
+        .registry
+        .domain(domain)
+        .filter(|reg| reg.record.state == DomainState::Faulted)
+        .map_or(0, |reg| {
+            reg.record
+                .history
+                .iter()
+                .rev()
+                .find(|event| event.to == DomainState::Faulted)
+                .map_or(u64::MAX, |event| {
+                    event.at_height.saturating_add(FREEZE_RESOLUTION_BLOCKS)
+                })
+        });
+    let resolves_at = guard_until.max(freeze_until);
+    (resolves_at > 0).then_some(resolves_at)
+}
+
 fn readmit(
     state: &mut AccountState,
     ctx: &ExternalDomainTxContext,
@@ -653,6 +714,21 @@ fn readmit(
     }
     require_registrant(state, ctx, domain)?;
     require_domain_mutable(state, domain)?;
+    {
+        // Readmission re-runs the adapter's self-test. That says nothing
+        // about why the domain froze, so the freeze is given its resolution
+        // period first, whoever asks and whatever the collateral is.
+        let intake = &state.settlement.external_intake;
+        let current_block = intake.registry.height();
+        if let Some(resolves_at) =
+            freeze_resolves_at(intake, domain).filter(|at| current_block < *at)
+        {
+            return Err(ExternalDomainTxError::FreezeUnresolved {
+                current_block,
+                resolves_at,
+            });
+        }
+    }
     {
         let reg = state
             .settlement
@@ -1252,6 +1328,208 @@ mod tests {
         );
     }
 
+    /// Runs `Readmit` as `registrant` at local block `height` and hands back
+    /// what the door said. A refusal is also required to have written
+    /// nothing: the settlement root and the bond escrow stay where they were.
+    fn readmit_at(
+        state: &mut AccountState,
+        key: DomainKey,
+        registrant: Address,
+        height: u64,
+    ) -> Result<(), ExternalDomainTxError> {
+        state.settlement.external_intake.on_block_committed(height);
+        let before = state.settlement.root();
+        let escrow_before = state.external_bond_escrow.clone();
+        let outcome = execute_external_domain_tx(
+            state,
+            &ctx(registrant),
+            &ExternalDomainTx::Readmit {
+                domain: key,
+                reason: "the fault was looked at".to_string(),
+            },
+        );
+        if outcome.is_err() {
+            assert_eq!(
+                state.settlement.root(),
+                before,
+                "a refused readmission writes nothing"
+            );
+            assert_eq!(state.external_bond_escrow, escrow_before);
+        }
+        outcome
+    }
+
+    /// A proven contradiction freezes the domain. Replacing the slashed
+    /// collateral is not what reopens it: the registrant waits out the
+    /// resolution period, to the block.
+    #[test]
+    fn readmission_is_refused_until_the_freeze_has_run_its_resolution_period() {
+        const FROZEN_AT: u64 = 100;
+        let (mut state, key, poster) = registered();
+        let challenger = addr(42);
+        state.add_balance(&challenger, 10_000);
+        state
+            .settlement
+            .external_intake
+            .on_block_committed(FROZEN_AT);
+
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::SubmitEvidence(Box::new(evidence(poster, 200, [0xAA; 32]))),
+        )
+        .expect("the attestation lands");
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::ChallengeContradiction(Box::new(evidence(
+                challenger, 200, [0xBB; 32],
+            ))),
+        )
+        .expect("the contradiction slashes the carrier and freezes the domain");
+        assert_fault_domain_state(&state, &key, DomainState::Faulted);
+
+        // A second prover puts the collateral back above the floor, so the
+        // refusals below are about the freeze and nothing else.
+        let backup = addr(11);
+        state.add_balance(&backup, bond() * 2);
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(backup),
+            &ExternalDomainTx::BondProver {
+                domain: key,
+                bond_atoms: u128::from(bond()),
+            },
+        )
+        .expect("the backup prover bonds");
+
+        let resolves_at = FROZEN_AT + FREEZE_RESOLUTION_BLOCKS;
+        let still_frozen = |current_block| {
+            Err(ExternalDomainTxError::FreezeUnresolved {
+                current_block,
+                resolves_at,
+            })
+        };
+        assert_eq!(
+            readmit_at(&mut state, key, poster, FROZEN_AT),
+            still_frozen(FROZEN_AT)
+        );
+        assert_eq!(
+            readmit_at(&mut state, key, poster, resolves_at - 1),
+            still_frozen(resolves_at - 1)
+        );
+        assert_fault_domain_state(&state, &key, DomainState::Faulted);
+        assert_eq!(readmit_at(&mut state, key, poster, resolves_at), Ok(()));
+        assert_fault_domain_state(&state, &key, DomainState::Admitted);
+    }
+
+    /// An objective fault freezes a domain without arming the intake guard:
+    /// nobody lied, so there is no strike. The freeze still holds for the
+    /// resolution period, counted from the block that froze the domain.
+    #[test]
+    fn a_freeze_that_arms_no_guard_cooldown_still_holds_readmission_for_the_period() {
+        const FROZEN_AT: u64 = 7_000;
+        let (mut state, key, poster) = registered();
+        let intake = &mut state.settlement.external_intake;
+        intake.on_block_committed(FROZEN_AT);
+        intake
+            .registry
+            .mark_faulted(&key, "two finalized roots at one height")
+            .expect("the domain is registered");
+        assert!(
+            intake.guard.record_of(&key).is_none(),
+            "nothing armed the guard"
+        );
+
+        let resolves_at = FROZEN_AT + FREEZE_RESOLUTION_BLOCKS;
+        let still_frozen = |current_block| {
+            Err(ExternalDomainTxError::FreezeUnresolved {
+                current_block,
+                resolves_at,
+            })
+        };
+        assert_eq!(
+            readmit_at(&mut state, key, poster, FROZEN_AT),
+            still_frozen(FROZEN_AT)
+        );
+        assert_eq!(
+            readmit_at(&mut state, key, poster, resolves_at - 1),
+            still_frozen(resolves_at - 1)
+        );
+        assert_fault_domain_state(&state, &key, DomainState::Faulted);
+        assert_eq!(readmit_at(&mut state, key, poster, resolves_at), Ok(()));
+        assert_fault_domain_state(&state, &key, DomainState::Admitted);
+    }
+
+    /// A second strike doubles the guard's cooldown past the freeze floor,
+    /// and the door waits for the later of the two.
+    #[test]
+    fn a_guard_cooldown_that_outlasts_the_freeze_floor_is_what_readmission_waits_for() {
+        const FROZEN_AT: u64 = 100;
+        let (mut state, key, poster) = registered();
+        let intake = &mut state.settlement.external_intake;
+        intake.on_block_committed(FROZEN_AT);
+        intake
+            .registry
+            .mark_faulted(&key, "a second proven contradiction")
+            .expect("the domain is registered");
+        intake
+            .guard
+            .record_contradiction(key, 200, 2, [0xA1; 32], FROZEN_AT);
+        let cooldown_until = intake
+            .guard
+            .record_contradiction(key, 201, 2, [0xA2; 32], FROZEN_AT);
+        let floor = FROZEN_AT + FREEZE_RESOLUTION_BLOCKS;
+        assert!(
+            cooldown_until > floor,
+            "two strikes outlast the freeze floor"
+        );
+
+        let still_frozen = |current_block| {
+            Err(ExternalDomainTxError::FreezeUnresolved {
+                current_block,
+                resolves_at: cooldown_until,
+            })
+        };
+        assert_eq!(
+            readmit_at(&mut state, key, poster, floor),
+            still_frozen(floor)
+        );
+        assert_eq!(
+            readmit_at(&mut state, key, poster, cooldown_until - 1),
+            still_frozen(cooldown_until - 1)
+        );
+        assert_fault_domain_state(&state, &key, DomainState::Faulted);
+        assert_eq!(readmit_at(&mut state, key, poster, cooldown_until), Ok(()));
+        assert_fault_domain_state(&state, &key, DomainState::Admitted);
+    }
+
+    /// The door reads the block that froze the domain from the domain's own
+    /// history. A frozen domain with no such entry is not given a start it
+    /// never had: it is refused at every height.
+    #[test]
+    fn a_frozen_domain_whose_history_names_no_freeze_is_refused_at_every_height() {
+        let (mut state, key, poster) = registered();
+        state
+            .settlement
+            .external_intake
+            .registry
+            .domain_mut(&key)
+            .expect("the domain is registered")
+            .record
+            .state = DomainState::Faulted;
+        for height in [0, FREEZE_RESOLUTION_BLOCKS, 1_000_000] {
+            assert_eq!(
+                readmit_at(&mut state, key, poster, height),
+                Err(ExternalDomainTxError::FreezeUnresolved {
+                    current_block: height,
+                    resolves_at: u64::MAX,
+                })
+            );
+        }
+        assert_fault_domain_state(&state, &key, DomainState::Faulted);
+    }
+
     #[test]
     fn a_fork_to_a_version_the_adapter_does_not_accept_is_refused() {
         let (mut state, key, poster) = registered();
@@ -1504,6 +1782,12 @@ mod tests {
             },
         )
         .unwrap();
+        // Collateral alone does not reopen a frozen domain: the freeze runs
+        // its resolution period first.
+        state
+            .settlement
+            .external_intake
+            .on_block_committed(FREEZE_RESOLUTION_BLOCKS);
         execute_external_domain_tx(
             &mut state,
             &ctx(poster),

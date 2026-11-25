@@ -50,6 +50,11 @@ state = "closed"
 evidence = "foreign_sui_is_closed_on_testnet"
 
 [[feature]]
+id = "freeze_resolution_period"
+state = "open"
+evidence = "freeze_resolution_period_is_open_on_testnet"
+
+[[feature]]
 id = "live_stream"
 state = "closed"
 evidence = "live_stream_is_closed_on_testnet"

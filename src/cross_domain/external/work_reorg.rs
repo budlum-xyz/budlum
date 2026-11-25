@@ -28,7 +28,9 @@
 //! reorganised deeper, so no bond moves and nobody is rewarded. The out-worked
 //! attestation, and every accepted attestation below it on the same branch
 //! above the fork point, is withdrawn and tombstoned, and the domain is frozen
-//! until it is readmitted.
+//! until it is readmitted. The readmission door holds the freeze for its
+//! resolution period first, so the registrant cannot undo it with the next
+//! transaction.
 //!
 //! Two rules keep a stale private fork from freezing a healthy domain. The
 //! witness must reach the highest height the domain has accepted, and the
@@ -379,8 +381,8 @@ mod tests {
     };
     use crate::cross_domain::external::profile::DomainState;
     use crate::cross_domain::external::{
-        execute_external_domain_tx, ExternalDomainTx, ExternalDomainTxContext, ObjectiveFaultProof,
-        RegistrationRequest, VersionPolicy,
+        execute_external_domain_tx, ExternalDomainTx, ExternalDomainTxContext,
+        ExternalDomainTxError, ObjectiveFaultProof, RegistrationRequest, VersionPolicy,
     };
 
     type Header = [u8; HEADER_LEN];
@@ -908,6 +910,92 @@ mod tests {
         assert_carrier_was_not_charged(intake, &key, live_before);
         assert_eq!(state.get_balance(&challenger), 1_000, "no reward is paid");
         assert_eq!(state.get_balance(&carrier), 1_000, "no balance is taken");
+    }
+
+    /// The freeze a work witness causes is not undone by the next
+    /// transaction. On the public testnet the registrant's readmission is
+    /// refused until the freeze has run its resolution period, nothing is
+    /// written while it waits, and the withdrawn claim stays withdrawn after.
+    #[test]
+    fn freeze_resolution_period_is_open_on_testnet() {
+        const FROZEN_AT: u64 = 40;
+        let accepted = fork(5, 1, b"carrier-tip");
+        let rival = fork(5, 7, b"rival-tip");
+        let (intake, key) = book(&[&accepted]);
+        let live_before = carrier_live_atoms(&intake, &key);
+        let challenger = Address::from(CHALLENGER);
+        let carrier = Address::from(CARRIER);
+        let mut state = AccountState::new();
+        state.settlement.external_intake = intake;
+        state
+            .settlement
+            .external_intake
+            .on_block_committed(FROZEN_AT);
+        state.current_block_unix_secs = NOW;
+        let ctx_of = |sender: Address| ExternalDomainTxContext {
+            sender,
+            chain_id: Network::Testnet.chain_id().value(),
+            fee: 10,
+            bls: IntakeState::production_bls,
+        };
+        execute_external_domain_tx(
+            &mut state,
+            &ctx_of(challenger),
+            &ExternalDomainTx::SubmitFaultProof {
+                domain: key,
+                proof: ObjectiveFaultProof::WorkReorg(Box::new(witness_for(
+                    906, 5, &accepted, &rival,
+                ))),
+            },
+        )
+        .expect("the work witness freezes the domain");
+
+        // The registrant is the honest carrier. Its bond is whole, so
+        // collateral is not what holds the door shut.
+        let readmit = ExternalDomainTx::Readmit {
+            domain: key,
+            reason: "the reorganisation has settled".to_string(),
+        };
+        let before = state.settlement.external_intake.clone();
+        let err = execute_external_domain_tx(&mut state, &ctx_of(carrier), &readmit)
+            .expect_err("the freeze still stands in the block that caused it");
+        let ExternalDomainTxError::FreezeUnresolved {
+            current_block,
+            resolves_at,
+        } = err
+        else {
+            panic!("expected the freeze refusal, got: {err}");
+        };
+        assert_eq!(current_block, FROZEN_AT);
+        assert!(resolves_at > FROZEN_AT, "the period is not empty");
+        assert_eq!(state.settlement.external_intake, before);
+
+        state
+            .settlement
+            .external_intake
+            .on_block_committed(resolves_at - 1);
+        let before = state.settlement.external_intake.clone();
+        execute_external_domain_tx(&mut state, &ctx_of(carrier), &readmit)
+            .expect_err("one block short of the period is still refused");
+        assert_eq!(state.settlement.external_intake, before);
+
+        state
+            .settlement
+            .external_intake
+            .on_block_committed(resolves_at);
+        execute_external_domain_tx(&mut state, &ctx_of(carrier), &readmit)
+            .expect("the freeze ran its resolution period");
+        let intake = &state.settlement.external_intake;
+        let registration = intake
+            .registry
+            .domain(&key)
+            .expect("domain stays registered");
+        assert_eq!(registration.record.state, DomainState::Admitted);
+        assert!(
+            registration.attestations.is_empty(),
+            "readmission does not bring the withdrawn claim back"
+        );
+        assert_carrier_was_not_charged(intake, &key, live_before);
     }
 
     #[test]
