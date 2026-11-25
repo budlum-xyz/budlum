@@ -181,6 +181,31 @@ impl GardenRecord {
     /// `now_ms` is wall clock time. A record that has run out of time or
     /// out of people is refused here, so a caller never has to remember to
     /// check those separately.
+    /// The invite line this record stands for.
+    ///
+    /// Section 5.8 lets a QR carry either form, and section 5.12 says a
+    /// record that arrived by a deliberate act joins on one tap. A record
+    /// holds everything an invite line holds - the Garden, its genesis,
+    /// the token and the peers - so a reader that was handed the signed
+    /// form does not have to go asking for the other one.
+    ///
+    /// A line is produced rather than a `GardenInvite` built field by
+    /// field: the line goes back through `GardenInvite::parse`, so the
+    /// checks that guard every other invite guard this one too.
+    pub fn to_invite_link(&self) -> String {
+        let mut link = format!(
+            "budlum-garden:1?chain={:016x}&genesis={}&token={}",
+            self.chain_id,
+            hex::encode(self.genesis_hash),
+            hex::encode(self.token)
+        );
+        for peer in &self.peers {
+            link.push_str("&peer=");
+            link.push_str(peer);
+        }
+        link
+    }
+
     pub fn check(&self, now_ms: u64) -> Result<(), String> {
         if self.version != RECORD_VERSION {
             return Err(format!(

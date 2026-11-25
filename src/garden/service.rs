@@ -11,7 +11,7 @@ use super::invite::GardenInvite;
 use super::node::{
     now_ms, random_bytes, spawn, GardenEntry, GardenHandle, GardenLeaveOutcome, GardenNodeConfig,
 };
-use super::record::GardenRecord;
+use super::record::{GardenRecord, RECORD_LINK_PREFIX};
 use super::settlement::GardenBudlumLink;
 use super::types::{status_label, GardenAdmission, GardenContentKind, GardenLimits};
 use crate::chain::chain_actor::ChainHandle;
@@ -251,7 +251,17 @@ impl GardenService {
         name: String,
         options: GardenOptions,
     ) -> Result<Value, String> {
-        let invite = GardenInvite::parse(&invite)?;
+        // A phone scans one code. Section 5.8 allows that code to be
+        // either the invite line or the signed record, so both are taken
+        // here rather than making the reader know which one it was handed.
+        // The record is verified before its contents are trusted.
+        let invite = if invite.trim().starts_with(RECORD_LINK_PREFIX) {
+            let record = GardenRecord::parse(&invite)?;
+            record.check(now_ms())?;
+            GardenInvite::parse(&record.to_invite_link())?
+        } else {
+            GardenInvite::parse(&invite)?
+        };
         let mut slot = self.slot.lock().await;
         match &*slot {
             Slot::Running(..) => {
