@@ -43,7 +43,7 @@ use crate::domain::types::Hash32;
 const RECORD_VERSION: u8 = 1;
 
 /// The scheme and path an invite record is written under.
-const RECORD_LINK_PREFIX: &str = "budlum://garden/join#";
+pub(crate) const RECORD_LINK_PREFIX: &str = "budlum://garden/join#";
 
 /// How long a record is good for when the caller does not say.
 ///
