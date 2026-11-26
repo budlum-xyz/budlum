@@ -114,7 +114,15 @@ fun DataScreen(model: GardenModel) {
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Fetch") }
         if (state.fetched.isNotEmpty()) {
-            GardenCard("FETCHED") { Text(readable(state.fetched)) }
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text("FETCHED", style = MaterialTheme.typography.labelSmall)
+                    Text(readable(state.fetched), style = MaterialTheme.typography.bodyMedium)
+                }
+            }
         }
         if (state.message.isNotEmpty()) {
             Text(state.message, style = MaterialTheme.typography.bodySmall)
