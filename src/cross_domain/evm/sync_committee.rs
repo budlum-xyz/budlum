@@ -3330,10 +3330,12 @@ mod tests {
         let mut layers = vec![leaves];
         while layers.last().unwrap().len() > 1 {
             let prev = layers.last().unwrap();
-            let next: Vec<[u8; 32]> = prev
-                .chunks_exact(2)
-                .map(|p| sha256_pair(&p[0], &p[1]))
-                .collect();
+            // `as_chunks` hands out the pairs whole; the older spelling
+            // indexes into each chunk and draws a lint on the next stable
+            // toolchain. A layer is a power of two long by construction, so
+            // the remainder is empty and is not read.
+            let (pairs, _rest) = prev.as_chunks::<2>();
+            let next: Vec<[u8; 32]> = pairs.iter().map(|p| sha256_pair(&p[0], &p[1])).collect();
             layers.push(next);
         }
         let root = layers.last().unwrap()[0];

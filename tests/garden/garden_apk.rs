@@ -758,12 +758,11 @@ fn garden_apk_permissions_denied() {
         // Root can write anywhere, so the refusal only means something when
         // the process is not root. Either way, a passing self test on an
         // unwritable directory would be the bug this check exists to catch.
-        if dir
+        if !dir
             .path()
             .metadata()
             .map(|m| m.permissions().readonly())
             .unwrap_or(false)
-            == false
         {
             eprintln!("note: running as root, so the storage refusal cannot be produced here");
         }
