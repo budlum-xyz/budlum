@@ -192,6 +192,21 @@ fn main() -> ExitCode {
             }
             say(phone.send(text, caption).map_err(|e| e.to_string()))
         }
+        "send-file" => {
+            // Prove the file path end to end: read bytes off disk, hex
+            // them, publish, then pull them back out of the chain and
+            // compare. Anything less is a guess.
+            let dir = args.next().ok_or("send-file <dir> <file> [mime]")?;
+            let file = args.next().ok_or("send-file <dir> <file> [mime]")?;
+            let mime = args.next().unwrap_or_else(|| "application/octet-stream".into());
+            let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+            let name = std::path::Path::new(&file)
+                .file_name()
+                .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().into_owned());
+            let phone = GardenPhone::new(dir)?;
+            let answer = phone.send_file(hex::encode(&bytes), mime, name)?;
+            println!("{}", answer.json);
+        }
         "feed" => {
             let limit = args
                 .get(3)

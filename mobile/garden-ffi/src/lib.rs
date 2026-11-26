@@ -226,6 +226,30 @@ impl GardenPhone {
         )))
     }
 
+    /// Send the contents of a file into the Garden.
+    ///
+    /// The bytes arrive as hex because that is the one binary encoding
+    /// the core's publish accepts, and they go down the same B.U.D. 3.0
+    /// path a note does: coded into parts, spread over the validators,
+    /// and checked against the chain when anybody asks for them back. A
+    /// picture is published as an image so a reader knows to show it;
+    /// everything else is a post.
+    pub fn send_file(
+        &self,
+        hex_bytes: String,
+        mime: String,
+        caption: String,
+    ) -> Result<GardenAnswer, GardenError> {
+        let kind = if mime.starts_with("image/") { "image" } else { "post" };
+        answer(self.runtime.block_on(self.service.publish(
+            kind.to_owned(),
+            hex_bytes,
+            Some("hex".to_owned()),
+            Some(mime),
+            Some(caption),
+        )))
+    }
+
     /// What the Garden has been sent, newest first.
     pub fn feed(&self, limit: u32) -> Result<GardenAnswer, GardenError> {
         answer(self.runtime.block_on(self.service.feed(Some(limit))))

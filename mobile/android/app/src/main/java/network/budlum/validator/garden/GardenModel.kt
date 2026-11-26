@@ -17,6 +17,38 @@ import java.util.Date
 import java.util.Locale
 
 /** Everything the three screens read. */
+/**
+ * One line of the conversation, as the chain holds it.
+ *
+ * `height` is the block the line landed in, which is the only order the
+ * group agrees on - a phone's own clock is its own opinion.
+ */
+data class ChatLine(
+    val id: String,
+    val author: String,
+    val who: String,
+    val text: String?,
+    val caption: String,
+    val mime: String,
+    val size: Int,
+    val height: Long,
+    val heldHere: Boolean,
+) {
+    /** True when this line is a file rather than something typed. */
+    val isFile: Boolean get() = text == null
+}
+
+/** Hex, because that is the binary encoding the core's publish takes. */
+internal fun ByteArray.toHex(): String {
+    val digits = "0123456789abcdef"
+    val out = StringBuilder(size * 2)
+    for (byte in this) {
+        val value = byte.toInt() and 0xff
+        out.append(digits[value shr 4]).append(digits[value and 0x0f])
+    }
+    return out.toString()
+}
+
 data class GardenState(
     val record: String = "",
     val recordQr: String = "",
@@ -27,6 +59,12 @@ data class GardenState(
     val message: String = "",
     val busy: Boolean = false,
     val selfTest: List<SelfTestStep> = emptyList(),
+    /** The conversation, oldest first. */
+    val messages: List<ChatLine> = emptyList(),
+    /** This phone's validator key, so its own lines can be told apart. */
+    val myKey: String = "",
+    /** True while this phone is the only validator of its network. */
+    val aloneHere: Boolean = false,
     /** What the group has sent, as the core reports it. */
     val feed: String = "",
     /** One piece of data pulled back out and checked. */
@@ -107,25 +145,112 @@ class GardenModel(
     }
 
     /**
-     * Send data into the Garden.
+     * Say something in the Garden.
      *
-     * This is the point of the thing. There is no token and nothing to
-     * pay; the validators' work is checking blocks and holding a share of
-     * what is sent, and this is what gets sent.
+     * There is no token and nothing to pay. The line is signed by this
+     * phone, coded into parts by B.U.D. 3.0 and spread over the group,
+     * and it comes back out of the chain verified rather than trusted.
      */
-    fun send(text: String, caption: String) = background {
-        if (text.isBlank()) {
-            state = state.copy(message = "There is nothing to send yet.")
-            return@background
-        }
-        val answer = phone.send(text, caption)
-        state = state.copy(message = "Sent. " + answer.json)
-        refreshFeed()
+    fun say(text: String) = background {
+        if (text.isBlank()) return@background
+        phone.send(text, "")
+        readChat()
     }
 
-    /** What the Garden has been sent. */
-    fun refreshFeed() = background {
-        state = state.copy(feed = phone.feed(FEED_LIMIT).json)
+    /**
+     * Send the contents of a file the person picked.
+     *
+     * Read here rather than in the screen because the screen does not
+     * outlive a rotation and a large file does.
+     */
+    fun sendFile(uri: android.net.Uri) = background {
+        val resolver = app.contentResolver
+        val mime = resolver.getType(uri) ?: "application/octet-stream"
+        val name = fileName(uri)
+        val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+        if (bytes == null) {
+            state = state.copy(message = "That file could not be opened.")
+            return@background
+        }
+        if (bytes.size > MAX_FILE_BYTES) {
+            state = state.copy(
+                message = "That file is " + (bytes.size / 1024 / 1024) +
+                    " MB. A Garden carries up to 4 MB in one piece.",
+            )
+            return@background
+        }
+        phone.sendFile(bytes.toHex(), mime, name)
+        readChat()
+    }
+
+    /** The name the picker knows the file by, for the caption. */
+    private fun fileName(uri: android.net.Uri): String {
+        val cursor = app.contentResolver.query(uri, null, null, null, null) ?: return "file"
+        return cursor.use {
+            val column = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (column >= 0 && it.moveToFirst()) it.getString(column) ?: "file" else "file"
+        }
+    }
+
+    /**
+     * The conversation, rebuilt from the chain.
+     *
+     * The feed names what was published; the bytes of each line live in
+     * the parts the validators hold, so each one is fetched and checked
+     * against its content id. Already-seen lines are kept, because the
+     * chain does not change its mind about them.
+     */
+    fun readChat() = background {
+        val status = runCatching { phone.status().json }.getOrNull() ?: return@background
+        val garden = JSONObject(status).optJSONObject("garden")
+        val me = garden?.optJSONObject("me")?.optString("key").orEmpty()
+        val alone = (garden?.optInt("active_validators", 0) ?: 0) <= 1
+        val feed = phone.feed(FEED_LIMIT).json
+        val items = runCatching {
+            JSONObject(feed).optJSONArray("items") ?: org.json.JSONArray()
+        }.getOrElse { org.json.JSONArray() }
+
+        val known = state.messages.associateBy { it.id }
+        val lines = mutableListOf<ChatLine>()
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            val id = item.optString("content_id")
+            val seen = known[id]
+            if (seen != null) {
+                lines.add(seen)
+                continue
+            }
+            val mime = item.optString("mime")
+            val text = if (mime.startsWith("text/")) {
+                runCatching {
+                    JSONObject(phone.fetch(id).json).optString("text").takeIf {
+                        it.isNotEmpty() && it != "null"
+                    }
+                }.getOrNull()
+            } else {
+                null
+            }
+            lines.add(
+                ChatLine(
+                    id = id,
+                    author = item.optString("author"),
+                    who = item.optString("author_name").ifBlank { "someone" },
+                    text = text,
+                    caption = item.optString("caption"),
+                    mime = mime,
+                    size = item.optInt("size", 0),
+                    height = item.optLong("height", 0),
+                    heldHere = item.optBoolean("held_here"),
+                ),
+            )
+        }
+        // The feed is newest first; a conversation reads the other way.
+        state = state.copy(
+            messages = lines.sortedWith(compareBy({ it.height }, { it.id })),
+            myKey = me,
+            aloneHere = alone,
+            feed = feed,
+        )
     }
 
     /** Pull one piece of data back out and check it against the chain. */
@@ -328,7 +453,10 @@ class GardenModel(
     private companion object {
         /** Section 5.7 asks the share text to say where the app comes from. */
         /** Enough of the feed to see what the group has sent. */
-        const val FEED_LIMIT = 50u
+        const val FEED_LIMIT = 100u
+
+        /** One Garden object, from the limits the chain was founded with. */
+        const val MAX_FILE_BYTES = 4 * 1024 * 1024
 
         const val APK_SOURCE = "https://github.com/budlum-xyz/budlum/releases"
     }

@@ -26,14 +26,14 @@ import network.budlum.validator.R
  * look: panels and rows are square because the grid is the interface,
  * not decoration, and only controls and chips are allowed to soften.
  */
-private val Page = Color(0xFFFBFCFA)
-private val Ground = Color(0xFF060705)
-private val Sage = Color(0xFF98AE89)
-private val Ink = Color(0xFF060705)
-private val Chalk = Color(0xFFFFFFFF)
-private val Flow = Color(0xFF8C0000)
-private val Mute = Color(0xFFBDBDBD)
-private val Faint = Color(0xFFE6E6E6)
+internal val Page = Color(0xFFFBFCFA)
+internal val Ground = Color(0xFF060705)
+internal val Sage = Color(0xFF98AE89)
+internal val Ink = Color(0xFF060705)
+internal val Chalk = Color(0xFFFFFFFF)
+internal val Flow = Color(0xFF8C0000)
+internal val Mute = Color(0xFFBDBDBD)
+internal val Faint = Color(0xFFE6E6E6)
 
 private val budlumColors = lightColorScheme(
     primary = Ground,

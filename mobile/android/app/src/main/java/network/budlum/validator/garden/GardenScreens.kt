@@ -6,6 +6,7 @@ import android.graphics.Color
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -30,13 +32,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
+import network.budlum.validator.R
 import org.json.JSONObject
 
 /**
@@ -65,15 +69,15 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
             onBack = { step = Step.Setup },
         )
         Step.Join -> Column(modifier = Modifier.fillMaxSize()) {
-            TopBar("Join a network") { step = Step.Choose }
+            TopBar("join a network") { step = Step.Choose }
             JoinScreen(model)
         }
         Step.Garden -> Column(modifier = Modifier.fillMaxSize()) {
-            TopBar("My network") { step = Step.Choose }
-            // Sending data is the first tab because it is the reason the
-            // network exists; the invite and the state of the group come
-            // after it.
-            val titles = listOf("Data", "Invite", "Status")
+            TopBar("my network") { step = Step.Choose }
+            // The room comes first. The network exists so a group can
+            // say things to each other; the invite and the state of the
+            // chain are what hold that up.
+            val titles = listOf("Room", "Invite", "Status")
             TabRow(selectedTabIndex = tab) {
                 titles.forEachIndexed { index, title ->
                     Tab(
@@ -85,7 +89,7 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
             }
             when (tab) {
                 0 -> if (model.state.status.contains("\"chain_id\"")) {
-                    DataScreen(model)
+                    ChatScreen(model)
                 } else {
                     InviteScreen(model) { step = Step.Join }
                 }
@@ -96,17 +100,40 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
     }
 }
 
-/** A title with the way back next to it, on every screen that has one. */
+/**
+ * The wordmark, with the way back beside it.
+ *
+ * The mark belongs at the top of every screen - it is the first thing
+ * the design file puts on a page, and an app that leaves it off looks
+ * like somebody else's. This is the exported vector from budlum.xyz,
+ * not a redrawing of it.
+ */
 @Composable
 private fun TopBar(title: String, onBack: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        TextButton(onClick = onBack) { Text("Back") }
-        Text(title.uppercase(), style = MaterialTheme.typography.labelSmall)
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp, bottom = 4.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                painter = painterResource(R.drawable.budlum_wordmark),
+                contentDescription = "Budlum",
+                modifier = Modifier.height(20.dp),
+            )
+            Row(modifier = Modifier.fillMaxWidth()) {
+                TextButton(onClick = onBack) { Text("back") }
+            }
+        }
+        Text(
+            title.lowercase(),
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 14.dp, bottom = 6.dp),
+        )
+        HorizontalDivider(thickness = 1.dp, color = Faint)
     }
 }
 
