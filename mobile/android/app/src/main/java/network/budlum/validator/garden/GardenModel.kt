@@ -211,6 +211,18 @@ class GardenModel(
         startValidating()
         state = state.copy(status = phone.status().json)
         runCatching { readInvite(phone.invite()) }
+        // A seat is a way back into a Garden that still exists. The one
+        // case where it is not is a network this phone founded alone: the
+        // chain lives in the running app, so nobody kept it while the app
+        // was gone. Saying "no Garden" there reads as a fault; it is not.
+        if (!state.status.contains("\"chain_id\"")) {
+            state = state.copy(
+                message = "The network you started is not running any more. " +
+                    "A network lives in the phones that are in it, so one " +
+                    "with only this phone in it ends when the app closes. " +
+                    "Start it again, and invite someone before you close it.",
+            )
+        }
     }
 
     /** Hand the scan off to the activity, which owns the camera. */
