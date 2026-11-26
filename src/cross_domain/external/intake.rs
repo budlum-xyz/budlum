@@ -6222,4 +6222,72 @@ mod tests {
             "no pinned committee means no fault tolerance at all"
         );
     }
+
+    /// The production door: a `PinExternalAnchor` vote reaches
+    /// `install_pinned_anchor`, and the family-keyed readback the executor
+    /// performs must return that anchor for every family this tree wires.
+    ///
+    /// NIPoPoW, GHOSTDAG and HoneyBadgerBFT are checked here beside Babylon
+    /// EOTS's own coverage, because the one failure mode that would matter is a
+    /// family whose value lands in a map no reader looks at: registering the
+    /// variant without teaching the lookup would leave the door closed on a
+    /// chain that voted the pin through, and the vote would still look
+    /// accepted.
+    #[test]
+    fn a_governance_vote_installs_each_new_family_anchor_under_its_own_key() {
+        let (nipopow, _, nipopow_golden) =
+            crate::cross_domain::external::nipopow::tests::make_golden_fixture();
+        let (ghostdag, _, ghostdag_golden) =
+            crate::cross_domain::external::ghostdag::tests::make_golden_fixture();
+        let (_, honeybadger, _, honeybadger_golden) =
+            crate::cross_domain::external::honeybadger_bft::tests::fixture();
+
+        let mut intake = IntakeState::new();
+        let cases = [
+            (
+                AnchorFamily::PoWSuccinct,
+                nipopow_golden.network.clone(),
+                PinnedExternalAnchor::Nipopow(nipopow),
+            ),
+            (
+                AnchorFamily::Ghostdag,
+                ghostdag_golden.network.clone(),
+                PinnedExternalAnchor::Ghostdag(ghostdag),
+            ),
+            (
+                AnchorFamily::HoneyBadger,
+                honeybadger_golden.network.clone(),
+                PinnedExternalAnchor::HoneyBadger(honeybadger),
+            ),
+        ];
+
+        for (family, network, anchor) in cases {
+            assert_eq!(
+                intake.pinned_anchor(family, &network),
+                None,
+                "an untouched {} slot is empty, which is what `expected_previous: None` means",
+                family.as_str()
+            );
+            let digest = anchor.digest().expect("digest");
+            intake.install_pinned_anchor(&network, anchor.clone());
+            assert_eq!(
+                intake.pinned_anchor(family, &network),
+                Some(anchor.clone()),
+                "the {} vote did not reach the family-keyed readback",
+                family.as_str()
+            );
+            assert_eq!(
+                intake.pinned_anchor_digest(family, &network),
+                Ok(Some(digest)),
+                "the {} anchor's digest is what a retargeting vote binds",
+                family.as_str()
+            );
+        }
+
+        // Each anchor went into its own map: three pins, none overwritten.
+        assert_eq!(intake.pinned_nipopow_genesis.len(), 1);
+        assert_eq!(intake.pinned_ghostdag_anchors.len(), 1);
+        assert_eq!(intake.pinned_honeybadger_committees.len(), 1);
+        assert!(intake.pinned_bitcoin_anchors.is_empty());
+    }
 }
