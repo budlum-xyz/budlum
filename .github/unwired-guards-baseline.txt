@@ -1,4 +1,4 @@
-3
+0
 # Guards without a production caller and without a justified module-level
 # WIRING exemption. The gate measures this count; do not raise it to accept a
 # new unreachable guard.
