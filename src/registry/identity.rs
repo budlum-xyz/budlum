@@ -60,6 +60,7 @@ use crate::core::hash::hash_fields_bytes;
 use crate::domain::ConsensusKind;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use subtle::ConstantTimeEq;
 
 /// A [`ConsensusKind::Custom`] label that must be written exactly this way
 /// before a PoA-only write is refused: the gate matches on the constant, not
@@ -263,11 +264,16 @@ impl IdentityRecord {
             });
         }
         for (i, method) in self.methods.iter().enumerate() {
+            if bool::from(method.key_id.ct_eq(&[0u8; 32])) {
+                return Err(IdentityError::BadApproval(
+                    "verification method key handle cannot be all-zero".to_string(),
+                ));
+            }
             if self
                 .methods
                 .iter()
                 .take(i)
-                .any(|m| m.key_id == method.key_id)
+                .any(|m| bool::from(m.key_id.ct_eq(&method.key_id)))
             {
                 return Err(IdentityError::DuplicateKeyId {
                     did: did_of(&self.subject),
@@ -618,11 +624,10 @@ impl IdentityRegistry {
             IdentityOp::Register { record } => self.register(record, now),
             IdentityOp::Issue { credential } => self.issue(credential, now),
             IdentityOp::Revoke { credential } => self.revoke(credential, now),
-            IdentityOp::Recover {
-                subject,
-                new_key,
-                approvals,
-            } => self.guardian_recovery(subject, new_key, &approvals, now),
+            IdentityOp::Recover { .. } => Err(IdentityError::BadApproval(
+                "recover: unsigned IdentityOp::Recover is refused; use authorize_recovery_in"
+                    .to_string(),
+            )),
         }
     }
 
@@ -810,8 +815,9 @@ impl IdentityRegistry {
     ///
     /// # Errors
     ///
-    /// Quorum shortfalls, unknown DIDs, and the new key colliding with a
-    /// live method.
+    /// Quorum shortfalls, unknown DIDs, all-zero replacement keys, exceeding
+    /// [`MAX_IDENTITY_METHODS`], and the new key colliding with any live or
+    /// previously revoked method on the record.
     pub fn guardian_recovery(
         &mut self,
         subject: Address,
@@ -819,6 +825,11 @@ impl IdentityRegistry {
         approvals: &[Address],
         now: u64,
     ) -> Result<(), IdentityError> {
+        if bool::from(new_key.ct_eq(&[0u8; 32])) {
+            return Err(IdentityError::BadApproval(
+                "recover: replacement key handle cannot be all-zero".to_string(),
+            ));
+        }
         let did = did_of(&subject);
         let record = self
             .records
@@ -843,9 +854,16 @@ impl IdentityRegistry {
         if record
             .methods
             .iter()
-            .any(|m| m.key_id == new_key && m.is_live_at(now))
+            .any(|m| bool::from(m.key_id.ct_eq(&new_key)))
         {
             return Err(IdentityError::DuplicateKeyId { did });
+        }
+        if record.methods.len() >= MAX_IDENTITY_METHODS {
+            return Err(IdentityError::TooMany {
+                did,
+                what: "verification methods",
+                max: MAX_IDENTITY_METHODS,
+            });
         }
         for method in &mut record.methods {
             if method.revoked_at.is_none() {
@@ -3217,6 +3235,216 @@ mod tests {
         assert!(
             bounded.credential(&exp_id).is_none(),
             "revoked/expired credential entry must be reclaimed from the active credentials pool"
+        );
+    }
+
+    #[test]
+    fn the_low_level_mutation_door_refuses_unsigned_recovery() {
+        let mut registry = IdentityRegistry::default();
+        let record = IdentityRecord::new(
+            addr(1),
+            vec![VerificationMethod::new([1u8; 32], MethodKind::MlDsa87)],
+            vec![addr(2), addr(3)],
+            2,
+        )
+        .unwrap();
+        registry
+            .apply(&ConsensusKind::PoA, IdentityOp::Register { record }, 10)
+            .unwrap();
+        let root_before = registry.root();
+
+        let err = registry
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Recover {
+                    subject: addr(1),
+                    new_key: [9u8; 32],
+                    approvals: vec![addr(2), addr(3)],
+                },
+                20,
+            )
+            .expect_err("unsigned IdentityOp::Recover through apply must be refused");
+        assert!(
+            matches!(err, IdentityError::BadApproval(_)),
+            "expected BadApproval refusal on unsigned recovery door, got {err:?}"
+        );
+        assert_eq!(
+            registry.root(),
+            root_before,
+            "refused unsigned recovery must not mutate registry state"
+        );
+        assert_eq!(registry.recovery_nonce_of(&addr(1)), 0);
+        assert!(
+            registry
+                .record(&addr(1))
+                .unwrap()
+                .live_method(&[1u8; 32], 20)
+                .is_some(),
+            "original key must remain live after refused unsigned recovery"
+        );
+    }
+
+    #[test]
+    fn guardian_recovery_refuses_revoked_key_resurrection() {
+        let mut registry = IdentityRegistry::default();
+        let record = IdentityRecord::new(
+            addr(1),
+            vec![VerificationMethod::new([1u8; 32], MethodKind::MlDsa87)],
+            vec![addr(2), addr(3)],
+            2,
+        )
+        .unwrap();
+        registry
+            .apply(&ConsensusKind::PoA, IdentityOp::Register { record }, 5)
+            .unwrap();
+
+        registry
+            .guardian_recovery(addr(1), [2u8; 32], &[addr(2), addr(3)], 10)
+            .unwrap();
+        let root_before = registry.root();
+
+        let err = registry
+            .guardian_recovery(addr(1), [1u8; 32], &[addr(2), addr(3)], 20)
+            .expect_err("rotating back to a previously revoked key_id must be refused");
+        assert!(
+            matches!(err, IdentityError::DuplicateKeyId { .. }),
+            "expected DuplicateKeyId when resurrecting a revoked key handle, got {err:?}"
+        );
+        assert_eq!(
+            registry.root(),
+            root_before,
+            "refused revoked-key resurrection must leave registry state untouched"
+        );
+        assert_eq!(registry.recovery_nonce_of(&addr(1)), 1);
+        registry
+            .record(&addr(1))
+            .unwrap()
+            .validate()
+            .expect("record must remain structurally valid");
+    }
+
+    #[test]
+    fn guardian_recovery_enforces_the_per_did_method_ceiling() {
+        let mut registry = IdentityRegistry::default();
+        let record = IdentityRecord::new(
+            addr(1),
+            vec![VerificationMethod::new([1u8; 32], MethodKind::MlDsa87)],
+            vec![addr(2), addr(3)],
+            2,
+        )
+        .unwrap();
+        registry
+            .apply(&ConsensusKind::PoA, IdentityOp::Register { record }, 1)
+            .unwrap();
+
+        for step in 2..=(MAX_IDENTITY_METHODS as u8) {
+            registry
+                .guardian_recovery(
+                    addr(1),
+                    [step; 32],
+                    &[addr(2), addr(3)],
+                    u64::from(step) * 10,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            registry.record(&addr(1)).unwrap().methods.len(),
+            MAX_IDENTITY_METHODS
+        );
+        registry
+            .record(&addr(1))
+            .unwrap()
+            .validate()
+            .expect("record at MAX_IDENTITY_METHODS ceiling must validate");
+        let root_before = registry.root();
+
+        let overflow_key = [(MAX_IDENTITY_METHODS as u8) + 1; 32];
+        let err = registry
+            .guardian_recovery(addr(1), overflow_key, &[addr(2), addr(3)], 9_999)
+            .expect_err("guardian_recovery must refuse exceeding MAX_IDENTITY_METHODS");
+        assert!(
+            matches!(
+                err,
+                IdentityError::TooMany {
+                    what: "verification methods",
+                    max: MAX_IDENTITY_METHODS,
+                    ..
+                }
+            ),
+            "expected TooMany verification methods refusal, got {err:?}"
+        );
+        assert_eq!(
+            registry.root(),
+            root_before,
+            "ceiling refusal must not revoke live methods or spend recovery_nonce"
+        );
+        assert_eq!(
+            registry.recovery_nonce_of(&addr(1)),
+            (MAX_IDENTITY_METHODS - 1) as u64
+        );
+        assert!(
+            registry
+                .record(&addr(1))
+                .unwrap()
+                .live_method(&[MAX_IDENTITY_METHODS as u8; 32], 9_999)
+                .is_some(),
+            "last valid rotated key must still be live after ceiling refusal"
+        );
+        registry
+            .record(&addr(1))
+            .unwrap()
+            .validate()
+            .expect("record must still pass validate() after refused overflow rotation");
+    }
+
+    #[test]
+    fn guardian_recovery_and_validate_refuse_all_zero_key_handles() {
+        let zero_record = IdentityRecord::new(
+            addr(1),
+            vec![VerificationMethod::new([0u8; 32], MethodKind::MlDsa87)],
+            vec![],
+            0,
+        );
+        let zero_reg_err =
+            zero_record.expect_err("registering an all-zero verification key handle must fail");
+        assert!(
+            matches!(zero_reg_err, IdentityError::BadApproval(_)),
+            "expected BadApproval on all-zero initial method key_id, got {zero_reg_err:?}"
+        );
+
+        let mut registry = IdentityRegistry::default();
+        let record = IdentityRecord::new(
+            addr(1),
+            vec![VerificationMethod::new([1u8; 32], MethodKind::MlDsa87)],
+            vec![addr(2), addr(3)],
+            2,
+        )
+        .unwrap();
+        registry
+            .apply(&ConsensusKind::PoA, IdentityOp::Register { record }, 10)
+            .unwrap();
+        let root_before = registry.root();
+
+        let err = registry
+            .guardian_recovery(addr(1), [0u8; 32], &[addr(2), addr(3)], 20)
+            .expect_err("rotating a DID to an all-zero key handle must be refused");
+        assert!(
+            matches!(err, IdentityError::BadApproval(_)),
+            "expected BadApproval on all-zero replacement key_id, got {err:?}"
+        );
+        assert_eq!(
+            registry.root(),
+            root_before,
+            "refused all-zero recovery must not mutate registry state"
+        );
+        assert_eq!(registry.recovery_nonce_of(&addr(1)), 0);
+        assert!(
+            registry
+                .record(&addr(1))
+                .unwrap()
+                .live_method(&[1u8; 32], 20)
+                .is_some(),
+            "original key must remain live after refused all-zero recovery"
         );
     }
 }
