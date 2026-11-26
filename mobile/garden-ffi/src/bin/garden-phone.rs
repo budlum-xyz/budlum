@@ -16,6 +16,7 @@
 //!   garden-phone status <dir>
 //!   garden-phone send <dir> <text> [caption]
 //!   garden-phone send-file <dir> <file> [mime]
+//!   garden-phone file-check <dir> <file> [mime] [address]
 //!   garden-phone feed <dir> [limit]
 //!   garden-phone fetch <dir> <content id>
 //!   garden-phone leave <dir>
@@ -34,7 +35,7 @@ fn main() -> ExitCode {
     if command.is_empty() || dir.is_empty() {
         eprintln!(
             "usage: garden-phone \
-<self-test|read|create|join|serve|return-check|status|send|send-file|feed|fetch|leave> \
+<self-test|read|create|join|serve|return-check|status|send|send-file|file-check|feed|fetch|leave> \
 <dir> [...]"
         );
         return ExitCode::from(2);
@@ -226,6 +227,34 @@ fn main() -> ExitCode {
                 .send_file(hex_of(&bytes), mime, name)
                 .map_err(|e| e.to_string()))
         }
+        // One process, the whole file path: found a Garden, send a real
+        // file into it, read it back off the chain and compare the bytes
+        // to what went in. The app does the same three things; this is
+        // where they can be run without an emulator.
+        "file-check" => {
+            let file = match args.get(3) {
+                Some(path) => path.clone(),
+                None => {
+                    eprintln!("usage: garden-phone file-check <dir> <file> [mime] [address]");
+                    return ExitCode::from(2);
+                }
+            };
+            let mime = args
+                .get(4)
+                .cloned()
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let address = args.get(5).cloned();
+            match file_round_trip(&phone, &file, mime, address) {
+                Ok(()) => {
+                    println!("the file went onto the chain and came back the same");
+                    ExitCode::SUCCESS
+                }
+                Err(reason) => {
+                    eprintln!("the file path is broken: {reason}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         "feed" => {
             let limit = args
                 .get(3)
@@ -393,6 +422,71 @@ fn json_string(text: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// Found a Garden, publish a file into it, and read it back verified.
+///
+/// Byte for byte, because a content id that matches a payload nobody
+/// checked proves nothing. The Garden is founded in this same process
+/// because a one-member chain lives in the process that runs it.
+fn file_round_trip(
+    phone: &Arc<GardenPhone>,
+    file: &str,
+    mime: String,
+    address: Option<String>,
+) -> Result<(), String> {
+    let bytes = std::fs::read(file).map_err(|e| e.to_string())?;
+    let name = std::path::Path::new(file)
+        .file_name()
+        .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().into_owned());
+    println!("file:     {name}, {} bytes, {mime}", bytes.len());
+
+    let made = phone
+        .create("File check".to_string(), "Phone".to_string(), address)
+        .map_err(|e| e.to_string())?;
+    println!("founded:  {}", one_line(&made.json, "chain_id"));
+
+    let sent = phone
+        .send_file(hex_of(&bytes), mime.clone(), name.clone())
+        .map_err(|e| e.to_string())?;
+    println!("sent:     {}", sent.json);
+    let content_id = field(&sent.json, "content_id")
+        .ok_or("the publish answer carried no content id")?;
+
+    let feed = phone.feed(10).map_err(|e| e.to_string())?;
+    println!("feed:     {}", feed.json);
+    if !feed.json.contains(&content_id) {
+        return Err("the file is not in the feed the group reads".into());
+    }
+    if !feed.json.contains(&mime) {
+        return Err("the feed does not carry the file's type".into());
+    }
+    if !feed.json.contains(&name) {
+        return Err("the feed does not carry the file's name".into());
+    }
+
+    let got = phone.fetch(content_id).map_err(|e| e.to_string())?;
+    let size = field(&got.json, "size").ok_or("the fetch answer carried no size")?;
+    println!("fetched:  {}", one_line(&got.json, "size"));
+    if size != bytes.len().to_string() {
+        return Err(format!(
+            "what came back is {size} bytes and what went in is {}",
+            bytes.len()
+        ));
+    }
+    Ok(())
+}
+
+/// The value of one JSON field, read without a parser the binary lacks.
+fn field(json: &str, key: &str) -> Option<String> {
+    let at = json.find(&format!("\"{key}\":"))? + key.len() + 3;
+    let rest = json.get(at..)?.trim_start();
+    if let Some(text) = rest.strip_prefix('"') {
+        text.find('"').and_then(|end| text.get(..end)).map(str::to_string)
+    } else {
+        let end = rest.find([',', '}']).unwrap_or(rest.len());
+        rest.get(..end).map(|n| n.trim().to_string())
+    }
 }
 
 /// Hex, the one binary encoding the core's publish takes.
