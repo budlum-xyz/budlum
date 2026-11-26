@@ -12,7 +12,9 @@ use std::path::Path;
 
 /// Check that every `name` appears as a full `test <name> ... ok` line in
 /// the log, where `name` is the full test path (e.g.
-/// `tests::bns::tests::test_bns_registration_and_resolution`).
+/// `tests::bns::tests::test_bns_registration_and_resolution`). Every observed
+/// outcome for a required name must be `ok`; an earlier success cannot hide
+/// a failed or ignored run of the same test.
 pub fn check_exact_log(log: &Path, tests: &[&str], subject: &str) -> Result<String, String> {
     if tests.is_empty() {
         return Err(format!(
@@ -28,8 +30,17 @@ pub fn check_exact_log(log: &Path, tests: &[&str], subject: &str) -> Result<Stri
     let content = fs::read_to_string(log).map_err(|e| e.to_string())?;
     let mut missing: Vec<String> = Vec::new();
     for name in tests {
-        let needle = format!("test {name} ... ok");
-        if !content.lines().any(|l| l.trim_end() == needle) {
+        let prefix = format!("test {name} ... ");
+        let mut seen = false;
+        let mut all_ok = true;
+        for outcome in content
+            .lines()
+            .filter_map(|line| line.trim_end().strip_prefix(&prefix))
+        {
+            seen = true;
+            all_ok &= outcome == "ok";
+        }
+        if !seen || !all_ok {
             missing.push(name.to_string());
         }
     }
@@ -78,6 +89,14 @@ pub fn self_test_exact(tests: &[&str], subject: &str) -> Result<String, String> 
     fs::write(&failed, &failed_text).map_err(|e| e.to_string())?;
     let failed_fails = check_exact_log(&failed, tests, subject).is_err();
 
+    let conflicting = dir.join("conflicting.txt");
+    let mut conflicting_text = full_text.clone();
+    if let Some(first) = tests.first() {
+        writeln!(conflicting_text, "test {first} ... FAILED").map_err(|e| e.to_string())?;
+    }
+    fs::write(&conflicting, &conflicting_text).map_err(|e| e.to_string())?;
+    let conflicting_fails = check_exact_log(&conflicting, tests, subject).is_err();
+
     let _ = fs::remove_dir_all(&dir);
 
     if !full_ok {
@@ -89,7 +108,72 @@ pub fn self_test_exact(tests: &[&str], subject: &str) -> Result<String, String> 
     if !failed_fails {
         return Err(format!("canary: a FAILED line passed ({subject})"));
     }
+    if !conflicting_fails {
+        return Err(format!("canary: conflicting outcomes passed ({subject})"));
+    }
     Ok(format!(
-        "canary OK: complete -> PASS, missing/FAILED -> FAIL ({subject})."
+        "canary OK: complete -> PASS, missing/FAILED/conflicting -> FAIL ({subject})."
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check_output(content: &str) -> Result<String, String> {
+        let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-exact-outcomes")
+            .expect("create isolated log fixture");
+        let log = dir.join("tests.log");
+        fs::write(&log, content).expect("write log fixture");
+        let result = check_exact_log(&log, &["proof::is_bound"], "proof");
+        fs::remove_dir_all(&dir).expect("remove log fixture");
+        result
+    }
+
+    #[test]
+    fn accepts_an_exact_success() {
+        assert!(check_output("test proof::is_bound ... ok\n").is_ok());
+    }
+
+    #[test]
+    fn refuses_a_missing_required_test() {
+        assert!(check_output("running 0 tests\n").is_err());
+    }
+
+    #[test]
+    fn refuses_a_similarly_named_test() {
+        assert!(check_output("test proof::is_bound_extra ... ok\n").is_err());
+    }
+
+    #[test]
+    fn refuses_a_failed_required_test() {
+        assert!(check_output("test proof::is_bound ... FAILED\n").is_err());
+    }
+
+    #[test]
+    fn accepts_repeated_consistent_successes() {
+        assert!(check_output("test proof::is_bound ... ok\ntest proof::is_bound ... ok\n").is_ok());
+    }
+
+    #[test]
+    fn refuses_success_followed_by_failure() {
+        assert!(
+            check_output("test proof::is_bound ... ok\ntest proof::is_bound ... FAILED\n").is_err()
+        );
+    }
+
+    #[test]
+    fn refuses_failure_followed_by_success() {
+        assert!(
+            check_output("test proof::is_bound ... FAILED\ntest proof::is_bound ... ok\n").is_err()
+        );
+    }
+
+    #[test]
+    fn refuses_success_followed_by_ignored() {
+        assert!(
+            check_output("test proof::is_bound ... ok\ntest proof::is_bound ... ignored\n")
+                .is_err()
+        );
+    }
 }
