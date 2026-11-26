@@ -46,8 +46,7 @@ use super::restaking_avs::RestakingAvsAdapter;
 use super::simplex_bft::SimplexBftAdapter;
 use super::solana_tower_bft::SolanaTowerBftAdapter;
 use super::spec::{
-    AdapterDescriptor, AdapterError, FinalityAttestation, RawConsensusEvidence,
-    VerificationPolicy,
+    AdapterDescriptor, AdapterError, FinalityAttestation, RawConsensusEvidence, VerificationPolicy,
 };
 use super::stark_validity_rollup::StarkValidityRollupAdapter;
 use super::stellar_fba::StellarScpAdapter;

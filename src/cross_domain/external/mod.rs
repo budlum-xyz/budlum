@@ -318,13 +318,13 @@ pub use stark_validity_rollup::{
 };
 pub use stellar_fba::{PinnedScpTier, ScpQuorumSet, ScpValidatorNode, StellarScpAdapter};
 pub use symbiotic_vault::{SymbioticVaultAdapter, SymbioticVaultEvidence};
-pub use unified::{NetworkCatalog, NetworkFamily};
 pub use tendermint::{
     quorum_threshold, validator_address_of, validator_set_commitment, validator_set_hash,
     vote_sign_bytes, PinnedTendermintAnchor, TendermintCommitEvidence, TendermintFinalityAdapter,
     TendermintSignature, TendermintValidator,
 };
 pub use ton_catchain::{PinnedTonMasterchainAnchor, TonCatchainAdapter, TonValidator};
+pub use unified::{NetworkCatalog, NetworkFamily};
 pub use versioning::{ForkError, VersionPolicy, VersionWindow};
 pub use zkvm_proof::{
     ZkFinalityEvidence, ZkVmFinalityAdapter, EVIDENCE_VERSION as ZK_EVIDENCE_VERSION,

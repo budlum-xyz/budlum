@@ -980,7 +980,11 @@ mod tests {
         assert_eq!(left["can_return"], json!(true));
         let guest_after = files_under(guest_dir.path());
         assert!(guest_after.contains(&guest_dir.path().join(SEAT_FILE)));
-        assert_eq!(guest_after.len(), 1, "content left on the guest: {guest_after:?}");
+        assert_eq!(
+            guest_after.len(),
+            1,
+            "content left on the guest: {guest_after:?}"
+        );
         assert_eq!(
             text(&guest.status().await.unwrap(), "/garden/status"),
             "Away"
