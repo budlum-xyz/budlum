@@ -626,6 +626,41 @@ impl FinalityGuarantee {
                     fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
+            AdapterSpec::OuroborosMithril {
+                epoch,
+                stake,
+                chain_id,
+                ..
+            } => {
+                // Cardano finality is a stake-threshold certificate over one
+                // epoch's registered signers: a quorum, and one that a
+                // certificate can clear without any block depth. The pin earns
+                // the guarantee only when it names that same epoch and holds
+                // real signers; a table for a different epoch would be a
+                // quorum the certificate never had to satisfy.
+                let valid = *chain_id != 0
+                    && stake.as_ref().is_some_and(|s| {
+                        s.epoch == *epoch
+                            && !s.signers.is_empty()
+                            && s.total().is_ok_and(|total| total > 0)
+                    });
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    // Mithril signatures are Ed25519 over the certificate
+                    // message; nothing in the pinned distribution commits a
+                    // post-quantum key, so the honest posture is classical.
+                    quantum_posture: QuantumClass::Classical,
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        event_root: valid,
+                        parent: valid,
+                    },
+                    // A foreign validator set: Budlum holds no bond over it.
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
             AdapterSpec::NearDoomslug { epoch, .. } => {
                 // Doomslug finality is a stake quorum over one epoch's block
                 // producers: deterministic quorum class, not a depth. A pin

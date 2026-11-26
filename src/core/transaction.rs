@@ -5692,7 +5692,36 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
-        // Tag 19: NEAR Doomslug epoch adapter, appended last.
+        // Tag 20: Ouroboros Praos / Mithril epoch adapter, appended last.
+        //
+        // The chain id, the epoch number and the whole registered stake table
+        // reach the preimage: a relay that could redirect a registration at an
+        // epoch whose signers it prefers would be choosing the quorum its own
+        // Mithril certificate has to clear.
+        AdapterSpec::OuroborosMithril {
+            network,
+            chain_id,
+            epoch,
+            stake,
+        } => {
+            put_u8(out, 20);
+            put_string(out, network);
+            put_u64(out, *chain_id);
+            put_u64(out, *epoch);
+            match stake {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.signers.len() as u64);
+                    for signer in &pin.signers {
+                        put_fixed(out, &signer.public_key);
+                        put_u128(out, signer.stake);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 19: NEAR Doomslug epoch adapter.
         //
         // The epoch identity, the successor commitment and the whole
         // block-producer table reach the preimage: a relay that could swap one

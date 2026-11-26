@@ -2,11 +2,14 @@
 //! finality is a stake lottery plus a threshold certificate, and whose
 //! certificate is what a light client can actually check.
 //!
-//! WIRING: unwired - this adapter is admitted by `super::selftest::admit` and
-//!   reached through `super::registry::ExternalDomainRegistry` once a
-//!   registration names `ouroboros_mithril::praos_adapter_id`; the dispatch
-//!   table that maps an incoming envelope to an adapter is `super::intake`'s,
-//!   and the entry there lands with the registry's Cardano domain record.
+//! WIRING: wired - `AdapterSpec::OuroborosMithril { network, chain_id, epoch }`
+//!   (wire tag 20) builds this adapter from an intake registration. Cardano
+//!   finality is a statement about one epoch's registered stake, so the
+//!   registration names the epoch explicitly and `IntakeState` refuses one that
+//!   it has not itself pinned (`IntakeState::install_ouroboros_epochs`,
+//!   reachable in production through `GovernanceAction::PinExternalAnchor`).
+//!   `FinalityGuarantee::for_external_spec_declared` maps the pinned stake
+//!   distribution to economic finality.
 //!
 //! # The two layers, and why both are here
 //!
@@ -1032,13 +1035,13 @@ fn rule(reason: impl Into<String>) -> AdapterError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::cross_domain::external::selftest::{admit, ProbeOutcome};
 
-    const CHAIN_ID: u64 = 7_645_382;
+    pub(crate) const CHAIN_ID: u64 = 7_645_382;
     const NETWORK: &str = "cardano-mainnet";
-    const EPOCH: u64 = 512;
+    pub(crate) const EPOCH: u64 = 512;
     const HEIGHT: u64 = 11_204_889;
     const STATE_ROOT: [u8; 32] = [0x51; 32];
 
@@ -1052,7 +1055,7 @@ mod tests {
 
     /// Six signers holding equal stake: no single one is anywhere near the
     /// two-thirds threshold, which is the shape a whale attack needs.
-    fn stake_distribution(epoch: u64) -> EpochStake {
+    pub(crate) fn stake_distribution(epoch: u64) -> EpochStake {
         EpochStake {
             epoch,
             signers: (1u8..=6)
@@ -1073,7 +1076,7 @@ mod tests {
 
     /// A certificate signed by four of six equal signers: two thirds of the
     /// stake, 4e18 of 6e18.
-    fn golden_evidence() -> RawConsensusEvidence {
+    pub(crate) fn golden_evidence() -> RawConsensusEvidence {
         let message = mithril_certificate_message(EPOCH, HEIGHT, &STATE_ROOT);
         let signatures = (1u8..=4)
             .map(|seed| sign_certificate(seed, &message))

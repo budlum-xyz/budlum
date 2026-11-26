@@ -316,6 +316,21 @@ pub enum AdapterSpec {
         #[serde(default)]
         epoch: Option<crate::cross_domain::external::near_doomslug::PinnedNearEpoch>,
     },
+    /// Cardano `Ouroboros Praos` slot proof with `Mithril` stake-threshold
+    /// certificates.
+    ///
+    /// The pin is one epoch's registered stake distribution, named by
+    /// `epoch` so the registration says which distribution it certifies
+    /// under: a Mithril certificate is a statement about a specific epoch's
+    /// signers, and an adapter that could pick its own epoch would be
+    /// choosing the quorum its certificate must clear.
+    OuroborosMithril {
+        network: String,
+        chain_id: u64,
+        epoch: u64,
+        #[serde(default)]
+        stake: Option<crate::cross_domain::external::ouroboros_mithril::EpochStake>,
+    },
 }
 
 impl AdapterSpec {
@@ -338,7 +353,8 @@ impl AdapterSpec {
             | Self::NipopowSuperblock { network, .. }
             | Self::Ghostdag { network, .. }
             | Self::HoneyBadgerBft { network, .. }
-            | Self::NearDoomslug { network, .. } => network,
+            | Self::NearDoomslug { network, .. }
+            | Self::OuroborosMithril { network, .. } => network,
         }
     }
 
@@ -470,6 +486,25 @@ impl AdapterSpec {
                 },
                 golden,
                 crate::cross_domain::external::near_doomslug::NearDoomslugAdapter::with_golden,
+            ),
+            Self::OuroborosMithril {
+                network,
+                chain_id,
+                epoch,
+                stake,
+            } => box_with_golden(
+                || {
+                    let mut adapter =
+                        crate::cross_domain::external::ouroboros_mithril::OuroborosMithrilAdapter::new(
+                            network, *chain_id,
+                        );
+                    if let Some(stake) = stake {
+                        adapter = adapter.with_epoch_stake(stake.clone());
+                    }
+                    adapter
+                },
+                golden,
+                crate::cross_domain::external::ouroboros_mithril::OuroborosMithrilAdapter::with_golden,
             ),
         }
     }
@@ -647,6 +682,20 @@ pub struct IntakeState {
         String,
         crate::cross_domain::external::near_doomslug::PinnedNearEpoch,
     >,
+    /// Governance-pinned `Ouroboros Praos` (Cardano) epoch stake
+    /// distributions, keyed by external network and then by epoch number.
+    ///
+    /// Nested rather than flat because an epoch is a *number*, not a name: a
+    /// late-arriving certificate from an earlier epoch must be checked against
+    /// that epoch's signers, not the newest ones.
+    #[serde(default)]
+    pub pinned_ouroboros_epochs: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<
+            u64,
+            crate::cross_domain::external::ouroboros_mithril::EpochStake,
+        >,
+    >,
     /// Governance-pinned `HoneyBadgerBFT` epoch committees keyed by external
     /// network.
     ///
@@ -691,6 +740,8 @@ pub enum AnchorFamily {
     HoneyBadger,
     /// Epoch validator table and successor epoch commitment (`NEAR`).
     NearEpoch,
+    /// One epoch's registered stake distribution (`Cardano`).
+    OuroborosEpoch,
 }
 
 impl AnchorFamily {
@@ -707,6 +758,7 @@ impl AnchorFamily {
             Self::Ghostdag => "ghostdag",
             Self::HoneyBadger => "honeybadger",
             Self::NearEpoch => "near-epoch",
+            Self::OuroborosEpoch => "ouroboros-epoch",
         }
     }
 }
@@ -738,6 +790,8 @@ pub enum PinnedExternalAnchor {
     HoneyBadger(crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee),
     /// Epoch validator table for a `Doomslug` (NEAR) domain.
     NearEpoch(crate::cross_domain::external::near_doomslug::PinnedNearEpoch),
+    /// Registered stake distribution for an `Ouroboros Praos` (Cardano) epoch.
+    OuroborosEpoch(crate::cross_domain::external::ouroboros_mithril::EpochStake),
 }
 
 impl PinnedExternalAnchor {
@@ -754,6 +808,7 @@ impl PinnedExternalAnchor {
             Self::Ghostdag(_) => AnchorFamily::Ghostdag,
             Self::HoneyBadger(_) => AnchorFamily::HoneyBadger,
             Self::NearEpoch(_) => AnchorFamily::NearEpoch,
+            Self::OuroborosEpoch(_) => AnchorFamily::OuroborosEpoch,
         }
     }
 
@@ -859,6 +914,20 @@ impl PinnedExternalAnchor {
                 // the wrong length, zero weight). A pin that does not validate
                 // cannot certify a single epoch.
                 committee.validate().map_err(|e| e.to_string())?;
+            }
+            Self::OuroborosEpoch(stake) => {
+                // A Cardano pin is one epoch's registered signers. An empty
+                // epoch has no stake at all, and a total of zero could never
+                // clear a threshold, so neither can certify anything.
+                stake
+                    .total()
+                    .map_err(|e| format!("the pinned Cardano epoch is not a stake table: {e}"))?;
+                if stake.signers.is_empty() {
+                    return Err("the pinned Cardano epoch has no signers".into());
+                }
+                if stake.total().is_ok_and(|total| total == 0) {
+                    return Err("the pinned Cardano epoch has no stake".into());
+                }
             }
             Self::NearEpoch(epoch) => {
                 // A NEAR pin is an epoch identity plus the block-producer table
@@ -1668,6 +1737,37 @@ impl IntakeState {
             .insert(network.into(), committee);
     }
 
+    /// Installs or updates the consensus-pinned `Ouroboros Praos` (Cardano)
+    /// stake distribution for `epoch` on `network`.
+    /// WIRING: genesis/test initializer; the production door is
+    /// `GovernanceAction::PinExternalAnchor` -> [`Self::install_pinned_anchor`].
+    pub fn pin_ouroboros_epoch(
+        &mut self,
+        network: impl Into<String>,
+        stake: crate::cross_domain::external::ouroboros_mithril::EpochStake,
+    ) {
+        self.pinned_ouroboros_epochs
+            .entry(network.into())
+            .or_default()
+            .insert(stake.epoch, stake);
+    }
+
+    /// Installs the Cardano stake distribution for `stake.epoch` only if it
+    /// names real signers.
+    ///
+    /// # Errors
+    ///
+    /// The named defect.
+    pub fn install_ouroboros_epoch(
+        &mut self,
+        network: impl Into<String>,
+        stake: crate::cross_domain::external::ouroboros_mithril::EpochStake,
+    ) -> Result<(), String> {
+        PinnedExternalAnchor::OuroborosEpoch(stake.clone()).validate()?;
+        self.pin_ouroboros_epoch(network, stake);
+        Ok(())
+    }
+
     /// Installs or updates the consensus-pinned `Doomslug` (NEAR) epoch for
     /// `network`. WIRING: genesis/test initializer; the production door is
     /// `GovernanceAction::PinExternalAnchor` -> [`Self::install_pinned_anchor`].
@@ -1677,6 +1777,17 @@ impl IntakeState {
         epoch: crate::cross_domain::external::near_doomslug::PinnedNearEpoch,
     ) {
         self.pinned_near_epochs.insert(network.into(), epoch);
+    }
+
+    /// The pinned Cardano stake distribution for `network`'s `epoch`, if that
+    /// epoch was pinned.
+    #[must_use]
+    pub fn pinned_ouroboros_epoch(
+        &self,
+        network: &str,
+        epoch: u64,
+    ) -> Option<&crate::cross_domain::external::ouroboros_mithril::EpochStake> {
+        self.pinned_ouroboros_epochs.get(network)?.get(&epoch)
     }
 
     /// Installs the NEAR epoch for `network` only if it is a real trust root.
@@ -1757,6 +1868,9 @@ impl IntakeState {
             PinnedExternalAnchor::NearEpoch(epoch) => {
                 self.pinned_near_epochs.insert(network.to_string(), epoch);
             }
+            PinnedExternalAnchor::OuroborosEpoch(stake) => {
+                self.pin_ouroboros_epoch(network.to_string(), stake);
+            }
         }
     }
 
@@ -1818,6 +1932,17 @@ impl IntakeState {
                 .get(network)
                 .cloned()
                 .map(PinnedExternalAnchor::NearEpoch),
+            // An `AnchorFamily` is keyed by network, and a Cardano domain is
+            // pinned by epoch: the anchor a lookup can name is the newest
+            // pinned epoch, which is the one a *new* certificate answers to.
+            // Verification of an older certificate goes through
+            // `pinned_ouroboros_epoch(network, epoch)`, which is exact.
+            AnchorFamily::OuroborosEpoch => self
+                .pinned_ouroboros_epochs
+                .get(network)
+                .and_then(|epochs| epochs.values().next_back())
+                .cloned()
+                .map(PinnedExternalAnchor::OuroborosEpoch),
         }
     }
 
@@ -2050,6 +2175,20 @@ impl IntakeState {
         // against one epoch's block producers; a registrant that could name its
         // own table would be certifying its own quorum, and the epoch-rotation
         // door is where a successor set is allowed to arrive.
+        if let AdapterSpec::OuroborosMithril {
+            network,
+            epoch,
+            stake,
+            ..
+        } = &spec
+        {
+            let Some(installed) = self.pinned_ouroboros_epoch(network, *epoch) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if stake.as_ref() != Some(installed) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
         if let AdapterSpec::NearDoomslug { network, epoch } = &spec {
             let Some(installed) = self.pinned_near_epochs.get(network) else {
                 return Err(IntakeError::CommitteeNotPinned);
@@ -6510,5 +6649,92 @@ mod tests {
         assert_eq!(governed.state_digest(), genesis.state_digest());
         assert!(governed.pinned_honeybadger_committees.is_empty());
         assert!(governed.pinned_ghostdag_anchors.is_empty());
+    }
+
+    #[test]
+    fn a_cardano_registration_must_name_an_epoch_the_state_pinned() {
+        use crate::cross_domain::external::ouroboros_mithril::tests::{
+            golden_evidence, stake_distribution, CHAIN_ID, EPOCH,
+        };
+
+        let stake = stake_distribution(EPOCH);
+        let net = "cardano-mainnet";
+        let spec = |epoch: u64, stake: Option<_>| AdapterSpec::OuroborosMithril {
+            network: net.to_string(),
+            chain_id: CHAIN_ID,
+            epoch,
+            stake,
+        };
+        let golden = golden_evidence();
+        let mut intake = IntakeState::default();
+
+        // No epoch pinned: closed.
+        assert_eq!(
+            admit_near(
+                &mut intake,
+                spec(EPOCH, Some(stake.clone())),
+                golden.clone()
+            ),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+
+        // An epoch with no signers is not a stake table, and one with zero
+        // total could never clear a threshold; both are refused by name.
+        let empty = crate::cross_domain::external::ouroboros_mithril::EpochStake {
+            epoch: EPOCH,
+            signers: Vec::new(),
+        };
+        assert!(intake
+            .install_ouroboros_epoch(net, empty)
+            .is_err_and(|e| e.contains("no signers")));
+        let mut broke = stake.clone();
+        for signer in &mut broke.signers {
+            signer.stake = 0;
+        }
+        assert!(intake
+            .install_ouroboros_epoch(net, broke)
+            .is_err_and(|e| e.contains("no stake")));
+        assert!(intake.pinned_ouroboros_epochs.is_empty());
+
+        // A table for epoch 512 does not certify epoch 513.
+        intake
+            .install_ouroboros_epoch(net, stake.clone())
+            .expect("the fixture stake table is a valid pin");
+        assert_eq!(
+            admit_near(
+                &mut intake,
+                spec(EPOCH + 1, Some(stake.clone())),
+                golden.clone()
+            ),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+        // Nor does a registration that echoes a different table for the pinned
+        // epoch: the signers are the quorum, and the certificate is checked
+        // against the pinned ones.
+        let mut inflated = stake.clone();
+        inflated.signers[0].stake *= 2;
+        assert_eq!(
+            admit_near(&mut intake, spec(EPOCH, Some(inflated)), golden.clone()),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+
+        // The genuine pair admits.
+        admit_near(&mut intake, spec(EPOCH, Some(stake.clone())), golden)
+            .expect("the pinned epoch admits");
+
+        // The governance door and the genesis door write the same map, so a
+        // vote and a genesis pin that agree cannot fork state.
+        let mut governed = IntakeState::default();
+        governed.install_pinned_anchor(net, PinnedExternalAnchor::OuroborosEpoch(stake.clone()));
+        let mut genesis = IntakeState::default();
+        genesis.pin_ouroboros_epoch(net, stake.clone());
+        assert_eq!(governed.state_digest(), genesis.state_digest());
+        assert_eq!(
+            governed.pinned_ouroboros_epoch(net, EPOCH),
+            Some(&stake),
+            "the epoch-keyed lookup is exact"
+        );
+        assert!(governed.pinned_ouroboros_epoch(net, EPOCH + 1).is_none());
+        assert!(governed.pinned_near_epochs.is_empty());
     }
 }
