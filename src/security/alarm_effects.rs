@@ -96,13 +96,20 @@ pub struct AlarmEffectReport {
 /// is `Active` or `Deprecated` takes the ladder to `Disabled` (one rung at a
 /// time, source `CanaryAlarm`); a `Reserved` scheme is left alone, because
 /// moving it would activate it. At Isolate the classical native domains freeze
-/// and the classical external domains isolate.
+/// and the classical external domains isolate, and the BLS family rides the
+/// same ladder to `Disabled`: the module's contract is that at Isolate the
+/// curve behind `BLS12381_MINSIG` has fallen, so every door that asks the
+/// registry -- not only the one that special-cases the alarm -- must stop
+/// trusting it.
 pub fn apply_to_state(state: &mut AccountState) -> AlarmEffectReport {
     let mut report = AlarmEffectReport::default();
-    let (schemes, isolate) = {
+    let (mut schemes, isolate) = {
         let alarm = state.settlement.quantum.alarm();
         (dropped_schemes(alarm), alarm.level() >= AlarmLevel::Isolate)
     };
+    if isolate && !schemes.contains(&SchemeId::BLS12381_MINSIG) {
+        schemes.push(SchemeId::BLS12381_MINSIG);
+    }
     for scheme in schemes {
         let mut moved = false;
         while let Some(status) = state.scheme_registry.scheme_status(scheme) {
@@ -291,5 +298,65 @@ mod tests {
         assert!(state
             .scheme_registry
             .scheme_verifies(SchemeId::SLH_DSA_SHAKE_256S));
+    }
+
+    /// Isolate must reach the scheme registry, not only the one door that
+    /// special-cases it: the module's own contract says the BLS half leaves
+    /// finality at Isolate because its curve fell, yet `apply_to_state`
+    /// never moved `BLS12381_MINSIG`, so every other `scheme_verifies`
+    /// door kept trusting a fallen curve.
+    #[test]
+    fn isolate_takes_the_bls_family_down_the_ladder() {
+        let mut state = state_with_alarm(&[CanaryId::EccK1]);
+        assert!(state
+            .scheme_registry
+            .scheme_verifies(SchemeId::BLS12381_MINSIG));
+
+        let report = apply_to_state(&mut state);
+
+        assert!(
+            report.schemes_disabled.contains(&SchemeId::BLS12381_MINSIG),
+            "Isolate must disable the BLS family in the state effect; report={:?}",
+            report.schemes_disabled
+        );
+        assert!(!state
+            .scheme_registry
+            .scheme_verifies(SchemeId::BLS12381_MINSIG));
+        assert_eq!(
+            state
+                .scheme_registry
+                .scheme_status(SchemeId::BLS12381_MINSIG),
+            Some(SchemeStatus::Disabled)
+        );
+    }
+
+    /// Idempotent like every other effect: the second pass reports nothing.
+    #[test]
+    fn isolate_bls_effect_is_idempotent() {
+        let mut state = state_with_alarm(&[CanaryId::EccK1]);
+        let first = apply_to_state(&mut state);
+        assert!(first.schemes_disabled.contains(&SchemeId::BLS12381_MINSIG));
+        let second = apply_to_state(&mut state);
+        assert!(second.schemes_disabled.is_empty(), "{second:?}");
+    }
+
+    /// Boundary: below Isolate the registry is untouched -- Watch and
+    /// Restrict act at the doors (intake, TEE), not on scheme status.
+    #[test]
+    fn below_isolate_leaves_the_bls_family_alone() {
+        for ids in [&[CanaryId::Ecc192][..], &[CanaryId::Ecc224][..]] {
+            let mut state = state_with_alarm(ids);
+            let report = apply_to_state(&mut state);
+            assert!(!report.schemes_disabled.contains(&SchemeId::BLS12381_MINSIG));
+            assert!(state
+                .scheme_registry
+                .scheme_verifies(SchemeId::BLS12381_MINSIG));
+            assert_eq!(
+                state
+                    .scheme_registry
+                    .scheme_status(SchemeId::BLS12381_MINSIG),
+                Some(SchemeStatus::Active)
+            );
+        }
     }
 }
