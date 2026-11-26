@@ -169,7 +169,7 @@ impl NetworkCatalog {
     /// exists to prevent.
     pub fn offer(&mut self, adapter: Box<dyn ExternalFinalityAdapter>) {
         let descriptor = adapter.descriptor();
-        let id = descriptor.id.as_str().to_string();
+        let id = hex::encode(descriptor.id.as_bytes());
         if self.adapters.contains_key(&id) {
             self.refused.insert(
                 id.clone(),
@@ -241,13 +241,17 @@ impl NetworkCatalog {
             .collect()
     }
 
-    /// The descriptor of one registered adapter, by id.
+    /// The descriptor of one registered adapter, by the hex of its
+    /// [`AdapterId::as_bytes`].
     #[must_use]
     pub fn profile_of(&self, id: &str) -> Option<AdapterDescriptor> {
         self.adapters.get(id).map(|adapter| adapter.descriptor())
     }
 
     /// Verify evidence against the adapter that claims it.
+    ///
+    /// `adapter_id` is the hex of the adapter's [`AdapterId::as_bytes`],
+    /// which is the key every entry of [`Self::descriptors`] is filed under.
     ///
     /// # Errors
     ///
@@ -263,6 +267,8 @@ impl NetworkCatalog {
             .adapters
             .get(adapter_id)
             .ok_or_else(|| AdapterError::UnknownAdapter(adapter_id.to_string()))?;
+        // The caller names one adapter and the evidence names another: that
+        // is a mis-route, and the adapter itself refuses it by name.
         adapter.verify(evidence, policy)
     }
 
@@ -285,10 +291,10 @@ impl NetworkCatalog {
         }
         for (id, adapter) in &self.adapters {
             let descriptor = adapter.descriptor();
-            if descriptor.id.as_str() != id {
+            let answered = hex::encode(descriptor.id.as_bytes());
+            if answered != *id {
                 problems.push(format!(
-                    "{id}: filed under an id its descriptor does not answer to ({})",
-                    descriptor.id.as_str()
+                    "{id}: filed under an id its descriptor does not answer to ({answered})"
                 ));
             }
             if descriptor.accepted_evidence_versions.is_empty() {
@@ -385,6 +391,19 @@ mod tests {
         let catalog = NetworkCatalog::with_builtin_families();
         if let Err(problems) = catalog.selftest() {
             panic!("the unified surface failed its own self-test: {problems:#?}");
+        }
+    }
+
+    #[test]
+    fn a_registered_adapter_is_found_by_the_key_the_catalog_files_it_under() {
+        let catalog = NetworkCatalog::with_builtin_families();
+        for descriptor in catalog.descriptors() {
+            let key = hex::encode(descriptor.id.as_bytes());
+            let found = catalog
+                .profile_of(&key)
+                .expect("a descriptor the catalog lists is filed under its own id");
+            assert_eq!(found.id, descriptor.id);
+            assert_eq!(found.name, descriptor.name);
         }
     }
 
