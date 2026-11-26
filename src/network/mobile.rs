@@ -63,7 +63,7 @@ pub struct BatteryStatus {
 
 impl BatteryStatus {
     #[must_use]
-    pub fn full() -> Self {
+    pub const fn full() -> Self {
         Self {
             level_pct: 100,
             charging: true,
@@ -72,7 +72,7 @@ impl BatteryStatus {
     }
 
     #[must_use]
-    pub fn critical() -> Self {
+    pub const fn critical() -> Self {
         Self {
             level_pct: 5,
             charging: false,
@@ -82,7 +82,7 @@ impl BatteryStatus {
 
     /// The working mode implied by the battery level.
     #[must_use]
-    pub fn power_mode(&self) -> PowerMode {
+    pub const fn power_mode(&self) -> PowerMode {
         if self.charging {
             PowerMode::Full
         } else if self.level_pct > 50 {
@@ -372,7 +372,7 @@ impl ChallengePolicy {
 
     /// Builds a challenge policy from the battery state.
     #[must_use]
-    pub fn from_power_mode(mode: PowerMode) -> Self {
+    pub const fn from_power_mode(mode: PowerMode) -> Self {
         match mode {
             PowerMode::Full => Self {
                 max_challenges_per_epoch: 100,
@@ -597,7 +597,7 @@ impl MobileNodeProfile {
 
     /// Can the node take on active tasks?
     #[must_use]
-    pub fn can_accept_tasks(&self) -> bool {
+    pub const fn can_accept_tasks(&self) -> bool {
         self.challenge_policy.max_challenges_per_epoch > 0
             || self.challenge_policy.max_proof_tasks > 0
     }
@@ -616,7 +616,7 @@ impl MobileNodeProfile {
         )
     }
 
-    fn device_type_suffix(&self) -> &'static str {
+    const fn device_type_suffix(&self) -> &'static str {
         match self.device_type {
             DeviceType::Phone => ":phone",
             DeviceType::Tablet => ":tablet",

@@ -29,7 +29,7 @@ use libp2p::{mdns, swarm::behaviour::toggle::Toggle};
 /// of the round - about 2.6 warnings per second per validator - and, on the
 /// prevote path, kept the vote out of `prevote_published`, so the node never
 /// recorded that it had already voted at that height.
-fn publish_reached_the_mesh(error: &gossipsub::PublishError) -> bool {
+const fn publish_reached_the_mesh(error: &gossipsub::PublishError) -> bool {
     matches!(error, gossipsub::PublishError::Duplicate)
 }
 
@@ -327,7 +327,7 @@ fn qc_chunk_response(
 /// height, not the height of the local tip checkpoint. A precommit at or below
 /// the last one signed could carry a different hash after a reorg, which is a
 /// slashable double sign, and would move the persisted mark backwards.
-fn precommit_height_is_new(signed_height: u64, last_precommit_height: u64) -> bool {
+const fn precommit_height_is_new(signed_height: u64, last_precommit_height: u64) -> bool {
     signed_height > last_precommit_height
 }
 
@@ -365,7 +365,7 @@ fn precommit_is_due(
 /// with its mark on disk, and its one re-publication is what lets the round
 /// it left complete. After that first send `published` is set and the
 /// cadence applies.
-fn same_round_retry(retry_due: bool, published: Option<&PublishedVote>) -> bool {
+const fn same_round_retry(retry_due: bool, published: Option<&PublishedVote>) -> bool {
     retry_due || published.is_none()
 }
 
@@ -660,7 +660,9 @@ fn advertised_address_is_allowed(addr: &Multiaddr, private_ok: bool) -> bool {
 /// Devnet is the one network where the peers really are on loopback; every
 /// other profile either faces the open internet or is a rehearsal of it, and
 /// there a private address in the routing table is an address nobody can dial.
-fn profile_rejects_private_advertisements(network: crate::core::chain_config::Network) -> bool {
+const fn profile_rejects_private_advertisements(
+    network: crate::core::chain_config::Network,
+) -> bool {
     !matches!(network, crate::core::chain_config::Network::Devnet)
 }
 
@@ -3825,7 +3827,7 @@ impl Node {
 
     /// Active sentry-validator shield configuration on this node.
     #[must_use]
-    pub fn sentry_shield(&self) -> &crate::network::sentry::SentryShieldConfig {
+    pub const fn sentry_shield(&self) -> &crate::network::sentry::SentryShieldConfig {
         &self.sentry_shield
     }
 

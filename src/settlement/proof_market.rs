@@ -26,7 +26,7 @@ const MAX_PROOF_MARKET_ASSIGNED_TASKS_PER_PROVER: usize = 16;
 /// ensures one spammer cannot lock other creators out before that boundary.
 const MAX_RETIRED_TASK_IDS_PER_CREATOR: usize = 256;
 
-fn is_zero_u64(v: &u64) -> bool {
+const fn is_zero_u64(v: &u64) -> bool {
     *v == 0
 }
 
@@ -529,7 +529,7 @@ impl ProofTask {
     }
 
     /// The default difficulty for a task kind.
-    fn default_difficulty(kind: &ProofTaskKind) -> u64 {
+    const fn default_difficulty(kind: &ProofTaskKind) -> u64 {
         match kind {
             ProofTaskKind::DomainCommitment { .. } => 1_000_000, // FIXED_POINT_SCALE = 1x
             ProofTaskKind::ZkProof { .. } => 10_000_000,         // 10x
@@ -623,7 +623,7 @@ impl ProofTask {
 
     /// Is the task active, meaning pending or assigned?
     #[must_use]
-    pub fn is_active(&self) -> bool {
+    pub const fn is_active(&self) -> bool {
         matches!(
             self.status,
             ProofTaskStatus::Pending | ProofTaskStatus::Assigned { .. }
@@ -679,7 +679,7 @@ impl ReceiptStatus {
 impl ProofReceipt {
     /// Creates a new proof receipt.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         task_id: [u8; 32],
         prover: Address,
         verified_epoch: u64,
@@ -771,7 +771,7 @@ impl ProofReceipt {
 
     /// Check if receipt has been paid (for pruning).
     #[must_use]
-    pub fn is_paid(&self) -> bool {
+    pub const fn is_paid(&self) -> bool {
         matches!(self.status, ReceiptStatus::Paid)
     }
 
@@ -780,7 +780,7 @@ impl ProofReceipt {
     /// The epoch-close sweep clears revoked receipts after a verifier has
     /// settled them; the receipt-submission and payment doors remain
     /// deliberately separate from funding and assignment.
-    fn is_revoked(&self) -> bool {
+    const fn is_revoked(&self) -> bool {
         matches!(self.status, ReceiptStatus::Revoked { .. })
     }
 
@@ -840,12 +840,12 @@ impl ProofMarketState {
     }
 
     #[must_use]
-    pub fn active_task_count(&self) -> usize {
+    pub const fn active_task_count(&self) -> usize {
         self.active_tasks.len()
     }
 
     #[must_use]
-    pub fn pending_receipt_count(&self) -> usize {
+    pub const fn pending_receipt_count(&self) -> usize {
         self.pending_receipts.len()
     }
 

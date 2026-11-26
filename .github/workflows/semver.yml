@@ -80,7 +80,7 @@ jobs:
           # rust-cache's `cargo metadata` call blows up at the root (Error log).
           workspaces: ./current
       - name: Install protoc
-        run: python3 .github/scripts/install_protoc.py
+        run: python3 current/.github/scripts/install_protoc.py
       - name: Install cargo-semver-checks (locked)
         run: cargo +1.97.1 install cargo-semver-checks --locked
       - name: Gate canary (vacuous-gate protection)

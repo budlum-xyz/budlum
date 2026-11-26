@@ -11,3 +11,4 @@
 6d7eefbc1d9e9c5e01410da459bdd92c701a0731:src/cli/commands.rs:generic-api-key:956
 fd7b941d273c0bc199e1aa3425c7a7ef502b573b:src/wallet/mod.rs:generic-api-key:19
 d4134230c23076f3c5eb355dbb7346de65315ace:fuzz/Cargo.lock:generic-api-key:2659
+60167037c82b825ac80c89678411f78e226df191:crates/ai-inference/crates/ai-tune/src/schema.rs:generic-api-key:377

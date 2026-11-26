@@ -133,7 +133,7 @@ pub enum DoubleSignKind {
 
 impl SlashingProof {
     /// The [`SlashingCondition`] this proof attests to.
-    pub fn condition(&self) -> SlashingCondition {
+    pub const fn condition(&self) -> SlashingCondition {
         match self {
             Self::DoubleSign { .. } => SlashingCondition::DoubleSign,
             Self::Liveness { .. } => SlashingCondition::LivenessFault,
@@ -268,7 +268,7 @@ impl SlashingReport {
     /// `SlashingReport::new_verified` or a cryptographic self-proof
     /// ([`SlashingReport::promote_self_proven`]), never from a claim
     /// (CWE-347).
-    pub fn new(
+    pub const fn new(
         offender: Address,
         role: RoleId,
         proof: SlashingProof,
@@ -288,7 +288,7 @@ impl SlashingReport {
     /// Convenience: crate-visible so the report constructors share the
     /// one construction path that requires a verified report; reports
     /// from outside arrive through the public constructors beside it.
-    pub(crate) fn new_verified(
+    pub(crate) const fn new_verified(
         offender: Address,
         role: RoleId,
         proof: SlashingProof,
@@ -305,13 +305,13 @@ impl SlashingReport {
 
     /// The report's provenance (the field is private).
     #[must_use]
-    pub fn provenance(&self) -> ProofProvenance {
+    pub const fn provenance(&self) -> ProofProvenance {
         self.provenance
     }
 
     /// Forces the report back to [`ProofProvenance::Unverified`] - the RPC
     /// layer's answer to a caller-supplied claim.
-    pub fn demote_to_unverified(&mut self) {
+    pub const fn demote_to_unverified(&mut self) {
         self.provenance = ProofProvenance::Unverified;
     }
 

@@ -61,7 +61,7 @@ impl AdapterId {
     }
 
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -83,7 +83,7 @@ impl DomainKey {
     }
 
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -212,7 +212,7 @@ impl SecurityBacking {
     /// The scheme a verified claim of this backing rests on, `None` when the
     /// backing names none (work, a bare authority set, nothing yet).
     #[must_use]
-    pub fn observed_scheme(&self) -> Option<ObservedScheme> {
+    pub const fn observed_scheme(&self) -> Option<ObservedScheme> {
         match self {
             Self::SignatureSet { scheme, .. } => Some(*scheme),
             Self::Zk { system, .. } => Some(ObservedScheme::Proof(system.assumption_class())),
@@ -291,7 +291,7 @@ pub struct FinalityAttestation {
     pub attested_tx_root: Option<Hash32>,
 }
 
-fn encode_optional_root(root: Option<&Hash32>) -> [u8; 33] {
+const fn encode_optional_root(root: Option<&Hash32>) -> [u8; 33] {
     let mut out = [0u8; 33];
     if let Some(bytes) = root {
         if let Some((tag, body)) = out.split_first_mut() {
@@ -370,7 +370,7 @@ pub enum TimeUnit {
 
 impl TimeUnit {
     #[must_use]
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Slot => "slot",
             Self::Epoch => "epoch",
@@ -467,7 +467,7 @@ impl VerificationPolicy {
     /// whose finality is a vote; a proven domain does not need the proxy, and
     /// asking one for depth makes it refuse - see [`Self::proven`].
     #[must_use]
-    pub fn strict(now: u64) -> Self {
+    pub const fn strict(now: u64) -> Self {
         Self {
             min_depth: 1,
             require_declared_match: true,
@@ -489,7 +489,7 @@ impl VerificationPolicy {
     /// `require_slashable` is false for the same reason: there is nobody to
     /// slash.
     #[must_use]
-    pub fn proven(now: u64) -> Self {
+    pub const fn proven(now: u64) -> Self {
         Self {
             min_depth: 0,
             require_declared_match: true,

@@ -90,7 +90,7 @@ pub enum SlashingCondition {
 const REGISTRY_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/permissionless-registry";
 
 impl SlashingCondition {
-    pub fn as_bytes(&self) -> &'static [u8] {
+    pub const fn as_bytes(&self) -> &'static [u8] {
         match self {
             Self::DoubleSign => b"double_sign",
             Self::LivenessFault => b"liveness_fault",
@@ -129,7 +129,7 @@ impl Registration {
     /// Eligible to actively perform the role right now. This is purely a
     /// Function of bonded stake + status (never any allow-list): the member
     /// Must be `Active` and still hold a positive bond.
-    pub fn is_active(&self) -> bool {
+    pub const fn is_active(&self) -> bool {
         matches!(self.status, MemberStatus::Active) && self.stake > 0
     }
 
@@ -150,7 +150,7 @@ impl Registration {
     /// bond is still locked and still slashable. Otherwise a relayer would
     /// submit its transaction and then immediately call `begin_unbonding` to
     /// step out of responsibility.
-    pub fn is_slashable(&self) -> bool {
+    pub const fn is_slashable(&self) -> bool {
         matches!(
             self.status,
             MemberStatus::Active
@@ -162,7 +162,7 @@ impl Registration {
     /// Whether this registration currently holds operational authority to
     /// act in its role (`Active`, or clean `Unbonding` whose bond is still
     /// locked; never `Slashed` or `SlashedUnbonding`).
-    fn has_role_authority(&self) -> bool {
+    const fn has_role_authority(&self) -> bool {
         matches!(
             self.status,
             MemberStatus::Active | MemberStatus::Unbonding { .. }
@@ -387,7 +387,7 @@ fn permissionless_member_key(role: RoleId, account: Address) -> String {
     )
 }
 
-fn permissionless_offence_window(
+const fn permissionless_offence_window(
     proof: &crate::registry::evidence::SlashingProof,
 ) -> Option<(u8, u64, u64)> {
     use crate::registry::evidence::SlashingProof;
@@ -458,7 +458,7 @@ impl PermissionlessRegistry {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_params(params: RegistryParams) -> Self {
+    pub(crate) const fn with_params(params: RegistryParams) -> Self {
         Self {
             registrations: BTreeMap::new(),
             params,
@@ -471,11 +471,11 @@ impl PermissionlessRegistry {
         }
     }
 
-    pub fn params(&self) -> &RegistryParams {
+    pub const fn params(&self) -> &RegistryParams {
         &self.params
     }
 
-    pub fn set_params(&mut self, params: RegistryParams) {
+    pub const fn set_params(&mut self, params: RegistryParams) {
         self.params = params;
     }
 
@@ -1724,11 +1724,11 @@ impl PermissionlessRegistry {
             })
     }
 
-    pub fn delegation_count(&self) -> usize {
+    pub const fn delegation_count(&self) -> usize {
         self.delegations.len()
     }
 
-    pub fn delegation_unbonding_count(&self) -> usize {
+    pub const fn delegation_unbonding_count(&self) -> usize {
         self.delegation_unbonding.len()
     }
 
@@ -1740,12 +1740,12 @@ impl PermissionlessRegistry {
             .collect()
     }
 
-    pub fn validator_commission_count(&self) -> usize {
+    pub const fn validator_commission_count(&self) -> usize {
         self.validator_commissions.len()
     }
 
     #[must_use]
-    pub fn slashing_history_count(&self) -> usize {
+    pub const fn slashing_history_count(&self) -> usize {
         self.slashing_history.len()
     }
 

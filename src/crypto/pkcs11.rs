@@ -489,7 +489,7 @@ impl Pkcs11Signer {
 
     /// Require vendor-native BLS/PQ signing and fail closed on any fallback.
     #[must_use]
-    pub fn require_vendor_native_signing(mut self) -> Self {
+    pub const fn require_vendor_native_signing(mut self) -> Self {
         self.strict_vendor_native = true;
         self
     }
@@ -819,20 +819,20 @@ impl Pkcs11VendorCapabilities {
     /// vendor mechanism. Still requires external audit before mainnet
     /// "non-extractable" claims.
     #[must_use]
-    pub fn vendor_native_signing_configured(&self) -> bool {
+    pub const fn vendor_native_signing_configured(&self) -> bool {
         self.bls_vendor_mechanism.is_some()
             && (self.pq_vendor_mechanism.is_some() || self.pq_standard_mechanism)
     }
 
     /// True when BLS can be signed (vendor path OR software fallback material).
     #[must_use]
-    pub fn bls_signing_available(&self) -> bool {
+    pub const fn bls_signing_available(&self) -> bool {
         self.bls_vendor_mechanism.is_some() || self.bls_software_fallback_present
     }
 
     /// True when PQ can be signed (vendor path OR software fallback material).
     #[must_use]
-    pub fn pq_signing_available(&self) -> bool {
+    pub const fn pq_signing_available(&self) -> bool {
         self.pq_vendor_mechanism.is_some()
             || self.pq_standard_mechanism
             || self.pq_software_fallback_present
@@ -1600,7 +1600,7 @@ pub enum HsmPqAlgorithm {
 }
 
 impl HsmPqAlgorithm {
-    fn scheme(self) -> SchemeId {
+    const fn scheme(self) -> SchemeId {
         match self {
             Self::MlDsa65 => SchemeId::ML_DSA_65,
             Self::MlDsa87 => SchemeId::ML_DSA_87,
@@ -1608,7 +1608,7 @@ impl HsmPqAlgorithm {
         }
     }
 
-    fn key_type(self) -> KeyType {
+    const fn key_type(self) -> KeyType {
         match self {
             Self::MlDsa65 | Self::MlDsa87 => KeyType::ML_DSA,
             Self::SlhDsaShake256s => KeyType::SLH_DSA,
@@ -1623,7 +1623,7 @@ impl HsmPqAlgorithm {
         }
     }
 
-    fn keygen_mechanism(self) -> Mechanism<'static> {
+    const fn keygen_mechanism(self) -> Mechanism<'static> {
         match self {
             Self::MlDsa65 | Self::MlDsa87 => Mechanism::MlDsaKeyPairGen,
             Self::SlhDsaShake256s => Mechanism::SlhDsaKeyPairGen,

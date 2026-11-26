@@ -101,27 +101,27 @@ impl ConsensusKind {
     }
 
     /// Convenience: is this a B.U.D. storage domain?
-    pub fn is_storage(&self) -> bool {
+    pub const fn is_storage(&self) -> bool {
         matches!(self, Self::StorageAttestation(_))
     }
 
     /// Convenience: is this an AI Inference domain?
-    pub fn is_ai(&self) -> bool {
+    pub const fn is_ai(&self) -> bool {
         matches!(self, Self::AiInference)
     }
 
     /// Convenience: is this a DAG domain?
-    pub fn is_dag(&self) -> bool {
+    pub const fn is_dag(&self) -> bool {
         matches!(self, Self::Dag)
     }
 
     /// Convenience: is this a `PoH` domain?
-    pub fn is_poh(&self) -> bool {
+    pub const fn is_poh(&self) -> bool {
         matches!(self, Self::Poh)
     }
 
     /// Convenience: is this a `PoSpace` domain?
-    pub fn is_pospace(&self) -> bool {
+    pub const fn is_pospace(&self) -> bool {
         matches!(self, Self::Pospace)
     }
 }
@@ -160,7 +160,7 @@ fn default_domain_operator() -> Option<Address> {
     Some(Address::zero())
 }
 
-fn default_domain_operator_bond() -> u64 {
+const fn default_domain_operator_bond() -> u64 {
     crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND
 }
 
@@ -303,7 +303,7 @@ impl ConsensusDomain {
         self.status == DomainStatus::Active
     }
 
-    pub fn has_operator_bond(&self, minimum_bond: u64) -> bool {
+    pub const fn has_operator_bond(&self, minimum_bond: u64) -> bool {
         self.operator.is_some() && self.operator_bond >= minimum_bond
     }
 }

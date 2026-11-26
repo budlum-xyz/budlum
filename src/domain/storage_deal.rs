@@ -260,7 +260,7 @@ impl StorageEconomicsParams {
 /// A storage deal binding an operator to host a specific shard of a
 /// Specific manifest. One shard may have multiple deals (replication =
 /// Different `replica_index`).
-fn default_merkle_depth() -> u8 {
+const fn default_merkle_depth() -> u8 {
     64
 }
 
@@ -335,7 +335,7 @@ impl StorageDeal {
     /// Number of epochs the deal is scheduled to last. `0` is a
     /// Configuration error caught at deal-open time.
     #[must_use]
-    pub fn duration_epochs(&self) -> u64 {
+    pub const fn duration_epochs(&self) -> u64 {
         self.deal_end_epoch.saturating_sub(self.deal_start_epoch)
     }
 }
@@ -474,7 +474,7 @@ pub struct StorageChallengeRangeInput<'a> {
 impl StorageChallengeProofContext {
     /// Builds a challenge proof context from registry state.
     #[must_use]
-    pub fn from_registry(
+    pub const fn from_registry(
         chain_id: u64,
         challenge: &RetrievalChallenge,
         deal: &StorageDeal,
@@ -3230,7 +3230,7 @@ impl StorageRegistry {
     /// # Errors
     ///
     /// Returns an error if the operation fails.
-    pub fn validate_challenge_window(
+    pub const fn validate_challenge_window(
         challenge_epoch: u64,
         deadline_epoch: u64,
         current_epoch: u64,
@@ -4350,7 +4350,7 @@ impl StorageRegistry {
     /// not tied to the stored shard contents. Keep proven-read and boost credit
     /// disabled, and do not slash on that unbound proof, until a shard-bound
     /// witness is implemented and verified.
-    pub(crate) fn storage_challenge_proofs_are_checkable() -> bool {
+    pub(crate) const fn storage_challenge_proofs_are_checkable() -> bool {
         false
     }
 

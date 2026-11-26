@@ -187,13 +187,13 @@ impl SubnetKey {
 
     /// The `/24` an IPv4 address belongs to, keyed by its first three octets.
     #[must_use]
-    fn ipv4([a, b, c]: [u8; 3]) -> Self {
+    const fn ipv4([a, b, c]: [u8; 3]) -> Self {
         Self([Self::FAMILY_V4, a, b, c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     }
 
     /// The `/64` an IPv6 address belongs to, keyed by its first eight octets.
     #[must_use]
-    fn ipv6([p0, p1, p2, p3, p4, p5, p6, p7]: [u8; 8]) -> Self {
+    const fn ipv6([p0, p1, p2, p3, p4, p5, p6, p7]: [u8; 8]) -> Self {
         Self([
             Self::FAMILY_V6,
             p0,
@@ -317,7 +317,7 @@ impl PeerManager {
     }
 
     #[must_use]
-    pub fn msg_refill_rate(&self) -> f64 {
+    pub const fn msg_refill_rate(&self) -> f64 {
         self.msg_refill_rate
     }
 
@@ -356,13 +356,13 @@ impl PeerManager {
     }
 
     #[must_use]
-    pub fn max_tracked_peers(&self) -> usize {
+    pub const fn max_tracked_peers(&self) -> usize {
         self.max_tracked_peers
     }
 
     /// Maximum admitted connections sharing the same IPv4 /24.
     #[must_use]
-    pub fn max_peers_per_subnet(&self) -> usize {
+    pub const fn max_peers_per_subnet(&self) -> usize {
         self.max_peers_per_subnet
     }
 
@@ -372,7 +372,7 @@ impl PeerManager {
 
     /// Outbound subnet diversity bound (0 = no limit).
     #[must_use]
-    pub fn max_outbound_per_subnet(&self) -> usize {
+    pub const fn max_outbound_per_subnet(&self) -> usize {
         self.max_outbound_per_subnet
     }
 

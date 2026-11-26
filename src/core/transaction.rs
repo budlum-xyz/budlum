@@ -151,7 +151,7 @@ const TX_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/transaction";
 
 impl crate::core::chain_config::Network {
     #[must_use]
-    pub fn gas_schedule(&self) -> GasSchedule {
+    pub const fn gas_schedule(&self) -> GasSchedule {
         match self {
             Self::Mainnet => GasSchedule {
                 base_fee: 10,
@@ -2065,7 +2065,7 @@ impl Transaction {
 
     /// Whether this transaction uses the aggregation layer at all.
     #[must_use]
-    pub fn uses_claims(&self) -> bool {
+    pub const fn uses_claims(&self) -> bool {
         self.auth_claim.is_some() || !self.claim_refs.is_empty()
     }
 
@@ -2572,7 +2572,7 @@ impl Transaction {
         serde_json::to_vec(self).unwrap_or_else(|_| TX_SERIALIZE_FAILED.to_vec())
     }
     #[must_use]
-    pub fn fee_bid(&self) -> crate::chain::fee_market::FeeBid {
+    pub const fn fee_bid(&self) -> crate::chain::fee_market::FeeBid {
         crate::chain::fee_market::FeeBid {
             max_fee: if self.max_fee == 0 {
                 self.fee
@@ -2588,7 +2588,7 @@ impl Transaction {
     /// `max_fee` and `priority_fee` remain signed wire-compatibility fields;
     /// State validation rejects any value that diverges from this flat fee.
     #[must_use]
-    pub fn fee_limit(&self) -> u64 {
+    pub const fn fee_limit(&self) -> u64 {
         self.fee
     }
 
@@ -2600,7 +2600,7 @@ impl Transaction {
     /// zero liquid cost. Admission, pending-balance projection and execution
     /// share this classification; `None` is a refusal, never a saturated cost.
     #[must_use]
-    pub fn checked_liquid_cost(&self) -> Option<u64> {
+    pub const fn checked_liquid_cost(&self) -> Option<u64> {
         match self.tx_type {
             TransactionType::AiOperatorWithdraw => Some(0),
             TransactionType::Unstake
@@ -3173,7 +3173,7 @@ fn put_option_address(out: &mut Vec<u8>, value: Option<Address>) {
         None => put_u8(out, 0),
     }
 }
-fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
+const fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
     match tx_type {
         TransactionType::Transfer => 0,
         TransactionType::Stake => 1,

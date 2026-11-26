@@ -38,7 +38,7 @@ impl Network {
     /// mainnet costs a genesis hash; changing it after would mean asking every
     /// wallet and explorer to migrate.
     #[must_use]
-    pub fn chain_id(&self) -> ChainId {
+    pub const fn chain_id(&self) -> ChainId {
         match self {
             Self::Mainnet => ChainId(45260),
             Self::Testnet => ChainId(45261),
@@ -47,7 +47,7 @@ impl Network {
     }
 
     #[must_use]
-    pub fn default_port(&self) -> u16 {
+    pub const fn default_port(&self) -> u16 {
         match self {
             Self::Mainnet => 4001,
             Self::Testnet => 5001,
@@ -56,7 +56,7 @@ impl Network {
     }
 
     #[must_use]
-    pub fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         match self {
             Self::Mainnet => "mainnet",
             Self::Testnet => "testnet",
@@ -105,7 +105,7 @@ impl Network {
     /// Kept next to `chain_id` on purpose: the two are a pair, and an id
     /// changed in one and not the other silently stops resolving.
     #[must_use]
-    pub fn from_chain_id(chain_id: u64) -> Option<Self> {
+    pub const fn from_chain_id(chain_id: u64) -> Option<Self> {
         match chain_id {
             45260 => Some(Self::Mainnet),
             45261 => Some(Self::Testnet),
@@ -162,7 +162,7 @@ impl Network {
     }
 
     #[must_use]
-    pub fn consensus_params(&self) -> ConsensusParams {
+    pub const fn consensus_params(&self) -> ConsensusParams {
         match self {
             Self::Mainnet => ConsensusParams {
                 epoch_len: 100,
@@ -282,7 +282,7 @@ impl Network {
     }
 
     #[must_use]
-    pub fn security_config(&self) -> SecurityConfig {
+    pub const fn security_config(&self) -> SecurityConfig {
         match self {
             Self::Mainnet => SecurityConfig {
                 max_peers: 100,
@@ -321,7 +321,7 @@ impl Network {
     }
 
     #[must_use]
-    pub fn magic_bytes(&self) -> [u8; 4] {
+    pub const fn magic_bytes(&self) -> [u8; 4] {
         match self {
             Self::Mainnet => *b"BDLM",
             Self::Testnet => *b"BDLT",
@@ -590,11 +590,11 @@ pub struct ChainId(pub u64);
 
 impl ChainId {
     #[must_use]
-    pub fn new(value: u64) -> Self {
+    pub const fn new(value: u64) -> Self {
         Self(value)
     }
     #[must_use]
-    pub fn value(&self) -> u64 {
+    pub const fn value(&self) -> u64 {
         self.0
     }
 }

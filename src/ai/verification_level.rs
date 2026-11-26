@@ -33,7 +33,7 @@ pub enum VerificationLevel {
 
 impl VerificationLevel {
     #[must_use]
-    pub fn label(&self) -> &'static str {
+    pub const fn label(&self) -> &'static str {
         match self {
             Self::Receipt => "VL-0",
             Self::CommitteeAgreement => "VL-1",
@@ -75,7 +75,7 @@ impl Default for LevelRecord {
 impl LevelRecord {
     /// A fresh record at VL-0.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             level: VerificationLevel::Receipt,
             refuted: false,
@@ -83,13 +83,13 @@ impl LevelRecord {
     }
 
     #[must_use]
-    pub fn level(&self) -> VerificationLevel {
+    pub const fn level(&self) -> VerificationLevel {
         self.level
     }
 
     /// WIRING: read by the RPC outcome view and the value doors.
     #[must_use]
-    pub fn is_refuted(&self) -> bool {
+    pub const fn is_refuted(&self) -> bool {
         self.refuted
     }
 
@@ -116,7 +116,7 @@ impl LevelRecord {
     /// An upheld challenge. The level stays what it was, for the record;
     /// the result carries no value from now on.
     /// WIRING: called by the challenge door when a challenge is upheld.
-    pub fn refute(&mut self) {
+    pub const fn refute(&mut self) {
         self.refuted = true;
     }
 

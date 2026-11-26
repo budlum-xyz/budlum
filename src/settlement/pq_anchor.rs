@@ -74,7 +74,7 @@ pub const ANCHOR_INTERVAL: u64 = 360;
 /// Whether an anchor is due at the checkpoint `height`: a positive multiple of
 /// [`ANCHOR_INTERVAL`]. Every network's checkpoint interval divides 360.
 #[must_use]
-pub fn anchor_due(height: u64) -> bool {
+pub const fn anchor_due(height: u64) -> bool {
     height > 0 && height.is_multiple_of(ANCHOR_INTERVAL)
 }
 
@@ -102,13 +102,13 @@ pub enum AnchorSignatureAlgorithm {
 impl AnchorSignatureAlgorithm {
     /// Whether a verifier for this algorithm exists in this build.
     #[must_use]
-    pub fn is_supported(self) -> bool {
+    pub const fn is_supported(self) -> bool {
         matches!(self, Self::MlDsa87 | Self::SlhDsaShake256s)
     }
 
     /// The registry identifier of the scheme, `None` for the reserved slot.
     #[must_use]
-    pub fn scheme_id(self) -> Option<crate::crypto::scheme::SchemeId> {
+    pub const fn scheme_id(self) -> Option<crate::crypto::scheme::SchemeId> {
         match self {
             Self::MlDsa87 => Some(crate::crypto::scheme::SchemeId::ML_DSA_87),
             Self::SlhDsaShake256s => Some(crate::crypto::scheme::SchemeId::SLH_DSA_SHAKE_256S),
@@ -136,7 +136,7 @@ pub struct AnchorSignature {
 /// The class is the weakest assumption behind a finality record, a fact and
 /// not a score (`crate::crypto::facts`).
 #[must_use]
-pub fn quantum_class_code(class: QuantumClass) -> u8 {
+pub const fn quantum_class_code(class: QuantumClass) -> u8 {
     match class {
         QuantumClass::Classical => 1,
         QuantumClass::Lattice => 2,
@@ -149,7 +149,7 @@ pub fn quantum_class_code(class: QuantumClass) -> u8 {
 /// of work and zk proofs are hash based, and a kind the node cannot assess
 /// counts as classical (the weakest reading, never the strongest).
 #[must_use]
-pub fn domain_quantum_class(kind: &ConsensusKind) -> QuantumClass {
+pub const fn domain_quantum_class(kind: &ConsensusKind) -> QuantumClass {
     match kind {
         ConsensusKind::PoS | ConsensusKind::Bft | ConsensusKind::PoA => QuantumClass::Lattice,
         ConsensusKind::PoW | ConsensusKind::Zk => QuantumClass::Hash,
@@ -284,7 +284,7 @@ pub enum AnchorError {
 impl AnchorError {
     /// A stable label.
     #[must_use]
-    pub fn kind(&self) -> &'static str {
+    pub const fn kind(&self) -> &'static str {
         match self {
             Self::EmptyAggregation => "anchor-empty-aggregation",
             Self::UnsupportedAlgorithm { .. } => "anchor-unsupported-algorithm",
@@ -682,7 +682,7 @@ pub struct EmissionRequest<'a> {
 ///
 /// [`AnchorError::ProductionBlocked`] when `mode` is
 /// [`AnchorMode::ProductionApproved`].
-pub fn enforce_anchor_mode(mode: AnchorMode) -> Result<(), AnchorError> {
+pub const fn enforce_anchor_mode(mode: AnchorMode) -> Result<(), AnchorError> {
     match mode {
         AnchorMode::GatedOff | AnchorMode::Devnet => Ok(()),
         AnchorMode::ProductionApproved => Err(AnchorError::ProductionBlocked {
