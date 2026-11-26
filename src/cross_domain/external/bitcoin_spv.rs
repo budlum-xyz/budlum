@@ -1098,7 +1098,21 @@ impl BitcoinSpvAdapter {
             }
 
             let block_work = ChainWork256::from_bits(current_bits)?;
-            cumulative_work = cumulative_work.saturating_add(block_work);
+            // Bitcoin Core's `nChainWork` is an exact 256-bit integer: it is
+            // never clamped, so a running total that leaves the range is a
+            // refusal and not a saturated `MAX`. Saturating here would flatten
+            // every later `cumulative_work` to the same value, make
+            // `tip.cumulative_work <= anchor_chainwork` true for a real chain,
+            // and freeze the reported `difficulty_bits` at the ceiling.
+            cumulative_work =
+                cumulative_work
+                    .checked_add(block_work)
+                    .ok_or_else(|| AdapterError::ConsensusRule {
+                        rule: format!(
+                            "Bitcoin chainwork overflows 256 bits at height {h}: the pinned anchor work plus {} header(s) is not representable",
+                            idx + 1
+                        ),
+                    })?;
             verified_headers.push(VerifiedBitcoinHeader {
                 height: h,
                 hash: header.hash,

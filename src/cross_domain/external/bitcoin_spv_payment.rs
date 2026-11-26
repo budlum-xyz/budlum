@@ -212,7 +212,19 @@ impl VerifiedBitcoinChain {
                 pow_limit_bits,
             )?;
             if let Some(prev_cw) = prev_cum_work {
-                if hdr.cumulative_work != prev_cw.saturating_add(expected_work) {
+                // Exact arithmetic: a saturated step would let two different
+                // header sets claim the same cumulative work at the 256-bit
+                // ceiling, which is precisely the tie the fork choice must be
+                // able to break.
+                let expected_cum = prev_cw.checked_add(expected_work).ok_or_else(|| {
+                    AdapterError::ConsensusRule {
+                        rule: format!(
+                            "Bitcoin header cumulative_work overflows 256 bits at height {}",
+                            hdr.height
+                        ),
+                    }
+                })?;
+                if hdr.cumulative_work != expected_cum {
                     return Err(AdapterError::ConsensusRule {
                         rule: "Bitcoin header cumulative_work breaks chainwork progression"
                             .to_string(),
