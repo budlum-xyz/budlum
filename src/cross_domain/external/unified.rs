@@ -10,7 +10,7 @@
 //! each for its own descriptor, and answers the three questions a caller
 //! actually has:
 //!
-//! - what can I verify against? ([`NetworkCatalog::networks`])
+//! - what can I verify against? ([`NetworkCatalog::families`])
 //! - what does this one promise? ([`NetworkCatalog::profile_of`])
 //! - does the surface I just built actually work? ([`NetworkCatalog::selftest`])
 //!

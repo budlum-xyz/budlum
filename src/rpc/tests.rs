@@ -3985,7 +3985,14 @@ mod rpc_tests {
         )
         .with_garden(garden);
         operator
-            .garden_create("Room".into(), "host".into(), None)
+            .garden_create(
+                "Room".into(),
+                "host".into(),
+                Some(crate::garden::GardenOptions {
+                    listen: Some("/ip4/127.0.0.1/tcp/0".into()),
+                    ..Default::default()
+                }),
+            )
             .await
             .expect("a garden is opened before an invite exists");
         let invite = operator.garden_invite().await.unwrap();
