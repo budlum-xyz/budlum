@@ -313,6 +313,9 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
                 reason: "a proven attestation has no depth; this caller asked for one".to_string(),
             });
         }
+        if policy.require_slashable {
+            return Err(AdapterError::UnslashableBacking);
+        }
         if policy.max_age > 0 {
             if decoded.inputs.block_height > policy.now {
                 return Err(AdapterError::Stale {
@@ -1043,6 +1046,14 @@ mod tests {
         assert!(
             matches!(err, AdapterError::ConsensusRule { .. }),
             "got: {err:?}"
+        );
+        // Unslashable ZK backing must fail closed when require_slashable is set.
+        let mut slash_policy = VerificationPolicy::proven(0);
+        slash_policy.require_slashable = true;
+        let err = adapter.verify(&evidence, &slash_policy).unwrap_err();
+        assert!(
+            matches!(err, AdapterError::UnslashableBacking),
+            "require_slashable=true on ZkVm must return UnslashableBacking, got: {err:?}"
         );
     }
 

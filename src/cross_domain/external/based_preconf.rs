@@ -1043,6 +1043,12 @@ impl ExternalFinalityAdapter for BasedPreconfAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned
+            .as_ref()
+            .is_some_and(|p| p.l1_chain_id != 0 && !p.members.is_empty())
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,

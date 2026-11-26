@@ -6140,6 +6140,34 @@ impl Blockchain {
         // `(state, block) -> state` transition: the external intake now lives
         // in the account state, so a clock driven from the commit path alone
         // would leave replay one tick behind live operation.
+        if let Some(frame) = block.claim_frame.as_ref() {
+            if frame
+                .claims
+                .iter()
+                .any(|c| matches!(c, crate::aggregation::claim::Claim::Prog { .. }))
+            {
+                if let Some(domain) = crate::aggregation::chain::claim_domain(block.chain_id) {
+                    if next_state.settlement.claimed_domain_finality.is_empty() {
+                        next_state.settlement.claimed_domain_finality =
+                            crate::aggregation::domain_finality::ClaimedDomainFinalityAdapter::new(
+                                domain,
+                            );
+                    }
+                    let agg_params = crate::aggregation::params::AggParams::default();
+                    let backend = crate::aggregation::stark::StarkBackend::new(
+                        next_state.scheme_registry.clone(),
+                        crate::aggregation::frame::FrameLimits::from(&agg_params),
+                        crate::aggregation::stark::STARK_PARAMETER_SET,
+                    );
+                    let snapshot = next_state.clone();
+                    next_state
+                        .settlement
+                        .claimed_domain_finality
+                        .admit_verified_frame(&snapshot, &backend, frame)
+                        .map_err(|e| format!("block claim_frame admission failed: {e}"))?;
+                }
+            }
+        }
         next_state.settlement.on_block_end(block.index);
         // Enqueue bridge-burn relay requests inside the `(state, block) -> state`
         // transition before `calculate_state_root` runs: `enqueue_bridge_relay`

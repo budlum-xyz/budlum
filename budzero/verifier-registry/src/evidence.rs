@@ -219,8 +219,11 @@ impl SlashingReport {
                 ..
             } => {
                 // The same hash in another spelling ("AA", "aa",
-                // "0xaa") is still the same block, not a conflict.
-                if canonical_hash(block_hash_1) == canonical_hash(block_hash_2) {
+                // "0xaa") is still the same block, not a conflict, and an
+                // empty / bare-"0x" string is not a block hash at all.
+                let h1 = canonical_hash(block_hash_1);
+                let h2 = canonical_hash(block_hash_2);
+                if h1.is_empty() || h2.is_empty() || h1 == h2 {
                     return Err(EvidenceError::NonConflictingHashes);
                 }
                 if signature_1.is_empty() || signature_2.is_empty() {
@@ -251,7 +254,7 @@ impl SlashingReport {
                 }
             }
             SlashingProof::Other { tag, data } => {
-                if tag.is_empty() {
+                if tag.trim().is_empty() {
                     return Err(EvidenceError::EmptyProofTag);
                 }
                 if tag.len() > MAX_EVIDENCE_TAG_LEN {

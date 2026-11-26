@@ -594,7 +594,9 @@ impl SlashingReport {
                         .unwrap_or(trimmed);
                     body.to_ascii_lowercase()
                 };
-                if norm(block_hash_1) == norm(block_hash_2) {
+                let h1 = norm(block_hash_1);
+                let h2 = norm(block_hash_2);
+                if h1.is_empty() || h2.is_empty() || h1 == h2 {
                     return Err(EvidenceError::NonConflictingHashes);
                 }
                 if signature_1.is_empty() || signature_2.is_empty() {
@@ -616,7 +618,7 @@ impl SlashingReport {
                 }
             }
             SlashingProof::Other { tag, data } => {
-                if tag.is_empty() {
+                if tag.trim().is_empty() {
                     return Err(EvidenceError::EmptyProofTag);
                 }
                 if tag.len() > MAX_EVIDENCE_TAG_LEN {

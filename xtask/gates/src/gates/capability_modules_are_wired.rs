@@ -559,10 +559,10 @@ fn names_after(src: &str, keyword: &str, lowercase_only: bool) -> BTreeSet<Strin
 
 /// Public function names in a body.
 fn pub_fns(src: &str) -> BTreeSet<String> {
-    names_after(src, "pub fn", true)
-        .union(&names_after(src, "pub async fn", true))
-        .cloned()
-        .collect()
+    let mut found = names_after(src, "pub fn", true);
+    found.extend(names_after(src, "pub async fn", true));
+    found.extend(names_after(src, "pub const fn", true));
+    found
 }
 
 /// Public type, constant and static names in a body.
@@ -578,7 +578,50 @@ fn pub_types(src: &str) -> BTreeSet<String> {
     ] {
         out.extend(names_after(src, kw, false));
     }
+    // `pub const fn` starts with `pub const`; exclude the `fn` keyword token.
+    out.remove("fn");
     out
+}
+
+/// Whether `hay` contains an unqualified `<mod_name>::<fn>(` call for a unique
+/// module stem (`mod_name` not preceded by an identifier character or `:`).
+fn mentions_unique_module_call(hay: &[char], mod_name: &str, mod_fns: &BTreeSet<String>) -> bool {
+    if mod_name.is_empty() || matches!(mod_name, "mod" | "lib" | "main") || mod_fns.is_empty() {
+        return false;
+    }
+    let prefix: Vec<char> = format!("{mod_name}::").chars().collect();
+    let plen = prefix.len();
+    if hay.len() <= plen {
+        return false;
+    }
+    let mut i = 0;
+    while i + plen < hay.len() {
+        if hay[i..i + plen] == prefix[..]
+            && (i == 0 || (!is_ident_char(hay[i - 1]) && hay[i - 1] != ':'))
+        {
+            let start = i + plen;
+            let mut end = start;
+            while end < hay.len() && is_ident_char(hay[end]) {
+                end += 1;
+            }
+            if end > start {
+                let mut k = end;
+                while k < hay.len() && hay[k].is_whitespace() {
+                    k += 1;
+                }
+                if k < hay.len() && hay[k] == '(' {
+                    let fn_name: String = hay[start..end].iter().collect();
+                    if mod_fns.contains(&fn_name) {
+                        return true;
+                    }
+                }
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 /// Does `haystack` name `needle` as a call, or as a bare mention?
@@ -826,6 +869,16 @@ fn ambiguous_names(production: &[PathBuf], bodies: &BTreeMap<PathBuf, String>) -
         .collect()
 }
 
+fn stem_counts_of(production: &[PathBuf]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for p in production {
+        if let Some(stem) = p.file_stem().map(|s| s.to_string_lossy().into_owned()) {
+            *counts.entry(stem).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
 fn measure(root: &Path) -> Result<Outcome, String> {
     let (files, bodies) = read_bodies(root)?;
 
@@ -851,6 +904,7 @@ fn measure(root: &Path) -> Result<Outcome, String> {
         .collect();
 
     let ambiguous = ambiguous_names(&production, &bodies);
+    let stem_counts = stem_counts_of(&production);
 
     let ubiquitous: BTreeSet<String> = UBIQUITOUS.iter().map(|s| (*s).to_string()).collect();
 
@@ -860,7 +914,8 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 
     for path in &production {
         let body = &bodies[path];
-        let fns: BTreeSet<String> = pub_fns(body).difference(&ubiquitous).cloned().collect();
+        let all_pub_fns = pub_fns(body);
+        let fns: BTreeSet<String> = all_pub_fns.difference(&ubiquitous).cloned().collect();
         if fns.len() < MIN_PUB_FNS {
             continue;
         }
@@ -907,16 +962,17 @@ fn measure(root: &Path) -> Result<Outcome, String> {
         for n in &crate_fns {
             needles.insert(n.as_str(), true);
         }
-        let mut wired = false;
-        for other in &production {
-            if other == path {
-                continue;
-            }
-            if mentions_any(&evidence_chars[other], &needles, &mod_name, &own_types) {
-                wired = true;
-                break;
-            }
-        }
+        let unique_stem = stem_counts.get(&mod_name).copied() == Some(1);
+        let wired = production.iter().any(|other| {
+            other != path
+                && (mentions_any(&evidence_chars[other], &needles, &mod_name, &own_types)
+                    || (unique_stem
+                        && mentions_unique_module_call(
+                            &evidence_chars[other],
+                            &mod_name,
+                            &all_pub_fns,
+                        )))
+        });
 
         let declared = declares_unwired(body, &fns);
         let rel = path
@@ -1125,6 +1181,30 @@ fn self_test_extraction(problems: &mut Vec<String>) {
     }
     if !pub_types(src).contains("Three") {
         problems.push(String::from("BROKEN: pub_types missed a struct"));
+    }
+
+    let const_src = "pub const fn provenance(&self) -> u8 { 0 }\n";
+    if !pub_fns(const_src).contains("provenance") {
+        problems.push(String::from("BROKEN: pub_fns missed pub const fn"));
+    }
+    if pub_types(const_src).contains("fn") {
+        problems.push(String::from(
+            "BROKEN: pub_types treated `fn` as a const name",
+        ));
+    }
+
+    let mod_fns: BTreeSet<String> = ["read", "write"].into_iter().map(String::from).collect();
+    let ok_call: Vec<char> = "let _ = varint::read(buf, 9);".chars().collect();
+    let foreign_call: Vec<char> = "let _ = other::varint::read(buf, 9);".chars().collect();
+    if !mentions_unique_module_call(&ok_call, "varint", &mod_fns) {
+        problems.push(String::from(
+            "BROKEN: unique module call varint::read missed",
+        ));
+    }
+    if mentions_unique_module_call(&foreign_call, "varint", &mod_fns) {
+        problems.push(String::from(
+            "VACUOUS: path-prefixed other::varint::read accepted as local module call",
+        ));
     }
 
     // The marker.

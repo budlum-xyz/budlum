@@ -1,9 +1,10 @@
 //! Phase 4 domain state-transition claims and [`ClaimedDomainFinalityAdapter`].
 //!
-//! WIRING: unwired - Phase 4 domain-transition prover and adapter surface;
-//! external rollup provers produce `ObjectKind::StarkProof` envelopes for
-//! `agg/object`, and settlement nodes wire `ClaimedDomainFinalityAdapter` into
-//! their domain registry once a block's `MasterProof` passes `StarkBackend::verify`.
+//! WIRING: wired into `SettlementRegistries::claimed_domain_finality` in
+//! `src/settlement/registries.rs` (checked during
+//! `SettlementRegistries::universal_finality_certificate` and folded into
+//! `SettlementRegistries::root` when non-empty) and verified by
+//! `tests/k2e_claimed_domain_finality_tests.rs`.
 //!
 //! Each domain's state-transition STARK proof enters the aggregation layer as
 //! an `ObjectKind::StarkProof` envelope and collapses into:
@@ -31,6 +32,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bud_vm::{poseidon4_hash, Vm};
+use serde::{Deserialize, Serialize};
 
 use super::backend::{AggBackend, AggError};
 use super::claim::{Claim, GOLDILOCKS_MODULUS};
@@ -500,12 +502,16 @@ pub fn prove_domain_transition(
 /// program authorization, predecessor tip continuity (when a finalized anchor
 /// is recorded for the domain), and pre-verified `Claim::Prog` inclusion in
 /// O(log n) without re-verifying the underlying STARK proof.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClaimedDomainFinalityAdapter {
     claim_domain: DomainId,
     registered_programs: BTreeMap<DomainId, Hash32>,
     verified_prog_digests: BTreeSet<Hash32>,
     finalized_tips: BTreeMap<DomainId, (u64, Hash32)>,
+    /// Certified `(height, state_root, claim_digest)` per domain backed by a
+    /// verified `Claim::Prog` from an accepted `MasterProof`.
+    #[serde(default)]
+    certified_commitments: BTreeMap<DomainId, (u64, Hash32, Hash32)>,
 }
 
 impl ClaimedDomainFinalityAdapter {
@@ -517,7 +523,68 @@ impl ClaimedDomainFinalityAdapter {
             registered_programs: BTreeMap::new(),
             verified_prog_digests: BTreeSet::new(),
             finalized_tips: BTreeMap::new(),
+            certified_commitments: BTreeMap::new(),
         }
+    }
+
+    /// True when no programs, verified claim digests, tips, or certified
+    /// commitments have been recorded (so empty registries keep pinned roots).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.registered_programs.is_empty()
+            && self.verified_prog_digests.is_empty()
+            && self.finalized_tips.is_empty()
+            && self.certified_commitments.is_empty()
+    }
+
+    /// Deterministic state root committing all registered programs, verified
+    /// `Claim::Prog` digests, finalized tips, and certified commitments.
+    #[must_use]
+    pub fn root(&self) -> Hash32 {
+        let mut fields: Vec<Vec<u8>> = Vec::with_capacity(
+            4 + self.registered_programs.len() * 2
+                + self.verified_prog_digests.len()
+                + self.finalized_tips.len() * 3
+                + self.certified_commitments.len() * 4,
+        );
+        fields.push(b"BDLM_CLAIMED_DOMAIN_FINALITY_V1".to_vec());
+        fields.push(self.claim_domain.to_le_bytes().to_vec());
+        fields.push(
+            (self.registered_programs.len() as u64)
+                .to_le_bytes()
+                .to_vec(),
+        );
+        for (domain_id, prog_hash) in &self.registered_programs {
+            fields.push(domain_id.to_le_bytes().to_vec());
+            fields.push(prog_hash.to_vec());
+        }
+        fields.push(
+            (self.verified_prog_digests.len() as u64)
+                .to_le_bytes()
+                .to_vec(),
+        );
+        for digest in &self.verified_prog_digests {
+            fields.push(digest.to_vec());
+        }
+        fields.push((self.finalized_tips.len() as u64).to_le_bytes().to_vec());
+        for (domain_id, (height, root)) in &self.finalized_tips {
+            fields.push(domain_id.to_le_bytes().to_vec());
+            fields.push(height.to_le_bytes().to_vec());
+            fields.push(root.to_vec());
+        }
+        fields.push(
+            (self.certified_commitments.len() as u64)
+                .to_le_bytes()
+                .to_vec(),
+        );
+        for (domain_id, (height, state_root, claim_digest)) in &self.certified_commitments {
+            fields.push(domain_id.to_le_bytes().to_vec());
+            fields.push(height.to_le_bytes().to_vec());
+            fields.push(state_root.to_vec());
+            fields.push(claim_digest.to_vec());
+        }
+        let refs: Vec<&[u8]> = fields.iter().map(Vec::as_slice).collect();
+        crate::core::hash::hash_fields_bytes(&refs)
     }
 
     /// Registers the canonical state-transition `program_hash` for `domain_id`.
@@ -530,6 +597,98 @@ impl ClaimedDomainFinalityAdapter {
     /// require `(prev_height, prev_state_root)` to connect directly to this tip.
     pub fn record_finalized_tip(&mut self, domain_id: DomainId, height: u64, state_root: Hash32) {
         self.finalized_tips.insert(domain_id, (height, state_root));
+    }
+
+    /// Verify a `FinalityProof::AggregatedProg` against admitted `MasterProof`
+    /// claims and, on success, advance the domain's certified commitment and
+    /// finalized tip so `universal_finality_certificate` marks the row Proven.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FinalityError`] when the proof is not `AggregatedProg` or is
+    /// rejected; no tip or certification state changes on refusal.
+    pub fn verify_and_certify_commitment(
+        &mut self,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<Hash32, FinalityError> {
+        let FinalityProof::AggregatedProg { claim_digest, .. } = proof else {
+            return Err(FinalityError(
+                "Expected AggregatedProg finality proof".into(),
+            ));
+        };
+        match self.verify_finality(domain, commitment, proof)? {
+            FinalityStatus::Finalized => {
+                self.finalized_tips
+                    .insert(domain.id, (commitment.domain_height, commitment.state_root));
+                self.certified_commitments.insert(
+                    domain.id,
+                    (
+                        commitment.domain_height,
+                        commitment.state_root,
+                        *claim_digest,
+                    ),
+                );
+                Ok(*claim_digest)
+            }
+            FinalityStatus::Rejected(reason) => Err(FinalityError(reason)),
+            FinalityStatus::Pending { .. } => Err(FinalityError(
+                "AggregatedProg finality proof remained pending".into(),
+            )),
+        }
+    }
+
+    /// True if `(domain_id, height, state_root)` was certified by a verified
+    /// `Claim::Prog` still present in `verified_prog_digests`.
+    #[must_use]
+    pub fn has_certified_claim(
+        &self,
+        domain_id: DomainId,
+        height: u64,
+        state_root: Hash32,
+    ) -> bool {
+        self.certified_commitments
+            .get(&domain_id)
+            .is_some_and(|&(h, root, digest)| {
+                h == height && root == state_root && self.verified_prog_digests.contains(&digest)
+            })
+    }
+
+    /// Enforce K2-E T-E.2 on a certificate row's [`FinalityGuarantee`]:
+    /// only a commitment backed by a verified `Claim::Prog` in this adapter
+    /// may carry `FinalityReversibility::CryptographicValidity` ("proven").
+    /// Any `agg-claimed-program-finality` domain lacking a verified `Claim::Prog`
+    /// cannot be promoted to proven and stays at voted/quorum level.
+    #[must_use]
+    pub fn certify_guarantee_for_domain(
+        &self,
+        domain: &ConsensusDomain,
+        commitment: Option<&DomainCommitment>,
+        mut base: crate::settlement::universal_finality::FinalityGuarantee,
+    ) -> crate::settlement::universal_finality::FinalityGuarantee {
+        use crate::crypto::facts::QuantumClass;
+        use crate::settlement::universal_finality::{FinalityReversibility, FINALITY_BINDS_ALL};
+
+        if let Some(c) = commitment {
+            if self.has_certified_claim(domain.id, c.domain_height, c.state_root) {
+                base.reversibility = FinalityReversibility::CryptographicValidity;
+                base.quantum_posture = QuantumClass::Hash;
+                base.attestation = FINALITY_BINDS_ALL;
+                if base.fault_tolerance_bps == 0 {
+                    base.fault_tolerance_bps = 10_000;
+                }
+                return base;
+            }
+        }
+        // Fail-closed: a domain configured for aggregated program claims cannot
+        // claim CryptographicValidity without a matching verified Claim::Prog.
+        if domain.finality_adapter == self.adapter_name()
+            && base.reversibility == FinalityReversibility::CryptographicValidity
+        {
+            base.reversibility = FinalityReversibility::DeterministicQuorum;
+        }
+        base
     }
 
     /// Verifies `frame` against `backend` (and validator bonds in `accounts`

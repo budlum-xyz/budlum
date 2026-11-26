@@ -18,6 +18,8 @@
 
 use crate::core::address::Address;
 use crate::core::transaction::{ExternalChain, RelayerExternalResult};
+use crate::crypto::facts::QuantumClass;
+use crate::security::quantum_canary::{AlarmKind, AlarmLevel, QuantumAlarmState};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -253,7 +255,15 @@ pub struct UserIntent {
     /// when it locks the fee, and the id commits to it.
     #[serde(default)]
     pub expected_emitter: Address,
+    /// Settlement chain identifier binding this intent to one network (K4-J O-J.3).
+    /// Zero preserves V2 compatibility for legacy callers; non-zero binds `chain_id`
+    /// under `BDLM_RELAYER_USER_INTENT_V3` so cross-chain / testnet->mainnet replay
+    /// changes `intent_id` and fails closed.
+    #[serde(default)]
+    pub chain_id: u64,
 }
+
+const UNBOUND_INTENT_CHAIN_ID: u64 = 0;
 
 impl UserIntent {
     #[allow(clippy::too_many_arguments)]
@@ -280,17 +290,32 @@ impl UserIntent {
             replay_nonce,
             policy_hash,
             expected_emitter,
+            chain_id: UNBOUND_INTENT_CHAIN_ID,
         };
         intent.intent_id = intent.calculate_id();
         intent
     }
 
+    /// Bind this intent to a specific settlement `chain_id` and recompute its
+    /// canonical `intent_id` under `BDLM_RELAYER_USER_INTENT_V3` (K4-J O-J.3).
+    #[must_use]
+    pub fn with_chain_id(mut self, chain_id: u64) -> Self {
+        self.chain_id = chain_id;
+        self.intent_id = self.calculate_id();
+        self
+    }
+
     #[must_use]
     pub fn calculate_id(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        // V2: the emitter is part of the id. A `V1` id did not commit to one,
-        // so it could name a different emitter than the owner chose.
-        hasher.update(b"BDLM_RELAYER_USER_INTENT_V2");
+        if self.chain_id != 0 {
+            hasher.update(b"BDLM_RELAYER_USER_INTENT_V3");
+            hasher.update(self.chain_id.to_le_bytes());
+        } else {
+            // V2: the emitter is part of the id. A `V1` id did not commit to one,
+            // so it could name a different emitter than the owner chose.
+            hasher.update(b"BDLM_RELAYER_USER_INTENT_V2");
+        }
         hasher.update(self.owner.as_bytes());
         hasher.update(self.source_domain.to_le_bytes());
         hasher.update(self.target_domain.to_le_bytes());
@@ -566,6 +591,61 @@ pub struct RelayerPolicyRegistry {
     /// The locked winner of each currently awarded intent.
     #[serde(default, with = "crate::core::map_keys")]
     pub awards: BTreeMap<[u8; 32], RelayerAward>,
+    /// Currently frozen domains mapped to the settlement block height at which
+    /// each freeze began (K4-J O-J.4). Empty on normal chains so pinned roots
+    /// remain unchanged.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub frozen_domains: BTreeMap<u32, u64>,
+    /// Accumulated freeze grace blocks per open intent id (K4-J O-J.4).
+    /// Extended when a frozen source or target domain unfreezes so honest
+    /// solvers are never slashed for domain freezes.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "crate::core::map_keys"
+    )]
+    pub freeze_grace_blocks: BTreeMap<[u8; 32], u64>,
+}
+
+/// Enforce K4-J O-J.5 quantum canary posture on a payment/intent leg.
+///
+/// Classical-signature legs close fail-closed at `AlarmLevel::Restrict`
+/// and `AlarmLevel::Isolate`, while post-quantum legs (`Lattice`,
+/// `Hash`) remain open unless their own cryptographic family breaks.
+///
+/// # Errors
+///
+/// Returns an error string naming the active quantum canary refusal.
+pub fn check_quantum_leg_posture(
+    alarm: &QuantumAlarmState,
+    leg_posture: QuantumClass,
+) -> Result<(), String> {
+    match leg_posture {
+        QuantumClass::Classical => {
+            if alarm.level() >= AlarmLevel::Restrict {
+                return Err(format!(
+                    "RelayerPolicyRegistry classical payment leg closed by quantum canary alarm ({:?})",
+                    alarm.level()
+                ));
+            }
+        }
+        QuantumClass::Lattice => {
+            if alarm.has(AlarmKind::LatticeBreak) {
+                return Err(
+                    "RelayerPolicyRegistry lattice payment leg closed by quantum canary alarm"
+                        .into(),
+                );
+            }
+        }
+        QuantumClass::Hash => {
+            if alarm.has(AlarmKind::HashBreak) {
+                return Err(
+                    "RelayerPolicyRegistry hash payment leg closed by quantum canary alarm".into(),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 impl RelayerPolicyRegistry {
@@ -582,6 +662,95 @@ impl RelayerPolicyRegistry {
             && self.settlements.is_empty()
             && self.settled_intents.is_empty()
             && self.awards.is_empty()
+            && self.frozen_domains.is_empty()
+            && self.freeze_grace_blocks.is_empty()
+    }
+
+    /// Record that `domain_id` entered `DomainStatus::Frozen` at `block_height`
+    /// (idempotent if already frozen), suspending open intents on that domain
+    /// so solvers are not penalized during the freeze (K4-J O-J.4).
+    pub fn record_domain_freeze(&mut self, domain_id: u32, block_height: u64) {
+        self.frozen_domains.entry(domain_id).or_insert(block_height);
+    }
+
+    /// Record that `domain_id` returned to `DomainStatus::Active` at
+    /// `block_height`, extending `freeze_grace_blocks` for every open intent
+    /// touching `domain_id` by the exact freeze duration (K4-J O-J.4).
+    pub fn record_domain_unfreeze(&mut self, domain_id: u32, block_height: u64) {
+        let Some(started) = self.frozen_domains.remove(&domain_id) else {
+            return;
+        };
+        let duration = block_height.saturating_sub(started);
+        if duration == 0 {
+            return;
+        }
+        for (id, intent) in &self.intents {
+            if intent.source_domain == domain_id || intent.target_domain == domain_id {
+                let entry = self.freeze_grace_blocks.entry(*id).or_insert(0);
+                *entry = entry.saturating_add(duration);
+            }
+        }
+    }
+
+    fn intent_has_frozen_domain(&self, intent: &UserIntent) -> bool {
+        self.frozen_domains.contains_key(&intent.source_domain)
+            || self.frozen_domains.contains_key(&intent.target_domain)
+    }
+
+    fn intent_grace_at(
+        &self,
+        intent_id: &[u8; 32],
+        intent: &UserIntent,
+        current_block: u64,
+    ) -> u64 {
+        let stored = self
+            .freeze_grace_blocks
+            .get(intent_id)
+            .copied()
+            .unwrap_or(0);
+        let active_src = self
+            .frozen_domains
+            .get(&intent.source_domain)
+            .map_or(0, |&s| current_block.saturating_sub(s));
+        let active_dst = self
+            .frozen_domains
+            .get(&intent.target_domain)
+            .map_or(0, |&s| current_block.saturating_sub(s));
+        stored.saturating_add(active_src.max(active_dst))
+    }
+
+    /// Submit a chain-bound intent, refusing cross-chain or testnet-to-mainnet
+    /// replay when `intent.chain_id != expected_chain_id` (K4-J O-J.3).
+    ///
+    /// # Errors
+    ///
+    /// Refuses zero `expected_chain_id`, mismatched `intent.chain_id`, or any
+    /// standard [`Self::submit_intent`] validation failure.
+    pub fn submit_intent_for_chain(
+        &mut self,
+        intent: UserIntent,
+        policy: &PolicyEnvelope,
+        expected_chain_id: u64,
+        current_block: u64,
+    ) -> Result<[u8; 32], String> {
+        if expected_chain_id == 0 {
+            return Err("RelayerPolicyRegistry expected_chain_id must be non-zero".into());
+        }
+        if intent.chain_id != 0 {
+            if intent.chain_id != expected_chain_id {
+                return Err(format!(
+                    "RelayerPolicyRegistry intent chain_id {} does not match settlement chain_id {} (cross-chain replay refused)",
+                    intent.chain_id, expected_chain_id
+                ));
+            }
+            let rebound = intent.clone().with_chain_id(expected_chain_id);
+            if rebound.intent_id != intent.intent_id {
+                return Err(
+                    "RelayerPolicyRegistry intent_id does not match chain_id V3 digest".into(),
+                );
+            }
+        }
+        self.submit_intent(intent, policy, current_block)
     }
 
     /// Performs the requested operation.
@@ -663,7 +832,18 @@ impl RelayerPolicyRegistry {
         if self.is_settled(&intent_id) {
             return Err("RelayerPolicyRegistry intent already settled".into());
         }
-        if intent.deadline_block > current_block {
+        if self.intent_has_frozen_domain(intent) {
+            return Err(
+                "RelayerPolicyRegistry intent suspended while source or target domain is frozen"
+                    .into(),
+            );
+        }
+        let effective_deadline = intent.deadline_block.saturating_add(self.intent_grace_at(
+            &intent_id,
+            intent,
+            current_block,
+        ));
+        if effective_deadline > current_block {
             return Err("RelayerPolicyRegistry intent is not expired".into());
         }
         let owner = intent.owner;
@@ -683,12 +863,8 @@ impl RelayerPolicyRegistry {
                 Some(bid.relayer) == awarded && bid.expires_at_block > intent.deadline_block
             })
             .collect();
-        // Drop `intent_id` from `intents` and omit it from `settled_intents`:
-        // `intent_id` binds `deadline_block <= current_block`, so `submit_intent`
-        // refuses any future replay by deadline, whereas inserting into
-        // `settled_intents` after removing from `intents` would leak a permanent
-        // unprunable 32-byte entry on every expired intent.
         self.intents.remove(&intent_id);
+        self.freeze_grace_blocks.remove(&intent_id);
         self.settled_intents.remove(&intent_id);
         let settlement = IntentSettlement {
             intent_id,
@@ -833,7 +1009,9 @@ impl RelayerPolicyRegistry {
         if self.is_settled(&intent_id) {
             return Err("RelayerPolicyRegistry intent already settled".into());
         }
-        if intent.deadline_block <= current_block {
+        let grace = self.intent_grace_at(&intent_id, intent, current_block);
+        let effective_deadline = intent.deadline_block.saturating_add(grace);
+        if effective_deadline <= current_block {
             return Err("RelayerPolicyRegistry intent expired".into());
         }
         // The owner fixed the winner before execution. Looking up the cheapest
@@ -853,7 +1031,7 @@ impl RelayerPolicyRegistry {
             .flatten()
             .find(|bid| bid.relayer == award.relayer)
             .ok_or_else(|| "RelayerPolicyRegistry awarded bid not found".to_string())?;
-        if bid.expires_at_block <= current_block {
+        if bid.expires_at_block.saturating_add(grace) <= current_block {
             return Err("RelayerPolicyRegistry selected bid expired".into());
         }
         if paid_fee == 0 || paid_fee > bid.quoted_fee {
@@ -872,6 +1050,7 @@ impl RelayerPolicyRegistry {
         self.settlements.insert(intent_id, settlement.clone());
         self.settled_intents.insert(intent_id);
         self.awards.remove(&intent_id);
+        self.freeze_grace_blocks.remove(&intent_id);
         Ok(settlement)
     }
 
@@ -889,14 +1068,22 @@ impl RelayerPolicyRegistry {
             .intents
             .iter()
             .filter_map(|(id, intent)| {
-                (intent.deadline_block <= current_block && !self.escrowed.contains_key(id))
-                    .then_some(*id)
+                let effective = intent.deadline_block.saturating_add(self.intent_grace_at(
+                    id,
+                    intent,
+                    current_block,
+                ));
+                (!self.intent_has_frozen_domain(intent)
+                    && effective <= current_block
+                    && !self.escrowed.contains_key(id))
+                .then_some(*id)
             })
             .collect();
         for id in &expired {
             self.intents.remove(id);
             self.bids.remove(id);
             self.awards.remove(id);
+            self.freeze_grace_blocks.remove(id);
             self.settled_intents.remove(id);
         }
         expired.len()
@@ -978,6 +1165,19 @@ impl RelayerPolicyRegistry {
         for id in &self.settled_intents {
             hasher.update(b"settled");
             hasher.update(id);
+        }
+        if !self.frozen_domains.is_empty() || !self.freeze_grace_blocks.is_empty() {
+            hasher.update(b"freeze_grace_v1");
+            hasher.update((self.frozen_domains.len() as u64).to_le_bytes());
+            for (dom, started) in &self.frozen_domains {
+                hasher.update(dom.to_le_bytes());
+                hasher.update(started.to_le_bytes());
+            }
+            hasher.update((self.freeze_grace_blocks.len() as u64).to_le_bytes());
+            for (id, grace) in &self.freeze_grace_blocks {
+                hasher.update(id);
+                hasher.update(grace.to_le_bytes());
+            }
         }
         hasher.finalize().into()
     }

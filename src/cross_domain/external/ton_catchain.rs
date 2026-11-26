@@ -1145,6 +1145,12 @@ impl ExternalFinalityAdapter for TonCatchainAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned
+            .as_ref()
+            .is_some_and(|p| p.utime_until > p.utime_since && !p.validators.is_empty())
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,

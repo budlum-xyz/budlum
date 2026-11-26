@@ -715,25 +715,34 @@ pub fn verify_commitment_finality_observed(
             )
         }
         ConsensusKind::Zk => {
-            // The claim-bound verifier: a ZK domain finalizes only against
-            // the root an accepted proof claim recorded.
-            let adapter = ZkFinalityAdapter;
-            ensure_adapter_name(domain, adapter.adapter_name())?;
-            let claim_key = ProofClaimKey {
-                domain_id: commitment.domain_id,
-                target_height: commitment.domain_height,
-            };
-            let accepted_root = state
-                .settlement
-                .proof_claims
-                .get(&claim_key)
-                .map(|c| c.final_state_root);
-            let verdict =
-                adapter.verify_finality_with_claim(domain, commitment, proof, accepted_root);
-            if let Ok(status) = &verdict {
-                adapter.observe_finalized(status, proof, observer);
+            if domain.finality_adapter == state.settlement.claimed_domain_finality.adapter_name() {
+                let adapter = &state.settlement.claimed_domain_finality;
+                let verdict = adapter.verify_finality(domain, commitment, proof);
+                if let Ok(status) = &verdict {
+                    adapter.observe_finalized(status, proof, observer);
+                }
+                verdict
+            } else {
+                // The claim-bound verifier: a ZK domain finalizes only against
+                // the root an accepted proof claim recorded.
+                let adapter = ZkFinalityAdapter;
+                ensure_adapter_name(domain, adapter.adapter_name())?;
+                let claim_key = ProofClaimKey {
+                    domain_id: commitment.domain_id,
+                    target_height: commitment.domain_height,
+                };
+                let accepted_root = state
+                    .settlement
+                    .proof_claims
+                    .get(&claim_key)
+                    .map(|c| c.final_state_root);
+                let verdict =
+                    adapter.verify_finality_with_claim(domain, commitment, proof, accepted_root);
+                if let Ok(status) = &verdict {
+                    adapter.observe_finalized(status, proof, observer);
+                }
+                verdict
             }
-            verdict
         }
         ConsensusKind::Custom(_) => {
             if domain.finality_adapter
@@ -1125,6 +1134,10 @@ fn freeze_domain(
     if let Some(domain) = state.settlement.domains.get_mut(domain_id) {
         domain.status = DomainStatus::Frozen;
     }
+    state
+        .settlement
+        .relayer_policy
+        .record_domain_freeze(domain_id, state.current_block_height);
     state
         .governance
         .applied_domain_unfreezes
@@ -1765,6 +1778,10 @@ pub fn apply_domain_unfreezes(
             .transition_status_checked(domain_id, DomainStatus::Active)
         {
             Ok(()) => {
+                state
+                    .settlement
+                    .relayer_policy
+                    .record_domain_unfreeze(domain_id, state.current_block_height);
                 tracing::info!(
                     "Governance unfreeze: domain {} unfrozen via justification {}",
                     domain_id,
@@ -1913,6 +1930,23 @@ pub fn execute_settlement_tx(
                     .settlement
                     .domains
                     .record_observed(payload.commitment.domain_id, &observed);
+                if matches!(payload.proof, FinalityProof::AggregatedProg { .. }) {
+                    if let Some(domain) = state
+                        .settlement
+                        .domains
+                        .get(payload.commitment.domain_id)
+                        .cloned()
+                    {
+                        let _ = state
+                            .settlement
+                            .claimed_domain_finality
+                            .verify_and_certify_commitment(
+                                &domain,
+                                &payload.commitment,
+                                &payload.proof,
+                            );
+                    }
+                }
             }
             Ok(())
         }
@@ -2310,11 +2344,40 @@ pub(crate) fn execute_relayer_intent_tx(
             if balance < needed {
                 return Err(SettlementTxError::BondUnfunded { needed, balance });
             }
-            let id = state
-                .settlement
-                .relayer_policy
-                .submit_intent((**intent).clone(), policy, state.current_block_height)
-                .map_err(SettlementTxError::Refused)?;
+            // K4-J O-J.5: if a quantum canary alarm is active, refuse intents
+            // touching classical-backed domains while keeping PQ legs open.
+            let alarm = state.settlement.quantum.alarm();
+            for leg_domain in [intent.source_domain, intent.target_domain] {
+                if let Some(posture) = state
+                    .settlement
+                    .domains
+                    .observed(leg_domain)
+                    .quantum_class()
+                {
+                    crate::relayer::check_quantum_leg_posture(alarm, posture)
+                        .map_err(SettlementTxError::Refused)?;
+                }
+            }
+            // K4-J O-J.3: enforce chain_id binding whenever ctx carries a
+            // non-zero chain_id so testnet intents cannot replay on mainnet.
+            let id = if ctx.chain_id != 0 {
+                state
+                    .settlement
+                    .relayer_policy
+                    .submit_intent_for_chain(
+                        (**intent).clone(),
+                        policy,
+                        ctx.chain_id,
+                        state.current_block_height,
+                    )
+                    .map_err(SettlementTxError::Refused)?
+            } else {
+                state
+                    .settlement
+                    .relayer_policy
+                    .submit_intent((**intent).clone(), policy, state.current_block_height)
+                    .map_err(SettlementTxError::Refused)?
+            };
             state
                 .settlement
                 .relayer_policy

@@ -16,9 +16,9 @@
 //! multiplications of its own: it stitches each node's padded input directly
 //! from its children's proven chip outputs and checks the bound STARK proofs.
 //!
-//! WIRING: unwired - the Phase 3 `StarkBackend` invokes `prove_tick_chips` and
-//! `verify_tick_chips` for production tick proofs; until Phase 3 lands,
-//! `benches/agg_tick_steps` and `src/aggregation/tests/programs.rs` drive them.
+//! WIRING: unwired - Phase 3 `StarkBackend` entry point, not yet wired in the node.
+//! Once Phase 3 lands it invokes `prove_tick_chips` and `verify_tick_chips`;
+//! until then `benches/agg_tick_steps` and `src/aggregation/tests/programs.rs` drive them.
 
 use bud_proof::chips::batch::{pad_rate_blocks, RATE_BYTES};
 use bud_proof::chips::keccak::{

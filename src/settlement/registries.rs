@@ -13,7 +13,9 @@
 //! [`SettlementRegistries::root`].
 //! Each registry joins in the change that gives it a transaction door.
 
+use crate::aggregation::domain_finality::ClaimedDomainFinalityAdapter;
 use crate::core::hash::hash_fields_bytes;
+use crate::cross_domain::event_bus::UniversalEventBus;
 use crate::cross_domain::external::IntakeState;
 use crate::cross_domain::UniversalRelayer;
 use crate::domain::{ConsensusDomainRegistry, DomainCommitmentRegistry, SovereignDomainRegistry};
@@ -82,6 +84,18 @@ pub struct SettlementRegistries {
     /// Empty: absent from the serialization and from the root.
     #[serde(default, skip_serializing_if = "ObjectLayerRegistry::is_empty")]
     pub object_layer: ObjectLayerRegistry,
+    /// Universal cross-domain event bus: subscriptions and exactly-once
+    /// callback delivery tracking. Empty: absent from serialization and root.
+    #[serde(default, skip_serializing_if = "UniversalEventBus::is_empty")]
+    pub event_bus: UniversalEventBus,
+    /// Verified Phase 4 `Claim::Prog` domain-transition finality adapter backing
+    /// proven rows in [`Self::universal_finality_certificate`].
+    /// Empty: absent from the serialization and from the root.
+    #[serde(
+        default,
+        skip_serializing_if = "ClaimedDomainFinalityAdapter::is_empty"
+    )]
+    pub claimed_domain_finality: ClaimedDomainFinalityAdapter,
 }
 
 impl SettlementRegistries {
@@ -109,6 +123,8 @@ impl SettlementRegistries {
             && self.shared_security.is_empty()
             && self.quantum.is_empty()
             && self.object_layer.is_empty()
+            && self.event_bus.is_empty()
+            && self.claimed_domain_finality.is_empty()
     }
 
     /// True when the external intake holds any record - including governance-
@@ -218,6 +234,18 @@ impl SettlementRegistries {
             fields.push(b"BDLM_OBJECT_LAYER_V1");
             fields.push(&object_layer);
         }
+        // The universal event bus joins only once it holds a subscription or
+        // delivery, keeping pinned roots unchanged on unused chains.
+        let event_bus = self.event_bus.root();
+        if !self.event_bus.is_empty() {
+            fields.push(b"BDLM_UNIVERSAL_EVENT_BUS_V1");
+            fields.push(&event_bus);
+        }
+        let claimed_domain_finality = self.claimed_domain_finality.root();
+        if !self.claimed_domain_finality.is_empty() {
+            fields.push(b"BDLM_CLAIMED_DOMAIN_FINALITY_V1");
+            fields.push(&claimed_domain_finality);
+        }
         hash_fields_bytes(&fields)
     }
 
@@ -268,7 +296,7 @@ impl SettlementRegistries {
                 self.domains.observed(domain.id).quantum_class(),
                 Some(QuantumClass::Lattice | QuantumClass::Hash)
             );
-            let guarantee = FinalityGuarantee::for_domain(&domain, pq_attested);
+            let base_guarantee = FinalityGuarantee::for_domain(&domain, pq_attested);
             let latest_commitment =
                 if domain.last_committed_height > 0 && domain.last_committed_hash != [0u8; 32] {
                     all_commitments.iter().find(|c| {
@@ -279,6 +307,11 @@ impl SettlementRegistries {
                 } else {
                     None
                 };
+            let guarantee = self.claimed_domain_finality.certify_guarantee_for_domain(
+                &domain,
+                latest_commitment,
+                base_guarantee,
+            );
             let (state_root, finality_proof_hash) = latest_commitment
                 .map_or(([0u8; 32], [0u8; 32]), |c| {
                     (c.state_root, c.finality_proof_hash)

@@ -222,6 +222,8 @@ pub enum RegistryError {
         account: Address,
         role: RoleId,
     },
+    /// The zero address cannot register a role bond.
+    ZeroAddress,
 }
 
 impl std::fmt::Display for RegistryError {
@@ -259,6 +261,9 @@ impl std::fmt::Display for RegistryError {
             }
             Self::StakeOverflow { account, role } => {
                 write!(f, "stake of {account} as {role} would overflow")
+            }
+            Self::ZeroAddress => {
+                write!(f, "zero address cannot register a role bond")
             }
         }
     }
@@ -387,10 +392,11 @@ fn permissionless_member_key(role: RoleId, account: Address) -> String {
     )
 }
 
-const fn permissionless_offence_window(
+fn permissionless_offence_window(
     proof: &crate::registry::evidence::SlashingProof,
 ) -> Option<(u8, u64, u64)> {
     use crate::registry::evidence::SlashingProof;
+    use sha2::{Digest, Sha256};
     match proof {
         SlashingProof::Liveness {
             window_start_epoch,
@@ -399,7 +405,20 @@ const fn permissionless_offence_window(
         } => Some((1, *window_start_epoch, *window_end_epoch)),
         SlashingProof::DoubleSign { height, .. } => Some((2, *height, *height)),
         SlashingProof::InvalidSignatureSpam { epoch, .. } => Some((3, *epoch, *epoch)),
-        SlashingProof::Other { .. } => None,
+        SlashingProof::Other { tag, data } => {
+            let mut hasher = Sha256::new();
+            hasher.update(b"BDLM_SLASH_OTHER_V1");
+            hasher.update((tag.len() as u64).to_le_bytes());
+            hasher.update(tag.as_bytes());
+            hasher.update((data.len() as u64).to_le_bytes());
+            hasher.update(data);
+            let digest = hasher.finalize();
+            let mut hi = [0u8; 8];
+            let mut lo = [0u8; 8];
+            hi.copy_from_slice(&digest[0..8]);
+            lo.copy_from_slice(&digest[8..16]);
+            Some((4, u64::from_le_bytes(hi), u64::from_le_bytes(lo)))
+        }
     }
 }
 
@@ -415,8 +434,10 @@ pub struct SlashingRecord {
 
 mod registrations_as_seq {
     use super::{Address, Registration, RoleId};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;
+
+    const MAX_DESER_REGISTRATIONS: usize = 1_000_000;
 
     pub fn serialize<S>(
         map: &BTreeMap<(RoleId, Address), Registration>,
@@ -436,10 +457,21 @@ mod registrations_as_seq {
         D: Deserializer<'de>,
     {
         let entries = Vec::<Registration>::deserialize(deserializer)?;
-        Ok(entries
-            .into_iter()
-            .map(|r| ((r.role, r.account), r))
-            .collect())
+        if entries.len() > MAX_DESER_REGISTRATIONS {
+            return Err(de::Error::custom(
+                "registration table exceeds deserialization safety cap",
+            ));
+        }
+        let mut map = BTreeMap::new();
+        for r in entries {
+            let key = (r.role, r.account);
+            if map.insert(key, r).is_some() {
+                return Err(de::Error::custom(
+                    "duplicate registration entry for (role, account)",
+                ));
+            }
+        }
+        Ok(map)
     }
 }
 
@@ -491,6 +523,9 @@ impl PermissionlessRegistry {
         stake: u64,
         current_epoch: u64,
     ) -> Result<(), RegistryError> {
+        if account == Address::zero() {
+            return Err(RegistryError::ZeroAddress);
+        }
         if stake < self.params.min_stake {
             return Err(RegistryError::InsufficientStake {
                 required: self.params.min_stake,
@@ -694,6 +729,9 @@ impl PermissionlessRegistry {
         total_stake: u64,
         current_epoch: u64,
     ) {
+        if account == Address::zero() {
+            return;
+        }
         let key = (role, account);
         let unbonding_epochs = self.params.unbonding_epochs;
         match self.registrations.get_mut(&key) {

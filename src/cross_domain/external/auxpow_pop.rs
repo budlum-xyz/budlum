@@ -1365,6 +1365,12 @@ impl ExternalFinalityAdapter for AuxPowPopAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned.as_ref().is_some_and(|p| {
+            p.aux_chain_id >= 1 && p.trusted_parent_hash != [0u8; 32] && p.min_confirmations >= 1
+        })
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,
