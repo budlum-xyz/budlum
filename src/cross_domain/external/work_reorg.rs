@@ -383,7 +383,11 @@ mod tests {
     use crate::cross_domain::external::{
         execute_external_domain_tx, ExternalDomainTx, ExternalDomainTxContext,
         ExternalDomainTxError, ObjectiveFaultProof, RegistrationRequest, VersionPolicy,
+        EXTERNAL_DOMAIN_FINALITY_ADAPTER,
     };
+    use crate::domain::{default_domain, ConsensusDomain, ConsensusKind, DomainCommitment};
+    use crate::settlement::finality_gate::{enforce_domain_not_refuted, ValueGate};
+    use crate::settlement::universal_finality::FinalityVerdict;
 
     type Header = [u8; HEADER_LEN];
 
@@ -517,6 +521,50 @@ mod tests {
             attested_tail: attested[common..].concat(),
             witness_tail: witness[common..].concat(),
         }
+    }
+
+    /// A bridge-enabled consensus domain whose finality the external
+    /// registration under `key` supplies.
+    fn bound_domain(id: u32, key: &DomainKey) -> ConsensusDomain {
+        let mut domain = default_domain(
+            id,
+            ConsensusKind::Custom("bitcoin-spv".to_string()),
+            45_262,
+            EXTERNAL_DOMAIN_FINALITY_ADAPTER,
+            1,
+        );
+        domain.config_hash = *key.as_bytes();
+        domain
+    }
+
+    /// What `bud_getExternalDomainProfile` answers for `key` on a node whose
+    /// external intake is `intake`.
+    async fn profile_read(intake: IntakeState, key: &DomainKey) -> serde_json::Value {
+        use crate::chain::blockchain::Blockchain;
+        use crate::chain::chain_actor::ChainActor;
+        use crate::consensus::pow::PoWEngine;
+        use crate::network::node::Node;
+        use crate::rpc::api::BudlumApiServer;
+        use crate::rpc::server::{RpcMode, RpcSecurityConfig, RpcServer};
+
+        let mut blockchain =
+            Blockchain::new(std::sync::Arc::new(PoWEngine::new(0)), None, 45_262, None);
+        blockchain.state.settlement.external_intake = intake;
+        let (actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move { Box::pin(actor.run()).await });
+        let client = Node::new(chain.clone())
+            .expect("node initialization")
+            .get_client();
+        let server = RpcServer::with_security_and_mode(
+            chain,
+            client,
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Operator,
+        );
+        let key_hex = format!("0x{}", hex::encode(key.as_bytes()));
+        Box::pin(server.get_external_domain_profile(key_hex))
+            .await
+            .expect("the profile of a registered domain is served")
     }
 
     fn carrier_live_atoms(state: &IntakeState, key: &DomainKey) -> u128 {
@@ -996,6 +1044,183 @@ mod tests {
             "readmission does not bring the withdrawn claim back"
         );
         assert_carrier_was_not_charged(intake, &key, live_before);
+    }
+
+    /// A frozen registration carries no value through the settlement gates.
+    /// A consensus domain bound to the external framework is closed to value
+    /// today whether it is frozen or not: its certificate row never reaches
+    /// `Established`. This pins the half of that which has to outlive the day
+    /// such a domain is given a value-bearing row: once a work witness has
+    /// frozen the registration, the row is not `Established` and neither
+    /// bridge gate lets the domain through.
+    #[test]
+    fn a_domain_a_work_witness_froze_moves_no_value_through_the_settlement_gates() {
+        const CHECKPOINT: u64 = 1_000;
+        let accepted = fork(5, 1, b"carrier-tip");
+        let rival = fork(5, 7, b"rival-tip");
+        let (intake, key) = book(&[&accepted]);
+        let mut state = AccountState::new();
+        state.settlement.external_intake = intake;
+        let mut domain = bound_domain(77, &key);
+        domain.last_committed_height = 906;
+        domain.last_committed_hash = [0xcc; 32];
+        state
+            .settlement
+            .commitments
+            .insert(DomainCommitment {
+                domain_id: domain.id,
+                domain_height: 906,
+                domain_block_hash: [0xcc; 32],
+                parent_domain_block_hash: [0xcb; 32],
+                state_root: [0xdd; 32],
+                tx_root: [0xd1; 32],
+                event_root: [0xd2; 32],
+                finality_proof_hash: [0xd3; 32],
+                consensus_kind: domain.kind.clone(),
+                validator_set_hash: [0; 32],
+                timestamp_ms: 1_000,
+                sequence: 1,
+                producer: None,
+                state_updates: std::collections::BTreeMap::new(),
+            })
+            .expect("the commitment is recorded");
+        state
+            .settlement
+            .domains
+            .register(domain)
+            .expect("the bound domain registers");
+
+        state
+            .settlement
+            .external_intake
+            .adjudicate_work_reorg(&key, &witness_for(906, 5, &accepted, &rival), NOW)
+            .expect("the work witness freezes the registration");
+
+        let certificate = state
+            .settlement
+            .universal_finality_certificate(CHECKPOINT)
+            .expect("a certificate is derived");
+        let row = certificate
+            .prove_domain(77)
+            .expect("the bound domain has a row");
+        assert_ne!(row.entry.verdict, FinalityVerdict::Established);
+        for gate in [ValueGate::BridgeMint, ValueGate::BridgeUnlock] {
+            enforce_domain_not_refuted(&state.settlement, CHECKPOINT, gate, 77)
+                .expect_err("a frozen registration moves no value");
+        }
+    }
+
+    /// Value in flight toward a domain that freezes is not stranded. A bridge
+    /// lock names its own expiry, and the block sweep that honours it does
+    /// not ask about the target domain: the owner is made whole on the source
+    /// side at that height, frozen registration or not.
+    #[test]
+    fn value_locked_toward_a_domain_that_froze_returns_to_its_owner_at_expiry() {
+        use crate::chain::blockchain::Blockchain;
+        use crate::consensus::pow::PoWEngine;
+        use crate::cross_domain::AssetId;
+
+        const EXPIRY: u64 = 1_000;
+        const LOCKED: u64 = 100;
+        let accepted = fork(5, 1, b"carrier-tip");
+        let rival = fork(5, 7, b"rival-tip");
+        let (intake, key) = book(&[&accepted]);
+        let mut bc = Blockchain::new(std::sync::Arc::new(PoWEngine::new(0)), None, 45_262, None);
+        bc.state.settlement.external_intake = intake;
+
+        let mut source = default_domain(1, ConsensusKind::PoW, 45_262, "pow-header-chain-v1", 1);
+        source.operator = Some(Address::from([11; 32]));
+        source.operator_bond = 100_000;
+        bc.register_consensus_domain(source)
+            .expect("the source domain registers");
+        bc.state
+            .settlement
+            .domains
+            .register(bound_domain(2, &key))
+            .expect("the bound domain registers");
+        let asset = AssetId([42; 32]);
+        bc.register_bridge_asset(asset, 1)
+            .expect("the asset registers on its home domain");
+
+        let owner = Address::from([21; 32]);
+        let recipient = Address::from([22; 32]);
+        bc.state.add_balance(&owner, 1_000_000);
+        let funded = bc.state.get_balance(&owner);
+        bc.lock_bridge_transfer(1, 2, 20, 0, asset, owner, recipient, LOCKED, EXPIRY)
+            .expect("the lock opens toward the bound domain");
+        assert_eq!(bc.state.get_balance(&owner), funded - LOCKED);
+
+        bc.state
+            .settlement
+            .external_intake
+            .adjudicate_work_reorg(&key, &witness_for(906, 5, &accepted, &rival), NOW)
+            .expect("the work witness freezes the registration");
+        let registration = bc
+            .state
+            .settlement
+            .external_intake
+            .registry
+            .domain(&key)
+            .expect("domain stays registered");
+        assert_eq!(registration.record.state, DomainState::Faulted);
+
+        assert!(
+            bc.apply_bridge_sweep(EXPIRY - 1).is_empty(),
+            "the lock is held until its own expiry"
+        );
+        assert_eq!(bc.state.get_balance(&owner), funded - LOCKED);
+        let released = bc.apply_bridge_sweep(EXPIRY);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].0, owner);
+        assert_eq!(released[0].1.get(), LOCKED);
+        assert_eq!(bc.state.get_balance(&owner), funded);
+        assert_eq!(bc.state.bridge_state.locked_amount_total(), 0);
+    }
+
+    /// What a reader is told about a frozen domain. The profile read derives
+    /// the guarantee it reports from the backing of the last accepted
+    /// attestation. A work witness withdraws that attestation, so once the
+    /// domain is frozen the read reports no fault tolerance and no attested
+    /// root, while the record of what was once checked stays in the profile.
+    #[tokio::test]
+    async fn a_domain_a_work_witness_froze_reads_as_backed_by_nothing() {
+        use crate::cross_domain::external::spec::SecurityBacking;
+
+        let accepted = fork(5, 1, b"carrier-tip");
+        let rival = fork(5, 7, b"rival-tip");
+        let (mut serving, key) = book(&[&accepted]);
+        // Regtest work sits below the floor a value-grade work claim needs,
+        // so the fixture is given the backing a main-network attestation
+        // carries.
+        serving
+            .registry
+            .domain_mut(&key)
+            .expect("domain is registered")
+            .record
+            .last_backing = Some(SecurityBacking::Work {
+            difficulty_bits: 80,
+        });
+        let mut frozen = serving.clone();
+        frozen
+            .adjudicate_work_reorg(&key, &witness_for(906, 5, &accepted, &rival), NOW)
+            .expect("the work witness freezes the domain");
+
+        let before = profile_read(serving, &key).await;
+        let after = profile_read(frozen, &key).await;
+        let zero = serde_json::json!(0);
+
+        assert_eq!(before["profile"]["state"], "Active");
+        assert_ne!(before["universalFinality"]["fault_tolerance_bps"], zero);
+        assert_eq!(before["universalFinality"]["attestation"]["tx_root"], true);
+
+        assert_eq!(after["profile"]["state"], "Faulted");
+        assert!(
+            after["profile"]["last_backing"].is_object(),
+            "the record of the withdrawn claim's backing is kept"
+        );
+        assert_eq!(after["universalFinality"]["fault_tolerance_bps"], zero);
+        assert_eq!(after["universalFinality"]["attestation"]["tx_root"], false);
+        assert_eq!(after["valueOutflowOpen"], false);
     }
 
     #[test]

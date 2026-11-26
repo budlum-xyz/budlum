@@ -167,6 +167,26 @@ impl DomainProfile {
         )
     }
 
+    /// The backing a reader can still hold this domain to: the backing of
+    /// its last accepted attestation while the domain serves, and none once
+    /// it is frozen, isolated or retired. A domain that does not serve takes
+    /// no new attestation, and the one `last_backing` remembers may be the
+    /// very claim a contradiction or a work witness withdrew. `last_backing`
+    /// stays what it is, a record of what was once checked; this is the part
+    /// of it that is still in force.
+    ///
+    /// WIRING: wired - `bud_getExternalDomainProfile` derives the guarantee
+    /// and the value-outflow answer it reports from this, not from
+    /// `last_backing`.
+    #[must_use]
+    pub const fn backing_in_force(&self) -> Option<&SecurityBacking> {
+        if self.state.serves() {
+            self.last_backing.as_ref()
+        } else {
+            None
+        }
+    }
+
     /// How stale this domain is, in Budlum heights. `None` if it has never
     /// produced an attestation - which is a different fact from "very stale",
     /// and is reported separately rather than as a large number.
@@ -301,5 +321,54 @@ mod tests {
                 .into_boxed_str(),
         );
         assert!(serde_json::from_str::<DomainProfile>(wrong_unit).is_err());
+    }
+
+    /// A profile in `state` whose last accepted attestation carried work.
+    fn attested(state: DomainState) -> DomainProfile {
+        DomainProfile {
+            domain: DomainKey::from_parts(&AdapterId::from_name("btc"), "mainnet"),
+            state,
+            consensus_kind: String::from("nakamoto-pow"),
+            finality_kind: FinalityKind::Probabilistic,
+            required_depth: 6,
+            trust_model: TrustModel::Trustless,
+            accepted_evidence_versions: vec![1],
+            evidence_forks: 0,
+            bond_atoms: 500,
+            bond_unit: BOND_UNIT,
+            bond_posters: 1,
+            attestations_accepted: 1,
+            attestations_refused: 0,
+            last_accepted_height: Some(840_006),
+            last_verified_at: Some(8),
+            last_backing: Some(SecurityBacking::Work {
+                difficulty_bits: 80,
+            }),
+            history: Vec::new(),
+            crypto_facts: CryptoFacts::new(),
+            quantum_class: None,
+        }
+    }
+
+    /// `last_backing` is a record of what was once checked and survives a
+    /// freeze. What a reader may still rely on does not: only a serving
+    /// domain keeps a backing in force.
+    #[test]
+    fn only_a_serving_domain_keeps_a_backing_in_force() {
+        for serving in [DomainState::Admitted, DomainState::Active] {
+            let profile = attested(serving);
+            assert_eq!(profile.backing_in_force(), profile.last_backing.as_ref());
+            assert!(profile.backing_in_force().is_some());
+        }
+        for not_serving in [
+            DomainState::Faulted,
+            DomainState::QuantumIsolated,
+            DomainState::Retired,
+            DomainState::Registered,
+        ] {
+            let profile = attested(not_serving);
+            assert!(profile.last_backing.is_some(), "the record is kept");
+            assert_eq!(profile.backing_in_force(), None, "{not_serving:?}");
+        }
     }
 }
