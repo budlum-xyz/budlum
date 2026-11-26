@@ -171,7 +171,7 @@ impl PoAWhitelist {
 /// The onboarding lifecycle manager for a set of `PoA` domains. Owns the
 /// Underlying [`PoaMembershipRegistry`] plus the compliance layer
 /// (audit trail + KYC expiry tracking).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PoAOnboarding {
     registry: PoaMembershipRegistry,
     audit: Vec<OnboardingEvent>,
@@ -184,10 +184,92 @@ pub struct PoAOnboarding {
     logged_expiry: BTreeSet<(DomainId, Address)>,
 }
 
+#[derive(Deserialize)]
+struct PoAOnboardingWire {
+    registry: PoaMembershipRegistry,
+    audit: Vec<OnboardingEvent>,
+    #[serde(with = "crate::core::map_keys")]
+    kyc_expiry: BTreeMap<(DomainId, Address), u64>,
+    logged_expiry: BTreeSet<(DomainId, Address)>,
+}
+
+impl<'de> Deserialize<'de> for PoAOnboarding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = PoAOnboardingWire::deserialize(deserializer)?;
+        let candidate = Self {
+            registry: wire.registry,
+            audit: wire.audit,
+            kyc_expiry: wire.kyc_expiry,
+            logged_expiry: wire.logged_expiry,
+        };
+        candidate.validate().map_err(serde::de::Error::custom)?;
+        Ok(candidate)
+    }
+}
+
 impl PoAOnboarding {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.audit.len() > MAX_POA_ONBOARDING_AUDIT_EVENTS {
+            return Err("PoA onboarding audit log exceeds capacity");
+        }
+        for ((domain, account), &expiry) in &self.kyc_expiry {
+            if *account == Address::zero() {
+                return Err("PoA KYC expiry cannot name the zero address");
+            }
+            if expiry == 0 || expiry == u64::MAX {
+                return Err("PoA KYC expiry block must be finite and non-zero");
+            }
+            let Some(member) = self.registry.get(*domain, account) else {
+                return Err("PoA KYC expiry entry references an unknown member");
+            };
+            if !member.is_authorized() {
+                return Err("PoA KYC expiry entry references a non-approved member");
+            }
+        }
+        for (domain, account) in &self.logged_expiry {
+            if *account == Address::zero() {
+                return Err("PoA logged expiry cannot name the zero address");
+            }
+            if self.registry.get(*domain, account).is_none() {
+                return Err("PoA logged expiry entry references an unknown member");
+            }
+        }
+        for ev in &self.audit {
+            match &ev.decision {
+                OnboardingDecision::Rejected { reason, .. }
+                | OnboardingDecision::Revoked { reason, .. } => {
+                    if reason.trim().is_empty() || reason.len() > MAX_POA_DECISION_REASON_BYTES {
+                        return Err("PoA onboarding decision reason violates byte bounds");
+                    }
+                }
+                OnboardingDecision::Submitted { kyc_commitment, .. } => {
+                    if *kyc_commitment == [0u8; 32] {
+                        return Err("PoA onboarding audit records zero KYC commitment");
+                    }
+                }
+                OnboardingDecision::Approved {
+                    kyc_expiry_block, ..
+                }
+                | OnboardingDecision::RenewedKyc {
+                    new_expiry_block: kyc_expiry_block,
+                    ..
+                } => {
+                    if *kyc_expiry_block == 0 || *kyc_expiry_block == u64::MAX {
+                        return Err("PoA onboarding audit records invalid expiry horizon");
+                    }
+                }
+                OnboardingDecision::KycExpired { .. } => {}
+            }
+        }
+        Ok(())
     }
 
     /// Borrow the underlying registry (e.g. for `is_admin`, `get`).
@@ -376,6 +458,7 @@ impl PoAOnboarding {
         }
         self.registry.revoke(domain, admin, applicant)?;
         self.kyc_expiry.remove(&(domain, applicant));
+        self.logged_expiry.remove(&(domain, applicant));
         self.push_audit(OnboardingEvent {
             domain,
             at_block,
@@ -719,6 +802,11 @@ pub fn execute_poa_onboarding_tx(
                     domain,
                 });
             }
+            if !state.registry.can_add_admin(domain, &admin) {
+                return Err(PoaMembershipError::InvalidTransition {
+                    from: MembershipStatus::Approved,
+                });
+            }
             state.add_admin(domain, admin);
             Ok(())
         }
@@ -1013,5 +1101,106 @@ mod tests {
         // renew_kyc must not stealth-shorten an active member's existing horizon (510 -> 110).
         assert!(poa.renew_kyc(7, admin, m2, kyc(3), 10, 100).is_err());
         assert_eq!(poa.whitelist(7, 12).kyc_expiry_of(&m2), Some(510));
+    }
+
+    #[test]
+    fn add_admin_tx_enforces_per_domain_admin_ceiling_and_revoke_clears_logged_expiry() {
+        let mut poa = PoAOnboarding::new();
+        let founder = addr(0xF0);
+        poa.add_admin(5, founder);
+
+        for idx in 1u8..64u8 {
+            execute_poa_onboarding_tx(
+                &mut poa,
+                &founder,
+                PoAOnboardingTx::AddAdmin {
+                    domain: 5,
+                    admin: addr(idx),
+                },
+                1,
+            )
+            .expect("within 64-admin per-domain ceiling");
+        }
+        assert_eq!(poa.admin_count(), 64);
+
+        let root_at_cap = poa.root();
+        let overflow_admin = addr(0xEE);
+        let overflow = execute_poa_onboarding_tx(
+            &mut poa,
+            &founder,
+            PoAOnboardingTx::AddAdmin {
+                domain: 5,
+                admin: overflow_admin,
+            },
+            2,
+        );
+        assert!(
+            overflow.is_err(),
+            "65th distinct admin in a single PoA domain must be refused"
+        );
+        assert_eq!(poa.admin_count(), 64);
+        assert_eq!(poa.root(), root_at_cap);
+
+        // Another PoA domain still has its own independent admin capacity.
+        poa.add_admin(6, founder);
+        assert!(poa.registry().is_admin(6, &founder));
+
+        // Revoking an expired member must clear its `logged_expiry` entry so no
+        // stranded offboarded key lingers in consensus state.
+        let applicant = addr(0xAA);
+        poa.submit_application(5, applicant, kyc(4), 10).unwrap();
+        poa.approve(5, founder, applicant, 10, 5).unwrap();
+        assert!(!poa.whitelist(5, 16).contains(&applicant));
+        assert!(poa.logged_expiry.contains(&(5, applicant)));
+
+        poa.revoke(5, founder, applicant, 17, "offboarded after expiry")
+            .unwrap();
+        assert!(
+            !poa.logged_expiry.contains(&(5, applicant)),
+            "revoking an expired member must remove its logged_expiry marker"
+        );
+    }
+
+    #[test]
+    fn onboarding_deserialization_refuses_orphan_or_unbounded_expiry_state() {
+        let mut honest = PoAOnboarding::new();
+        let admin = addr(0x11);
+        let member = addr(0x22);
+        honest.add_admin(3, admin);
+        honest.submit_application(3, member, kyc(7), 1).unwrap();
+        honest.approve(3, admin, member, 2, 100).unwrap();
+
+        let honest_json = serde_json::to_string(&honest).unwrap();
+        let restored: PoAOnboarding = serde_json::from_str(&honest_json).unwrap();
+        assert_eq!(restored.root(), honest.root());
+        let bincode_bytes = bincode::serialize(&honest).unwrap();
+        let bincode_rt: PoAOnboarding = bincode::deserialize(&bincode_bytes).unwrap();
+        assert_eq!(bincode_rt.root(), honest.root());
+
+        // `u64::MAX` in `kyc_expiry` creates an unexpirable dossier that `compute_expiry` forbids.
+        let exp_key = format!("3:{}", hex::encode(member.as_bytes()));
+        let mut max_exp_val: serde_json::Value = serde_json::from_str(&honest_json).unwrap();
+        max_exp_val
+            .get_mut("kyc_expiry")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .insert(exp_key, serde_json::json!(u64::MAX));
+        assert!(
+            serde_json::from_value::<PoAOnboarding>(max_exp_val).is_err(),
+            "deserialization must refuse u64::MAX KYC expiry horizons"
+        );
+
+        // Orphan `kyc_expiry` entry for an unknown account not in `registry.members`.
+        let ghost_key = format!("3:{}", hex::encode(addr(0x99).as_bytes()));
+        let mut orphan_val: serde_json::Value = serde_json::from_str(&honest_json).unwrap();
+        orphan_val
+            .get_mut("kyc_expiry")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .insert(ghost_key, serde_json::json!(500u64));
+        assert!(
+            serde_json::from_value::<PoAOnboarding>(orphan_val).is_err(),
+            "deserialization must refuse orphan kyc_expiry entries without an Approved member"
+        );
     }
 }
