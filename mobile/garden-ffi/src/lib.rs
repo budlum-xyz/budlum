@@ -142,37 +142,6 @@ impl GardenPhone {
         )
     }
 
-    /// The address this phone answers at on the network it is on.
-    ///
-    /// Asked of the routing table rather than of a list of interfaces: a
-    /// phone has several, most of them useless here, and the one that
-    /// would carry a packet to a neighbour is the one an invite should
-    /// name. Nothing is sent - a connected UDP socket only fixes the
-    /// route, which is all that is being asked.
-    fn address_on_this_network() -> Option<String> {
-        use std::net::{IpAddr, Ipv4Addr, UdpSocket};
-        // TEST-NET-2, which is not routed anywhere. The question is which
-        // interface a packet would leave by, not whether it arrives.
-        for target in [Ipv4Addr::new(198, 51, 100, 1), Ipv4Addr::new(192, 168, 1, 1)] {
-            let probe = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
-                Ok(probe) => probe,
-                Err(_) => continue,
-            };
-            if probe.connect((target, 9)).is_err() {
-                continue;
-            }
-            match probe.local_addr().map(|local| local.ip()) {
-                Ok(IpAddr::V4(ip))
-                    if !ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local() =>
-                {
-                    return Some(format!("/ip4/{ip}/tcp/0"));
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
     /// The invite record to hand out, with its QR content.
     ///
     /// This is the Invite screen of section 2.5: the link, the QR and
@@ -281,6 +250,37 @@ impl GardenPhone {
 impl GardenPhone {
     /// The listen address a phone uses: every interface, a port the system
     /// picks. A phone moves between networks and cannot be told a port.
+    /// The address this phone answers at on the network it is on.
+    ///
+    /// Asked of the routing table rather than of a list of interfaces: a
+    /// phone has several, most of them useless here, and the one that
+    /// would carry a packet to a neighbour is the one an invite should
+    /// name. Nothing is sent - a connected UDP socket only fixes the
+    /// route, which is all that is being asked.
+    fn address_on_this_network() -> Option<String> {
+        use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+        // TEST-NET-2, which is not routed anywhere. The question is which
+        // interface a packet would leave by, not whether it arrives.
+        for target in [Ipv4Addr::new(198, 51, 100, 1), Ipv4Addr::new(192, 168, 1, 1)] {
+            let probe = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
+                Ok(probe) => probe,
+                Err(_) => continue,
+            };
+            if probe.connect((target, 9)).is_err() {
+                continue;
+            }
+            match probe.local_addr().map(|local| local.ip()) {
+                Ok(IpAddr::V4(ip))
+                    if !ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local() =>
+                {
+                    return Some(format!("/ip4/{ip}/tcp/0"));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn options() -> GardenOptions {
         serde_json::from_value(serde_json::json!({ "listen": "/ip4/0.0.0.0/tcp/0" }))
             .unwrap_or_default()
