@@ -40,7 +40,8 @@
 //!    commitments signed by the same validator for the same `(genesis_hash,
 //!    committee_epoch, acs_epoch, proposer_index)`.
 //!
-//! WIRING: unwired - implements `ExternalFinalityAdapter` for `ExternalDomainRegistry`, verified by `selftest::admit_observed`; `AdapterSpec` joins `intake.rs` in the follow-up merge.
+//! WIRING: built by [`NetworkCatalog::with_builtin_families`](super::unified::NetworkCatalog::with_builtin_families)
+//! as the HoneyBadger family and reached through `bud_unifiedNetworks` and `bud_unifiedSelftest`.
 
 use std::collections::BTreeSet;
 

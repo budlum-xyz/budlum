@@ -25,7 +25,8 @@
 //!    finality (`FinalityKind::EconomicFinality`) and report both verified
 //!    signature schemes to the caller's [`CryptoObserver`].
 //!
-//! WIRING: unwired - external Symbiotic curated-vault adapter awaits `AdapterSpec`
+//! WIRING: built by [`NetworkCatalog::with_builtin_families`](super::unified::NetworkCatalog::with_builtin_families)
+//! as the Symbiotic family and reached through `bud_unifiedNetworks` and `bud_unifiedSelftest`.
 //! variant binding in `external_tx` domain intake.
 
 use std::collections::BTreeSet;

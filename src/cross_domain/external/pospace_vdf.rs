@@ -36,7 +36,8 @@
 //!    farmer or timelord signing two distinct block hashes at the exact same
 //!    `(network, sub_slot, signage_index)` for permissionless slashing.
 //!
-//! WIRING: unwired - implements [`ExternalFinalityAdapter`] for
+//! WIRING: built by [`NetworkCatalog::with_builtin_families`](super::unified::NetworkCatalog::with_builtin_families)
+//! as the PoSpace family and reached through `bud_unifiedNetworks` and `bud_unifiedSelftest`.
 //! [`super::ExternalDomainRegistry`], verified by [`super::selftest::admit`];
 //! `AdapterSpec` variant joins `intake.rs` in the follow-up intake merge.
 

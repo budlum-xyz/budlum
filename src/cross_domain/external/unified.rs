@@ -62,6 +62,10 @@ use super::ExternalFinalityAdapter;
 /// A family is not a chain. `bitcoin-spv-mainnet` and `bitcoin-spv-testnet`
 /// are two entries of the same family, and the family name is what a caller
 /// groups by.
+///
+/// WIRING: built by [`NetworkCatalog::families`] and rendered by the
+/// `bud_unifiedNetworks` RPC, which is how a wallet asks one chain's
+/// neighbours and depth without reading thirty descriptors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkFamily {
     /// The adapter name the descriptor carries, for example `bitcoin-spv`.
@@ -189,7 +193,7 @@ impl NetworkCatalog {
         self.adapters.len()
     }
 
-    /// Whether the catalog holds nothing.
+    /// Whether the catalog registered no adapter at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.adapters.is_empty()

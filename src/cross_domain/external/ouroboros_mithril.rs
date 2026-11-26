@@ -2,7 +2,8 @@
 //! finality is a stake lottery plus a threshold certificate, and whose
 //! certificate is what a light client can actually check.
 //!
-//! WIRING: unwired - this adapter is admitted by `super::selftest::admit` and
+//! WIRING: built by [`NetworkCatalog::with_builtin_families`](super::unified::NetworkCatalog::with_builtin_families)
+//! as the Ouroboros family and reached through `bud_unifiedNetworks` and `bud_unifiedSelftest`.
 //!   reached through `super::registry::ExternalDomainRegistry` once a
 //!   registration names `ouroboros_mithril::praos_adapter_id`; the dispatch
 //!   table that maps an incoming envelope to an adapter is `super::intake`'s,

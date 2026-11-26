@@ -3580,9 +3580,29 @@ impl BudlumApiServer for RpcServer {
                 })
             })
             .collect();
+        // The descriptor of every adapter travels with the family digest so a
+        // client can read one adapter's contract without a second round trip.
+        let descriptors: Vec<serde_json::Value> = catalog
+            .descriptors()
+            .into_iter()
+            .map(|d| {
+                serde_json::json!({
+                    "id": hex::encode(d.id.as_bytes()),
+                    "name": d.name,
+                    "adapterVersion": d.adapter_version,
+                    "acceptedEvidenceVersions": d.accepted_evidence_versions,
+                    "consensusKind": d.consensus_kind,
+                    "finalityKind": d.finality_kind,
+                    "requiredDepth": d.required_depth,
+                    "timeUnit": d.time_unit,
+                    "trustModel": d.trust_model,
+                })
+            })
+            .collect();
         Ok(serde_json::json!({
             "adapters": catalog.len(),
             "families": families,
+            "descriptors": descriptors,
             "refused": catalog.refused(),
         }))
     }

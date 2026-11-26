@@ -1,14 +1,14 @@
-//! WIRING: unwired - external 2-of-3 multi-prover adapter awaits `AdapterSpec` variant registration in `external_tx`.
+//! WIRING: built by [`NetworkCatalog::with_builtin_families`](super::unified::NetworkCatalog::with_builtin_families)
+//! as the multi-prover family and reached through `bud_unifiedNetworks` and `bud_unifiedSelftest`.
 //!
 //! Endgame `2-of-3` Heterogeneous Multi-Prover external finality adapter
 //! (`multiprover-2of3-v1`).
 //!
-//! WIRING: unwired - the 2-of-3 agreement check is re-exported by
-//! `crate::cross_domain::external` but no production path constructs the
-//! adapter yet: a multi-prover quorum is only meaningful once the individual
-//! prover registries it combines are themselves pinned by intake, and
-//! accepting a quorum over unpinned provers would weaken every domain it
-//! aggregates. Until then this module's test suite is its only caller.
+//! Pinning: a multi-prover quorum is meaningful only once the individual
+//! prover registries it combines are themselves pinned by intake. The catalog
+//! constructs the adapter so its descriptor and self-test are reachable, and a
+//! quorum over unpinned provers is still refused, because accepting one would
+//! weaken every domain it aggregates.
 //!
 //! Single-prover ZK rollups suffer catastrophic total-value loss from a single
 //! under-constrained AIR circuit bug, while single-prover optimistic rollups

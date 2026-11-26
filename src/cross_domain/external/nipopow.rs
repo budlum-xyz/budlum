@@ -1,13 +1,13 @@
-//! WIRING: unwired - external `NIPoPoW` superblock adapter awaits `AdapterSpec` variant registration in `external_tx`.
+//! WIRING: built by [`NetworkCatalog::with_builtin_families`](super::unified::NetworkCatalog::with_builtin_families)
+//! as the NIPoPoW family and reached through `bud_unifiedNetworks` and `bud_unifiedSelftest`.
 //! Non-Interactive Proofs of Proof-of-Work (`NIPoPoW`, Kiayias-Miller-Zindros
 //! EUROCRYPT 2020) sublinear genesis-anchored external finality adapter.
 //!
-//! WIRING: unwired - the superblock verifier and its interlink checks are
-//! re-exported by `crate::cross_domain::external` but no production path
-//! constructs the adapter yet: sublinear sync is admitted only once an intake
-//! registration pins a genesis anchor for it, and admitting it before that
-//! would let an unpinned verifier answer for a chain nobody anchored. Until
-//! then this module's test suite is its only caller.
+//! Pinning: sublinear sync is trusted only once an intake registration pins a
+//! genesis anchor for it. The catalog constructs the verifier so operators can
+//! read its descriptor and run its self-test; admitting evidence for a chain
+//! nobody anchored is still refused, because an unpinned verifier would answer
+//! for a chain nobody pinned.
 //!
 //! Whereas linear SPV downloads every block header `O(|C|)`, `NIPoPoW` exploits
 //! rare high-work superblocks satisfying `id <= target >> mu` and per-header

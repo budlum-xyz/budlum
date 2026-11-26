@@ -41,7 +41,8 @@
 //!    the trusted `(batch_number, state_root, expected_forced_queue_head)` only
 //!    from a cryptographically verified batch.
 //!
-//! WIRING: unwired - implements `ExternalFinalityAdapter` for `ExternalDomainRegistry`, verified by `selftest::admit_observed`; `AdapterSpec` joins `intake.rs` in the follow-up merge.
+//! WIRING: built by [`NetworkCatalog::with_builtin_families`](super::unified::NetworkCatalog::with_builtin_families)
+//! as the STARK family and reached through `bud_unifiedNetworks` and `bud_unifiedSelftest`.
 
 use bincode::Options;
 use bud_proof::{ExecutionPublicInputs, ProofEnvelope, ProverAdapter};

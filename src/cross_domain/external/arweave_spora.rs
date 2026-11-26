@@ -22,7 +22,8 @@
 //!    domain-separated attestation digest binding the network, height, epoch,
 //!    weave root, chunk commitment and endowment parameters.
 //!
-//! WIRING: unwired - external Arweave `SPoRA` recall adapter awaits `AdapterSpec`
+//! WIRING: built by [`NetworkCatalog::with_builtin_families`](super::unified::NetworkCatalog::with_builtin_families)
+//! as the Arweave family and reached through `bud_unifiedNetworks` and `bud_unifiedSelftest`.
 //! variant binding in `external_tx` domain intake.
 
 use serde::{Deserialize, Serialize};
