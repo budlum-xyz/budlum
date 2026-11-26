@@ -64,7 +64,7 @@
     <string name="g_self_test_first">the self test has to pass first</string>
     <string name="g_unnamed">unnamed</string>
     <string name="g_what_this_is">budlum</string>
-    <string name="g_data_not_money">A group of phones that carry each other's data. No token, no balance, nothing to pay.</string>
+    <string name="g_data_not_money">A group of phones that carry data for each other. No token, no balance, nothing to pay.</string>
     <string name="g_testnet">testnet</string>
     <string name="g_notifications_off">notifications off</string>
     <string name="g_battery_limited">battery limited</string>

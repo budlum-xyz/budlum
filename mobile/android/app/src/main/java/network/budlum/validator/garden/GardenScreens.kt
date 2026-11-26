@@ -23,6 +23,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,10 +70,18 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
             Column(modifier = Modifier.fillMaxSize()) {
                 TopBar(stringResource(R.string.g_join_network)) { step = Step.Choose }
                 CodeJoinScreen(model)
-                if (model.state.myKey.isNotEmpty()) {
-                    // Asking got this phone into the waiting row. The
-                    // host's answer arrives on the people screen.
-                    step = Step.Garden
+                // Asking got this phone into the waiting row, so the
+                // join screen has done its job and the people screen
+                // is where the host's answer will show up. Moving on
+                // is an effect of the key arriving, not something
+                // decided while drawing - a screen that reassigns its
+                // own state mid-draw redraws forever.
+                val seated = model.state.myKey.isNotEmpty()
+                LaunchedEffect(seated) {
+                    if (seated) {
+                        step = Step.Garden
+                        tab = 1
+                    }
                 }
             }
         }
@@ -298,10 +307,5 @@ private fun PermissionRows(model: GardenModel) {
     }
 }
 
-/** The palette, named once so no screen picks its own. */
-internal val Ink = Color(0xFF060705)
-internal val Page = Color(0xFFFBFCFA)
-internal val Sage = Color(0xFF98AE89)
-internal val Faint = Color(0xFFE6E6E6)
-internal val Mute = Color(0xFFBDBDBD)
-internal val Flow = Color(0xFF8C0000)
+// The palette lives in GardenTheme, which already measured it from the
+// design file. Naming it twice is how two screens drift apart.

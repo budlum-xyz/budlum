@@ -285,7 +285,8 @@ class GardenModel(
                 ChatLine(
                     id = id,
                     author = item.optString("author"),
-                    who = item.optString("author_name").ifBlank { "someone" },
+                    who = item.optString("author_name")
+                        .ifBlank { app.getString(R.string.g_unnamed) },
                     text = text,
                     caption = item.optString("caption"),
                     mime = mime,
