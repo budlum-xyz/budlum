@@ -15,6 +15,7 @@
 //!   garden-phone return-check <dir> <record> [name]
 //!   garden-phone status <dir>
 //!   garden-phone send <dir> <text> [caption]
+//!   garden-phone send-file <dir> <file> [mime]
 //!   garden-phone feed <dir> [limit]
 //!   garden-phone fetch <dir> <content id>
 //!   garden-phone leave <dir>
@@ -33,7 +34,8 @@ fn main() -> ExitCode {
     if command.is_empty() || dir.is_empty() {
         eprintln!(
             "usage: garden-phone \
-<self-test|read|create|join|serve|return-check|status|send|feed|fetch|leave> <dir> [...]"
+<self-test|read|create|join|serve|return-check|status|send|send-file|feed|fetch|leave> \
+<dir> [...]"
         );
         return ExitCode::from(2);
     }
@@ -193,19 +195,36 @@ fn main() -> ExitCode {
             say(phone.send(text, caption).map_err(|e| e.to_string()))
         }
         "send-file" => {
-            // Prove the file path end to end: read bytes off disk, hex
-            // them, publish, then pull them back out of the chain and
-            // compare. Anything less is a guess.
-            let dir = args.next().ok_or("send-file <dir> <file> [mime]")?;
-            let file = args.next().ok_or("send-file <dir> <file> [mime]")?;
-            let mime = args.next().unwrap_or_else(|| "application/octet-stream".into());
-            let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+            // The same path the Room's paperclip takes: read the bytes,
+            // hex them, publish. Here so the file path can be run where
+            // no emulator can.
+            let file = match args.get(3) {
+                Some(path) => path.clone(),
+                None => {
+                    eprintln!("usage: garden-phone send-file <dir> <file> [mime]");
+                    return ExitCode::from(2);
+                }
+            };
+            let mime = args
+                .get(4)
+                .cloned()
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let bytes = match std::fs::read(&file) {
+                Ok(bytes) => bytes,
+                Err(reason) => {
+                    eprintln!("that file could not be read: {reason}");
+                    return ExitCode::FAILURE;
+                }
+            };
             let name = std::path::Path::new(&file)
                 .file_name()
                 .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().into_owned());
-            let phone = GardenPhone::new(dir)?;
-            let answer = phone.send_file(hex::encode(&bytes), mime, name)?;
-            println!("{}", answer.json);
+            if !gate(&phone) || !return_first(&phone) {
+                return ExitCode::FAILURE;
+            }
+            say(phone
+                .send_file(hex_of(&bytes), mime, name)
+                .map_err(|e| e.to_string()))
         }
         "feed" => {
             let limit = args
@@ -373,6 +392,16 @@ fn json_string(text: &str) -> String {
         }
     }
     out.push('"');
+    out
+}
+
+/// Hex, the one binary encoding the core's publish takes.
+fn hex_of(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        let _ = write!(out, "{byte:02x}");
+    }
     out
 }
 
