@@ -2542,4 +2542,116 @@ mod tests {
         assert_eq!(node_snap.quorum_stake(), shared_snap.quorum_stake());
         assert_eq!(node_snap.quorum_count(), shared_snap.quorum_count());
     }
+
+    /// A vote minted for another chain must not enter the round, even when its
+    /// BLS signature verifies for that other chain.
+    #[test]
+    fn aggregator_rejects_votes_signed_for_another_chain() {
+        let (snap, sks) = make_snapshot_with_keys(4, 1000);
+        let expected = crate::core::transaction::DEFAULT_CHAIN_ID;
+        let foreign = expected + 1;
+        let mut agg = FinalityAggregator::new(expected, 1, 10, "cp_hash".into(), snap.clone());
+
+        let mut prevote = signed_prevote(&snap, &sks, 0, 1, 10, "cp_hash");
+        prevote.chain_id = foreign;
+        prevote.sig_bls = sign_msg(sks[0], &prevote.signing_message());
+        let err = agg
+            .add_prevote(prevote)
+            .expect_err("a foreign-chain prevote must not be admitted");
+        assert!(err.contains("aggregator expects"), "got: {err}");
+
+        let mut precommit = Precommit {
+            chain_id: foreign,
+            epoch: 1,
+            checkpoint_height: 10,
+            checkpoint_hash: "cp_hash".into(),
+            voter_id: snap.validators[0].address,
+            sig_bls: Vec::new(),
+            auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
+        };
+        precommit.sig_bls = sign_msg(sks[0], &precommit.signing_message());
+        let err = agg
+            .add_precommit(precommit)
+            .expect_err("a foreign-chain precommit must not be admitted");
+        assert!(err.contains("aggregator expects"), "got: {err}");
+    }
+
+    /// Once a voter equivocates it is excluded from the round, so its later vote
+    /// for the canonical checkpoint cannot supply the seat that completes a
+    /// quorum.
+    #[test]
+    fn equivocating_validator_is_excluded_from_the_finality_round() {
+        let (snap, sks) = make_snapshot_with_keys(4, 1000);
+        let chain = crate::core::transaction::DEFAULT_CHAIN_ID;
+        let mut agg = FinalityAggregator::new(chain, 1, 10, "cp_hash".into(), snap.clone());
+
+        // Two different non-canonical checkpoints from the same voter: neither
+        // counts, but together they are order-independent double-sign evidence.
+        let err = agg
+            .add_prevote(signed_prevote(&snap, &sks, 0, 1, 10, "hash_a"))
+            .expect_err("a non-canonical prevote must not count");
+        assert!(err.contains("checkpoint hash mismatch"), "got: {err}");
+        let err = agg
+            .add_prevote(signed_prevote(&snap, &sks, 0, 1, 10, "hash_b"))
+            .expect_err("a non-canonical prevote must not count");
+        assert!(err.contains("checkpoint hash mismatch"), "got: {err}");
+        assert_eq!(
+            agg.detected_equivocations.len(),
+            1,
+            "the conflicting pair must be reported before exclusion is tested"
+        );
+
+        // The equivocator now tries to vote for the canonical checkpoint. On an
+        // unfixed aggregator this vote is admitted and counts; fixed, it is
+        // refused because the voter is already flagged.
+        let err = agg
+            .add_prevote(signed_prevote(&snap, &sks, 0, 1, 10, "cp_hash"))
+            .expect_err("an equivocator must not vote in this round");
+        assert!(err.contains("Equivocating"), "got: {err}");
+        assert!(
+            agg.prevotes.is_empty(),
+            "no prevote from the equivocator may enter the aggregate"
+        );
+    }
+
+    /// A forged PQ attestation must not occupy an honest precommit slot, and the
+    /// rejection happens before deduplication.
+    #[test]
+    fn precommit_with_a_forged_pq_attestation_is_rejected() {
+        let (mut snap, sks) = make_snapshot_with_keys(4, 1000);
+        let pq = crate::crypto::primitives::PqKeyPair::generate();
+        snap.validators[0].pq_public_key = pq.public_key_bytes().to_vec();
+        snap.set_hash = ValidatorSetSnapshot::compute_hash(&snap.validators);
+        let chain = crate::core::transaction::DEFAULT_CHAIN_ID;
+        let mut agg = FinalityAggregator::new(chain, 1, 10, "cp_hash".into(), snap.clone());
+        for i in 0..4 {
+            agg.add_prevote(signed_prevote(&snap, &sks, i, 1, 10, "cp_hash"))
+                .unwrap();
+        }
+        assert!(
+            agg.prevote_quorum_reached,
+            "the test needs a prevote quorum before precommits are admitted"
+        );
+
+        let mut precommit = Precommit {
+            chain_id: chain,
+            epoch: 1,
+            checkpoint_height: 10,
+            checkpoint_hash: "cp_hash".into(),
+            voter_id: snap.validators[0].address,
+            sig_bls: Vec::new(),
+            auth_sig: Vec::new(),
+            pq_sig: vec![0x41; 64],
+        };
+        precommit.sig_bls = sign_msg(sks[0], &precommit.signing_message());
+        let err = agg
+            .add_precommit(precommit)
+            .expect_err("a forged PQ attestation must be rejected");
+        assert!(err.contains("PQ"), "got: {err}");
+        assert!(
+            agg.precommits.is_empty(),
+            "the rejected precommit must not occupy the voter's slot"
+        );
+    }
 }
