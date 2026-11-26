@@ -3984,6 +3984,12 @@ mod rpc_tests {
             RpcMode::Operator,
         )
         .with_garden(garden);
+        // A host has to say where the others will dial it. Left to itself the
+        // core now picks the interface that would carry a packet to a
+        // neighbour, and on a machine with no route to anywhere that is no
+        // address at all - which is correct for a phone and useless for a
+        // test. The test names a loopback listen address, as the other Garden
+        // RPC checks do.
         operator
             .garden_create(
                 "Room".into(),
@@ -4055,7 +4061,10 @@ mod rpc_tests {
         assert!(public.garden_resolve("00".repeat(32)).await.is_err());
         // Reading a record is a Garden surface too, and the public listener
         // refuses it for the same reason it refuses every other one.
-        assert!(public.garden_read_record("not a record".into()).await.is_err());
+        assert!(public
+            .garden_read_record("not a record".into())
+            .await
+            .is_err());
         // The unified surface is refused where every other read is refused on
         // a public listener: it is a local read, and a public listener does not
         // answer local reads.
