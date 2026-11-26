@@ -342,7 +342,7 @@ fn family_of(name: &str) -> String {
 mod tests {
     use super::*;
     use crate::core::address::Address;
-    use super::spec::AdapterId;
+    use crate::cross_domain::external::spec::AdapterId;
 
     #[test]
     fn the_catalog_lists_the_chains_this_build_can_read() {
