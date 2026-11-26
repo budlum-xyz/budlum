@@ -5,6 +5,9 @@ import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -13,9 +16,6 @@ import network.budlum.validator.R
 import org.json.JSONObject
 import uniffi.budlum_garden_ffi.GardenPhone
 import uniffi.budlum_garden_ffi.SelfTestStep
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /** Everything the three screens read. */
 /**
