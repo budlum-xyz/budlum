@@ -6,7 +6,7 @@ on:
     # daily integration pull request into `main` does not - that path is
     # budgeted by `ci-pull-request-fanout-is-budgeted` and the evidence-window
     # owner dispatches this workflow on the wave head instead.
-    branches: [consensus-of-consensuses]
+    branches: [consensus-of-consensuses, testnet]
   push:
     branches: [main]
   # Heavy battery. It runs on the schedule, on demand (the evidence-window

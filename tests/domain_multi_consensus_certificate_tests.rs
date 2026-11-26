@@ -39,9 +39,9 @@ use budlum_core::settlement::domains::{
     execute_settlement_tx, SettlementTx, SettlementTxContext, SettlementTxError,
 };
 use budlum_core::settlement::universal_finality::{
-    compose, compose_cross_domain_route, DomainFinalityEntry, EconomicSecurityBound,
-    FinalityGuarantee, FinalityPendingReason, FinalityReversibility, FinalityVerdict,
-    FINALITY_BINDS_ALL,
+    compose, compose_cross_domain_route, trace_record_binds, trace_record_quantum_posture,
+    DomainFinalityEntry, EconomicSecurityBound, FinalityGuarantee, FinalityPendingReason,
+    FinalityReversibility, FinalityVerdict, FINALITY_BINDS_ALL,
 };
 
 const HUB_CHAIN_ID: u64 = 45_262;
@@ -441,6 +441,8 @@ fn five_consensus_families_settle_into_one_certificate_and_ulp_stark_bundle() {
             finality_proof_hash: verified.commitment.finality_proof_hash,
             guarantee_backing_hash: backing_hash,
             bond_atoms: u128::from(dom.operator_bond),
+            binds: trace_record_binds(&guarantee.attestation),
+            posture_trace: trace_record_quantum_posture(guarantee.quantum_posture),
             guarantee,
             verdict,
         });

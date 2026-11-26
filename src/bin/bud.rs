@@ -3869,11 +3869,19 @@ fn run_finality_route(
     let hub = budlum_core::settlement::FinalityGuarantee::settlement_hub();
     let composed_guarantee = src.entry.guarantee.meet(&hub).meet(&dst.entry.guarantee);
 
+    // This CLI verifier is offline: it holds no Sentry feed, so it passes an
+    // empty, open Sentry. That is honest - the check cannot fire on a domain
+    // the process has never observed - and the live RPC path
+    // (`bud_getRouteFinality`) does carry the real circuit state. The remaining
+    // five checks are byte-for-byte the same call, so a forged or weak row is
+    // still refused here.
+    let sentry = budlum_core::cross_domain::external::sentry::ConsensusSentry::new();
     let gate_result: Result<
         budlum_core::settlement::finality_gate::ValueGateVerdict,
         budlum_core::settlement::finality_gate::ValueGateRefusal,
     > = budlum_core::settlement::finality_gate::check_certificate_value_gate(
         &cert,
+        &sentry,
         budlum_core::settlement::finality_gate::ValueGate::UniversalPayment,
         source,
         Some(target),
@@ -5799,8 +5807,9 @@ mod rpc_auth_tests {
     fn finality_cli_verifiers_accept_valid_proofs_and_reject_forged_payloads() {
         use budlum_core::crypto::facts::QuantumClass;
         use budlum_core::settlement::{
-            compose_global_finality_certificate, DomainFinalityEntry, FinalityGuarantee,
-            FinalityReversibility, FinalityVerdict, FINALITY_BINDS_ALL,
+            compose_global_finality_certificate, trace_record_binds, trace_record_quantum_posture,
+            DomainFinalityEntry, FinalityGuarantee, FinalityReversibility, FinalityVerdict,
+            FINALITY_BINDS_ALL,
         };
 
         let make_entry = |id: u32| DomainFinalityEntry {
@@ -5820,6 +5829,8 @@ mod rpc_auth_tests {
                 slashable_backing: false,
                 fault_tolerance_bps: 4_999,
             },
+            binds: trace_record_binds(&FINALITY_BINDS_ALL),
+            posture_trace: trace_record_quantum_posture(QuantumClass::Hash),
             verdict: FinalityVerdict::Established,
         };
 
@@ -5857,8 +5868,9 @@ mod finality_anchor_tests {
     use super::*;
     use budlum_core::crypto::facts::QuantumClass;
     use budlum_core::settlement::{
-        compose_global_finality_certificate, DomainFinalityEntry, FinalityGuarantee,
-        FinalityReversibility, FinalityVerdict, GlobalFinalityCertificate, FINALITY_BINDS_ALL,
+        compose_global_finality_certificate, trace_record_binds, trace_record_quantum_posture,
+        DomainFinalityEntry, FinalityGuarantee, FinalityReversibility, FinalityVerdict,
+        GlobalFinalityCertificate, FINALITY_BINDS_ALL,
     };
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -5887,6 +5899,8 @@ mod finality_anchor_tests {
                 slashable_backing: false,
                 fault_tolerance_bps: 4_999,
             },
+            binds: trace_record_binds(&FINALITY_BINDS_ALL),
+            posture_trace: trace_record_quantum_posture(QuantumClass::Hash),
             verdict: FinalityVerdict::Established,
         }
     }

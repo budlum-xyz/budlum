@@ -33,6 +33,11 @@ name: Diverse Double Compiling
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [testnet]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   # Heavy battery. It runs on the schedule, on demand (the evidence-window
   # owner dispatches it on the wave head) and on pushes to `main`. It is out
   # of the pull-request path on purpose: one push was queueing more work than
@@ -203,3 +208,51 @@ jobs:
             exit 1
           fi
           echo "OK: two independent compilers produced the same canonical values."
+
+  # Two release builds are two hours of runner time and stay out of the
+  # pull-request path. What a pull request can afford is the part that makes
+  # the comparison meaningful: that both stages still exist, still build the
+  # same binary, and that the canonical-symbol tooling is still wired. If a
+  # stage name or the tool disappears, the weekly job turns green while
+  # comparing nothing - this five-minute canary makes that impossible to miss.
+  instrument-canary:
+    name: Double-compile instrumentation canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Both stages and the compare job are still declared
+        run: |
+          set -euo pipefail
+          wf=.github/workflows/diverse-double-compiling.yml
+          for marker in "Stage 1" "Stage 2 compare" "compile-with" "compare"; do
+            grep -qF "$marker" "$wf" || { echo "::error::missing DDC job marker: $marker"; exit 1; }
+          done
+          echo "DDC job graph intact"
+
+      - name: Two distinct toolchains are still requested
+        run: |
+          set -euo pipefail
+          wf=.github/workflows/diverse-double-compiling.yml
+          # The comparison is only meaningful if the matrix asks for two
+          # different compilers; one toolchain run twice is `determinism.yml`.
+          # `grep -c` exits 1 on zero matches; take its count without masking.
+          labels=0
+          if ! labels=$(grep -cE '^\s+- label:' "$wf"); then
+            labels=0
+          fi
+          echo "matrix labels: $labels"
+          test "$labels" -ge 2 || { echo "::error::DDC matrix no longer has two toolchains"; exit 1; }
+
+      - name: Canonical digest tooling is still present
+        run: |
+          set -euo pipefail
+          test -d xtask/tools || { echo "::error::xtask/tools disappeared"; exit 1; }
+          cargo metadata --no-deps --format-version 1 > /dev/null
+          grep -qF "xtask/tools" Cargo.toml || { echo "::error::xtask/tools is no longer a workspace member"; exit 1; }
+          echo "canonical-symbol tooling intact"

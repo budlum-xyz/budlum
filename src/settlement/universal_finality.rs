@@ -1127,6 +1127,17 @@ pub struct DomainFinalityEntry {
     pub bond_atoms: u128,
     /// Exact finality guarantee derived strictly from consensus state.
     pub guarantee: FinalityGuarantee,
+    /// Trace of the binds proof this row attests, sealed into `row_digest`.
+    ///
+    /// Derived from [`DomainFinalityEntry::guarantee`] by
+    /// [`trace_record_binds`] and never taken from a caller: a row can only
+    /// seal what its own guarantee proves, so the seal cannot claim a wider
+    /// proof than the row carries.
+    pub binds: [u8; 32],
+    /// Trace of the quantum posture this row attests, sealed into `row_digest`.
+    ///
+    /// Derived by [`trace_record_quantum_posture`] from the same guarantee.
+    pub posture_trace: [u8; 32],
     /// Three-valued verdict of the domain's own finality rule.
     pub verdict: FinalityVerdict,
 }
@@ -1153,9 +1164,51 @@ impl DomainFinalityEntry {
         hasher.update(self.guarantee_backing_hash);
         hasher.update(self.bond_atoms.to_be_bytes());
         absorb_guarantee_keccak(&mut hasher, &self.guarantee);
+        hasher.update(self.binds);
+        hasher.update(self.posture_trace);
         absorb_verdict_keccak(&mut hasher, self.verdict);
         hasher.finalize().into()
     }
+}
+
+/// Canonical trace record of the binds a [`CommitmentAttestation`] proves.
+///
+/// The trace speaks the row's own domain separation tag and encodes each root
+/// as one byte in a fixed order, so two rows that bind different roots can
+/// never produce the same trace, and no other digest in the tree (row, leaf,
+/// node, certificate header) shares this prefix.
+#[must_use]
+pub fn trace_record_binds(attestation: &CommitmentAttestation) -> [u8; 32] {
+    use sha3::{Digest as _, Keccak256};
+
+    let mut hasher = Keccak256::new();
+    hasher.update(b"BDLM_FINALITY_BINDS_TRACE_V1");
+    hasher.update([
+        u8::from(attestation.state_root),
+        u8::from(attestation.tx_root),
+        u8::from(attestation.event_root),
+        u8::from(attestation.parent),
+    ]);
+    hasher.finalize().into()
+}
+
+/// Canonical trace record of a [`QuantumClass`] posture.
+///
+/// The class is pinned to a fixed code byte so a reordered enum cannot
+/// silently change what an old trace meant.
+#[must_use]
+pub fn trace_record_quantum_posture(posture: QuantumClass) -> [u8; 32] {
+    use sha3::{Digest as _, Keccak256};
+
+    let code: u8 = match posture {
+        QuantumClass::Classical => 0,
+        QuantumClass::Lattice => 1,
+        QuantumClass::Hash => 2,
+    };
+    let mut hasher = Keccak256::new();
+    hasher.update(b"BDLM_FINALITY_POSTURE_TRACE_V1");
+    hasher.update([code]);
+    hasher.finalize().into()
 }
 
 fn absorb_guarantee_keccak(hasher: &mut sha3::Keccak256, guarantee: &FinalityGuarantee) {
@@ -1399,6 +1452,18 @@ pub enum FinalityComposeError {
         /// Offending domain identifier.
         domain_id: u32,
     },
+    /// A row's sealed `binds`/`posture_trace` does not match what its own
+    /// guarantee and posture derive.
+    ///
+    /// A certificate row that seals a trace its proof cannot produce is
+    /// attesting to evidence it never saw; `compose` refuses it in every
+    /// bucket, including `Pending` and `Refuted`, so a hand-built row cannot
+    /// carry a wider claim than its proof - even when it is about to be
+    /// discarded from `Established`.
+    BindsMismatch {
+        /// Offending domain identifier.
+        domain_id: u32,
+    },
     /// More than `MAX_CERTIFICATE_DOMAINS` domains were supplied.
     TooManyDomains,
     /// A serialized or externally supplied certificate does not match its recomputed digest/roots.
@@ -1530,6 +1595,17 @@ pub fn compose(
             return Err(FinalityComposeError::ConflictingCheckpoints {
                 expected: checkpoint_height,
                 found: entry.checkpoint_height,
+            });
+        }
+        // The row must seal the traces of the proof it attests, in every
+        // bucket. This runs before the verdict split so a `Pending` or
+        // `Refuted` row cannot smuggle a mismatched trace past compose by
+        // being about to leave the Established set.
+        if entry.binds != trace_record_binds(&entry.guarantee.attestation)
+            || entry.posture_trace != trace_record_quantum_posture(entry.guarantee.quantum_posture)
+        {
+            return Err(FinalityComposeError::BindsMismatch {
+                domain_id: entry.domain_id,
             });
         }
         match entry.verdict {
@@ -2174,6 +2250,8 @@ mod tests {
                 slashable_backing: true,
                 fault_tolerance_bps: bps,
             },
+            binds: trace_record_binds(&FINALITY_BINDS_ALL),
+            posture_trace: trace_record_quantum_posture(QuantumClass::Hash),
             verdict,
         }
     }
@@ -2304,6 +2382,9 @@ mod tests {
             FinalityVerdict::Established,
         );
         entry.guarantee.attestation.parent = false;
+        // The seal follows the proof: this test measures the attestation
+        // check, not the trace check, so the row must stay internally honest.
+        entry.binds = trace_record_binds(&entry.guarantee.attestation);
         assert_eq!(
             compose(&[entry]),
             Err(FinalityComposeError::AttestationUnbound { domain_id: 0 })

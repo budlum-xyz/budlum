@@ -6,6 +6,7 @@ pub mod cold_wallet;
 pub mod commitment_tree;
 pub mod domains;
 pub mod finality_gate;
+pub mod finality_policy;
 pub mod global_block;
 pub mod liquidation_proof;
 pub mod pq_anchor;
@@ -75,8 +76,9 @@ pub use root_seal::{
     seal_due, RootSeal, RootSealLog, SealError, SealKeys, SoftwareSealSigner, ROOT_SEAL_INTERVAL,
 };
 pub use universal_finality::{
-    compose as compose_global_finality_certificate, compose_cross_domain_route,
-    DomainFinalityEntry, DomainFinalityInclusionProof, EconomicSecurityBound, FinalityBucket,
-    FinalityComposeError, FinalityGuarantee, FinalityPendingReason, FinalityReversibility,
-    FinalityVerdict, GlobalFinalityCertificate, RouteFinalityBound, FINALITY_BINDS_ALL,
+    compose as compose_global_finality_certificate, compose_cross_domain_route, trace_record_binds,
+    trace_record_quantum_posture, DomainFinalityEntry, DomainFinalityInclusionProof,
+    EconomicSecurityBound, FinalityBucket, FinalityComposeError, FinalityGuarantee,
+    FinalityPendingReason, FinalityReversibility, FinalityVerdict, GlobalFinalityCertificate,
+    RouteFinalityBound, FINALITY_BINDS_ALL,
 };

@@ -746,9 +746,9 @@ mod finality_read_tests {
     use budlum_core::core::account::AccountState;
     use budlum_core::crypto::facts::QuantumClass;
     use budlum_core::settlement::{
-        compose_global_finality_certificate, DomainFinalityEntry, FinalityGuarantee,
-        FinalityReversibility, FinalityVerdict, GlobalBlockHeader, GlobalFinalityCertificate,
-        FINALITY_BINDS_ALL,
+        compose_global_finality_certificate, trace_record_binds, trace_record_quantum_posture,
+        DomainFinalityEntry, FinalityGuarantee, FinalityReversibility, FinalityVerdict,
+        GlobalBlockHeader, GlobalFinalityCertificate, FINALITY_BINDS_ALL,
     };
     use std::collections::BTreeSet;
 
@@ -772,6 +772,8 @@ mod finality_read_tests {
                 slashable_backing: false,
                 fault_tolerance_bps: 4_999,
             },
+            binds: trace_record_binds(&FINALITY_BINDS_ALL),
+            posture_trace: trace_record_quantum_posture(QuantumClass::Hash),
             verdict: FinalityVerdict::Established,
         }
     }

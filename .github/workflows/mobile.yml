@@ -9,6 +9,15 @@ on:
       - "src/registry/mobile_runtime.rs"
       - "xtask/gates/src/gates/mobile_validator_apps.rs"
       - ".github/workflows/mobile.yml"
+  pull_request:
+    branches: [testnet]
+    paths:
+      - "mobile/android/**"
+      - "mobile/ios/**"
+      - "mobile/tools/**"
+      - "src/registry/mobile_runtime.rs"
+      - "xtask/gates/src/gates/mobile_validator_apps.rs"
+      - ".github/workflows/mobile.yml"
   workflow_dispatch:
 
 permissions:
@@ -213,3 +222,98 @@ jobs:
           working-directory: mobile/android
           # The action's published input is `script`, not `run`.
           script: gradle connectedDebugAndroidTest --no-daemon
+
+  # The full Android suite above needs the JDK/Android SDK and 20+ minutes; it
+  # stays out of the pull-request path on purpose. What a pull request into the
+  # product branch can afford is the part that has actually broken review
+  # before: a manifest that quietly gains an entitlement, a target SDK that
+  # quietly drops, or a validator app that disappears from the registry gate.
+  # This job checks exactly those, with no toolchain download, in well under a
+  # minute - so the `mobile-validator-apps` gate is never "green because it
+  # never ran".
+  manifest-and-policy-canary:
+    name: Mobile manifest and policy canary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Manifest declares only the reviewed permission set
+        run: |
+          set -euo pipefail
+          manifest=mobile/android/app/src/main/AndroidManifest.xml
+          test -f "$manifest" || { echo "::error::missing $manifest"; exit 1; }
+          # Every android.permission.* the manifest declares must be one the
+          # custody review signed off on (Section 7.9.11). A new permission is
+          # a policy change, not a build detail, and must reach review.
+          allowed='^(INTERNET|ACCESS_NETWORK_STATE|FOREGROUND_SERVICE|FOREGROUND_SERVICE_SPECIAL_USE|POST_NOTIFICATIONS|RECEIVE_BOOT_COMPLETED|USE_BIOMETRIC)$'
+          declared=$(grep -oE 'android\.permission\.[A-Z_]+' "$manifest" | sed 's/^android\.permission\.//' | sort -u)
+          echo "declared:"; echo "$declared"
+          # `grep -v` exits 1 when nothing is left, which is the good case; capture
+          # that status explicitly instead of swallowing it with `|| true`.
+          bad=""
+          if ! bad=$(echo "$declared" | grep -vE "$allowed"); then
+            bad=""
+          fi
+          if [ -n "$bad" ]; then
+            echo "::error::unreviewed Android permission(s): $bad"
+            exit 1
+          fi
+
+      - name: Target SDK and min SDK still match the reviewed floor
+        run: |
+          set -euo pipefail
+          gradle=mobile/android/app/build.gradle.kts
+          test -f "$gradle" || { echo "::error::missing $gradle"; exit 1; }
+          target=$(grep -oE 'targetSdk *= *[0-9]+' "$gradle" | grep -oE '[0-9]+' | head -1)
+          minsdk=$(grep -oE 'minSdk *= *[0-9]+' "$gradle" | grep -oE '[0-9]+' | head -1)
+          echo "targetSdk=$target minSdk=$minsdk"
+          test -n "$target" || { echo "::error::targetSdk not found"; exit 1; }
+          test "$target" -ge 35 || { echo "::error::targetSdk $target is below the reviewed floor 35"; exit 1; }
+          test -n "$minsdk" || { echo "::error::minSdk not found"; exit 1; }
+
+      - name: iOS custody contract is intact
+        run: |
+          set -euo pipefail
+          plist=mobile/ios/Info.plist
+          test -f "$plist" || { echo "::error::missing $plist"; exit 1; }
+          python3 - "$plist" <<'PY'
+          import plistlib, sys
+          with open(sys.argv[1], "rb") as fh:
+              plist = plistlib.load(fh)
+          # The field harness runs as a background custody observer, never as
+          # a foreground camera/biometric app: the reviewed plist carries the
+          # bundle identity, the minimum OS and the background task modes. A
+          # silent privacy-scope addition (a camera or Face ID usage string)
+          # would be a policy change and must reach review, so it fails here.
+          required = [
+              "CFBundleIdentifier",
+              "CFBundleShortVersionString",
+              "MinimumOSVersion",
+              "UIBackgroundModes",
+              "BGTaskSchedulerPermittedIdentifiers",
+          ]
+          missing = [k for k in required if k not in plist]
+          if missing:
+              raise SystemExit(f"::error::iOS custody contract keys missing: {missing}")
+          forbidden = [k for k in plist if k.endswith("UsageDescription")]
+          if forbidden:
+              raise SystemExit(
+                  f"::error::iOS privacy-scope strings added without review: {forbidden}"
+              )
+          print("iOS custody contract intact:", sorted(required))
+          PY
+
+      - name: Registry gate still covers the mobile validator apps
+        run: |
+          set -euo pipefail
+          gate=xtask/gates/src/gates/mobile_validator_apps.rs
+          test -f "$gate" || { echo "::error::missing $gate"; exit 1; }
+          grep -qE 'mobile' "$gate" || { echo "::error::$gate no longer references the mobile tree"; exit 1; }
+          runtime=src/registry/mobile_runtime.rs
+          test -f "$runtime" || { echo "::error::missing $runtime"; exit 1; }
+          echo "mobile gate wiring intact"

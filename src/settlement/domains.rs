@@ -981,6 +981,38 @@ pub struct CommitmentAttestation {
 }
 
 impl CommitmentAttestation {
+    /// Whether this attestation binds everything `required` asks for.
+    ///
+    /// A subset test, deliberately not an equality test: a proof that binds
+    /// more than the gate reads is safer, not wrong. The finality gate uses
+    /// this to refuse a row whose proof binds less than the roots the gate is
+    /// about to read.
+    #[must_use]
+    pub const fn covers(&self, required: &Self) -> bool {
+        (!required.state_root || self.state_root)
+            && (!required.tx_root || self.tx_root)
+            && (!required.event_root || self.event_root)
+            && (!required.parent || self.parent)
+    }
+
+    /// The attestation that binds whatever either input binds.
+    ///
+    /// Used where one value-path reads several roots at once
+    /// (`BINDS_STATE_ROOT.union(BINDS_EVENT_ROOT)`), so the requirement a row
+    /// is measured against is stated as the union of the reads. `const fn`
+    /// because the masks are compile-time constants; written as a method
+    /// rather than `BitOr` because `CommitmentAttestation` deliberately does
+    /// not implement an operator that reads as if it were set arithmetic.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self {
+            state_root: self.state_root || other.state_root,
+            tx_root: self.tx_root || other.tx_root,
+            event_root: self.event_root || other.event_root,
+            parent: self.parent || other.parent,
+        }
+    }
+
     /// What the proof family registered for `kind` binds.
     #[must_use]
     pub const fn for_kind(kind: &ConsensusKind) -> Self {

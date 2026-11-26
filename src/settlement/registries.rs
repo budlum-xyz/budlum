@@ -254,8 +254,8 @@ impl SettlementRegistries {
         use crate::crypto::facts::QuantumClass;
         use crate::domain::types::DomainStatus;
         use crate::settlement::universal_finality::{
-            compose, DomainFinalityEntry, FinalityGuarantee, FinalityPendingReason,
-            FinalityVerdict, FINALITY_BINDS_ALL,
+            compose, trace_record_binds, trace_record_quantum_posture, DomainFinalityEntry,
+            FinalityGuarantee, FinalityPendingReason, FinalityVerdict, FINALITY_BINDS_ALL,
         };
 
         if self.domains.is_empty() {
@@ -322,6 +322,10 @@ impl SettlementRegistries {
                 finality_proof_hash,
                 guarantee_backing_hash,
                 bond_atoms: u128::from(domain.operator_bond),
+                // Derived, never supplied: the row seals exactly the traces
+                // its own guarantee proves. A caller cannot widen the claim.
+                binds: trace_record_binds(&guarantee.attestation),
+                posture_trace: trace_record_quantum_posture(guarantee.quantum_posture),
                 guarantee,
                 verdict,
             });

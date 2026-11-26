@@ -3416,8 +3416,9 @@ mod tests {
     fn certificate_pending_or_refuted_zeroes_economic_guard_ceiling_immediately() {
         use crate::crypto::facts::QuantumClass;
         use crate::settlement::universal_finality::{
-            compose, DomainFinalityEntry, FinalityGuarantee, FinalityPendingReason,
-            FinalityReversibility, FinalityVerdict, FINALITY_BINDS_ALL,
+            compose, trace_record_binds, trace_record_quantum_posture, DomainFinalityEntry,
+            FinalityGuarantee, FinalityPendingReason, FinalityReversibility, FinalityVerdict,
+            FINALITY_BINDS_ALL,
         };
 
         let mut guard = BridgeEconomicGuard::new();
@@ -3458,6 +3459,8 @@ mod tests {
                 slashable_backing: true,
                 fault_tolerance_bps: 3_333,
             },
+            binds: trace_record_binds(&FINALITY_BINDS_ALL),
+            posture_trace: trace_record_quantum_posture(QuantumClass::Hash),
             verdict,
         };
 

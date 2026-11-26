@@ -1,5 +1,20 @@
 //! Single finality decision point shared by every cross-domain value gate.
 //!
+//! Every value gate asks one question, through one function:
+//! [`check_certificate_value_gate`]. Inside it the checks run in a fixed
+//! order, and each one can only refuse:
+//!
+//! 1. `enforce_root` - the row commits a non-zero state root;
+//! 2. the row's verdict (`Refuted`/`Pending` refuse, `Established` passes);
+//! 3. `enforce_binds` - the proof binds every root the route reads;
+//! 4. `enforce_quantum_posture` - the posture satisfies the gate's policy;
+//! 5. `enforce_sentry_circuit_clear` - Sentry has not escalated the circuit;
+//! 6. `evaluate_route_guarantee` - the composed route admits value.
+//!
+//! The four `enforce_*` helpers are private to this module: a caller cannot
+//! pick them up and run half a gate. A new value path either calls
+//! [`check_certificate_value_gate`] or it does not move value.
+//!
 //! Instead of each value-moving subsystem re-implementing its own finality
 //! heuristic, every gate routes through this module:
 //! - bridge mint and unlock (`crate::cross_domain::bridge_tx`),
@@ -11,6 +26,10 @@
 
 use std::fmt;
 
+use crate::settlement::finality_policy::{
+    enforce_binds, enforce_quantum_posture, enforce_root, QuantumPosturePolicy, BINDS_PARENT,
+    BINDS_VALUE_ROUTE,
+};
 use crate::settlement::registries::SettlementRegistries;
 use crate::settlement::universal_finality::{
     compose_cross_domain_route, EconomicSecurityBound, FinalityBucket, FinalityGuarantee,
@@ -45,6 +64,22 @@ impl ValueGate {
             Self::UniversalPayment => "universal-payment",
         }
     }
+
+    /// The quantum posture this gate settles under.
+    ///
+    /// Every gate that moves value across a domain boundary demands at least a
+    /// lattice-or-hash posture: a classical (Shor-breakable) signature over a
+    /// settlement certificate would let a future adversary forge the proof
+    /// and then move the value. `Classical` is admitted only where value stays
+    /// inside the hub, which no gate in this enum does.
+    ///
+    /// Private: the policy is a property of the single gate, not a knob a
+    /// caller can turn per call site. Callers pick the *gate*; this map says
+    /// what that gate settles under.
+    #[must_use]
+    const fn quantum_posture_policy(self) -> QuantumPosturePolicy {
+        QuantumPosturePolicy::AtLeast(crate::crypto::facts::QuantumClass::Lattice)
+    }
 }
 
 /// Fail-closed refusal produced by the single finality decision gate.
@@ -70,6 +105,28 @@ pub enum ValueGateRefusal {
         domain_id: u32,
         /// Pending reason carried by the certificate row.
         reason: FinalityPendingReason,
+    },
+    /// The proof behind the row binds less than the roots this gate reads.
+    ///
+    /// The rule itself lives in
+    /// [`crate::settlement::finality_policy::enforce_binds`]; this variant
+    /// names what the gate was about to read.
+    BindsUnproven {
+        /// Value gate that refused settlement.
+        gate: ValueGate,
+        /// Domain whose proof binds too little.
+        domain_id: u32,
+        /// Human-readable list of the roots the gate required.
+        required: &'static str,
+    },
+    /// The row's quantum posture is weaker than this gate's policy.
+    QuantumPostureInsufficient {
+        /// Value gate that refused settlement.
+        gate: ValueGate,
+        /// Domain whose posture is too weak.
+        domain_id: u32,
+        /// Canonical posture label observed on the row.
+        observed: &'static str,
     },
     /// Consensus Sentry circuit breaker escalated this domain out of `Open`.
     SentryCircuitEscalated {
@@ -107,6 +164,24 @@ impl fmt::Display for ValueGateRefusal {
             Self::DomainPending { domain_id, reason } => write!(
                 f,
                 "domain {domain_id} is pending in the finality certificate ({reason:?})"
+            ),
+            Self::BindsUnproven {
+                gate,
+                domain_id,
+                required,
+            } => write!(
+                f,
+                "{} refused: domain {domain_id} proof binds less than required ({required})",
+                gate.as_str()
+            ),
+            Self::QuantumPostureInsufficient {
+                gate,
+                domain_id,
+                observed,
+            } => write!(
+                f,
+                "{} refused: domain {domain_id} quantum posture {observed} is below policy",
+                gate.as_str()
             ),
             Self::SentryCircuitEscalated {
                 gate,
@@ -157,6 +232,13 @@ pub struct ValueGateVerdict {
 /// Returns `Some(route)` only when the source guarantee admits cross-domain
 /// value transfer, the composed route admits transfer, and the bottleneck fault
 /// tolerance is strictly positive.
+///
+/// This helper answers the *route* question for a caller that already holds
+/// state-derived guarantees and no certificate row (universal payment
+/// staging). It is deliberately named `evaluate_*`, not `enforce_*`: the
+/// authoritative gate over certificate rows is
+/// [`check_certificate_value_gate`], and this function cannot admit anything
+/// that gate would refuse - it sees strictly less.
 #[must_use]
 pub fn evaluate_route_guarantee(
     source: &FinalityGuarantee,
@@ -173,11 +255,35 @@ pub fn evaluate_route_guarantee(
     Some(route)
 }
 
+/// Canonical posture label for a refusal message.
+fn posture_label(class: crate::crypto::facts::QuantumClass) -> &'static str {
+    match class {
+        crate::crypto::facts::QuantumClass::Classical => "CLASSICAL",
+        crate::crypto::facts::QuantumClass::Lattice => "LATTICE",
+        crate::crypto::facts::QuantumClass::Hash => "HASH",
+    }
+}
+
+/// The roots a value read requires, spelled for a refusal message.
+const REQUIRED_VALUE_ROUTE: &str = "state_root+tx_root+event_root+parent";
+
+/// The parent link alone, spelled for a refusal message.
+const REQUIRED_PARENT: &str = "parent";
+
 /// Evaluate whether `gate` may move value out of `source_domain` (optionally
 /// into `target_domain`) using strictly the derived [`GlobalFinalityCertificate`].
 ///
-/// Fails closed if either domain is missing, `Pending`, or `Refuted`, or if
-/// [`evaluate_route_guarantee`] rejects the weakest-link composed guarantee.
+/// The six checks run in this order and each one only refuses:
+///
+/// 1. `enforce_root` - the source row commits a non-zero state root;
+/// 2. verdict - `Refuted`/`Pending` refuse, `Established` proceeds;
+/// 3. `enforce_binds` - the source proof binds every root the route reads;
+/// 4. `enforce_quantum_posture` - the source posture meets the gate policy;
+/// 5. `enforce_sentry_circuit_clear` - Sentry has not escalated the domain.
+///
+/// Then the same root/binds/posture checks run for the target row, and
+/// finally [`enforce_route_guarantee`] admits the composed route. A refusal
+/// names the earliest failing condition, so callers can act on it.
 ///
 /// # Errors
 ///
@@ -185,6 +291,7 @@ pub fn evaluate_route_guarantee(
 /// invariant that blocked value transfer.
 pub fn check_certificate_value_gate(
     cert: &GlobalFinalityCertificate,
+    sentry: &crate::cross_domain::external::sentry::ConsensusSentry,
     gate: ValueGate,
     source_domain: u32,
     target_domain: Option<u32>,
@@ -194,21 +301,9 @@ pub fn check_certificate_value_gate(
         .ok_or(ValueGateRefusal::DomainMissing {
             domain_id: source_domain,
         })?;
-    match src.entry.verdict {
-        FinalityVerdict::Established => {}
-        FinalityVerdict::Refuted { code } => {
-            return Err(ValueGateRefusal::DomainRefuted {
-                domain_id: source_domain,
-                code,
-            });
-        }
-        FinalityVerdict::Pending { reason } => {
-            return Err(ValueGateRefusal::DomainPending {
-                domain_id: source_domain,
-                reason,
-            });
-        }
-    }
+
+    // Checks 1-5 for the source row, in the documented order.
+    enforce_row_admissible(gate, &src, sentry)?;
 
     let hub = FinalityGuarantee::settlement_hub();
     let (target_guarantee, target_econ_ceiling) = match target_domain {
@@ -216,21 +311,9 @@ pub fn check_certificate_value_gate(
             let dst = cert
                 .prove_domain(dst_id)
                 .ok_or(ValueGateRefusal::DomainMissing { domain_id: dst_id })?;
-            match dst.entry.verdict {
-                FinalityVerdict::Established => {}
-                FinalityVerdict::Refuted { code } => {
-                    return Err(ValueGateRefusal::DomainRefuted {
-                        domain_id: dst_id,
-                        code,
-                    });
-                }
-                FinalityVerdict::Pending { reason } => {
-                    return Err(ValueGateRefusal::DomainPending {
-                        domain_id: dst_id,
-                        reason,
-                    });
-                }
-            }
+            // The same five checks for the target row: value must be admissible
+            // at both ends of the route, not only where it leaves.
+            enforce_row_admissible(gate, &dst, sentry)?;
             let dst_econ = EconomicSecurityBound::derive(
                 &dst.entry.guarantee,
                 dst.entry.bond_atoms,
@@ -244,6 +327,7 @@ pub fn check_certificate_value_gate(
         None => (hub, u128::MAX),
     };
 
+    // Check 6: the weakest link of the composed route must admit value.
     let composed = src.entry.guarantee.meet(&hub).meet(&target_guarantee);
     let Some(route) = evaluate_route_guarantee(&src.entry.guarantee, &hub, &target_guarantee)
     else {
@@ -271,6 +355,79 @@ pub fn check_certificate_value_gate(
         source_bucket: src.bucket,
         safe_value_outflow_ceiling_atoms: safe_ceiling,
     })
+}
+
+/// Run checks 1-5 of the single gate against one certificate row.
+///
+/// This is the whole per-row contract in one place: root, verdict, binds,
+/// posture, sentry. It answers "may this row carry value at all", with no
+/// knowledge of routes, ceilings or the other end - so the source and target
+/// rows are measured by exactly the same code, and a future third leg would be
+/// too.
+///
+/// # Errors
+///
+/// Returns the [`ValueGateRefusal`] of the earliest failing check.
+fn enforce_row_admissible(
+    gate: ValueGate,
+    proof: &crate::settlement::universal_finality::DomainFinalityInclusionProof,
+    sentry: &crate::cross_domain::external::sentry::ConsensusSentry,
+) -> Result<(), ValueGateRefusal> {
+    let entry = &proof.entry;
+    let domain_id = entry.domain_id;
+
+    // 1. Root: a row that commits no state root proves nothing about state.
+    if enforce_root(entry.state_root).is_err() {
+        return Err(ValueGateRefusal::DomainPending {
+            domain_id,
+            reason: FinalityPendingReason::EvidenceMissing,
+        });
+    }
+
+    // 2. Verdict: the row's own rule decides before any downstream symptom.
+    match entry.verdict {
+        FinalityVerdict::Established => {}
+        FinalityVerdict::Refuted { code } => {
+            return Err(ValueGateRefusal::DomainRefuted { domain_id, code });
+        }
+        FinalityVerdict::Pending { reason } => {
+            return Err(ValueGateRefusal::DomainPending { domain_id, reason });
+        }
+    }
+
+    // 3. Binds: the route reads the parent link and all three roots, so the
+    //    parent is named on its own first and then the full route set.
+    if enforce_binds(&entry.guarantee.attestation, BINDS_PARENT).is_err() {
+        return Err(ValueGateRefusal::BindsUnproven {
+            gate,
+            domain_id,
+            required: REQUIRED_PARENT,
+        });
+    }
+    if enforce_binds(&entry.guarantee.attestation, BINDS_VALUE_ROUTE).is_err() {
+        return Err(ValueGateRefusal::BindsUnproven {
+            gate,
+            domain_id,
+            required: REQUIRED_VALUE_ROUTE,
+        });
+    }
+
+    // 4. Posture: the proof must survive an adversary with a quantum computer.
+    if enforce_quantum_posture(
+        entry.guarantee.quantum_posture,
+        gate.quantum_posture_policy(),
+    )
+    .is_err()
+    {
+        return Err(ValueGateRefusal::QuantumPostureInsufficient {
+            gate,
+            domain_id,
+            observed: posture_label(entry.guarantee.quantum_posture),
+        });
+    }
+
+    // 5. Sentry circuit: a domain the sentry has escalated moves no value.
+    enforce_sentry_circuit_clear(sentry, gate, domain_id)
 }
 
 /// Refuse any value-moving gate whose `domain_id` is in the certificate's
@@ -334,6 +491,12 @@ pub fn enforce_domain_not_refuted(
 ///
 /// Returns [`ValueGateRefusal::SentryCircuitEscalated`] when Sentry blocks
 /// settlement for `domain_id`.
+///
+/// Shared helper, not a second decision point: it answers Sentry's part of
+/// the gate and nothing else. The value paths that run it directly
+/// (`bridge_tx`, `app_binding`, `domains`) also run
+/// [`check_certificate_value_gate`]; the helper is public so they can refuse
+/// before touching storage, without duplicating the circuit semantics.
 pub fn enforce_sentry_circuit_clear(
     sentry: &crate::cross_domain::external::sentry::ConsensusSentry,
     gate: ValueGate,
@@ -355,9 +518,11 @@ pub fn enforce_sentry_circuit_clear(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cross_domain::external::sentry::ConsensusSentry;
     use crate::crypto::facts::QuantumClass;
     use crate::settlement::universal_finality::{
-        compose, DomainFinalityEntry, FinalityReversibility, FINALITY_BINDS_ALL,
+        compose, trace_record_binds, trace_record_quantum_posture, DomainFinalityEntry,
+        FinalityReversibility, FINALITY_BINDS_ALL,
     };
 
     fn entry(
@@ -384,6 +549,8 @@ mod tests {
                 slashable_backing: slashable,
                 fault_tolerance_bps: bps,
             },
+            binds: trace_record_binds(&FINALITY_BINDS_ALL),
+            posture_trace: trace_record_quantum_posture(QuantumClass::Hash),
             verdict,
         }
     }
@@ -440,8 +607,9 @@ mod tests {
             ValueGate::ObjectLayerArrive,
             ValueGate::UniversalPayment,
         ] {
-            let verdict = check_certificate_value_gate(&cert, gate, 1, Some(2))
-                .expect("established value route must pass");
+            let verdict =
+                check_certificate_value_gate(&cert, &ConsensusSentry::new(), gate, 1, Some(2))
+                    .expect("established value route must pass");
             assert_eq!(verdict.gate, gate);
             assert_eq!(verdict.source_bucket, FinalityBucket::Established);
             assert!(verdict.safe_value_outflow_ceiling_atoms > 0);
@@ -449,17 +617,35 @@ mod tests {
 
         // Pending domain is refused.
         assert!(matches!(
-            check_certificate_value_gate(&cert, ValueGate::BridgeMint, 3, Some(2)),
+            check_certificate_value_gate(
+                &cert,
+                &ConsensusSentry::new(),
+                ValueGate::BridgeMint,
+                3,
+                Some(2)
+            ),
             Err(ValueGateRefusal::DomainPending { domain_id: 3, .. })
         ));
         assert!(matches!(
-            check_certificate_value_gate(&cert, ValueGate::UniversalPayment, 1, Some(3)),
+            check_certificate_value_gate(
+                &cert,
+                &ConsensusSentry::new(),
+                ValueGate::UniversalPayment,
+                1,
+                Some(3)
+            ),
             Err(ValueGateRefusal::DomainPending { domain_id: 3, .. })
         ));
 
         // Refuted domain is refused.
         assert!(matches!(
-            check_certificate_value_gate(&cert, ValueGate::AppBindingClaim, 4, None),
+            check_certificate_value_gate(
+                &cert,
+                &ConsensusSentry::new(),
+                ValueGate::AppBindingClaim,
+                4,
+                None
+            ),
             Err(ValueGateRefusal::DomainRefuted {
                 domain_id: 4,
                 code: 1
@@ -468,7 +654,13 @@ mod tests {
 
         // Non-slashable DeterministicQuorum fails admits_cross_domain_value.
         assert!(matches!(
-            check_certificate_value_gate(&cert, ValueGate::ObjectLayerArrive, 5, Some(2)),
+            check_certificate_value_gate(
+                &cert,
+                &ConsensusSentry::new(),
+                ValueGate::ObjectLayerArrive,
+                5,
+                Some(2)
+            ),
             Err(ValueGateRefusal::RouteFinalityInsufficient {
                 source_domain: 5,
                 ..
@@ -477,7 +669,13 @@ mod tests {
 
         // Absent domain is refused.
         assert_eq!(
-            check_certificate_value_gate(&cert, ValueGate::RelayerIntentSettle, 99, None),
+            check_certificate_value_gate(
+                &cert,
+                &ConsensusSentry::new(),
+                ValueGate::RelayerIntentSettle,
+                99,
+                None
+            ),
             Err(ValueGateRefusal::DomainMissing { domain_id: 99 })
         );
     }

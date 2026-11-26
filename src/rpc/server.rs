@@ -3242,11 +3242,15 @@ impl BudlumApiServer for RpcServer {
             &dst.entry.guarantee,
         );
         let composed_guarantee = src.entry.guarantee.meet(&hub).meet(&dst.entry.guarantee);
+        // The live path reads Sentry, so it hands the gate the real circuit
+        // state: an escalated domain cannot route value through this query.
+        let sentry = self.chain.get_consensus_sentry().await;
         let gate_result: Result<
             crate::settlement::finality_gate::ValueGateVerdict,
             crate::settlement::finality_gate::ValueGateRefusal,
         > = crate::settlement::finality_gate::check_certificate_value_gate(
             &cert,
+            &sentry,
             crate::settlement::finality_gate::ValueGate::UniversalPayment,
             source_domain,
             Some(target_domain),

@@ -20,8 +20,9 @@ use crate::cross_domain::external::prover::{
 use crate::crypto::facts::QuantumClass;
 use crate::settlement::domains::CommitmentAttestation;
 use crate::settlement::universal_finality::{
-    compose, DomainFinalityEntry, EconomicSecurityBound, FinalityBucket, FinalityGuarantee,
-    FinalityPendingReason, FinalityReversibility, FinalityVerdict,
+    compose, trace_record_binds, trace_record_quantum_posture, DomainFinalityEntry,
+    EconomicSecurityBound, FinalityBucket, FinalityGuarantee, FinalityPendingReason,
+    FinalityReversibility, FinalityVerdict,
 };
 
 fn sample_entry(
@@ -42,6 +43,8 @@ fn sample_entry(
         guarantee_backing_hash: [tag.wrapping_add(2); 32],
         bond_atoms: 1_000_000_000,
         guarantee,
+        binds: trace_record_binds(&guarantee.attestation),
+        posture_trace: trace_record_quantum_posture(guarantee.quantum_posture),
         verdict,
     }
 }

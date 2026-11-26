@@ -74,6 +74,8 @@ pub mod evm_finality_contract;
 #[cfg(test)]
 pub mod finality_adversarial;
 #[cfg(test)]
+pub mod finality_binds_gate;
+#[cfg(test)]
 pub mod finality_live_path;
 #[cfg(test)]
 pub mod fork_choice_locks;
