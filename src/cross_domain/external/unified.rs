@@ -48,7 +48,7 @@ use super::restaking_avs::RestakingAvsAdapter;
 use super::simplex_bft::SimplexBftAdapter;
 use super::solana_tower_bft::SolanaTowerBftAdapter;
 use super::spec::{
-    AdapterDescriptor, AdapterError, FinalityAttestation, RawConsensusEvidence,
+    AdapterDescriptor, AdapterError, AdapterId, FinalityAttestation, RawConsensusEvidence,
     VerificationPolicy,
 };
 use super::stark_validity_rollup::StarkValidityRollupAdapter;
@@ -422,7 +422,7 @@ mod tests {
                     declared_root: [0u8; 32],
                     submitter: Address::from([0x12; 32]),
                 },
-                &VerificationPolicy::allow_all(),
+                &VerificationPolicy::strict(0),
             )
             .unwrap_err();
         assert!(
