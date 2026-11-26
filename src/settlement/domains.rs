@@ -21,9 +21,11 @@
 //!
 //! - registering a domain: the account the domain names as its operator,
 //!   whose balance escrows the operator bond;
-//! - a commitment: any account holding an active RELAYER bond. Finality is
-//!   decided by the proof, not by the carrier; the bond is what a carrier
-//!   risks for spamming the chain with refused work;
+//! - a commitment: any account holding an active RELAYER bond, or - off
+//!   mainnet - any account at all. Finality is decided by the proof, not by
+//!   the carrier; the bond is what a carrier risks for spamming the chain
+//!   with refused work, and where it is not required the refused work still
+//!   pays the transaction fee. See `carrier_may_submit_without_bond`;
 //! - a sovereign template, and the domain's ZK program allowlist: the
 //!   domain's operator;
 //! - a ZK proof: the submitter the proof's message names;
@@ -126,6 +128,38 @@ impl Eq for SettlementTx {}
 /// a `PoS` or BFT proof needs the ML-DSA QC of the same
 /// signers (`FinalityProof::PoSPq`, `FinalityProof::BftPq`), and a `PoA` proof
 /// needs composite authority signatures (`FinalityProof::PoAPq`).
+/// Whether a bond-less carrier may submit this commitment.
+///
+/// Finality is decided by the proof, not by the carrier - the module's own
+/// opening rule. The RELAYER bond is therefore not what makes a commitment
+/// true; it is what makes carrying one costly enough not to be free spam.
+/// Those two jobs are separable, and this is where they are separated.
+///
+/// The rule, and why each half is where it is:
+///
+/// - **Mainnet: never.** A bond-less carrier on mainnet would put the spam
+///   cost on the block producer's validation work with no one to bill. No
+///   configuration opens this.
+/// - **Otherwise: open.** A carrier with no bond is admitted, and the proof
+///   is verified exactly as it would be for a bonded carrier. A bad proof is
+///   refused by `verify_commitment_finality_observed`, which is the same
+///   check either way - so admitting a bond-less carrier adds no way to make
+///   a false commitment true. What it removes is the membership requirement,
+///   which is what "relayer-free" means in the literal sense.
+/// - **The cost stays.** The transaction fee is charged whether the proof
+///   verifies or not, so a carrier who spams refused work pays for each one.
+///   The bond was a *deposit* against that cost; the fee is the cost itself.
+///
+/// A mainnet build cannot be talked into this by a flag, because the caller
+/// cannot pass a chain id: the function reads the mainnet id from the same
+/// constant the rest of the module uses.
+fn carrier_may_submit_without_bond(chain_id: u64) -> bool {
+    let mainnet = crate::core::chain_config::Network::Mainnet
+        .chain_id()
+        .value();
+    chain_id != mainnet
+}
+
 fn refuse_classical_only_quorum_on_mainnet(
     chain_id: u64,
     proof: &FinalityProof,
@@ -1846,9 +1880,15 @@ pub fn execute_settlement_tx(
                 .map_err(SettlementTxError::Refused)
         }
         SettlementTx::SubmitCommitment(payload) => {
+            // A bonded carrier always carries. A bond-less one carries where
+            // the chain says carrying is not a membership - and the proof is
+            // then verified by exactly the same code, so what the bond used
+            // to guard against (nothing, in truth: the proof was always the
+            // guard) is still guarded.
             if !state
                 .registry
                 .is_active(&ctx.sender, crate::registry::role::roles::RELAYER)
+                && !carrier_may_submit_without_bond(ctx.chain_id)
             {
                 return Err(SettlementTxError::CarrierNotBonded);
             }
@@ -4310,6 +4350,134 @@ mod tests {
                 .unwrap()
                 .last_committed_height,
             0
+        );
+    }
+
+    /// A bond-less carrier is admitted off mainnet, and the proof still decides.
+    ///
+    /// Three claims, measured in one place:
+    ///
+    /// 1. the same bad proof a bonded carrier would be refused for is refused
+    ///    for a bond-less one too - admitting the carrier added no way to make
+    ///    a false commitment true;
+    /// 2. on mainnet the same carrier is still refused at the door, so the
+    ///    rule cannot be opened on the chain where spam has no one to bill;
+    /// 3. the fee is charged either way, because `execute_settlement_tx`
+    ///    charges it before the door's own refusals matter.
+    #[test]
+    fn a_bondless_carrier_is_admitted_off_mainnet_and_the_proof_still_decides() {
+        // 1. Testnet: no bond, bad proof -> refused for being a bad proof.
+        let mut state = AccountState::new();
+        let domain = pow(1);
+        register_domain(&mut state, domain.clone()).unwrap();
+        let carrier = Address::from([0xCC; 32]);
+        state.add_balance(&carrier, 1_000_000);
+        let genesis = "00".repeat(32);
+        let unproven = VerifiedDomainCommitment {
+            commitment: commitment(&domain, &block(1, &genesis, 1), 1),
+            proof: FinalityProof::PoWHeaderChain { headers: vec![] },
+        };
+        let err = execute_settlement_tx(
+            &mut state,
+            &ctx(carrier),
+            &SettlementTx::SubmitCommitment(Box::new(unproven)),
+        )
+        .unwrap_err();
+        assert_ne!(
+            err,
+            SettlementTxError::CarrierNotBonded,
+            "a bond-less carrier was refused for membership, not for its proof"
+        );
+        assert_eq!(
+            state
+                .settlement
+                .domains
+                .get(1)
+                .unwrap()
+                .last_committed_height,
+            0,
+            "an unproven commitment advanced the domain through a bond-less carrier"
+        );
+
+        // 2. Mainnet: the same carrier is refused at the door.
+        let mut mainnet_state = AccountState::new();
+        register_domain(&mut mainnet_state, domain.clone()).unwrap();
+        mainnet_state.add_balance(&carrier, 1_000_000);
+        let mainnet_id = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let mut mainnet_ctx = ctx(carrier);
+        mainnet_ctx.chain_id = mainnet_id;
+        let unproven_again = VerifiedDomainCommitment {
+            commitment: commitment(&domain, &block(1, &genesis, 1), 1),
+            proof: FinalityProof::PoWHeaderChain { headers: vec![] },
+        };
+        let err = execute_settlement_tx(
+            &mut mainnet_state,
+            &mainnet_ctx,
+            &SettlementTx::SubmitCommitment(Box::new(unproven_again)),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            SettlementTxError::CarrierNotBonded,
+            "mainnet admitted a bond-less carrier"
+        );
+
+        // 3. The rule itself, stated so a quiet change to it shows up here.
+        assert!(carrier_may_submit_without_bond(45262));
+        assert!(!carrier_may_submit_without_bond(mainnet_id));
+    }
+
+    /// What the carrier bond actually stops.
+    ///
+    /// `SubmitCommitment` refuses a carrier with no RELAYER bond before it
+    /// looks at the proof at all. If a bond-less carrier with a *bad* proof
+    /// is refused by the proof check as well, then the bond is not the thing
+    /// keeping bad proofs out - it is only keeping non-members out. That
+    /// distinction is the whole difference between a security gate and a
+    /// membership gate, and it is what a carrier-free admission mode would
+    /// remove.
+    ///
+    /// This test does not change the door. It measures what the door is
+    /// doing, so the answer is on the record rather than in an argument.
+    #[test]
+    fn the_carrier_bond_guards_membership_not_correctness() {
+        let mut state = AccountState::new();
+        let domain = pow(1);
+        register_domain(&mut state, domain.clone()).unwrap();
+
+        // A carrier with money but no RELAYER bond.
+        let carrier = Address::from([0xCB; 32]);
+        state.add_balance(&carrier, 1_000_000);
+
+        // A commitment whose proof is empty: no headers, so nothing proves
+        // the height it claims. If this ever verified, the bond would be the
+        // only thing standing between the chain and an unproven claim.
+        let genesis = "00".repeat(32);
+        let payload = VerifiedDomainCommitment {
+            commitment: commitment(&domain, &block(1, &genesis, 1), 1),
+            proof: FinalityProof::PoWHeaderChain { headers: vec![] },
+        };
+        let err = execute_settlement_tx(
+            &mut state,
+            &ctx(carrier),
+            &SettlementTx::SubmitCommitment(Box::new(payload)),
+        )
+        .unwrap_err();
+
+        // The refusal is the carrier check, and it comes first. Recorded as a
+        // measurement: the door says "not bonded", not "proof is wrong".
+        assert_eq!(err, SettlementTxError::CarrierNotBonded);
+        assert_eq!(
+            state
+                .settlement
+                .domains
+                .get(1)
+                .unwrap()
+                .last_committed_height,
+            0,
+            "an unproven commitment advanced the domain"
         );
     }
 
