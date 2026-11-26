@@ -248,8 +248,6 @@ impl GardenPhone {
 }
 
 impl GardenPhone {
-    /// The listen address a phone uses: every interface, a port the system
-    /// picks. A phone moves between networks and cannot be told a port.
     /// The address this phone answers at on the network it is on.
     ///
     /// Asked of the routing table rather than of a list of interfaces: a
@@ -281,6 +279,9 @@ impl GardenPhone {
         None
     }
 
+    /// The listen address a phone uses: every interface, a port the system
+    /// picks. A phone moves between networks and cannot be told a port.
+    /// Founding a Garden overrides this, because a host must be dialable.
     fn options() -> GardenOptions {
         serde_json::from_value(serde_json::json!({ "listen": "/ip4/0.0.0.0/tcp/0" }))
             .unwrap_or_default()
