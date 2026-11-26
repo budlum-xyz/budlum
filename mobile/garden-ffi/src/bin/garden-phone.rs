@@ -17,6 +17,7 @@
 //!   garden-phone send <dir> <text> [caption]
 //!   garden-phone send-file <dir> <file> [mime]
 //!   garden-phone file-check <dir> <file> [mime] [address]
+//!   garden-phone room-check <dir> [file] [address]
 //!   garden-phone feed <dir> [limit]
 //!   garden-phone fetch <dir> <content id>
 //!   garden-phone leave <dir>
@@ -35,7 +36,7 @@ fn main() -> ExitCode {
     if command.is_empty() || dir.is_empty() {
         eprintln!(
             "usage: garden-phone \
-<self-test|read|create|join|serve|return-check|status|send|send-file|file-check|feed|fetch|leave> \
+<self-test|read|create|join|serve|return-check|status|send|send-file|file-check|room-check|feed|fetch|leave> \
 <dir> [...]"
         );
         return ExitCode::from(2);
@@ -231,6 +232,24 @@ fn main() -> ExitCode {
         // file into it, read it back off the chain and compare the bytes
         // to what went in. The app does the same three things; this is
         // where they can be run without an emulator.
+        // What the Room does, in one process: found a Garden, type two
+        // lines, send a file, then read the whole thing back off the
+        // chain the way the screen reads it - feed for what was sent,
+        // fetch for the words themselves.
+        "room-check" => {
+            let file = args.get(3).cloned();
+            let address = args.get(4).cloned();
+            match room_round_trip(&phone, file, address) {
+                Ok(()) => {
+                    println!("the room came back off the chain in the order it was said");
+                    ExitCode::SUCCESS
+                }
+                Err(reason) => {
+                    eprintln!("the room is broken: {reason}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         "file-check" => {
             let file = match args.get(3) {
                 Some(path) => path.clone(),
@@ -422,6 +441,96 @@ fn json_string(text: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// Say two lines and send a file, then read the room back off the chain.
+///
+/// This is the Room screen's whole job written out: publish, wait for
+/// the block the group agreed on, read the feed, and fetch the words
+/// back rather than trusting what this phone remembers typing.
+fn room_round_trip(
+    phone: &Arc<GardenPhone>,
+    file: Option<String>,
+    address: Option<String>,
+) -> Result<(), String> {
+    let made = phone
+        .create("Kitchen table".to_string(), "Phone".to_string(), address)
+        .map_err(|e| e.to_string())?;
+    println!("founded:  {}", one_line(&made.json, "chain_id"));
+
+    let first = "this is the first thing anybody said here";
+    let second = "and this is the second, so the order can be checked";
+    let one = phone
+        .send(first.to_string(), String::new())
+        .map_err(|e| e.to_string())?;
+    let first_id = field(&one.json, "content_id").ok_or("the first line has no content id")?;
+    println!("said:     {first}");
+    let two = phone
+        .send(second.to_string(), String::new())
+        .map_err(|e| e.to_string())?;
+    let second_id = field(&two.json, "content_id").ok_or("the second line has no content id")?;
+    println!("said:     {second}");
+
+    let mut file_id = None;
+    if let Some(path) = file {
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .map_or_else(|| "file".to_string(), |n| n.to_string_lossy().into_owned());
+        let sent = phone
+            .send_file(hex_of(&bytes), "image/png".to_string(), name.clone())
+            .map_err(|e| e.to_string())?;
+        println!("sent:     {name}, {} bytes", bytes.len());
+        file_id = field(&sent.json, "content_id");
+    }
+
+    let wanted = file_id.clone().map_or(2, |_| 3);
+    let feed = wait_for_feed(phone, wanted)?;
+    println!("feed:     {feed}");
+
+    // The screen fetches the words of a text line rather than echoing
+    // what was typed, so that is what is checked here.
+    let back = phone.fetch(first_id.clone()).map_err(|e| e.to_string())?;
+    println!("fetched:  {}", back.json);
+    if !back.json.contains(first) {
+        return Err("the first line did not come back off the chain".into());
+    }
+    if !feed.contains(&second_id) {
+        return Err("the second line is not in the feed".into());
+    }
+    if let Some(id) = file_id {
+        if !feed.contains(&id) {
+            return Err("the file is not in the feed".into());
+        }
+        if !feed.contains("image/png") {
+            return Err("the feed does not say the file is an image".into());
+        }
+    }
+    // Order is by the block a line landed in, which is what the screen
+    // sorts on. The feed hands them back newest first, so the second
+    // line has to come before the first one in it.
+    let newest = feed.find(&second_id).ok_or("the second line vanished")?;
+    let oldest = feed.find(&first_id).ok_or("the first line vanished")?;
+    if newest > oldest {
+        return Err("the chain put the lines in the wrong order".into());
+    }
+    Ok(())
+}
+
+/// Wait until the group has agreed on blocks carrying `wanted` items.
+fn wait_for_feed(phone: &Arc<GardenPhone>, wanted: usize) -> Result<String, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    loop {
+        let feed = phone.feed(20).map_err(|e| e.to_string())?;
+        let got = feed.json.matches("\"content_id\"").count();
+        if got >= wanted {
+            return Ok(feed.json);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("only {got} of {wanted} reached a block in ninety seconds"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
 }
 
 /// Found a Garden, publish a file into it, and read it back verified.
