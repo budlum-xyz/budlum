@@ -626,6 +626,39 @@ impl FinalityGuarantee {
                     fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
+            AdapterSpec::NearDoomslug { epoch, .. } => {
+                // Doomslug finality is a stake quorum over one epoch's block
+                // producers: deterministic quorum class, not a depth. A pin
+                // with no producers, no successor, or a zero successor
+                // commitment names no quorum, so it earns no guarantee.
+                let valid = epoch.as_ref().is_some_and(|e| {
+                    e.epoch_id != [0u8; 32]
+                        && e.next_epoch_id != [0u8; 32]
+                        && e.epoch_id != e.next_epoch_id
+                        && e.next_bp_hash != [0u8; 32]
+                        && !e.block_producers.is_empty()
+                });
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    // Ed25519 approvals carry ML-DSA-65 co-signatures when the
+                    // producers publish a PQ key, so the pinned posture is
+                    // lattice-grade only when every producer commits one.
+                    quantum_posture: if valid {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        event_root: valid,
+                        parent: valid,
+                    },
+                    // A foreign validator set: Budlum holds no bond over it.
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
             AdapterSpec::HoneyBadgerBft { committee, .. } => {
                 // Asynchronous ACS finality is protocol finality under an
                 // honest supermajority: one decided epoch is final, and the

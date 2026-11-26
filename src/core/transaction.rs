@@ -5692,6 +5692,32 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
+        // Tag 19: NEAR Doomslug epoch adapter, appended last.
+        //
+        // The epoch identity, the successor commitment and the whole
+        // block-producer table reach the preimage: a relay that could swap one
+        // producer's key or stake on a signed registration would be choosing the
+        // quorum its own light-client proof must satisfy.
+        AdapterSpec::NearDoomslug { network, epoch } => {
+            put_u8(out, 19);
+            put_string(out, network);
+            match epoch {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.epoch_id);
+                    put_fixed(out, &pin.next_epoch_id);
+                    put_fixed(out, &pin.next_bp_hash);
+                    put_u64(out, pin.block_producers.len() as u64);
+                    for bp in &pin.block_producers {
+                        put_string(out, &bp.account_id);
+                        put_fixed(out, &bp.ed25519_pubkey);
+                        put_u128(out, bp.stake);
+                        put_bytes(out, &bp.pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
     }
 }
 

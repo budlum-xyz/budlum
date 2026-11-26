@@ -35,7 +35,12 @@
 //!    `target_height` and surround-vote `s_1 < s_2 < t_2 < t_1`).
 
 //!
-//! WIRING: unwired - implements `ExternalFinalityAdapter` for `ExternalDomainRegistry`; `AdapterSpec` joins `intake.rs` in the follow-up merge.
+//! WIRING: wired - `AdapterSpec::NearDoomslug { network, epoch }` (wire tag 19)
+//! builds this adapter from an intake registration whose epoch must equal the
+//! governance pin (`IntakeState::pin_near_epoch`, reachable in production
+//! through `GovernanceAction::PinExternalAnchor`), and
+//! `FinalityGuarantee::for_external_spec_declared` maps the pinned producer
+//! table to deterministic-quorum finality.
 
 use crate::crypto::facts::{CryptoObserver, ObservedScheme};
 use crate::crypto::scheme::SchemeId;
@@ -998,7 +1003,7 @@ impl ExternalFinalityAdapter for NearDoomslugAdapter {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::core::address::Address;
     use crate::cross_domain::external::selftest;
@@ -1006,15 +1011,15 @@ mod tests {
 
     const NET: &str = "near-mainnet";
 
-    struct NearFixture {
-        pinned: PinnedNearEpoch,
-        ed_keys: Vec<KeyPair>,
-        pq_keys: Vec<PqKeyPair>,
-        next_bps: Vec<NearBlockProducer>,
-        b0: NearLightHeader,
-        b1: NearLightHeader,
-        b2: NearLightHeader,
-        golden: RawConsensusEvidence,
+    pub(crate) struct NearFixture {
+        pub(crate) pinned: PinnedNearEpoch,
+        pub(crate) ed_keys: Vec<KeyPair>,
+        pub(crate) pq_keys: Vec<PqKeyPair>,
+        pub(crate) next_bps: Vec<NearBlockProducer>,
+        pub(crate) b0: NearLightHeader,
+        pub(crate) b1: NearLightHeader,
+        pub(crate) b2: NearLightHeader,
+        pub(crate) golden: RawConsensusEvidence,
     }
 
     fn make_header(
@@ -1062,7 +1067,7 @@ mod tests {
         }
     }
 
-    fn build_near_fixture() -> NearFixture {
+    pub(crate) fn build_near_fixture() -> NearFixture {
         let ed_keys: Vec<KeyPair> = (0..4).map(|_| KeyPair::generate().unwrap()).collect();
         let pq_keys: Vec<PqKeyPair> = (0..4).map(|_| PqKeyPair::generate()).collect();
         let stakes = [300u128, 250, 250, 200]; // total = 1000; first 3 = 800 > 666

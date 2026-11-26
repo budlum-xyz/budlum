@@ -301,6 +301,21 @@ pub enum AdapterSpec {
         committee:
             Option<crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee>,
     },
+    /// NEAR `Doomslug` / Nightshade epoch finality.
+    ///
+    /// `encode_adapter_spec` tag is the first free slot after HoneyBadgerBFT's
+    /// 18.
+    ///
+    /// The pin is an epoch: the active and successor epoch ids, the committed
+    /// `next_bp_hash` over the block-producer table, and that table itself
+    /// (account ids, Ed25519 keys, stakes, optional ML-DSA-65 keys). A NEAR
+    /// light-client proof is a statement about one epoch's block producers, so
+    /// a spec without that epoch is the closed admission state.
+    NearDoomslug {
+        network: String,
+        #[serde(default)]
+        epoch: Option<crate::cross_domain::external::near_doomslug::PinnedNearEpoch>,
+    },
 }
 
 impl AdapterSpec {
@@ -322,7 +337,8 @@ impl AdapterSpec {
             | Self::BabylonEots { network, .. }
             | Self::NipopowSuperblock { network, .. }
             | Self::Ghostdag { network, .. }
-            | Self::HoneyBadgerBft { network, .. } => network,
+            | Self::HoneyBadgerBft { network, .. }
+            | Self::NearDoomslug { network, .. } => network,
         }
     }
 
@@ -444,6 +460,16 @@ impl AdapterSpec {
                 },
                 golden,
                 crate::cross_domain::external::honeybadger_bft::HoneyBadgerBftAdapter::with_golden,
+            ),
+            Self::NearDoomslug { network, epoch } => box_with_golden(
+                || {
+                    crate::cross_domain::external::near_doomslug::NearDoomslugAdapter::new(
+                        network,
+                        epoch.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::near_doomslug::NearDoomslugAdapter::with_golden,
             ),
         }
     }
@@ -611,6 +637,16 @@ pub struct IntakeState {
         String,
         crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor,
     >,
+    /// Governance-pinned `Doomslug` (NEAR) epoch validator tables keyed by
+    /// external network.
+    ///
+    /// Inside [`Self::state_digest`] like every other pin map: only a block may
+    /// write it.
+    #[serde(default)]
+    pub pinned_near_epochs: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::near_doomslug::PinnedNearEpoch,
+    >,
     /// Governance-pinned `HoneyBadgerBFT` epoch committees keyed by external
     /// network.
     ///
@@ -653,6 +689,8 @@ pub enum AnchorFamily {
     Ghostdag,
     /// Leaderless asynchronous BFT (`HoneyBadgerBFT`) epoch committee.
     HoneyBadger,
+    /// Epoch validator table and successor epoch commitment (`NEAR`).
+    NearEpoch,
 }
 
 impl AnchorFamily {
@@ -668,6 +706,7 @@ impl AnchorFamily {
             Self::PoWSuccinct => "pow-succinct",
             Self::Ghostdag => "ghostdag",
             Self::HoneyBadger => "honeybadger",
+            Self::NearEpoch => "near-epoch",
         }
     }
 }
@@ -697,6 +736,8 @@ pub enum PinnedExternalAnchor {
     Ghostdag(crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor),
     /// Epoch committee for a leaderless asynchronous `HoneyBadgerBFT` domain.
     HoneyBadger(crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee),
+    /// Epoch validator table for a `Doomslug` (NEAR) domain.
+    NearEpoch(crate::cross_domain::external::near_doomslug::PinnedNearEpoch),
 }
 
 impl PinnedExternalAnchor {
@@ -712,6 +753,7 @@ impl PinnedExternalAnchor {
             Self::Nipopow(_) => AnchorFamily::PoWSuccinct,
             Self::Ghostdag(_) => AnchorFamily::Ghostdag,
             Self::HoneyBadger(_) => AnchorFamily::HoneyBadger,
+            Self::NearEpoch(_) => AnchorFamily::NearEpoch,
         }
     }
 
@@ -817,6 +859,33 @@ impl PinnedExternalAnchor {
                 // the wrong length, zero weight). A pin that does not validate
                 // cannot certify a single epoch.
                 committee.validate().map_err(|e| e.to_string())?;
+            }
+            Self::NearEpoch(epoch) => {
+                // A NEAR pin is an epoch identity plus the block-producer table
+                // that epoch is served by. Zero or self-referential epoch ids
+                // name no epoch, and an empty table names no producers.
+                //
+                // `next_bp_hash` is deliberately *not* checked against
+                // `block_producers`: in NEAR a header commits to the
+                // **successor** epoch's producer set, so the hash is over a
+                // table that is not in the pin at all. It must be non-zero -
+                // a proof against a zero commitment proves nothing - and the
+                // successor table is checked where the evidence is verified.
+                if epoch.epoch_id == [0u8; 32] {
+                    return Err("the pinned NEAR epoch id is all zeroes".into());
+                }
+                if epoch.next_epoch_id == [0u8; 32] {
+                    return Err("the pinned NEAR successor epoch id is all zeroes".into());
+                }
+                if epoch.epoch_id == epoch.next_epoch_id {
+                    return Err("the pinned NEAR epoch names itself as its successor".into());
+                }
+                if epoch.next_bp_hash == [0u8; 32] {
+                    return Err("the pinned NEAR next block-producer hash is all zeroes".into());
+                }
+                if epoch.block_producers.is_empty() {
+                    return Err("the pinned NEAR epoch has no block producers".into());
+                }
             }
         }
         Ok(())
@@ -1599,6 +1668,32 @@ impl IntakeState {
             .insert(network.into(), committee);
     }
 
+    /// Installs or updates the consensus-pinned `Doomslug` (NEAR) epoch for
+    /// `network`. WIRING: genesis/test initializer; the production door is
+    /// `GovernanceAction::PinExternalAnchor` -> [`Self::install_pinned_anchor`].
+    pub fn pin_near_epoch(
+        &mut self,
+        network: impl Into<String>,
+        epoch: crate::cross_domain::external::near_doomslug::PinnedNearEpoch,
+    ) {
+        self.pinned_near_epochs.insert(network.into(), epoch);
+    }
+
+    /// Installs the NEAR epoch for `network` only if it is a real trust root.
+    ///
+    /// # Errors
+    ///
+    /// The named zero or inconsistent field.
+    pub fn install_near_epoch(
+        &mut self,
+        network: impl Into<String>,
+        epoch: crate::cross_domain::external::near_doomslug::PinnedNearEpoch,
+    ) -> Result<(), String> {
+        PinnedExternalAnchor::NearEpoch(epoch.clone()).validate()?;
+        self.pinned_near_epochs.insert(network.into(), epoch);
+        Ok(())
+    }
+
     /// Installs the HoneyBadgerBFT committee for `network` only if it is a
     /// real trust root.
     ///
@@ -1659,6 +1754,9 @@ impl IntakeState {
                 self.pinned_honeybadger_committees
                     .insert(network.to_string(), committee);
             }
+            PinnedExternalAnchor::NearEpoch(epoch) => {
+                self.pinned_near_epochs.insert(network.to_string(), epoch);
+            }
         }
     }
 
@@ -1715,6 +1813,11 @@ impl IntakeState {
                 .get(network)
                 .cloned()
                 .map(PinnedExternalAnchor::HoneyBadger),
+            AnchorFamily::NearEpoch => self
+                .pinned_near_epochs
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::NearEpoch),
         }
     }
 
@@ -1939,6 +2042,19 @@ impl IntakeState {
                 return Err(IntakeError::CommitteeNotPinned);
             };
             if committee.as_ref() != Some(installed) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // Doomslug admission requires a governance-pinned epoch for `network`,
+        // echoed exactly by the spec. A NEAR light-client proof is verified
+        // against one epoch's block producers; a registrant that could name its
+        // own table would be certifying its own quorum, and the epoch-rotation
+        // door is where a successor set is allowed to arrive.
+        if let AdapterSpec::NearDoomslug { network, epoch } = &spec {
+            let Some(installed) = self.pinned_near_epochs.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if epoch.as_ref() != Some(installed) {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
@@ -6289,5 +6405,110 @@ mod tests {
         assert_eq!(intake.pinned_ghostdag_anchors.len(), 1);
         assert_eq!(intake.pinned_honeybadger_committees.len(), 1);
         assert!(intake.pinned_bitcoin_anchors.is_empty());
+    }
+
+    /// Registers `spec` through the real admission path, which is the only
+    /// door: the same call production makes.
+    fn admit_near(
+        state: &mut IntakeState,
+        spec: AdapterSpec,
+        golden: crate::cross_domain::external::spec::RawConsensusEvidence,
+    ) -> Result<DomainKey, IntakeError> {
+        let economics = IntakeState::conservative_economics(1_000_000);
+        let versions = versions_for(&spec);
+        state.register_domain(
+            RegistrationRequest {
+                spec,
+                policy: VerificationPolicy::strict(1_000),
+                bond_atoms: economics_bond(),
+                economics,
+                versions,
+                poster: addr(9),
+                golden,
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn a_near_epoch_pin_is_the_only_epoch_a_registration_may_certify() {
+        use crate::cross_domain::external::near_doomslug::tests::build_near_fixture;
+
+        let fx = build_near_fixture();
+        let net = "near-mainnet";
+        let mut intake = IntakeState::default();
+        let spec = AdapterSpec::NearDoomslug {
+            network: net.to_string(),
+            epoch: Some(fx.pinned.clone()),
+        };
+
+        // Nothing pinned: the adapter cannot be registered at all.
+        assert_eq!(
+            admit_near(&mut intake, spec.clone(), fx.golden.clone()),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+
+        // A pin that is not a trust root is refused by the checked door.
+        let mut broken = fx.pinned.clone();
+        broken.next_bp_hash = [0u8; 32];
+        assert!(intake
+            .install_near_epoch(net, broken.clone())
+            .is_err_and(|e| e.contains("all zeroes")));
+        // The checked door left no pin behind, so admission is still closed.
+        assert!(intake.pinned_near_epochs.is_empty());
+        assert_eq!(
+            admit_near(&mut intake, spec.clone(), fx.golden.clone()),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+
+        // A pin with no producers, and a pin that names itself as its own
+        // successor, are both refused by name: neither names a quorum.
+        let mut empty = fx.pinned.clone();
+        empty.block_producers.clear();
+        assert!(intake
+            .install_near_epoch(net, empty)
+            .is_err_and(|e| e.contains("no block producers")));
+        let mut self_successor = fx.pinned.clone();
+        self_successor.next_epoch_id = self_successor.epoch_id;
+        assert!(intake
+            .install_near_epoch(net, self_successor)
+            .is_err_and(|e| e.contains("names itself as its successor")));
+
+        // The genuine epoch installs and admits exactly that epoch.
+        intake
+            .install_near_epoch(net, fx.pinned.clone())
+            .expect("the fixture epoch is a valid trust root");
+        admit_near(&mut intake, spec, fx.golden.clone()).expect("the pinned epoch admits");
+
+        // A registration naming a different epoch is refused: an unsigned
+        // relay cannot choose which validator set its proof answers to.
+        let mut other = fx.pinned.clone();
+        other.next_epoch_id = [0x11u8; 32];
+        assert_eq!(
+            admit_near(
+                &mut intake,
+                AdapterSpec::NearDoomslug {
+                    network: net.to_string(),
+                    epoch: Some(other),
+                },
+                fx.golden.clone(),
+            ),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+
+        // The governance door reaches the same map under its own key.
+        let mut governed = IntakeState::default();
+        governed.install_pinned_anchor(net, PinnedExternalAnchor::NearEpoch(fx.pinned.clone()));
+        assert_eq!(
+            governed.pinned_anchor(AnchorFamily::NearEpoch, net),
+            Some(PinnedExternalAnchor::NearEpoch(fx.pinned.clone()))
+        );
+        // Both doors write the same map, so both states digest identically:
+        // a governance vote and a genesis pin that agree must not fork state.
+        let mut genesis = IntakeState::default();
+        genesis.pin_near_epoch(net, fx.pinned.clone());
+        assert_eq!(governed.state_digest(), genesis.state_digest());
+        assert!(governed.pinned_honeybadger_committees.is_empty());
+        assert!(governed.pinned_ghostdag_anchors.is_empty());
     }
 }
