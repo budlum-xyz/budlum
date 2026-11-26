@@ -43,6 +43,15 @@ jobs:
     name: "Semver Check (item 5: public API breakage gate)"
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # This job checks the tree out into `current/` (and a baseline into
+    # `baseline/`), so the workspace root holds no repository at all: a
+    # root-relative `.github/scripts/...` step died with "can't open file
+    # .../.github/scripts/install_protoc.py" on 2026-11-25, the only red of
+    # eighteen runs on that snapshot. The job runs in `current/`, which is the
+    # tree under test; the steps that need the baseline name it explicitly.
+    defaults:
+      run:
+        working-directory: current
     steps:
       - name: Checkout (current)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -84,7 +93,7 @@ jobs:
       - name: Install cargo-semver-checks (locked)
         run: cargo +1.97.1 install cargo-semver-checks --locked
       - name: Gate canary (vacuous-gate protection)
-        run: BUDLUM_ROOT="$PWD/current" cargo run --release --manifest-path ./current/xtask/gates/Cargo.toml -- semver --self-test
+        run: BUDLUM_ROOT="$PWD" cargo run --release --manifest-path ./xtask/gates/Cargo.toml -- semver --self-test
       - name: Diagnosis (permanent evidence step) - rustdoc-json directly
         # This one is a DIAGNOSTIC, not a gate, and it now says so in its exit
         # code rather than in a flag. It exists to make the error body that the
@@ -108,7 +117,6 @@ jobs:
           RUST_BACKTRACE: "1"
         run: |
           set +e
-          cd current
           cargo rustdoc -p budlum-core --lib -- -Z unstable-options --output-format json \
             > /tmp/rustdoc-direct.log 2>&1
           status=$?
@@ -147,7 +155,8 @@ jobs:
             echo "NOTE: budlum-core is not published on crates.io; a base is mandatory."
             exit 0
           fi
-          BUDLUM_ROOT="$PWD/current" cargo run --release --manifest-path ./current/xtask/gates/Cargo.toml -- semver ./current ./baseline
+          # The job runs inside `current/`; the baseline copy is its sibling.
+          BUDLUM_ROOT="$PWD" cargo run --release --manifest-path ./xtask/gates/Cargo.toml -- semver . ../baseline
           rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "::warning::gate exit=$rc - runner memory snapshot (for OOM evidence):"

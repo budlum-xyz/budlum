@@ -226,6 +226,7 @@ mod gates {
     pub mod wire_fields_are_signed;
     pub mod workflow_red_keeps_its_words;
     pub mod workflows_cover_every_workspace;
+    pub mod workflow_scripts_resolve;
     pub mod workflows_produce_jobs;
     pub mod zero_address_sender_is_verified;
     pub mod zero_storage_frozen;
@@ -1444,6 +1445,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::workflow_red_keeps_its_words::self_test,
+    },
+    Gate {
+        name: "workflow-scripts-resolve",
+        replaces: None,
+        run: gates::workflow_scripts_resolve::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::workflow_scripts_resolve::self_test,
     },
     Gate {
         name: "unwired-code-is-ratcheted",
