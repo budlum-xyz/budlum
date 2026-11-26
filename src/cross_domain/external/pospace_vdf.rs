@@ -38,6 +38,12 @@
 //!
 //! WIRING: built by [`NetworkCatalog::with_builtin_families`](super::unified::NetworkCatalog::with_builtin_families)
 //! as the PoSpace family and reached through `bud_unifiedNetworks` and `bud_unifiedSelftest`.
+//!
+//! WIRING: unwired - `verify_double_signage_equivocation`. The adapter itself
+//! is built by `NetworkCatalog` and its evidence path is reachable, but this
+//! refusal waits until a
+//! slashing intake names the signage slot; finality verification does not ask.
+//!
 //! [`super::ExternalDomainRegistry`], verified by [`super::selftest::admit`];
 //! `AdapterSpec` variant joins `intake.rs` in the follow-up intake merge.
 

@@ -37,6 +37,12 @@
 //!
 //! WIRING: built by [`NetworkCatalog::with_builtin_families`](super::unified::NetworkCatalog::with_builtin_families)
 //! as the DOOMSLUG family and reached through `bud_unifiedNetworks` and `bud_unifiedSelftest`.
+//!
+//! WIRING: unwired - `verify_near_approval_slash`. The adapter itself is
+//! built by `NetworkCatalog` and its evidence path is reachable, but this
+//! refusal waits until an intake
+//! carries the slashing transaction; the finality path never needs it.
+//!
 
 use crate::crypto::facts::{CryptoObserver, ObservedScheme};
 use crate::crypto::scheme::SchemeId;

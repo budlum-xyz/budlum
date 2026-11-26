@@ -42,6 +42,13 @@
 //!
 //! WIRING: built by [`NetworkCatalog::with_builtin_families`](super::unified::NetworkCatalog::with_builtin_families)
 //! as the HoneyBadger family and reached through `bud_unifiedNetworks` and `bud_unifiedSelftest`.
+//!
+//! WIRING: unwired - `verify_rbc_equivocation`. The adapter itself is built
+//! by `NetworkCatalog` and its evidence path is reachable, but this refusal
+//! waits until a slashing
+//! intake names the RBC round; calling it before that would let a refusal
+//! answer a question no transaction asks.
+//!
 
 use std::collections::BTreeSet;
 
