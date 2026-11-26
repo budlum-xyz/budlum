@@ -33,6 +33,7 @@ data class ChatLine(
     val size: Int,
     val height: Long,
     val heldHere: Boolean,
+    val verified: Boolean = false,
 ) {
     /** True when this line is a file rather than something typed. */
     val isFile: Boolean get() = text == null
@@ -221,11 +222,15 @@ class GardenModel(
                 continue
             }
             val mime = item.optString("mime")
+            // The words are fetched rather than remembered: the core
+            // hands the bytes back checked against the content id, and
+            // says so. What the Room shows is what the chain holds.
+            var verified = false
             val text = if (mime.startsWith("text/")) {
                 runCatching {
-                    JSONObject(phone.fetch(id).json).optString("text").takeIf {
-                        it.isNotEmpty() && it != "null"
-                    }
+                    val got = JSONObject(phone.fetch(id).json)
+                    verified = got.optBoolean("verified")
+                    got.optString("text").takeIf { it.isNotEmpty() && it != "null" }
                 }.getOrNull()
             } else {
                 null
@@ -241,12 +246,18 @@ class GardenModel(
                     size = item.optInt("size", 0),
                     height = item.optLong("height", 0),
                     heldHere = item.optBoolean("held_here"),
+                    verified = verified,
                 ),
             )
         }
-        // The feed is newest first; a conversation reads the other way.
+        // The feed is newest first, already in the order the chain put
+        // things in - by block, and within a block by where the
+        // transaction sits in it. Two lines often share a block, so
+        // sorting by height alone would reorder them and sorting by
+        // content id would scramble them outright. Reversing the feed
+        // keeps the order the group agreed on.
         state = state.copy(
-            messages = lines.sortedWith(compareBy({ it.height }, { it.id })),
+            messages = lines.asReversed(),
             myKey = me,
             aloneHere = alone,
             feed = feed,

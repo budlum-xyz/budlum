@@ -209,8 +209,9 @@ private fun FileLine(line: ChatLine) {
 
 /** Where the line sits in the chain, and whether a part of it is here. */
 private fun footer(line: ChatLine): String {
-    val held = if (line.heldHere) " - a part kept on this phone" else ""
-    return "block " + line.height + held
+    val held = if (line.heldHere) " - a part kept here" else ""
+    val checked = if (line.verified) " - checked" else ""
+    return "block " + line.height + held + checked
 }
 
 private fun readableSize(bytes: Int): String = when {
