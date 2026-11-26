@@ -3755,6 +3755,25 @@ fn verify_certificate_rpc_response(
     Ok(cert)
 }
 
+/// Read the node's CRQC alarm state before the route gate runs.
+///
+/// The quantum posture of a route is a fact about the chain the certificate
+/// came from, and the CLI has no sentry of its own. The one thing it can do
+/// honestly is ask the node whether its alarm is active, and refuse unless
+/// the answer is an explicit `false`: a node that does not answer the
+/// question has not said "no".
+fn read_crqc_alarm_active(rpc_url: &str) -> Result<bool, String> {
+    let health = rpc_call(rpc_url, "bud_getDomainHealth", serde_json::json!([null]))?;
+    health
+        .get("crqcAlarmActive")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| {
+            "the node's `bud_getDomainHealth` response has no boolean `crqcAlarmActive`; \
+             the route's quantum posture cannot be read, refusing"
+                .to_string()
+        })
+}
+
 /// Operator-supplied finality anchor (`--trusted-finality-digest` +
 /// `--trusted-finality-checkpoint`), obtained out-of-band from a source the
 /// operator already trusts: an own node, a light client, a pinned header.
@@ -3941,6 +3960,19 @@ fn run_finality_route(
     let cert = verify_certificate_rpc_response(&resp)?;
     check_certificate_against_anchor(&cert, &anchor)?;
 
+    // The gate's quantum posture check reads a sentry, and the CLI has none.
+    // Ask the node for the one fact that decides whether that check can say
+    // anything: an active alarm means the posture question is live, and only
+    // the node's sentry can answer it for a route. Refuse there; never
+    // invent an answer.
+    if read_crqc_alarm_active(rpc_url)? {
+        return Err(
+            "the node reports an active CRQC alarm: the route's quantum posture is decided \
+             by the node (bud_getRouteFinality), not by this client"
+                .to_string(),
+        );
+    }
+
     let src = cert.prove_domain(source).ok_or_else(|| {
         format!("source domain {source} is not present in the finality certificate")
     })?;
@@ -3965,9 +3997,16 @@ fn run_finality_route(
         budlum_core::settlement::finality_gate::ValueGateRefusal,
     > = budlum_core::settlement::finality_gate::check_certificate_value_gate(
         &cert,
+        // The CLI has no sentry of its own. A fresh sentry is the no-alarm
+        // state, which is exactly what the node just reported: without an
+        // alarm the posture check inside the gate asks nothing, so this
+        // answer equals the node's for every route the node admits, and the
+        // alarm case was refused above instead of being guessed.
+        &budlum_core::cross_domain::external::sentry::ConsensusSentry::new(),
         budlum_core::settlement::finality_gate::ValueGate::UniversalPayment,
         source,
         Some(target),
+        budlum_core::settlement::universal_finality::FinalityBinds::EVENT_ROOT,
     );
 
     let (admits_value, refusal_reason, safe_ceiling) = match gate_result {
@@ -6086,6 +6125,7 @@ mod rpc_auth_tests {
             finality_proof_hash: [0x11; 32],
             guarantee_backing_hash: [0x22; 32],
             bond_atoms: 1_000_000,
+            binds: budlum_core::settlement::universal_finality::FinalityBinds::ALL,
             guarantee: FinalityGuarantee {
                 reversibility: FinalityReversibility::ProbabilisticWork { confirmations: 6 },
                 quantum_posture: QuantumClass::Hash,
@@ -6153,6 +6193,7 @@ mod finality_anchor_tests {
             finality_proof_hash: [0x11; 32],
             guarantee_backing_hash: [0x22; 32],
             bond_atoms: 1_000_000,
+            binds: budlum_core::settlement::universal_finality::FinalityBinds::ALL,
             guarantee: FinalityGuarantee {
                 reversibility: FinalityReversibility::ProbabilisticWork { confirmations: 6 },
                 quantum_posture: QuantumClass::Hash,
@@ -6333,5 +6374,105 @@ mod finality_anchor_tests {
             request.contains(&format!("\"params\":[{CHECKPOINT}]")),
             "the certificate must be requested at the anchored height, got: {request}"
         );
+    }
+
+    /// Serve `replies` in order, one per request: the certificate first, then
+    /// whatever the node answers next. Every request body is yielded in order.
+    fn serve_sequence(replies: &[serde_json::Value]) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock RPC");
+        listener
+            .set_nonblocking(true)
+            .expect("non-blocking mock RPC");
+        let addr = listener.local_addr().expect("mock RPC address");
+        let payloads: Vec<String> = replies
+            .iter()
+            .enumerate()
+            .map(|(i, result)| {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": i + 1,
+                    "result": result,
+                })
+                .to_string()
+            })
+            .collect();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            for payload in payloads {
+                let mut stream = loop {
+                    if Instant::now() >= deadline {
+                        return;
+                    }
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    }
+                };
+                stream.set_nonblocking(false).expect("blocking stream");
+                let request = read_request(&mut stream);
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = tx.send(request);
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    fn certificate_reply(cert: &GlobalFinalityCertificate) -> serde_json::Value {
+        serde_json::json!({
+            "certificateDigest": digest_hex(cert),
+            "certificate": cert,
+        })
+    }
+
+    #[test]
+    fn route_refuses_when_the_node_reports_an_active_crqc_alarm() {
+        let honest = honest();
+        let (url, rx) = serve_sequence(&[
+            certificate_reply(&honest),
+            serde_json::json!({ "crqcAlarmActive": true }),
+        ]);
+        let err = run_finality_route(&url, 1, 2, Some(&digest_hex(&honest)), Some(CHECKPOINT))
+            .expect_err("an active alarm must not be reported as an admitted route");
+        assert!(err.contains("CRQC alarm"), "unexpected error: {err}");
+        let first = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("certificate request");
+        assert!(first.contains("bud_getFinalityCertificate"));
+        let second = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("health request");
+        assert!(
+            second.contains("bud_getDomainHealth"),
+            "the alarm must be read from the node, got: {second}"
+        );
+    }
+
+    #[test]
+    fn route_refuses_when_the_node_does_not_report_its_alarm_state() {
+        let honest = honest();
+        let (url, _rx) = serve_sequence(&[
+            certificate_reply(&honest),
+            serde_json::json!({ "watchedDomainCount": 0 }),
+        ]);
+        let err = run_finality_route(&url, 1, 2, Some(&digest_hex(&honest)), Some(CHECKPOINT))
+            .expect_err("a node that does not answer the alarm question has not said no");
+        assert!(err.contains("crqcAlarmActive"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn route_admits_only_when_the_node_reports_no_alarm() {
+        let honest = honest();
+        let (url, _rx) = serve_sequence(&[
+            certificate_reply(&honest),
+            serde_json::json!({ "crqcAlarmActive": false }),
+        ]);
+        run_finality_route(&url, 1, 2, Some(&digest_hex(&honest)), Some(CHECKPOINT))
+            .expect("an anchored honest route with no alarm on the node is admitted");
     }
 }

@@ -162,6 +162,9 @@ impl PrivateTransferAuth {
         if self.amount == 0 {
             return Err(PrivateTransferError::ZeroAmount);
         }
+        if *blinding == [0u8; 32] || self.nullifier == [0u8; 32] {
+            return Err(PrivateTransferError::CommitmentMismatch);
+        }
         if transfer_commitment(&self.nullifier, self.amount, blinding) != self.commitment {
             return Err(PrivateTransferError::CommitmentMismatch);
         }

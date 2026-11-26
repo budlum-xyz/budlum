@@ -131,14 +131,29 @@ pub struct ThresholdWitness {
     pub tag: [u8; 32],
 }
 
-fn verify_threshold_witness(w: &ThresholdWitness, message_digest: &[u8; 32]) -> bool {
+fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn verify_threshold_witness(
+    w: &ThresholdWitness,
+    expected_signer_index: u32,
+    message_digest: &[u8; 32],
+) -> bool {
+    if w.share_index != expected_signer_index || w.commitment == [0u8; 32] {
+        return false;
+    }
     let mut buf = Vec::with_capacity(96);
     buf.extend_from_slice(b"BDLM_SIGAGG_SHARE_V1");
     buf.extend_from_slice(&w.share_index.to_le_bytes());
     buf.extend_from_slice(&w.epoch.to_le_bytes());
     buf.extend_from_slice(&w.commitment);
     buf.extend_from_slice(message_digest);
-    keccak256_bytes(&buf) == w.tag
+    ct_eq_32(&keccak256_bytes(&buf), &w.tag)
 }
 
 /// One validator's signature entry included in an aggregated batch.
@@ -183,14 +198,25 @@ pub enum SigAggError {
 }
 
 fn leaf_hash(sig: &SignerSignature, message_digest: &[u8; 32]) -> [u8; 32] {
-    let mut preimage = Vec::with_capacity(80 + sig.signature.len());
+    let mut preimage = Vec::with_capacity(160 + sig.signature.len());
     preimage.extend_from_slice(b"BDLM_SIGAGG_LEAF_V1");
     preimage.extend_from_slice(message_digest);
     preimage.extend_from_slice(&sig.signer_index.to_le_bytes());
     preimage.extend_from_slice(&sig.weight.to_le_bytes());
     preimage.push(sig.scheme as u8);
     preimage.extend_from_slice(&sig.public_key_digest);
+    preimage.extend_from_slice(&(sig.signature.len() as u64).to_le_bytes());
     preimage.extend_from_slice(&sig.signature);
+    match &sig.threshold_witness {
+        None => preimage.push(0),
+        Some(w) => {
+            preimage.push(1);
+            preimage.extend_from_slice(&w.share_index.to_le_bytes());
+            preimage.extend_from_slice(&w.epoch.to_le_bytes());
+            preimage.extend_from_slice(&w.commitment);
+            preimage.extend_from_slice(&w.tag);
+        }
+    }
     keccak256_bytes(&preimage)
 }
 
@@ -208,28 +234,44 @@ pub fn compute_committee_root(members: &[(u32, u64, SignatureScheme, [u8; 32])])
     keccak256_bytes(&buf)
 }
 
-/// Fold ordered leaf digests into a binary Merkle root.
+/// Fold ordered leaf digests into a domain-separated binary Merkle root.
+///
+/// Leaves are prefixed with `0x00`, internal pairs with `0x01`, and odd lone
+/// nodes with `0x02` (never duplicated) to prevent CVE-2012-2459 odd-leaf
+/// collisions and leaf/internal second-preimage ambiguity.
 #[must_use]
 pub fn aggregate_merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
     if leaves.is_empty() {
         return [0u8; 32];
     }
-    let mut layer = leaves.to_vec();
+    let mut layer: Vec<[u8; 32]> = leaves
+        .iter()
+        .map(|leaf| {
+            let mut buf = [0u8; 33];
+            buf[0] = 0x00;
+            buf[1..].copy_from_slice(leaf);
+            keccak256_bytes(&buf)
+        })
+        .collect();
     while layer.len() > 1 {
         let mut next = Vec::with_capacity(layer.len().div_ceil(2));
         for pair in layer.chunks(2) {
-            let mut node = [0u8; 64];
-            node[..32].copy_from_slice(&pair[0]);
-            if pair.len() == 2 {
-                node[32..].copy_from_slice(&pair[1]);
-            } else {
-                node[32..].copy_from_slice(&pair[0]);
+            if let [left, right] = pair {
+                let mut node = [0u8; 65];
+                node[0] = 0x01;
+                node[1..33].copy_from_slice(left);
+                node[33..].copy_from_slice(right);
+                next.push(keccak256_bytes(&node));
+            } else if let [lone] = pair {
+                let mut node = [0u8; 33];
+                node[0] = 0x02;
+                node[1..].copy_from_slice(lone);
+                next.push(keccak256_bytes(&node));
             }
-            next.push(keccak256_bytes(&node));
         }
         layer = next;
     }
-    layer[0]
+    layer.first().copied().unwrap_or([0u8; 32])
 }
 
 /// Aggregate sorted distinct committee signatures into an [`AggregatedSignatureBatch`].
@@ -271,11 +313,13 @@ pub fn aggregate_signatures(
             return Err(SigAggError::MalformedSignature(sig.signer_index));
         }
         if let Some(ref w) = sig.threshold_witness {
-            if !verify_threshold_witness(w, &message_digest) {
+            if !verify_threshold_witness(w, sig.signer_index, &message_digest) {
                 return Err(SigAggError::InvalidThresholdWitness(sig.signer_index));
             }
         }
-        total_weight = total_weight.saturating_add(sig.weight);
+        total_weight = total_weight
+            .checked_add(sig.weight)
+            .ok_or(SigAggError::MalformedSignature(sig.signer_index))?;
         indices.push(sig.signer_index);
         leaves.push(leaf_hash(sig, &message_digest));
     }
@@ -335,7 +379,22 @@ pub fn verify_aggregated_batch<F>(
 where
     F: Fn(&SignerSignature, &[u8; 32]) -> bool,
 {
-    if batch.committee_root != compute_committee_root(committee) {
+    if required_weight == 0 {
+        return Err(SigAggError::InsufficientWeight {
+            have: 0,
+            required: 0,
+        });
+    }
+    if committee.is_empty() {
+        return Err(SigAggError::CommitteeMismatch);
+    }
+    let mut seen_committee = BTreeSet::new();
+    for &(idx, weight, _, key) in committee {
+        if !seen_committee.insert(idx) || weight == 0 || key == [0u8; 32] {
+            return Err(SigAggError::CommitteeMismatch);
+        }
+    }
+    if !ct_eq_32(&batch.committee_root, &compute_committee_root(committee)) {
         return Err(SigAggError::CommitteeMismatch);
     }
     for sig in &batch.signatures {
@@ -352,7 +411,7 @@ where
         batch.committee_root,
         batch.signatures.clone(),
     )?;
-    if recomputed.aggregate_digest != batch.aggregate_digest
+    if !ct_eq_32(&recomputed.aggregate_digest, &batch.aggregate_digest)
         || recomputed.total_weight != batch.total_weight
         || recomputed.signer_indices != batch.signer_indices
     {
@@ -363,7 +422,9 @@ where
         if !verify_signature(sig, &batch.message_digest) {
             return Err(SigAggError::InvalidSignature(sig.signer_index));
         }
-        verified_weight = verified_weight.saturating_add(sig.weight);
+        verified_weight = verified_weight
+            .checked_add(sig.weight)
+            .ok_or(SigAggError::MalformedSignature(sig.signer_index))?;
     }
     if verified_weight < required_weight {
         return Err(SigAggError::InsufficientWeight {
@@ -608,6 +669,107 @@ mod tests {
         assert_eq!(
             aggregate_signatures(msg, c, vec![s0.clone(), s0]).unwrap_err(),
             SigAggError::DuplicateSigner(0)
+        );
+    }
+
+    #[test]
+    fn budprf02_sigagg_refuses_merkle_malleability_witness_strip_mismatch_and_bad_committee() {
+        // 1. CVE-2012-2459: odd-leaf duplication must NOT collide [a, b, c] with [a, b, c, c].
+        let a = [0x11u8; 32];
+        let b = [0x22u8; 32];
+        let c = [0x33u8; 32];
+        assert_ne!(
+            aggregate_merkle_root(&[a, b, c]),
+            aggregate_merkle_root(&[a, b, c, c]),
+            "odd-leaf duplication must not collide 3-leaf and 4-leaf Merkle roots"
+        );
+        // Domain separation: 2-leaf internal node must not collide with 1-leaf raw digest.
+        let mut concat_ab = [0u8; 64];
+        concat_ab[..32].copy_from_slice(&a);
+        concat_ab[32..].copy_from_slice(&b);
+        assert_ne!(
+            aggregate_merkle_root(&[a, b]),
+            aggregate_merkle_root(&[keccak256_bytes(&concat_ab)]),
+            "leaf and internal Merkle nodes must be domain-separated"
+        );
+
+        // 2. ThresholdWitness must be bound into aggregate_digest, match signer_index, and
+        // carry a non-zero commitment.
+        let committee = committee();
+        let msg = [0x7Au8; 32];
+        let make_witness = |share_index: u32, epoch: u64, commitment: [u8; 32]| {
+            let mut buf = Vec::with_capacity(96);
+            buf.extend_from_slice(b"BDLM_SIGAGG_SHARE_V1");
+            buf.extend_from_slice(&share_index.to_le_bytes());
+            buf.extend_from_slice(&epoch.to_le_bytes());
+            buf.extend_from_slice(&commitment);
+            buf.extend_from_slice(&msg);
+            ThresholdWitness {
+                share_index,
+                epoch,
+                commitment,
+                tag: keccak256_bytes(&buf),
+            }
+        };
+
+        let mut e0 = honest(&committee[0], &msg);
+        e0.threshold_witness = Some(make_witness(0, 7, [0x42u8; 32]));
+        let batch = batch_of(&committee, msg, vec![e0, honest(&committee[1], &msg)]);
+        verify_aggregated_batch(&batch, &committee, 70, verifies)
+            .expect("batch with valid threshold witness verifies");
+
+        // Stripping threshold_witness must break aggregate_digest.
+        let mut stripped = batch.clone();
+        stripped.signatures[0].threshold_witness = None;
+        assert_eq!(
+            verify_aggregated_batch(&stripped, &committee, 70, verifies).unwrap_err(),
+            SigAggError::AggregateDigestMismatch,
+            "stripping threshold_witness must be caught by aggregate_digest"
+        );
+
+        // Witness share_index != signer_index must be refused.
+        let mut wrong_share = honest(&committee[0], &msg);
+        wrong_share.threshold_witness = Some(make_witness(1, 7, [0x42u8; 32]));
+        assert_eq!(
+            aggregate_signatures(msg, compute_committee_root(&committee), vec![wrong_share])
+                .unwrap_err(),
+            SigAggError::InvalidThresholdWitness(0),
+            "threshold witness with mismatched share_index must be refused"
+        );
+
+        // Zero commitment witness must be refused.
+        let mut zero_comm = honest(&committee[0], &msg);
+        zero_comm.threshold_witness = Some(make_witness(0, 7, [0u8; 32]));
+        assert_eq!(
+            aggregate_signatures(msg, compute_committee_root(&committee), vec![zero_comm])
+                .unwrap_err(),
+            SigAggError::InvalidThresholdWitness(0),
+            "threshold witness with zero commitment must be refused"
+        );
+
+        // 3. Weight overflow must fail closed (no silent saturating_add).
+        let mut ov0 = sample_sig(0, SignatureScheme::Ed25519, u64::MAX);
+        ov0.signature[0] = 0x99;
+        let ov1 = sample_sig(1, SignatureScheme::Bls, 1);
+        assert!(
+            aggregate_signatures(msg, [0x33u8; 32], vec![ov0, ov1]).is_err(),
+            "weight overflow must fail closed instead of saturating"
+        );
+
+        // 4. required_weight == 0 and duplicate committee signer_index must fail closed.
+        assert!(
+            verify_aggregated_batch(&batch, &committee, 0, verifies).is_err(),
+            "zero required_weight must be refused"
+        );
+        let dup_committee = vec![
+            (0, 30, SignatureScheme::Ed25519, [1u8; 32]),
+            (0, 500, SignatureScheme::Ed25519, [2u8; 32]),
+        ];
+        let dup_batch = batch_of(&dup_committee, msg, vec![honest(&dup_committee[0], &msg)]);
+        assert_eq!(
+            verify_aggregated_batch(&dup_batch, &dup_committee, 10, verifies).unwrap_err(),
+            SigAggError::CommitteeMismatch,
+            "duplicate signer_index in committee must be refused"
         );
     }
 }

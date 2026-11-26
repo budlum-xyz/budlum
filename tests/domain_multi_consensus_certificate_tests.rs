@@ -441,6 +441,9 @@ fn five_consensus_families_settle_into_one_certificate_and_ulp_stark_bundle() {
             finality_proof_hash: verified.commitment.finality_proof_hash,
             guarantee_backing_hash: backing_hash,
             bond_atoms: u128::from(dom.operator_bond),
+            binds: budlum_core::settlement::universal_finality::attestation_bits(
+                guarantee.attestation,
+            ),
             guarantee,
             verdict,
         });

@@ -181,7 +181,7 @@ fn account_commitment(account: &QuantumAccount) -> [u8; 32] {
 /// the registry's current root. A replayed copy from an older state therefore
 /// fails on the root and never runs its change - the same counter-measurement
 /// an ordered chain gets from a sequence number that cannot go backwards.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct QuantumAccountRegistry {
     // A JSON object keys by string, so the map goes through the shared key
     // codec rather than handing serde a byte array it cannot write.
@@ -192,6 +192,48 @@ pub struct QuantumAccountRegistry {
     /// same as the current one.
     #[serde(default)]
     pub epoch: u64,
+}
+
+impl<'de> serde::Deserialize<'de> for QuantumAccountRegistry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct RawQuantumAccountRegistry {
+            #[serde(default, with = "crate::core::map_keys")]
+            accounts: BTreeMap<[u8; 32], QuantumAccount>,
+            #[serde(default)]
+            epoch: u64,
+        }
+
+        let raw = RawQuantumAccountRegistry::deserialize(deserializer)?;
+        if raw.accounts.len() > MAX_QUANTUM_ACCOUNTS {
+            return Err(serde::de::Error::custom(format!(
+                "quantum account registry exceeds cap ({MAX_QUANTUM_ACCOUNTS})"
+            )));
+        }
+        let mut validated = BTreeMap::new();
+        for (key, account) in raw.accounts {
+            if key != account.address {
+                return Err(serde::de::Error::custom(
+                    "quantum account map key does not match account address",
+                ));
+            }
+            let derived = QuantumAccount::address_from_public_key(&account.pq_public_key);
+            if derived != account.address {
+                return Err(serde::de::Error::custom(
+                    "quantum account address does not match public key",
+                ));
+            }
+            account.validate_all().map_err(serde::de::Error::custom)?;
+            validated.insert(key, account);
+        }
+        Ok(Self {
+            accounts: validated,
+            epoch: raw.epoch,
+        })
+    }
 }
 
 impl QuantumAccountRegistry {
@@ -470,6 +512,12 @@ impl QuantumAccountRegistry {
             return Err(QuantumAccountRegistryError::BoundFieldChanged {
                 address: *address,
                 field,
+            });
+        }
+        if candidate.nonce < current.nonce {
+            return Err(QuantumAccountRegistryError::InvalidAccount {
+                address: *address,
+                reason: "account nonce cannot decrease".to_string(),
             });
         }
         if let Err(reason) = candidate.validate_all() {

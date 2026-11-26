@@ -2316,52 +2316,7 @@ impl ProverAdapter for Plonky3Adapter {
         checked_trace_rows(trace.len())?;
         info!(trace_len = trace.len(), "Building trace matrix");
         let (matrix, trace_len) = trace_matrix(trace, program, public_inputs)?;
-        let config = build_config();
-
-        let air = BudAir {
-            num_steps: trace.len(),
-            program: program.to_vec(),
-        };
-
-        let degree_bits = log2_strict_usize(matrix.height());
-        debug!(
-            degree_bits,
-            height = matrix.height(),
-            "Commencing STARK prove"
-        );
-        let Some((preprocessed_prover, _)) = setup_preprocessed(&config, &air, degree_bits) else {
-            return Err(ProverError::TraceGenerationError(
-                "BudAir preprocessed ROM rejected program (unsupported ZK syscall or oversized trace)".to_string(),
-            ));
-        };
-
-        let public_values = to_public_values(public_inputs);
-
-        let p3_proof = prove_with_preprocessed(
-            &config,
-            &air,
-            matrix.clone(),
-            Some(aux_trace_generator(
-                matrix.clone(),
-                trace_len,
-                program.to_vec(),
-            )),
-            &public_values,
-            Some(&preprocessed_prover),
-        );
-
-        let proof_bytes = postcard::to_allocvec(&p3_proof)
-            .map_err(|e| ProverError::SerializationError(e.to_string()))?;
-
-        Ok(ProofEnvelope {
-            proof_format_version: PROOF_FORMAT_VERSION,
-            backend: "Plonky3-Keccak-Goldilocks".to_string(),
-            p3_version: "0.5.2".to_string(),
-            fri_params_id: "test_fri_params".to_string(),
-            public_inputs_hash: public_inputs.hash(),
-            proof_bytes,
-            degree_bits: degree_bits as u32,
-        })
+        prove_matrix_envelope(matrix, trace_len, public_inputs, program)
     }
 
     /// Verify under the default activation state, in which the staged
@@ -2379,6 +2334,67 @@ impl ProverAdapter for Plonky3Adapter {
             bud_isa::MainnetActivation::default(),
         )
     }
+}
+
+/// Prove a caller-supplied main trace matrix directly through `setup_preprocessed`,
+/// `aux_trace_generator`, and `prove_with_preprocessed`.
+///
+/// Exposed hidden for direct AIR-witness / LogUp soundness mutation tests where a
+/// forged matrix must pass through the real prover before reaching the verifier.
+#[doc(hidden)]
+pub fn prove_matrix_envelope(
+    matrix: RowMajorMatrix<Goldilocks>,
+    trace_len: usize,
+    public_inputs: &ExecutionPublicInputs,
+    program: &[u64],
+) -> Result<ProofEnvelope, ProverError> {
+    let config = build_config();
+
+    let air = BudAir {
+        num_steps: trace_len,
+        program: program.to_vec(),
+    };
+
+    let degree_bits = log2_strict_usize(matrix.height());
+    debug!(
+        degree_bits,
+        height = matrix.height(),
+        "Commencing STARK prove"
+    );
+    let Some((preprocessed_prover, _)) = setup_preprocessed(&config, &air, degree_bits) else {
+        return Err(ProverError::TraceGenerationError(
+            "BudAir preprocessed ROM rejected program (unsupported ZK syscall or oversized trace)"
+                .to_string(),
+        ));
+    };
+
+    let public_values = to_public_values(public_inputs);
+
+    let p3_proof = prove_with_preprocessed(
+        &config,
+        &air,
+        matrix.clone(),
+        Some(aux_trace_generator(
+            matrix.clone(),
+            trace_len,
+            program.to_vec(),
+        )),
+        &public_values,
+        Some(&preprocessed_prover),
+    );
+
+    let proof_bytes = postcard::to_allocvec(&p3_proof)
+        .map_err(|e| ProverError::SerializationError(e.to_string()))?;
+
+    Ok(ProofEnvelope {
+        proof_format_version: PROOF_FORMAT_VERSION,
+        backend: "Plonky3-Keccak-Goldilocks".to_string(),
+        p3_version: "0.5.2".to_string(),
+        fri_params_id: "test_fri_params".to_string(),
+        public_inputs_hash: public_inputs.hash(),
+        proof_bytes,
+        degree_bits: degree_bits as u32,
+    })
 }
 
 /// True when every 64 bit scalar public input is below the Goldilocks
@@ -2557,6 +2573,16 @@ impl Plonky3Adapter {
                 "BudAir preprocessed ROM rejected program".to_string(),
             ));
         };
+
+        crate::bud_stark::verify_bud_air_vk_pin::<ChipStarkConfig, BudAir>(
+            &air,
+            Some(&preprocessed_vk),
+            3,
+            76,
+            None,
+            &crate::bud_stark::BudStarkVkPin::canonical_bud_air(),
+        )
+        .map_err(|_| VerifyError::InvalidProof)?;
 
         let public_values = to_public_values(expected_inputs);
 

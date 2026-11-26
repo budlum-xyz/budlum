@@ -185,8 +185,9 @@ impl QuarantineLedger {
         out
     }
 
-    /// Parse the text written by [`Self::to_text`]. A malformed line is an
-    /// error: a ledger that silently dropped a ban would lift it.
+    /// Parse the text written by [`Self::to_text`]. A malformed, duplicate,
+    /// non-canonical, or over-capacity ledger is an error: a ledger that
+    /// silently dropped or downgraded a ban would lift it.
     pub fn from_text(text: &str) -> Result<Self, String> {
         let mut ledger = Self::new();
         for (index, line) in text.lines().enumerate() {
@@ -195,7 +196,11 @@ impl QuarantineLedger {
             }
             let bad = || format!("quarantine line {} is malformed", index + 1);
             let (hash_hex, reason_text) = line.split_once(' ').ok_or_else(bad)?;
-            if hash_hex.len() != 64 || !hash_hex.is_ascii() {
+            if hash_hex.len() != 64
+                || !hash_hex
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            {
                 return Err(bad());
             }
             let mut program_hash = [0u8; 32];
@@ -203,8 +208,25 @@ impl QuarantineLedger {
                 let digits = std::str::from_utf8(pair).map_err(|_| bad())?;
                 *slot = u8::from_str_radix(digits, 16).map_err(|_| bad())?;
             }
-            let reason_byte: u8 = reason_text.trim().parse().map_err(|_| bad())?;
+            let reason_byte = match reason_text {
+                "0" => 0u8,
+                "1" => 1u8,
+                "2" => 2u8,
+                "3" => 3u8,
+                _ => return Err(bad()),
+            };
             let reason = QuarantineReason::from_byte(reason_byte).ok_or_else(bad)?;
+            if ledger.is_banned(&program_hash) {
+                return Err(format!(
+                    "quarantine line {} duplicates an earlier program hash",
+                    index + 1
+                ));
+            }
+            if ledger.len() >= MAX_QUARANTINE_ENTRIES {
+                return Err(format!(
+                    "quarantine ledger exceeds capacity of {MAX_QUARANTINE_ENTRIES} entries"
+                ));
+            }
             ledger.ban(program_hash, reason);
         }
         Ok(ledger)
@@ -345,6 +367,51 @@ mod tests {
         assert!(
             ledger.is_banned(&canonical_offender),
             "canonical-program TransferViolation must survive NonCanonicalProgram floods"
+        );
+    }
+
+    #[test]
+    fn budprf06_quarantine_from_text_refuses_duplicates_overflow_and_noncanonical_lines() {
+        let hex_a = "11".repeat(32);
+
+        // 1. Duplicate program_hash (especially downgrading TransferViolation via earlier
+        // NonCanonicalProgram) must be refused instead of silently keeping the first entry.
+        let dup_text = format!("{hex_a} 0\n{hex_a} 1\n");
+        assert!(
+            QuarantineLedger::from_text(&dup_text).is_err(),
+            "duplicate program_hash in persisted quarantine ledger must be refused"
+        );
+
+        // 2. Over-cap persisted ledger (> MAX_QUARANTINE_ENTRIES) must be refused instead of
+        // silently evicting stored bans.
+        let mut overcap = String::new();
+        for seed in 0..=MAX_QUARANTINE_ENTRIES {
+            for b in hash_of(seed) {
+                overcap.push_str(&format!("{b:02x}"));
+            }
+            overcap.push_str(" 1\n");
+        }
+        assert!(
+            QuarantineLedger::from_text(&overcap).is_err(),
+            "persisted quarantine ledger exceeding cap must fail closed instead of dropping bans"
+        );
+
+        // 3. Non-canonical reason syntax (+1, 01, leading space) and uppercase hex must be refused.
+        assert!(
+            QuarantineLedger::from_text(&format!("{hex_a} +1\n")).is_err(),
+            "signed +1 reason must be refused"
+        );
+        assert!(
+            QuarantineLedger::from_text(&format!("{hex_a} 01\n")).is_err(),
+            "leading-zero 01 reason must be refused"
+        );
+        assert!(
+            QuarantineLedger::from_text(&format!("{hex_a}  1\n")).is_err(),
+            "double-space reason must be refused"
+        );
+        assert!(
+            QuarantineLedger::from_text(&format!("{} 1\n", "AA".repeat(32))).is_err(),
+            "uppercase hex hash must be refused"
         );
     }
 }

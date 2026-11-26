@@ -32,7 +32,10 @@
 //! certificate carries. Each read prints a `FINALITY ANCHOR` line naming the
 //! `--trusted-finality-checkpoint` / `--trusted-finality-digest` pair that
 //! `bud finality show|route` require, then one `DOMAIN FINALITY VERIFIED`
-//! line per row. The certificate and proofs are what `bud_getFinalityCertificate`
+//! line per row - but only for rows whose verdict is `Established` and which
+//! carry every binding named by `--require-binds`. A `Pending` or `Refuted` row
+//! is an authenticated fact about the domain, not finality: the read is refused
+//! instead of being reported verified. The certificate and proofs are what `bud_getFinalityCertificate`
 //! returns as `certificate` and `cert.prove_domain` produces per domain.
 //!
 //! A global header opening extends the verified chain one step: trust
@@ -56,8 +59,9 @@ use budlum_core::crypto::scheme::SchemeStatusRegistry;
 use budlum_core::light_client::{
     LightClient, LightClientError, TrustedCheckpoint, VerifiedCheckpoint,
 };
+use budlum_core::settlement::universal_finality::FinalityBinds;
 use budlum_core::settlement::{
-    DomainFinalityInclusionProof, GlobalBlockHeader, GlobalFinalityCertificate,
+    DomainFinalityInclusionProof, FinalityVerdict, GlobalBlockHeader, GlobalFinalityCertificate,
 };
 use clap::Parser;
 
@@ -142,6 +146,13 @@ struct Cli {
     /// because the export being verified never carries its own policy.
     #[arg(long)]
     scheme_registry: Option<PathBuf>,
+
+    /// Bindings every read row must carry, as a comma-separated list drawn from
+    /// the row's own vocabulary (`state_root,tx_root,event_root,parent`). A row
+    /// that lacks a demanded binding is refused, as `bud finality route` refuses
+    /// it. Empty demands nothing beyond the row being `Established`.
+    #[arg(long, default_value = "")]
+    require_binds: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -169,6 +180,59 @@ struct FinalityRead {
     proofs: Vec<DomainFinalityInclusionProof>,
 }
 
+/// Parse the comma-separated binding names a consumer demands of every row.
+/// The names are the row vocabulary's own `Display` names, so a binding can be
+/// demanded only under the name a row prints it; an empty list demands nothing.
+fn parse_bind_names(names: &str) -> Result<FinalityBinds, String> {
+    let mut required = FinalityBinds::NONE;
+    for name in names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let flag = [
+            FinalityBinds::STATE_ROOT,
+            FinalityBinds::TX_ROOT,
+            FinalityBinds::EVENT_ROOT,
+            FinalityBinds::PARENT,
+        ]
+        .into_iter()
+        .find(|flag| flag.to_string() == name)
+        .ok_or_else(|| {
+            format!(
+                "unknown --require-binds name {name}: expected state_root, tx_root, event_root or parent"
+            )
+        })?;
+        required = required.union(flag);
+    }
+    Ok(required)
+}
+
+/// Why a certified row may not be reported as final for a read, or `None`.
+///
+/// A `Pending` or `Refuted` row carries no finality. An `Established` row is
+/// reported only when it carries every binding the read demands. Composition
+/// already refuses an `Established` row whose attestation outstrips its binds,
+/// so the second refusal guards the consumer if that rule is ever relaxed; it
+/// is decided here, at the read, not inherited from the producer.
+fn finality_read_refusal(
+    verdict: &FinalityVerdict,
+    binds: FinalityBinds,
+    required: FinalityBinds,
+) -> Option<String> {
+    if !matches!(verdict, FinalityVerdict::Established) {
+        return Some(format!(
+            "the row is not Established ({verdict:?}); no value moves on it"
+        ));
+    }
+    if !binds.covers(required) {
+        return Some(format!(
+            "domain binds {binds} but this read requires {required}"
+        ));
+    }
+    None
+}
+
 /// Verify the finality reads bound to `verified` against its verified global
 /// header opening, and return the lines to print.
 ///
@@ -178,12 +242,16 @@ struct FinalityRead {
 /// and the inclusion path. The anchor line names the flags `bud finality
 /// show|route` takes, so the CLI's trust input comes from this verified
 /// chain rather than from the node it then queries. Nothing is returned
-/// unless every row of every read verified.
+/// unless every row of every read verified. A verified inclusion is not yet
+/// finality: the row is reported only when its verdict is `Established` and it
+/// carries every binding in `required_binds`; any other row refuses the read,
+/// with the same two sets the value gate names.
 fn verify_finality_reads(
     client: &LightClient,
     verified: &VerifiedCheckpoint,
     opening: Option<(&GlobalHeaderOpening, [u8; 32])>,
     reads: &[FinalityRead],
+    required_binds: FinalityBinds,
 ) -> Result<Vec<String>, String> {
     let mut lines = Vec::new();
     for read in reads
@@ -223,16 +291,27 @@ fn verify_finality_reads(
                         proof.entry.domain_id, verified.height
                     )
                 })?;
+            // The proof entry is the certified row: its digest was just checked
+            // against the certificate's own entry, and the digest absorbs `binds`.
+            if let Some(reason) =
+                finality_read_refusal(&row.verdict, proof.entry.binds, required_binds)
+            {
+                return Err(format!(
+                    "finality read for domain {} at checkpoint {} refused: {reason}",
+                    row.domain_id, verified.height
+                ));
+            }
             lines.push(format!(
                 "DOMAIN FINALITY VERIFIED checkpoint={} domain={} bucket={:?} verdict={:?} \
-                 height={} state_root=0x{} guarantee={}",
+                 height={} state_root=0x{} guarantee={} binds={}",
                 verified.height,
                 row.domain_id,
                 row.bucket,
                 row.verdict,
                 row.height,
                 hex::encode(row.state_root),
-                row.guarantee_label
+                row.guarantee_label,
+                proof.entry.binds
             ));
         }
     }
@@ -415,6 +494,13 @@ fn main() -> ExitCode {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }
+    let required_binds = match parse_bind_names(&cli.require_binds) {
+        Ok(binds) => binds,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     let raw = match read_bounded(&cli.chain_file, MAX_CHAIN_FILE_BYTES) {
         Ok(raw) => raw,
@@ -566,7 +652,13 @@ fn main() -> ExitCode {
                         hex::encode(opening.header.calculate_hash_bytes())
                     );
                 }
-                match verify_finality_reads(&client, &verified, opening, &export.finality_reads) {
+                match verify_finality_reads(
+                    &client,
+                    &verified,
+                    opening,
+                    &export.finality_reads,
+                    required_binds,
+                ) {
                     Ok(lines) => {
                         for line in lines {
                             println!("{line}");
@@ -745,6 +837,7 @@ mod finality_read_tests {
     };
     use budlum_core::core::account::AccountState;
     use budlum_core::crypto::facts::QuantumClass;
+    use budlum_core::settlement::universal_finality::FinalityBinds;
     use budlum_core::settlement::{
         compose_global_finality_certificate, DomainFinalityEntry, FinalityGuarantee,
         FinalityReversibility, FinalityVerdict, GlobalBlockHeader, GlobalFinalityCertificate,
@@ -765,6 +858,7 @@ mod finality_read_tests {
             finality_proof_hash: [0x11; 32],
             guarantee_backing_hash: [0x22; 32],
             bond_atoms: 1_000_000,
+            binds: budlum_core::settlement::universal_finality::FinalityBinds::ALL,
             guarantee: FinalityGuarantee {
                 reversibility: FinalityReversibility::ProbabilisticWork { confirmations: 6 },
                 quantum_posture: QuantumClass::Hash,
@@ -865,6 +959,7 @@ mod finality_read_tests {
             &checkpoint,
             Some((&opening, body)),
             &[read(honest, &[1, 2])],
+            FinalityBinds::NONE,
         )
         .expect("rows the header commits to verify");
         assert_eq!(
@@ -888,6 +983,143 @@ mod finality_read_tests {
     }
 
     #[test]
+    fn a_pending_row_is_refused_instead_of_being_reported_verified() {
+        let mut stalled = row(2, 0x03);
+        stalled.verdict = FinalityVerdict::Pending {
+            reason:
+                budlum_core::settlement::universal_finality::FinalityPendingReason::EvidenceMissing,
+        };
+        let cert = compose_global_finality_certificate(&[row(1, 0x01), stalled])
+            .expect("compose the certificate");
+        let (client, checkpoint, opening, body) = anchored(&cert);
+        let err = verify_finality_reads(
+            &client,
+            &checkpoint,
+            Some((&opening, body)),
+            &[read(cert, &[2])],
+            FinalityBinds::NONE,
+        )
+        .expect_err("a Pending row carries no finality to verify");
+        assert!(err.contains("not Established"), "{err}");
+        assert!(err.contains("EvidenceMissing"), "{err}");
+    }
+
+    #[test]
+    fn a_refuted_row_is_refused_instead_of_being_reported_verified() {
+        let mut rejected = row(2, 0x03);
+        rejected.verdict = FinalityVerdict::Refuted { code: 7 };
+        let cert = compose_global_finality_certificate(&[row(1, 0x01), rejected])
+            .expect("compose the certificate");
+        let (client, checkpoint, opening, body) = anchored(&cert);
+        let err = verify_finality_reads(
+            &client,
+            &checkpoint,
+            Some((&opening, body)),
+            &[read(cert, &[2])],
+            FinalityBinds::NONE,
+        )
+        .expect_err("a Refuted row carries no finality to verify");
+        assert!(err.contains("not Established"), "{err}");
+        assert!(err.contains("Refuted"), "{err}");
+    }
+
+    #[test]
+    fn the_verified_line_names_the_binds_the_row_carries() {
+        let honest = certificate(0x01);
+        let (client, checkpoint, opening, body) = anchored(&honest);
+        let lines = verify_finality_reads(
+            &client,
+            &checkpoint,
+            Some((&opening, body)),
+            &[read(honest, &[1])],
+            FinalityBinds::NONE,
+        )
+        .expect("rows the header commits to verify");
+        assert!(lines[1].contains(" binds=all"), "{}", lines[1]);
+    }
+
+    #[test]
+    fn a_row_lacking_a_demanded_bind_is_refused_with_both_sets() {
+        use super::finality_read_refusal;
+        let both = FinalityBinds::EVENT_ROOT.union(FinalityBinds::TX_ROOT);
+        let reason = finality_read_refusal(
+            &FinalityVerdict::Established,
+            FinalityBinds::EVENT_ROOT,
+            both,
+        )
+        .expect("the row lacks the demanded transaction-root binding");
+        assert!(
+            reason.contains("binds event_root but this read requires tx_root|event_root"),
+            "{reason}"
+        );
+        assert!(
+            finality_read_refusal(&FinalityVerdict::Established, FinalityBinds::ALL, both)
+                .is_none(),
+            "a row that carries the demand is reported"
+        );
+        assert!(
+            finality_read_refusal(
+                &FinalityVerdict::Established,
+                FinalityBinds::NONE,
+                FinalityBinds::NONE
+            )
+            .is_none(),
+            "an empty demand asks only that the row be Established"
+        );
+        // The verdict is decided first: a Refuted row that carries every binding
+        // is still refused.
+        assert!(
+            finality_read_refusal(
+                &FinalityVerdict::Refuted { code: 7 },
+                FinalityBinds::ALL,
+                FinalityBinds::NONE
+            )
+            .is_some(),
+            "a Refuted row is refused whatever it binds"
+        );
+    }
+
+    #[test]
+    fn a_thin_established_row_cannot_reach_the_read_path() {
+        // Composition refuses the thin row outright: an Established row may not
+        // claim an attestation its binds do not cover.
+        let mut thin = row(1, 0x01);
+        thin.binds = FinalityBinds::EVENT_ROOT;
+        assert!(compose_global_finality_certificate(&[thin, row(2, 0x02)]).is_err());
+        // A certificate assembled around such a row anyway (counts and bucket
+        // roots kept, the row swapped) fails integrity inside the read path, so
+        // it is refused there and nothing is printed as verified.
+        let mut forged = certificate(0x01);
+        forged.established[0].binds = FinalityBinds::EVENT_ROOT;
+        let (client, checkpoint, opening, body) = anchored(&forged);
+        let err = verify_finality_reads(
+            &client,
+            &checkpoint,
+            Some((&opening, body)),
+            &[read(forged, &[1])],
+            FinalityBinds::NONE,
+        )
+        .expect_err("a thin Established row is not a certificate");
+        assert!(err.contains("AttestationUnbound"), "{err}");
+    }
+
+    #[test]
+    fn bind_names_come_from_the_row_vocabulary() {
+        use super::parse_bind_names;
+        let both = parse_bind_names(" tx_root, event_root").expect("known names");
+        assert!(both.covers(FinalityBinds::TX_ROOT) && both.covers(FinalityBinds::EVENT_ROOT));
+        assert!(!both.covers(FinalityBinds::STATE_ROOT));
+        assert!(parse_bind_names("")
+            .expect("empty demands nothing")
+            .is_empty());
+        assert!(parse_bind_names("state_root,tx_root,event_root,parent")
+            .expect("all four")
+            .is_all());
+        assert!(parse_bind_names("ALL").is_err());
+        assert!(parse_bind_names("tx_root,signer").is_err());
+    }
+
+    #[test]
     fn a_self_consistent_forgery_the_header_does_not_commit_to_is_refused() {
         let honest = certificate(0x01);
         let (client, checkpoint, opening, body) = anchored(&honest);
@@ -896,6 +1128,7 @@ mod finality_read_tests {
             &checkpoint,
             Some((&opening, body)),
             &[read(certificate(0xEE), &[1])],
+            FinalityBinds::NONE,
         )
         .expect_err("a certificate composed from invented rows must not verify");
         assert!(err.contains("rejected"), "unexpected error: {err}");
@@ -905,8 +1138,14 @@ mod finality_read_tests {
     fn a_read_without_a_verified_global_header_opening_is_refused() {
         let honest = certificate(0x01);
         let (client, checkpoint, _opening, _body) = anchored(&honest);
-        let err = verify_finality_reads(&client, &checkpoint, None, &[read(honest, &[1])])
-            .expect_err("no opening, nothing to bind the certificate to");
+        let err = verify_finality_reads(
+            &client,
+            &checkpoint,
+            None,
+            &[read(honest, &[1])],
+            FinalityBinds::NONE,
+        )
+        .expect_err("no opening, nothing to bind the certificate to");
         assert!(
             err.contains("no verified global header opening"),
             "unexpected error: {err}"
@@ -922,6 +1161,7 @@ mod finality_read_tests {
             &checkpoint,
             Some((&opening, body)),
             &[read(honest, &[])],
+            FinalityBinds::NONE,
         )
         .expect_err("an anchor nothing was verified against must not be printed");
         assert!(err.contains("proves no domain"), "unexpected error: {err}");
@@ -933,8 +1173,14 @@ mod finality_read_tests {
         let (client, checkpoint, opening, body) = anchored(&honest);
         let mut later = read(certificate(0x01), &[1]);
         later.certificate.checkpoint_height = HEIGHT + 10;
-        let lines = verify_finality_reads(&client, &checkpoint, Some((&opening, body)), &[later])
-            .expect("a read for another checkpoint is not judged here");
+        let lines = verify_finality_reads(
+            &client,
+            &checkpoint,
+            Some((&opening, body)),
+            &[later],
+            FinalityBinds::NONE,
+        )
+        .expect("a read for another checkpoint is not judged here");
         assert!(lines.is_empty());
     }
 

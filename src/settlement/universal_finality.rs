@@ -26,6 +26,7 @@ use crate::cross_domain::external::AdapterSpec;
 use crate::crypto::facts::QuantumClass;
 use crate::domain::types::{ConsensusDomain, ConsensusKind};
 use crate::settlement::domains::CommitmentAttestation;
+use core::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Basis-point ceiling representing `100.00%` (`10_000 bps`).
@@ -1133,6 +1134,137 @@ pub fn compose_multi_domain_finality(domains: &[FinalityGuarantee]) -> Option<Fi
     Some(rest.iter().fold(*first, |acc, next| acc.meet(next)))
 }
 
+/// The set of commitment fields a finality proof actually bound.
+///
+/// One bit per field of [`CommitmentAttestation`]. The set exists because
+/// "the proof bound the state root" and "the proof bound the event root" are
+/// different claims, and a value route may need one without the other.
+///
+/// A newtype rather than a bare `u8`: a bare bit set cannot tell a required
+/// set from a present one, so `present.covers(required)` would not be
+/// expressible and every caller would re-write the comparison. Construct it
+/// from named constants (`FinalityBinds::EVENT_ROOT`) or [`Self::from_bits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct FinalityBinds(u8);
+
+impl FinalityBinds {
+    /// No commitment bound (and, as a requirement, "no binding demanded").
+    pub const NONE: Self = Self(0);
+    /// The account/state trie root is authenticated.
+    pub const STATE_ROOT: Self = Self(1 << 0);
+    /// The transaction root is authenticated.
+    /// WIRING: bind-bit vocabulary for value-gate callers (`required_binds`)
+    /// and `attestation_bits`; external callers name this bit when they require
+    /// transaction-root binding on a certificate row.
+    pub const TX_ROOT: Self = Self(1 << 1);
+    /// The event/log root is authenticated.
+    pub const EVENT_ROOT: Self = Self(1 << 2);
+    /// The parent checkpoint is bound.
+    /// WIRING: bind-bit vocabulary for value-gate callers (`required_binds`)
+    /// and `attestation_bits`; external callers name this bit when they require
+    /// parent-header binding on a certificate row.
+    pub const PARENT: Self = Self(1 << 3);
+    /// Every commitment is bound. Mirrors [`FINALITY_BINDS_ALL`].
+    /// WIRING: bind-bit vocabulary for value-gate callers (`required_binds`)
+    /// and test/fixtures that assert a fully bound row; production `compose`
+    /// derives the equivalent set from each row's attestation.
+    pub const ALL: Self = Self(0b1111);
+
+    /// Raw bit value, for encoding and diagnostics.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Build a set from raw bits. Unknown bits are dropped, which can only
+    /// narrow a claim: a row cannot widen what it bound through this door.
+    #[must_use]
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits & Self::ALL.0)
+    }
+
+    /// Union of two sets, used to express "root plus parent".
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// True when every field in `required` is also present in `self`.
+    ///
+    /// This is the only comparison the gate uses; writing it once here keeps a
+    /// caller from inverting it.
+    #[must_use]
+    pub const fn covers(self, required: Self) -> bool {
+        self.0 & required.0 == required.0
+    }
+
+    /// True when the set demands (or carries) nothing.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// True when every commitment is bound.
+    #[must_use]
+    /// WIRING: used by `Display for FinalityBinds` (same file) and reserved for
+    /// external callers that must branch on a fully-bound requirement.
+    pub const fn is_all(self) -> bool {
+        self.covers(Self::ALL)
+    }
+}
+
+impl fmt::Display for FinalityBinds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_empty() {
+            return f.write_str("none");
+        }
+        if self.is_all() {
+            return f.write_str("all");
+        }
+        let mut first = true;
+        for (flag, name) in [
+            (Self::STATE_ROOT, "state_root"),
+            (Self::TX_ROOT, "tx_root"),
+            (Self::EVENT_ROOT, "event_root"),
+            (Self::PARENT, "parent"),
+        ] {
+            if self.covers(flag) {
+                if !first {
+                    f.write_str("|")?;
+                }
+                f.write_str(name)?;
+                first = false;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The bit set a [`CommitmentAttestation`] claim corresponds to.
+///
+/// The claim and the set are two encodings of one fact, so they are derived
+/// from each other rather than written twice: [`compose`] compares a row's
+/// `binds` against `attestation_bits(row.guarantee.attestation)` and refuses a
+/// row that claims more than it bound.
+#[must_use]
+pub const fn attestation_bits(att: CommitmentAttestation) -> FinalityBinds {
+    let mut bits = 0u8;
+    if att.state_root {
+        bits |= FinalityBinds::STATE_ROOT.0;
+    }
+    if att.tx_root {
+        bits |= FinalityBinds::TX_ROOT.0;
+    }
+    if att.event_root {
+        bits |= FinalityBinds::EVENT_ROOT.0;
+    }
+    if att.parent {
+        bits |= FinalityBinds::PARENT.0;
+    }
+    FinalityBinds(bits)
+}
+
 /// Every commitment a domain finality proof must bind before its verdict may
 /// enter a global certificate.
 ///
@@ -1234,6 +1366,16 @@ pub struct DomainFinalityEntry {
     pub guarantee_backing_hash: [u8; 32],
     /// Escrowed slashable operator bond backing this domain (in atoms).
     pub bond_atoms: u128,
+    /// Which attestation fields this row actually bound, as a bit set drawn
+    /// from [`FinalityBinds::STATE_ROOT`] and friends.
+    ///
+    /// `FINALITY_BINDS_ALL` in [`FinalityGuarantee::attestation`] says *all*
+    /// commitments are bound. This says which ones are bound *here*, so a
+    /// consumer can require exactly the bindings it needs instead of trusting a
+    /// single all-or-nothing flag, and so a row cannot claim a binding it did
+    /// not compute. `compose` refuses a row whose `binds` does not cover its
+    /// own `attestation` claim.
+    pub binds: FinalityBinds,
     /// Exact finality guarantee derived strictly from consensus state.
     pub guarantee: FinalityGuarantee,
     /// Three-valued verdict of the domain's own finality rule.
@@ -1261,6 +1403,9 @@ impl DomainFinalityEntry {
         hasher.update(self.finality_proof_hash);
         hasher.update(self.guarantee_backing_hash);
         hasher.update(self.bond_atoms.to_be_bytes());
+        // `binds` is part of the sealed row: a binding set that is not digested
+        // could be widened after `compose` without breaking the seal.
+        hasher.update([self.binds.bits()]);
         absorb_guarantee_keccak(&mut hasher, &self.guarantee);
         absorb_verdict_keccak(&mut hasher, self.verdict);
         hasher.finalize().into()
@@ -1643,8 +1788,13 @@ pub fn compose(
         }
         match entry.verdict {
             FinalityVerdict::Established => {
+                // A row may not claim a binding it did not compute: `binds` is
+                // the set actually derived from the proof, `attestation` is the
+                // claim. All of the claim must be covered by the set.
+                let claimed = attestation_bits(entry.guarantee.attestation);
                 if entry.guarantee.attestation != FINALITY_BINDS_ALL
                     || entry.guarantee.fault_tolerance_bps == 0
+                    || !entry.binds.covers(claimed)
                 {
                     return Err(FinalityComposeError::AttestationUnbound {
                         domain_id: entry.domain_id,
@@ -2276,6 +2426,7 @@ mod tests {
             finality_proof_hash: [0x11; 32],
             guarantee_backing_hash: [0x22; 32],
             bond_atoms: 1_000_000,
+            binds: FinalityBinds::ALL,
             guarantee: FinalityGuarantee {
                 reversibility,
                 quantum_posture: QuantumClass::Hash,
@@ -2533,6 +2684,9 @@ mod tests {
         let mut c = base.clone();
         c.bond_atoms += 1;
         cases.push(("bond_atoms", c));
+        let mut c = base.clone();
+        c.binds = FinalityBinds::NONE;
+        cases.push(("binds", c));
         let mut c = base.clone();
         c.guarantee.reversibility = FinalityReversibility::ProbabilisticWork { confirmations: 100 };
         cases.push(("reversibility.confirmations", c));

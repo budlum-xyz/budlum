@@ -2,6 +2,7 @@
 pub struct Contract {
     pub name: String,
     pub storage: Vec<StorageField>,
+    pub witnesses: Vec<StorageField>,
     pub structs: Vec<Struct>,
     pub functions: Vec<Function>,
 }
@@ -87,6 +88,7 @@ pub enum Expr {
     Int(u64),
     Ident(String),
     StorageRead(String),
+    WitnessRead(String),
     MappingRead(String, Box<Expr>),
     FieldAccess(Box<Expr>, String),
     StructLiteral(String, Vec<(String, Expr)>),

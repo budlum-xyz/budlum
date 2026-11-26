@@ -86,6 +86,25 @@ This is the split asks to have written down: **BLS at every
 checkpoint, post-quantum signatures at every set change.** On mainnet the <!-- claim:L-FINALITY-01 -->
 checkpoint carries the post-quantum half as well. <!-- claim:L-FINALITY-01 -->
 
+### Finality reads: a verified inclusion is not finality
+
+A `finality_reads` entry opens one row of the checkpoint's finality certificate
+through the global header (`finality_certificate_root`) and an inclusion proof.
+The proof says the row is in the certificate the finalized header commits to;
+it says nothing about whether the row is final. A row is therefore printed as
+`DOMAIN FINALITY VERIFIED` only when its verdict is `Established` and it carries
+every binding named by `--require-binds` (`state_root,tx_root,event_root,parent`).
+A `Pending` or `Refuted` row refuses the whole read; nothing is printed as
+verified. The `binds=` field on each row names what the row carries.
+
+Where the boundary is today: certificate composition already refuses an
+`Established` row whose attestation is not covered by its binds, and the light
+client recomposes the certificate before any read. So every `Established` row
+that passes verification carries all four bindings, and the binding refusal is
+a guard for the consumer that becomes observable only if composition is ever
+relaxed. A read does not re-derive the adapter evidence behind a row: it trusts the
+checkpoint that commits the certificate and checks what that commitment says.
+
 ## What it costs a phone
 
 The sizes below are computed from the signature sizes, not measured. They

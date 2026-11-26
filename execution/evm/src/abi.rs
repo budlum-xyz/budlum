@@ -101,14 +101,22 @@ fn read_u8_word(buf: &[u8], offset: usize) -> Option<u8> {
     word.get(31).copied()
 }
 
-fn read_dyn_bytes(args: &[u8], head_offset: usize) -> Option<Vec<u8>> {
+fn read_dyn_bytes(args: &[u8], head_offset: usize, min_tail_offset: usize) -> Option<Vec<u8>> {
     let rel = read_usize_word(args, head_offset)?;
+    if rel < min_tail_offset || !rel.is_multiple_of(32) {
+        return None;
+    }
     let len = read_usize_word(args, rel)?;
     if len > MAX_PRECOMPILE_BYTES {
         return None;
     }
     let data_start = rel.checked_add(32)?;
     let data_end = data_start.checked_add(len)?;
+    let padded_len = len.div_ceil(32).checked_mul(32)?;
+    let padded_end = data_start.checked_add(padded_len)?;
+    if args.get(data_end..padded_end)?.iter().any(|&b| b != 0) {
+        return None;
+    }
     Some(args.get(data_start..data_end)?.to_vec())
 }
 
@@ -121,12 +129,13 @@ pub fn decode_precompile_call(calldata: &[u8]) -> Option<ParsedPrecompileCall> {
     let sel = calldata.get(..4)?;
     let args = calldata.get(4..)?;
     if sel == SEL_UNIVERSAL_CALL {
-        if args.len() < 32 * 5 {
+        const HEAD_LEN: usize = 32 * 5;
+        if args.len() < HEAD_LEN {
             return None;
         }
         let target_ee = read_u8_word(args, 0)?;
-        let target = read_dyn_bytes(args, 32)?;
-        let input = read_dyn_bytes(args, 64)?;
+        let target = read_dyn_bytes(args, 32, HEAD_LEN)?;
+        let input = read_dyn_bytes(args, 64, HEAD_LEN)?;
         let value_attos = read_u128_word(args, 96)?;
         let gas_bgu = read_u64_word(args, 128)?;
         Some(ParsedPrecompileCall {
@@ -138,12 +147,13 @@ pub fn decode_precompile_call(calldata: &[u8]) -> Option<ParsedPrecompileCall> {
             gas_bgu,
         })
     } else if sel == SEL_UNIVERSAL_STATIC_CALL {
-        if args.len() < 32 * 4 {
+        const HEAD_LEN: usize = 32 * 4;
+        if args.len() < HEAD_LEN {
             return None;
         }
         let target_ee = read_u8_word(args, 0)?;
-        let target = read_dyn_bytes(args, 32)?;
-        let input = read_dyn_bytes(args, 64)?;
+        let target = read_dyn_bytes(args, 32, HEAD_LEN)?;
+        let input = read_dyn_bytes(args, 64, HEAD_LEN)?;
         let gas_bgu = read_u64_word(args, 96)?;
         Some(ParsedPrecompileCall {
             is_static_selector: true,
@@ -273,22 +283,33 @@ pub fn decode_uol_call(calldata: &[u8]) -> Option<DecodedUolCall> {
     let sel = calldata.get(..4)?;
     let args = calldata.get(4..)?;
     if sel == uol_selector("balanceOf(bytes32,bytes)") {
+        const HEAD_LEN: usize = 32 * 2;
+        if args.len() < HEAD_LEN {
+            return None;
+        }
         let mut class_id = [0u8; 32];
         class_id.copy_from_slice(read_word(args, 0)?);
-        let holder = read_dyn_bytes(args, 32)?;
+        let holder = read_dyn_bytes(args, 32, HEAD_LEN)?;
         return Some(DecodedUolCall::BalanceOf { class_id, holder });
     }
     if sel == uol_selector("holderOf(bytes32)") {
+        if args.len() != 32 {
+            return None;
+        }
         let mut asset_id = [0u8; 32];
         asset_id.copy_from_slice(read_word(args, 0)?);
         return Some(DecodedUolCall::HolderOf { asset_id });
     }
     if sel == uol_selector("transfer(bytes32,bytes32,bytes,uint128)") {
+        const HEAD_LEN: usize = 32 * 4;
+        if args.len() < HEAD_LEN {
+            return None;
+        }
         let mut class_id = [0u8; 32];
         class_id.copy_from_slice(read_word(args, 0)?);
         let mut asset_id = [0u8; 32];
         asset_id.copy_from_slice(read_word(args, 32)?);
-        let to = read_dyn_bytes(args, 64)?;
+        let to = read_dyn_bytes(args, 64, HEAD_LEN)?;
         let amount = read_u128_word(args, 96)?;
         return Some(DecodedUolCall::Transfer {
             class_id,
@@ -298,12 +319,16 @@ pub fn decode_uol_call(calldata: &[u8]) -> Option<DecodedUolCall> {
         });
     }
     if sel == uol_selector("offer(bytes32,bytes32,bytes,bytes,uint128,uint64)") {
+        const HEAD_LEN: usize = 32 * 6;
+        if args.len() < HEAD_LEN {
+            return None;
+        }
         let mut class_id = [0u8; 32];
         class_id.copy_from_slice(read_word(args, 0)?);
         let mut asset_id = [0u8; 32];
         asset_id.copy_from_slice(read_word(args, 32)?);
-        let taker = read_dyn_bytes(args, 64)?;
-        let payment = read_dyn_bytes(args, 96)?;
+        let taker = read_dyn_bytes(args, 64, HEAD_LEN)?;
+        let payment = read_dyn_bytes(args, 96, HEAD_LEN)?;
         let amount = read_u128_word(args, 128)?;
         let expiry = read_u64_word(args, 160)?;
         return Some(DecodedUolCall::Offer {
@@ -316,6 +341,9 @@ pub fn decode_uol_call(calldata: &[u8]) -> Option<DecodedUolCall> {
         });
     }
     if sel == uol_selector("accept(bytes32)") {
+        if args.len() != 32 {
+            return None;
+        }
         let mut offer_id = [0u8; 32];
         offer_id.copy_from_slice(read_word(args, 0)?);
         return Some(DecodedUolCall::Accept { offer_id });
@@ -366,12 +394,18 @@ pub fn decode_uol_offer_bytes(raw: &[u8]) -> Option<UolOfferRecord> {
     let mut tl_arr = [0u8; 4];
     tl_arr.copy_from_slice(raw.get(108..112)?);
     let taker_len = usize::try_from(u32::from_le_bytes(tl_arr)).ok()?;
+    if taker_len > MAX_PRECOMPILE_BYTES {
+        return None;
+    }
     let taker_end = 112usize.checked_add(taker_len)?;
     let taker = raw.get(112..taker_end)?.to_vec();
     let mut pl_arr = [0u8; 4];
     let pl_end = taker_end.checked_add(4)?;
     pl_arr.copy_from_slice(raw.get(taker_end..pl_end)?);
     let pay_len = usize::try_from(u32::from_le_bytes(pl_arr)).ok()?;
+    if pay_len > MAX_PRECOMPILE_BYTES {
+        return None;
+    }
     let pay_end = pl_end.checked_add(pay_len)?;
     if raw.len() != pay_end {
         return None;
@@ -386,4 +420,88 @@ pub fn decode_uol_offer_bytes(raw: &[u8]) -> Option<UolOfferRecord> {
         amount,
         expiry,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evmee03_abi_rejects_head_tail_overlap_unaligned_dirty_padding_trailing_and_oversized_offer()
+    {
+        // 1. Head/tail overlap: dynamic `target` offset points inside the 160-byte head (rel = 0).
+        let mut overlap = Vec::from(SEL_UNIVERSAL_CALL);
+        let mut head = vec![0u8; 160];
+        head[31] = 2; // target_ee = 2 (also read as len=2 if rel=0!)
+                      // target offset = 0 (aliases head word 0!)
+                      // input offset = 160
+        head[88..96].copy_from_slice(&160u64.to_be_bytes());
+        overlap.extend_from_slice(&head);
+        overlap.extend_from_slice(&[0u8; 32]); // input len = 0
+        assert!(
+            decode_precompile_call(&overlap).is_none(),
+            "dynamic offset pointing into ABI head must be refused"
+        );
+
+        // 2. Unaligned dynamic offset (rel = 161, not a multiple of 32) with valid
+        //    length + zero-padded bytes laid out right at offset 161.
+        let mut unaligned = Vec::from(SEL_UNIVERSAL_CALL);
+        let mut uhead = vec![0u8; 160];
+        uhead[31] = 2; // target_ee
+        uhead[56..64].copy_from_slice(&161u64.to_be_bytes()); // unaligned target offset
+        uhead[88..96].copy_from_slice(&256u64.to_be_bytes()); // aligned input offset
+        uhead[152..160].copy_from_slice(&100u64.to_be_bytes()); // gas
+        unaligned.extend_from_slice(&uhead);
+        let mut utail = vec![0u8; 128]; // bytes 160..288
+        utail[1 + 31] = 2; // len = 2 at rel = 161
+        utail[1 + 32] = b'a';
+        utail[1 + 33] = b'b';
+        // input at rel = 256 (utail[96..128]) has len = 0
+        unaligned.extend_from_slice(&utail);
+        assert!(
+            decode_precompile_call(&unaligned).is_none(),
+            "non-32-byte-aligned dynamic offset must be refused"
+        );
+
+        // 3. Non-zero dirty padding in dynamic `bytes` tail.
+        let mut dirty_pad = encode_universal_call_input(2, b"ab", b"cd", 0, 100);
+        // target starts at 4 + 160 + 32 = 196, len = 2, padding is 198..228.
+        dirty_pad[198] = 0xFF;
+        assert!(
+            decode_precompile_call(&dirty_pad).is_none(),
+            "dirty non-zero padding in ABI bytes tail must be refused"
+        );
+
+        // 4. Trailing garbage bytes on fixed-size UOL calls holderOf(bytes32) & accept(bytes32).
+        let mut holder_trailing = Vec::from(uol_selector("holderOf(bytes32)"));
+        holder_trailing.extend_from_slice(&[0x11u8; 32]);
+        holder_trailing.extend_from_slice(&[0x22u8; 4]);
+        assert!(
+            decode_uol_call(&holder_trailing).is_none(),
+            "holderOf(bytes32) with trailing garbage must be refused"
+        );
+        let mut accept_trailing = Vec::from(uol_selector("accept(bytes32)"));
+        accept_trailing.extend_from_slice(&[0x11u8; 32]);
+        accept_trailing.push(0x00);
+        assert!(
+            decode_uol_call(&accept_trailing).is_none(),
+            "accept(bytes32) with trailing bytes must be refused"
+        );
+
+        // 5. decode_uol_offer_bytes must enforce MAX_PRECOMPILE_BYTES on taker and payment.
+        let huge_taker_len = u32::try_from(MAX_PRECOMPILE_BYTES + 1).expect("u32");
+        let mut huge_raw = Vec::with_capacity(116 + MAX_PRECOMPILE_BYTES + 1);
+        huge_raw.extend_from_slice(&[0x11u8; 20]); // maker
+        huge_raw.extend_from_slice(&[0x22u8; 32]); // class_id
+        huge_raw.extend_from_slice(&[0x33u8; 32]); // asset_id
+        huge_raw.extend_from_slice(&1u128.to_le_bytes()); // amount
+        huge_raw.extend_from_slice(&10u64.to_le_bytes()); // expiry
+        huge_raw.extend_from_slice(&huge_taker_len.to_le_bytes());
+        huge_raw.resize(huge_raw.len() + MAX_PRECOMPILE_BYTES + 1, 0xAA);
+        huge_raw.extend_from_slice(&0u32.to_le_bytes()); // pay_len = 0
+        assert!(
+            decode_uol_offer_bytes(&huge_raw).is_none(),
+            "decode_uol_offer_bytes must reject taker exceeding MAX_PRECOMPILE_BYTES"
+        );
+    }
 }

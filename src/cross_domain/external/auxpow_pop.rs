@@ -1802,4 +1802,58 @@ mod tests {
         };
         assert!(verify_pop_equivocation(NET, &pinned, &same).is_err());
     }
+
+    /// STRX consistency gate: on the **non-PoP Work** path (no pinned PoP
+    /// committee, no bonded signature set) a caller that demands slashable
+    /// backing is refused with the same `UnslashableBacking` red meaning as
+    /// every other work-weighted adapter. AuxPoW+PoP without a local Budlum
+    /// confiscation arm is accumulated PoW work, so `require_slashable = true`
+    /// must fail closed here, locking the STRX-194-01 red meaning across the
+    /// Work adapter family so a direct caller cannot read `Work` as if it were
+    /// a bonded signature set.
+    #[test]
+    fn auxpow_pop_work_path_require_slashable_refuses_unslashable_backing() {
+        // Build the standard (PoP-pinned) fixture, then strip the PoP
+        // committee and its signatures to exercise the pure Work path.
+        let (_signers, mut pinned, mut bundle, _raw) = build_fixture();
+        pinned.pop_signers.clear();
+        bundle.pop_sigs.clear();
+        let payload = encode_auxpow_evidence(&bundle).expect("work-only bundle encodes");
+        let raw = RawConsensusEvidence {
+            adapter: AdapterId::from_name(ADAPTER_NAME),
+            evidence_version: EVIDENCE_VERSION,
+            network: NET.into(),
+            declared_height: bundle.aux_block.aux_height,
+            declared_root: bundle.aux_block.state_root,
+            payload,
+            submitter: crate::core::address::Address::from([0x22; 32]),
+        };
+        let adapter = AuxPowPopAdapter::new(NET, Some(pinned)).with_golden(raw.clone());
+        let policy = VerificationPolicy {
+            min_depth: 6,
+            max_age: 1_000,
+            now: 88_100,
+            require_declared_match: true,
+            require_slashable: true,
+        };
+        assert!(
+            matches!(
+                adapter.verify(&raw, &policy),
+                Err(AdapterError::UnslashableBacking)
+            ),
+            "require_slashable=true must fail closed with UnslashableBacking on the Work path"
+        );
+
+        // Sanity: the same work-only evidence verifies when slashability is
+        // not demanded, and reports Work (not a slashable signature set).
+        let mut work_policy = policy;
+        work_policy.require_slashable = false;
+        let att = adapter
+            .verify(&raw, &work_policy)
+            .expect("work-only AuxPoW verifies when slashability is not required");
+        assert!(
+            matches!(att.security, SecurityBacking::Work { .. }),
+            "the non-PoP path must report Work backing, not a bonded signature set"
+        );
+    }
 }

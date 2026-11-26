@@ -355,6 +355,12 @@ impl SettlementRegistries {
                 finality_proof_hash,
                 guarantee_backing_hash,
                 bond_atoms: u128::from(domain.operator_bond),
+                // Bindings this row actually carries: derived from the adapter's
+                // attestation, not asserted. A row can therefore never claim a
+                // binding it did not compute.
+                binds: crate::settlement::universal_finality::attestation_bits(
+                    guarantee.attestation,
+                ),
                 guarantee,
                 verdict,
             });

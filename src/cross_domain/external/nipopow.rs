@@ -980,4 +980,86 @@ pub(crate) mod tests {
         assert_eq!(superblock_level(&fail, &target), None);
         assert_eq!(superblock_level(&[0u8; 32], &[0u8; 32]), None);
     }
+
+    #[test]
+    fn nipopow_refuses_pinned_genesis_with_zero_fields() {
+        let (pinned, _bundle, golden) = make_golden_fixture();
+        let policy = VerificationPolicy {
+            min_depth: 4,
+            max_age: 0,
+            now: 0,
+            require_declared_match: true,
+            require_slashable: false,
+        };
+
+        let zero_cases = [
+            PinnedNipopowGenesis {
+                genesis_id: [0u8; 32],
+                ..pinned.clone()
+            },
+            PinnedNipopowGenesis {
+                pow_target: [0u8; 32],
+                ..pinned.clone()
+            },
+            PinnedNipopowGenesis {
+                min_superblocks_m: 0,
+                ..pinned.clone()
+            },
+            PinnedNipopowGenesis {
+                min_superblock_level: 0,
+                ..pinned.clone()
+            },
+            PinnedNipopowGenesis {
+                min_suffix_k: 0,
+                ..pinned
+            },
+        ];
+
+        for bad_pinned in zero_cases {
+            let adapter = NipopowAdapter::new(NET, Some(bad_pinned));
+            let err = adapter
+                .verify(&golden, &policy)
+                .expect_err("zero-field pinned genesis must be refused fail-closed");
+            assert!(
+                matches!(
+                    err,
+                    AdapterError::ConsensusRule { ref rule }
+                        if rule.contains("pinned NIPoPoW genesis parameters contain zero field")
+                ),
+                "unexpected error for zero-field pinned genesis: {err:?}"
+            );
+        }
+    }
+
+    /// STRX consistency gate: a caller that demands slashable backing is
+    /// refused with the same `UnslashableBacking` red meaning as every other
+    /// work-weighted adapter. NIPoPoW backing is accumulated PoW work with no
+    /// bonded stake to confiscate, so `require_slashable = true` must fail
+    /// closed here exactly as it does in the other Work producers.
+    #[test]
+    fn nipopow_require_slashable_policy_refuses_work_backing() {
+        let (pinned, bundle, golden) = make_golden_fixture();
+        let adapter = NipopowAdapter::new(NET, Some(pinned)).with_golden(golden.clone());
+        let mut slash_policy = VerificationPolicy {
+            min_depth: 4,
+            max_age: 100,
+            now: bundle.suffix[0].height + 4,
+            require_declared_match: true,
+            require_slashable: true,
+        };
+        assert!(
+            matches!(
+                adapter.verify(&golden, &slash_policy),
+                Err(AdapterError::UnslashableBacking)
+            ),
+            "require_slashable=true must fail closed with UnslashableBacking for work backing"
+        );
+
+        // Sanity: the same golden passes when slashability is not demanded.
+        slash_policy.require_slashable = false;
+        assert!(
+            adapter.verify(&golden, &slash_policy).is_ok(),
+            "the golden NIPoPoW proof must verify when slashability is not required"
+        );
+    }
 }

@@ -3247,9 +3247,11 @@ impl BudlumApiServer for RpcServer {
             crate::settlement::finality_gate::ValueGateRefusal,
         > = crate::settlement::finality_gate::check_certificate_value_gate(
             &cert,
+            &self.chain.get_consensus_sentry().await,
             crate::settlement::finality_gate::ValueGate::UniversalPayment,
             source_domain,
             Some(target_domain),
+            crate::settlement::universal_finality::FinalityBinds::EVENT_ROOT,
         );
         let (admits_value, refusal_reason, safe_ceiling) = match gate_result {
             Ok(verdict) => (true, None, verdict.safe_value_outflow_ceiling_atoms),

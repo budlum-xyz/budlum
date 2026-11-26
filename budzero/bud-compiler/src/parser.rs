@@ -193,6 +193,7 @@ impl<'a> Parser<'a> {
 
         let mut functions = Vec::new();
         let mut storage = Vec::new();
+        let mut witnesses = Vec::new();
         let mut structs = Vec::new();
 
         while self.peek() != &Token::BraceClose {
@@ -237,6 +238,50 @@ impl<'a> Parser<'a> {
                         storage.push(StorageField { name, ty });
                     }
                     self.expect(Token::BraceClose)?;
+                }
+                Token::Witness => {
+                    self.consume();
+                    if self.peek() == &Token::BraceOpen {
+                        self.consume();
+                        while self.peek() != &Token::BraceClose {
+                            let name = if let Token::Ident(name) = self.consume() {
+                                name
+                            } else {
+                                return Err(CompileError::ParserError(
+                                    "Expected witness name".to_string(),
+                                ));
+                            };
+                            self.expect(Token::Colon)?;
+                            let ty = if let Token::Ident(ty) = self.consume() {
+                                ty
+                            } else {
+                                return Err(CompileError::ParserError(
+                                    "Expected witness type".to_string(),
+                                ));
+                            };
+                            self.comma_or_close(&Token::BraceClose)?;
+                            witnesses.push(StorageField { name, ty });
+                        }
+                        self.expect(Token::BraceClose)?;
+                    } else {
+                        let name = if let Token::Ident(name) = self.consume() {
+                            name
+                        } else {
+                            return Err(CompileError::ParserError(
+                                "Expected witness name".to_string(),
+                            ));
+                        };
+                        self.expect(Token::Colon)?;
+                        let ty = if let Token::Ident(ty) = self.consume() {
+                            ty
+                        } else {
+                            return Err(CompileError::ParserError(
+                                "Expected witness type".to_string(),
+                            ));
+                        };
+                        self.expect(Token::Semicolon)?;
+                        witnesses.push(StorageField { name, ty });
+                    }
                 }
                 Token::Struct => {
                     self.consume();
@@ -286,6 +331,7 @@ impl<'a> Parser<'a> {
         Ok(Contract {
             name,
             storage,
+            witnesses,
             structs,
             functions,
         })
@@ -811,6 +857,18 @@ impl<'a> Parser<'a> {
                     return Err(CompileError::ParserError("Expected name".to_string()));
                 };
                 Ok(Expr::StorageRead(name))
+            }
+            Token::Witness => {
+                self.expect(Token::Colon)?;
+                self.expect(Token::Colon)?;
+                let name = if let Token::Ident(name) = self.consume() {
+                    name
+                } else {
+                    return Err(CompileError::ParserError(
+                        "Expected witness name".to_string(),
+                    ));
+                };
+                Ok(Expr::WitnessRead(name))
             }
             _ => Err(CompileError::ParserError(
                 "Expected primary expression".to_string(),

@@ -655,7 +655,7 @@ impl ClaimedDomainFinalityAdapter {
             })
     }
 
-    /// Enforce K2-E T-E.2 on a certificate row's [`FinalityGuarantee`]:
+    /// Enforce finality floor and binding guarantees on a certificate row's `FinalityGuarantee`:
     /// only a commitment backed by a verified `Claim::Prog` in this adapter
     /// may carry `FinalityReversibility::CryptographicValidity` ("proven").
     /// Any `agg-claimed-program-finality` domain lacking a verified `Claim::Prog`
