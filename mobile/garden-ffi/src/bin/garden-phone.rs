@@ -453,10 +453,19 @@ fn file_round_trip(
     let content_id = field(&sent.json, "content_id")
         .ok_or("the publish answer carried no content id")?;
 
-    let feed = phone.feed(10).map_err(|e| e.to_string())?;
+    // Publishing hands the file to the group; the feed only shows it
+    // once a block carrying it has been agreed on. At a three second
+    // round that is a wait, not a failure, and the Room waits the same
+    // way by re-reading the chain rather than echoing what was typed.
+    let mut feed = phone.feed(10).map_err(|e| e.to_string())?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !feed.json.contains(&content_id) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        feed = phone.feed(10).map_err(|e| e.to_string())?;
+    }
     println!("feed:     {}", feed.json);
     if !feed.json.contains(&content_id) {
-        return Err("the file is not in the feed the group reads".into());
+        return Err("the file never reached a block the group agreed on".into());
     }
     if !feed.json.contains(&mime) {
         return Err("the feed does not carry the file's type".into());
