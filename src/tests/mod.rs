@@ -72,6 +72,8 @@ pub mod ethereum_real_finality;
 #[cfg(test)]
 pub mod evm_finality_contract;
 #[cfg(test)]
+pub mod external_unpinned_refusal;
+#[cfg(test)]
 pub mod finality_adversarial;
 #[cfg(test)]
 pub mod finality_live_path;
