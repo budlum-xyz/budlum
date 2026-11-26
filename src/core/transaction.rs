@@ -5692,7 +5692,35 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
-        // Tag 20: Ouroboros Praos / Mithril epoch adapter, appended last.
+        // Tag 21: Solana TowerBFT epoch adapter, appended last.
+        //
+        // Genesis hash, epoch number, slot range and the whole vote-account
+        // roster reach the preimage: redirecting a registration at an epoch
+        // whose stake table the relay prefers would be choosing the quorum
+        // behind a TowerBFT certificate.
+        AdapterSpec::SolanaTower { network, epoch } => {
+            put_u8(out, 21);
+            put_string(out, network);
+            match epoch {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_string(out, &pin.genesis_hash_hex);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.first_slot);
+                    put_u64(out, pin.last_slot);
+                    put_u8(out, u8::from(pin.has_bonded_slash_escrow));
+                    put_u64(out, pin.validators.len() as u64);
+                    for validator in &pin.validators {
+                        put_fixed(out, &validator.vote_account);
+                        put_u64(out, validator.stake_lamports);
+                        put_fixed(out, &validator.ed25519_pubkey);
+                        put_bytes(out, &validator.pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 20: Ouroboros Praos / Mithril epoch adapter.
         //
         // The chain id, the epoch number and the whole registered stake table
         // reach the preimage: a relay that could redirect a registration at an

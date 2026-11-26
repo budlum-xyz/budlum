@@ -47,9 +47,13 @@
 //!    backing refuse bare mainnet votes automatically, while Budlum's bonded
 //!    prover remains slashable on contradiction).
 //!
-//! WIRING: implements `ExternalFinalityAdapter` for `ExternalDomainRegistry`
-//! admission/submission/slashing; `AdapterSpec` tag append joins `intake.rs`
-//! after concurrent intake hardening merges.
+//! WIRING: wired - `AdapterSpec::SolanaTower { network, epoch }` (wire tag 21)
+//! builds this adapter from an intake registration. Solana finality is a stake
+//! quorum over one epoch's vote accounts, so the registration echoes the epoch
+//! it certifies under and `IntakeState` refuses one it has not itself pinned
+//! (`IntakeState::install_solana_epoch`, reachable in production through
+//! `GovernanceAction::PinExternalAnchor`). `FinalityGuarantee` maps the pinned
+//! stake table to deterministic-quorum finality.
 
 use crate::crypto::facts::{CryptoObserver, ObservedScheme};
 use crate::crypto::scheme::SchemeId;
@@ -702,7 +706,7 @@ impl ExternalFinalityAdapter for SolanaTowerBftAdapter {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::core::address::Address;
     use crate::cross_domain::external::selftest::admit;
@@ -716,7 +720,7 @@ mod tests {
     const LAST_SLOT: u64 = 333_232_639;
     const SLOT: u64 = 333_000_000;
 
-    struct StakeNode {
+    pub(crate) struct StakeNode {
         ed: KeyPair,
         pq: PqKeyPair,
         vote_account: [u8; 32],
@@ -772,6 +776,16 @@ mod tests {
 
     /// 5 validators with stake 40 / 30 / 15 / 10 / 5 (total 100 units).
     /// Top-3 signers control 85% of stake (strict supermajority); tail-2 hold 15%.
+    /// The pinned epoch and its golden admission evidence.
+    ///
+    /// Public within the crate because the intake tests register a Solana
+    /// domain end to end and need the same known-good sample admission will
+    /// verify against; the intermediate evidence type stays private.
+    pub(crate) fn tower_fixture(slash_escrow: bool) -> (PinnedSolEpoch, RawConsensusEvidence) {
+        let (pinned, _nodes, _evidence, golden) = build_tower_fixture(slash_escrow);
+        (pinned, golden)
+    }
+
     fn build_tower_fixture(
         slash_escrow: bool,
     ) -> (

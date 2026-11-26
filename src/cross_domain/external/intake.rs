@@ -331,6 +331,18 @@ pub enum AdapterSpec {
         #[serde(default)]
         stake: Option<crate::cross_domain::external::ouroboros_mithril::EpochStake>,
     },
+    /// Solana `TowerBFT` epoch finality (`solana_tower_bft`).
+    ///
+    /// The pin is one epoch's vote-account stake table plus the slot range it
+    /// covers. `has_bonded_slash_escrow` travels inside the pin and stays
+    /// `false` for bare Solana stake: a foreign validator set is not
+    /// slashable by Budlum, and the field records that rather than pretending
+    /// otherwise.
+    SolanaTower {
+        network: String,
+        #[serde(default)]
+        epoch: Option<crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch>,
+    },
 }
 
 impl AdapterSpec {
@@ -354,7 +366,8 @@ impl AdapterSpec {
             | Self::Ghostdag { network, .. }
             | Self::HoneyBadgerBft { network, .. }
             | Self::NearDoomslug { network, .. }
-            | Self::OuroborosMithril { network, .. } => network,
+            | Self::OuroborosMithril { network, .. }
+            | Self::SolanaTower { network, .. } => network,
         }
     }
 
@@ -487,10 +500,14 @@ impl AdapterSpec {
                 golden,
                 crate::cross_domain::external::near_doomslug::NearDoomslugAdapter::with_golden,
             ),
+            // `epoch` is the registration's claim about which pinned stake
+            // table it answers to; `register_domain` has already refused a
+            // claim that does not match, and the adapter itself reads the
+            // epoch from the pinned table, so it is not re-read here.
             Self::OuroborosMithril {
                 network,
                 chain_id,
-                epoch,
+                epoch: _,
                 stake,
             } => box_with_golden(
                 || {
@@ -505,6 +522,19 @@ impl AdapterSpec {
                 },
                 golden,
                 crate::cross_domain::external::ouroboros_mithril::OuroborosMithrilAdapter::with_golden,
+            ),
+            // The adapter needs the roster to check TowerBFT votes at all:
+            // `register_domain` has already refused a registration whose epoch
+            // is not the pinned one, so this pin is the governance pin.
+            Self::SolanaTower { network, epoch } => box_with_golden(
+                || {
+                    crate::cross_domain::external::solana_tower_bft::SolanaTowerBftAdapter::new(
+                        network,
+                        epoch.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::solana_tower_bft::SolanaTowerBftAdapter::with_golden,
             ),
         }
     }
@@ -696,6 +726,18 @@ pub struct IntakeState {
             crate::cross_domain::external::ouroboros_mithril::EpochStake,
         >,
     >,
+    /// Governance-pinned `TowerBFT` (Solana) epoch stake tables keyed by
+    /// external network and then by epoch number, for the same reason the
+    /// Cardano map is nested: an epoch is a number, and a late certificate
+    /// must answer to its own epoch's roster.
+    #[serde(default)]
+    pub pinned_solana_epochs: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<
+            u64,
+            crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch,
+        >,
+    >,
     /// Governance-pinned `HoneyBadgerBFT` epoch committees keyed by external
     /// network.
     ///
@@ -742,6 +784,8 @@ pub enum AnchorFamily {
     NearEpoch,
     /// One epoch's registered stake distribution (`Cardano`).
     OuroborosEpoch,
+    /// One epoch's vote-account stake table (`Solana`).
+    SolanaEpoch,
 }
 
 impl AnchorFamily {
@@ -759,6 +803,7 @@ impl AnchorFamily {
             Self::HoneyBadger => "honeybadger",
             Self::NearEpoch => "near-epoch",
             Self::OuroborosEpoch => "ouroboros-epoch",
+            Self::SolanaEpoch => "solana-epoch",
         }
     }
 }
@@ -792,6 +837,8 @@ pub enum PinnedExternalAnchor {
     NearEpoch(crate::cross_domain::external::near_doomslug::PinnedNearEpoch),
     /// Registered stake distribution for an `Ouroboros Praos` (Cardano) epoch.
     OuroborosEpoch(crate::cross_domain::external::ouroboros_mithril::EpochStake),
+    /// Vote-account stake table for a `TowerBFT` (Solana) epoch.
+    SolanaEpoch(crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch),
 }
 
 impl PinnedExternalAnchor {
@@ -809,6 +856,7 @@ impl PinnedExternalAnchor {
             Self::HoneyBadger(_) => AnchorFamily::HoneyBadger,
             Self::NearEpoch(_) => AnchorFamily::NearEpoch,
             Self::OuroborosEpoch(_) => AnchorFamily::OuroborosEpoch,
+            Self::SolanaEpoch(_) => AnchorFamily::SolanaEpoch,
         }
     }
 
@@ -914,6 +962,23 @@ impl PinnedExternalAnchor {
                 // the wrong length, zero weight). A pin that does not validate
                 // cannot certify a single epoch.
                 committee.validate().map_err(|e| e.to_string())?;
+            }
+            Self::SolanaEpoch(epoch) => {
+                // Solana admission needs a real epoch: a genesis hash to bind
+                // the signing root, a non-inverted slot range, and a roster of
+                // vote accounts inside `1..=MAX_SOL_VALIDATORS` with non-zero
+                // stake and unique keys. The adapter's own validator is the
+                // authority on all of it; this door only insists that it is
+                // asked before the pin enters state.
+                if epoch.genesis_hash_hex.trim().is_empty() {
+                    return Err("the pinned Solana epoch names no genesis hash".into());
+                }
+                if epoch.first_slot > epoch.last_slot {
+                    return Err("the pinned Solana epoch slot range is inverted".into());
+                }
+                if epoch.validators.is_empty() {
+                    return Err("the pinned Solana epoch has no validators".into());
+                }
             }
             Self::OuroborosEpoch(stake) => {
                 // A Cardano pin is one epoch's registered signers. An empty
@@ -1737,6 +1802,47 @@ impl IntakeState {
             .insert(network.into(), committee);
     }
 
+    /// Installs or updates the consensus-pinned `TowerBFT` (Solana) epoch for
+    /// `epoch.epoch` on `network`.
+    /// WIRING: genesis/test initializer; the production door is
+    /// `GovernanceAction::PinExternalAnchor` -> [`Self::install_pinned_anchor`].
+    pub fn pin_solana_epoch(
+        &mut self,
+        network: impl Into<String>,
+        epoch: crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch,
+    ) {
+        self.pinned_solana_epochs
+            .entry(network.into())
+            .or_default()
+            .insert(epoch.epoch, epoch);
+    }
+
+    /// Installs the Solana epoch for `network` only if it names a real roster.
+    ///
+    /// # Errors
+    ///
+    /// The named defect.
+    pub fn install_solana_epoch(
+        &mut self,
+        network: impl Into<String>,
+        epoch: crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch,
+    ) -> Result<(), String> {
+        PinnedExternalAnchor::SolanaEpoch(epoch.clone()).validate()?;
+        self.pin_solana_epoch(network, epoch);
+        Ok(())
+    }
+
+    /// The pinned Solana epoch for `network`'s `epoch`, if that epoch was
+    /// pinned.
+    #[must_use]
+    pub fn pinned_solana_epoch(
+        &self,
+        network: &str,
+        epoch: u64,
+    ) -> Option<&crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch> {
+        self.pinned_solana_epochs.get(network)?.get(&epoch)
+    }
+
     /// Installs or updates the consensus-pinned `Ouroboros Praos` (Cardano)
     /// stake distribution for `epoch` on `network`.
     /// WIRING: genesis/test initializer; the production door is
@@ -1871,6 +1977,9 @@ impl IntakeState {
             PinnedExternalAnchor::OuroborosEpoch(stake) => {
                 self.pin_ouroboros_epoch(network.to_string(), stake);
             }
+            PinnedExternalAnchor::SolanaEpoch(epoch) => {
+                self.pin_solana_epoch(network.to_string(), epoch);
+            }
         }
     }
 
@@ -1943,6 +2052,15 @@ impl IntakeState {
                 .and_then(|epochs| epochs.values().next_back())
                 .cloned()
                 .map(PinnedExternalAnchor::OuroborosEpoch),
+            // As with Cardano: the network-keyed anchor a lookup can name is
+            // the newest pinned epoch; verification of a specific epoch goes
+            // through `pinned_solana_epoch(network, epoch)`.
+            AnchorFamily::SolanaEpoch => self
+                .pinned_solana_epochs
+                .get(network)
+                .and_then(|epochs| epochs.values().next_back())
+                .cloned()
+                .map(PinnedExternalAnchor::SolanaEpoch),
         }
     }
 
@@ -2186,6 +2304,20 @@ impl IntakeState {
                 return Err(IntakeError::CommitteeNotPinned);
             };
             if stake.as_ref() != Some(installed) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        if let AdapterSpec::SolanaTower { network, epoch } = &spec {
+            // A TowerBFT registration certifies one epoch's vote-account
+            // quorum. Without a pinned epoch for exactly that epoch number the
+            // quorum is whatever the registrant says it is.
+            let Some(installed) = epoch
+                .as_ref()
+                .and_then(|e| self.pinned_solana_epoch(network, e.epoch))
+            else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if epoch.as_ref() != Some(installed) {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
@@ -6736,5 +6868,82 @@ mod tests {
         );
         assert!(governed.pinned_ouroboros_epoch(net, EPOCH + 1).is_none());
         assert!(governed.pinned_near_epochs.is_empty());
+    }
+
+    #[test]
+    fn a_solana_registration_is_bound_to_the_epoch_the_state_pinned() {
+        use crate::cross_domain::external::solana_tower_bft::tests::tower_fixture;
+
+        let (pinned, golden) = tower_fixture(false);
+        let net = "mainnet-beta";
+        let spec = |pin: Option<_>| AdapterSpec::SolanaTower {
+            network: net.to_string(),
+            epoch: pin,
+        };
+        let mut intake = IntakeState::default();
+
+        // Nothing pinned: closed, and a spec that carries no epoch at all is
+        // closed for the same reason.
+        assert_eq!(
+            admit_near(&mut intake, spec(None), golden.clone()),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+        assert_eq!(
+            admit_near(&mut intake, spec(Some(pinned.clone())), golden.clone()),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+
+        // A roster with no validators is not a quorum; an inverted slot range
+        // is not an epoch. Both are refused by name and neither enters state.
+        let mut empty = pinned.clone();
+        empty.validators.clear();
+        assert!(intake
+            .install_solana_epoch(net, empty)
+            .is_err_and(|e| e.contains("no validators")));
+        let mut inverted = pinned.clone();
+        inverted.last_slot = inverted.first_slot - 1;
+        assert!(intake
+            .install_solana_epoch(net, inverted)
+            .is_err_and(|e| e.contains("inverted")));
+        assert!(intake.pinned_solana_epochs.is_empty());
+
+        intake
+            .install_solana_epoch(net, pinned.clone())
+            .expect("the fixture epoch is a real roster");
+
+        // Epoch 770's table does not certify epoch 771.
+        let mut later = pinned.clone();
+        later.epoch = pinned.epoch + 1;
+        assert_eq!(
+            admit_near(&mut intake, spec(Some(later)), golden.clone()),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+        // Nor does a registration that widens one validator's stake: the
+        // roster is the quorum, and it is echoed exactly.
+        let mut widened = pinned.clone();
+        widened.validators[0].stake_lamports *= 2;
+        assert_eq!(
+            admit_near(&mut intake, spec(Some(widened)), golden.clone()),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+
+        admit_near(&mut intake, spec(Some(pinned.clone())), golden)
+            .expect("the pinned epoch admits");
+
+        // Governance and genesis doors agree, and the epoch-keyed lookup is
+        // exact rather than "whatever is newest".
+        let mut governed = IntakeState::default();
+        governed.install_pinned_anchor(net, PinnedExternalAnchor::SolanaEpoch(pinned.clone()));
+        let mut genesis = IntakeState::default();
+        genesis.pin_solana_epoch(net, pinned.clone());
+        assert_eq!(governed.state_digest(), genesis.state_digest());
+        assert_eq!(
+            governed.pinned_solana_epoch(net, pinned.epoch),
+            Some(&pinned)
+        );
+        assert!(governed
+            .pinned_solana_epoch(net, pinned.epoch + 1)
+            .is_none());
+        assert!(governed.pinned_ouroboros_epochs.is_empty());
     }
 }

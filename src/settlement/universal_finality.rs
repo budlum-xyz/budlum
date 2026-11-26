@@ -626,6 +626,43 @@ impl FinalityGuarantee {
                     fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
+            AdapterSpec::SolanaTower { epoch, .. } => {
+                // TowerBFT finality is a stake-weighted vote lock: a quorum,
+                // not a depth. A pin with no validators, an inverted slot
+                // range or no genesis binding names no quorum at all, so it
+                // earns no guarantee.
+                let valid = epoch.as_ref().is_some_and(|e| {
+                    !e.genesis_hash_hex.trim().is_empty()
+                        && !e.validators.is_empty()
+                        && e.first_slot <= e.last_slot
+                });
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    // Vote locks are Ed25519; a validator that publishes a
+                    // ML-DSA-65 key upgrades the posture, and one that does not
+                    // leaves it classical. The pin records which, per validator.
+                    quantum_posture: if valid
+                        && epoch
+                            .as_ref()
+                            .is_some_and(|e| e.validators.iter().all(|v| !v.pq_pubkey.is_empty()))
+                    {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        event_root: valid,
+                        parent: valid,
+                    },
+                    // Unless the pin says every validator is backed by an
+                    // escrow, the stake is foreign and Budlum cannot slash it.
+                    slashable_backing: valid
+                        && epoch.as_ref().is_some_and(|e| e.has_bonded_slash_escrow),
+                    fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
             AdapterSpec::OuroborosMithril {
                 epoch,
                 stake,
