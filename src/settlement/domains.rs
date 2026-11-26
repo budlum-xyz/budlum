@@ -1984,18 +1984,54 @@ fn execute_object_layer_tx(
                 .map_err(SettlementTxError::Refused)?;
         }
     }
-    if let crate::object_layer::ObjectLayerTx::Arrive(proof) = tx {
+    fn push_unique_domain(out: &mut Vec<DomainId>, id: DomainId) {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    fn collect_single_object_layer_domain(
+        tx: &crate::object_layer::ObjectLayerTx,
+        out: &mut Vec<DomainId>,
+    ) {
+        match tx {
+            crate::object_layer::ObjectLayerTx::Arrive(proof)
+            | crate::object_layer::ObjectLayerTx::HomeCall(proof)
+            | crate::object_layer::ObjectLayerTx::ConfirmDeparture(proof)
+            | crate::object_layer::ObjectLayerTx::GuestReturn { proof, .. } => {
+                push_unique_domain(out, proof.domain);
+            }
+            crate::object_layer::ObjectLayerTx::GuestPlace { guest_domain, .. } => {
+                push_unique_domain(out, *guest_domain);
+            }
+            crate::object_layer::ObjectLayerTx::Adopt { home } => {
+                if let Ok(proof) =
+                    postcard::from_bytes::<crate::object_layer::registry::HomeEventProof>(home)
+                {
+                    push_unique_domain(out, proof.domain);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut gated_domains = Vec::new();
+    if let crate::object_layer::ObjectLayerTx::HomeStipendCall { domain, action, .. } = tx {
+        push_unique_domain(&mut gated_domains, *domain);
+        collect_single_object_layer_domain(action, &mut gated_domains);
+    } else {
+        collect_single_object_layer_domain(tx, &mut gated_domains);
+    }
+    for gated_domain in gated_domains {
         crate::settlement::finality_gate::enforce_domain_not_refuted(
             &state.settlement,
             state.current_block_height,
             crate::settlement::finality_gate::ValueGate::ObjectLayerArrive,
-            proof.domain,
+            gated_domain,
         )
         .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
         crate::settlement::finality_gate::enforce_sentry_circuit_clear(
             &state.bridge_state.consensus_sentry,
             crate::settlement::finality_gate::ValueGate::ObjectLayerArrive,
-            proof.domain,
+            gated_domain,
         )
         .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
     }
