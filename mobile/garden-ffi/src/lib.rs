@@ -19,8 +19,11 @@
 //! Section 2.8 keeps message, post and trace queries out of the app, so
 //! they are not exported here even though the core has them.
 
+
+pub mod rendezvous;
+
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use budlum_core::garden::{GardenOptions, GardenService};
 use tokio::runtime::Runtime;
@@ -36,6 +39,17 @@ uniffi::setup_scaffolding!();
 pub struct GardenAnswer {
     /// The JSON body, verbatim from the core.
     pub json: String,
+}
+
+/// Six digits a person can read out, and how long they last.
+#[derive(uniffi::Record)]
+pub struct GardenCode {
+    /// The six digits themselves, leading zeros kept.
+    pub code: String,
+    /// Seconds before the code stops being answered.
+    pub seconds_left: u64,
+    /// The invite the code stands for, for anyone off this Wi-Fi.
+    pub record: String,
 }
 
 /// One check of the first run self test.
@@ -85,6 +99,8 @@ pub struct GardenPhone {
     runtime: Runtime,
     service: GardenService,
     data_dir: PathBuf,
+    /// The six digit code this phone is answering, while it lasts.
+    desk: Mutex<Option<rendezvous::Desk>>,
 }
 
 #[uniffi::export]
@@ -111,6 +127,7 @@ impl GardenPhone {
             runtime,
             service,
             data_dir: dir,
+            desk: Mutex::new(None),
         }))
     }
 
@@ -165,6 +182,71 @@ impl GardenPhone {
     /// something to share.
     pub fn invite(&self) -> Result<GardenAnswer, GardenError> {
         answer(self.runtime.block_on(self.service.invite()))
+    }
+
+    /// Admit or refuse a key that is waiting for this phone's answer.
+    ///
+    /// Only the phone that started the network has this authority; the
+    /// chain refuses it from anyone else. An invite gets a key into the
+    /// waiting row, not into the group.
+    pub fn admit(&self, key: String, accept: bool) -> Result<GardenAnswer, GardenError> {
+        answer(self.runtime.block_on(self.service.admit(key, accept)))
+    }
+
+    /// Open a six digit code that stands for this Garden's invite.
+    ///
+    /// The code is answered on the local network for an hour. It is a
+    /// meeting point, not the invite itself: six digits cannot carry a
+    /// chain id, a genesis hash, a token and an address.
+    pub fn open_code(&self) -> Result<GardenCode, GardenError> {
+        let record = self
+            .runtime
+            .block_on(self.service.invite())
+            .map_err(|e| GardenError::Refused { reason: e })?;
+        // The signed record is preferred over the bare line: it carries
+        // who opened the door and until when, and join takes either.
+        let record = record
+            .get("record")
+            .or_else(|| record.get("invite"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| GardenError::Refused {
+                reason: "this Garden gave out no invite to stand behind a code".into(),
+            })?;
+        let code = rendezvous::fresh_code().map_err(|e| GardenError::Refused { reason: e })?;
+        let desk = rendezvous::Desk::open(code.clone(), record.clone())
+            .map_err(|e| GardenError::Refused { reason: e })?;
+        let answer = GardenCode {
+            code: desk.code().to_owned(),
+            seconds_left: desk.seconds_left(),
+            record,
+        };
+        *self.desk.lock().unwrap_or_else(|e| e.into_inner()) = Some(desk);
+        Ok(answer)
+    }
+
+    /// The code this phone is currently answering, if any is still good.
+    pub fn code_now(&self) -> Option<GardenCode> {
+        let desk = self.desk.lock().unwrap_or_else(|e| e.into_inner());
+        desk.as_ref().filter(|d| !d.expired()).map(|d| GardenCode {
+            code: d.code().to_owned(),
+            seconds_left: d.seconds_left(),
+            record: d.record().to_owned(),
+        })
+    }
+
+    /// Ask the local network for the invite behind six digits, then join.
+    ///
+    /// Joining lands this phone in the waiting row. What happens next is
+    /// the host's to decide, and has no deadline.
+    pub fn join_with_code(&self, code: String, name: String) -> Result<GardenAnswer, GardenError> {
+        let record = rendezvous::ask(
+            code.trim(),
+            std::time::Duration::from_secs(8),
+            Some(rendezvous::loopback_desk()),
+        )
+        .map_err(|reason| GardenError::Refused { reason })?;
+        self.join(record, name)
     }
 
     /// Read an invite record without acting on it, so the Join screen can
@@ -323,9 +405,19 @@ impl GardenPhone {
     /// The listen address a phone uses: every interface, a port the system
     /// picks. A phone moves between networks and cannot be told a port.
     /// Founding a Garden overrides this, because a host must be dialable.
+    /// How this phone starts or enters a Garden.
+    ///
+    /// Admission is the host's to give. An invite - or the six digits
+    /// standing in for one - puts a key in the waiting row; the phone
+    /// that started the network decides whether it gets a seat. The
+    /// owner asked for every network to work this way, and a group that
+    /// anyone holding a code can walk into is not a group.
     fn options() -> GardenOptions {
-        serde_json::from_value(serde_json::json!({ "listen": "/ip4/0.0.0.0/tcp/0" }))
-            .unwrap_or_default()
+        serde_json::from_value(serde_json::json!({
+            "listen": "/ip4/0.0.0.0/tcp/0",
+            "admission": "host_approval",
+        }))
+        .unwrap_or_default()
     }
 
     fn check_private_storage(&self) -> SelfTestStep {

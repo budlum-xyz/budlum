@@ -101,7 +101,7 @@ class QrScanActivity : ComponentActivity() {
 
     /** Say what the camera is for, so the view is not a bare picture. */
     private fun hint(): TextView = TextView(this).apply {
-        text = "Point this at the invite QR code"
+        text = context.getString(network.budlum.validator.R.string.g_point_at_qr)
         setTextColor(Color.WHITE)
         setBackgroundColor(Color.argb(140, 0, 0, 0))
         setPadding(32, 24, 32, 24)
@@ -120,7 +120,7 @@ class QrScanActivity : ComponentActivity() {
      * door next to it.
      */
     private fun backButton(): Button = Button(this).apply {
-        text = "Cancel"
+        text = context.getString(network.budlum.validator.R.string.g_cancel)
         setOnClickListener { cancel() }
         layoutParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,

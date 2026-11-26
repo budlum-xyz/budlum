@@ -1,21 +1,18 @@
 package network.budlum.validator.garden
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import network.budlum.validator.R
 
 /** Where in the app the person is. Nothing is a dead end. */
 enum class Step {
@@ -33,16 +30,15 @@ enum class Step {
 }
 
 /**
- * The choice the app is offering.
+ * The choice, as the sheets would put it: a few lowercase lines.
  *
- * Being a validator comes first and is one thing; which network that
- * validator serves is a second, separate thing.
- *
- * What a Garden is *not* needs saying on this screen, because every
- * other chain people have met works the other way: there is no token
- * here, no balance, no payment and nothing to buy. A Garden carries
- * data. Validators check blocks and hold a share of what the group
- * sends, and that is the whole of the arrangement.
+ * This screen used to carry five paragraphs explaining what a network
+ * is, what a token is not, and what the testnet is for. The design
+ * file has a menu in its bottom left corner reading "a.o / market /
+ * ecosystem / participation" - four words, no sentences - and that is
+ * the voice this app is supposed to have. Someone who needs to know
+ * what the thing is reads the one line that says it; everyone else
+ * taps the line they came for.
  */
 @Composable
 fun ChooseScreen(
@@ -54,78 +50,47 @@ fun ChooseScreen(
 ) {
     val state = model.state
     val seated = state.status.contains("\"chain_id\"")
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        Text("THIS PHONE IS READY", style = MaterialTheme.typography.labelSmall)
-        Text("What is this phone validating?", style = MaterialTheme.typography.headlineSmall)
+    CubeFloor(model.skin) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Label(stringResource(R.string.g_what_this_is))
+            Text(
+                stringResource(R.string.g_data_not_money),
+                style = MaterialTheme.typography.bodySmall,
+                color = Ink,
+                modifier = Modifier.padding(bottom = 22.dp),
+            )
 
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text("YOUR OWN NETWORK", style = MaterialTheme.typography.labelSmall)
-                Text(
-                    "A network of your own, run by the phones you invite - a " +
-                        "household, a room, a street. It carries data: you send " +
-                        "something, it goes over the chain through B.U.D. 3.0, " +
-                        "and anyone in the group can pull it back out verified.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Text(
-                    "There is no token, no balance and nothing to pay. Running " +
-                        "your own network does not mean issuing money; it means " +
-                        "the group carries its own data.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                if (seated) {
-                    Text(
-                        "This phone is already in a network.",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Button(onClick = onStartOwn, modifier = Modifier.fillMaxWidth()) {
-                        Text("Open my network")
-                    }
-                } else {
-                    Button(onClick = onStartOwn, modifier = Modifier.fillMaxWidth()) {
-                        Text("Start my own network")
-                    }
-                    OutlinedButton(onClick = onHaveInvite, modifier = Modifier.fillMaxWidth()) {
-                        Text("I was invited to one")
-                    }
-                }
+            if (seated) {
+                MenuLine(stringResource(R.string.g_my_network), onStartOwn)
+            } else {
+                MenuLine(stringResource(R.string.g_start_own), onStartOwn)
+                MenuLine(stringResource(R.string.g_was_invited), onHaveInvite)
             }
-        }
+            MenuLine(stringResource(R.string.g_testnet), onTestnet)
+            MenuLine(stringResource(R.string.g_back), onBack)
 
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text("TESTNET", style = MaterialTheme.typography.labelSmall)
-                Text(
-                    "The public Budlum test network, which is a different thing " +
-                        "and not needed for your own. It is the one with an " +
-                        "address and a faucet attached, and it is here only " +
-                        "because a validator may also serve it.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                OutlinedButton(onClick = onTestnet, modifier = Modifier.fillMaxWidth()) {
-                    Text("Validate the testnet instead")
-                }
+            if (state.message.isNotEmpty()) {
+                Label(state.message, color = Flow, modifier = Modifier.padding(top = 18.dp))
             }
-        }
-
-        TextButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-            Text("Back to the requirements")
-        }
-        if (state.message.isNotEmpty()) {
-            Text(state.message, style = MaterialTheme.typography.bodySmall)
         }
     }
+}
+
+/** One line of the menu: lowercase, no box, no shadow, just a word. */
+@Composable
+private fun MenuLine(text: String, onTap: () -> Unit) {
+    Text(
+        text = text.lowercase(),
+        style = MaterialTheme.typography.bodyLarge,
+        color = Ink,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onTap)
+            .padding(vertical = 9.dp),
+    )
 }

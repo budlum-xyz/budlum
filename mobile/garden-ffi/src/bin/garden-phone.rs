@@ -18,6 +18,7 @@
 //!   garden-phone send-file <dir> <file> [mime]
 //!   garden-phone file-check <dir> <file> [mime] [address]
 //!   garden-phone room-check <dir> [file] [address]
+//!   garden-phone join-check <dir> [second dir] [address]
 //!   garden-phone feed <dir> [limit]
 //!   garden-phone fetch <dir> <content id>
 //!   garden-phone leave <dir>
@@ -36,7 +37,7 @@ fn main() -> ExitCode {
     if command.is_empty() || dir.is_empty() {
         eprintln!(
             "usage: garden-phone \
-<self-test|read|create|join|serve|return-check|status|send|send-file|file-check|room-check|feed|fetch|leave> \
+<self-test|read|create|join|serve|return-check|status|send|send-file|file-check|room-check|join-check|feed|fetch|leave> \
 <dir> [...]"
         );
         return ExitCode::from(2);
@@ -236,6 +237,29 @@ fn main() -> ExitCode {
         // lines, send a file, then read the whole thing back off the
         // chain the way the screen reads it - feed for what was sent,
         // fetch for the words themselves.
+        // The whole invite story in one place: a host opens a six digit
+        // code, a second phone in another directory asks the network for
+        // it and joins, the host sees it waiting and admits it, and both
+        // ends agree it is seated. Run where no two phones are.
+        "join-check" => {
+            let second = args.get(3).cloned().unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join("garden-join-check")
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            let address = args.get(4).cloned();
+            match join_round_trip(&phone, &second, address) {
+                Ok(()) => {
+                    println!("the code let a second phone in, and the host admitted it");
+                    ExitCode::SUCCESS
+                }
+                Err(reason) => {
+                    eprintln!("the invite is broken: {reason}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         "room-check" => {
             let file = args.get(3).cloned();
             let address = args.get(4).cloned();
@@ -441,6 +465,90 @@ fn json_string(text: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// Open a code, let a second phone in with it, and admit it.
+fn join_round_trip(
+    host: &Arc<GardenPhone>,
+    second_dir: &str,
+    address: Option<String>,
+) -> Result<(), String> {
+    let _ = std::fs::remove_dir_all(second_dir);
+    let made = host
+        .create("Kitchen table".to_string(), "Host".to_string(), address)
+        .map_err(|e| e.to_string())?;
+    println!("founded:  {}", one_line(&made.json, "chain_id"));
+
+    let status = host.status().map_err(|e| e.to_string())?;
+    let admission = field(&status.json, "admission").unwrap_or_default();
+    println!("admission: {admission}");
+    if admission != "host_approval" {
+        return Err(format!("this Garden admits on {admission:?}, not on the host's word"));
+    }
+
+    let code = host.open_code().map_err(|e| e.to_string())?;
+    println!("code:     {} good for {} seconds", code.code, code.seconds_left);
+    if code.code.len() != 6 || !code.code.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("{:?} is not six digits", code.code));
+    }
+
+    // A second phone, with its own directory and its own key.
+    let guest = GardenPhone::new(second_dir.to_string()).map_err(|e| e.to_string())?;
+    let joined = guest
+        .join_with_code(code.code.clone(), "Guest".to_string())
+        .map_err(|e| e.to_string())?;
+    println!("asked:    {}", one_line(&joined.json, "status"));
+
+    // The guest is in the waiting row, and must not be seated yet.
+    let guest_status = guest.status().map_err(|e| e.to_string())?;
+    let member = field(&guest_status.json, "member").unwrap_or_default();
+    println!("guest is: {member}");
+    if member != "Waiting" {
+        return Err(format!("the guest is {member:?} before anybody admitted it"));
+    }
+
+    // The host sees somebody waiting, and knows which key.
+    let waiting = wait_until(host, "waiting_for_host", "1")?;
+    println!("host sees: {} waiting", field(&waiting, "waiting_for_host").unwrap_or_default());
+    let key = field(&guest_status.json, "key").ok_or("the guest has no key to admit")?;
+
+    host.admit(key.clone(), true).map_err(|e| e.to_string())?;
+    println!("admitted: {key}");
+
+    // Both ends have to agree, because only one of them was asked.
+    let seated = deadline_loop(|| {
+        let answer = guest.status().ok()?;
+        (field(&answer.json, "member").as_deref() == Some("Active")).then_some(())
+    });
+    if seated.is_none() {
+        return Err("the guest was admitted and never became active".into());
+    }
+    let host_sees = wait_until(host, "active_validators", "2")?;
+    println!("network:  {} validators", field(&host_sees, "active_validators").unwrap_or_default());
+    Ok(())
+}
+
+/// Poll a phone's status until one field reads `want`.
+fn wait_until(phone: &Arc<GardenPhone>, key: &str, want: &str) -> Result<String, String> {
+    deadline_loop(|| {
+        let answer = phone.status().ok()?;
+        (field(&answer.json, key).as_deref() == Some(want)).then_some(answer.json)
+    })
+    .ok_or_else(|| format!("{key} never reached {want}"))
+}
+
+/// Try something twice a second for half a minute.
+fn deadline_loop<T>(mut attempt: impl FnMut() -> Option<T>) -> Option<T> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if let Some(got) = attempt() {
+            return Some(got);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
 }
 
 /// Say two lines and send a file, then read the room back off the chain.

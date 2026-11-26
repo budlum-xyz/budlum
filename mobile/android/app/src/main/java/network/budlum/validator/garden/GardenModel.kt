@@ -9,6 +9,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import network.budlum.validator.R
 import org.json.JSONObject
 import uniffi.budlum_garden_ffi.GardenPhone
 import uniffi.budlum_garden_ffi.SelfTestStep
@@ -23,6 +24,27 @@ import java.util.Locale
  * `height` is the block the line landed in, which is the only order the
  * group agrees on - a phone's own clock is its own opinion.
  */
+/**
+ * Somebody the chain knows about.
+ *
+ * `waiting` is the whole point of the people screen: a key that holds an
+ * invite is in the record but not in the group, and somebody has to say
+ * yes. Nothing about a person here is self-reported - the name travels
+ * with the join, the key is what signs, and the state is the chain's.
+ */
+data class Person(
+    val key: String,
+    val name: String,
+    val state: String,
+    val isMe: Boolean,
+) {
+    val waiting: Boolean get() = state == "Waiting"
+    val active: Boolean get() = state == "Active"
+    /** The short form a person reads, like the design shows addresses. */
+    val shortKey: String
+        get() = if (key.length > 16) key.take(7) + "..." + key.takeLast(7) else key
+}
+
 data class ChatLine(
     val id: String,
     val author: String,
@@ -34,6 +56,10 @@ data class ChatLine(
     val height: Long,
     val heldHere: Boolean,
     val verified: Boolean = false,
+    /** Decoded once, when the line is a picture the chain handed back. */
+    val picture: androidx.compose.ui.graphics.ImageBitmap? = null,
+    /** True while a line is published but no block carries it yet. */
+    val sending: Boolean = false,
 ) {
     /** True when this line is a file rather than something typed. */
     val isFile: Boolean get() = text == null
@@ -66,6 +92,18 @@ data class GardenState(
     val myKey: String = "",
     /** True while this phone is the only validator of its network. */
     val aloneHere: Boolean = false,
+    /** Everyone the chain knows about, seated or waiting. */
+    val people: List<Person> = emptyList(),
+    /** The six digits this phone is answering, while they last. */
+    val code: String = "",
+    /** Seconds before the code stops working. */
+    val codeSecondsLeft: Long = 0,
+    /** True when this phone is waiting for somebody else's answer. */
+    val waitingForHost: Boolean = false,
+    /** True when this phone started the network. */
+    val iAmHost: Boolean = false,
+    /** The record behind the preview, kept so one tap can act on it. */
+    val previewRecord: String = "",
     /** What the group has sent, as the core reports it. */
     val feed: String = "",
     /** One piece of data pulled back out and checked. */
@@ -170,14 +208,11 @@ class GardenModel(
         val name = fileName(uri)
         val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
         if (bytes == null) {
-            state = state.copy(message = "That file could not be opened.")
+            state = state.copy(message = app.getString(R.string.g_file_unreadable))
             return@background
         }
         if (bytes.size > MAX_FILE_BYTES) {
-            state = state.copy(
-                message = "That file is " + (bytes.size / 1024 / 1024) +
-                    " MB. A Garden carries up to 4 MB in one piece.",
-            )
+            state = state.copy(message = app.getString(R.string.g_file_too_big))
             return@background
         }
         phone.sendFile(bytes.toHex(), mime, name)
@@ -201,11 +236,13 @@ class GardenModel(
      * against its content id. Already-seen lines are kept, because the
      * chain does not change its mind about them.
      */
-    fun readChat() = background {
+    fun readChat() = background(quiet = true) {
         val status = runCatching { phone.status().json }.getOrNull() ?: return@background
         val garden = JSONObject(status).optJSONObject("garden")
-        val me = garden?.optJSONObject("me")?.optString("key").orEmpty()
+        val mine = garden?.optJSONObject("me")
+        val me = mine?.optString("key").orEmpty()
         val alone = (garden?.optInt("active_validators", 0) ?: 0) <= 1
+        val folk = readPeople(garden, me)
         val feed = phone.feed(FEED_LIMIT).json
         val items = runCatching {
             JSONObject(feed).optJSONArray("items") ?: org.json.JSONArray()
@@ -226,14 +263,23 @@ class GardenModel(
             // hands the bytes back checked against the content id, and
             // says so. What the Room shows is what the chain holds.
             var verified = false
-            val text = if (mime.startsWith("text/")) {
+            var picture: androidx.compose.ui.graphics.ImageBitmap? = null
+            var text: String? = null
+            if (mime.startsWith("text/") || mime.startsWith("image/")) {
                 runCatching {
                     val got = JSONObject(phone.fetch(id).json)
                     verified = got.optBoolean("verified")
-                    got.optString("text").takeIf { it.isNotEmpty() && it != "null" }
+                    if (mime.startsWith("image/")) {
+                        // A picture is worth fetching whole: the chain
+                        // hands the bytes back checked, and a thumbnail
+                        // nobody can see is not a message.
+                        picture = pictureFrom(got.optString("hex"))
+                    } else {
+                        text = got.optString("text").takeIf {
+                            it.isNotEmpty() && it != "null"
+                        }
+                    }
                 }.getOrNull()
-            } else {
-                null
             }
             lines.add(
                 ChatLine(
@@ -247,6 +293,7 @@ class GardenModel(
                     height = item.optLong("height", 0),
                     heldHere = item.optBoolean("held_here"),
                     verified = verified,
+                    picture = picture,
                 ),
             )
         }
@@ -260,8 +307,64 @@ class GardenModel(
             messages = lines.asReversed(),
             myKey = me,
             aloneHere = alone,
+            people = folk,
+            waitingForHost = mine?.optString("member") == "Waiting",
+            iAmHost = mine?.optBoolean("host") == true,
             feed = feed,
         )
+    }
+
+    /** Everyone in the chain's identity record, me first, waiting next. */
+    private fun readPeople(garden: JSONObject?, me: String): List<Person> {
+        val list = garden?.optJSONArray("validators") ?: return emptyList()
+        val folk = mutableListOf<Person>()
+        for (index in 0 until list.length()) {
+            val entry = list.optJSONObject(index) ?: continue
+            val key = entry.optString("key")
+            folk.add(
+                Person(
+                    key = key,
+                    name = entry.optString("name")
+                        .ifBlank { app.getString(R.string.g_unnamed) },
+                    state = entry.optString("status"),
+                    isMe = key == me && me.isNotEmpty(),
+                ),
+            )
+        }
+        // Me at the top, then whoever is waiting on an answer, then the
+        // rest. The people waiting are the only ones needing anything.
+        return folk.sortedWith(
+            compareByDescending<Person> { it.isMe }
+                .thenByDescending { it.waiting }
+                .thenBy { it.name },
+        )
+    }
+
+    /**
+     * Which of the three floors is showing.
+     *
+     * The sheets put this switch in the corner of every page, so it
+     * lives on the model rather than inside one screen - the floor is
+     * under all of them.
+     */
+    var skin by mutableStateOf(Skin.Page)
+
+    /** Let somebody in, or turn them away. Only the host may. */
+    fun answerRequest(key: String, accept: Boolean) = background {
+        phone.admit(key, accept)
+        readChat()
+    }
+
+    /** Open six digits that stand for this Garden's invite for an hour. */
+    fun openCode() = background {
+        val opened = phone.openCode()
+        state = state.copy(code = opened.code, codeSecondsLeft = opened.secondsLeft.toLong())
+    }
+
+    /** Join the network six digits point at. */
+    fun joinWithCode(code: String) = background {
+        phone.joinWithCode(code.trim(), name)
+        readChat()
     }
 
     /** Pull one piece of data back out and check it against the chain. */
@@ -277,7 +380,7 @@ class GardenModel(
     /** Show who is inviting before anybody agrees to anything. */
     fun preview(record: String) {
         if (record.isBlank()) {
-            state = state.copy(preview = "")
+            state = state.copy(preview = "", previewRecord = "")
             return
         }
         scope.launch {
@@ -289,19 +392,22 @@ class GardenModel(
                     "validator " + owner + ", good until " + until
                 }.getOrElse { "" }
             }
-            state = state.copy(preview = shown)
+            state = state.copy(
+                preview = shown,
+                previewRecord = if (shown.isEmpty()) "" else record.trim(),
+            )
         }
     }
 
     fun join(record: String) = background {
         if (!selfTestPassed()) return@background
         val answer = phone.join(record.trim(), name)
-        state = state.copy(status = answer.json, preview = "")
+        state = state.copy(status = answer.json, preview = "", previewRecord = "")
         readInvite(phone.invite())
         startValidating()
     }
 
-    fun refreshStatus() = background {
+    fun refreshStatus() = background(quiet = true) {
         state = state.copy(status = phone.status().json)
     }
 
@@ -353,10 +459,7 @@ class GardenModel(
         // was gone. Saying "no Garden" there reads as a fault; it is not.
         if (!state.status.contains("\"chain_id\"")) {
             state = state.copy(
-                message = "The network you started is not running any more. " +
-                    "A network lives in the phones that are in it, so one " +
-                    "with only this phone in it ends when the app closes. " +
-                    "Start it again, and invite someone before you close it.",
+                message = app.getString(R.string.g_network_ended),
             )
         }
     }
@@ -407,9 +510,8 @@ class GardenModel(
         val failure = runCatching { GardenValidatorService.start(app) }.exceptionOrNull()
             ?: return
         state = state.copy(
-            message = "In the Garden, but Android would not let the background " +
-                "validator start: " + (failure.message ?: failure.toString()) +
-                " - check notifications and battery in setup.",
+            message = app.getString(R.string.g_background_refused) +
+                " " + (failure.message ?: failure.toString()),
         )
     }
 
@@ -423,7 +525,7 @@ class GardenModel(
         val passed = state.selfTest.isNotEmpty() && state.selfTest.all { it.passed }
         if (!passed) {
             state = state.copy(
-                message = "The self test has to pass before this phone joins a Garden.",
+                message = app.getString(R.string.g_self_test_first),
             )
         }
         return passed
@@ -448,16 +550,31 @@ class GardenModel(
             SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(millis))
         }
 
-    private fun background(work: suspend () -> Unit) {
+    /**
+     * Run something off the main thread.
+     *
+     * `quiet` is for work nobody asked for - the timer that re-reads the
+     * chain. Letting that work raise the busy flag was a real bug: the
+     * Room polls every three seconds, the poll takes a moment, and the
+     * send and attach buttons are disabled while it runs, so for most of
+     * any given second they could not be tapped at all. Quiet work also
+     * leaves the message alone, because wiping it every three seconds
+     * meant an error was gone before it could be read.
+     */
+    private fun background(quiet: Boolean = false, work: suspend () -> Unit) {
         scope.launch {
-            state = state.copy(busy = true, message = "")
+            if (!quiet) {
+                state = state.copy(busy = true, message = "")
+            }
             val failure = withContext(Dispatchers.IO) {
                 runCatching { work() }.exceptionOrNull()
             }
-            state = state.copy(
-                busy = false,
-                message = failure?.message ?: state.message,
-            )
+            if (failure != null) {
+                state = state.copy(message = failure.message ?: "that did not work")
+            }
+            if (!quiet) {
+                state = state.copy(busy = false)
+            }
         }
     }
 

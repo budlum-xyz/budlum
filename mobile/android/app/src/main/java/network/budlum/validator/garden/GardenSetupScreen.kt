@@ -1,5 +1,6 @@
 package network.budlum.validator.garden
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,200 +9,164 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import network.budlum.validator.R
 
 /**
- * What this phone is about to become, and what it needs to do it.
+ * What this phone has to be allowed to do before it validates anything.
  *
- * This is not a fourth screen of section 2.4: it is the way in to the
- * three. Before it existed the app opened on a box asking for the name of
- * a Garden, with nothing to say what a Garden was, whether the person was
- * meant to have one already, or why the phone would keep working after
- * the screen went dark. Then the permissions it never asked for turned
- * into warnings from the system.
- *
- * Everything is asked for here, with the reason attached, and the person
- * can see at a glance what is still missing.
+ * The old version of this screen explained all of it in four paragraphs
+ * of prose - what a Garden is, why Android sleeps background apps, what
+ * the camera is for. A person opening an app for the first time does
+ * not read that. Each requirement is now one row: what it is, where it
+ * stands, and the way to fix it if it does not stand.
  */
 @Composable
 fun SetupScreen(model: GardenModel, onReady: () -> Unit) {
     val context = LocalContext.current
     val state = model.state
     val ready = state.readiness
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        Text("BUDLUM GARDEN", style = MaterialTheme.typography.labelSmall)
-        Text(
-            "This phone becomes a validator.",
-            style = MaterialTheme.typography.headlineSmall,
-        )
-        Text(
-            "A Garden is a small chain that a group of phones runs together. " +
-                "Yours will check every block, keep a share of what the group " +
-                "stores, and answer for it - while the app is open and while it " +
-                "is not. It needs two things from you before it can start.",
-            style = MaterialTheme.typography.bodyMedium,
-        )
+    val checksDone = state.selfTest.isNotEmpty()
+    val checksPassed = checksDone && state.selfTest.all { it.passed }
 
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text("1 - THIS PHONE CAN DO THE WORK", style = MaterialTheme.typography.labelSmall)
-                if (state.selfTest.isEmpty()) {
-                    Text("Checking...", style = MaterialTheme.typography.bodySmall)
-                } else {
-                    state.selfTest.forEach { step ->
+    CubeFloor(model.skin) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Label(stringResource(R.string.g_what_this_is))
+            Text(
+                stringResource(R.string.g_becomes_validator),
+                style = MaterialTheme.typography.bodySmall,
+                color = Ink,
+                modifier = Modifier.padding(bottom = 20.dp),
+            )
+
+            Slab(modifier = Modifier.fillMaxWidth()) {
+                Column {
+                    Fact(
+                        stringResource(R.string.g_self_test),
+                        when {
+                            !checksDone -> stringResource(R.string.g_checking)
+                            checksPassed -> stringResource(R.string.g_passed) +
+                                " · " + state.selfTestMs + " ms"
+                            else -> stringResource(R.string.g_failed)
+                        },
+                    )
+                    // Only a failing line is worth the room. Four green
+                    // rows telling a person their phone works are four
+                    // rows of nothing.
+                    state.selfTest.filterNot { it.passed }.forEach { step ->
+                        Rule()
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 7.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
-                            Text(step.name, style = MaterialTheme.typography.bodySmall)
-                            Text(
-                                if (step.passed) "ok" else "failed",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (step.passed) {
-                                    MaterialTheme.colorScheme.onSurface
-                                } else {
-                                    MaterialTheme.colorScheme.error
-                                },
-                            )
+                            Label(step.name, color = Flow)
+                            Label(step.detail, color = Flow)
                         }
                     }
-                    Text(
-                        "Took ${state.selfTestMs} ms. Nothing here touches the network.",
-                        style = MaterialTheme.typography.bodySmall,
+                }
+            }
+
+            Rule()
+
+            Slab(modifier = Modifier.fillMaxWidth()) {
+                Column {
+                    Need(
+                        name = stringResource(R.string.g_notifications),
+                        met = ready.notifications,
+                        why = stringResource(R.string.g_why_notifications),
+                        onFix = { model.askForNotifications() },
+                        onSettings = {
+                            context.startActivity(GardenReadiness.notificationSettings(context))
+                        },
+                    )
+                    Rule()
+                    Need(
+                        name = stringResource(R.string.g_battery),
+                        met = ready.batteryUnrestricted,
+                        why = stringResource(R.string.g_why_battery) +
+                            " · " + ready.batteryPath,
+                        onFix = null,
+                        onSettings = {
+                            context.startActivity(GardenReadiness.batterySettings(context))
+                        },
+                    )
+                }
+            }
+
+            Rule()
+            Fact(stringResource(R.string.g_camera), stringResource(R.string.g_only_for_qr))
+
+            RuleButton(
+                text = when {
+                    !checksDone -> stringResource(R.string.g_checking)
+                    !checksPassed -> stringResource(R.string.g_cannot_validate)
+                    !ready.notifications -> stringResource(R.string.g_notifications_needed)
+                    else -> stringResource(R.string.g_done)
+                },
+                onTap = onReady,
+                enabled = checksPassed && ready.canValidate,
+                modifier = Modifier.padding(top = 20.dp),
+            )
+
+            if (state.message.isNotEmpty()) {
+                Label(state.message, color = Flow, modifier = Modifier.padding(top = 12.dp))
+            }
+        }
+    }
+}
+
+/**
+ * One thing Android has to allow: its name, whether it is allowed, and
+ * the shortest way to change that. The reason shows only while the
+ * answer is no, because a reason for something already done is noise.
+ */
+@Composable
+private fun Need(
+    name: String,
+    met: Boolean,
+    why: String,
+    onFix: (() -> Unit)?,
+    onSettings: () -> Unit,
+) {
+    Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Label(name, color = Ink)
+            if (met) {
+                Label(stringResource(R.string.g_allowed))
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (onFix != null) {
+                        RuleButton(stringResource(R.string.g_allow), onTap = onFix)
+                    }
+                    Label(
+                        stringResource(R.string.g_settings),
+                        color = Flow,
+                        modifier = Modifier.clickable(onClick = onSettings),
                     )
                 }
             }
         }
-
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text("2 - NOTIFICATIONS", style = MaterialTheme.typography.labelSmall)
-                Text(
-                    "The validator keeps running when you leave the app. Android " +
-                        "only allows that if it can show you a notification saying " +
-                        "so, and that notification is also how you see which block " +
-                        "you are on. Without it the work has to stop.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                if (ready.notifications) {
-                    Text("Allowed.", style = MaterialTheme.typography.bodyMedium)
-                } else {
-                    Button(
-                        onClick = { model.askForNotifications() },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Allow notifications") }
-                    OutlinedButton(
-                        onClick = {
-                            context.startActivity(GardenReadiness.notificationSettings(context))
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Open notification settings") }
-                }
-            }
-        }
-
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text("3 - BATTERY", style = MaterialTheme.typography.labelSmall)
-                Text(
-                    "Android puts background apps to sleep to save power. A " +
-                        "sleeping validator is an absent one, and the Garden will " +
-                        "eventually suspend its seat. This app is not allowed to " +
-                        "ask for the exemption itself, so the choice is yours to " +
-                        "make in settings.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Text(
-                    if (ready.batteryUnrestricted) {
-                        "Not restricted right now. Worth confirming on " +
-                            ready.batteryFamily + "."
-                    } else {
-                        "This app is currently restricted in the background."
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Text(ready.batteryPath, style = MaterialTheme.typography.bodySmall)
-                OutlinedButton(
-                    onClick = { context.startActivity(GardenReadiness.batterySettings(context)) },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Open battery settings") }
-            }
-        }
-
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text("4 - CAMERA", style = MaterialTheme.typography.labelSmall)
-                Text(
-                    "Only for reading an invite QR code, and only asked for at " +
-                        "the moment you tap scan. You can paste an invite instead " +
-                        "and never grant it.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        }
-
-        // The gate says which of the two things is missing rather than
-        // sitting there greyed out. A disabled button with no reason on
-        // it is the thing that made this screen feel broken.
-        val checksDone = state.selfTest.isNotEmpty()
-        val checksPassed = checksDone && state.selfTest.all { it.passed }
-        Button(
-            onClick = onReady,
-            enabled = checksPassed && ready.canValidate,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(
-                when {
-                    !checksDone -> "Running the checks..."
-                    !checksPassed -> "This phone cannot validate"
-                    !ready.notifications -> "Allow notifications to continue"
-                    else -> "Continue"
-                },
-            )
-        }
-        if (checksPassed && !ready.notifications) {
-            Text(
-                "Android needs this one before background work is allowed. " +
-                    "If the dialog does not appear, the switch is in notification " +
-                    "settings above.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        if (checksDone && !checksPassed) {
-            Text(
-                "One of the four checks failed, so this phone will not be " +
-                    "offered a seat. The failing line above says which.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        if (state.message.isNotEmpty()) {
-            Text(state.message, style = MaterialTheme.typography.bodySmall)
+        if (!met) {
+            Label(why, modifier = Modifier.padding(top = 4.dp))
         }
     }
 }
