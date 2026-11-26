@@ -125,16 +125,44 @@ impl std::fmt::Display for PoaMembershipError {
 
 impl std::error::Error for PoaMembershipError {}
 
+const MAX_POA_ADMINS_PER_DOMAIN: usize = 64;
+const MAX_POA_ADMINS_TOTAL: usize = 4_096;
+const MAX_POA_MEMBERS_PER_DOMAIN: usize = 4_096;
+const MAX_POA_MEMBERS_TOTAL: usize = 65_536;
+
 /// The isolated permissioned registry for a set of `PoA` domains.
 ///
 /// Admins are the compliance-authorized approvers; members are KYC'd parties.
 /// Both are keyed by `(domain, account)` so `PoA` domains are independent.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PoaMembershipRegistry {
     #[serde(with = "crate::core::map_keys")]
     admins: BTreeMap<(DomainId, Address), ()>,
     #[serde(with = "crate::core::map_keys")]
     members: BTreeMap<(DomainId, Address), PoaMember>,
+}
+
+#[derive(Deserialize)]
+struct PoaMembershipRegistryWire {
+    #[serde(with = "crate::core::map_keys")]
+    admins: BTreeMap<(DomainId, Address), ()>,
+    #[serde(with = "crate::core::map_keys")]
+    members: BTreeMap<(DomainId, Address), PoaMember>,
+}
+
+impl<'de> Deserialize<'de> for PoaMembershipRegistry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = PoaMembershipRegistryWire::deserialize(deserializer)?;
+        let candidate = Self {
+            admins: wire.admins,
+            members: wire.members,
+        };
+        candidate.validate().map_err(serde::de::Error::custom)?;
+        Ok(candidate)
+    }
 }
 
 impl PoaMembershipRegistry {
@@ -156,10 +184,79 @@ impl PoaMembershipRegistry {
         self.members.len()
     }
 
+    fn domain_admin_count(&self, domain: DomainId) -> usize {
+        self.admins
+            .range((domain, Address::zero())..)
+            .take_while(|((d, _), ())| *d == domain)
+            .count()
+    }
+
+    fn domain_member_count(&self, domain: DomainId) -> usize {
+        self.members
+            .range((domain, Address::zero())..)
+            .take_while(|((d, _), _)| *d == domain)
+            .count()
+    }
+
+    pub(crate) fn can_add_admin(&self, domain: DomainId, admin: &Address) -> bool {
+        if *admin == Address::zero() {
+            return false;
+        }
+        if self.admins.contains_key(&(domain, *admin)) {
+            return true;
+        }
+        self.admins.len() < MAX_POA_ADMINS_TOTAL
+            && self.domain_admin_count(domain) < MAX_POA_ADMINS_PER_DOMAIN
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.admins.len() > MAX_POA_ADMINS_TOTAL || self.members.len() > MAX_POA_MEMBERS_TOTAL {
+            return Err("PoA membership registry exceeds global capacity");
+        }
+        let mut cur_admin_dom: Option<(DomainId, usize)> = None;
+        for ((domain, admin), ()) in &self.admins {
+            if *admin == Address::zero() {
+                return Err("PoA admin address cannot be zero");
+            }
+            let count = match cur_admin_dom {
+                Some((d, c)) if d == *domain => c + 1,
+                _ => 1,
+            };
+            if count > MAX_POA_ADMINS_PER_DOMAIN {
+                return Err("PoA per-domain admin capacity exceeded");
+            }
+            cur_admin_dom = Some((*domain, count));
+        }
+        let mut cur_member_dom: Option<(DomainId, usize)> = None;
+        for ((domain, account), member) in &self.members {
+            if member.domain != *domain || member.account != *account {
+                return Err("PoA member record disagrees with its map key");
+            }
+            if member.kyc_commitment == [0u8; 32] {
+                return Err("PoA member KYC commitment cannot be zero");
+            }
+            if member.decided_by == Some(Address::zero()) {
+                return Err("PoA member decider address cannot be zero");
+            }
+            let count = match cur_member_dom {
+                Some((d, c)) if d == *domain => c + 1,
+                _ => 1,
+            };
+            if count > MAX_POA_MEMBERS_PER_DOMAIN {
+                return Err("PoA per-domain member capacity exceeded");
+            }
+            cur_member_dom = Some((*domain, count));
+        }
+        Ok(())
+    }
+
     /// Bootstrap an admin for a `PoA` domain. In production this is expected to be
     /// Wired through governance; here it is the trust root of the permissioned
     /// Sub-domain.
     pub fn add_admin(&mut self, domain: DomainId, admin: Address) {
+        if !self.can_add_admin(domain, &admin) {
+            return;
+        }
         self.admins.insert((domain, admin), ());
     }
 
@@ -312,15 +409,12 @@ impl PoaMembershipRegistry {
                 return Err(PoaMembershipError::AlreadyApplied { account, domain });
             }
         } else {
-            const MAX_POA_MEMBERS_PER_DOMAIN: usize = 4_096;
-            const MAX_POA_MEMBERS_TOTAL: usize = 65_536;
             if self.members.len() >= MAX_POA_MEMBERS_TOTAL {
                 return Err(PoaMembershipError::InvalidTransition {
                     from: MembershipStatus::Pending,
                 });
             }
-            let domain_count = self.members.keys().filter(|(d, _)| *d == domain).count();
-            if domain_count >= MAX_POA_MEMBERS_PER_DOMAIN {
+            if self.domain_member_count(domain) >= MAX_POA_MEMBERS_PER_DOMAIN {
                 return Err(PoaMembershipError::InvalidTransition {
                     from: MembershipStatus::Pending,
                 });
@@ -434,8 +528,10 @@ impl PoaMembershipRegistry {
     #[must_use]
     pub fn authorized_members(&self, domain: DomainId) -> Vec<&PoaMember> {
         self.members
-            .values()
-            .filter(|m| m.domain == domain && m.is_authorized())
+            .range((domain, Address::zero())..)
+            .take_while(|((d, _), _)| *d == domain)
+            .map(|(_, m)| m)
+            .filter(|m| m.is_authorized())
             .collect()
     }
 
@@ -525,5 +621,72 @@ mod tests {
         // Another PoA domain retains its own independent admission capacity.
         reg.submit_application(DOMAIN + 1, overflow, kyc(7))
             .expect("other domain unaffected");
+    }
+
+    #[test]
+    fn poa_membership_deserialization_refuses_split_brain_zero_and_over_cap_records() {
+        let mut honest = PoaMembershipRegistry::new();
+        let admin = addr(1);
+        let member = addr(2);
+        honest.add_admin(DOMAIN, admin);
+        honest.submit_application(DOMAIN, member, kyc(9)).unwrap();
+        honest.approve(DOMAIN, admin, member).unwrap();
+
+        let honest_json = serde_json::to_string(&honest).unwrap();
+        let restored: PoaMembershipRegistry = serde_json::from_str(&honest_json).unwrap();
+        assert_eq!(
+            restored.root_with_expiry(&BTreeMap::new()),
+            honest.root_with_expiry(&BTreeMap::new())
+        );
+
+        // Split-brain inner `account`/`domain` on PoaMember (map key says DOMAIN:member,
+        // inner record claims DOMAIN+1:addr(99)).
+        let key_str = format!("{DOMAIN}:{}", hex::encode(member.as_bytes()));
+        let mut split_val: serde_json::Value = serde_json::from_str(&honest_json).unwrap();
+        {
+            let rec_obj = split_val
+                .get_mut("members")
+                .and_then(|m| m.get_mut(&key_str))
+                .and_then(serde_json::Value::as_object_mut)
+                .unwrap();
+            rec_obj.insert("domain".to_string(), serde_json::json!(DOMAIN + 1));
+            rec_obj.insert(
+                "account".to_string(),
+                serde_json::to_value(addr(99)).unwrap(),
+            );
+        }
+        assert!(
+            serde_json::from_value::<PoaMembershipRegistry>(split_val).is_err(),
+            "deserialization must refuse PoaMember whose (domain, account) disagrees with its map key"
+        );
+
+        // Zero KYC commitment inside a stored member record.
+        let mut zero_kyc_val: serde_json::Value = serde_json::from_str(&honest_json).unwrap();
+        zero_kyc_val
+            .get_mut("members")
+            .and_then(|m| m.get_mut(&key_str))
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .insert(
+                "kyc_commitment".to_string(),
+                serde_json::to_value([0u8; 32]).unwrap(),
+            );
+        assert!(
+            serde_json::from_value::<PoaMembershipRegistry>(zero_kyc_val).is_err(),
+            "deserialization must refuse zero KYC commitments"
+        );
+
+        // Zero admin address inside `admins`.
+        let zero_admin_key = format!("{DOMAIN}:{}", hex::encode(Address::zero().as_bytes()));
+        let mut zero_admin_val: serde_json::Value = serde_json::from_str(&honest_json).unwrap();
+        zero_admin_val
+            .get_mut("admins")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .insert(zero_admin_key, serde_json::Value::Null);
+        assert!(
+            serde_json::from_value::<PoaMembershipRegistry>(zero_admin_val).is_err(),
+            "deserialization must refuse zero-address PoA admins"
+        );
     }
 }

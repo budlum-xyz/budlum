@@ -143,7 +143,7 @@ impl std::error::Error for PoaComplianceError {}
 /// Convenience: pub so compliance callers can observe the audit ring cap.
 pub const MAX_POA_COMPLIANCE_AUDIT_EVENTS: usize = 10_000;
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct PoaComplianceRegistry {
     #[serde(with = "crate::core::map_keys")]
     screenings: BTreeMap<(DomainId, Address), ScreeningRecord>,
@@ -152,6 +152,34 @@ pub struct PoaComplianceRegistry {
     #[serde(with = "crate::core::map_keys")]
     travel_rules: BTreeMap<[u8; 32], TravelRuleRecord>,
     audit_log: Vec<ComplianceAuditEvent>,
+}
+
+#[derive(Deserialize)]
+struct PoaComplianceRegistryWire {
+    #[serde(with = "crate::core::map_keys")]
+    screenings: BTreeMap<(DomainId, Address), ScreeningRecord>,
+    #[serde(with = "crate::core::map_keys")]
+    freezes: BTreeMap<(DomainId, Address), FreezeRecord>,
+    #[serde(with = "crate::core::map_keys")]
+    travel_rules: BTreeMap<[u8; 32], TravelRuleRecord>,
+    audit_log: Vec<ComplianceAuditEvent>,
+}
+
+impl<'de> Deserialize<'de> for PoaComplianceRegistry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = PoaComplianceRegistryWire::deserialize(deserializer)?;
+        let candidate = Self {
+            screenings: wire.screenings,
+            freezes: wire.freezes,
+            travel_rules: wire.travel_rules,
+            audit_log: wire.audit_log,
+        };
+        candidate.validate().map_err(serde::de::Error::custom)?;
+        Ok(candidate)
+    }
 }
 
 impl PoaComplianceRegistry {
@@ -163,6 +191,87 @@ impl PoaComplianceRegistry {
     #[must_use]
     pub fn frozen_count(&self) -> usize {
         self.freezes.len()
+    }
+
+    fn domain_screening_count(&self, domain_id: DomainId) -> usize {
+        self.screenings
+            .range((domain_id, Address::zero())..)
+            .take_while(|((d, _), _)| *d == domain_id)
+            .count()
+    }
+
+    fn domain_freeze_count(&self, domain_id: DomainId) -> usize {
+        self.freezes
+            .range((domain_id, Address::zero())..)
+            .take_while(|((d, _), _)| *d == domain_id)
+            .count()
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.screenings.len() > MAX_POA_COMPLIANCE_ENTRIES_GLOBAL
+            || self.freezes.len() > MAX_POA_COMPLIANCE_ENTRIES_GLOBAL
+            || self.travel_rules.len() > MAX_POA_COMPLIANCE_ENTRIES_GLOBAL
+            || self.audit_log.len() > MAX_POA_COMPLIANCE_AUDIT_EVENTS
+        {
+            return Err("PoA compliance registry exceeds global capacity");
+        }
+        let mut cur_screen_dom: Option<(DomainId, usize)> = None;
+        for ((domain_id, addr), rec) in &self.screenings {
+            if *addr == Address::zero() {
+                return Err("PoA screening subject address cannot be zero");
+            }
+            if rec.domain_id != *domain_id || rec.address != *addr {
+                return Err("PoA screening record disagrees with its map key");
+            }
+            if rec.oracle_reference_hash == [0u8; 32] {
+                return Err("PoA screening evidence hash cannot be zero");
+            }
+            let count = match cur_screen_dom {
+                Some((d, c)) if d == *domain_id => c + 1,
+                _ => 1,
+            };
+            if count > MAX_POA_COMPLIANCE_ENTRIES_PER_DOMAIN {
+                return Err("PoA screening per-domain capacity exceeded");
+            }
+            cur_screen_dom = Some((*domain_id, count));
+        }
+        let mut cur_freeze_dom: Option<(DomainId, usize)> = None;
+        for ((domain_id, addr), rec) in &self.freezes {
+            if *addr == Address::zero() {
+                return Err("PoA freeze subject address cannot be zero");
+            }
+            if rec.domain_id != *domain_id || rec.address != *addr {
+                return Err("PoA freeze record disagrees with its map key");
+            }
+            if rec.reason_hash == [0u8; 32] {
+                return Err("PoA freeze evidence hash cannot be zero");
+            }
+            let count = match cur_freeze_dom {
+                Some((d, c)) if d == *domain_id => c + 1,
+                _ => 1,
+            };
+            if count > MAX_POA_COMPLIANCE_ENTRIES_PER_DOMAIN {
+                return Err("PoA freeze per-domain capacity exceeded");
+            }
+            cur_freeze_dom = Some((*domain_id, count));
+        }
+        for (tx_hash, rec) in &self.travel_rules {
+            if *tx_hash == [0u8; 32] || rec.metadata_hash == [0u8; 32] {
+                return Err("PoA travel-rule hash cannot be zero");
+            }
+            if rec.subject == Address::zero() {
+                return Err("PoA travel-rule subject address cannot be zero");
+            }
+            if rec.tx_hash != *tx_hash {
+                return Err("PoA travel-rule record disagrees with its map key");
+            }
+        }
+        for ev in &self.audit_log {
+            if ev.address == Address::zero() || ev.evidence_hash == [0u8; 32] {
+                return Err("PoA compliance audit event carries zero address or evidence hash");
+            }
+        }
+        Ok(())
     }
 
     const fn ensure_poa(domain: ComplianceDomainKind) -> Result<(), PoaComplianceError> {
@@ -213,12 +322,7 @@ impl PoaComplianceRegistry {
             if self.screenings.len() >= MAX_POA_COMPLIANCE_ENTRIES_GLOBAL {
                 return Err(PoaComplianceError::CapacityExceeded);
             }
-            let domain_count = self
-                .screenings
-                .keys()
-                .filter(|(d, _)| *d == domain_id)
-                .count();
-            if domain_count >= MAX_POA_COMPLIANCE_ENTRIES_PER_DOMAIN {
+            if self.domain_screening_count(domain_id) >= MAX_POA_COMPLIANCE_ENTRIES_PER_DOMAIN {
                 return Err(PoaComplianceError::CapacityExceeded);
             }
         }
@@ -271,8 +375,7 @@ impl PoaComplianceRegistry {
             if self.freezes.len() >= MAX_POA_COMPLIANCE_ENTRIES_GLOBAL {
                 return Err(PoaComplianceError::CapacityExceeded);
             }
-            let domain_count = self.freezes.keys().filter(|(d, _)| *d == domain_id).count();
-            if domain_count >= MAX_POA_COMPLIANCE_ENTRIES_PER_DOMAIN {
+            if self.domain_freeze_count(domain_id) >= MAX_POA_COMPLIANCE_ENTRIES_PER_DOMAIN {
                 return Err(PoaComplianceError::CapacityExceeded);
             }
         }
@@ -945,5 +1048,112 @@ mod tests {
             "overwriting recorded travel-rule evidence must be refused"
         );
         assert_eq!(reg.travel_rule(&hash(10)).unwrap().metadata_hash, hash(11));
+    }
+
+    #[test]
+    fn poa_compliance_deserialization_refuses_split_brain_zero_and_over_cap_payloads() {
+        let mut honest = PoaComplianceRegistry::new();
+        let domain_a: DomainId = 10;
+        let subject = addr(0x22);
+        honest
+            .freeze_suspicious(
+                ComplianceDomainKind::PoA,
+                domain_a,
+                addr(1),
+                subject,
+                hash(1),
+                5,
+            )
+            .unwrap();
+        honest
+            .screen_address(
+                ComplianceDomainKind::PoA,
+                domain_a,
+                subject,
+                ScreeningStatus::Sanctioned,
+                hash(2),
+                5,
+            )
+            .unwrap();
+        honest
+            .record_travel_rule_metadata(ComplianceDomainKind::PoA, hash(9), subject, hash(8), 6)
+            .unwrap();
+
+        let honest_json = serde_json::to_string(&honest).unwrap();
+        let round_trip: PoaComplianceRegistry = serde_json::from_str(&honest_json).unwrap();
+        assert_eq!(round_trip.root(), honest.root());
+        let bincode_bytes = bincode::serialize(&honest).unwrap();
+        let bincode_rt: PoaComplianceRegistry = bincode::deserialize(&bincode_bytes).unwrap();
+        assert_eq!(bincode_rt.root(), honest.root());
+
+        // Split-brain inner `domain_id` on FreezeRecord (key says 10, value says 99).
+        let mut bad_freeze_val: serde_json::Value = serde_json::from_str(&honest_json).unwrap();
+        let key_str = format!("{domain_a}:{}", hex::encode(subject.as_bytes()));
+        bad_freeze_val
+            .get_mut("freezes")
+            .and_then(|m| m.get_mut(&key_str))
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("domain_id".to_string(), serde_json::json!(99u32));
+        assert!(
+            serde_json::from_value::<PoaComplianceRegistry>(bad_freeze_val).is_err(),
+            "deserialization must refuse FreezeRecord whose domain_id disagrees with its map key"
+        );
+
+        // Split-brain inner `tx_hash` on TravelRuleRecord.
+        let mut bad_tr_val: serde_json::Value = serde_json::from_str(&honest_json).unwrap();
+        let tx_key = hex::encode(hash(9));
+        bad_tr_val
+            .get_mut("travel_rules")
+            .and_then(|m| m.get_mut(&tx_key))
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "tx_hash".to_string(),
+                serde_json::to_value(hash(0x77)).unwrap(),
+            );
+        assert!(
+            serde_json::from_value::<PoaComplianceRegistry>(bad_tr_val).is_err(),
+            "deserialization must refuse TravelRuleRecord whose tx_hash disagrees with its map key"
+        );
+
+        // All-zero evidence hash inside a screening record.
+        let mut zero_hash_val: serde_json::Value = serde_json::from_str(&honest_json).unwrap();
+        zero_hash_val
+            .get_mut("screenings")
+            .and_then(|m| m.get_mut(&key_str))
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "oracle_reference_hash".to_string(),
+                serde_json::to_value([0u8; 32]).unwrap(),
+            );
+        assert!(
+            serde_json::from_value::<PoaComplianceRegistry>(zero_hash_val).is_err(),
+            "deserialization must refuse zero compliance evidence hashes"
+        );
+
+        // Audit log exceeding MAX_POA_COMPLIANCE_AUDIT_EVENTS.
+        let oversized_event = serde_json::to_value(ComplianceAuditEvent {
+            domain_id: domain_a,
+            action: ComplianceAction::ScreeningUpdated,
+            address: subject,
+            block: 1,
+            evidence_hash: hash(2),
+            admin: Address::zero(),
+        })
+        .unwrap();
+        let mut huge_audit_val: serde_json::Value = serde_json::from_str(&honest_json).unwrap();
+        huge_audit_val.as_object_mut().unwrap().insert(
+            "audit_log".to_string(),
+            serde_json::Value::Array(vec![oversized_event; MAX_POA_COMPLIANCE_AUDIT_EVENTS + 1]),
+        );
+        assert!(
+            serde_json::from_value::<PoaComplianceRegistry>(huge_audit_val).is_err(),
+            "deserialization must refuse an audit_log exceeding MAX_POA_COMPLIANCE_AUDIT_EVENTS"
+        );
     }
 }
