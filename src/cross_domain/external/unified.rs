@@ -20,8 +20,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::core::address::Address;
-
 use super::algorand_stateproof::AlgorandStateProofAdapter;
 use super::aptos_jolteon_bft::AptosJolteonAdapter;
 use super::arweave_spora::ArweaveSpOraAdapter;
@@ -48,8 +46,7 @@ use super::restaking_avs::RestakingAvsAdapter;
 use super::simplex_bft::SimplexBftAdapter;
 use super::solana_tower_bft::SolanaTowerBftAdapter;
 use super::spec::{
-    AdapterDescriptor, AdapterError, AdapterId, FinalityAttestation, RawConsensusEvidence,
-    VerificationPolicy,
+    AdapterDescriptor, AdapterError, FinalityAttestation, RawConsensusEvidence, VerificationPolicy,
 };
 use super::stark_validity_rollup::StarkValidityRollupAdapter;
 use super::stellar_fba::StellarScpAdapter;
@@ -153,11 +150,16 @@ impl NetworkCatalog {
             catalog.offer(Box::new(BitVmCovenantAdapter::new(network, None)));
             catalog.offer(Box::new(StarkValidityRollupAdapter::new(network, None)));
             catalog.offer(Box::new(ZkVmFinalityAdapter::new(network, None, None)));
-            catalog.offer(Box::new(HeterogeneousMultiProverAdapter::new(network, None)));
+            catalog.offer(Box::new(HeterogeneousMultiProverAdapter::new(
+                network, None,
+            )));
             catalog.offer(Box::new(BabylonEotsAdapter::new(network, 0)));
             catalog.offer(Box::new(OuroborosMithrilAdapter::new(network, 0)));
         }
-        catalog.offer(Box::new(TendermintFinalityAdapter::new("tendermint", "cosmoshub-4")));
+        catalog.offer(Box::new(TendermintFinalityAdapter::new(
+            "tendermint",
+            "cosmoshub-4",
+        )));
         catalog
     }
 
@@ -306,7 +308,9 @@ impl NetworkCatalog {
             let policy = VerificationPolicy::strict(0);
             match adapter.verify(&golden, &policy) {
                 Ok(_) => {}
-                Err(error) => problems.push(format!("{id}: refused its own golden evidence: {error}")),
+                Err(error) => {
+                    problems.push(format!("{id}: refused its own golden evidence: {error}"))
+                }
             }
         }
         if problems.is_empty() {
@@ -335,6 +339,11 @@ fn family_of(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Named only by the tests below; importing either one at the top of the
+    // file is an unused import in the library build, which this repository
+    // denies.
+    use crate::core::address::Address;
+    use crate::cross_domain::external::spec::AdapterId;
 
     #[test]
     fn the_catalog_lists_the_chains_this_build_can_read() {
@@ -437,7 +446,11 @@ mod tests {
         catalog.offer(Box::new(NipopowAdapter::new("mainnet", None)));
         let before = catalog.len();
         catalog.offer(Box::new(NipopowAdapter::new("mainnet", None)));
-        assert_eq!(catalog.len(), before, "the second adapter replaced the first");
+        assert_eq!(
+            catalog.len(),
+            before,
+            "the second adapter replaced the first"
+        );
         assert_eq!(catalog.refused().len(), 1);
     }
 
