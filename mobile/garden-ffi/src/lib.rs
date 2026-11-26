@@ -115,8 +115,27 @@ impl GardenPhone {
     }
 
     /// Start a Garden and become its host.
+    ///
+    /// A host is dialled by everyone it invites, so unlike a joiner it
+    /// cannot leave its address unsaid. Listening on every interface is
+    /// right for a phone - it moves between networks - but "every
+    /// interface" is not an address anybody can dial, and founding a
+    /// Garden with only that was refused outright: the invite would have
+    /// carried nowhere to go. So the address of the network this phone is
+    /// actually on is found first and announced alongside the binding.
     pub fn create(&self, title: String, name: String) -> Result<GardenAnswer, GardenError> {
-        let options = Self::options();
+        let mut options = Self::options();
+        // Bound to that one interface rather than announced on top of a
+        // binding to all of them: the port is picked by the system, and
+        // only the binding knows which one it got. An announcement would
+        // have had to name the port before it existed.
+        options.listen = Some(Self::address_on_this_network().ok_or_else(|| {
+            GardenError::of(
+                "this phone is on no network the others could reach it on. \
+                 Join the Wi-Fi the others are on, then start the network."
+                    .to_owned(),
+            )
+        })?);
         answer(
             self.runtime
                 .block_on(self.service.create(title, name, options)),
@@ -229,8 +248,40 @@ impl GardenPhone {
 }
 
 impl GardenPhone {
+    /// The address this phone answers at on the network it is on.
+    ///
+    /// Asked of the routing table rather than of a list of interfaces: a
+    /// phone has several, most of them useless here, and the one that
+    /// would carry a packet to a neighbour is the one an invite should
+    /// name. Nothing is sent - a connected UDP socket only fixes the
+    /// route, which is all that is being asked.
+    fn address_on_this_network() -> Option<String> {
+        use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+        // TEST-NET-2, which is not routed anywhere. The question is which
+        // interface a packet would leave by, not whether it arrives.
+        for target in [Ipv4Addr::new(198, 51, 100, 1), Ipv4Addr::new(192, 168, 1, 1)] {
+            let probe = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
+                Ok(probe) => probe,
+                Err(_) => continue,
+            };
+            if probe.connect((target, 9)).is_err() {
+                continue;
+            }
+            match probe.local_addr().map(|local| local.ip()) {
+                Ok(IpAddr::V4(ip))
+                    if !ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local() =>
+                {
+                    return Some(format!("/ip4/{ip}/tcp/0"));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// The listen address a phone uses: every interface, a port the system
     /// picks. A phone moves between networks and cannot be told a port.
+    /// Founding a Garden overrides this, because a host must be dialable.
     fn options() -> GardenOptions {
         serde_json::from_value(serde_json::json!({ "listen": "/ip4/0.0.0.0/tcp/0" }))
             .unwrap_or_default()
