@@ -1,0 +1,3334 @@
+{
+  "domain_tag": "BDLM_FINALITY_CERT_V1",
+  "encoding": {
+    "hash": "keccak256-legacy-pad-0x01",
+    "integers": "big-endian",
+    "tree": "binary, odd tail pairs with itself at the last node of an odd level"
+  },
+  "known_answers": {
+    "keccak256(0x616263)": "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45",
+    "keccak256(empty)": "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+    "sha3_256(empty)_MUST_NOT_BE_USED": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a"
+  },
+  "limits": {
+    "bps_scale": 10000,
+    "max_certificate_domains": 4096,
+    "min_value_safe_pow_confirmations": 6
+  },
+  "negative": [
+    {
+      "name": "forged_fourth_leaf_on_three_row_bucket",
+      "proof": {
+        "bucket": "Established",
+        "entry": {
+          "adapter_id": "tendermint-ibc",
+          "adapter_version": 3,
+          "bond_atoms": 1000000,
+          "checkpoint_height": 77,
+          "domain_id": 1,
+          "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+          "guarantee": {
+            "attestation": {
+              "event_root": true,
+              "parent": true,
+              "state_root": true,
+              "tx_root": true
+            },
+            "fault_tolerance_bps": 3333,
+            "quantum_posture": "Lattice",
+            "reversibility": {
+              "kind": "DeterministicQuorum"
+            },
+            "slashable_backing": true
+          },
+          "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+          "height": 770,
+          "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+          "verdict": {
+            "kind": "Established"
+          }
+        },
+        "expected_bucket_root": "751e625b59bf86c28e405faae1db69e0188eb55c25e813947e69de8638e1ee11",
+        "leaf_count": 4,
+        "leaf_index": 0,
+        "siblings": [
+          "cf5e911026ac48f2a27da1c9a02def69b2ce8c3c0fb174dbe0779ac8e304a695",
+          "a006bdd18eae6a440793db9defb008e17856e7634b636b8c38868aa99008c242",
+          "cf5e911026ac48f2a27da1c9a02def69b2ce8c3c0fb174dbe0779ac8e304a695"
+        ]
+      },
+      "why_rejected": "leaf_count is claimed as 4 while the bucket has 3 rows; the duplicated odd tail must not read as a distinct position"
+    },
+    {
+      "name": "pending_row_presented_as_established",
+      "proof": {
+        "bucket": "Established",
+        "entry": {
+          "adapter_id": "tendermint-ibc",
+          "adapter_version": 3,
+          "bond_atoms": 1000000,
+          "checkpoint_height": 77,
+          "domain_id": 1,
+          "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+          "guarantee": {
+            "attestation": {
+              "event_root": true,
+              "parent": true,
+              "state_root": true,
+              "tx_root": true
+            },
+            "fault_tolerance_bps": 3333,
+            "quantum_posture": "Lattice",
+            "reversibility": {
+              "kind": "DeterministicQuorum"
+            },
+            "slashable_backing": true
+          },
+          "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+          "height": 770,
+          "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+          "verdict": {
+            "kind": "Pending",
+            "reason": "RuleNotSatisfied"
+          }
+        },
+        "expected_bucket_root": "751e625b59bf86c28e405faae1db69e0188eb55c25e813947e69de8638e1ee11",
+        "leaf_count": 1,
+        "leaf_index": 0,
+        "siblings": []
+      },
+      "why_rejected": "the bucket field must match the row's verdict"
+    },
+    {
+      "name": "leaf_index_out_of_range",
+      "proof": {
+        "bucket": "Established",
+        "entry": {
+          "adapter_id": "tendermint-ibc",
+          "adapter_version": 3,
+          "bond_atoms": 1000000,
+          "checkpoint_height": 77,
+          "domain_id": 1,
+          "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+          "guarantee": {
+            "attestation": {
+              "event_root": true,
+              "parent": true,
+              "state_root": true,
+              "tx_root": true
+            },
+            "fault_tolerance_bps": 3333,
+            "quantum_posture": "Lattice",
+            "reversibility": {
+              "kind": "DeterministicQuorum"
+            },
+            "slashable_backing": true
+          },
+          "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+          "height": 770,
+          "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+          "verdict": {
+            "kind": "Established"
+          }
+        },
+        "expected_bucket_root": "751e625b59bf86c28e405faae1db69e0188eb55c25e813947e69de8638e1ee11",
+        "leaf_count": 3,
+        "leaf_index": 3,
+        "siblings": [
+          "cf5e911026ac48f2a27da1c9a02def69b2ce8c3c0fb174dbe0779ac8e304a695",
+          "a006bdd18eae6a440793db9defb008e17856e7634b636b8c38868aa99008c242"
+        ]
+      },
+      "why_rejected": "leaf_index >= leaf_count is a fabricated position"
+    },
+    {
+      "name": "truncated_sibling_path",
+      "proof": {
+        "bucket": "Established",
+        "entry": {
+          "adapter_id": "tendermint-ibc",
+          "adapter_version": 3,
+          "bond_atoms": 1000000,
+          "checkpoint_height": 77,
+          "domain_id": 5,
+          "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb05",
+          "guarantee": {
+            "attestation": {
+              "event_root": true,
+              "parent": true,
+              "state_root": true,
+              "tx_root": true
+            },
+            "fault_tolerance_bps": 3333,
+            "quantum_posture": "Lattice",
+            "reversibility": {
+              "kind": "DeterministicQuorum"
+            },
+            "slashable_backing": true
+          },
+          "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc05",
+          "height": 770,
+          "state_root": "000000000000000000000000000000000000000000000000000000000000aa05",
+          "verdict": {
+            "kind": "Established"
+          }
+        },
+        "expected_bucket_root": "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f",
+        "leaf_count": 8,
+        "leaf_index": 4,
+        "siblings": [
+          "2737b2821cd759c3acdd3b80a350821247a577e3db584f881f488b7390ea5485",
+          "9df7788f238525f4e9c7424864eb8c056217e0b17151f769783714da39e4d23f"
+        ]
+      },
+      "why_rejected": "the sibling count must equal depth(leaf_count); a short path would otherwise be reinterpreted as a shallower tree"
+    },
+    {
+      "name": "siblings_reused_across_levels",
+      "proof": {
+        "bucket": "Established",
+        "entry": {
+          "adapter_id": "tendermint-ibc",
+          "adapter_version": 3,
+          "bond_atoms": 1000000,
+          "checkpoint_height": 77,
+          "domain_id": 5,
+          "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb05",
+          "guarantee": {
+            "attestation": {
+              "event_root": true,
+              "parent": true,
+              "state_root": true,
+              "tx_root": true
+            },
+            "fault_tolerance_bps": 3333,
+            "quantum_posture": "Lattice",
+            "reversibility": {
+              "kind": "DeterministicQuorum"
+            },
+            "slashable_backing": true
+          },
+          "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc05",
+          "height": 770,
+          "state_root": "000000000000000000000000000000000000000000000000000000000000aa05",
+          "verdict": {
+            "kind": "Established"
+          }
+        },
+        "expected_bucket_root": "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f",
+        "leaf_count": 8,
+        "leaf_index": 4,
+        "siblings": [
+          "2737b2821cd759c3acdd3b80a350821247a577e3db584f881f488b7390ea5485",
+          "2737b2821cd759c3acdd3b80a350821247a577e3db584f881f488b7390ea5485",
+          "2737b2821cd759c3acdd3b80a350821247a577e3db584f881f488b7390ea5485"
+        ]
+      },
+      "why_rejected": "a path where the same digest is repeated off the odd tail is the self-pairing smuggled into a full level"
+    },
+    {
+      "name": "wrong_bucket_root_target",
+      "proof": {
+        "bucket": "Established",
+        "entry": {
+          "adapter_id": "tendermint-ibc",
+          "adapter_version": 3,
+          "bond_atoms": 1000000,
+          "checkpoint_height": 77,
+          "domain_id": 1,
+          "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+          "guarantee": {
+            "attestation": {
+              "event_root": true,
+              "parent": true,
+              "state_root": true,
+              "tx_root": true
+            },
+            "fault_tolerance_bps": 3333,
+            "quantum_posture": "Lattice",
+            "reversibility": {
+              "kind": "DeterministicQuorum"
+            },
+            "slashable_backing": true
+          },
+          "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+          "height": 770,
+          "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+          "verdict": {
+            "kind": "Established"
+          }
+        },
+        "expected_bucket_root": "35ce2e028e0e4f1ec101dd5b1d14bed75769805bbddb95caeb17c98540047bda",
+        "leaf_count": 3,
+        "leaf_index": 0,
+        "siblings": [
+          "cf5e911026ac48f2a27da1c9a02def69b2ce8c3c0fb174dbe0779ac8e304a695",
+          "a006bdd18eae6a440793db9defb008e17856e7634b636b8c38868aa99008c242"
+        ]
+      },
+      "why_rejected": "opening against the Pending root must not establish a row from the Established bucket"
+    },
+    {
+      "expect": "compose_rejects",
+      "name": "established_row_without_event_attestation",
+      "rows": [
+        {
+          "adapter_id": "tendermint-ibc",
+          "adapter_version": 3,
+          "bond_atoms": 1000000,
+          "checkpoint_height": 77,
+          "domain_id": 1,
+          "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+          "guarantee": {
+            "attestation": {
+              "event_root": false,
+              "parent": true,
+              "state_root": true,
+              "tx_root": true
+            },
+            "fault_tolerance_bps": 3333,
+            "quantum_posture": "Lattice",
+            "reversibility": {
+              "kind": "DeterministicQuorum"
+            },
+            "slashable_backing": true
+          },
+          "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+          "height": 770,
+          "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+          "verdict": {
+            "kind": "Established"
+          }
+        }
+      ],
+      "why_rejected": "an Established row must bind all four commitments"
+    },
+    {
+      "expect": "compose_rejects",
+      "name": "established_row_with_zero_fault_tolerance",
+      "rows": [
+        {
+          "adapter_id": "tendermint-ibc",
+          "adapter_version": 3,
+          "bond_atoms": 1000000,
+          "checkpoint_height": 77,
+          "domain_id": 1,
+          "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+          "guarantee": {
+            "attestation": {
+              "event_root": true,
+              "parent": true,
+              "state_root": true,
+              "tx_root": true
+            },
+            "fault_tolerance_bps": 0,
+            "quantum_posture": "Hash",
+            "reversibility": {
+              "kind": "CryptographicValidity"
+            },
+            "slashable_backing": false
+          },
+          "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+          "height": 770,
+          "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+          "verdict": {
+            "kind": "Established"
+          }
+        }
+      ],
+      "why_rejected": "0 bps means the domain grants no safety; it may not be certified"
+    },
+    {
+      "expect": "compose_rejects",
+      "name": "conflicting_checkpoint_heights",
+      "rows": [
+        {
+          "adapter_id": "tendermint-ibc",
+          "adapter_version": 3,
+          "bond_atoms": 1000000,
+          "checkpoint_height": 77,
+          "domain_id": 1,
+          "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+          "guarantee": {
+            "attestation": {
+              "event_root": true,
+              "parent": true,
+              "state_root": true,
+              "tx_root": true
+            },
+            "fault_tolerance_bps": 3333,
+            "quantum_posture": "Lattice",
+            "reversibility": {
+              "kind": "DeterministicQuorum"
+            },
+            "slashable_backing": true
+          },
+          "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+          "height": 770,
+          "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+          "verdict": {
+            "kind": "Established"
+          }
+        },
+        {
+          "adapter_id": "tendermint-ibc",
+          "adapter_version": 3,
+          "bond_atoms": 1000000,
+          "checkpoint_height": 78,
+          "domain_id": 2,
+          "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb02",
+          "guarantee": {
+            "attestation": {
+              "event_root": true,
+              "parent": true,
+              "state_root": true,
+              "tx_root": true
+            },
+            "fault_tolerance_bps": 3333,
+            "quantum_posture": "Lattice",
+            "reversibility": {
+              "kind": "DeterministicQuorum"
+            },
+            "slashable_backing": true
+          },
+          "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc02",
+          "height": 780,
+          "state_root": "000000000000000000000000000000000000000000000000000000000000aa02",
+          "verdict": {
+            "kind": "Established"
+          }
+        }
+      ],
+      "why_rejected": "one certificate cannot seal two checkpoints"
+    },
+    {
+      "expect": "compose_rejects",
+      "name": "duplicate_domain_id",
+      "rows": [
+        {
+          "adapter_id": "tendermint-ibc",
+          "adapter_version": 3,
+          "bond_atoms": 1000000,
+          "checkpoint_height": 77,
+          "domain_id": 1,
+          "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+          "guarantee": {
+            "attestation": {
+              "event_root": true,
+              "parent": true,
+              "state_root": true,
+              "tx_root": true
+            },
+            "fault_tolerance_bps": 3333,
+            "quantum_posture": "Lattice",
+            "reversibility": {
+              "kind": "DeterministicQuorum"
+            },
+            "slashable_backing": true
+          },
+          "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+          "height": 770,
+          "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+          "verdict": {
+            "kind": "Established"
+          }
+        },
+        {
+          "adapter_id": "tendermint-ibc",
+          "adapter_version": 3,
+          "bond_atoms": 1000000,
+          "checkpoint_height": 77,
+          "domain_id": 1,
+          "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+          "guarantee": {
+            "attestation": {
+              "event_root": true,
+              "parent": true,
+              "state_root": true,
+              "tx_root": true
+            },
+            "fault_tolerance_bps": 3333,
+            "quantum_posture": "Lattice",
+            "reversibility": {
+              "kind": "DeterministicQuorum"
+            },
+            "slashable_backing": true
+          },
+          "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+          "height": 999,
+          "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+          "verdict": {
+            "kind": "Established"
+          }
+        }
+      ],
+      "why_rejected": "two rows for one domain means two final heights"
+    },
+    {
+      "expect": "compose_rejects",
+      "name": "empty_row_set",
+      "rows": [],
+      "why_rejected": "an empty certificate proves nothing"
+    }
+  ],
+  "positive": [
+    {
+      "expected": {
+        "certificate_digest": "6c93a8a54ad8c16c82c55bff06063d16a3e39e63903e030c96430b85bb77a176",
+        "checkpoint_height": 77,
+        "counts": {
+          "Established": 1,
+          "Pending": 0,
+          "Refuted": 0
+        },
+        "folded_guarantee": {
+          "attestation": {
+            "event_root": true,
+            "parent": true,
+            "state_root": true,
+            "tx_root": true
+          },
+          "fault_tolerance_bps": 3333,
+          "quantum_posture": "Lattice",
+          "reversibility": {
+            "kind": "DeterministicQuorum"
+          },
+          "slashable_backing": true
+        },
+        "roots": {
+          "Established": "3c4c972a810617c586e5a277f37b1033f4b3bf573d8c23740f83e3c5985f96f6",
+          "Pending": "35ce2e028e0e4f1ec101dd5b1d14bed75769805bbddb95caeb17c98540047bda",
+          "Refuted": "35ce2e028e0e4f1ec101dd5b1d14bed75769805bbddb95caeb17c98540047bda"
+        },
+        "row_digests": {
+          "1": "bdf07f53667aa80d6ae32e00a530f1b255e992aedc37ac06e25b93358b8a7b82"
+        }
+      },
+      "inclusion_proofs": [
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 1,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "3c4c972a810617c586e5a277f37b1033f4b3bf573d8c23740f83e3c5985f96f6",
+          "leaf_count": 1,
+          "leaf_index": 0,
+          "siblings": []
+        }
+      ],
+      "input": {
+        "rows": [
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 1,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+            "verdict": {
+              "kind": "Established"
+            }
+          }
+        ]
+      },
+      "name": "single_established_row"
+    },
+    {
+      "expected": {
+        "certificate_digest": "c6b00a27fadca1e62f8069748d4864aabfaa669c512330aef88d11b5cb66f2c2",
+        "checkpoint_height": 77,
+        "counts": {
+          "Established": 3,
+          "Pending": 0,
+          "Refuted": 0
+        },
+        "folded_guarantee": {
+          "attestation": {
+            "event_root": true,
+            "parent": true,
+            "state_root": true,
+            "tx_root": true
+          },
+          "fault_tolerance_bps": 3333,
+          "quantum_posture": "Lattice",
+          "reversibility": {
+            "kind": "DeterministicQuorum"
+          },
+          "slashable_backing": true
+        },
+        "roots": {
+          "Established": "751e625b59bf86c28e405faae1db69e0188eb55c25e813947e69de8638e1ee11",
+          "Pending": "35ce2e028e0e4f1ec101dd5b1d14bed75769805bbddb95caeb17c98540047bda",
+          "Refuted": "35ce2e028e0e4f1ec101dd5b1d14bed75769805bbddb95caeb17c98540047bda"
+        },
+        "row_digests": {
+          "1": "bdf07f53667aa80d6ae32e00a530f1b255e992aedc37ac06e25b93358b8a7b82",
+          "2": "f1c7cc55342896a8b9a65b0d4fc81577acd0217e4b5ed7255cef5283024d8a90",
+          "3": "78b4411e9fd9a44f9fbd12427ba24d0d85b9889e8be1d0892e755f4ca7548747"
+        }
+      },
+      "inclusion_proofs": [
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 1,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "751e625b59bf86c28e405faae1db69e0188eb55c25e813947e69de8638e1ee11",
+          "leaf_count": 3,
+          "leaf_index": 0,
+          "siblings": [
+            "cf5e911026ac48f2a27da1c9a02def69b2ce8c3c0fb174dbe0779ac8e304a695",
+            "a006bdd18eae6a440793db9defb008e17856e7634b636b8c38868aa99008c242"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 2,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb02",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc02",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa02",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "751e625b59bf86c28e405faae1db69e0188eb55c25e813947e69de8638e1ee11",
+          "leaf_count": 3,
+          "leaf_index": 1,
+          "siblings": [
+            "3c4c972a810617c586e5a277f37b1033f4b3bf573d8c23740f83e3c5985f96f6",
+            "a006bdd18eae6a440793db9defb008e17856e7634b636b8c38868aa99008c242"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 3,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb03",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc03",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa03",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "751e625b59bf86c28e405faae1db69e0188eb55c25e813947e69de8638e1ee11",
+          "leaf_count": 3,
+          "leaf_index": 2,
+          "siblings": [
+            "1d453aae02f28f7e5cba289517667406100b84f526afbaf9be0a923880aa44d3",
+            "08f8257ddb3b40b5c16108ac661a663ba28eebf9933059022b46cd5ad2916c78"
+          ]
+        }
+      ],
+      "input": {
+        "rows": [
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 1,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 2,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb02",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc02",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa02",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 3,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb03",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc03",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa03",
+            "verdict": {
+              "kind": "Established"
+            }
+          }
+        ]
+      },
+      "name": "three_rows_odd_tail"
+    },
+    {
+      "expected": {
+        "certificate_digest": "b1af05e2e55e092e6fb35e3d9784481394ddf6365da5f8dc8bd9cbc82aaecd92",
+        "checkpoint_height": 77,
+        "counts": {
+          "Established": 2,
+          "Pending": 0,
+          "Refuted": 0
+        },
+        "folded_guarantee": {
+          "attestation": {
+            "event_root": true,
+            "parent": true,
+            "state_root": true,
+            "tx_root": true
+          },
+          "fault_tolerance_bps": 3333,
+          "quantum_posture": "Lattice",
+          "reversibility": {
+            "kind": "DeterministicQuorum"
+          },
+          "slashable_backing": true
+        },
+        "roots": {
+          "Established": "08f8257ddb3b40b5c16108ac661a663ba28eebf9933059022b46cd5ad2916c78",
+          "Pending": "35ce2e028e0e4f1ec101dd5b1d14bed75769805bbddb95caeb17c98540047bda",
+          "Refuted": "35ce2e028e0e4f1ec101dd5b1d14bed75769805bbddb95caeb17c98540047bda"
+        },
+        "row_digests": {
+          "1": "bdf07f53667aa80d6ae32e00a530f1b255e992aedc37ac06e25b93358b8a7b82",
+          "2": "f1c7cc55342896a8b9a65b0d4fc81577acd0217e4b5ed7255cef5283024d8a90"
+        }
+      },
+      "inclusion_proofs": [
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 1,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "08f8257ddb3b40b5c16108ac661a663ba28eebf9933059022b46cd5ad2916c78",
+          "leaf_count": 2,
+          "leaf_index": 0,
+          "siblings": [
+            "cf5e911026ac48f2a27da1c9a02def69b2ce8c3c0fb174dbe0779ac8e304a695"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 2,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb02",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc02",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa02",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "08f8257ddb3b40b5c16108ac661a663ba28eebf9933059022b46cd5ad2916c78",
+          "leaf_count": 2,
+          "leaf_index": 1,
+          "siblings": [
+            "3c4c972a810617c586e5a277f37b1033f4b3bf573d8c23740f83e3c5985f96f6"
+          ]
+        }
+      ],
+      "input": {
+        "rows": [
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 1,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 2,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb02",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc02",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa02",
+            "verdict": {
+              "kind": "Established"
+            }
+          }
+        ]
+      },
+      "name": "two_rows"
+    },
+    {
+      "expected": {
+        "certificate_digest": "cfa743be54412289e9ea1d2719d49435409fee0d8679106bad1fed24bb6f3c98",
+        "checkpoint_height": 77,
+        "counts": {
+          "Established": 8,
+          "Pending": 0,
+          "Refuted": 0
+        },
+        "folded_guarantee": {
+          "attestation": {
+            "event_root": true,
+            "parent": true,
+            "state_root": true,
+            "tx_root": true
+          },
+          "fault_tolerance_bps": 3333,
+          "quantum_posture": "Lattice",
+          "reversibility": {
+            "kind": "DeterministicQuorum"
+          },
+          "slashable_backing": true
+        },
+        "roots": {
+          "Established": "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f",
+          "Pending": "35ce2e028e0e4f1ec101dd5b1d14bed75769805bbddb95caeb17c98540047bda",
+          "Refuted": "35ce2e028e0e4f1ec101dd5b1d14bed75769805bbddb95caeb17c98540047bda"
+        },
+        "row_digests": {
+          "1": "bdf07f53667aa80d6ae32e00a530f1b255e992aedc37ac06e25b93358b8a7b82",
+          "2": "f1c7cc55342896a8b9a65b0d4fc81577acd0217e4b5ed7255cef5283024d8a90",
+          "3": "78b4411e9fd9a44f9fbd12427ba24d0d85b9889e8be1d0892e755f4ca7548747",
+          "4": "9247829e640444d15c739a10416fdc38a8be001bedeec60b6deb9fe9432e8f2c",
+          "5": "06d1731d43f3976e32d3eacbcf4068c9e8842e91e77ce5bf00a5da5244e6aac2",
+          "6": "51cb2f7333945feb0efc34b853436fa1143aede5c1b6aa12564b36eaade3930f",
+          "7": "a0672fc47298c4612823ba38d859c592f4b10c9d940014f35e63fc7847340d5f",
+          "8": "422f79bbbd56cb62b3027c6c59faad85e22c2359d3b18e2c038b32b9ac17dd6e"
+        }
+      },
+      "inclusion_proofs": [
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 1,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f",
+          "leaf_count": 8,
+          "leaf_index": 0,
+          "siblings": [
+            "cf5e911026ac48f2a27da1c9a02def69b2ce8c3c0fb174dbe0779ac8e304a695",
+            "0e3a5226e973d7f6c2a05f2fb90d7cacabb18a6da39da282e84cca9a1aa62855",
+            "33eb6cff49551b06909d20d1b24ca5f63c2d8868a822e0429be3ced0db082dac"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 2,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb02",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc02",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa02",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f",
+          "leaf_count": 8,
+          "leaf_index": 1,
+          "siblings": [
+            "3c4c972a810617c586e5a277f37b1033f4b3bf573d8c23740f83e3c5985f96f6",
+            "0e3a5226e973d7f6c2a05f2fb90d7cacabb18a6da39da282e84cca9a1aa62855",
+            "33eb6cff49551b06909d20d1b24ca5f63c2d8868a822e0429be3ced0db082dac"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 3,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb03",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc03",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa03",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f",
+          "leaf_count": 8,
+          "leaf_index": 2,
+          "siblings": [
+            "ec745d1c48be560bf30effe8500869d42d4346086631f9298511bf7d1a26acfb",
+            "08f8257ddb3b40b5c16108ac661a663ba28eebf9933059022b46cd5ad2916c78",
+            "33eb6cff49551b06909d20d1b24ca5f63c2d8868a822e0429be3ced0db082dac"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 4,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb04",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc04",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa04",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f",
+          "leaf_count": 8,
+          "leaf_index": 3,
+          "siblings": [
+            "1d453aae02f28f7e5cba289517667406100b84f526afbaf9be0a923880aa44d3",
+            "08f8257ddb3b40b5c16108ac661a663ba28eebf9933059022b46cd5ad2916c78",
+            "33eb6cff49551b06909d20d1b24ca5f63c2d8868a822e0429be3ced0db082dac"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 5,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb05",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc05",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa05",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f",
+          "leaf_count": 8,
+          "leaf_index": 4,
+          "siblings": [
+            "2737b2821cd759c3acdd3b80a350821247a577e3db584f881f488b7390ea5485",
+            "9df7788f238525f4e9c7424864eb8c056217e0b17151f769783714da39e4d23f",
+            "f0f2def40c373370f47c94ee1754fb27f04ad3d0ffac5738bf6b48b72c253279"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 6,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb06",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc06",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa06",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f",
+          "leaf_count": 8,
+          "leaf_index": 5,
+          "siblings": [
+            "9e51398b42e706ca4bcfde8e6e8bd15dfcd8adc00dd49d8d7df055ccc9792681",
+            "9df7788f238525f4e9c7424864eb8c056217e0b17151f769783714da39e4d23f",
+            "f0f2def40c373370f47c94ee1754fb27f04ad3d0ffac5738bf6b48b72c253279"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 7,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb07",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc07",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa07",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f",
+          "leaf_count": 8,
+          "leaf_index": 6,
+          "siblings": [
+            "308a9324c5e7cbc334923f472e5ebafc31dac85575685493948ff8ac35064251",
+            "4e33b210341d1966c45a1a672f80b2b854e2d1e52d221db18c445b49d0341ad6",
+            "f0f2def40c373370f47c94ee1754fb27f04ad3d0ffac5738bf6b48b72c253279"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 8,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb08",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc08",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa08",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f",
+          "leaf_count": 8,
+          "leaf_index": 7,
+          "siblings": [
+            "9ae56e805f4f0be7c902319766d3dd497132c4336cf3cc3009641bbd233c7b05",
+            "4e33b210341d1966c45a1a672f80b2b854e2d1e52d221db18c445b49d0341ad6",
+            "f0f2def40c373370f47c94ee1754fb27f04ad3d0ffac5738bf6b48b72c253279"
+          ]
+        }
+      ],
+      "input": {
+        "rows": [
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 1,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 2,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb02",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc02",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa02",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 3,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb03",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc03",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa03",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 4,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb04",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc04",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa04",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 5,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb05",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc05",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa05",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 6,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb06",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc06",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa06",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 7,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb07",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc07",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa07",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 8,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb08",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc08",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa08",
+            "verdict": {
+              "kind": "Established"
+            }
+          }
+        ]
+      },
+      "name": "eight_rows_full_levels"
+    },
+    {
+      "expected": {
+        "certificate_digest": "6addb368916d9051c2fcd8d743591f13600c7752192708918084409b188d8596",
+        "checkpoint_height": 77,
+        "counts": {
+          "Established": 2,
+          "Pending": 2,
+          "Refuted": 1
+        },
+        "folded_guarantee": {
+          "attestation": {
+            "event_root": true,
+            "parent": true,
+            "state_root": true,
+            "tx_root": true
+          },
+          "fault_tolerance_bps": 3333,
+          "quantum_posture": "Lattice",
+          "reversibility": {
+            "kind": "DeterministicQuorum"
+          },
+          "slashable_backing": true
+        },
+        "roots": {
+          "Established": "46764b11aba0f53f2024090a2b86b07c41b6467d8d8b04fad354470d263c77db",
+          "Pending": "c06be985c0bba53e92ee935f5b00a61b6bfdb9d65938650bbb43fbcf1700edec",
+          "Refuted": "822673c8ecbb139e7466e0820c2415b0099896eaa7b4b308a51f57a797d7668a"
+        },
+        "row_digests": {
+          "1": "bdf07f53667aa80d6ae32e00a530f1b255e992aedc37ac06e25b93358b8a7b82",
+          "12": "82b4766c3a3316ec060d121cb889f9aa73e3c98670625f21afc778c1f3db0dfd",
+          "4": "9247829e640444d15c739a10416fdc38a8be001bedeec60b6deb9fe9432e8f2c",
+          "7": "f8b5ab2c35593679eada35132879e395cd8c0c5ea097ad9414c94c556a65ab0f",
+          "9": "9022d4905105f7d467224b40d68611a17d29d08dbbca36a30d6605d55fe463f6"
+        }
+      },
+      "inclusion_proofs": [
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 1,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "46764b11aba0f53f2024090a2b86b07c41b6467d8d8b04fad354470d263c77db",
+          "leaf_count": 2,
+          "leaf_index": 0,
+          "siblings": [
+            "ec745d1c48be560bf30effe8500869d42d4346086631f9298511bf7d1a26acfb"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 4,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb04",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc04",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa04",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "46764b11aba0f53f2024090a2b86b07c41b6467d8d8b04fad354470d263c77db",
+          "leaf_count": 2,
+          "leaf_index": 1,
+          "siblings": [
+            "3c4c972a810617c586e5a277f37b1033f4b3bf573d8c23740f83e3c5985f96f6"
+          ]
+        },
+        {
+          "bucket": "Pending",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 7,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb07",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc07",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa07",
+            "verdict": {
+              "kind": "Pending",
+              "reason": "EvidenceMissing"
+            }
+          },
+          "expected_bucket_root": "c06be985c0bba53e92ee935f5b00a61b6bfdb9d65938650bbb43fbcf1700edec",
+          "leaf_count": 2,
+          "leaf_index": 0,
+          "siblings": [
+            "669a1dec1370d4775030f1ba6744cbb10461d920e7a38dfe1ec7b8069bf4ebb6"
+          ]
+        },
+        {
+          "bucket": "Pending",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 9,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb09",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc09",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa09",
+            "verdict": {
+              "kind": "Pending",
+              "reason": "BondUnverified"
+            }
+          },
+          "expected_bucket_root": "c06be985c0bba53e92ee935f5b00a61b6bfdb9d65938650bbb43fbcf1700edec",
+          "leaf_count": 2,
+          "leaf_index": 1,
+          "siblings": [
+            "30eeda457f4f6fd496fcfdcf9eb56495b1ad738f3ee1adf20dc56045b3c7f528"
+          ]
+        },
+        {
+          "bucket": "Refuted",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 12,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb0c",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc0c",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa0c",
+            "verdict": {
+              "code": 4001,
+              "kind": "Refuted"
+            }
+          },
+          "expected_bucket_root": "822673c8ecbb139e7466e0820c2415b0099896eaa7b4b308a51f57a797d7668a",
+          "leaf_count": 1,
+          "leaf_index": 0,
+          "siblings": []
+        }
+      ],
+      "input": {
+        "rows": [
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 1,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 4,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb04",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc04",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa04",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 7,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb07",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc07",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa07",
+            "verdict": {
+              "kind": "Pending",
+              "reason": "EvidenceMissing"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 9,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb09",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc09",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa09",
+            "verdict": {
+              "kind": "Pending",
+              "reason": "BondUnverified"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 12,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb0c",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc0c",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa0c",
+            "verdict": {
+              "code": 4001,
+              "kind": "Refuted"
+            }
+          }
+        ]
+      },
+      "name": "five_rows_three_buckets"
+    },
+    {
+      "expected": {
+        "certificate_digest": "b024db7f48f5582cb6fdf4933eca17d852e460be43df7946c4348bf382d358fe",
+        "checkpoint_height": 77,
+        "counts": {
+          "Established": 16,
+          "Pending": 0,
+          "Refuted": 0
+        },
+        "folded_guarantee": {
+          "attestation": {
+            "event_root": true,
+            "parent": true,
+            "state_root": true,
+            "tx_root": true
+          },
+          "fault_tolerance_bps": 3333,
+          "quantum_posture": "Lattice",
+          "reversibility": {
+            "kind": "DeterministicQuorum"
+          },
+          "slashable_backing": true
+        },
+        "roots": {
+          "Established": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "Pending": "35ce2e028e0e4f1ec101dd5b1d14bed75769805bbddb95caeb17c98540047bda",
+          "Refuted": "35ce2e028e0e4f1ec101dd5b1d14bed75769805bbddb95caeb17c98540047bda"
+        },
+        "row_digests": {
+          "1": "bdf07f53667aa80d6ae32e00a530f1b255e992aedc37ac06e25b93358b8a7b82",
+          "10": "610e0e8f078365118e1e3a99e79c4c7c672c3053db3d69d250f501b984f1b44b",
+          "11": "988a3b83cd7fc365d867fa72c4b6958129470bfa54ff8e95b7fb14805f65e15c",
+          "12": "35a35a8290a4014f811a069ac5c101c6ee249f9b0fa2185866326b675af9fe79",
+          "13": "5c84757fb2007ccab64feea657c80f658e58c9ffc893cf0026be7c7c0ce23ad0",
+          "14": "e6140dcd6cb586d5370665009e169b2c64058187842359224b8f3eba02cbaa3b",
+          "15": "c9b8f01fdc1de9e6735da8370f8b3b096264492edf9fd53e1fc5394d5ab29766",
+          "16": "169d638f175d993f0974bca7784ce935b438f19abc290ddcf65f10cb93b637cf",
+          "2": "f1c7cc55342896a8b9a65b0d4fc81577acd0217e4b5ed7255cef5283024d8a90",
+          "3": "78b4411e9fd9a44f9fbd12427ba24d0d85b9889e8be1d0892e755f4ca7548747",
+          "4": "9247829e640444d15c739a10416fdc38a8be001bedeec60b6deb9fe9432e8f2c",
+          "5": "06d1731d43f3976e32d3eacbcf4068c9e8842e91e77ce5bf00a5da5244e6aac2",
+          "6": "51cb2f7333945feb0efc34b853436fa1143aede5c1b6aa12564b36eaade3930f",
+          "7": "a0672fc47298c4612823ba38d859c592f4b10c9d940014f35e63fc7847340d5f",
+          "8": "422f79bbbd56cb62b3027c6c59faad85e22c2359d3b18e2c038b32b9ac17dd6e",
+          "9": "3d1f2abc5fb0b4687246ce5e9699fad008b76f9751a0a981f80ea54f136f8d25"
+        }
+      },
+      "inclusion_proofs": [
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 11,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb0b",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc0b",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa0b",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 10,
+          "siblings": [
+            "81549e9203ed58853e566b4130463920a5627e680b460e34a118f92cc0a2e74f",
+            "db0b9e03d621a01826de2aa4f8dddd0f5062692a3037425e0cd5fd649705f5a0",
+            "790edb0097bdf2ae28de1782af046a658fc151175a2e8c9d936a9141f0d92223",
+            "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 3,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb03",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc03",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa03",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 2,
+          "siblings": [
+            "ec745d1c48be560bf30effe8500869d42d4346086631f9298511bf7d1a26acfb",
+            "08f8257ddb3b40b5c16108ac661a663ba28eebf9933059022b46cd5ad2916c78",
+            "33eb6cff49551b06909d20d1b24ca5f63c2d8868a822e0429be3ced0db082dac",
+            "ba97cd81f32896912afde082dc48ccd89e54dbe9c49ae04d2fc8f253aee31785"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 14,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb0e",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc0e",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa0e",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 13,
+          "siblings": [
+            "4a8401f25de96038e1139fa77596e487169c7ccf191de1b89cfd705e2422d4f8",
+            "c39f5aec206444a90edcedc95e2da72fab70f8cc19cff08472356afc87ca23d5",
+            "16a94339536480b359f31ebbe16f6168aa7780bb3d0ce328494fabfbdeb7ef17",
+            "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 1,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 0,
+          "siblings": [
+            "cf5e911026ac48f2a27da1c9a02def69b2ce8c3c0fb174dbe0779ac8e304a695",
+            "0e3a5226e973d7f6c2a05f2fb90d7cacabb18a6da39da282e84cca9a1aa62855",
+            "33eb6cff49551b06909d20d1b24ca5f63c2d8868a822e0429be3ced0db082dac",
+            "ba97cd81f32896912afde082dc48ccd89e54dbe9c49ae04d2fc8f253aee31785"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 9,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb09",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc09",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa09",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 8,
+          "siblings": [
+            "bc64b50633226799e1b557cce201a155dff70269511f968c1b82c2dfdb206473",
+            "dcd5b49418752f4042e08c2464122ea89c5d37c39aa305bd7dfd64354c303194",
+            "790edb0097bdf2ae28de1782af046a658fc151175a2e8c9d936a9141f0d92223",
+            "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 2,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb02",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc02",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa02",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 1,
+          "siblings": [
+            "3c4c972a810617c586e5a277f37b1033f4b3bf573d8c23740f83e3c5985f96f6",
+            "0e3a5226e973d7f6c2a05f2fb90d7cacabb18a6da39da282e84cca9a1aa62855",
+            "33eb6cff49551b06909d20d1b24ca5f63c2d8868a822e0429be3ced0db082dac",
+            "ba97cd81f32896912afde082dc48ccd89e54dbe9c49ae04d2fc8f253aee31785"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 16,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb10",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc10",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa10",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 15,
+          "siblings": [
+            "0d952ee09a581560d3b17fab508aaafb15dea18b670c65a46727e8ee97ef68fa",
+            "85652069c1671852f078bb364da50457df4582cc3d10afed4339cc8b9b6ef2ce",
+            "16a94339536480b359f31ebbe16f6168aa7780bb3d0ce328494fabfbdeb7ef17",
+            "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 5,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb05",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc05",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa05",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 4,
+          "siblings": [
+            "2737b2821cd759c3acdd3b80a350821247a577e3db584f881f488b7390ea5485",
+            "9df7788f238525f4e9c7424864eb8c056217e0b17151f769783714da39e4d23f",
+            "f0f2def40c373370f47c94ee1754fb27f04ad3d0ffac5738bf6b48b72c253279",
+            "ba97cd81f32896912afde082dc48ccd89e54dbe9c49ae04d2fc8f253aee31785"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 12,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb0c",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc0c",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa0c",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 11,
+          "siblings": [
+            "fa97fbfa8341bc6058a0e0b1f444594da62b9851630c34f4426147a68b4a6bec",
+            "db0b9e03d621a01826de2aa4f8dddd0f5062692a3037425e0cd5fd649705f5a0",
+            "790edb0097bdf2ae28de1782af046a658fc151175a2e8c9d936a9141f0d92223",
+            "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 7,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb07",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc07",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa07",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 6,
+          "siblings": [
+            "308a9324c5e7cbc334923f472e5ebafc31dac85575685493948ff8ac35064251",
+            "4e33b210341d1966c45a1a672f80b2b854e2d1e52d221db18c445b49d0341ad6",
+            "f0f2def40c373370f47c94ee1754fb27f04ad3d0ffac5738bf6b48b72c253279",
+            "ba97cd81f32896912afde082dc48ccd89e54dbe9c49ae04d2fc8f253aee31785"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 4,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb04",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc04",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa04",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 3,
+          "siblings": [
+            "1d453aae02f28f7e5cba289517667406100b84f526afbaf9be0a923880aa44d3",
+            "08f8257ddb3b40b5c16108ac661a663ba28eebf9933059022b46cd5ad2916c78",
+            "33eb6cff49551b06909d20d1b24ca5f63c2d8868a822e0429be3ced0db082dac",
+            "ba97cd81f32896912afde082dc48ccd89e54dbe9c49ae04d2fc8f253aee31785"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 15,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb0f",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc0f",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa0f",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 14,
+          "siblings": [
+            "4ceb9cc8d3ea6e768f48a42fbade9cf15055c363bf1ad6952b211694b99d7408",
+            "85652069c1671852f078bb364da50457df4582cc3d10afed4339cc8b9b6ef2ce",
+            "16a94339536480b359f31ebbe16f6168aa7780bb3d0ce328494fabfbdeb7ef17",
+            "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 8,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb08",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc08",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa08",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 7,
+          "siblings": [
+            "9ae56e805f4f0be7c902319766d3dd497132c4336cf3cc3009641bbd233c7b05",
+            "4e33b210341d1966c45a1a672f80b2b854e2d1e52d221db18c445b49d0341ad6",
+            "f0f2def40c373370f47c94ee1754fb27f04ad3d0ffac5738bf6b48b72c253279",
+            "ba97cd81f32896912afde082dc48ccd89e54dbe9c49ae04d2fc8f253aee31785"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 13,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb0d",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc0d",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa0d",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 12,
+          "siblings": [
+            "2c35771c868ffc65c3e8bd71da86c42ff3e93b0f874296d543fee8a9444fe69b",
+            "c39f5aec206444a90edcedc95e2da72fab70f8cc19cff08472356afc87ca23d5",
+            "16a94339536480b359f31ebbe16f6168aa7780bb3d0ce328494fabfbdeb7ef17",
+            "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 6,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb06",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc06",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa06",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 5,
+          "siblings": [
+            "9e51398b42e706ca4bcfde8e6e8bd15dfcd8adc00dd49d8d7df055ccc9792681",
+            "9df7788f238525f4e9c7424864eb8c056217e0b17151f769783714da39e4d23f",
+            "f0f2def40c373370f47c94ee1754fb27f04ad3d0ffac5738bf6b48b72c253279",
+            "ba97cd81f32896912afde082dc48ccd89e54dbe9c49ae04d2fc8f253aee31785"
+          ]
+        },
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 10,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb0a",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc0a",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa0a",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "d925abb1d9608f927ac08dc1612adb089a873dd72e5093834902a19c344e8d01",
+          "leaf_count": 16,
+          "leaf_index": 9,
+          "siblings": [
+            "244a8636b985cd2c0cbdb3479844fee454942052d099429c0c94ff7b5d55d98f",
+            "dcd5b49418752f4042e08c2464122ea89c5d37c39aa305bd7dfd64354c303194",
+            "790edb0097bdf2ae28de1782af046a658fc151175a2e8c9d936a9141f0d92223",
+            "86ad8c777a7b1c2f92a91dc1a03ad4249441b271cb71977435f8a08e6dea5c8f"
+          ]
+        }
+      ],
+      "input": {
+        "rows": [
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 11,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb0b",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc0b",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa0b",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 3,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb03",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc03",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa03",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 14,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb0e",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc0e",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa0e",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 1,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 9,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb09",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc09",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa09",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 2,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb02",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc02",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa02",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 16,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb10",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc10",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa10",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 5,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb05",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc05",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa05",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 12,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb0c",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc0c",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa0c",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 7,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb07",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc07",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa07",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 4,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb04",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc04",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa04",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 15,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb0f",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc0f",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa0f",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 8,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb08",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc08",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa08",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 13,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb0d",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc0d",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa0d",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 6,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb06",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc06",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa06",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 10,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb0a",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc0a",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa0a",
+            "verdict": {
+              "kind": "Established"
+            }
+          }
+        ]
+      },
+      "name": "sixteen_rows_unsorted_input"
+    },
+    {
+      "expected": {
+        "certificate_digest": "c6935e2855919ea8be346d55c303ed7cf7f1fc4f1cf357660767548fd9ae9432",
+        "checkpoint_height": 77,
+        "counts": {
+          "Established": 1,
+          "Pending": 0,
+          "Refuted": 2
+        },
+        "folded_guarantee": {
+          "attestation": {
+            "event_root": true,
+            "parent": true,
+            "state_root": true,
+            "tx_root": true
+          },
+          "fault_tolerance_bps": 3333,
+          "quantum_posture": "Lattice",
+          "reversibility": {
+            "kind": "DeterministicQuorum"
+          },
+          "slashable_backing": true
+        },
+        "roots": {
+          "Established": "1d453aae02f28f7e5cba289517667406100b84f526afbaf9be0a923880aa44d3",
+          "Pending": "35ce2e028e0e4f1ec101dd5b1d14bed75769805bbddb95caeb17c98540047bda",
+          "Refuted": "e7df785cdf902e51b25a497e2d98a294f5aaccc521c8faa484eb54dba70d4566"
+        },
+        "row_digests": {
+          "1": "8a35ef9ea9eb601090e27628965a6e3015fd66e101f84b47efb5e6e4cc36b9ab",
+          "2": "ae13c7c4659f4e6da4a0c2d2bee39ecb210b056b5bd7e7e08857b5653757823a",
+          "3": "78b4411e9fd9a44f9fbd12427ba24d0d85b9889e8be1d0892e755f4ca7548747"
+        }
+      },
+      "inclusion_proofs": [
+        {
+          "bucket": "Established",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 3,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb03",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc03",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa03",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          "expected_bucket_root": "1d453aae02f28f7e5cba289517667406100b84f526afbaf9be0a923880aa44d3",
+          "leaf_count": 1,
+          "leaf_index": 0,
+          "siblings": []
+        },
+        {
+          "bucket": "Refuted",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 1,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+            "verdict": {
+              "code": 1,
+              "kind": "Refuted"
+            }
+          },
+          "expected_bucket_root": "e7df785cdf902e51b25a497e2d98a294f5aaccc521c8faa484eb54dba70d4566",
+          "leaf_count": 2,
+          "leaf_index": 0,
+          "siblings": [
+            "45085687a6f5f4c3d6c614bec6c631884ef536a0839168321d7de73d68f2f2fd"
+          ]
+        },
+        {
+          "bucket": "Refuted",
+          "entry": {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 2,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb02",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc02",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa02",
+            "verdict": {
+              "code": 70,
+              "kind": "Refuted"
+            }
+          },
+          "expected_bucket_root": "e7df785cdf902e51b25a497e2d98a294f5aaccc521c8faa484eb54dba70d4566",
+          "leaf_count": 2,
+          "leaf_index": 1,
+          "siblings": [
+            "57933b7b66229c7ed365e8637a352c5834a8f6f1791d3bfb4b63ae9993c2a22b"
+          ]
+        }
+      ],
+      "input": {
+        "rows": [
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 3,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb03",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc03",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa03",
+            "verdict": {
+              "kind": "Established"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 1,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb01",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc01",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa01",
+            "verdict": {
+              "code": 1,
+              "kind": "Refuted"
+            }
+          },
+          {
+            "adapter_id": "tendermint-ibc",
+            "adapter_version": 3,
+            "bond_atoms": 1000000,
+            "checkpoint_height": 77,
+            "domain_id": 2,
+            "finality_proof_hash": "000000000000000000000000000000000000000000000000000000000000bb02",
+            "guarantee": {
+              "attestation": {
+                "event_root": true,
+                "parent": true,
+                "state_root": true,
+                "tx_root": true
+              },
+              "fault_tolerance_bps": 3333,
+              "quantum_posture": "Lattice",
+              "reversibility": {
+                "kind": "DeterministicQuorum"
+              },
+              "slashable_backing": true
+            },
+            "guarantee_backing_hash": "000000000000000000000000000000000000000000000000000000000000cc02",
+            "height": 770,
+            "state_root": "000000000000000000000000000000000000000000000000000000000000aa02",
+            "verdict": {
+              "code": 70,
+              "kind": "Refuted"
+            }
+          }
+        ]
+      },
+      "name": "one_established_two_refuted"
+    }
+  ],
+  "tags": {
+    "empty_bucket": "BDLM_FINALITY_CERT_EMPTY_V1",
+    "leaf": "BDLM_FINALITY_CERT_LEAF_V1",
+    "node": "BDLM_FINALITY_CERT_NODE_V1",
+    "row": "BDLM_FINALITY_CERT_ROW_V1"
+  }
+}

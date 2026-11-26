@@ -1,0 +1,529 @@
+{
+  "admits_cross_domain_value": [
+    {
+      "expected": true,
+      "input": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 4999,
+        "quantum_posture": "Classical",
+        "reversibility": {
+          "kind": "ProbabilisticWork",
+          "param": 6
+        },
+        "slashable_backing": false
+      },
+      "name": "deep_pow_without_stake_allows"
+    },
+    {
+      "expected": false,
+      "input": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 4999,
+        "quantum_posture": "Classical",
+        "reversibility": {
+          "kind": "ProbabilisticWork",
+          "param": 5
+        },
+        "slashable_backing": false
+      },
+      "name": "shallow_pow_without_stake_blocks"
+    },
+    {
+      "expected": false,
+      "input": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 3333,
+        "quantum_posture": "Classical",
+        "reversibility": {
+          "kind": "DeterministicQuorum"
+        },
+        "slashable_backing": false
+      },
+      "name": "deterministic_quorum_alone_blocks"
+    },
+    {
+      "expected": true,
+      "input": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 3333,
+        "quantum_posture": "Lattice",
+        "reversibility": {
+          "kind": "DeterministicQuorum"
+        },
+        "slashable_backing": true
+      },
+      "name": "deterministic_quorum_with_stake_allows"
+    },
+    {
+      "expected": false,
+      "input": {
+        "attestation": {
+          "event_root": false,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 9999,
+        "quantum_posture": "Hash",
+        "reversibility": {
+          "kind": "CryptographicValidity"
+        },
+        "slashable_backing": true
+      },
+      "name": "unauthenticated_events_block"
+    },
+    {
+      "expected": false,
+      "input": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 0,
+        "quantum_posture": "Hash",
+        "reversibility": {
+          "kind": "CryptographicValidity"
+        },
+        "slashable_backing": true
+      },
+      "name": "zero_bps_blocks"
+    }
+  ],
+  "domain_tag": "BDLM_ASSURANCE_BUNDLE_V1",
+  "encoding": {
+    "field_order": [
+      "reversibility_tag",
+      "reversibility_param",
+      "quantum_tag",
+      "attestation",
+      "slashable_backing",
+      "fault_tolerance_bps"
+    ],
+    "integers": "big-endian",
+    "length_bytes": 17
+  },
+  "meet": [
+    {
+      "a": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 4999,
+        "quantum_posture": "Hash",
+        "reversibility": {
+          "kind": "ProbabilisticWork",
+          "param": 9
+        },
+        "slashable_backing": true
+      },
+      "b": {
+        "attestation": {
+          "event_root": true,
+          "parent": false,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 3333,
+        "quantum_posture": "Classical",
+        "reversibility": {
+          "kind": "DeterministicQuorum"
+        },
+        "slashable_backing": false
+      },
+      "expected": {
+        "attestation": {
+          "event_root": true,
+          "parent": false,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 3333,
+        "quantum_posture": "Classical",
+        "reversibility": {
+          "kind": "ProbabilisticWork",
+          "param": 9
+        },
+        "slashable_backing": false
+      },
+      "name": "pow9_and_bft3333"
+    },
+    {
+      "a": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 4999,
+        "quantum_posture": "Hash",
+        "reversibility": {
+          "kind": "ProbabilisticWork",
+          "param": 9
+        },
+        "slashable_backing": true
+      },
+      "b": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 4999,
+        "quantum_posture": "Hash",
+        "reversibility": {
+          "kind": "ProbabilisticWork",
+          "param": 9
+        },
+        "slashable_backing": true
+      },
+      "expected": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 4999,
+        "quantum_posture": "Hash",
+        "reversibility": {
+          "kind": "ProbabilisticWork",
+          "param": 9
+        },
+        "slashable_backing": true
+      },
+      "name": "self_is_idempotent"
+    },
+    {
+      "a": {
+        "attestation": {
+          "event_root": true,
+          "parent": false,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 3333,
+        "quantum_posture": "Classical",
+        "reversibility": {
+          "kind": "DeterministicQuorum"
+        },
+        "slashable_backing": false
+      },
+      "b": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 4999,
+        "quantum_posture": "Hash",
+        "reversibility": {
+          "kind": "ProbabilisticWork",
+          "param": 9
+        },
+        "slashable_backing": true
+      },
+      "expected": {
+        "attestation": {
+          "event_root": true,
+          "parent": false,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 3333,
+        "quantum_posture": "Classical",
+        "reversibility": {
+          "kind": "ProbabilisticWork",
+          "param": 9
+        },
+        "slashable_backing": false
+      },
+      "name": "commutative"
+    },
+    {
+      "a": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 10000,
+        "quantum_posture": "Lattice",
+        "reversibility": {
+          "kind": "DataAvailabilitySampled",
+          "param": 8
+        },
+        "slashable_backing": true
+      },
+      "b": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 6666,
+        "quantum_posture": "Lattice",
+        "reversibility": {
+          "kind": "DataAvailabilitySampled",
+          "param": 5
+        },
+        "slashable_backing": true
+      },
+      "expected": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 6666,
+        "quantum_posture": "Lattice",
+        "reversibility": {
+          "kind": "DataAvailabilitySampled",
+          "param": 5
+        },
+        "slashable_backing": true
+      },
+      "name": "da_samples_min"
+    },
+    {
+      "a": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 9999,
+        "quantum_posture": "Hash",
+        "reversibility": {
+          "kind": "CryptographicValidity"
+        },
+        "slashable_backing": false
+      },
+      "b": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 9999,
+        "quantum_posture": "Hash",
+        "reversibility": {
+          "kind": "CryptographicValidity"
+        },
+        "slashable_backing": false
+      },
+      "expected": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 9999,
+        "quantum_posture": "Hash",
+        "reversibility": {
+          "kind": "CryptographicValidity"
+        },
+        "slashable_backing": false
+      },
+      "name": "stark_only_no_stake"
+    }
+  ],
+  "wire": [
+    {
+      "expected": {
+        "hex": "0000000000000000090201010101011387"
+      },
+      "input": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 4999,
+        "quantum_posture": "Hash",
+        "reversibility": {
+          "kind": "ProbabilisticWork",
+          "param": 9
+        },
+        "slashable_backing": true
+      },
+      "name": "pow9_hash_all_binds"
+    },
+    {
+      "expected": {
+        "hex": "0200000000000000000001010100000d05"
+      },
+      "input": {
+        "attestation": {
+          "event_root": true,
+          "parent": false,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 3333,
+        "quantum_posture": "Classical",
+        "reversibility": {
+          "kind": "DeterministicQuorum"
+        },
+        "slashable_backing": false
+      },
+      "name": "bft_classical_partial"
+    },
+    {
+      "expected": {
+        "hex": "0000000000000000060001010101001387"
+      },
+      "input": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 4999,
+        "quantum_posture": "Classical",
+        "reversibility": {
+          "kind": "ProbabilisticWork",
+          "param": 6
+        },
+        "slashable_backing": false
+      },
+      "name": "deep_pow_without_stake_allows"
+    },
+    {
+      "expected": {
+        "hex": "0000000000000000050001010101001387"
+      },
+      "input": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 4999,
+        "quantum_posture": "Classical",
+        "reversibility": {
+          "kind": "ProbabilisticWork",
+          "param": 5
+        },
+        "slashable_backing": false
+      },
+      "name": "shallow_pow_without_stake_blocks"
+    },
+    {
+      "expected": {
+        "hex": "0200000000000000000001010101000d05"
+      },
+      "input": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 3333,
+        "quantum_posture": "Classical",
+        "reversibility": {
+          "kind": "DeterministicQuorum"
+        },
+        "slashable_backing": false
+      },
+      "name": "deterministic_quorum_alone_blocks"
+    },
+    {
+      "expected": {
+        "hex": "0200000000000000000101010101010d05"
+      },
+      "input": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 3333,
+        "quantum_posture": "Lattice",
+        "reversibility": {
+          "kind": "DeterministicQuorum"
+        },
+        "slashable_backing": true
+      },
+      "name": "deterministic_quorum_with_stake_allows"
+    },
+    {
+      "expected": {
+        "hex": "030000000000000000020101000101270f"
+      },
+      "input": {
+        "attestation": {
+          "event_root": false,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 9999,
+        "quantum_posture": "Hash",
+        "reversibility": {
+          "kind": "CryptographicValidity"
+        },
+        "slashable_backing": true
+      },
+      "name": "unauthenticated_events_block"
+    },
+    {
+      "expected": {
+        "hex": "0300000000000000000201010101010000"
+      },
+      "input": {
+        "attestation": {
+          "event_root": true,
+          "parent": true,
+          "state_root": true,
+          "tx_root": true
+        },
+        "fault_tolerance_bps": 0,
+        "quantum_posture": "Hash",
+        "reversibility": {
+          "kind": "CryptographicValidity"
+        },
+        "slashable_backing": true
+      },
+      "name": "zero_bps_blocks"
+    }
+  ]
+}
