@@ -9,7 +9,7 @@
 //! Usage:
 //!   garden-phone self-test <dir>
 //!   garden-phone read <dir> <record>
-//!   garden-phone create <dir> <title> [name]
+//!   garden-phone create <dir> <title> [name] [listen multiaddr]
 //!   garden-phone join <dir> <record> <name>
 //!   garden-phone serve <dir> <port> [record] [name]
 //!   garden-phone return-check <dir> <record> [name]
@@ -95,7 +95,8 @@ fn main() -> ExitCode {
             if !gate(&phone) {
                 return ExitCode::FAILURE;
             }
-            say(phone.create(title, name).map_err(|e| e.to_string()))
+            let address = args.get(5).cloned();
+            say(phone.create(title, name, address).map_err(|e| e.to_string()))
         }
         "join" => {
             let record = args.get(3).cloned().unwrap_or_default();
