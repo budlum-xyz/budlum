@@ -357,6 +357,15 @@ fn serve(dir: &Path, record: Option<&str>) -> Result<(Serving, Value), String> {
 
 /// Ask a `serve` door one path and read its JSON answer.
 fn get_path(port: u16, path: &str) -> Result<Value, String> {
+    get_with_status(port, path).map(|(_, body)| body)
+}
+
+/// The same read, keeping the status line.
+///
+/// A door that answers a refusal with `200` and an `{"error":...}` body is
+/// indistinguishable from an answer to a caller that reads the status first,
+/// which is what most do. The checks that care ask for the status.
+fn get_with_status(port: u16, path: &str) -> Result<(u16, Value), String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
@@ -369,10 +378,16 @@ fn get_path(port: u16, path: &str) -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     let mut raw = String::new();
     stream.read_to_string(&mut raw).map_err(|e| e.to_string())?;
-    let Some((_, payload)) = raw.split_once("\r\n\r\n") else {
+    let Some((head, payload)) = raw.split_once("\r\n\r\n") else {
         return Err(format!("no body from {path}: {raw}"));
     };
-    serde_json::from_str(payload).map_err(|e| e.to_string())
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| format!("no status line from {path}: {head}"))?;
+    let body = serde_json::from_str(payload).map_err(|e| e.to_string())?;
+    Ok((status, body))
 }
 
 fn status_over(port: u16) -> Result<Value, String> {
@@ -607,6 +622,20 @@ fn garden_apk_clipboard_join() -> Result<(), String> {
         fetched.get("verified").and_then(Value::as_bool),
         Some(true),
         "the phone did not verify what it fetched: {fetched}"
+    );
+
+    // ...and what it does with a content id no Garden holds. A door that
+    // answers "200, and here is an error inside" is a door a caller cannot
+    // tell from success without reading the body, which most callers do not.
+    let missing = "0".repeat(64);
+    let (status, body) = get_with_status(serving.port, &format!("/fetch/{missing}"))?;
+    assert_ne!(
+        status, 200,
+        "the phone answered 200 for a content id it does not hold: {body}"
+    );
+    assert!(
+        body.get("error").is_some(),
+        "the refusal does not say what was refused: {body}"
     );
     drop(serving);
     Ok(())

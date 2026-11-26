@@ -96,7 +96,9 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             let address = args.get(5).cloned();
-            say(phone.create(title, name, address).map_err(|e| e.to_string()))
+            say(phone
+                .create(title, name, address)
+                .map_err(|e| e.to_string()))
         }
         "join" => {
             let record = args.get(3).cloned().unwrap_or_default();
@@ -332,12 +334,19 @@ fn answer_one(phone: &Arc<GardenPhone>, mut stream: TcpStream) {
     } else {
         phone.status()
     };
-    let body = match answer {
-        Ok(answer) => answer.json,
-        Err(e) => format!("{{\"error\":{}}}", json_string(&e.to_string())),
+    // A refusal is not a success with a sad body. A caller that only reads
+    // the status line - which is most of them - would take `{"error":...}`
+    // for an answer and go on to parse a Garden that was never read. The
+    // status says which it was, and the body says why.
+    let (status, body) = match answer {
+        Ok(answer) => ("200 OK", answer.json),
+        Err(e) => (
+            "409 CONFLICT",
+            format!("{{\"error\":{}}}", json_string(&e.to_string())),
+        ),
     };
     let head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(head.as_bytes());
