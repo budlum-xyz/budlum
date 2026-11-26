@@ -1911,6 +1911,7 @@ jobs:
           workspaces: |
             crates/bpqs
             crates/bud-codec
+            crates/budlum-nipopow
             crates/note-packing
             crates/uel-abi
             execution/budzero
@@ -2062,6 +2063,13 @@ jobs:
       - name: Tests (uel-abi)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo test --manifest-path crates/uel-abi/Cargo.toml
+      - name: Tests (budlum-nipopow)
+        # The crate is not a dependency of the root package, so `cargo test
+        # --lib` at the root never compiles it and its proof verification
+        # tests would never run. Named here for the same reason the other
+        # standalone crates are: an unbuilt test is not evidence.
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path crates/budlum-nipopow/Cargo.toml
       - name: Tests (ee-mock)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo test --manifest-path execution/mock/Cargo.toml

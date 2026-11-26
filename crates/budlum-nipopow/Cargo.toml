@@ -1,0 +1,23 @@
+[package]
+name = "budlum-nipopow"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "NIPoPoW succinct proof-of-work finality verification adapter for Budlum (Universal Settlement Layer)"
+repository = "https://github.com/budlum-xyz/budlum"
+
+[dependencies]
+# FIPS 180-4 SHA-256: the production interlink/anchor digest. The verification
+# logic is hash-agnostic; it only consumes a fixed 32-byte digest.
+sha2 = { version = "0.10", default-features = false }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_import_braces = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

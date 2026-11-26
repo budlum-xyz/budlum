@@ -2,12 +2,8 @@
 # The surface is enumerated from the tree; growth and silent removal
 # both fail the gate. Re-measure in the same change that moves it:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- native-security-review --print-surface
-# Native security review attack-surface baseline (step 1).
-# The surface is enumerated from the tree; growth and silent removal
-# both fail the gate. Re-measure in the same change that moves it:
-#   cargo run --release --manifest-path xtask/gates/Cargo.toml -- native-security-review --print-surface
-digest: 014535a9686054f15ad32749d794d063343ca364a213cf9b04c303d25bdba754
-entries: 101
+digest: 145d8f486fded85f17c783d80706d24b2bfbd7f12a817eee58d905d18ec3c368
+entries: 102
 bin	src/bin/bud-migrate.rs
 bin	src/bin/bud.rs
 bin	src/bin/budlum-domain-producer.rs
@@ -44,6 +40,7 @@ manifest	crates/ai-inference/crates/ai-tune/Cargo.toml
 manifest	crates/bpqs/Cargo.toml
 manifest	crates/bud-codec/Cargo.toml
 manifest	crates/budlum-explorer/Cargo.toml
+manifest	crates/budlum-nipopow/Cargo.toml
 manifest	crates/budlum-types/Cargo.toml
 manifest	crates/note-packing/Cargo.toml
 manifest	crates/uel-abi/Cargo.toml

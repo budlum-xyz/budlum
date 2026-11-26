@@ -15,6 +15,7 @@ const SCAN_ROOTS: &[&str] = &[
     "crates/bpqs",
     "crates/bud-codec",
     "crates/budlum-explorer",
+    "crates/budlum-nipopow",
     "crates/budlum-types",
     "crates/note-packing",
     "crates/uel-abi",
