@@ -123,8 +123,25 @@ impl GardenPhone {
     /// Garden with only that was refused outright: the invite would have
     /// carried nowhere to go. So the address of the network this phone is
     /// actually on is found first and announced alongside the binding.
-    pub fn create(&self, title: String, name: String) -> Result<GardenAnswer, GardenError> {
+    pub fn create(
+        &self,
+        title: String,
+        name: String,
+        address: Option<String>,
+    ) -> Result<GardenAnswer, GardenError> {
         let mut options = Self::options();
+        if let Some(given) = address.filter(|a| !a.trim().is_empty()) {
+            // A caller that already knows where it answers says so. The
+            // app never does - it is the phone, and the phone asks the
+            // network it is on - but a terminal driving this library can
+            // name a address, which is how the founding path is exercised
+            // somewhere other than a handset.
+            options.listen = Some(given);
+            return answer(
+                self.runtime
+                    .block_on(self.service.create(title, name, options)),
+            );
+        }
         // Bound to that one interface rather than announced on top of a
         // binding to all of them: the port is picked by the system, and
         // only the binding knows which one it got. An announcement would
