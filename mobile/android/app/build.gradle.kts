@@ -15,8 +15,11 @@ android {
         applicationId = "network.budlum.validator"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0-testnet"
+        // Goes up with every build the owner is given, so Android can
+        // tell a newer one from an older one. The name is what the
+        // release is called on GitHub.
+        versionCode = 4
+        versionName = "0.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
