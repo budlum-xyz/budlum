@@ -117,6 +117,18 @@ pub enum BoundedReadError {
         /// The path that was being read.
         path: std::path::PathBuf,
     },
+    /// The path exists but is not a regular file.
+    ///
+    /// A FIFO is the case this variant exists for: `File::open` on a named
+    /// pipe blocks until a writer appears, so a reader that takes its input
+    /// path from a peer can be parked forever by whoever names the path.
+    /// Directories land here too - `read` on one fails with `IsADirectory`
+    /// anyway, and refusing before the open keeps every non-file in one
+    /// place.
+    NotRegular {
+        /// The path that was being read.
+        path: std::path::PathBuf,
+    },
 }
 
 impl std::fmt::Display for BoundedReadError {
@@ -144,6 +156,9 @@ impl std::fmt::Display for BoundedReadError {
             Self::NotUtf8 { path } => {
                 write!(f, "{} is not valid UTF-8", path.display())
             }
+            Self::NotRegular { path } => {
+                write!(f, "{} is not a regular file", path.display())
+            }
         }
     }
 }
@@ -166,7 +181,7 @@ impl BoundedReadError {
     pub fn is_not_found(&self) -> bool {
         match self {
             Self::Io { source, .. } => source.kind() == std::io::ErrorKind::NotFound,
-            Self::TooLarge { .. } | Self::NotUtf8 { .. } => false,
+            Self::TooLarge { .. } | Self::NotUtf8 { .. } | Self::NotRegular { .. } => false,
         }
     }
 }
@@ -175,7 +190,7 @@ impl std::error::Error for BoundedReadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
-            Self::TooLarge { .. } | Self::NotUtf8 { .. } => None,
+            Self::TooLarge { .. } | Self::NotUtf8 { .. } | Self::NotRegular { .. } => None,
         }
     }
 }
@@ -190,8 +205,26 @@ impl std::error::Error for BoundedReadError {
 ///
 /// [`BoundedReadError::TooLarge`] when the file exceeds `limit`, before the
 /// memory is committed; [`BoundedReadError::NotUtf8`] when the bytes are not
-/// UTF-8; [`BoundedReadError::Io`] for anything else.
+/// UTF-8; [`BoundedReadError::NotRegular`] when the path is not a regular
+/// file (a FIFO would otherwise block the open forever); [`BoundedReadError::Io`]
+/// for anything else.
 pub fn read_to_string_bounded(path: &Path, limit: u64) -> Result<String, BoundedReadError> {
+    // Refuse non-files before the open. `File::open` on a FIFO blocks until
+    // a writer appears on the other end, so the reader never returns and the
+    // ceiling below never gets a chance to matter. The check follows
+    // symlinks (`fs::metadata`, not `symlink_metadata`): a symlink to a
+    // regular file is a regular file for reading purposes, and the size
+    // ceiling still applies to its target; a symlink to a FIFO is a FIFO.
+    // A missing path falls through to `File::open` so the caller still sees
+    // the canonical not-found error, and so does any path whose metadata
+    // cannot be read for a reason the open will report the same way.
+    if let Ok(meta) = std::fs::metadata(path) {
+        if !meta.is_file() {
+            return Err(BoundedReadError::NotRegular {
+                path: path.to_path_buf(),
+            });
+        }
+    }
     let file = File::open(path).map_err(|source| BoundedReadError::Io {
         path: path.to_path_buf(),
         source,
