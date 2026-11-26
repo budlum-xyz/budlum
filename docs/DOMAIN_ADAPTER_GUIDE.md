@@ -108,6 +108,23 @@ Equivocation or a parent mismatch freezes the domain in the block; a
 governance unfreeze is applied in a later block. Custom plugin domains that
 cannot be verified in a block are refused.
 
+A reorganised proof-of-work domain is the same case. A second verified
+commitment for a height the domain already committed, with another block,
+is evidence and not a replacement: the commitment that settled first stays
+in the book and the domain is frozen in the block that carries the second
+one. What that does to value:
+
+- A bridge lock minted before the freeze stays minted. Nothing is clawed
+  back.
+- Nothing more is minted from the frozen domain, not even a lock proven
+  under the block that had settled. Such a lock stays a lock and returns to
+  its owner at its own expiry.
+- Other domains keep committing, and value minted before the freeze still
+  leaves through them.
+- A domain with an economic-guard policy mints only at the value-safe
+  depth: one registered with fewer than six confirmations has a zero
+  ceiling.
+
 ## 5. What each adapter actually checks
 
 This table is the contract `CommitmentAttestation::for_kind` encodes; the

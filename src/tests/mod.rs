@@ -298,3 +298,7 @@ pub mod rpc_admin_wallet_identity_coverage;
 // Property, invariant, and refutation coverage for Universal Finality certificates and bounds.
 #[cfg(test)]
 pub mod universal_finality_properties;
+
+// What a reorganised proof-of-work domain does to value that already settled.
+#[cfg(test)]
+pub mod pow_reorg_after_settlement;
