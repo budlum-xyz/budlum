@@ -700,6 +700,30 @@ fn file_round_trip(
             bytes.len()
         ));
     }
+
+    // The size matching is not the claim worth making. A picture that
+    // comes back the right length and the wrong bytes is still a broken
+    // picture, and the phone decodes these bytes into something a person
+    // looks at, so they are compared one by one.
+    let hex = field(&got.json, "hex").ok_or("the fetch answer carried no bytes")?;
+    let back = bytes_of(&hex)?;
+    if back != bytes {
+        let at = back
+            .iter()
+            .zip(bytes.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or(0);
+        return Err(format!("what came back differs from the file at byte {at}"));
+    }
+    println!("compared: every one of {} bytes is the same", bytes.len());
+
+    // A picture is only a picture if its header survived the trip.
+    if mime == "image/png" && !back.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return Err("the bytes came back without a PNG header".into());
+    }
+    if field(&got.json, "verified").as_deref() != Some("true") {
+        return Err("the chain did not vouch for what it handed back".into());
+    }
     Ok(())
 }
 
@@ -713,6 +737,20 @@ fn field(json: &str, key: &str) -> Option<String> {
         let end = rest.find([',', '}']).unwrap_or(rest.len());
         rest.get(..end).map(|n| n.trim().to_string())
     }
+}
+
+/// Bytes from the hex the core hands back.
+fn bytes_of(hex: &str) -> Result<Vec<u8>, String> {
+    if hex.len() % 2 != 0 {
+        return Err("the hex came back with an odd number of digits".into());
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let digits = hex.as_bytes();
+    for pair in digits.chunks(2) {
+        let text = std::str::from_utf8(pair).map_err(|e| e.to_string())?;
+        out.push(u8::from_str_radix(text, 16).map_err(|e| e.to_string())?);
+    }
+    Ok(out)
 }
 
 /// Hex, the one binary encoding the core's publish takes.
