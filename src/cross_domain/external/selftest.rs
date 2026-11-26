@@ -113,6 +113,9 @@ pub enum RefusalKind {
     UnslashableBacking,
     Crypto,
     Unavailable,
+    /// The caller named an adapter no registry holds. Named apart from
+    /// the refusals about evidence: nothing was examined.
+    UnknownAdapter,
 }
 
 impl RefusalKind {
@@ -129,6 +132,7 @@ impl RefusalKind {
             AdapterError::UnslashableBacking => Self::UnslashableBacking,
             AdapterError::Crypto { .. } => Self::Crypto,
             AdapterError::Unavailable { .. } => Self::Unavailable,
+            AdapterError::UnknownAdapter(_) => Self::UnknownAdapter,
         }
     }
 
@@ -138,6 +142,7 @@ impl RefusalKind {
             Self::WrongAdapter => "wrong-adapter",
             Self::UnsupportedEvidenceVersion => "unsupported-evidence-version",
             Self::Malformed => "malformed",
+            Self::UnknownAdapter => "unknown-adapter",
             Self::ConsensusRule => "consensus-rule",
             Self::DeclarationMismatch => "declaration-mismatch",
             Self::InsufficientDepth => "insufficient-depth",
