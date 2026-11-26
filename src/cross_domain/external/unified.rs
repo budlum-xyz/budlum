@@ -46,7 +46,8 @@ use super::restaking_avs::RestakingAvsAdapter;
 use super::simplex_bft::SimplexBftAdapter;
 use super::solana_tower_bft::SolanaTowerBftAdapter;
 use super::spec::{
-    AdapterDescriptor, AdapterError, FinalityAttestation, RawConsensusEvidence, VerificationPolicy,
+    AdapterDescriptor, AdapterError, FinalityAttestation, RawConsensusEvidence,
+    VerificationPolicy,
 };
 use super::stark_validity_rollup::StarkValidityRollupAdapter;
 use super::stellar_fba::StellarScpAdapter;
@@ -244,7 +245,7 @@ impl NetworkCatalog {
     }
 
     /// The descriptor of one registered adapter, by the hex of its
-    /// [`AdapterId::as_bytes`].
+    /// [`AdapterId`](super::spec::AdapterId)`::as_bytes`.
     #[must_use]
     pub fn profile_of(&self, id: &str) -> Option<AdapterDescriptor> {
         self.adapters.get(id).map(|adapter| adapter.descriptor())
@@ -252,7 +253,8 @@ impl NetworkCatalog {
 
     /// Verify evidence against the adapter that claims it.
     ///
-    /// `adapter_id` is the hex of the adapter's [`AdapterId::as_bytes`],
+    /// `adapter_id` is the hex of the adapter's
+    /// [`AdapterId`](super::spec::AdapterId)`::as_bytes`,
     /// which is the key every entry of [`Self::descriptors`] is filed under.
     ///
     /// # Errors
@@ -270,7 +272,7 @@ impl NetworkCatalog {
             .get(adapter_id)
             .ok_or_else(|| AdapterError::UnknownAdapter(adapter_id.to_string()))?;
         // The caller names one adapter and the evidence names another: that
-        // is a mis-route, and the adapter itself refuses it by name.
+        // is a wrong route, and the adapter itself refuses it by name.
         adapter.verify(evidence, policy)
     }
 
@@ -339,11 +341,8 @@ fn family_of(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Named only by the tests below; importing either one at the top of the
-    // file is an unused import in the library build, which this repository
-    // denies.
     use crate::core::address::Address;
-    use crate::cross_domain::external::spec::AdapterId;
+    use super::spec::AdapterId;
 
     #[test]
     fn the_catalog_lists_the_chains_this_build_can_read() {
