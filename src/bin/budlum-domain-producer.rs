@@ -269,14 +269,19 @@ fn seed<const N: usize>(text: &str, what: &str) -> Result<[u8; N], String> {
 }
 
 fn read_keys(cli: &Cli) -> Result<QuorumKeys, String> {
+    use std::io::Read;
+    const MAX_QUORUM_KEYS_BYTES: u64 = 1_048_576;
     let path = cli
         .quorum_keys
         .as_ref()
         .ok_or_else(|| "--quorum-keys is required".to_string())?;
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("cannot open QuorumKeys {}: {e}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(path)
+        let mode = file
+            .metadata()
             .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?
             .permissions()
             .mode();
@@ -288,7 +293,17 @@ fn read_keys(cli: &Cli) -> Result<QuorumKeys, String> {
             ));
         }
     }
-    read_json(path, "QuorumKeys")
+    let mut raw = Vec::new();
+    file.take(MAX_QUORUM_KEYS_BYTES.saturating_add(1))
+        .read_to_end(&mut raw)
+        .map_err(|e| format!("cannot read QuorumKeys {}: {e}", path.display()))?;
+    if raw.len() as u64 > MAX_QUORUM_KEYS_BYTES {
+        return Err(format!(
+            "QuorumKeys {} exceeds {MAX_QUORUM_KEYS_BYTES}-byte limit",
+            path.display()
+        ));
+    }
+    serde_json::from_slice(&raw).map_err(|e| format!("{} is not a QuorumKeys: {e}", path.display()))
 }
 
 fn bft_members(

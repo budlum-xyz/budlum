@@ -429,6 +429,10 @@ impl MarketplaceRegistry {
                  listing to another"
             ));
         }
+        let next_offer_id = self
+            .next_offer_id
+            .checked_add(1)
+            .ok_or_else(|| "offer id counter exhausted".to_string())?;
         let offer = DataOffer {
             id,
             seller,
@@ -438,7 +442,7 @@ impl MarketplaceRegistry {
             created_at_block: current_block,
         };
         self.offers.insert(id, offer);
-        self.next_offer_id = self.next_offer_id.saturating_add(1);
+        self.next_offer_id = next_offer_id;
         Ok(id)
     }
 

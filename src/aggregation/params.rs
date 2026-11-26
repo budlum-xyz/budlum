@@ -50,6 +50,21 @@ pub struct AggParams {
     pub agg_share_bps: u16,
     /// Blocks a full node keeps proof bytes for.
     pub proof_retention_blocks: u64,
+    /// Block height at which `AggMode::On` activates on public Testnet
+    /// (Rung 4 of the aggregation ladder). `None` keeps `AggMode::On` closed.
+    pub activation_height: Option<u64>,
+    /// Require proven (non-attested-only) tick proofs on public Testnet before
+    /// `AggMode::On` may activate (Rung 4).
+    pub require_proven_ticks: bool,
+}
+
+impl AggParams {
+    /// True when the Rung 4 Testnet activation prerequisites are declared:
+    /// a positive `activation_height` and `require_proven_ticks = true`.
+    #[must_use]
+    pub const fn testnet_ladder_ready(&self) -> bool {
+        matches!(self.activation_height, Some(h) if h > 0) && self.require_proven_ticks
+    }
 }
 
 impl Default for AggParams {
@@ -67,6 +82,8 @@ impl Default for AggParams {
             claim_fee_per_byte: 64,
             agg_share_bps: 5000,
             proof_retention_blocks: 100_000,
+            activation_height: None,
+            require_proven_ticks: false,
         }
     }
 }

@@ -11,12 +11,39 @@
 
 use std::fmt;
 
+use crate::cross_domain::external::phase_a_dual::{classify_root_proof_status, RootProofStatus};
 use crate::settlement::registries::SettlementRegistries;
 use crate::settlement::universal_finality::{
     compose_cross_domain_route, EconomicSecurityBound, FinalityBinds, FinalityBucket,
     FinalityGuarantee, FinalityPendingReason, FinalityVerdict, GlobalFinalityCertificate,
     RouteFinalityBound,
 };
+
+/// Minimum batch-proof liveness level required by a value gate.
+///
+/// Liveness does not depend on the prover: when the prover lags behind
+/// finalized voted blocks, `VotedOnly` gates continue to settle while
+/// `ProvenRequired` gates wait until `proven_height` catches up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofRequirement {
+    /// Voted finality suffices; proceeds while batch proving is `PendingProof`
+    /// or `DelayExceeded`.
+    VotedOnly,
+    /// Requires `RootProofStatus::Proven` (`block_height <= proven_height`);
+    /// refuses while `PendingProof` or `DelayExceeded`.
+    ProvenRequired,
+}
+
+/// Parameters for enforcing batch-proof liveness on a value gate decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProofLivenessCheck {
+    /// Finalized block height inspected by the gate.
+    pub block_height: u64,
+    /// Latest height covered by an anchored aggregate proof.
+    pub proven_height: u64,
+    /// Whether voted finality suffices or a proven root is required.
+    pub requirement: ProofRequirement,
+}
 
 /// Value-carrying settlement gate requesting a finality decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +154,16 @@ pub enum ValueGateRefusal {
         /// Deterministic human-readable guarantee label of the insufficient route.
         label: String,
     },
+    /// Value gate requires a proven block root (`block_height <= proven_height`),
+    /// but the prover has not yet covered `block_height`.
+    ProofPending {
+        /// Finalized block height inspected by the gate.
+        block_height: u64,
+        /// Latest height covered by an anchored aggregate proof.
+        proven_height: u64,
+        /// Exact `RootProofStatus` lag classification (`PendingProof` or `DelayExceeded`).
+        status: RootProofStatus,
+    },
 }
 
 impl fmt::Display for ValueGateRefusal {
@@ -180,6 +217,14 @@ impl fmt::Display for ValueGateRefusal {
             } => write!(
                 f,
                 "route finality insufficient for source {source_domain} -> {target_domain:?} ({label})"
+            ),
+            Self::ProofPending {
+                block_height,
+                proven_height,
+                status,
+            } => write!(
+                f,
+                "value gate waiting for aggregate proof at height {block_height} (proven_height={proven_height}, status={status:?})"
             ),
         }
     }
@@ -426,6 +471,50 @@ pub fn enforce_quantum_posture(
         }
     }
     Ok(())
+}
+
+/// Evaluate a value gate with explicit batch-proof liveness enforcement.
+///
+/// Under `ProofRequirement::VotedOnly`, the gate succeeds whenever the
+/// finality certificate, sentry quantum posture, and required binds pass,
+/// even if the prover is behind (`PendingProof` or `DelayExceeded`),
+/// preserving chain liveness.
+/// Under `ProofRequirement::ProvenRequired`, the gate refuses with
+/// `ValueGateRefusal::ProofPending` until `proven_height >= block_height`.
+///
+/// # Errors
+///
+/// Returns `ValueGateRefusal` if the finality certificate rejects the route
+/// or if `requirement == ProofRequirement::ProvenRequired` while
+/// `block_height > proven_height`.
+pub fn check_certificate_value_gate_with_proof_level(
+    cert: &GlobalFinalityCertificate,
+    sentry: &crate::cross_domain::external::sentry::ConsensusSentry,
+    gate: ValueGate,
+    source_domain: u32,
+    target_domain: Option<u32>,
+    required_binds: FinalityBinds,
+    liveness: ProofLivenessCheck,
+) -> Result<ValueGateVerdict, ValueGateRefusal> {
+    let verdict = check_certificate_value_gate(
+        cert,
+        sentry,
+        gate,
+        source_domain,
+        target_domain,
+        required_binds,
+    )?;
+    if liveness.requirement == ProofRequirement::ProvenRequired {
+        let status = classify_root_proof_status(liveness.block_height, liveness.proven_height);
+        if status != RootProofStatus::Proven {
+            return Err(ValueGateRefusal::ProofPending {
+                block_height: liveness.block_height,
+                proven_height: liveness.proven_height,
+                status,
+            });
+        }
+    }
+    Ok(verdict)
 }
 
 /// Refuse any value-moving gate whose `domain_id` is in the certificate's

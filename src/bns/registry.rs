@@ -631,6 +631,9 @@ impl BnsRegistry {
         let expires_at = current_epoch
             .checked_add(duration)
             .ok_or(BnsError::InvalidDuration)?;
+        expires_at
+            .checked_add(Self::GRACE_PERIOD)
+            .ok_or(BnsError::InvalidDuration)?;
         let record = NameRecord::try_new(name.clone(), owner, current_epoch, expires_at)?;
         // Cap total name count - fail-closed.
         //
@@ -692,6 +695,9 @@ impl BnsRegistry {
         let base_epoch = record.expires_at.max(current_epoch);
         let new_expires_at = base_epoch
             .checked_add(duration)
+            .ok_or(BnsError::InvalidDuration)?;
+        new_expires_at
+            .checked_add(Self::GRACE_PERIOD)
             .ok_or(BnsError::InvalidDuration)?;
         if new_expires_at.saturating_sub(current_epoch) > MAX_DURATION {
             return Err(BnsError::InvalidDuration);

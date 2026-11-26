@@ -1,9 +1,5 @@
 //! `ProofCarryingLiquidation`: oracle-free AMM/TWAP state-root-proven
-//! cross-domain liquidation engine.
-//!
-//! WIRING: unwired - oracle-free AMM/TWAP cross-domain liquidation proof
-//! verifier awaits its dedicated settlement transaction door and RPC submission
-//! endpoint in a subsequent integration step.
+//! cross-domain liquidation engine and wallet quote-deviation reference.
 //!
 //! This module implements a liquidation mechanism that does not depend on
 //! any external price oracle. Instead, it uses a Time-Weighted Average Price
@@ -289,6 +285,65 @@ fn compute_twap_price(observations: &[AmmReserveSnapshot]) -> Result<u128, Liqui
     }
 
     Ok(weighted_sum / total_duration)
+}
+
+/// Default advisory warning threshold for solver quote deviation from proven
+/// AMM reserve TWAP (`500` bps = `5.00%`).
+pub const DEFAULT_QUOTE_DEVIATION_WARN_BPS: u64 = 500;
+
+/// Non-binding wallet advisory comparing a solver quote against the proven
+/// AMM reserve TWAP (K4-G O-G.2).
+///
+/// The reference price never overrides or blocks competitive solver quotes;
+/// it exists solely so wallets can warn users when a quote deviates sharply
+/// from settled on-chain reserves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuoteDeviationAdvisory {
+    /// Proven AMM reserve TWAP scaled by `10^18`.
+    pub reference_twap_scaled: u128,
+    /// Solver-quoted price scaled by `10^18`.
+    pub quoted_price_scaled: u128,
+    /// Absolute deviation from `reference_twap_scaled` in basis points.
+    pub deviation_bps: u64,
+    /// Advisory warning threshold in basis points.
+    pub warn_threshold_bps: u64,
+    /// `true` when `deviation_bps > warn_threshold_bps`.
+    pub exceeds_threshold: bool,
+}
+
+/// Evaluate a solver quote against proven AMM reserve observations without
+/// calling any price oracle (K4-G O-G.1 & O-G.2).
+///
+/// # Errors
+///
+/// Returns [`LiquidationError`] when fewer than `MIN_TWAP_EPOCHS` observations
+/// are provided, any reserve is zero, or arithmetic overflows.
+pub fn evaluate_quote_against_proven_twap(
+    observations: &[AmmReserveSnapshot],
+    quoted_price_scaled: u128,
+    warn_threshold_bps: u64,
+) -> Result<QuoteDeviationAdvisory, LiquidationError> {
+    let obs_len = u64::try_from(observations.len()).unwrap_or(u64::MAX);
+    if obs_len < MIN_TWAP_EPOCHS {
+        return Err(LiquidationError::InsufficientObservations {
+            got: observations.len(),
+            min: MIN_TWAP_EPOCHS,
+        });
+    }
+    let reference_twap_scaled = compute_twap_price(observations)?;
+    if reference_twap_scaled == 0 {
+        return Err(LiquidationError::ZeroReserve { epoch: 0 });
+    }
+    let diff = quoted_price_scaled.abs_diff(reference_twap_scaled);
+    let dev_wide = diff.saturating_mul(u128::from(BPS_DEN)) / reference_twap_scaled;
+    let deviation_bps = u64::try_from(dev_wide).unwrap_or(u64::MAX);
+    Ok(QuoteDeviationAdvisory {
+        reference_twap_scaled,
+        quoted_price_scaled,
+        deviation_bps,
+        warn_threshold_bps,
+        exceeds_threshold: deviation_bps > warn_threshold_bps,
+    })
 }
 
 /// Compute the amount of collateral to seize for a liquidation.

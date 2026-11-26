@@ -307,6 +307,18 @@ enum Command {
         #[command(subcommand)]
         action: EventBusAction,
     },
+    /// Compare a solver quote against proven AMM reserve TWAP (non-binding advisory).
+    QuoteCheck {
+        /// Path to JSON file containing an array of `AmmReserveSnapshot` records.
+        #[arg(long, required = true)]
+        observations: String,
+        /// Solver-quoted price scaled by 1e18.
+        #[arg(long, required = true)]
+        quoted_price_scaled: u128,
+        /// Advisory warning threshold in basis points (default 500 = 5%).
+        #[arg(long, default_value_t = budlum_core::settlement::liquidation_proof::DEFAULT_QUOTE_DEVIATION_WARN_BPS)]
+        warn_bps: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4843,11 +4855,36 @@ fn main() {
         Command::RewardPool { epoch } => run_reward_pool(*epoch),
         Command::Notary { action } => run_notary(action),
         Command::EventBus { action } => run_event_bus(action),
+        Command::QuoteCheck {
+            observations,
+            quoted_price_scaled,
+            warn_bps,
+        } => run_quote_check(observations, *quoted_price_scaled, *warn_bps),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+fn run_quote_check(
+    observations_path: &str,
+    quoted_price_scaled: u128,
+    warn_bps: u64,
+) -> Result<(), String> {
+    use budlum_core::settlement::liquidation_proof::{
+        evaluate_quote_against_proven_twap, AmmReserveSnapshot,
+    };
+    let raw = std::fs::read(observations_path)
+        .map_err(|e| format!("failed to read observations `{observations_path}`: {e}"))?;
+    let snapshots: Vec<AmmReserveSnapshot> = serde_json::from_slice(&raw)
+        .map_err(|e| format!("invalid AmmReserveSnapshot JSON: {e}"))?;
+    let advisory = evaluate_quote_against_proven_twap(&snapshots, quoted_price_scaled, warn_bps)
+        .map_err(|e| format!("TWAP reference evaluation failed: {e}"))?;
+    let out = serde_json::to_string_pretty(&advisory)
+        .map_err(|e| format!("failed to serialize advisory: {e}"))?;
+    println!("{out}");
+    Ok(())
 }
 
 fn run_event_bus(action: &EventBusAction) -> Result<(), String> {

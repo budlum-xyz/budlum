@@ -313,7 +313,14 @@ impl NftFolderRegistry {
             return Err(SocialFiBud3Error::FolderLimitExceeded);
         }
         let folder_id = self.next_folder_id;
-        self.next_folder_id = self.next_folder_id.saturating_add(1);
+        let next_folder_id = self
+            .next_folder_id
+            .checked_add(1)
+            .ok_or(SocialFiBud3Error::FolderLimitExceeded)?;
+        if self.folders.contains_key(&folder_id) {
+            return Err(SocialFiBud3Error::FolderLimitExceeded);
+        }
+        self.next_folder_id = next_folder_id;
         self.folders.insert(
             folder_id,
             NftFolder {

@@ -3836,6 +3836,14 @@ impl ChainActor {
                 }
                 ChainCommand::GetRelayerStatus(message_id, tx) => {
                     let relayer = &self.blockchain.state.settlement.relayer;
+                    let concentration = self
+                        .blockchain
+                        .state
+                        .settlement
+                        .relayer_policy
+                        .get_solver_concentration_report(
+                            crate::relayer::policy::DEFAULT_SOLVER_CONCENTRATION_WARN_BPS,
+                        );
                     let pending = message_id.and_then(|id| relayer.pending_relay(&id));
                     let record = message_id.and_then(|id| relayer.ledger.get_record(&id));
                     let _ = tx.send(serde_json::json!({
@@ -3845,6 +3853,7 @@ impl ChainActor {
                         "ledgerRoot": format!("0x{}", hex::encode(relayer.ledger_root())),
                         "pending": pending,
                         "record": record,
+                        "solverConcentration": concentration,
                     }));
                 }
                 ChainCommand::GetRelayerIntent(intent_id, tx) => {

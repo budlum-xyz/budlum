@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Maximum number of queued out-of-order commitments held above a domain's
 /// committed tip so a stalled domain cannot accumulate unbounded state.
-pub const MAX_PENDING_COMMITMENTS_PER_DOMAIN: usize = 64;
+pub const MAX_PENDING_COMMITMENTS_PER_DOMAIN: usize = 256;
 
 /// Default anti-withholding inclusion SLA window in Budlum blocks before an
 /// unadvanced pending commitment is flagged as overdue.

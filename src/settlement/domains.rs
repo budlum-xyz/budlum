@@ -2425,6 +2425,86 @@ fn execute_object_layer_tx(
     Ok(())
 }
 
+/// Enforce K4-C O-C.10 route finality and economic outflow ceiling on relayer
+/// intents whenever the universal finality certificate covers `source_domain`
+/// or `target_domain`.
+///
+/// - Any covered leg whose certificate verdict is `Pending` or `Refuted` is
+///   refused fail-closed ("Pending domain legs are never taken").
+/// - Every covered leg's route guarantee is composed via
+///   `compose_cross_domain_route` and must pass `admits_cross_domain_value()`.
+/// - Cumulative outflow `prior_outflow_atoms + amount_atoms` on each covered
+///   domain must stay within `EconomicSecurityBound::safe_value_outflow_ceiling_atoms`
+///   derived directly from that domain's certificate row.
+fn enforce_relayer_route_finality_and_ceiling(
+    state: &AccountState,
+    source_domain: u32,
+    target_domain: u32,
+    amount_atoms: u128,
+) -> Result<(), SettlementTxError> {
+    let Some(cert) = state
+        .settlement
+        .universal_finality_certificate(state.current_block_height)
+    else {
+        return Ok(());
+    };
+    let hub = crate::settlement::universal_finality::FinalityGuarantee::settlement_hub();
+    let mut legs = [source_domain, target_domain];
+    let leg_count = if source_domain == target_domain { 1 } else { 2 };
+    for domain_id in legs.iter_mut().take(leg_count) {
+        let dom = *domain_id;
+        let Some(proof) = cert.prove_domain(dom) else {
+            continue;
+        };
+        match proof.entry.verdict {
+            crate::settlement::universal_finality::FinalityVerdict::Established => {}
+            crate::settlement::universal_finality::FinalityVerdict::Pending { reason } => {
+                return Err(SettlementTxError::Refused(format!(
+                    "relayer intent cannot take leg on pending domain {dom} ({reason:?})"
+                )));
+            }
+            crate::settlement::universal_finality::FinalityVerdict::Refuted { code } => {
+                return Err(SettlementTxError::Refused(format!(
+                    "relayer intent cannot take leg on refuted domain {dom} (code {code})"
+                )));
+            }
+        }
+        let route = crate::settlement::universal_finality::compose_cross_domain_route(
+            &proof.entry.guarantee,
+            &hub,
+            &hub,
+        );
+        if !proof.entry.guarantee.admits_cross_domain_value()
+            || !route.source_admits_value_transfer
+            || route.bottleneck_fault_tolerance_bps == 0
+        {
+            return Err(SettlementTxError::Refused(format!(
+                "relayer intent route guarantee on domain {dom} does not admit cross-domain value ({})",
+                proof.entry.guarantee.label()
+            )));
+        }
+        let econ = crate::settlement::universal_finality::EconomicSecurityBound::derive(
+            &proof.entry.guarantee,
+            proof.entry.bond_atoms,
+            proof.entry.bond_atoms,
+        );
+        let prior = state
+            .settlement
+            .relayer_policy
+            .domain_outflow_atoms
+            .get(&dom)
+            .copied()
+            .unwrap_or(0);
+        if prior.saturating_add(amount_atoms) > econ.safe_value_outflow_ceiling_atoms {
+            return Err(SettlementTxError::Refused(format!(
+                "relayer intent exceeds economic outflow ceiling on domain {dom}: {} + {} > {}",
+                prior, amount_atoms, econ.safe_value_outflow_ceiling_atoms
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn execute_relayer_intent_tx(
     state: &mut AccountState,
     ctx: &SettlementTxContext,
@@ -2458,6 +2538,15 @@ pub(crate) fn execute_relayer_intent_tx(
                         .map_err(SettlementTxError::Refused)?;
                 }
             }
+            // K4-C O-C.10: refuse taking legs from Pending/Refuted domains,
+            // routes failing admits_cross_domain_value, or domains whose
+            // certificate economic outflow ceiling would be exceeded.
+            enforce_relayer_route_finality_and_ceiling(
+                state,
+                intent.source_domain,
+                intent.target_domain,
+                u128::from(intent.max_fee),
+            )?;
             // K4-J O-J.3: enforce chain_id binding whenever ctx carries a
             // non-zero chain_id so testnet intents cannot replay on mainnet.
             let id = if ctx.chain_id != 0 {
@@ -2562,6 +2651,22 @@ pub(crate) fn execute_relayer_intent_tx(
                 intent.target_domain,
             )
             .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+            let intent_source_domain = intent.source_domain;
+            let intent_target_domain = intent.target_domain;
+            // K4-C O-C.10: enforce universal finality certificate route guarantee
+            // and cumulative per-domain economic outflow ceiling before mutating state.
+            enforce_relayer_route_finality_and_ceiling(
+                state,
+                intent_source_domain,
+                intent_target_domain,
+                u128::from(*paid_fee),
+            )?;
+            // K4-C O-C.7: one external delivery transfer cannot close two intents.
+            let transfer_key = state
+                .settlement
+                .relayer_policy
+                .ensure_delivery_transfer_unused(result.chain, &result.tx_hash)
+                .map_err(SettlementTxError::Refused)?;
             crate::relayer::policy::verify_intent_result(
                 &state.external_roots,
                 intent,
@@ -2602,6 +2707,15 @@ pub(crate) fn execute_relayer_intent_tx(
                     state.current_block_height,
                 )
                 .map_err(SettlementTxError::Refused)?;
+            state
+                .settlement
+                .relayer_policy
+                .record_delivery_transfer_and_outflow(
+                    transfer_key,
+                    intent_source_domain,
+                    intent_target_domain,
+                    u128::from(*paid_fee),
+                );
             state
                 .settlement
                 .relayer_policy

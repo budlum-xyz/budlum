@@ -847,6 +847,10 @@ impl IdentityRegistry {
         {
             return Err(IdentityError::DuplicateKeyId { did });
         }
+        let next_recovery_nonce = record
+            .recovery_nonce
+            .checked_add(1)
+            .ok_or_else(|| IdentityError::RecoveryNonceExhausted { did: did.clone() })?;
         for method in &mut record.methods {
             if method.revoked_at.is_none() {
                 method.revoked_at = Some(now);
@@ -857,7 +861,7 @@ impl IdentityRegistry {
             .push(VerificationMethod::new(new_key, MethodKind::MlDsa87));
         // The applied quorum is spent: the next recovery digest signs over
         // the incremented nonce, so these approvals can never run again.
-        record.recovery_nonce = record.recovery_nonce.saturating_add(1);
+        record.recovery_nonce = next_recovery_nonce;
         Ok(())
     }
 
@@ -1585,6 +1589,9 @@ pub enum IdentityError {
     /// operation is refused; a skipped approval is not "quorum short", it is
     /// a silent downgrade, which this crate names in its own headers.
     BadApproval(String),
+    /// The subject's recovery nonce reached `u64::MAX` and cannot advance
+    /// without making the last guardian quorum replayable.
+    RecoveryNonceExhausted { did: String },
 }
 
 impl std::fmt::Display for IdentityError {
@@ -1666,6 +1673,9 @@ impl std::fmt::Display for IdentityError {
                 )
             }
             Self::BadApproval(why) => write!(f, "a recovery approval is not sound: {why}"),
+            Self::RecoveryNonceExhausted { did } => {
+                write!(f, "{did} exhausted its u64 recovery nonce space")
+            }
         }
     }
 }

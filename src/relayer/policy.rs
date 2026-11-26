@@ -605,6 +605,67 @@ pub struct RelayerPolicyRegistry {
         with = "crate::core::map_keys"
     )]
     pub freeze_grace_blocks: BTreeMap<[u8; 32], u64>,
+    /// External delivery transfers (`delivery_transfer_key(chain, tx_hash)`)
+    /// already consumed to close an intent (K4-C O-C.7). Prevents one external
+    /// transfer from closing two separate intents.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub consumed_delivery_transfers: BTreeSet<[u8; 32]>,
+    /// Cumulative settled value outflow in atoms per domain (K4-C O-C.10).
+    /// Checked against the universal finality certificate's
+    /// `safe_value_outflow_ceiling_atoms`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub domain_outflow_atoms: BTreeMap<u32, u128>,
+}
+
+/// Maximum number of consumed external delivery transfer keys retained in
+/// consensus state to bound memory growth (A-F.1 / K4-C O-C.7).
+pub const MAX_CONSUMED_DELIVERY_TRANSFERS: usize = 65_536;
+
+/// Domain-separated canonical key for an external delivery transfer `(chain, tx_hash)`
+/// used to enforce K4-C O-C.7 (one external transfer cannot close two intents).
+///
+/// Canonicalizes `tx_hash` by trimming ASCII whitespace, stripping any `0x`/`0X`
+/// hex prefix, and lowercasing ASCII hex digits so `"0xAABB"`, `"0xaabb"`, and
+/// `"aabb"` all collide onto the same single-use key.
+#[must_use]
+pub fn delivery_transfer_key(chain: ExternalChain, tx_hash: &str) -> [u8; 32] {
+    let trimmed = tx_hash.trim();
+    let stripped = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    let canonical = stripped.to_ascii_lowercase();
+    let mut hasher = Sha256::new();
+    hasher.update(b"BDLM_RELAYER_DELIVERY_TX_V1");
+    hasher.update(chain.domain_id().to_be_bytes());
+    hasher.update((canonical.len() as u64).to_be_bytes());
+    hasher.update(canonical.as_bytes());
+    hasher.finalize().into()
+}
+
+/// Default single-solver concentration warning threshold (`5_000` bps = `50%`,
+/// K4-G O-G.6).
+pub const DEFAULT_SOLVER_CONCENTRATION_WARN_BPS: u64 = 5_000;
+
+/// Single-solver market concentration telemetry derived from executed intent
+/// settlements (K4-G O-G.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolverConcentrationReport {
+    /// Total number of `Executed` intent settlements measured.
+    pub total_executed_settlements: u64,
+    /// Number of distinct solvers that executed at least one settlement.
+    pub distinct_solvers: usize,
+    /// Solver with the highest executed settlement count (`None` when empty).
+    pub top_solver: Option<Address>,
+    /// Number of executed settlements completed by `top_solver`.
+    pub top_solver_settlements: u64,
+    /// Top solver's share of executed settlements in basis points (`0..=10_000`).
+    pub top_solver_share_bps: u64,
+    /// Configured concentration warning threshold in basis points.
+    pub warn_threshold_bps: u64,
+    /// `true` when `total_executed_settlements > 0` and
+    /// `top_solver_share_bps > warn_threshold_bps`.
+    pub concentration_alert: bool,
 }
 
 /// Enforce K4-J O-J.5 quantum canary posture on a payment/intent leg.
@@ -664,6 +725,94 @@ impl RelayerPolicyRegistry {
             && self.awards.is_empty()
             && self.frozen_domains.is_empty()
             && self.freeze_grace_blocks.is_empty()
+            && self.consumed_delivery_transfers.is_empty()
+            && self.domain_outflow_atoms.is_empty()
+    }
+
+    /// Ensure `(chain, tx_hash)` has not already been consumed to settle another
+    /// intent (K4-C O-C.7), returning its canonical key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the external delivery transfer was already used.
+    pub fn ensure_delivery_transfer_unused(
+        &self,
+        chain: ExternalChain,
+        tx_hash: &str,
+    ) -> Result<[u8; 32], String> {
+        let key = delivery_transfer_key(chain, tx_hash);
+        if self.consumed_delivery_transfers.contains(&key) {
+            return Err(format!(
+                "relayer delivery transfer `{tx_hash}` on domain {} was already consumed by another intent",
+                chain.domain_id()
+            ));
+        }
+        if self.consumed_delivery_transfers.len() >= MAX_CONSUMED_DELIVERY_TRANSFERS {
+            return Err(format!(
+                "relayer consumed delivery transfer capacity exceeded (max={MAX_CONSUMED_DELIVERY_TRANSFERS})"
+            ));
+        }
+        Ok(key)
+    }
+
+    /// Record a consumed external delivery transfer key and accumulate
+    /// settled outflow atoms across each distinct touched domain (K4-C O-C.7 / O-C.10).
+    pub fn record_delivery_transfer_and_outflow(
+        &mut self,
+        transfer_key: [u8; 32],
+        source_domain: u32,
+        target_domain: u32,
+        amount_atoms: u128,
+    ) {
+        self.consumed_delivery_transfers.insert(transfer_key);
+        let entry = self.domain_outflow_atoms.entry(source_domain).or_insert(0);
+        *entry = entry.saturating_add(amount_atoms);
+        if target_domain != source_domain {
+            let dst = self.domain_outflow_atoms.entry(target_domain).or_insert(0);
+            *dst = dst.saturating_add(amount_atoms);
+        }
+    }
+
+    /// Measure single-solver concentration across `Executed` settlements and
+    /// raise `concentration_alert` whenever the leading solver's basis-point
+    /// share exceeds `warn_threshold_bps` (K4-G O-G.6).
+    #[must_use]
+    pub fn get_solver_concentration_report(
+        &self,
+        warn_threshold_bps: u64,
+    ) -> SolverConcentrationReport {
+        let mut counts: BTreeMap<Address, u64> = BTreeMap::new();
+        let mut total: u64 = 0;
+        for settlement in self.settlements.values() {
+            if settlement.status == IntentSettlementStatus::Executed {
+                let entry = counts.entry(settlement.relayer).or_insert(0);
+                *entry = entry.saturating_add(1);
+                total = total.saturating_add(1);
+            }
+        }
+        let mut top_solver: Option<Address> = None;
+        let mut top_count: u64 = 0;
+        for (solver, count) in &counts {
+            if *count > top_count {
+                top_count = *count;
+                top_solver = Some(*solver);
+            }
+        }
+        let share_bps = if total == 0 {
+            0
+        } else {
+            let wide = u128::from(top_count).saturating_mul(10_000) / u128::from(total);
+            u64::try_from(wide).unwrap_or(10_000)
+        };
+        SolverConcentrationReport {
+            total_executed_settlements: total,
+            distinct_solvers: counts.len(),
+            top_solver,
+            top_solver_settlements: top_count,
+            top_solver_share_bps: share_bps,
+            warn_threshold_bps,
+            concentration_alert: total > 0 && share_bps > warn_threshold_bps,
+        }
     }
 
     /// Record that `domain_id` entered `DomainStatus::Frozen` at `block_height`
@@ -1177,6 +1326,18 @@ impl RelayerPolicyRegistry {
             for (id, grace) in &self.freeze_grace_blocks {
                 hasher.update(id);
                 hasher.update(grace.to_le_bytes());
+            }
+        }
+        if !self.consumed_delivery_transfers.is_empty() || !self.domain_outflow_atoms.is_empty() {
+            hasher.update(b"BDLM_RELAYER_POLICY_DELIVERY_V1");
+            hasher.update((self.consumed_delivery_transfers.len() as u64).to_le_bytes());
+            for key in &self.consumed_delivery_transfers {
+                hasher.update(key);
+            }
+            hasher.update((self.domain_outflow_atoms.len() as u64).to_le_bytes());
+            for (dom, atoms) in &self.domain_outflow_atoms {
+                hasher.update(dom.to_le_bytes());
+                hasher.update(atoms.to_le_bytes());
             }
         }
         hasher.finalize().into()
