@@ -385,6 +385,14 @@ pub fn build_root_seal(
     key_index: u8,
     signer: &dyn SealSigner,
 ) -> Result<RootSeal, SealError> {
+    for anchor in period_anchors {
+        if anchor.chain_id != chain_id {
+            return Err(SealError::WrongChain {
+                expected: chain_id,
+                got: anchor.chain_id,
+            });
+        }
+    }
     let (anchors_root, anchor_count) = period_anchors_root(seal_height, period_anchors)?;
     let previous_seal = previous.map_or(GENESIS_SEAL_LINK, RootSeal::digest);
     let payload = root_seal_payload(
@@ -446,6 +454,18 @@ pub fn verify_root_seal(
             height: seal.seal_height,
         });
     }
+    if seal.anchor_count == 0 {
+        return Err(SealError::NoAnchors);
+    }
+    if usize::try_from(seal.anchor_count).unwrap_or(usize::MAX) > MAX_SEAL_ANCHORS {
+        return Err(SealError::TooManyAnchors {
+            max: MAX_SEAL_ANCHORS,
+            presented: usize::try_from(seal.anchor_count).unwrap_or(usize::MAX),
+        });
+    }
+    if seal.anchors_root == [0u8; 32] {
+        return Err(SealError::AnchorsMismatch);
+    }
     if seal.key_epoch != current_key_epoch {
         return Err(SealError::StaleKeyEpoch {
             seal_epoch: seal.key_epoch,
@@ -464,6 +484,14 @@ pub fn verify_root_seal(
         });
     }
     if let Some(anchors) = anchors {
+        for anchor in anchors {
+            if anchor.chain_id != chain_id {
+                return Err(SealError::WrongChain {
+                    expected: chain_id,
+                    got: anchor.chain_id,
+                });
+            }
+        }
         let (root, count) = period_anchors_root(seal.seal_height, anchors)?;
         if root != seal.anchors_root || count != seal.anchor_count {
             return Err(SealError::AnchorsMismatch);
@@ -807,5 +835,32 @@ mod tests {
         ] {
             assert_ne!(base, other);
         }
+    }
+
+    #[test]
+    fn root_seal_refuses_foreign_chain_anchors_and_zero_anchor_count_header_sync() {
+        let (signer, _, _) = fixture();
+        let mut foreign_anchors = period(3_600);
+        foreign_anchors[0].chain_id = CHAIN + 99;
+
+        // Building a seal for CHAIN must refuse anchors belonging to another chain.
+        let build_err = build_root_seal(CHAIN, 3_600, &foreign_anchors, None, 1, 0, signer)
+            .expect_err("foreign-chain PqAnchor must not enter RootSeal");
+        assert_eq!(build_err.kind(), "seal-wrong-chain");
+
+        // Header-only verification (`anchors = None`) must refuse `anchor_count == 0`
+        // or `anchor_count > MAX_SEAL_ANCHORS` or `anchors_root == [0; 32]` BEFORE running
+        // expensive 29,792-byte SLH-DSA verification!
+        let mut empty_header_seal = fixture().2.clone();
+        empty_header_seal.anchor_count = 0;
+        let zero_cnt_err = verify_root_seal(&empty_header_seal, CHAIN, &keys(), 1, None)
+            .expect_err("anchor_count == 0 must fail as seal-no-anchors");
+        assert_eq!(zero_cnt_err.kind(), "seal-no-anchors");
+
+        let mut oversized_header_seal = fixture().2.clone();
+        oversized_header_seal.anchor_count = (MAX_SEAL_ANCHORS as u32) + 1;
+        let over_cnt_err = verify_root_seal(&oversized_header_seal, CHAIN, &keys(), 1, None)
+            .expect_err("anchor_count > MAX_SEAL_ANCHORS must fail as seal-too-many-anchors");
+        assert_eq!(over_cnt_err.kind(), "seal-too-many-anchors");
     }
 }
