@@ -217,16 +217,47 @@ pub fn read_owner_only_bounded(
     read_pinned_bounded(file, path, max_bytes, label).map(Zeroizing::new)
 }
 
-/// Refuse to read a key file that is readable or writable by anyone but its
-/// owner, or that is a symlink or non-regular file.
+/// Refuse a key file path that is a symlink, not a regular file, or has any
+/// group/other permission bit (`mode & 0o077 != 0`).
+///
+/// Use [`open_owner_only_pinned`] or [`read_owner_only_bounded`] whenever the
+/// caller will read bytes from the file so `fstat` runs on the pinned open FD.
 ///
 /// # Errors
 ///
-/// An I/O error from inspecting/opening `path`, or
-/// [`std::io::ErrorKind::PermissionDenied`] naming the file, its mode and
-/// `chmod 600`.
+/// An I/O error from inspecting `path`, [`std::io::ErrorKind::InvalidInput`]
+/// on symlinks or non-regular files, or [`std::io::ErrorKind::PermissionDenied`]
+/// naming the file, its mode and `chmod 600`.
 pub fn require_owner_only(path: &Path) -> Result<(), std::io::Error> {
-    open_owner_only_pinned(path).map(|_| ())
+    let lmeta = std::fs::symlink_metadata(path)?;
+    if lmeta.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is a symbolic link; refusing to follow", path.display()),
+        ));
+    }
+    if !lmeta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = lmeta.permissions().mode();
+        if mode & KEY_FILE_FORBIDDEN_MASK != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} has mode {:03o}; group and others must have no access (chmod 600)",
+                    path.display(),
+                    mode & 0o777
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A unique sibling temporary path `<name>.<pid>.<seq>.tmp` for `path`.
