@@ -180,6 +180,11 @@ pub enum SettlementTx {
     ///
     /// Appended to preserve existing bincode enum discriminants.
     ViewGrant(Box<ViewGrantTx>),
+
+    /// Move a layered data record between K1/K2/K3/K4.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    DataLayer(Box<DataLayerTx>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -2104,7 +2109,78 @@ pub fn execute_settlement_tx(
             execute_universal_payment(state, ctx, payment_tx)
         }
         SettlementTx::ViewGrant(grant_tx) => execute_view_grant(state, ctx, grant_tx),
+        SettlementTx::DataLayer(layer_tx) => execute_data_layer(state, ctx, layer_tx),
     }
+}
+
+/// A data-layering action.
+///
+/// Only one arm: the mandatory entry point is `register_confidential_default`,
+/// and registration is the minting of a record. Transitions are the part with a
+/// pre-existing record to protect.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DataLayerTx {
+    /// `K3Confidential` -> `K2Pseudonymous`.
+    ToPseudonymous {
+        /// The record.
+        record_id: [u8; 32],
+        /// The per-record stealth salt.
+        stealth_salt: [u8; 32],
+        /// Owner ML-DSA-65 signature over the transition digest.
+        auth: crate::privacy::data_layering::LayerOwnerAuth,
+    },
+    /// `K3Confidential`/`K2Pseudonymous` -> `K1Public`.
+    Declassify {
+        /// The record.
+        record_id: [u8; 32],
+        /// The plaintext, opened by the owner.
+        plaintext: Vec<u8>,
+        /// Optional blinding salt the commitment was made with.
+        blind_salt: Option<[u8; 32]>,
+        /// Owner ML-DSA-65 signature.
+        auth: crate::privacy::data_layering::LayerOwnerAuth,
+    },
+}
+
+/// Executes a data-layering transaction.
+///
+/// The authority is the owner's own ML-DSA-65 signature, verified inside the
+/// registry against the digest bound to this chain id and this nonce. The chain
+/// adds nothing to that check - only the rule that the signature must be the
+/// one the transition names. A record whose owner signed nothing cannot move,
+/// which is what makes the layer a promise rather than a label.
+fn execute_data_layer(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &DataLayerTx,
+) -> Result<(), SettlementTxError> {
+    use crate::privacy::data_layering::DataLayerError;
+
+    if state.settlement.data_layers.is_none() {
+        state.settlement.data_layers = Some(
+            crate::privacy::data_layering::DataLayerRegistry::new(ctx.chain_id).map_err(
+                |err: DataLayerError| SettlementTxError::Refused(format!("data layer: {err:?}")),
+            )?,
+        );
+    }
+    let layers = state.settlement.data_layers.as_mut().expect("fitted above");
+
+    let result = match tx {
+        DataLayerTx::ToPseudonymous {
+            record_id,
+            stealth_salt,
+            auth,
+        } => layers
+            .transition_to_pseudonymous(record_id, stealth_salt, auth)
+            .map(|_| ()),
+        DataLayerTx::Declassify {
+            record_id,
+            plaintext,
+            blind_salt,
+            auth,
+        } => layers.declassify_to_public(record_id, plaintext.clone(), blind_salt.as_ref(), auth),
+    };
+    result.map_err(|err: DataLayerError| SettlementTxError::Refused(format!("data layer: {err:?}")))
 }
 
 /// A view-grant action.

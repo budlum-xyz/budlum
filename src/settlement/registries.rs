@@ -61,6 +61,18 @@ pub struct SettlementRegistries {
     /// declared a denomination, so its presence changes no root until used.
     #[serde(default)]
     pub denominations: crate::settlement::universal_asset::DenominationIndex,
+    /// The K1/K2/K3/K4 data-layering state machine.
+    ///
+    /// Optional because the registry carries a `chain_id` and refuses to be
+    /// built without one, so it is fitted on first write rather than defaulted:
+    /// a `DataLayerRegistry` bound to chain 0 would accept a transition meant
+    /// for another chain.
+    ///
+    /// Every transition behind it is authorised by an ML-DSA-65 owner signature
+    /// (`LayerOwnerAuth`), which is why it can be a chain door at all - the
+    /// authority arrives with the transaction instead of being assumed.
+    #[serde(default)]
+    pub data_layers: Option<crate::privacy::data_layering::DataLayerRegistry>,
     /// View grants: who may open which stored content, and until when.
     ///
     /// `ViewGrantRegistry::issue` was complete and its result lived nowhere, so

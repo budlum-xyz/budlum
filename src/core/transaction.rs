@@ -4682,6 +4682,16 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
                 }
             }
         }
+        SettlementTx::DataLayer(layer_tx) => {
+            // Tag 19. A layering move changes who can read the bytes, so the
+            // whole action - including the owner signature that authorises it -
+            // is in the signed preimage.
+            use crate::settlement::domains::DataLayerTx;
+            put_u8(out, 19);
+            let bytes = postcard::to_allocvec(layer_tx.as_ref())
+                .unwrap_or_else(|_| b"budlum/data-layer/fields-failed".to_vec());
+            put_bytes(out, &bytes);
+        }
         SettlementTx::ViewGrant(grant_tx) => {
             // Tag 18. A grant is a permission, so the grantee and the policy go
             // into the signed preimage: a permission whose audience could be
