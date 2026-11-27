@@ -2012,7 +2012,43 @@ impl UniversalPaymentRequestUri {
             ],
         )
     }
+
+    /// Enforce that this payment request carries a non-zero invoice commitment
+    /// and a positive deadline not yet elapsed at `now_unix_secs` (K4-E O-E.1).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::InvalidIntent`] if `invoice_digest` is zero or
+    /// `deadline_unix_secs == 0`, or [`PaymentError::Expired`] when
+    /// `now_unix_secs > deadline_unix_secs`.
+    pub fn validate_not_expired(&self, now_unix_secs: u64) -> Result<(), PaymentError> {
+        if self.invoice_digest == [0u8; 32] {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment request URI requires a non-zero invoice digest",
+            )));
+        }
+        if self.deadline_unix_secs == 0 {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payment request URI requires a positive deadline",
+            )));
+        }
+        if now_unix_secs > self.deadline_unix_secs {
+            return Err(PaymentError::Expired {
+                now: now_unix_secs,
+                deadline: self.deadline_unix_secs,
+            });
+        }
+        Ok(())
+    }
 }
+
+/// Domain-separated ML-DSA-87 signing context for merchant-authorized reverse
+/// payment refunds (K4-E O-E.4).
+pub const REFUND_SIGNATURE_CONTEXT: &[u8] = crate::crypto::ctx::REFUND_V1;
+
+/// Maximum number of single-use refund records tracked in consensus state
+/// (A-F.1 bounded state growth).
+pub const MAX_REFUND_RECORDS: usize = 65_536;
 
 /// Reverse payment intent bound cryptographically to an original
 /// [`UniversalPaymentReceipt`] so a merchant refund can never be forged or
@@ -2092,9 +2128,62 @@ impl RefundRegistry {
         if self.refunded_receipts.contains_key(&original.receipt_hash) {
             return Err(PaymentError::ReplayDetected);
         }
+        if self.refunded_receipts.len() >= MAX_REFUND_RECORDS {
+            return Err(PaymentError::InputLimitExceeded);
+        }
         let rid = refund.refund_id();
         self.refunded_receipts.insert(original.receipt_hash, rid);
         Ok(rid)
+    }
+
+    /// Authenticate a merchant-signed refund against both the original
+    /// [`UniversalPaymentIntent`] and its settled [`UniversalPaymentReceipt`],
+    /// verifying a real ML-DSA-87 signature under [`REFUND_SIGNATURE_CONTEXT`]
+    /// and enforcing single-use replay protection (K4-E O-E.4).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::InvalidIntent`] if the receipt does not settle
+    /// `original_intent`, the merchant key does not match `original_intent.merchant_id`,
+    /// or the ML-DSA-87 signature is invalid; [`PaymentError::ReplayDetected`]
+    /// if the receipt was already refunded; or [`PaymentError::InputLimitExceeded`]
+    /// if the refund registry reached [`MAX_REFUND_RECORDS`].
+    pub fn record_signed_refund(
+        &mut self,
+        original: &UniversalPaymentReceipt,
+        original_intent: &UniversalPaymentIntent,
+        refund: &RefundIntent,
+        merchant_public_key: &[u8],
+        merchant_signature: &[u8],
+    ) -> Result<Hash32, PaymentError> {
+        verify_receipt_settles_intent(original, original_intent)?;
+        if refund.merchant_id != original_intent.merchant_id {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "refund merchant_id does not match original payment intent merchant",
+            )));
+        }
+        let derived_merchant = crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(
+            merchant_public_key,
+        )
+        .map_err(|e| {
+            PaymentError::InvalidIntent(format!("invalid merchant ML-DSA-87 public key: {e}"))
+        })?;
+        if derived_merchant.0 != refund.merchant_id {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "merchant public key does not derive refund.merchant_id",
+            )));
+        }
+        let rid = refund.refund_id();
+        crate::crypto::primitives::verify_ml_dsa_87_signature(
+            REFUND_SIGNATURE_CONTEXT,
+            &rid,
+            merchant_signature,
+            merchant_public_key,
+        )
+        .map_err(|e| {
+            PaymentError::InvalidIntent(format!("invalid merchant ML-DSA-87 refund signature: {e}"))
+        })?;
+        self.record_refund(original, refund)
     }
 }
 

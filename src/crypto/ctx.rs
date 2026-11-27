@@ -111,6 +111,9 @@ pub const IDENTITY_ADDR_LINK_V1: &[u8] = b"BDLM/IDENTITY_ADDR_LINK/V1";
 /// A payer's PQ-hybrid signature over a pre-authorized offline spend voucher
 /// (`unification::payment_router::SignedOfflineVoucher`).
 pub const OFFLINE_VOUCHER_V1: &[u8] = b"BDLM/OFFLINE_VOUCHER/V1";
+/// A merchant's ML-DSA-87 signature authorizing a reverse payment refund
+/// (`unification::payment_router::RefundIntent`).
+pub const REFUND_V1: &[u8] = b"BDLM/REFUND/V1";
 
 /// table, in the order of section 6.5.
 pub const TABLE: &[&[u8]] = &[
@@ -155,6 +158,7 @@ pub const EXTRAS: &[&[u8]] = &[
     AGG_SEGMENT_V1,
     IDENTITY_ADDR_LINK_V1,
     OFFLINE_VOUCHER_V1,
+    REFUND_V1,
 ];
 
 /// Whether `ctx` is a registered context string.
