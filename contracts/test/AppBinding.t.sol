@@ -542,4 +542,44 @@ contract AppBindingTest is Harness {
         assertEq(counter.count(), 1, "Hybrid finality executes remote call");
         assertEq(account.nonce(), 1, "Hybrid finality advances remote nonce");
     }
+
+    function test_execute_emits_outbound_log_with_awarded_budlum_solver_recipient() public {
+        VmLogRecorder recorder = VmLogRecorder(address(uint160(uint256(keccak256("hevm cheat code")))));
+        bytes32 intent = keccak256("outbound-recipient-intent");
+        bytes memory data = abi.encodeCall(Counter.bump, ());
+        _authorizeSelf(intent, address(counter), data);
+
+        recorder.recordLogs();
+        executor.execute(intent, address(counter), data, hex"01");
+        VmLogRecorder.Log[] memory logs = recorder.getRecordedLogs();
+
+        bytes32 outboundTopic0 = keccak256("BudlumOutbound(bytes,bytes32,bytes32,bytes32)");
+        bool found = false;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics.length == 3 && logs[i].topics[0] == outboundTopic0) {
+                found = true;
+                assertEq(logs[i].topics[1], SOLVER, "outbound recipient must name awarded Budlum solver, never zero");
+                assertEq(logs[i].topics[2], intent, "outbound correlationId must match intentId");
+                (bytes memory kind, bytes32 payloadHash) = abi.decode(logs[i].data, (bytes, bytes32));
+                assertEq(keccak256(kind), keccak256("budlum/app_binding/fulfilled/v1"), "outbound kind");
+                assertEq(
+                    payloadHash,
+                    executor.fulfilledPayloadHash(intent, address(counter), keccak256(data), 0, hex"01", SOLVER),
+                    "outbound payloadHash"
+                );
+            }
+        }
+        assertTrue(found, "BudlumOutbound log must be emitted on fulfilment");
+    }
+}
+
+interface VmLogRecorder {
+    struct Log {
+        bytes32[] topics;
+        bytes data;
+        address emitter;
+    }
+
+    function recordLogs() external;
+    function getRecordedLogs() external returns (Log[] memory);
 }

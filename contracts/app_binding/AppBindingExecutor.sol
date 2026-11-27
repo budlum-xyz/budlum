@@ -165,7 +165,7 @@ contract AppBindingExecutor is BudlumOutboundEmitter {
         emit BudlumAppBindingFulfilled(intentId, target, callHash, msg.value, beneficiary, true);
         _emitOutbound(
             FULFILLED_KIND,
-            bytes32(0),
+            budlumSolver,
             intentId,
             fulfilledPayloadHash(intentId, target, callHash, uint64(msg.value), beneficiary, budlumSolver)
         );

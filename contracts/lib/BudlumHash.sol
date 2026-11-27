@@ -65,19 +65,26 @@ library BudlumHash {
         bytes[] memory sentinelFields = new bytes[](SENTINEL_FIELDS);
         sentinelFields[0] = "BDLM_MERKLE_ODD_SENTINEL_V1";
         bytes32 sentinel = hashFields(sentinelFields);
+        bool isTail = false;
         for (uint256 i = 0; i < siblings.length; i++) {
             if (siblings[i] == sentinel) {
-                if (idx % MERKLE_PAIR_ARITY != 0) {
+                if (idx == 0 || idx % MERKLE_PAIR_ARITY != 0 || i + 1 == siblings.length) {
                     return (false, bytes32(0));
                 }
+                isTail = true;
                 bytes[] memory promoteFields = new bytes[](MERKLE_PROMOTE_FIELDS);
                 promoteFields[0] = "BDLM_MERKLE_ODD_PROMOTE_V1";
                 promoteFields[1] = bytes.concat(cur);
                 cur = hashFields(promoteFields);
-            } else if (idx % MERKLE_PAIR_ARITY == 0) {
-                cur = merkleNode(cur, siblings[i]);
             } else {
-                cur = merkleNode(siblings[i], cur);
+                if (isTail && idx % MERKLE_PAIR_ARITY == 0) {
+                    return (false, bytes32(0));
+                }
+                if (idx % MERKLE_PAIR_ARITY == 0) {
+                    cur = merkleNode(cur, siblings[i]);
+                } else {
+                    cur = merkleNode(siblings[i], cur);
+                }
             }
             idx /= MERKLE_PAIR_ARITY;
         }
@@ -139,13 +146,11 @@ library BudlumHash {
     }
 
     /// Canonical leaf commitment for an AppBinding payment fact.
-    function appBindingPaymentLeaf(
-        bytes32 intentId,
-        bytes32 appId,
-        bytes32 payer,
-        bytes32 assetId,
-        uint128 amount
-    ) internal pure returns (bytes32) {
+    function appBindingPaymentLeaf(bytes32 intentId, bytes32 appId, bytes32 payer, bytes32 assetId, uint128 amount)
+        internal
+        pure
+        returns (bytes32)
+    {
         bytes[] memory fields = new bytes[](PAYMENT_LEAF_FIELDS);
         fields[0] = "BDLM_STATE_APP_PAYMENT_LEAF_V1";
         fields[1] = bytes.concat(intentId);
@@ -175,12 +180,11 @@ library BudlumHash {
     }
 
     /// Verify a Merkle inclusion proof for `leaf` against a non-zero `finalizedRoot`.
-    function verifyLeafAgainstRoot(
-        bytes32 finalizedRoot,
-        bytes32 leaf,
-        uint256 index,
-        bytes32[] memory siblings
-    ) internal pure returns (bool) {
+    function verifyLeafAgainstRoot(bytes32 finalizedRoot, bytes32 leaf, uint256 index, bytes32[] memory siblings)
+        internal
+        pure
+        returns (bool)
+    {
         if (finalizedRoot == bytes32(0) || leaf == bytes32(0)) {
             return false;
         }
