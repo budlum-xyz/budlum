@@ -917,6 +917,17 @@ impl ExternalDomainRegistry {
             }));
         }
 
+        // 7. The caller's policy, against the backing the adapter attested.
+        //    Every adapter refuses an unslashable backing itself when the
+        //    policy demands one, and the registry repeats the rule here for
+        //    the reason it repeats the adapter binding in step 2: the
+        //    boundary stays fail-closed for an adapter that forgets. The rule
+        //    itself lives on the policy (`VerificationPolicy::admits_backing`)
+        //    so the adapters, the bridge and this door all read one text.
+        policy
+            .admits_backing(&attestation.security)
+            .map_err(RegistryError::Adapter)?;
+
         Ok((attestation, observed))
     }
 
