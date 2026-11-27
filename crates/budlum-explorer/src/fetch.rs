@@ -210,6 +210,13 @@ impl BudManifest {
         }
         let mut data: Vec<&BudShard> = self.shards.iter().filter(|s| !s.parity).collect();
         data.sort_by_key(|s| s.index);
+        if self.erasure_k == 0
+            || self.erasure_n < self.erasure_k
+            || data.len() != self.erasure_k as usize
+            || !data.windows(2).all(|w| w[0].index < w[1].index)
+        {
+            return false;
+        }
         let data_count = data.len();
         let mut off = 0usize;
         for (position, shard) in data.iter().enumerate() {
