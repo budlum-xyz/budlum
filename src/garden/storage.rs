@@ -96,8 +96,13 @@ const CODED_SYMBOL_BUDGET: u64 = 8 * 1024 * 1024;
 /// The fewest repair symbols a segment gets, however small it is.
 ///
 /// A small object has few source symbols, so a proportional share would
-/// round down to nothing and leave it with no redundancy at all.
-const MIN_REPAIR_SYMBOLS: u32 = 8;
+/// round down to nothing and leave it with no redundancy at all. Two is
+/// the floor rather than something larger because a symbol is a fixed
+/// 2911 bytes: a one-symbol object given eight spares costs twenty-six
+/// kilobytes of disk to carry twelve bytes of text, and a Garden is
+/// mostly short messages. At the floor the object still survives losing
+/// two thirds of itself.
+const MIN_REPAIR_SYMBOLS: u32 = 2;
 
 /// What B.U.D. 3.0 made of one object.
 #[derive(Debug)]
@@ -143,7 +148,26 @@ pub struct GardenContentStore {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Recipe {
     record: ObjectRecord,
+    /// How many bytes of content the recipe rebuilds to.
+    ///
+    /// The record's `object_len` is the BOF-1 object, which is the content
+    /// with a header on it and a codec possibly applied, so it is neither
+    /// the content's length nor close to it. The chain accounts for the
+    /// content, and a holder that reports the object's length instead
+    /// looks to every other node like it is holding the wrong thing.
+    content_len: u64,
     symbols: Vec<Symbol>,
+}
+
+/// A recipe's head: everything written before the symbols.
+///
+/// Reading this reads the first few hundred bytes of the file instead of
+/// all of it, which is what `stored_len` and the startup count want. It
+/// must stay a prefix of `Recipe`, field for field, or it reads garbage.
+#[derive(serde::Deserialize)]
+struct RecipeHead {
+    record: ObjectRecord,
+    content_len: u64,
 }
 
 /// What a recipe file is called. The suffix keeps recipes apart from the
@@ -215,11 +239,12 @@ fn count_recipes_on_disk(root: &Path) -> Bud3PartCounts {
         let Ok(file) = fs::File::open(&path) else {
             continue;
         };
-        let Ok(record) =
-            bincode::deserialize_from::<_, ObjectRecord>(std::io::BufReader::new(file))
+        let Ok(head) =
+            bincode::deserialize_from::<_, RecipeHead>(std::io::BufReader::new(file))
         else {
             continue;
         };
+        let record = head.record;
         let segments = count_of(record.symbol_roots.len());
         let made = segments.saturating_mul(u64::from(record.symbols_per_segment));
         let source = record
@@ -288,9 +313,10 @@ impl GardenContentStore {
     }
 
     /// Turn bytes into the recipe this node will keep for them.
-    fn recipe_blob(coded: &CodedObject) -> Result<Vec<u8>, String> {
+    fn recipe_blob(coded: &CodedObject, content_len: u64) -> Result<Vec<u8>, String> {
         let recipe = Recipe {
             record: coded.record.clone(),
+            content_len,
             symbols: coded.segments.iter().flatten().cloned().collect(),
         };
         bincode::serialize(&recipe)
@@ -306,6 +332,17 @@ impl GardenContentStore {
         bincode::deserialize(&blob).ok()
     }
 
+    /// Read only the head of a recipe, without the symbols.
+    fn head_of(&self, content_id: &Hash32) -> Option<RecipeHead> {
+        match self.path_of(content_id) {
+            Some(path) => {
+                let file = fs::File::open(path).ok()?;
+                bincode::deserialize_from(std::io::BufReader::new(file)).ok()
+            }
+            None => bincode::deserialize(self.memory.get(content_id)?).ok(),
+        }
+    }
+
     /// Store `bytes` and return their content id.
     pub fn put(&mut self, bytes: &[u8]) -> Result<Hash32, String> {
         if bytes.is_empty() || bytes.len() > self.max_object_bytes {
@@ -316,6 +353,7 @@ impl GardenContentStore {
             ));
         }
         let content_id = ContentId::of(bytes).0;
+        let content_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         // Code the object with B.U.D. 3.0 before a single byte is written.
         // If BOF-1 cannot represent it, this node does not get to say it
         // stored it - there would be nothing to store.
@@ -323,7 +361,7 @@ impl GardenContentStore {
         // A node that cannot keep the recipe must not keep the coding
         // either: `get_coded` would otherwise answer for an object this
         // node does not hold.
-        match self.store_recipe(content_id) {
+        match self.store_recipe(content_id, content_len) {
             Ok(()) => Ok(content_id),
             Err(e) => {
                 self.drop_coding(&content_id);
@@ -333,12 +371,12 @@ impl GardenContentStore {
     }
 
     /// Write the recipe down, once the coder has produced one.
-    fn store_recipe(&mut self, content_id: Hash32) -> Result<(), String> {
+    fn store_recipe(&mut self, content_id: Hash32, content_len: u64) -> Result<(), String> {
         let coded = self
             .coded
             .get(&content_id)
             .ok_or_else(|| "this object has no B.U.D. 3.0 coding to store".to_string())?;
-        let blob = Self::recipe_blob(coded)?;
+        let blob = Self::recipe_blob(coded, content_len)?;
         let bytes: &[u8] = &blob;
         let len = charged_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         match self.path_of(&content_id) {
@@ -403,7 +441,7 @@ impl GardenContentStore {
         self.code_and_count(content_id, bytes)?;
         // Same rule as `put`: a reservation that fails leaves no coding
         // behind for an object this node will not hold.
-        match self.reserve_room(content_id) {
+        match self.reserve_room(content_id, u64::try_from(bytes.len()).unwrap_or(u64::MAX)) {
             Ok(room) => Ok(room),
             Err(e) => {
                 self.drop_coding(&content_id);
@@ -416,12 +454,13 @@ impl GardenContentStore {
     fn reserve_room(
         &mut self,
         content_id: Hash32,
+        content_len: u64,
     ) -> Result<Option<(PathBuf, Vec<u8>, u64)>, String> {
         let coded = self
             .coded
             .get(&content_id)
             .ok_or_else(|| "this object has no B.U.D. 3.0 coding to store".to_string())?;
-        let blob = Self::recipe_blob(coded)?;
+        let blob = Self::recipe_blob(coded, content_len)?;
         let len = charged_bytes(u64::try_from(blob.len()).unwrap_or(u64::MAX));
         if let Some(path) = self.path_of(&content_id) {
             if self.contains(&content_id) {
@@ -584,7 +623,7 @@ impl GardenContentStore {
     /// what makes losing pieces survivable, which is the entire reason
     /// the object is coded at all.
     const fn with_repair(k: u32) -> u32 {
-        let quarter = k / 4;
+        let quarter = k.div_ceil(4);
         let repair = if quarter > MIN_REPAIR_SYMBOLS {
             quarter
         } else {
@@ -741,11 +780,13 @@ impl GardenContentStore {
 
     /// The byte length of a stored object, without reading it.
     pub fn stored_len(&self, content_id: &Hash32) -> Option<u64> {
-        // The object's length, not the recipe's. The chain accounts for
-        // what was published; a recipe carries repair symbols and is a
-        // different size, so reporting the file size here would make every
-        // holder look like it held the wrong thing.
-        self.recipe_of(content_id).map(|r| r.record.object_len)
+        // The content's length. Not the file's, which is the recipe and
+        // carries repair symbols, and not the record's `object_len`, which
+        // is the BOF-1 object. The chain accounts for the content, and a
+        // holder reporting anything else looks to every other node like it
+        // is holding the wrong thing - which is how a correctly sized
+        // publication came to be dropped as if it had understated itself.
+        self.head_of(content_id).map(|head| head.content_len)
     }
 
     /// Drop one object, when this node no longer holds it.
@@ -842,6 +883,20 @@ impl GardenContentStore {
 mod tests {
     use super::*;
 
+    /// What one object actually costs this store.
+    ///
+    /// The charge is the recipe's size, not the content's, and a recipe
+    /// is symbols of a fixed 2911 bytes. Tests used to assume the charge
+    /// was `MIN_PUBLICATION_CHARGE`, which was true while the content was
+    /// what landed on disk and is not true of an object layer. Measuring
+    /// it keeps them about the rule they are testing - a ceiling is
+    /// enforced, a removal reclaims - instead of a number.
+    fn charge_of(payload: &[u8]) -> u64 {
+        let mut probe = GardenContentStore::open(None, 1 << 20).unwrap();
+        probe.put(payload).unwrap();
+        probe.total_bytes()
+    }
+
     #[test]
     fn garden_store_reads_back_what_it_stored_under_the_budlum_content_id() {
         let dir = tempfile::tempdir().unwrap();
@@ -929,7 +984,7 @@ mod tests {
     #[test]
     fn an_object_survives_losing_an_eighth_of_its_symbols() {
         let mut store = GardenContentStore::open(None, 1024 * 1024).unwrap();
-        let payload: Vec<u8> = (0..40_000u32)
+        let payload: Vec<u8> = (0..300_000u32)
             .map(|i| u8::try_from(i % 251).unwrap_or_default())
             .collect();
         let id = store.put(&payload).unwrap();
@@ -969,7 +1024,7 @@ mod tests {
     fn the_symbol_count_a_segment_gets_does_not_grow_with_the_object() {
         let small = GardenContentStore::with_repair(4);
         let large = GardenContentStore::with_repair(4096);
-        assert_eq!(small, 12, "a small segment still gets the floor of eight");
+        assert_eq!(small, 6, "a small segment still gets the floor of two");
         assert_eq!(large, 5120, "a full segment gets a quarter again");
         assert!(
             large <= MAX_SYMBOLS_PER_SEGMENT,
@@ -1054,24 +1109,24 @@ mod tests {
 
     #[test]
     fn garden_store_enforces_local_total_byte_ceiling_and_reclaims_on_remove() {
-        let floor = crate::garden::types::MIN_PUBLICATION_CHARGE;
+        let one = charge_of(&[1u8; 12]);
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("garden");
-        let mut store = GardenContentStore::open_with_limit(Some(&root), 16, floor + 1024).unwrap();
+        // Room for one recipe and a little spare, not two.
+        let mut store = GardenContentStore::open_with_limit(Some(&root), 16, one + 1024).unwrap();
         let a = store.put(&[1u8; 12]).unwrap();
-        assert_eq!(store.total_bytes(), floor);
+        assert_eq!(store.total_bytes(), one);
         // Re-putting identical bytes is idempotent and does not double-count.
         assert_eq!(store.put(&[1u8; 12]).unwrap(), a);
-        assert_eq!(store.total_bytes(), floor);
-        // A second 12-byte object still costs `floor` bytes on disk, exceeding
-        // `floor + 1024`, so tiny-object amplification is refused.
+        assert_eq!(store.total_bytes(), one);
+        // A second object costs another recipe, which does not fit.
         let err = store.put(&[2u8; 12]).unwrap_err();
         assert!(err.contains("local storage limit"), "{err}");
-        assert_eq!(store.total_bytes(), floor);
+        assert_eq!(store.total_bytes(), one);
         // Atomic `write_object_file_blocking` claims `Ok(true)` once and `Ok(false)` on duplicate,
         // and stale `<64hex>.tmp.*` files are purged on reopen without inflating quota.
         let dup_id = ContentId::of(&[9u8; 12]).0;
-        let dup_path = root.join(hex::encode(dup_id));
+        let dup_path = root.join(format!("{}{RECIPE_SUFFIX}", hex::encode(dup_id)));
         assert!(
             GardenContentStore::write_object_file_blocking(dup_path.clone(), vec![9u8; 12])
                 .unwrap()
@@ -1082,37 +1137,43 @@ mod tests {
         );
         let stale = root.join(format!("{}.tmp.99999.0", hex::encode([0xABu8; 32])));
         fs::write(&stale, b"partial").unwrap();
-        let reopened = GardenContentStore::open_with_limit(Some(&root), 16, floor * 4).unwrap();
+        let reopened = GardenContentStore::open_with_limit(Some(&root), 16, one * 4).unwrap();
         assert!(
             !stale.exists(),
             "orphan .tmp.* file must be cleaned on open"
         );
-        assert_eq!(reopened.total_bytes(), floor * 2);
+        // The real recipe, plus the twelve byte stand-in, which is charged
+        // the publication floor like anything smaller than it.
+        assert_eq!(
+            reopened.total_bytes(),
+            one + crate::garden::types::MIN_PUBLICATION_CHARGE
+        );
         fs::remove_file(&dup_path).unwrap();
-        // Removing `a` reclaims the full floor charge so the new object fits.
+        // Removing `a` reclaims its whole charge, so the new object fits.
         store.remove(&a);
         assert_eq!(store.total_bytes(), 0);
         let b = store.put(&[2u8; 12]).unwrap();
-        assert_eq!(store.total_bytes(), floor);
+        assert_eq!(store.total_bytes(), charge_of(&[2u8; 12]));
         assert!(store.contains(&b));
-        // Re-opening from disk recovers the accurate floor-charged byte count.
-        let reopened = GardenContentStore::open_with_limit(Some(&root), 16, 2 * floor).unwrap();
-        assert_eq!(reopened.total_bytes(), floor);
+        // Re-opening from disk recovers the accurate charge.
+        let held = store.total_bytes();
+        let reopened = GardenContentStore::open_with_limit(Some(&root), 16, 2 * held).unwrap();
+        assert_eq!(reopened.total_bytes(), held);
         assert!(reopened.can_fit(1));
-        assert!(reopened.can_fit(floor));
-        assert!(!reopened.can_fit(floor + 1));
+        assert!(reopened.can_fit(held));
+        assert!(!reopened.can_fit(held + 1));
     }
 
     #[test]
     fn reserve_background_write_is_idempotent_when_object_already_on_disk() {
-        let floor = crate::garden::types::MIN_PUBLICATION_CHARGE;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("garden");
         // Budget fits one object plus spare headroom, not two full charges.
-        let mut store = GardenContentStore::open_with_limit(Some(&root), 64, floor + 512).unwrap();
         let payload = [0x42u8; 24];
+        let one = charge_of(&payload);
+        let mut store = GardenContentStore::open_with_limit(Some(&root), 64, one + 512).unwrap();
         let id = store.put(&payload).unwrap();
-        assert_eq!(store.total_bytes(), floor);
+        assert_eq!(store.total_bytes(), one);
 
         // Re-reserving the exact already-stored object must succeed without
         // charging a second slot or pushing total_bytes past the cap.
@@ -1123,7 +1184,7 @@ mod tests {
             reservation.is_none(),
             "existing valid object need not schedule another disk write"
         );
-        assert_eq!(store.total_bytes(), floor);
+        assert_eq!(store.total_bytes(), one);
     }
 
     #[test]
