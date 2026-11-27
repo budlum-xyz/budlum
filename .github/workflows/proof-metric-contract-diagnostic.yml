@@ -45,7 +45,7 @@ jobs:
       working-directory: baseline
       env:
         BASE_SHA: 70ae828be0103a38750f0a351490b7719f8195dc
-        CANDIDATE_FILES_JSON: '{".github/scripts/proof_metric_workflow_contract.py":"c6260eca8aaa8246579d30b1643cf2bdd832c974644d021727917b61689d99a1",".github/workflows/benchmark.yml":"4a26358d07ed3403b808262e80face5d9bb1fabea9df81453e1a086835e06b85","xtask/gates/src/gates/benchmark_proof_metrics.rs":"a8c4a8e6f7602698bd09182c957f079338660f0ad0437c9fe040dccb8c64fb23","xtask/gates/src/gates/exact_named_tests.rs":"2dc34cc496b3c757d354153a89d180059aaab725e1925136e54e165492b8280c","xtask/gates/src/main.rs":"57f27d4650a6c5715dfe363fb75fc0de626d4e2ac44ab07fb60099a8d7d47ee4"}'
+        CANDIDATE_FILES_JSON: '{".github/scripts/proof_metric_workflow_contract.py":"c6260eca8aaa8246579d30b1643cf2bdd832c974644d021727917b61689d99a1",".github/workflows/benchmark.yml":"4a26358d07ed3403b808262e80face5d9bb1fabea9df81453e1a086835e06b85","xtask/gates/src/gates/benchmark_proof_metrics.rs":"a8c4a8e6f7602698bd09182c957f079338660f0ad0437c9fe040dccb8c64fb23","xtask/gates/src/gates/exact_named_tests.rs":"2dc34cc496b3c757d354153a89d180059aaab725e1925136e54e165492b8280c","xtask/gates/src/main.rs":"48dad449f183dd5716f23a4f82a4989a321e8ac72c8366569a6211dac839b1f6"}'
       run: |
         python3 - <<'PYCODE'
         from pathlib import Path
@@ -133,14 +133,6 @@ jobs:
         set -euo pipefail
         cargo test --locked --manifest-path xtask/gates/Cargo.toml gates::exact_named_tests::tests:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/exact-green.log"
         grep -Fq 'test result: ok. 8 passed; 0 failed;' "$RUNNER_TEMP/exact-green.log"
-    - name: Run complete gates unit tests
-      id: unit
-      if: always() && steps.fixed.outcome == 'success' && steps.rust.outcome == 'success'
-      working-directory: baseline
-      shell: bash
-      run: |
-        set -euo pipefail
-        cargo test --locked --manifest-path xtask/gates/Cargo.toml 2>&1 | tee "$RUNNER_TEMP/gates-unit.log"
     - name: Build and measure the provenance pin
       id: pin
       if: always() && steps.fixed.outcome == 'success' && steps.rust.outcome == 'success'
@@ -153,6 +145,14 @@ jobs:
         cp "$RUNNER_TEMP/measured-pin.txt" .github/gate-source-provenance-baseline.txt
         cargo build --locked --release --manifest-path xtask/gates/Cargo.toml 2>&1 | tee "$RUNNER_TEMP/gates-rebuild.log"
         xtask/gates/target/release/budlum-gates gate-source-provenance 2>&1 | tee "$RUNNER_TEMP/gates-provenance.log"
+    - name: Run complete gates unit tests
+      id: unit
+      if: always() && steps.pin.outcome == 'success'
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo test --locked --manifest-path xtask/gates/Cargo.toml 2>&1 | tee "$RUNNER_TEMP/gates-unit.log"
     - name: Exercise the registered metric gate through the workflow
       id: benchmark_green
       if: always() && steps.pin.outcome == 'success'
