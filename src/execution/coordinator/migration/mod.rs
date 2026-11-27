@@ -83,6 +83,8 @@ pub struct MigrationAuthorization {
     pub state_root: [u8; 32],
     /// Runtime code hash the deployer signed for.
     pub code_hash: [u8; 32],
+    /// IDENTITY: excluded - the EIP-712 signature over [`Self::digest`]; a
+    /// digest cannot contain its own signature.
     pub signature: Vec<u8>,
 }
 
