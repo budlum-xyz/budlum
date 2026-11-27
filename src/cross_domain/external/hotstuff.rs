@@ -647,7 +647,11 @@ impl ExternalFinalityAdapter for HotStuffThreeChainAdapter {
     }
 
     fn has_pinned_trust_anchor(&self) -> bool {
-        self.pinned.is_some()
+        !self.network.trim().is_empty()
+            && self
+                .pinned
+                .as_ref()
+                .is_some_and(|p| validate_pinned_committee(p).is_ok())
     }
 
     fn verify(
@@ -665,9 +669,10 @@ impl ExternalFinalityAdapter for HotStuffThreeChainAdapter {
         observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityAttestation, AdapterError> {
         let (att, all_pq) = self.verify_inner(evidence, policy)?;
-        observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         if all_pq {
             observer.observe(ObservedScheme::Scheme(SchemeId::ML_DSA_65));
+        } else {
+            observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         }
         Ok(att)
     }
@@ -1142,5 +1147,34 @@ mod tests {
             blank_adapter.verify(&blank_ev, &policy),
             Err(AdapterError::ConsensusRule { .. })
         ));
+    }
+
+    #[test]
+    fn hotstuff_preserves_lattice_quantum_class_and_validates_trust_anchor() {
+        use crate::crypto::facts::QuantumClass;
+
+        let (pinned, _keys, _bundle, golden) = hotstuff_fixture();
+        let adapter = HotStuffThreeChainAdapter::new("aptos-jolteon-1", Some(pinned.clone()));
+        assert!(adapter.has_pinned_trust_anchor());
+        assert!(
+            !HotStuffThreeChainAdapter::new("  ", Some(pinned.clone())).has_pinned_trust_anchor()
+        );
+
+        let mut empty_pin = pinned;
+        empty_pin.members.clear();
+        assert!(
+            !HotStuffThreeChainAdapter::new("aptos-jolteon-1", Some(empty_pin))
+                .has_pinned_trust_anchor()
+        );
+
+        let mut facts = CryptoFacts::new();
+        adapter
+            .verify_observed(&golden, &VerificationPolicy::strict(1_010), &mut facts)
+            .expect("HotStuff 3-chain verifies");
+        assert_eq!(
+            facts.quantum_class(),
+            Some(QuantumClass::Lattice),
+            "100% ML-DSA-65 HotStuff 3-chain committee must preserve QuantumClass::Lattice"
+        );
     }
 }

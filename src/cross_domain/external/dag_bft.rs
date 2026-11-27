@@ -758,13 +758,35 @@ impl BullsharkDagAdapter {
     }
 }
 
+fn is_valid_pinned_dag_committee(pinned: &PinnedDagCommittee) -> bool {
+    if pinned.members.is_empty() || pinned.members.len() > MAX_DAG_COMMITTEE {
+        return false;
+    }
+    let mut seen = BTreeSet::new();
+    let mut total = 0u128;
+    for m in &pinned.members {
+        if m.ed25519_pubkey == [0u8; 32] || m.voting_weight == 0 || !seen.insert(m.ed25519_pubkey) {
+            return false;
+        }
+        let Some(next) = total.checked_add(u128::from(m.voting_weight)) else {
+            return false;
+        };
+        total = next;
+    }
+    total > 0
+}
+
 impl ExternalFinalityAdapter for BullsharkDagAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
     }
 
     fn has_pinned_trust_anchor(&self) -> bool {
-        self.pinned.is_some()
+        !self.network.trim().is_empty()
+            && self
+                .pinned
+                .as_ref()
+                .is_some_and(is_valid_pinned_dag_committee)
     }
 
     fn verify(
@@ -782,9 +804,10 @@ impl ExternalFinalityAdapter for BullsharkDagAdapter {
         observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityAttestation, AdapterError> {
         let (att, all_pq) = self.verify_inner(evidence, policy)?;
-        observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         if all_pq {
             observer.observe(ObservedScheme::Scheme(SchemeId::ML_DSA_65));
+        } else {
+            observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         }
         Ok(att)
     }
@@ -2080,5 +2103,31 @@ mod tests {
                 max_age: 10
             })
         ));
+    }
+
+    #[test]
+    fn bullshark_dag_preserves_lattice_quantum_class_and_validates_trust_anchor() {
+        use crate::crypto::facts::QuantumClass;
+
+        let (pinned, _keys, _bundle, golden) = dag_wave_fixture();
+        let adapter = BullsharkDagAdapter::new("sui-bullshark-1", Some(pinned.clone()));
+        assert!(adapter.has_pinned_trust_anchor());
+
+        let mut empty_pin = pinned;
+        empty_pin.members.clear();
+        assert!(
+            !BullsharkDagAdapter::new("sui-bullshark-1", Some(empty_pin)).has_pinned_trust_anchor()
+        );
+        assert!(!BullsharkDagAdapter::new("  ", None).has_pinned_trust_anchor());
+
+        let mut facts = CryptoFacts::new();
+        adapter
+            .verify_observed(&golden, &VerificationPolicy::strict(110), &mut facts)
+            .expect("Bullshark wave verifies");
+        assert_eq!(
+            facts.quantum_class(),
+            Some(QuantumClass::Lattice),
+            "100% ML-DSA-65 Bullshark DAG-BFT committee must preserve QuantumClass::Lattice"
+        );
     }
 }
