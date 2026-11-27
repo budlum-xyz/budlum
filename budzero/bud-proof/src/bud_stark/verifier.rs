@@ -47,7 +47,13 @@ pub fn recompose_quotient_from_chunks<SC>(
 where
     SC: StarkGenericConfig,
 {
-    if quotient_chunks.len() != quotient_chunks_domains.len() {
+    if quotient_chunks.is_empty() || quotient_chunks.len() != quotient_chunks_domains.len() {
+        return None;
+    }
+    if quotient_chunks
+        .iter()
+        .any(|ch| ch.len() != SC::Challenge::DIMENSION)
+    {
         return None;
     }
     let mut zps = Vec::with_capacity(quotient_chunks_domains.len());
@@ -203,11 +209,18 @@ where
     A: for<'a> Air<VerifierConstraintFolder<'a, SC>>,
 {
     // Determine expected preprocessed width.
-    // - If a verifier key is provided, trust its width.
-    // - Otherwise, derive width from the AIR's preprocessed trace (if any).
+    // - If both the AIR and a verifier key declare a preprocessed trace,
+    //   their widths must agree; trusting a mismatched VK would let an
+    //   under-sized opening reach `air.eval` and panic.
+    let air_preprocessed_width = air.preprocessed_trace().as_ref().map(|m| m.width);
+    if let (Some(vk), Some(air_w)) = (preprocessed_vk, air_preprocessed_width) {
+        if vk.width != air_w {
+            return Err(VerificationError::InvalidProofShape);
+        }
+    }
     let preprocessed_width = preprocessed_vk
         .map(|vk| vk.width)
-        .or_else(|| air.preprocessed_trace().as_ref().map(|m| m.width))
+        .or(air_preprocessed_width)
         .unwrap_or(0);
 
     // Check that the proof's opened preprocessed values match the expected width.
@@ -507,6 +520,9 @@ where
     SC: StarkGenericConfig,
 {
     if degree_bits > MAX_VERIFIER_DEGREE_BITS || degree_bits < usize::from(config.is_zk()) {
+        return Err(VerificationError::InvalidProofShape);
+    }
+    if shape.air_width == 0 {
         return Err(VerificationError::InvalidProofShape);
     }
     if shape.log_num_quotient_chunks > MAX_LOG_QUOTIENT_CHUNKS {
@@ -866,6 +882,9 @@ where
     {
         return Err(VerificationError::InvalidProofShape);
     }
+    if stmt.public_values.len() != air.num_public_values() {
+        return Err(VerificationError::InvalidProofShape);
+    }
     let (preprocessed_width, preprocessed_commit) =
         process_preprocessed_trace::<SC, A>(air, stmt.opened_values, stmt.preprocessed_vk)?;
     if let Some(vk) = stmt.preprocessed_vk {
@@ -919,6 +938,9 @@ where
     } = proof;
 
     if *degree_bits > MAX_VERIFIER_DEGREE_BITS || *degree_bits < usize::from(config.is_zk()) {
+        return Err(VerificationError::InvalidProofShape);
+    }
+    if public_values.len() != air.num_public_values() {
         return Err(VerificationError::InvalidProofShape);
     }
 
@@ -1124,6 +1146,186 @@ mod tests {
         assert!(
             started.elapsed().as_millis() < 5,
             "rejecting unbacked quotient chunk counts must be O(1) without domain-vector allocation"
+        );
+    }
+
+    #[test]
+    fn budprf05_stark_verifier_refuses_bad_public_values_preproc_width_and_quotient_shape() {
+        use p3_field::PrimeCharacteristicRing;
+        type SC = crate::plonky3_prover::ChipStarkConfig;
+
+        let config = crate::plonky3_prover::build_config();
+        let ext_zero = <SC as StarkGenericConfig>::Challenge::ZERO;
+
+        // 1. recompose_quotient_from_chunks must refuse empty slice lists and wrong chunk dims.
+        assert!(
+            recompose_quotient_from_chunks::<SC>(&[], &[], ext_zero).is_none(),
+            "empty quotient chunks must be refused"
+        );
+        let domain = <<SC as StarkGenericConfig>::Pcs as Pcs<
+            <SC as StarkGenericConfig>::Challenge,
+            <SC as StarkGenericConfig>::Challenger,
+        >>::natural_domain_for_degree(config.pcs(), 4);
+        assert!(
+            recompose_quotient_from_chunks::<SC>(&[domain], &[vec![ext_zero; 1]], ext_zero)
+                .is_none(),
+            "truncated quotient chunk (< DIMENSION) must be refused"
+        );
+        assert!(
+            recompose_quotient_from_chunks::<SC>(&[domain], &[vec![ext_zero; 4]], ext_zero)
+                .is_none(),
+            "oversized quotient chunk (> DIMENSION) must be refused"
+        );
+
+        // 2. derive_transcript must refuse air_width == 0.
+        let dummy_commit = crate::plonky3_prover::chip_commitment_from_bytes([0u8; 32]);
+        let commitments = crate::bud_stark::Commitments {
+            trace: dummy_commit.clone(),
+            quotient_chunks: dummy_commit.clone(),
+            random: None,
+            aux_trace: None,
+        };
+        let empty_openings = crate::bud_stark::OpenedValues {
+            trace_local: vec![],
+            trace_next: None,
+            quotient_chunks: vec![vec![ext_zero; 3]; 1],
+            random: None,
+            aux_trace_local: None,
+            aux_trace_next: None,
+            preprocessed_local: None,
+            preprocessed_next: None,
+        };
+        let zero_width_shape = PcsOpeningShape {
+            air_width: 0,
+            preprocessed_width: 0,
+            log_num_quotient_chunks: 0,
+            main_next: false,
+            pre_next: false,
+            has_aux_trace: false,
+        };
+        assert!(
+            matches!(
+                derive_transcript(
+                    &config,
+                    zero_width_shape,
+                    &commitments,
+                    &empty_openings,
+                    2,
+                    &[],
+                    None
+                ),
+                Err(VerificationError::InvalidProofShape)
+            ),
+            "air_width == 0 must be refused as InvalidProofShape"
+        );
+
+        // 3. process_preprocessed_trace must refuse a VK whose width disagrees with the AIR's
+        // declared preprocessed_trace() width.
+        let air = BudAir {
+            num_steps: 1,
+            program: vec![bud_isa::Instruction {
+                opcode: bud_isa::Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode()],
+        };
+        let bad_vk = PreprocessedVerifierKey::<SC> {
+            commitment: dummy_commit.clone(),
+            degree_bits: 4,
+            width: PREPROCESSED_WIDTH.saturating_sub(1).max(1),
+        };
+        assert_ne!(bad_vk.width, PREPROCESSED_WIDTH);
+        let vk_openings = crate::bud_stark::OpenedValues {
+            trace_local: vec![ext_zero; <BudAir as p3_air::BaseAir<Goldilocks>>::width(&air)],
+            trace_next: Some(vec![
+                ext_zero;
+                <BudAir as p3_air::BaseAir<Goldilocks>>::width(&air)
+            ]),
+            quotient_chunks: vec![vec![ext_zero; 3]; 4],
+            random: None,
+            aux_trace_local: Some(vec![ext_zero; 9]),
+            aux_trace_next: Some(vec![ext_zero; 9]),
+            preprocessed_local: Some(vec![ext_zero; bad_vk.width]),
+            preprocessed_next: None,
+        };
+        assert!(
+            matches!(
+                process_preprocessed_trace::<SC, BudAir>(&air, &vk_openings, Some(&bad_vk)),
+                Err(VerificationError::InvalidProofShape)
+            ),
+            "preprocessed VK width mismatching AIR preprocessed_trace width must be refused"
+        );
+
+        // 4. verify_algebra must refuse wrong public_values.len() instead of panicking inside air.eval.
+        use p3_air::BaseAir;
+        let ext_dim =
+            <<SC as StarkGenericConfig>::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION;
+        let good_vk = PreprocessedVerifierKey::<SC> {
+            commitment: dummy_commit.clone(),
+            degree_bits: 4,
+            width: PREPROCESSED_WIDTH,
+        };
+        let Ok(shape) = shape_for_air::<SC, BudAir>(&config, &air, 4, true, PREPROCESSED_WIDTH)
+        else {
+            panic!("shape_for_air for canonical BudAir must succeed");
+        };
+        let num_quotient_chunks =
+            1usize << (shape.log_num_quotient_chunks + usize::from(config.is_zk()));
+        let pre_next = if shape.pre_next {
+            Some(vec![ext_zero; shape.preprocessed_width])
+        } else {
+            None
+        };
+        let good_openings = crate::bud_stark::OpenedValues {
+            trace_local: vec![ext_zero; shape.air_width],
+            trace_next: shape.main_next.then(|| vec![ext_zero; shape.air_width]),
+            quotient_chunks: vec![vec![ext_zero; ext_dim]; num_quotient_chunks],
+            random: None,
+            aux_trace_local: shape.has_aux_trace.then(|| vec![ext_zero; 3 * ext_dim]),
+            aux_trace_next: (shape.has_aux_trace && shape.main_next)
+                .then(|| vec![ext_zero; 3 * ext_dim]),
+            preprocessed_local: Some(vec![ext_zero; shape.preprocessed_width]),
+            preprocessed_next: pre_next,
+        };
+        let aux_commitments = crate::bud_stark::Commitments {
+            trace: dummy_commit.clone(),
+            quotient_chunks: dummy_commit.clone(),
+            random: None,
+            aux_trace: shape.has_aux_trace.then_some(dummy_commit),
+        };
+        // Sanity check: with the exact expected public_values length, the opening shape
+        // passes derive_transcript and reaches algebraic OOD verification.
+        let valid_pvs = vec![Goldilocks::ZERO; BaseAir::<Goldilocks>::num_public_values(&air)];
+        let valid_shape_stmt = AlgebraStatement {
+            commitments: &aux_commitments,
+            opened_values: &good_openings,
+            degree_bits: 4,
+            public_values: &valid_pvs,
+            preprocessed_vk: Some(&good_vk),
+        };
+        assert!(
+            !matches!(
+                verify_algebra::<SC, BudAir>(&config, &air, &valid_shape_stmt),
+                Err(VerificationError::InvalidProofShape)
+            ),
+            "control fixture must have a valid opening shape past derive_transcript"
+        );
+        let bad_pv_stmt = AlgebraStatement {
+            commitments: &aux_commitments,
+            opened_values: &good_openings,
+            degree_bits: 4,
+            public_values: &[], // BudAir expects > 0 public values
+            preprocessed_vk: Some(&good_vk),
+        };
+        assert!(
+            matches!(
+                verify_algebra::<SC, BudAir>(&config, &air, &bad_pv_stmt),
+                Err(VerificationError::InvalidProofShape)
+            ),
+            "wrong public_values length must return InvalidProofShape instead of panicking"
         );
     }
 }

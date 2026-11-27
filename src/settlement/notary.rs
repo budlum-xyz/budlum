@@ -421,22 +421,33 @@ pub struct NotaryAnchorRequest<'a> {
     pub extra_period_anchors: &'a [PqAnchor],
 }
 
+fn enforce_notary_mode(mode: AnchorMode) -> Result<(), NotaryError> {
+    if mode == AnchorMode::GatedOff {
+        return Err(NotaryError::Anchor(AnchorError::ProductionBlocked {
+            blocker: "anchor-pipeline-gated-off",
+        }));
+    }
+    if enforce_anchor_mode(mode).is_err() {
+        return Err(NotaryError::ProductionModeBlocked);
+    }
+    Ok(())
+}
+
 /// Anchor a batch of [`NotaryEntry`] items into a `PqAnchor` and SLH-DSA-SHAKE-256s
 /// [`RootSeal`], returning the offline-verifiable proof for `entries[entry_index]`.
 ///
 /// # Errors
 ///
-/// Refuses production mode when unapproved, invalid entries, heights outside
-/// the seal period, or seal signing errors.
+/// Refuses production or gated-off mode, foreign-chain or stale-epoch sibling
+/// period anchors, invalid entries, heights outside the seal period, or seal
+/// signing errors.
 pub fn anchor_notary_entries(
     req: &NotaryAnchorRequest<'_>,
     entries: &[NotaryEntry],
     entry_index: usize,
     signer: &dyn SealSigner,
 ) -> Result<NotaryTimestampProof, NotaryError> {
-    if enforce_anchor_mode(req.mode).is_err() {
-        return Err(NotaryError::ProductionModeBlocked);
-    }
+    enforce_notary_mode(req.mode)?;
     if !seal_due(req.seal_height) {
         return Err(NotaryError::Seal(SealError::HeightNotOnBoundary {
             height: req.seal_height,
@@ -448,6 +459,20 @@ pub fn anchor_notary_entries(
             anchor_height: req.anchor_height,
             seal_height: req.seal_height,
         });
+    }
+    for extra in req.extra_period_anchors {
+        if extra.chain_id != req.chain_id {
+            return Err(NotaryError::AnchorWrongChain {
+                expected: req.chain_id,
+                got: extra.chain_id,
+            });
+        }
+        if extra.key_epoch != req.key_epoch {
+            return Err(NotaryError::Seal(SealError::StaleKeyEpoch {
+                seal_epoch: extra.key_epoch,
+                current_epoch: req.key_epoch,
+            }));
+        }
     }
 
     let (notary_root, notary_proof) = build_notary_inclusion_proof(entries, entry_index)?;
@@ -523,9 +548,9 @@ pub fn anchor_notary_entries(
 ///
 /// # Errors
 ///
-/// Fails closed on any tampered digest, invalid Merkle proof geometry, wrong
-/// chain/epoch/period, non-hash anchor class, invalid SLH-DSA signature, or
-/// broken Root Seal hash chain.
+/// Fails closed on unapproved or gated-off mode tags, any tampered digest,
+/// invalid Merkle proof geometry, wrong chain/epoch/period, non-hash anchor
+/// class, invalid SLH-DSA signature, or broken Root Seal hash chain.
 pub fn verify_notary_proof_offline(
     proof: &NotaryTimestampProof,
     expected_digest: Option<[u8; 32]>,
@@ -533,6 +558,7 @@ pub fn verify_notary_proof_offline(
     keys: &dyn SealKeys,
     current_key_epoch: u32,
 ) -> Result<VerifiedNotaryTimestamp, NotaryError> {
+    enforce_notary_mode(proof.anchor_mode)?;
     if proof.seal_chain.len() > MAX_NOTARY_CHAIN_EXTENSIONS {
         return Err(NotaryError::TooManyChainExtensions {
             presented: proof.seal_chain.len(),
@@ -577,6 +603,12 @@ pub fn verify_notary_proof_offline(
             expected: chain_id,
             got: proof.anchor.chain_id,
         });
+    }
+    if proof.anchor.key_epoch != current_key_epoch {
+        return Err(NotaryError::Seal(SealError::StaleKeyEpoch {
+            seal_epoch: proof.anchor.key_epoch,
+            current_epoch: current_key_epoch,
+        }));
     }
     if proof.notary_proof.entry.height > proof.anchor.height {
         return Err(NotaryError::EntryAfterAnchor {
@@ -654,4 +686,139 @@ pub fn verify_notary_proof_offline(
         quantum_class: QuantumClass::Hash,
         anchor_mode: proof.anchor_mode,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settlement::root_seal::SoftwareSealSigner;
+
+    fn signer(seed_byte: u8) -> SoftwareSealSigner {
+        SoftwareSealSigner::from_seed(&[seed_byte; 96]).expect("96-byte SLH-DSA seed")
+    }
+
+    #[test]
+    fn offline_verifier_refuses_unsigned_mode_elevation_and_stale_anchor_epoch() {
+        let s = signer(0x31);
+        let keys = StaticSealKeySet::new(0, s.public_key()).expect("64-byte pk");
+        let entries = [NotaryEntry {
+            document_digest: [0x11; 32],
+            height: 700,
+            label: "notary-mode-guard".to_string(),
+        }];
+        let req = NotaryAnchorRequest {
+            mode: AnchorMode::Devnet,
+            chain_id: 45_261,
+            anchor_height: 720,
+            seal_height: ROOT_SEAL_INTERVAL,
+            key_epoch: 1,
+            key_index: 0,
+            previous_seal: None,
+            extra_anchor_leaves: &[],
+            extra_period_anchors: &[],
+        };
+        let base = anchor_notary_entries(&req, &entries, 0, &s).expect("devnet proof");
+
+        // Unsigned top-level mode field spoofed to ProductionApproved or GatedOff fails closed.
+        let mut prod_spoof = base.clone();
+        prod_spoof.anchor_mode = AnchorMode::ProductionApproved;
+        assert_eq!(
+            verify_notary_proof_offline(&prod_spoof, None, 45_261, &keys, 1),
+            Err(NotaryError::ProductionModeBlocked)
+        );
+
+        let mut gated_spoof = base.clone();
+        gated_spoof.anchor_mode = AnchorMode::GatedOff;
+        assert!(matches!(
+            verify_notary_proof_offline(&gated_spoof, None, 45_261, &keys, 1),
+            Err(NotaryError::Anchor(AnchorError::ProductionBlocked { .. }))
+        ));
+
+        let gated_req = NotaryAnchorRequest {
+            mode: AnchorMode::GatedOff,
+            ..req
+        };
+        assert!(matches!(
+            anchor_notary_entries(&gated_req, &entries, 0, &s),
+            Err(NotaryError::Anchor(AnchorError::ProductionBlocked { .. }))
+        ));
+
+        // Stale anchor key_epoch sealed under a newer RootSeal key_epoch fails closed.
+        let mut stale_anchor = base;
+        stale_anchor.seal = build_root_seal(
+            45_261,
+            ROOT_SEAL_INTERVAL,
+            std::slice::from_ref(&stale_anchor.anchor),
+            None,
+            3,
+            0,
+            &s,
+        )
+        .expect("resealed at epoch 3");
+        assert_eq!(
+            verify_notary_proof_offline(&stale_anchor, None, 45_261, &keys, 3),
+            Err(NotaryError::Seal(SealError::StaleKeyEpoch {
+                seal_epoch: 1,
+                current_epoch: 3,
+            }))
+        );
+    }
+
+    #[test]
+    fn anchor_notary_entries_refuses_foreign_chain_or_stale_epoch_sibling_anchors() {
+        let s = signer(0x32);
+        let entries = [NotaryEntry {
+            document_digest: [0x22; 32],
+            height: 700,
+            label: "sibling-anchor-guard".to_string(),
+        }];
+        let foreign = [PqAnchor {
+            chain_id: 99_999,
+            height: 360,
+            aggregate_root: [0xAA; 32],
+            stark_root: None,
+            crossdomain_root: None,
+            key_epoch: 2,
+            signatures: Vec::new(),
+        }];
+        let req_foreign = NotaryAnchorRequest {
+            mode: AnchorMode::Devnet,
+            chain_id: 45_261,
+            anchor_height: 720,
+            seal_height: ROOT_SEAL_INTERVAL,
+            key_epoch: 2,
+            key_index: 0,
+            previous_seal: None,
+            extra_anchor_leaves: &[],
+            extra_period_anchors: &foreign,
+        };
+        assert_eq!(
+            anchor_notary_entries(&req_foreign, &entries, 0, &s),
+            Err(NotaryError::AnchorWrongChain {
+                expected: 45_261,
+                got: 99_999,
+            })
+        );
+
+        let stale = [PqAnchor {
+            chain_id: 45_261,
+            height: 360,
+            aggregate_root: [0xBB; 32],
+            stark_root: None,
+            crossdomain_root: None,
+            key_epoch: 1,
+            signatures: Vec::new(),
+        }];
+        let req_stale = NotaryAnchorRequest {
+            extra_period_anchors: &stale,
+            ..req_foreign
+        };
+        assert_eq!(
+            anchor_notary_entries(&req_stale, &entries, 0, &s),
+            Err(NotaryError::Seal(SealError::StaleKeyEpoch {
+                seal_epoch: 1,
+                current_epoch: 2,
+            }))
+        );
+    }
 }

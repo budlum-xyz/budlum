@@ -65,3 +65,17 @@ receipt for another solver cannot be reused. On intent expiry only an awarded
 bid still live through the deadline can be slashed; unawarded or earlier-lapsed
 bids are not liveness offences. This is a consensus/protocol upgrade, so use a
 fresh testnet genesis or coordinate activation with all validators.
+
+## Reorg rule (probabilistic PoW)
+
+Settlement is irreversible: a commitment that advanced a domain is never
+rolled back. For a `PoW` domain finality is probabilistic
+(`FinalityReversibility::ProbabilisticWork`), so when a rival root appears at
+the accepted height the domain freezes for equivocation, its operator backing
+becomes slashable through the quarantine path, and every later checkpoint
+certificate carries the domain as `Refuted` instead of `Established` - the
+domain's value path closes while all previously applied global state stays.
+Reorg probability is priced into the value threshold rather than into
+rollback: a `ProbabilisticWork` guarantee only admits cross-domain value at
+`>= 6` confirmations (`MIN_VALUE_SAFE_POW_CONFIRMATIONS`), and two rival
+roots at one height are never accepted as equivalent.
