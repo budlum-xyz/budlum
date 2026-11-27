@@ -4,12 +4,45 @@
 
 use std::env;
 use std::fs;
+use std::io::ErrorKind;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use budlum_ee_polkavm::PolkaVmWorker;
 use budlum_uel_abi::transport::{serve_connection, ServeEnd};
+
+fn bind_worker_socket(socket_path: &Path) -> Result<UnixListener, String> {
+    if socket_path.as_os_str().is_empty() {
+        return Err("empty socket path".into());
+    }
+    match fs::symlink_metadata(socket_path) {
+        Ok(meta) => {
+            if !meta.file_type().is_socket() {
+                return Err(format!(
+                    "refusing to remove non-socket path {}",
+                    socket_path.display()
+                ));
+            }
+            fs::remove_file(socket_path).map_err(|e| {
+                format!(
+                    "failed to remove stale socket {}: {e}",
+                    socket_path.display()
+                )
+            })?;
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!("failed to inspect {}: {e}", socket_path.display()));
+        }
+    }
+    let listener = UnixListener::bind(socket_path)
+        .map_err(|e| format!("failed to bind {}: {e}", socket_path.display()))?;
+    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("failed to secure socket {}: {e}", socket_path.display()))?;
+    Ok(listener)
+}
 
 fn parse_socket_arg() -> Result<PathBuf, String> {
     let mut args = env::args().skip(1);
@@ -37,13 +70,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if socket_path.exists() {
-        let _ = fs::remove_file(&socket_path);
-    }
-    let listener = match UnixListener::bind(&socket_path) {
+    let listener = match bind_worker_socket(&socket_path) {
         Ok(l) => l,
-        Err(err) => {
-            eprintln!("failed to bind {}: {err}", socket_path.display());
+        Err(msg) => {
+            eprintln!("{msg}");
             return ExitCode::from(1);
         }
     };
