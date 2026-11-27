@@ -143,4 +143,8 @@
     <string name="w_bud_zero">0M $BUD</string>
     <string name="g_default_title">My Garden</string>
     <string name="g_a_file">a file</string>
+    <string name="b_testnet">testnet</string>
+    <string name="b_validator">validator</string>
+    <string name="b_wallet">wallet</string>
+    <string name="b_garden">garden</string>
 </resources>

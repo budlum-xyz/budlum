@@ -143,4 +143,8 @@
     <string name="w_bud_zero">0M $BUD</string>
     <string name="g_default_title">Bahçem</string>
     <string name="g_a_file">dosya</string>
+    <string name="b_testnet">testnet</string>
+    <string name="b_validator">doğrulayıcı</string>
+    <string name="b_wallet">cüzdan</string>
+    <string name="b_garden">bahçe</string>
 </resources>

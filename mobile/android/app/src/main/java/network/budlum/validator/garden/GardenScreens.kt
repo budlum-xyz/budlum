@@ -50,16 +50,21 @@ import org.json.JSONObject
  */
 @Composable
 fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
-    var step by remember { mutableStateOf(Step.Setup) }
+    var step by remember { mutableStateOf(Step.Blocks) }
     val gardenTitle = stringResource(R.string.g_default_title)
     // Whether this phone holds a wallet, and which address it is, asked
     // once when the app opens rather than on every draw.
     LaunchedEffect(Unit) { model.readWallet() }
     var tab by remember { mutableStateOf(0) }
+    // Set when a block asked for testnet on a phone with no wallet, so
+    // that making one carries on to where the tap was going instead of
+    // dropping the person somewhere else.
+    var wantedTestnet by remember { mutableStateOf(false) }
 
-    BackHandler(enabled = step != Step.Setup) {
+    BackHandler(enabled = step != Step.Blocks) {
         step = when (step) {
-            Step.Choose, Step.Wallet -> Step.Setup
+            Step.Setup -> Step.Blocks
+            Step.Choose, Step.Wallet -> Step.Blocks
             // The words are shown once. Going back out of them without
             // saying they are written down would be a way to lose a
             // wallet by pressing a system button, so that door stays
@@ -74,6 +79,32 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
     }
 
     when (step) {
+        // The field the design opens on. A block is not a menu row: it
+        // can be picked up and put somewhere else, and tapping it goes
+        // where it leads. Testnet is the one the file puts a lit block
+        // on, and it needs a wallet to pay into, so a phone without one
+        // is sent to make it first and lands on testnet after.
+        Step.Blocks -> BlockFieldScreen(model.skin) { goes ->
+            when (goes) {
+                BlockGoes.Testnet ->
+                    if (model.state.walletExists) {
+                        onTestnet()
+                    } else {
+                        wantedTestnet = true
+                        step = Step.Wallet
+                    }
+                BlockGoes.Validator -> step = Step.Setup
+                BlockGoes.Wallet -> step = Step.Wallet
+                BlockGoes.Garden -> {
+                    if (!model.state.status.contains("\"chain_id\"")) {
+                        model.create(gardenTitle)
+                    }
+                    step = Step.Garden
+                    tab = 0
+                }
+                BlockGoes.Nowhere -> Unit
+            }
+        }
         // The validator checks pass first, then the key. A phone that
         // cannot do the duties has no use for a wallet, and a phone that
         // already holds one is not asked twice.
@@ -109,7 +140,18 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
             }
         }
         Step.Seed -> SeedPhraseScreen(model) { step = Step.SeedVerify }
-        Step.SeedVerify -> SeedVerifyScreen(model) { step = Step.Choose }
+        Step.SeedVerify -> SeedVerifyScreen(model) {
+            // The words are confirmed, so the wallet is real. If a
+            // block asked for testnet to get here, that is where the
+            // tap was going.
+            if (wantedTestnet) {
+                wantedTestnet = false
+                onTestnet()
+                step = Step.Blocks
+            } else {
+                step = Step.Choose
+            }
+        }
         Step.Choose -> ChooseScreen(
             model = model,
             // This used to only change the tab. `create` existed on

@@ -15,6 +15,13 @@ import network.budlum.validator.R
 
 /** Where in the app the person is. Nothing is a dead end. */
 enum class Step {
+    /**
+     * The field of blocks the design opens on, and the first thing the
+     * app shows. A block is picked up with a long press and tapped to
+     * go where it leads.
+     */
+    Blocks,
+
     /** What this phone must be allowed to do before it validates anything. */
     Setup,
 
