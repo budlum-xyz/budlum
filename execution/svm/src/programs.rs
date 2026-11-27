@@ -141,6 +141,21 @@ pub struct BorshUniversalCall {
     pub is_static: bool,
 }
 
+/// Highest valid canonical UEL `EeId` discriminant (`EeId::RV32 = 0x0C`).
+pub const MAX_KNOWN_EE_ID: u8 = 0x0C;
+
+/// Maximum target address byte length accepted in a `BorshUniversalCall`.
+pub const MAX_UNIVERSAL_CALL_TARGET_LEN: usize = 128;
+
+/// Maximum input payload byte length accepted in a `BorshUniversalCall` (1 MiB).
+pub const MAX_UNIVERSAL_CALL_INPUT_LEN: usize = 1024 * 1024;
+
+/// Returns `true` when `program_id` is an explicitly refused Solana consensus program.
+#[must_use]
+pub fn is_refused_builtin_program(program_id: &[u8; 32]) -> bool {
+    *program_id == VOTE_PROGRAM_ID || *program_id == STAKE_PROGRAM_ID
+}
+
 fn take_slice<'a>(cur: &mut &'a [u8], len: usize) -> Option<&'a [u8]> {
     let (h, t) = cur.split_at_checked(len)?;
     *cur = t;
@@ -157,24 +172,43 @@ fn take_borsh_vec(cur: &mut &[u8], max_len: usize) -> Option<Vec<u8>> {
 }
 
 /// Decode a Borsh-serialized `UniversalCall` instruction data buffer.
+///
+/// Fails closed on unknown `target_ee`, empty `target`, zero `gas_limit_bgu`,
+/// non-canonical boolean flags, trailing bytes, or non-zero value transfer
+/// inside a read-only (`is_static = true`) call.
 #[must_use]
 pub fn decode_borsh_universal_call(mut data: &[u8]) -> Option<BorshUniversalCall> {
     let target_ee = *take_slice(&mut data, 1)?.first()?;
-    let target = take_borsh_vec(&mut data, 128)?;
-    let input = take_borsh_vec(&mut data, 1024 * 1024)?;
+    if target_ee > MAX_KNOWN_EE_ID {
+        return None;
+    }
+    let target = take_borsh_vec(&mut data, MAX_UNIVERSAL_CALL_TARGET_LEN)?;
+    if target.is_empty() {
+        return None;
+    }
+    let input = take_borsh_vec(&mut data, MAX_UNIVERSAL_CALL_INPUT_LEN)?;
     let val_bytes: [u8; 16] = take_slice(&mut data, 16)?.try_into().ok()?;
     let gas_bytes: [u8; 8] = take_slice(&mut data, 8)?.try_into().ok()?;
     let static_byte = *take_slice(&mut data, 1)?.first()?;
     if !data.is_empty() || static_byte > 1 {
         return None;
     }
+    let value_attos = u128::from_le_bytes(val_bytes);
+    let gas_limit_bgu = u64::from_le_bytes(gas_bytes);
+    let is_static = static_byte == 1;
+    if gas_limit_bgu == 0 {
+        return None;
+    }
+    if is_static && value_attos > 0 {
+        return None;
+    }
     Some(BorshUniversalCall {
         target_ee,
         target,
         input,
-        value_attos: u128::from_le_bytes(val_bytes),
-        gas_limit_bgu: u64::from_le_bytes(gas_bytes),
-        is_static: static_byte == 1,
+        value_attos,
+        gas_limit_bgu,
+        is_static,
     })
 }
 
@@ -247,4 +281,79 @@ pub fn derive_associated_token_address(
         }
     }
     [0u8; 32]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_call() -> BorshUniversalCall {
+        BorshUniversalCall {
+            target_ee: 0x01,
+            target: vec![0xAA; 20],
+            input: b"ping".to_vec(),
+            value_attos: 0,
+            gas_limit_bgu: 50_000,
+            is_static: false,
+        }
+    }
+
+    #[test]
+    fn red_decode_borsh_rejects_static_call_with_nonzero_value() {
+        let mut call = valid_call();
+        call.is_static = true;
+        call.value_attos = 1;
+        let raw = encode_borsh_universal_call(&call);
+        assert!(
+            decode_borsh_universal_call(&raw).is_none(),
+            "static UniversalCall must not transfer value"
+        );
+    }
+
+    #[test]
+    fn red_decode_borsh_rejects_empty_target() {
+        let mut call = valid_call();
+        call.target.clear();
+        let raw = encode_borsh_universal_call(&call);
+        assert!(
+            decode_borsh_universal_call(&raw).is_none(),
+            "UniversalCall must reject empty target"
+        );
+    }
+
+    #[test]
+    fn red_decode_borsh_rejects_zero_gas_limit() {
+        let mut call = valid_call();
+        call.gas_limit_bgu = 0;
+        let raw = encode_borsh_universal_call(&call);
+        assert!(
+            decode_borsh_universal_call(&raw).is_none(),
+            "UniversalCall must reject zero gas_limit_bgu"
+        );
+    }
+
+    #[test]
+    fn red_decode_borsh_rejects_unknown_target_ee() {
+        let mut call = valid_call();
+        call.target_ee = 0xFE;
+        let raw = encode_borsh_universal_call(&call);
+        assert!(
+            decode_borsh_universal_call(&raw).is_none(),
+            "UniversalCall must fail closed on unknown EeId"
+        );
+    }
+
+    #[test]
+    fn decode_borsh_accepts_valid_static_zero_value_and_boundary_ee_ids() {
+        let mut call = valid_call();
+        call.is_static = true;
+        call.value_attos = 0;
+        call.target_ee = MAX_KNOWN_EE_ID;
+        let raw = encode_borsh_universal_call(&call);
+        assert_eq!(decode_borsh_universal_call(&raw), Some(call));
+
+        assert!(is_refused_builtin_program(&VOTE_PROGRAM_ID));
+        assert!(is_refused_builtin_program(&STAKE_PROGRAM_ID));
+        assert!(!is_refused_builtin_program(&SYSTEM_PROGRAM_ID));
+    }
 }
