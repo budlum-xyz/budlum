@@ -1040,6 +1040,20 @@ impl ExternalFinalityAdapter for StellarScpAdapter {
     fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
         self.golden.clone()
     }
+
+    fn attested_parent(&self, evidence: &RawConsensusEvidence) -> Option<[u8; 32]> {
+        let policy = VerificationPolicy {
+            min_depth: 0,
+            require_declared_match: false,
+            max_age: 0,
+            now: 0,
+            require_slashable: false,
+        };
+        self.verify(evidence, &policy).ok()?;
+        let decoded = decode_scp_evidence(&evidence.payload).ok()?;
+        let prev = decoded.ledger.prev_ledger_hash;
+        (prev != [0u8; 32]).then_some(prev)
+    }
 }
 
 #[cfg(test)]
@@ -1422,5 +1436,28 @@ mod tests {
             ),
             "future-dated SCP ledger_seq above policy.now must fail closed when max_age > 0"
         );
+    }
+
+    #[test]
+    fn stellar_scp_anchor_and_attested_parent_bind_prev_ledger() {
+        let (pinned, _, mut bundle, ev) = build_hierarchical_scp_fixture(false);
+        assert!(!StellarScpAdapter::new("stellar-pubnet", None).has_pinned_trust_anchor());
+        let adapter = StellarScpAdapter::new("stellar-pubnet", Some(pinned));
+        assert!(adapter.has_pinned_trust_anchor());
+        assert_eq!(
+            adapter.attested_parent(&ev),
+            Some(bundle.ledger.prev_ledger_hash)
+        );
+
+        let mut forged_sig = bundle.clone();
+        forged_sig.envelopes[0].ed25519_sig[0] ^= 0xFF;
+        let mut forged_ev = ev.clone();
+        forged_ev.payload = encode_scp_evidence(&forged_sig).unwrap();
+        assert_eq!(adapter.attested_parent(&forged_ev), None);
+
+        bundle.ledger.header_hash[0] ^= 0xFF;
+        let mut tampered = ev;
+        tampered.payload = encode_scp_evidence(&bundle).unwrap();
+        assert_eq!(adapter.attested_parent(&tampered), None);
     }
 }

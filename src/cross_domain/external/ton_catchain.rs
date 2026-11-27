@@ -1224,6 +1224,22 @@ impl ExternalFinalityAdapter for TonCatchainAdapter {
     fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
         self.golden.clone()
     }
+
+    fn attested_parent(&self, evidence: &RawConsensusEvidence) -> Option<[u8; 32]> {
+        let policy = VerificationPolicy {
+            min_depth: 0,
+            require_declared_match: false,
+            max_age: 0,
+            now: 0,
+            require_slashable: false,
+        };
+        self.verify(evidence, &policy).ok()?;
+        let decoded = decode_ton_evidence(&evidence.payload).ok()?;
+        if decoded.target_shard.is_some() || decoded.masterchain.prev_root_hash == [0u8; 32] {
+            return None;
+        }
+        Some(decoded.masterchain.prev_root_hash)
+    }
 }
 
 #[cfg(test)]
@@ -1586,5 +1602,34 @@ mod tests {
             ),
             "future-dated Masterchain seqno above policy.now must fail closed when max_age > 0"
         );
+    }
+
+    #[test]
+    fn ton_catchain_anchor_and_attested_parent_bind_masterchain_prev_root() {
+        let (pinned, _, mut bundle, shard_ev) = build_rotated_shard_fixture();
+        assert!(!TonCatchainAdapter::new("ton-mainnet", None).has_pinned_trust_anchor());
+        let adapter = TonCatchainAdapter::new("ton-mainnet", Some(pinned));
+        assert!(adapter.has_pinned_trust_anchor());
+        // Shardchain proofs attest shard file_hash, not masterchain prev_root_hash -> None.
+        assert_eq!(adapter.attested_parent(&shard_ev), None);
+
+        bundle.target_shard = None;
+        let mut mc_ev = shard_ev;
+        mc_ev.payload = encode_ton_evidence(&bundle).unwrap();
+        assert_eq!(
+            adapter.attested_parent(&mc_ev),
+            Some(bundle.masterchain.prev_root_hash)
+        );
+
+        let mut forged = bundle.clone();
+        forged.catchain_sigs[0].ed25519_sig[0] ^= 0xFF;
+        let mut forged_ev = mc_ev.clone();
+        forged_ev.payload = encode_ton_evidence(&forged).unwrap();
+        assert_eq!(adapter.attested_parent(&forged_ev), None);
+
+        bundle.masterchain.root_hash[0] ^= 0xFF;
+        let mut bad_root = mc_ev;
+        bad_root.payload = encode_ton_evidence(&bundle).unwrap();
+        assert_eq!(adapter.attested_parent(&bad_root), None);
     }
 }

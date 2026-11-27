@@ -1247,6 +1247,20 @@ impl ExternalFinalityAdapter for SimplexBftAdapter {
     fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
         self.golden.clone()
     }
+
+    fn attested_parent(&self, evidence: &RawConsensusEvidence) -> Option<[u8; 32]> {
+        let policy = VerificationPolicy {
+            min_depth: 0,
+            require_declared_match: false,
+            max_age: 0,
+            now: 0,
+            require_slashable: false,
+        };
+        self.verify(evidence, &policy).ok()?;
+        let decoded = decode_simplex_evidence(&evidence.payload).ok()?;
+        (!bool::from(decoded.block.parent_hash.ct_eq(&[0u8; 32])))
+            .then_some(decoded.block.parent_hash)
+    }
 }
 
 #[cfg(test)]
@@ -1586,5 +1600,28 @@ mod tests {
             skip_sigs: vec![vals[3].sign(&sm)],
         };
         assert!(verify_simplex_slashing(NET, &pinned, &disjoint).is_err());
+    }
+
+    #[test]
+    fn simplex_bft_anchor_and_attested_parent_bind_parent_hash() {
+        let (_, pinned, mut bundle, raw) = build_gap_fixture();
+        assert!(!SimplexBftAdapter::new(NET, None).has_pinned_trust_anchor());
+        let adapter = SimplexBftAdapter::new(NET, Some(pinned));
+        assert!(adapter.has_pinned_trust_anchor());
+        assert_eq!(
+            adapter.attested_parent(&raw),
+            Some(bundle.block.parent_hash)
+        );
+
+        let mut forged_sig = bundle.clone();
+        forged_sig.notarize_sigs[0].ed25519_sig[0] ^= 0xFF;
+        let mut forged_raw = raw.clone();
+        forged_raw.payload = encode_simplex_evidence(&forged_sig).unwrap();
+        assert_eq!(adapter.attested_parent(&forged_raw), None);
+
+        bundle.block.digest[0] ^= 0xFF;
+        let mut tampered = raw;
+        tampered.payload = encode_simplex_evidence(&bundle).unwrap();
+        assert_eq!(adapter.attested_parent(&tampered), None);
     }
 }

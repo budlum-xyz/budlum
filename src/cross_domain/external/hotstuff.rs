@@ -735,6 +735,20 @@ impl ExternalFinalityAdapter for HotStuffThreeChainAdapter {
     fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
         self.golden.clone()
     }
+
+    fn attested_parent(&self, evidence: &RawConsensusEvidence) -> Option<[u8; 32]> {
+        let policy = VerificationPolicy {
+            min_depth: 0,
+            require_declared_match: false,
+            max_age: 0,
+            now: 0,
+            require_slashable: false,
+        };
+        self.verify(evidence, &policy).ok()?;
+        let bundle = decode_hotstuff_evidence(&evidence.payload).ok()?;
+        let parent = bundle.prepare_block.parent_hash;
+        (parent != [0u8; 32]).then_some(parent)
+    }
 }
 
 #[cfg(test)]
@@ -1141,6 +1155,77 @@ mod tests {
         assert!(matches!(
             blank_adapter.verify(&blank_ev, &policy),
             Err(AdapterError::ConsensusRule { .. })
+        ));
+    }
+
+    #[test]
+    fn hotstuff_attested_parent_is_authenticated_and_drives_falsity_adjudication() {
+        use crate::cross_domain::external::falsity::{
+            adjudicate, BookSlot, Refusal, Ruling, SuccessorView,
+        };
+        use std::collections::BTreeSet;
+
+        let (pinned, _, mut bundle, ev) = hotstuff_fixture();
+        let adapter = HotStuffThreeChainAdapter::new("aptos-jolteon-1", Some(pinned));
+        assert!(adapter.has_pinned_trust_anchor());
+
+        let expected_parent = bundle.prepare_block.parent_hash;
+        assert_eq!(adapter.attested_parent(&ev), Some(expected_parent));
+
+        let mut forged_sig = bundle.clone();
+        forged_sig.prepare_qc.signatures[0].ed25519_sig[0] ^= 0xFF;
+        let mut forged_ev = ev.clone();
+        forged_ev.payload = encode_hotstuff_evidence(&forged_sig).expect("encode forged sig");
+        assert_eq!(adapter.attested_parent(&forged_ev), None);
+
+        // Tampered header hash or wrong network must return None.
+        let mut wrong_net = ev.clone();
+        wrong_net.network = "wrong-net".to_string();
+        assert_eq!(adapter.attested_parent(&wrong_net), None);
+
+        bundle.prepare_block.block_hash[0] ^= 0xFF;
+        let mut tampered_ev = ev.clone();
+        tampered_ev.payload = encode_hotstuff_evidence(&bundle).expect("encode tampered");
+        assert_eq!(adapter.attested_parent(&tampered_ev), None);
+
+        let att = adapter
+            .verify(&ev, &VerificationPolicy::strict(1_010))
+            .expect("fixture verifies");
+        let carrier_a = Address([0xAA; 32]);
+        let carrier_b = Address([0xBB; 32]);
+        let challenger = Address([0xCC; 32]);
+        let decided = BTreeSet::new();
+
+        let honest_pred = BookSlot {
+            domain: att.domain,
+            adapter: att.adapter,
+            height: att.height - 1,
+            evidence_version: att.evidence_version,
+            evidence_digest: [0x11; 32],
+            carrier: carrier_a,
+            attested_block_hash: Some(expected_parent),
+        };
+        let successor = SuccessorView {
+            domain: att.domain,
+            adapter: att.adapter,
+            height: att.height,
+            evidence_version: att.evidence_version,
+            evidence_digest: att.evidence_digest,
+            carrier: carrier_b,
+            attested_parent: adapter.attested_parent(&ev),
+        };
+        assert_eq!(
+            adjudicate(&successor, &honest_pred, challenger, &decided),
+            Ruling::Refused(Refusal::NoContradiction)
+        );
+
+        let lying_pred = BookSlot {
+            attested_block_hash: Some([0x99; 32]),
+            ..honest_pred
+        };
+        assert!(matches!(
+            adjudicate(&successor, &lying_pred, challenger, &decided),
+            Ruling::Refuted { carrier, .. } if carrier == carrier_a
         ));
     }
 }
