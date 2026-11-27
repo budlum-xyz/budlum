@@ -278,8 +278,6 @@ pub fn proven_term(
     }
 }
 
-#[cfg(test)]
-
 /// Builds the unified balance the chain can report right now.
 ///
 /// This is the read side that makes the module more than an arithmetic helper:
@@ -305,6 +303,7 @@ pub fn proven_term(
 /// domain is missing; a missing domain is data, not a bug.
 pub fn unified_balance<F>(
     denominations: &DenominationIndex,
+
     accepted_roots: &std::collections::BTreeMap<u32, (Hash32, u64)>,
     assets: &[Hash32],
     amount_on: F,
@@ -375,6 +374,7 @@ where
     Ok(totals)
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::address::Address;

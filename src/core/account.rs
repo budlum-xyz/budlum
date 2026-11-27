@@ -5011,6 +5011,49 @@ impl AccountState {
         balance
     }
 
+    /// The unified balance this chain can report for one account.
+    ///
+    /// One total per denominated asset, each term carrying the height it is
+    /// true as of, and a name for every chain the total is missing. This is the
+    /// read the "one balance" claim rests on: the assets come from the
+    /// settlement registry (not from the caller), the roots come from
+    /// `external_roots` (not from the caller), and only the *amount* is
+    /// supplied per chain.
+    ///
+    /// # Why the amount is a closure
+    ///
+    /// This chain does not parse foreign state. An account model stores one
+    /// number per address; a UTXO chain stores outputs and the number is a sum
+    /// over what the address can spend. Both are "an amount on a chain", and the
+    /// closure is where a caller says which one it is reading - without the
+    /// ability to change whether the term counts or whether it is final.
+    ///
+    /// # Errors
+    ///
+    /// The arithmetic errors of [`crate::settlement::unified_balance`]. A
+    /// missing chain is data, not an error: it comes back as an exclusion.
+    pub fn unified_balance_for<F>(
+        &self,
+        assets: &[[u8; 32]],
+        amount_on: F,
+    ) -> Result<Vec<crate::settlement::unified_balance::AssetTotal>, String>
+    where
+        F: Fn(u32, &[u8; 32]) -> Option<u64>,
+    {
+        let roots: std::collections::BTreeMap<u32, ([u8; 32], u64)> = self
+            .external_roots
+            .iter()
+            .map(|(domain, root)| (*domain, (*root, 0u64)))
+            .collect();
+        crate::settlement::unified_balance::unified_balance(
+            &self.settlement.denominations,
+            &roots,
+            assets,
+            amount_on,
+        )
+        .map_err(|err| format!("unified balance: {err}"))
+    }
+
     /// Total $BUD in liquid account balances, rounded up across fractional
     /// attoBUD sub-units so splitting an atom across accounts never reopens
     /// false minting headroom.
