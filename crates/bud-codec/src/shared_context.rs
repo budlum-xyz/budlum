@@ -191,6 +191,11 @@ fn decode_with_shared_dict(
     payload: &[u8],
     content_len: u64,
 ) -> Result<Vec<u8>, CodecError> {
+    if content_len >= SMALL_OBJECT_MAX_BYTES as u64 {
+        return Err(CodecError::TooLong {
+            max: (SMALL_OBJECT_MAX_BYTES - 1) as u64,
+        });
+    }
     let header = payload
         .get(..4)
         .ok_or_else(|| CodecError::Malformed(String::from("missing Codec 3 token header")))?;
@@ -222,6 +227,11 @@ fn decode_with_shared_dict(
                 let mut arr = [0u8; 2];
                 arr.copy_from_slice(lb);
                 let run_len = usize::from(u16::from_le_bytes(arr));
+                if run_len == 0 {
+                    return Err(CodecError::Malformed(String::from(
+                        "zero-length literal token",
+                    )));
+                }
                 pos += 2;
                 let lit = tokens
                     .get(pos..pos + run_len)
@@ -247,6 +257,11 @@ fn decode_with_shared_dict(
                 let off = usize::try_from(u32::from_le_bytes(ob))
                     .map_err(|_| CodecError::Malformed(String::from("dict offset overflow")))?;
                 let mlen = usize::from(u16::from_le_bytes(lb));
+                if mlen == 0 {
+                    return Err(CodecError::Malformed(String::from(
+                        "zero-length dict token",
+                    )));
+                }
                 pos += 6;
                 let end = off
                     .checked_add(mlen)
@@ -294,7 +309,10 @@ impl ContextRegistry {
         domain_class: &str,
         dict_bytes: Vec<u8>,
     ) -> Result<[u8; 32], CodecError> {
-        if dict_bytes.is_empty() || self.contexts.contains_key(&context_id) {
+        if dict_bytes.is_empty()
+            || domain_class.trim().is_empty()
+            || self.contexts.contains_key(&context_id)
+        {
             return Err(CodecError::Encode(String::from(
                 "invalid or duplicate CompressionContext",
             )));
@@ -324,6 +342,11 @@ impl ContextRegistry {
             .contexts
             .get_mut(&context_id)
             .ok_or_else(|| CodecError::Malformed(String::from("unknown context_id")))?;
+        if ctx.status == ContextStatus::Retired {
+            return Err(CodecError::Encode(String::from(
+                "cannot deprecate a Retired context",
+            )));
+        }
         if ctx.status == ContextStatus::Active {
             ctx.status = ContextStatus::Deprecated;
         }
@@ -334,12 +357,17 @@ impl ContextRegistry {
     ///
     /// # Errors
     ///
-    /// Refuses retirement while `ref_count > 0`.
+    /// Refuses retirement unless `status == Deprecated` and `ref_count == 0`.
     pub fn retire(&mut self, context_id: u32) -> Result<(), CodecError> {
         let ctx = self
             .contexts
             .get_mut(&context_id)
             .ok_or_else(|| CodecError::Malformed(String::from("unknown context_id")))?;
+        if ctx.status != ContextStatus::Deprecated {
+            return Err(CodecError::Encode(String::from(
+                "context must be Deprecated before retirement",
+            )));
+        }
         if ctx.ref_count != 0 {
             return Err(CodecError::Encode(String::from(
                 "cannot retire context while ref_count > 0",
@@ -396,6 +424,9 @@ impl ContextRegistry {
             .contexts
             .get(&context_id)
             .ok_or_else(|| CodecError::Malformed(String::from("unknown context_id")))?;
+        if ctx.status == ContextStatus::Retired {
+            return Err(CodecError::Malformed(String::from("context is Retired")));
+        }
         let want = u64::try_from(content_len).map_err(|_| CodecError::TooLong { max: u64::MAX })?;
         decode_with_shared_dict(&ctx.dict_bytes, payload, want)
     }
@@ -623,6 +654,9 @@ impl ConvergentDedupStore {
         plaintext: &[u8],
         convergent_mode: bool,
     ) -> ([u8; 32], usize) {
+        if owner_id.iter().all(|b| *b == 0) || owner_secret.iter().all(|b| *b == 0) {
+            return ([0u8; 32], 0);
+        }
         let compressed = zstd_compress(plaintext).unwrap_or_else(|_| plaintext.to_vec());
         if !convergent_mode {
             let mut nonce_material = Vec::with_capacity(40);
@@ -670,13 +704,10 @@ impl ConvergentDedupStore {
                 auth_tag,
                 wraps: BTreeMap::new(),
             });
-        entry.wraps.insert(
+        entry.wraps.entry(owner_id).or_insert(OwnerKeyWrap {
             owner_id,
-            OwnerKeyWrap {
-                owner_id,
-                wrapped_key,
-            },
-        );
+            wrapped_key,
+        });
         (envelope_id, entry.wraps.len())
     }
 
@@ -712,6 +743,11 @@ impl ConvergentDedupStore {
         owner_secret: &[u8; 32],
         plaintext_len: usize,
     ) -> Result<Vec<u8>, CodecError> {
+        if owner_id.iter().all(|b| *b == 0) || owner_secret.iter().all(|b| *b == 0) {
+            return Err(CodecError::Malformed(String::from(
+                "all-zero owner_id or owner_secret refused",
+            )));
+        }
         let rec = self
             .shared
             .get(envelope_id)
@@ -845,5 +881,90 @@ mod tests {
         assert_ne!(iso1, iso2);
         assert_eq!((r1, r2), (1, 1));
         Ok(())
+    }
+
+    #[test]
+    fn convergent_store_protects_existing_owner_wrap_and_refuses_zero_keys() {
+        let mut store = ConvergentDedupStore::default();
+        let alice = [0x11u8; 32];
+        let alice_sk = [0xA1u8; 32];
+        let mallory_sk = [0xE9u8; 32];
+        let payload = b"confidential multi-owner record ".repeat(16);
+
+        let (env, refs) = store.put(alice, alice_sk, &payload, true);
+        assert_eq!(refs, 1);
+
+        // Mallory re-putting under Alice's owner_id with a different secret must NEVER
+        // clobber Alice's existing wrapped content key.
+        let (_env2, refs2) = store.put(alice, mallory_sk, &payload, true);
+        assert_eq!(refs2, 1);
+        assert_eq!(
+            store.open(&env, &alice, &alice_sk, payload.len()),
+            Ok(payload.clone())
+        );
+        assert!(store
+            .open(&env, &alice, &mallory_sk, payload.len())
+            .is_err());
+
+        // All-zero owner_id or all-zero owner_secret must never create an openable wrap.
+        let (z_env_id, z_refs_id) = store.put([0u8; 32], alice_sk, &payload, true);
+        assert_eq!(z_refs_id, 0);
+        assert!(store
+            .open(&z_env_id, &[0u8; 32], &alice_sk, payload.len())
+            .is_err());
+
+        let (z_env_sk, z_refs_sk) = store.put([0x33u8; 32], [0u8; 32], &payload, true);
+        assert_eq!(z_refs_sk, 0);
+        assert!(store
+            .open(&z_env_sk, &[0x33u8; 32], &[0u8; 32], payload.len())
+            .is_err());
+    }
+
+    #[test]
+    fn context_lifecycle_and_small_dict_bounds_fail_closed() {
+        let mut reg = ContextRegistry::default();
+        let dict = vec![b'D'; SMALL_OBJECT_MAX_BYTES];
+
+        // Blank domain_class is refused.
+        assert!(reg.register(10, "   ", dict.clone()).is_err());
+
+        reg.register(1, "json-small", dict.clone()).unwrap();
+        // Active context cannot skip Deprecated straight to Retired.
+        assert!(reg.retire(1).is_err());
+        reg.deprecate(1).unwrap();
+        reg.retire(1).unwrap();
+        // Retired context cannot be re-deprecated or used for decoding.
+        assert!(reg.deprecate(1).is_err());
+
+        reg.register(2, "json-small", dict.clone()).unwrap();
+        let sample = b"DDDDDDDDDDDDDDDD-hello";
+        let enc = reg.encode_small_with_context(2, sample).unwrap();
+        // Force ref_count check bypass scenario via fresh unreferenced context 3:
+        reg.register(3, "json-small", dict).unwrap();
+        reg.deprecate(3).unwrap();
+        reg.retire(3).unwrap();
+        assert!(reg
+            .decode_small_with_context(3, &enc, sample.len())
+            .is_err());
+
+        // Active context 2 must refuse >= SMALL_OBJECT_MAX_BYTES decode length and zero-length tokens.
+        let mut bomb_tokens = Vec::new();
+        bomb_tokens.push(0x01u8);
+        bomb_tokens.extend_from_slice(&0u32.to_le_bytes());
+        bomb_tokens.extend_from_slice(&(SMALL_OBJECT_MAX_BYTES as u16).to_le_bytes());
+        let z = zstd_compress_small(&bomb_tokens).unwrap();
+        let mut bomb_payload = Vec::new();
+        bomb_payload.extend_from_slice(&(bomb_tokens.len() as u32).to_le_bytes());
+        bomb_payload.extend_from_slice(&z);
+        assert!(reg
+            .decode_small_with_context(2, &bomb_payload, SMALL_OBJECT_MAX_BYTES)
+            .is_err());
+
+        let zero_lit_tokens = [0x00u8, 0x00, 0x00];
+        let z_zero = zstd_compress_small(&zero_lit_tokens).unwrap();
+        let mut zero_payload = Vec::new();
+        zero_payload.extend_from_slice(&(zero_lit_tokens.len() as u32).to_le_bytes());
+        zero_payload.extend_from_slice(&z_zero);
+        assert!(reg.decode_small_with_context(2, &zero_payload, 0).is_err());
     }
 }

@@ -558,4 +558,85 @@ mod tests {
         let all_bytes: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
         assert_eq!(entropy_millibits(&all_bytes), 8_000);
     }
+
+    #[test]
+    fn decode_codec_rejects_invalid_mode_and_short_output() {
+        // Forged mode byte on mode-0 short COLUMNAR_JSON (exact length 7, so exit length
+        // check alone cannot rescue a missing mode-0/1 gate), mode-1 COLUMNAR_JSON (4),
+        // TIME_SERIES (15), FLOAT_SPLIT (19), and single-mode LZMA2 (2) must fail closed.
+        let mut short_json_enc = codecs::encode_codec(4, b"{\"a\":1}").unwrap();
+        assert_eq!(short_json_enc[1], 0);
+        short_json_enc[1] = 0xFF;
+        assert!(codecs::decode_codec(4, &short_json_enc, 7).is_err());
+
+        let mut json_enc = codecs::encode_codec(
+            4,
+            b"{\"a\":1}\n{\"a\":2}\n{\"a\":3}\n{\"a\":4}\n{\"a\":5}\n",
+        )
+        .unwrap();
+        json_enc[1] = 0xFF;
+        assert!(codecs::decode_codec(4, &json_enc, 40).is_err());
+
+        let mut lz_enc = codecs::encode_codec(2, b"aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb").unwrap();
+        lz_enc[1] = 0x00;
+        assert!(codecs::decode_codec(2, &lz_enc, 32).is_err());
+
+        let mut ts_enc = codecs::encode_codec(15, &[0u8; 32]).unwrap();
+        ts_enc[1] = 0x02;
+        assert!(codecs::decode_codec(15, &ts_enc, 32).is_err());
+
+        let mut fp_enc = codecs::encode_codec(19, &[0u8; 16]).unwrap();
+        fp_enc[1] = 0x02;
+        assert!(codecs::decode_codec(19, &fp_enc, 16).is_err());
+
+        // Direct decode_codec call must enforce exact content_len (TooShort on empty payload vs want=32).
+        let empty_dna = codecs::encode_codec(23, b"").unwrap();
+        assert_eq!(
+            codecs::decode_codec(23, &empty_dna, 32),
+            Err(CodecError::TooShort { want: 32, got: 0 })
+        );
+    }
+
+    #[test]
+    fn genomic_and_chunk_dedup_reject_noncanonical_and_zero_tokens() {
+        let wrap = |codec: CodecId, inner: &[u8]| -> Vec<u8> {
+            let comp = zstd_encode(inner, STORE_LEVEL, false).unwrap();
+            let mut out = Vec::with_capacity(6 + comp.len());
+            out.push(codec as u8);
+            out.push(1);
+            out.extend_from_slice(&(inner.len() as u32).to_le_bytes());
+            out.extend_from_slice(&comp);
+            out
+        };
+
+        // Genomic 2-bit run of 5 bases with non-zero low 6 padding bits (0x03) in byte 2.
+        let noncanonical_dna = wrap(23, &[0x01, 0x05, 0b00_01_10_11, 0b00_00_00_11]);
+        assert!(decode(23, &noncanonical_dna, 5).is_err());
+
+        // Genomic zero-count literal spin token.
+        let zero_dna = wrap(23, &[0x00, 0x00]);
+        assert!(decode(23, &zero_dna, 0).is_err());
+
+        // Chunk-dedup (Codec 11) with zero-length unique chunk spinning 4 times.
+        let mut zero_chunk = Vec::new();
+        zero_chunk.extend_from_slice(&1u32.to_le_bytes()); // unique_count = 1
+        zero_chunk.extend_from_slice(&0u32.to_le_bytes()); // chunk_len = 0
+        zero_chunk.extend_from_slice(&4u32.to_le_bytes()); // seq_count = 4
+        for _ in 0..4 {
+            zero_chunk.extend_from_slice(&0u32.to_le_bytes());
+        }
+        let zero_chunk_payload = wrap(11, &zero_chunk);
+        assert!(decode(11, &zero_chunk_payload, 0).is_err());
+
+        // Chunk-dedup with trailing unread bytes after valid table.
+        let mut trailing_chunk = Vec::new();
+        trailing_chunk.extend_from_slice(&1u32.to_le_bytes());
+        trailing_chunk.extend_from_slice(&4u32.to_le_bytes());
+        trailing_chunk.extend_from_slice(b"ABCD");
+        trailing_chunk.extend_from_slice(&1u32.to_le_bytes());
+        trailing_chunk.extend_from_slice(&0u32.to_le_bytes());
+        trailing_chunk.extend_from_slice(b"JUNK");
+        let trailing_payload = wrap(11, &trailing_chunk);
+        assert!(decode(11, &trailing_payload, 4).is_err());
+    }
 }

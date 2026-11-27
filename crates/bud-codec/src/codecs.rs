@@ -668,6 +668,11 @@ fn pack_genomic_decode(encoded: &[u8], content_len: u64) -> Result<Vec<u8>, Code
                 .get(pos + 1)
                 .ok_or_else(|| CodecError::Malformed(String::from("truncated genomic count")))?,
         );
+        if count == 0 {
+            return Err(CodecError::Malformed(String::from(
+                "zero genomic token count",
+            )));
+        }
         pos += 2;
         if out.len().saturating_add(count) > want {
             return Err(CodecError::TooLong { max: content_len });
@@ -681,10 +686,24 @@ fn pack_genomic_decode(encoded: &[u8], content_len: u64) -> Result<Vec<u8>, Code
                 pos += count;
             }
             0x01 => {
+                if count < 4 {
+                    return Err(CodecError::Malformed(String::from(
+                        "non-canonical short genomic 2bit run",
+                    )));
+                }
                 let packed_bytes = count.div_ceil(4);
                 let packed = encoded
                     .get(pos..pos + packed_bytes)
                     .ok_or_else(|| CodecError::Malformed(String::from("truncated genomic 2bit")))?;
+                if count % 4 != 0 {
+                    let rem_bits = (4 - (count % 4)) * 2;
+                    let pad_mask = (1u8 << rem_bits) - 1;
+                    if packed.last().is_some_and(|last| (last & pad_mask) != 0) {
+                        return Err(CodecError::Malformed(String::from(
+                            "non-zero genomic tail padding bits",
+                        )));
+                    }
+                }
                 pos += packed_bytes;
                 for i in 0..count {
                     let byte = *packed.get(i / 4).unwrap_or(&0);
@@ -745,6 +764,9 @@ fn chunk_dedup_decode(encoded: &[u8], content_len: u64) -> Result<Vec<u8>, Codec
     for _ in 0..unique_count {
         let len = usize::try_from(read_u32_le(encoded, &mut pos)?)
             .map_err(|_| CodecError::Malformed(String::from("chunk len overflow")))?;
+        if len == 0 {
+            return Err(CodecError::Malformed(String::from("empty unique chunk")));
+        }
         let end = pos
             .checked_add(len)
             .ok_or_else(|| CodecError::Malformed(String::from("chunk slice overflow")))?;
@@ -756,6 +778,9 @@ fn chunk_dedup_decode(encoded: &[u8], content_len: u64) -> Result<Vec<u8>, Codec
     }
     let seq_count = usize::try_from(read_u32_le(encoded, &mut pos)?)
         .map_err(|_| CodecError::Malformed(String::from("seq count overflow")))?;
+    if seq_count > max_chunks {
+        return Err(CodecError::TooLong { max: content_len });
+    }
     let mut out = Vec::with_capacity(want.min(1 << 20));
     for _ in 0..seq_count {
         let idx = usize::try_from(read_u32_le(encoded, &mut pos)?)
@@ -767,6 +792,11 @@ fn chunk_dedup_decode(encoded: &[u8], content_len: u64) -> Result<Vec<u8>, Codec
             return Err(CodecError::TooLong { max: content_len });
         }
         out.extend_from_slice(chunk);
+    }
+    if pos != encoded.len() {
+        return Err(CodecError::Malformed(String::from(
+            "trailing chunk_dedup bytes",
+        )));
     }
     Ok(out)
 }
@@ -909,6 +939,20 @@ pub fn encode_codec(codec: CodecId, content: &[u8]) -> Result<Vec<u8>, CodecErro
     }
 }
 
+fn require_mode_1(mode: u8) -> Result<(), CodecError> {
+    if mode != 1 {
+        return Err(CodecError::Malformed(String::from("invalid codec mode")));
+    }
+    Ok(())
+}
+
+fn require_mode_01(mode: u8) -> Result<(), CodecError> {
+    if !matches!(mode, 0 | 1) {
+        return Err(CodecError::Malformed(String::from("invalid codec mode")));
+    }
+    Ok(())
+}
+
 /// Decode `payload` under `codec` up to exactly `content_len` bytes.
 ///
 /// # Errors
@@ -924,17 +968,20 @@ pub fn decode_codec(
             max: MAX_CODEC_DECODE_BYTES,
         });
     }
-    match codec {
+    let decoded = match codec {
         LZMA2 | PREFLATE | LZ_CONTEXT | PDF_SPLIT => {
-            let (_mode, tokens) = unwrap_tagged_zstd(codec, payload, content_len)?;
+            let (mode, tokens) = unwrap_tagged_zstd(codec, payload, content_len)?;
+            require_mode_1(mode)?;
             decode_lz77_tokens(&tokens, content_len)
         }
         DICT_ZSTD => {
-            let (_mode, out) = unwrap_tagged_zstd(DICT_ZSTD, payload, content_len)?;
+            let (mode, out) = unwrap_tagged_zstd(DICT_ZSTD, payload, content_len)?;
+            require_mode_1(mode)?;
             Ok(out)
         }
         COLUMNAR_JSON | WAL_COLUMNAR | MARKDOWN_SPLIT => {
             let (mode, inner) = unwrap_tagged_zstd(codec, payload, content_len)?;
+            require_mode_01(mode)?;
             if mode == 1 {
                 columnar_lines_decode(&inner, b'\n', content_len)
             } else {
@@ -942,24 +989,29 @@ pub fn decode_codec(
             }
         }
         LEPTON_JPEG | DERIVATION => {
-            let (_mode, inner) = unwrap_tagged_zstd(codec, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(codec, payload, content_len)?;
+            require_mode_1(mode)?;
             Ok(xor_neighbor_decode(&inner))
         }
         LOSSLESS_AUDIO => {
-            let (_mode, inner) = unwrap_tagged_zstd(LOSSLESS_AUDIO, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(LOSSLESS_AUDIO, payload, content_len)?;
+            require_mode_1(mode)?;
             Ok(stride_delta_decode(&inner, 2))
         }
         CONTEXT_MIX => range_coder::decode(payload, content_len),
         VERSION_DELTA | OFFICE_OPC => {
-            let (_mode, inner) = unwrap_tagged_zstd(codec, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(codec, payload, content_len)?;
+            require_mode_1(mode)?;
             chunk_dedup_decode(&inner, content_len)
         }
         CONTEXT_MACHINE => {
-            let (_mode, inner) = unwrap_tagged_zstd(CONTEXT_MACHINE, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(CONTEXT_MACHINE, payload, content_len)?;
+            require_mode_1(mode)?;
             Ok(stride_delta_decode(&inner, 1))
         }
         LOG_COLUMNAR => {
             let (mode, inner) = unwrap_tagged_zstd(LOG_COLUMNAR, payload, content_len)?;
+            require_mode_01(mode)?;
             if mode == 1 {
                 columnar_lines_decode(&inner, b' ', content_len)
             } else {
@@ -978,6 +1030,7 @@ pub fn decode_codec(
                     "TIME_SERIES tag mismatch",
                 )));
             }
+            require_mode_01(mode)?;
             if mode == 1 {
                 let want = usize::try_from(content_len)
                     .map_err(|_| CodecError::TooLong { max: content_len })?;
@@ -988,11 +1041,13 @@ pub fn decode_codec(
             }
         }
         PCAP_COLUMNAR => {
-            let (_mode, inner) = unwrap_tagged_zstd(PCAP_COLUMNAR, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(PCAP_COLUMNAR, payload, content_len)?;
+            require_mode_1(mode)?;
             Ok(stride_delta_decode(&inner, 16))
         }
         PAGE_XOR_DELTA => {
-            let (_mode, inner) = unwrap_tagged_zstd(PAGE_XOR_DELTA, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(PAGE_XOR_DELTA, payload, content_len)?;
+            require_mode_1(mode)?;
             Ok(stride_delta_decode(&inner, 4096))
         }
         FLOAT_SPLIT => {
@@ -1007,6 +1062,7 @@ pub fn decode_codec(
                     "FLOAT_SPLIT tag mismatch",
                 )));
             }
+            require_mode_01(mode)?;
             if mode == 1 {
                 let want = usize::try_from(content_len)
                     .map_err(|_| CodecError::TooLong { max: content_len })?;
@@ -1017,23 +1073,38 @@ pub fn decode_codec(
             }
         }
         EXE_SPLIT => {
-            let (_mode, inner) = unwrap_tagged_zstd(EXE_SPLIT, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(EXE_SPLIT, payload, content_len)?;
+            require_mode_1(mode)?;
             Ok(stride_delta_decode(&inner, 4))
         }
         GENOMIC => {
-            let (_mode, inner) = unwrap_tagged_zstd(GENOMIC, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(GENOMIC, payload, content_len)?;
+            require_mode_1(mode)?;
             pack_genomic_decode(&inner, content_len)
         }
         POINT_CLOUD => {
-            let (_mode, inner) = unwrap_tagged_zstd(POINT_CLOUD, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(POINT_CLOUD, payload, content_len)?;
+            require_mode_1(mode)?;
             Ok(stride_delta_decode(&inner, 24))
         }
         LOSSLESS_IMAGE => {
-            let (_mode, inner) = unwrap_tagged_zstd(LOSSLESS_IMAGE, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(LOSSLESS_IMAGE, payload, content_len)?;
+            require_mode_1(mode)?;
             Ok(stride_delta_decode(&inner, 3))
         }
         other => Err(CodecError::Unknown(other)),
+    }?;
+    let got = decoded.len() as u64;
+    if got > content_len {
+        return Err(CodecError::TooLong { max: content_len });
     }
+    if got < content_len {
+        return Err(CodecError::TooShort {
+            want: content_len,
+            got,
+        });
+    }
+    Ok(decoded)
 }
 
 /// Fast candidate codecs matched by content signature or size for `select()`.

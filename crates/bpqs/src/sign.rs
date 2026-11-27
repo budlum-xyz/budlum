@@ -131,6 +131,12 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
     /// [`BpqsSigner::fresh_device`]).
     pub fn ceremonial_keygen(root_seed: [u8; 32], window: EpochWindow) -> Result<Self, BpqsError> {
         crate::params::ensure_valid_params::<P>()?;
+        if window.0 == 0 {
+            return Err(BpqsError::BadEpochWindow);
+        }
+        if root_seed.iter().all(|b| *b == 0) {
+            return Err(BpqsError::Malformed("all-zero root seed is refused"));
+        }
         let mut vks = Vec::with_capacity(1usize << P::T_LOG2);
         for epoch in 0..(1u32 << P::T_LOG2) {
             let seed = prf_epoch_seed::<H>(&root_seed, epoch);
@@ -195,19 +201,22 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
                     "resumed quota names an epoch beyond the tree's headroom",
                 ));
             }
+            if used == 0 {
+                return Err(BpqsError::Malformed(
+                    "resumed quota entry must record at least one spent signature",
+                ));
+            }
             if used > P::Q_MAX {
                 return Err(BpqsError::Malformed(
                     "resumed quota count is above the few-time ceiling",
                 ));
             }
-            if used > 0 {
-                signer.per_epoch_counts.insert(epoch, used);
-                signer.highest_epoch_minted = Some(
-                    signer
-                        .highest_epoch_minted
-                        .map_or(epoch, |highest| highest.max(epoch)),
-                );
-            }
+            signer.per_epoch_counts.insert(epoch, used);
+            signer.highest_epoch_minted = Some(
+                signer
+                    .highest_epoch_minted
+                    .map_or(epoch, |highest| highest.max(epoch)),
+            );
         }
         // An empty list is not a resume, it is the absence of one. Accepting it
         // would let a restarted device that forgot to read its log re-open the
@@ -411,7 +420,7 @@ pub fn verify_at_height<H: BpqsHash, P: BpqsParams>(
 /// WIRING: anchor family verifier log for research line F2.
 #[derive(Clone, Debug, Default)]
 pub struct BpqsVerifierLog {
-    seen_epochs: alloc::collections::BTreeSet<([u8; 32], &'static str, u64, u32)>,
+    seen_epochs: alloc::collections::BTreeSet<([u8; 32], &'static str, &'static str, u64, u32)>,
     allow_test_params: bool,
 }
 
@@ -457,10 +466,15 @@ impl BpqsVerifierLog {
                 "non-production BPQS parameter row refused by production verifier",
             ));
         }
+        if !self.allow_test_params && !H::IS_PRODUCTION {
+            return Err(BpqsError::Malformed(
+                "non-production BPQS hash backend refused by production verifier",
+            ));
+        }
         verify_at_height::<H, P>(public, height, msg, sig)?;
         if !self
             .seen_epochs
-            .insert((public.root, P::NAME, public.window.0, sig.epoch))
+            .insert((public.root, P::NAME, H::NAME, public.window.0, sig.epoch))
         {
             return Err(BpqsError::QuotaExceeded {
                 epoch: sig.epoch,
@@ -832,6 +846,114 @@ mod tests {
             BpqsPublicKey::<ParamsTestFast>::from_parts([0u8; 32], window, ParamsTestFast::NAME);
         assert!(matches!(
             verify_at_height::<H, ParamsTestFast>(&zero_pk, 0, b"m", &signed_fast()),
+            Err(BpqsError::Malformed(_))
+        ));
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct TruncatedChecksumRow;
+
+    impl BpqsParams for TruncatedChecksumRow {
+        const N: usize = 32;
+        const WIN: u32 = 16;
+        const LEN1: usize = 64;
+        const LEN2: usize = 1;
+        const LEN: usize = 65;
+        const T_LOG2: usize = 4;
+        const NAME: &'static str = "bpqs-truncated-checksum";
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct InflatedChecksumRow;
+
+    impl BpqsParams for InflatedChecksumRow {
+        const N: usize = 32;
+        const WIN: u32 = 16;
+        const LEN1: usize = 64;
+        const LEN2: usize = 4;
+        const LEN: usize = 68;
+        const T_LOG2: usize = 4;
+        const NAME: &'static str = "bpqs-inflated-checksum";
+    }
+
+    #[test]
+    fn params_reject_noncanonical_winternitz_checksum_len2() {
+        assert!(matches!(
+            BpqsSigner::<TruncatedChecksumRow, H>::fresh_device([0x33; 32], EpochWindow(4)),
+            Err(BpqsError::Malformed(_))
+        ));
+        assert!(matches!(
+            BpqsSigner::<InflatedChecksumRow, H>::fresh_device([0x33; 32], EpochWindow(4)),
+            Err(BpqsError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn production_verifier_refuses_poseidon2_research_backend() {
+        use crate::params::ParamsL5;
+        use crate::poseidon2::Poseidon2GoldilocksHash;
+
+        type R = Poseidon2GoldilocksHash;
+        let epoch_seed = prf_epoch_seed::<R>(&[0x77; 32], 0);
+        let chains = wots::epoch_secret_chains::<R, ParamsL5>(&epoch_seed);
+        let vk = wots::vk_of_chains::<R, ParamsL5>(&chains);
+        let mut cur = merkle::leaf::<R, ParamsL5>(&vk);
+        let mut path = [[0u8; 32]; 16];
+        for (lvl, slot) in path.iter_mut().enumerate() {
+            *slot = [0x11u8.wrapping_add(lvl as u8); 32];
+            cur = merkle::node::<R, ParamsL5>(&cur, slot);
+        }
+        let pk = BpqsPublicKey::<ParamsL5>::from_parts(cur, EpochWindow(8), ParamsL5::NAME);
+        let randomizer = [0x22u8; 16];
+        let msg = b"prod-anchor-under-algebraic-hash";
+        let bound = R::digest32(domains::MESSAGE_BIND_V1, &[&randomizer, msg]);
+        let mut signed = wots::sign_chains::<R, ParamsL5>(&chains, &bound);
+        for lane in signed.iter_mut().skip(ParamsL5::LEN) {
+            *lane = [0u8; 32];
+        }
+        let sig = BpqsSignature::<ParamsL5> {
+            epoch: 0,
+            randomizer,
+            chains: signed,
+            path,
+            _private: core::marker::PhantomData,
+        };
+        // Sanity: stateless verification passes for this genuine signature.
+        verify_at_height::<R, ParamsL5>(&pk, 0, msg, &sig)
+            .expect("synthetic single-path L5 Poseidon2 signature must be valid");
+
+        // Production ceremony log MUST refuse research-only Poseidon2 backend.
+        let mut prod_log = BpqsVerifierLog::new_production();
+        assert_eq!(
+            prod_log.accept_at_height::<R, ParamsL5>(&pk, 0, msg, &sig),
+            Err(BpqsError::Malformed(
+                "non-production BPQS hash backend refused by production verifier"
+            ))
+        );
+    }
+
+    #[test]
+    fn keygen_refuses_zero_window_and_all_zero_root_seed() {
+        assert_eq!(
+            keygen_root::<H, ParamsTestFast>([0x55; 32], EpochWindow(0)),
+            Err(BpqsError::BadEpochWindow)
+        );
+        assert!(matches!(
+            keygen_root::<H, ParamsTestFast>([0u8; 32], EpochWindow(8)),
+            Err(BpqsError::Malformed(_))
+        ));
+        assert!(matches!(
+            BpqsSigner::<ParamsTestFast, H>::fresh_device([0u8; 32], EpochWindow(8)),
+            Err(BpqsError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn resume_refuses_zero_count_entry_paired_with_spent_epoch() {
+        // Partial log corruption zeroing epoch 5 alongside valid (1, 1) must
+        // fail closed rather than dropping (5, 0) and reopening epoch 5.
+        assert!(matches!(
+            BpqsSigner::<ParamsTestFast, H>::resume([0x42; 32], EpochWindow(8), [(1, 1), (5, 0)]),
             Err(BpqsError::Malformed(_))
         ));
     }

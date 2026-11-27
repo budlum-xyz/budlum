@@ -43,6 +43,12 @@ use sha3::{Digest, Sha3_256};
 /// domain-separated 32-byte digest. Parameter rows with N < 32 truncate
 /// under their own domain (see crate doc).
 pub trait BpqsHash {
+    /// Canonical backend identifier recorded in stateful ceremony logs.
+    const NAME: &'static str;
+    /// True only on vetted FIPS-202 backends (`Shake256Hash`, `Sha3_256Hash`).
+    /// Algebraic research backends stay `false` so production verifiers refuse
+    /// them fail-closed.
+    const IS_PRODUCTION: bool = false;
     /// Compute a 32-byte digest over `parts` bound to `domain`.
     fn digest32(domain: &[u8], parts: &[&[u8]]) -> [u8; 32];
 }
@@ -77,6 +83,9 @@ pub(crate) fn frame_bytes(domain: &[u8], parts: &[&[u8]]) -> Vec<u8> {
 pub struct Sha3_256Hash;
 
 impl BpqsHash for Sha3_256Hash {
+    const NAME: &'static str = "sha3-256";
+    const IS_PRODUCTION: bool = true;
+
     fn digest32(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
         hasher.update(frame_bytes(domain, parts));

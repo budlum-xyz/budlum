@@ -462,6 +462,8 @@ fn sponge_digest(frame: &[u8]) -> [u8; 32] {
 pub struct Poseidon2GoldilocksHash;
 
 impl super::hash::BpqsHash for Poseidon2GoldilocksHash {
+    const NAME: &'static str = "poseidon2-goldilocks-research";
+
     fn digest32(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
         sponge_digest(&super::hash::frame_bytes(domain, parts))
     }

@@ -77,6 +77,9 @@ fn xor_block(st: &mut [u64; 25], block: &[u8]) {
 pub struct Shake256Hash;
 
 impl BpqsHash for Shake256Hash {
+    const NAME: &'static str = "shake256";
+    const IS_PRODUCTION: bool = true;
+
     fn digest32(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
         shake256_32(&frame_bytes(domain, parts))
     }

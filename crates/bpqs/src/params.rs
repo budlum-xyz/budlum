@@ -59,7 +59,14 @@ pub(crate) fn ensure_valid_params<P: BpqsParams>() -> Result<(), crate::error::B
             "BPQS LEN1 must equal 2 * N",
         ));
     }
-    if P::LEN2 == 0 || P::LEN != P::LEN1 + P::LEN2 || P::LEN > 256 {
+    let max_checksum = (P::LEN1 as u32).saturating_mul(P::WIN - 1);
+    let mut rem = max_checksum;
+    let mut expected_len2 = 0usize;
+    while rem > 0 {
+        expected_len2 += 1;
+        rem >>= 4;
+    }
+    if P::LEN2 != expected_len2 || P::LEN != P::LEN1 + P::LEN2 || P::LEN > 256 {
         return Err(crate::error::BpqsError::Malformed(
             "BPQS LEN / LEN2 checksum geometry is out of bounds",
         ));
