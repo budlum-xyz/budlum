@@ -110,6 +110,31 @@ pub fn verify_path<H: BpqsHash, P: BpqsParams>(
     if P::T_LOG2 > 16 {
         return Err(BpqsError::Malformed("tree height exceeds the path budget"));
     }
+    if P::N == 0 || P::N > 32 {
+        return Err(BpqsError::Malformed("lane width outside digest bounds"));
+    }
+    if index >= (1usize << P::T_LOG2) {
+        return Err(BpqsError::Malformed("leaf index out of epoch headroom"));
+    }
+    if leaf_value.iter().skip(P::N).any(|b| *b != 0)
+        || expected_root.iter().skip(P::N).any(|b| *b != 0)
+    {
+        return Err(BpqsError::Malformed(
+            "non-zero padding in merkle digest lane",
+        ));
+    }
+    for sib in path.iter().take(P::T_LOG2) {
+        if sib.iter().skip(P::N).any(|b| *b != 0) {
+            return Err(BpqsError::Malformed("non-zero padding in auth path lane"));
+        }
+    }
+    for unused in path.iter().skip(P::T_LOG2) {
+        if unused.iter().any(|b| *b != 0) {
+            return Err(BpqsError::Malformed(
+                "non-zero bytes in unused auth path lane",
+            ));
+        }
+    }
     let mut cur = leaf::<H, P>(leaf_value);
     let mut cursor = index;
     for sib in path.iter().take(P::T_LOG2) {
@@ -196,9 +221,58 @@ mod merkle_tests {
     #[test]
     fn epoch_index_out_of_headroom_refuses() {
         let vks = fake_vks();
-        let (_, levels) =
+        let (root, levels) =
             build_tree::<Sha3_256Hash, P>(&vks).unwrap_or_else(|e| panic!("tree: {e}"));
         assert!(auth_path::<P>(&levels, 1 << P::T_LOG2).is_err());
+
+        // Direct verify_path must also refuse out-of-range indices rather than
+        // aliasing `index + 2^T_LOG2` onto leaf `index` via low-bit truncation.
+        let path0 = auth_path::<P>(&levels, 0).unwrap_or_else(|e| panic!("path0: {e}"));
+        assert_eq!(
+            verify_path::<Sha3_256Hash, P>(&vks[0], 1usize << P::T_LOG2, &path0, &root),
+            Err(BpqsError::Malformed("leaf index out of epoch headroom"))
+        );
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct NarrowTestRow;
+
+    impl BpqsParams for NarrowTestRow {
+        const N: usize = 16;
+        const WIN: u32 = 16;
+        const LEN1: usize = 32;
+        const LEN2: usize = 3;
+        const LEN: usize = 35;
+        const T_LOG2: usize = 4;
+        const NAME: &'static str = "narrow-test";
+    }
+
+    #[test]
+    fn verify_path_refuses_non_zero_unused_path_entries_and_lane_padding() {
+        let mut vks = Vec::with_capacity(1usize << NarrowTestRow::T_LOG2);
+        for i in 0..(1usize << NarrowTestRow::T_LOG2) {
+            let wide = Sha3_256Hash::digest32(b"vk16", &[&(i as u32).to_le_bytes()]);
+            let mut lane = [0u8; 32];
+            lane[..NarrowTestRow::N].copy_from_slice(&wide[..NarrowTestRow::N]);
+            vks.push(lane);
+        }
+        let (root, levels) =
+            build_tree::<Sha3_256Hash, NarrowTestRow>(&vks).unwrap_or_else(|e| panic!("tree: {e}"));
+        let path0 = auth_path::<NarrowTestRow>(&levels, 0).unwrap_or_else(|e| panic!("path0: {e}"));
+
+        let mut dirty_unused = path0;
+        dirty_unused[NarrowTestRow::T_LOG2][0] = 1;
+        assert!(matches!(
+            verify_path::<Sha3_256Hash, NarrowTestRow>(&vks[0], 0, &dirty_unused, &root),
+            Err(BpqsError::Malformed(_))
+        ));
+
+        let mut dirty_lane = path0;
+        dirty_lane[0][NarrowTestRow::N] = 1;
+        assert!(matches!(
+            verify_path::<Sha3_256Hash, NarrowTestRow>(&vks[0], 0, &dirty_lane, &root),
+            Err(BpqsError::Malformed(_))
+        ));
     }
 
     #[test]

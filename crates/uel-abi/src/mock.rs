@@ -125,7 +125,10 @@ impl MockEe {
                 let result = host.universal_call(UniversalCall {
                     from: call.target.clone(),
                     to_ee: EeId(*to),
-                    target: call.target.clone(),
+                    target: EeIdentity {
+                        ee: EeId(*to),
+                        id: call.target.id.clone(),
+                    },
                     value: BudAmount(0),
                     input: data.to_vec(),
                     gas_limit: call.gas_limit,

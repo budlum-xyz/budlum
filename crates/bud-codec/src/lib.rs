@@ -103,16 +103,58 @@ pub fn decode(codec: CodecId, payload: &[u8], content_len: u64) -> Result<Vec<u8
             payload.to_vec()
         }
         ZSTD => {
-            let mut dec = ruzstd::decoding::StreamingDecoder::new(payload)
+            // Canonical single-frame ZSTD decoding: reject skippable frames,
+            // concatenated multi-frame payloads, and unconsumed trailing bytes.
+            if payload.len() < 4 || payload[..4] != [0x28, 0xB5, 0x2F, 0xFD] {
+                return Err(CodecError::Malformed(
+                    "zstd payload must start with canonical frame magic".into(),
+                ));
+            }
+            let mut cursor = std::io::Cursor::new(payload);
+            let mut dec = ruzstd::decoding::FrameDecoder::new();
+            dec.reset(&mut cursor)
                 .map_err(|e| CodecError::Malformed(e.to_string()))?;
             let mut out = Vec::with_capacity(cap.min(1 << 20));
             // Read one byte past the declared length (bounded by MAX_CODEC_DECODE_BYTES)
             // to detect a longer stream without allowing unbounded allocations.
             let limit = content_len.min(MAX_CODEC_DECODE_BYTES).saturating_add(1);
-            (&mut dec)
-                .take(limit)
-                .read_to_end(&mut out)
+            let mut buf = [0u8; 8192];
+            let mut empty_blocks = 0u32;
+            while !dec.is_finished() && (out.len() as u64) < limit {
+                let before = out.len();
+                dec.decode_blocks(
+                    &mut cursor,
+                    ruzstd::decoding::BlockDecodingStrategy::UptoBlocks(1),
+                )
                 .map_err(|e| CodecError::Malformed(e.to_string()))?;
+                while dec.can_collect() > 0 && (out.len() as u64) < limit {
+                    let room = usize::try_from(limit - (out.len() as u64))
+                        .unwrap_or(buf.len())
+                        .min(buf.len());
+                    let n = dec
+                        .read(&mut buf[..room])
+                        .map_err(|e| CodecError::Malformed(e.to_string()))?;
+                    if n == 0 {
+                        break;
+                    }
+                    out.extend_from_slice(&buf[..n]);
+                }
+                if out.len() == before && !dec.is_finished() {
+                    empty_blocks = empty_blocks.saturating_add(1);
+                    if empty_blocks > 64 {
+                        return Err(CodecError::Malformed("excessive empty zstd blocks".into()));
+                    }
+                } else {
+                    empty_blocks = 0;
+                }
+            }
+            if (out.len() as u64) <= content_len
+                && (!dec.is_finished() || cursor.position() != (payload.len() as u64))
+            {
+                return Err(CodecError::Malformed(
+                    "trailing bytes or concatenated frames after zstd stream".into(),
+                ));
+            }
             out
         }
         id if is_open(id) => codecs::decode_codec(id, payload, content_len)?,
@@ -557,5 +599,51 @@ mod tests {
         assert_eq!(entropy_millibits(&four_sym), 2_000);
         let all_bytes: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
         assert_eq!(entropy_millibits(&all_bytes), 8_000);
+    }
+
+    #[test]
+    fn zstd_decode_refuses_concatenated_empty_frames_skippable_frames_and_trailing_bytes() {
+        let content = b"canonical single-frame zstd payload";
+        let valid = zstd_encode(content, PROBE_LEVEL, false).unwrap();
+        assert_eq!(
+            decode(ZSTD, &valid, content.len() as u64).unwrap(),
+            content.to_vec()
+        );
+
+        // 1. Concatenated empty zstd frame (0 extra output bytes, bypasses output-only take(limit)).
+        let empty_frame = zstd_encode(b"", PROBE_LEVEL, false).unwrap();
+        let mut multi_frame = valid.clone();
+        multi_frame.extend_from_slice(&empty_frame);
+        assert!(
+            matches!(
+                decode(ZSTD, &multi_frame, content.len() as u64),
+                Err(CodecError::Malformed(_))
+            ),
+            "concatenated empty zstd frame must be refused to preserve canonical payload uniqueness"
+        );
+
+        // 2. Appended zstd skippable frame (magic 0x184D2A50, 4-byte LE size = 4, 4 hidden bytes).
+        let mut with_skippable = valid.clone();
+        with_skippable.extend_from_slice(&0x184D_2A50u32.to_le_bytes());
+        with_skippable.extend_from_slice(&4u32.to_le_bytes());
+        with_skippable.extend_from_slice(b"hide");
+        assert!(
+            matches!(
+                decode(ZSTD, &with_skippable, content.len() as u64),
+                Err(CodecError::Malformed(_))
+            ),
+            "skippable frame smuggling must be refused"
+        );
+
+        // 3. Trailing raw byte after frame end.
+        let mut trailing_byte = valid;
+        trailing_byte.push(0x00);
+        assert!(
+            matches!(
+                decode(ZSTD, &trailing_byte, content.len() as u64),
+                Err(CodecError::Malformed(_))
+            ),
+            "trailing unconsumed byte after zstd frame must be refused"
+        );
     }
 }

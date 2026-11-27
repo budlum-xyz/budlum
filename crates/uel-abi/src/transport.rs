@@ -322,6 +322,12 @@ fn answer_host_request(
                                 caller_ee.0, call.from.ee.0
                             )));
                         }
+                        if call.target.ee != call.to_ee {
+                            return Err(HostError::Invalid(format!(
+                                "UniversalCall target EE 0x{:02x} does not match to_ee 0x{:02x}",
+                                call.target.ee.0, call.to_ee.0
+                            )));
+                        }
                         host.universal_call(call)
                     })
                     .map(|result| pb::HostResponse {
@@ -633,6 +639,7 @@ impl EeClient {
                 ctx: Some(ctx.into()),
                 call: Some(call.into()),
             }))?;
+        let expected_ee = self.expected;
         let result = self
             .drive(id, Some(HostAccess::Full(host)), deadline)
             .and_then(|body| match body {
@@ -641,10 +648,16 @@ impl EeClient {
                         Ok(Ok(outcome.try_into()?))
                     }
                     Some(pb::execute_response::Result::Fault(fault)) => {
-                        let fault = fault.try_into()?;
+                        let fault: EeFault = fault.try_into()?;
                         // Convert before dropping: even a malformed fault is
                         // an untrustworthy connection, not a reusable stream.
                         self.stream = None;
+                        if fault.ee != expected_ee {
+                            return Err(TransportError::WrongEnvironment {
+                                expected: expected_ee,
+                                got: fault.ee,
+                            });
+                        }
                         Ok(Err(fault))
                     }
                     None => Err(TransportError::Protocol("empty execute response".into())),
@@ -1217,5 +1230,109 @@ mod caller_identity_tests {
             answer_host_request(EeId::WASM, &mut access, uc).result,
             Some(pb::host_response::Result::Error(_))
         ));
+    }
+
+    #[test]
+    fn answer_host_request_refuses_universal_call_with_mismatched_target_ee() {
+        let mut host = DenyAllHost;
+        let mut access = HostAccess::Full(&mut host);
+        let ucall = UniversalCall {
+            from: EeIdentity {
+                ee: EeId::WASM,
+                id: vec![0xBB; 32],
+            },
+            to_ee: EeId::SVM,
+            target: EeIdentity {
+                ee: EeId::EVM,
+                id: vec![0xCC; 20],
+            },
+            input: vec![],
+            value: BudAmount(0),
+            gas_limit: 1_000,
+            is_static: false,
+        };
+        let uc = pb::HostRequest {
+            op: Some(pb::host_request::Op::UniversalCall((&ucall).into())),
+        };
+        assert!(matches!(
+            answer_host_request(EeId::WASM, &mut access, uc).result,
+            Some(pb::host_response::Result::Error(_))
+        ));
+    }
+
+    #[test]
+    fn ee_client_execute_refuses_fault_claiming_another_environment() {
+        let path = std::env::temp_dir().join(format!(
+            "uel-abi-spoof-fault-{}-{}.sock",
+            std::process::id(),
+            17
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path)
+            .unwrap_or_else(|e| panic!("bind socket: {e}"));
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .unwrap_or_else(|e| panic!("accept socket: {e}"));
+            let hello = read_frame(&mut stream).unwrap_or_else(|e| panic!("read hello: {e}"));
+            write_frame(
+                &mut stream,
+                &envelope(
+                    hello.request_id,
+                    pb::envelope::Body::Hello(pb::Hello {
+                        ee: u32::from(EeId::SVM.0),
+                    }),
+                ),
+            )
+            .unwrap_or_else(|e| panic!("write hello: {e}"));
+            let req = read_frame(&mut stream).unwrap_or_else(|e| panic!("read execute: {e}"));
+            let spoofed_fault = EeFault {
+                ee: EeId::EVM,
+                panic_digest: [0xAB; 32],
+            };
+            write_frame(
+                &mut stream,
+                &envelope(
+                    req.request_id,
+                    pb::envelope::Body::ExecuteResponse(pb::ExecuteResponse {
+                        result: Some(pb::execute_response::Result::Fault((&spoofed_fault).into())),
+                    }),
+                ),
+            )
+            .unwrap_or_else(|e| panic!("write fault: {e}"));
+        });
+
+        let mut client = EeClient::new(&path, EeId::SVM);
+        let mut host = DenyAllHost;
+        let caller = EeIdentity {
+            ee: EeId::SVM,
+            id: vec![1; 32],
+        };
+        let call = EeCall {
+            kind: crate::EeCallKind::Call,
+            caller: caller.clone(),
+            target: caller,
+            value: BudAmount(0),
+            input: vec![],
+            gas_limit: 10_000,
+            depth: 0,
+            tx_hash: [7u8; 32],
+        };
+        let ctx = BlockContext {
+            chain_id: 45_261,
+            height: 1,
+            timestamp_ms: 1,
+        };
+        let res = client.execute(&ctx, &call, &mut host);
+        let _ = worker.join();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            res,
+            Err(TransportError::WrongEnvironment {
+                expected: EeId::SVM,
+                got: EeId::EVM,
+            })
+        );
+        assert!(!client.is_connected());
     }
 }
