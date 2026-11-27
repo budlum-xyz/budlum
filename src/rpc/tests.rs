@@ -3982,15 +3982,32 @@ mod rpc_tests {
             RpcSecurityConfig::operator_default(),
             RpcMode::Operator,
         );
-        // A chain that has settled nothing has no anchor to join, and the
-        // answer says so rather than handing back a digest made of zeros.
-        let answered = operator.unified_finality_root().await;
-        let refused = answered.expect_err("a fresh chain has no joined root");
+        // Before the chain settles anything there is no anchor to join, and
+        // `bud_unifiedFinalityRoot` refuses instead of inventing a root of
+        // zeros: an answer that orients a caller must not be a placeholder.
+        let unanchored = operator
+            .unified_finality_root()
+            .await
+            .expect_err("a chain with no settlement anchor has no joined root");
         assert!(
-            refused.message().contains("settlement anchor"),
+            unanchored.message().contains("settlement anchor"),
             "the refusal does not say why: {}",
-            refused.message()
+            unanchored.message()
         );
+
+        // Once a block settles, the anchor exists and the same call answers a
+        // root. Fifty blocks put the tip past the settlement horizon, which is
+        // where `settlement_root` stops being empty.
+        for _ in 0..50 {
+            let _ = chain.produce_block(Address::from([0x11; 32])).await;
+        }
+        let answered = operator
+            .unified_finality_root()
+            .await
+            .expect("a chain past the settlement horizon answers a joined root");
+        let root = answered.get("root").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(root.len(), 66, "a 32-byte root renders as 0x and 64 hex");
+        assert!(root.starts_with("0x"));
 
         // Public mode answers nothing: the method is behind the operator door,
         // and the refusal names the method that was refused.
