@@ -110,6 +110,28 @@ pub fn verify_path<H: BpqsHash, P: BpqsParams>(
     if P::T_LOG2 > 16 {
         return Err(BpqsError::Malformed("tree height exceeds the path budget"));
     }
+    if index >= (1usize << P::T_LOG2) {
+        return Err(BpqsError::Malformed("leaf index out of epoch headroom"));
+    }
+    if leaf_value.iter().skip(P::N).any(|b| *b != 0)
+        || expected_root.iter().skip(P::N).any(|b| *b != 0)
+    {
+        return Err(BpqsError::Malformed(
+            "non-zero padding in Merkle leaf or expected root",
+        ));
+    }
+    for sib in path.iter().take(P::T_LOG2) {
+        if sib.iter().skip(P::N).any(|b| *b != 0) {
+            return Err(BpqsError::Malformed("non-zero padding in Merkle auth path"));
+        }
+    }
+    for unused in path.iter().skip(P::T_LOG2) {
+        if unused.iter().any(|b| *b != 0) {
+            return Err(BpqsError::Malformed(
+                "non-zero bytes in unused Merkle auth path entry",
+            ));
+        }
+    }
     let mut cur = leaf::<H, P>(leaf_value);
     let mut cursor = index;
     for sib in path.iter().take(P::T_LOG2) {
