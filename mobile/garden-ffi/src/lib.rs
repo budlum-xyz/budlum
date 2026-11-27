@@ -286,11 +286,13 @@ impl GardenPhone {
         // A phone can redeem its own code against its own desk while
         // testing. Burn it here too, so the single-use rule holds on
         // this side of the exchange as well as the answering side.
-        if let Some(desk) = self.desk.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        let guard = self.desk.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(desk) = guard.as_ref() {
             if desk.code() == code.trim() {
                 desk.burn();
             }
         }
+        drop(guard);
         self.join(record, name)
     }
 

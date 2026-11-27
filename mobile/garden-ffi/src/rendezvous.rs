@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The port both sides agree on. Chosen high and fixed so neither phone
 /// has to tell the other anything except the six digits.
@@ -99,9 +99,19 @@ impl Desk {
 
     /// Open a code and write it down in `dir`, so it survives a restart.
     pub fn open_noted(dir: &Path, code: String, record: String) -> Result<Self, String> {
-        let desk = Self::start(PORT, code, record, now_secs(), Some(note_path(dir)))?;
-        desk.write_note()?;
-        Ok(desk)
+        let born = now_secs();
+        let path = note_path(dir);
+        // Written down before the desk starts answering. The other order
+        // leaves a note behind for a code that was already redeemed, and
+        // a restart would then put a spent code back on the air.
+        write_note(&path, &code, born, &record)?;
+        match Self::start(PORT, code, record, born, Some(path.clone())) {
+            Ok(desk) => Ok(desk),
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                Err(e)
+            }
+        }
     }
 
     /// Pick up a code written down earlier, if it is still good.
@@ -220,19 +230,6 @@ impl Desk {
         })
     }
 
-    /// Write the code, the hour it started and the record it stands for.
-    fn write_note(&self) -> Result<(), String> {
-        let Some(path) = self.note.as_ref() else {
-            return Ok(());
-        };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("the code could not be written down: {e}"))?;
-        }
-        std::fs::write(path, format!("{}\n{}\n{}", self.code, self.born, self.record))
-            .map_err(|e| format!("the code could not be written down: {e}"))
-    }
-
     /// True once somebody has redeemed the code.
     pub fn burnt(&self) -> bool {
         self.burnt.load(Ordering::Acquire)
@@ -294,6 +291,16 @@ impl Drop for Desk {
 /// Where an open code is written down inside the app's own directory.
 fn note_path(dir: &Path) -> PathBuf {
     dir.join("open-code.txt")
+}
+
+/// Write the code, the hour it started and the record it stands for.
+fn write_note(path: &Path, code: &str, born: u64, record: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("the code could not be written down: {e}"))?;
+    }
+    std::fs::write(path, format!("{code}\n{born}\n{record}"))
+        .map_err(|e| format!("the code could not be written down: {e}"))
 }
 
 /// Shout `code` on the local network and wait for the record.
