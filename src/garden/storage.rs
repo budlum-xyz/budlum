@@ -187,6 +187,55 @@ fn scan_disk_bytes(root: &Path) -> u64 {
     total
 }
 
+/// What the recipes already on disk say this node has coded.
+///
+/// The part counts used to start at zero every time the app opened, so a
+/// phone that had coded a hundred objects reported none of it the moment
+/// it was closed and reopened - which reads as B.U.D. 3.0 not running at
+/// all. The recipes are on disk, and they say exactly what was made, so
+/// the counts are read back from them instead of being remembered.
+///
+/// Only the record at the head of each recipe is read. The symbols are
+/// the bulk of the file and the record already says how many there are.
+fn count_recipes_on_disk(root: &Path) -> Bud3PartCounts {
+    let mut counts = Bud3PartCounts::default();
+    let Ok(entries) = fs::read_dir(root) else {
+        return counts;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_recipe = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(RECIPE_SUFFIX))
+            .is_some_and(|stem| hex::decode(stem).is_ok_and(|bytes| bytes.len() == 32));
+        if !is_recipe {
+            continue;
+        }
+        let Ok(file) = fs::File::open(&path) else {
+            continue;
+        };
+        let Ok(record) =
+            bincode::deserialize_from::<_, ObjectRecord>(std::io::BufReader::new(file))
+        else {
+            continue;
+        };
+        let segments = count_of(record.symbol_roots.len());
+        let made = segments.saturating_mul(u64::from(record.symbols_per_segment));
+        let source = record
+            .object_len
+            .div_ceil(u64::from(Profile::P0.symbol_size));
+        counts.objects_coded = counts.objects_coded.saturating_add(1);
+        counts.segments_coded = counts.segments_coded.saturating_add(segments);
+        counts.symbols_made = counts.symbols_made.saturating_add(made);
+        counts.symbols_repair = counts
+            .symbols_repair
+            .saturating_add(made.saturating_sub(source));
+        counts.symbol_roots = counts.symbol_roots.saturating_add(segments);
+    }
+    counts
+}
+
 impl GardenContentStore {
     /// Open a store under `root` using the default local byte ceiling
     /// (`MAX_LOCAL_GARDEN_BYTES`). `None` keeps the objects in memory only.
@@ -202,12 +251,12 @@ impl GardenContentStore {
         max_object_bytes: usize,
         max_total_bytes: u64,
     ) -> Result<Self, String> {
-        let total_bytes = if let Some(root) = root {
+        let (total_bytes, parts) = if let Some(root) = root {
             fs::create_dir_all(root)
                 .map_err(|e| format!("garden content directory cannot be created: {e}"))?;
-            scan_disk_bytes(root)
+            (scan_disk_bytes(root), count_recipes_on_disk(root))
         } else {
-            0
+            (0, Bud3PartCounts::default())
         };
         Ok(Self {
             root: root.map(Path::to_path_buf),
@@ -218,7 +267,7 @@ impl GardenContentStore {
             coded: BTreeMap::new(),
             coded_order: VecDeque::new(),
             coded_bytes: 0,
-            parts: Bud3PartCounts::default(),
+            parts,
         })
     }
 
@@ -464,6 +513,11 @@ impl GardenContentStore {
         if self.coded.contains_key(&content_id) {
             return Ok(());
         }
+        // Already on disk, so its recipe was counted when the store opened.
+        // Coding it a second time is work this node is redoing, not work it
+        // has newly done, and counting it again would inflate the figure a
+        // person reads off the status screen.
+        let recounted = self.contains(&content_id);
         let coded = Self::code_object(bytes)?;
         let segments = count_of(coded.segments.len());
         let symbols = coded
@@ -480,11 +534,13 @@ impl GardenContentStore {
             .object_len
             .div_ceil(u64::from(Profile::P0.symbol_size));
         let repair = symbols.saturating_sub(source);
-        self.parts.objects_coded = self.parts.objects_coded.saturating_add(1);
-        self.parts.segments_coded = self.parts.segments_coded.saturating_add(segments);
-        self.parts.symbols_made = self.parts.symbols_made.saturating_add(symbols);
-        self.parts.symbols_repair = self.parts.symbols_repair.saturating_add(repair);
-        self.parts.symbol_roots = self.parts.symbol_roots.saturating_add(roots);
+        if !recounted {
+            self.parts.objects_coded = self.parts.objects_coded.saturating_add(1);
+            self.parts.segments_coded = self.parts.segments_coded.saturating_add(segments);
+            self.parts.symbols_made = self.parts.symbols_made.saturating_add(symbols);
+            self.parts.symbols_repair = self.parts.symbols_repair.saturating_add(repair);
+            self.parts.symbol_roots = self.parts.symbol_roots.saturating_add(roots);
+        }
         self.coded_bytes = self.coded_bytes.saturating_add(coded.footprint);
         self.coded.insert(content_id, coded);
         self.coded_order.push_back(content_id);
@@ -823,6 +879,48 @@ mod tests {
         )
         .unwrap();
         assert!(store.get(&id).is_none());
+    }
+
+    /// A restart used to report no B.U.D. 3.0 work at all, because the
+    /// counts lived in memory while the objects lived on disk.
+    #[test]
+    fn the_part_counts_survive_closing_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("garden");
+        let payload: Vec<u8> = (0..30_000u32)
+            .map(|i| u8::try_from(i % 251).unwrap_or_default())
+            .collect();
+
+        let mut store = GardenContentStore::open(Some(&root), 1024 * 1024).unwrap();
+        let id = store.put(&payload).unwrap();
+        let before = store.part_counts();
+        assert!(before.objects_coded == 1 && before.symbols_repair > 0);
+        drop(store);
+
+        let reopened = GardenContentStore::open(Some(&root), 1024 * 1024).unwrap();
+        let after = reopened.part_counts();
+        assert_eq!(
+            after.objects_coded, before.objects_coded,
+            "the objects this node coded do not disappear when it closes"
+        );
+        assert_eq!(after.symbols_made, before.symbols_made);
+        assert_eq!(after.symbols_repair, before.symbols_repair);
+        assert_eq!(after.segments_coded, before.segments_coded);
+        assert!(reopened.contains(&id));
+    }
+
+    /// Storing the same object twice is the node redoing work, not doing
+    /// new work. Counting it again inflates what a person reads.
+    #[test]
+    fn re_storing_an_object_does_not_count_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("garden");
+        let mut store = GardenContentStore::open(Some(&root), 1024 * 1024).unwrap();
+        let payload = b"the same object, handed in a second time".repeat(40);
+        store.put(&payload).unwrap();
+        let once = store.part_counts();
+        store.put(&payload).unwrap();
+        assert_eq!(store.part_counts(), once, "the second put counts nothing");
     }
 
     /// The point of coding an object is surviving the loss of pieces of
