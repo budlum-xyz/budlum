@@ -394,11 +394,7 @@ const fn exceeds_two_thirds(signed_stake: u128, total_stake: u128) -> bool {
     }
 }
 
-fn verify_doomslug_bundle(
-    network: &str,
-    pinned: &PinnedNearEpoch,
-    bundle: &NearDoomslugEvidence,
-) -> Result<(u64, u64, u128, bool), AdapterError> {
+fn validate_pinned_epoch_ids(pinned: &PinnedNearEpoch) -> Result<(), AdapterError> {
     if pinned.epoch_id == [0u8; 32]
         || pinned.next_epoch_id == [0u8; 32]
         || pinned.next_bp_hash == [0u8; 32]
@@ -413,6 +409,26 @@ fn verify_doomslug_bundle(
             rule: "pinned NEAR epoch has zero or self-referential epoch identifiers".into(),
         });
     }
+    Ok(())
+}
+
+fn validate_approval_inner(inner: &NearApprovalInner) -> Result<(), AdapterError> {
+    if let NearApprovalInner::Endorsement { parent_hash, .. } = inner {
+        if *parent_hash == [0u8; 32] {
+            return Err(AdapterError::ConsensusRule {
+                rule: "NEAR endorsement carries an all-zero parent_hash".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn verify_doomslug_bundle(
+    network: &str,
+    pinned: &PinnedNearEpoch,
+    bundle: &NearDoomslugEvidence,
+) -> Result<(u64, u64, u128, bool), AdapterError> {
+    validate_pinned_epoch_ids(pinned)?;
     let (bp_map, total_stake) = validate_bp_table(&pinned.block_producers)?;
 
     let b0 = &bundle.final_block;
@@ -692,6 +708,14 @@ pub fn verify_near_approval_slash(
     pinned: &PinnedNearEpoch,
     proof: &NearApprovalSlashProof,
 ) -> Result<(String, u128, NearSlashKind), AdapterError> {
+    if network.trim().is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "NEAR approval slash network cannot be empty".into(),
+        });
+    }
+    validate_pinned_epoch_ids(pinned)?;
+    validate_approval_inner(&proof.inner_a)?;
+    validate_approval_inner(&proof.inner_b)?;
     let (bp_map, _) = validate_bp_table(&pinned.block_producers)?;
     if !bool::from(
         proof
@@ -816,6 +840,11 @@ impl NearDoomslugAdapter {
                 accepted: EVIDENCE_VERSION.to_string(),
             });
         }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "NEAR Doomslug network identifier cannot be empty".into(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -910,6 +939,14 @@ impl ExternalFinalityAdapter for NearDoomslugAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        !self.network.trim().is_empty()
+            && self.pinned.as_ref().is_some_and(|p| {
+                validate_pinned_epoch_ids(p).is_ok()
+                    && validate_bp_table(&p.block_producers).is_ok()
+            })
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,
@@ -925,9 +962,10 @@ impl ExternalFinalityAdapter for NearDoomslugAdapter {
         observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityAttestation, AdapterError> {
         let (att, all_pq) = self.verify_inner(evidence, policy)?;
-        observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         if all_pq {
             observer.observe(ObservedScheme::Scheme(SchemeId::ML_DSA_65));
+        } else {
+            observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         }
         Ok(att)
     }
@@ -1441,6 +1479,69 @@ mod tests {
                 Err(AdapterError::UnslashableBacking)
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
+        );
+    }
+
+    #[test]
+    fn near_doomslug_preserves_lattice_quantum_class_pins_anchor_and_hardens_slash_checks() {
+        use crate::crypto::facts::{CryptoFacts, QuantumClass};
+
+        let fx = build_near_fixture();
+        let adapter = NearDoomslugAdapter::new(NET, Some(fx.pinned.clone()));
+        assert!(adapter.has_pinned_trust_anchor());
+        assert!(!NearDoomslugAdapter::new(NET, None).has_pinned_trust_anchor());
+
+        let policy = VerificationPolicy {
+            require_slashable: false,
+            min_depth: DOOMSLUG_BFT_DEPTH,
+            max_age: 100,
+            now: 130_000_010,
+            require_declared_match: true,
+        };
+        let mut facts = CryptoFacts::default();
+        adapter
+            .verify_observed(&fx.golden, &policy, &mut facts)
+            .expect("verify observed");
+        assert_eq!(
+            facts.quantum_class(),
+            Some(QuantumClass::Lattice),
+            "100% ML-DSA-65 NEAR epoch must preserve QuantumClass::Lattice"
+        );
+
+        let inner_a = NearApprovalInner::Endorsement {
+            parent_hash: [0u8; 32],
+            parent_height: 10,
+        };
+        let inner_b = NearApprovalInner::Skip { source_height: 9 };
+        let sig_a = sign_approval(
+            &fx.ed_keys[0],
+            &fx.pq_keys[0],
+            &fx.pinned.epoch_id,
+            &inner_a,
+            11,
+        );
+        let sig_b = sign_approval(
+            &fx.ed_keys[0],
+            &fx.pq_keys[0],
+            &fx.pinned.epoch_id,
+            &inner_b,
+            11,
+        );
+        let zero_parent_slash = NearApprovalSlashProof {
+            inner_a,
+            target_a: 11,
+            sig_a,
+            inner_b,
+            target_b: 11,
+            sig_b,
+        };
+        assert!(
+            verify_near_approval_slash(NET, &fx.pinned, &zero_parent_slash).is_err(),
+            "zero parent_hash endorsement in slash proof must fail closed"
+        );
+        assert!(
+            verify_near_approval_slash("   ", &fx.pinned, &zero_parent_slash).is_err(),
+            "blank network in verify_near_approval_slash must fail closed"
         );
     }
 }

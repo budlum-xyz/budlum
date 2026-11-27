@@ -604,14 +604,20 @@ impl PoSpaceVdfAdapter {
         policy: &VerificationPolicy,
     ) -> Result<(FinalityAttestation, bool), AdapterError> {
         if evidence.adapter != self.descriptor.id {
-            return Err(AdapterError::ConsensusRule {
-                rule: "evidence adapter id does not match pospace-vdf-v1".into(),
+            return Err(AdapterError::WrongAdapter {
+                expected: self.descriptor.name.clone(),
+                found: hex::encode(evidence.adapter.as_bytes()),
             });
         }
         if evidence.evidence_version != POSPACE_VDF_EVIDENCE_VERSION {
             return Err(AdapterError::UnsupportedEvidenceVersion {
                 version: evidence.evidence_version,
                 accepted: format!("{POSPACE_VDF_EVIDENCE_VERSION}"),
+            });
+        }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "pospace-vdf network identifier cannot be empty".into(),
             });
         }
         if evidence.network != self.network {
@@ -654,26 +660,28 @@ impl PoSpaceVdfAdapter {
             .blocks
             .len()
             .saturating_sub(1)
-            .saturating_sub(target_idx);
-        let required_depth = usize::try_from(pinned.required_depth).unwrap_or(usize::MAX);
+            .saturating_sub(target_idx) as u64;
+        let required_depth = u64::from(pinned.required_depth).max(policy.min_depth);
         if confirmations < required_depth {
             return Err(AdapterError::InsufficientDepth {
-                observed: confirmations as u64,
-                required: u64::from(pinned.required_depth),
+                observed: confirmations,
+                required: required_depth,
             });
         }
 
         // Declaration binding runs before expensive iterated VDF hashing where safe,
         // after structural checks so declaration probes hit DeclarationMismatch cleanly.
-        if evidence.declared_height != target.height {
-            return Err(AdapterError::DeclarationMismatch {
-                field: "declared_height",
-            });
-        }
-        if !bool::from(evidence.declared_root.ct_eq(&target.state_root)) {
-            return Err(AdapterError::DeclarationMismatch {
-                field: "declared_root",
-            });
+        if policy.require_declared_match {
+            if evidence.declared_height != target.height {
+                return Err(AdapterError::DeclarationMismatch {
+                    field: "declared_height",
+                });
+            }
+            if !bool::from(evidence.declared_root.ct_eq(&target.state_root)) {
+                return Err(AdapterError::DeclarationMismatch {
+                    field: "declared_root",
+                });
+            }
         }
         if policy.max_age > 0 {
             if target.height > policy.now {
@@ -919,6 +927,14 @@ impl PoSpaceVdfAdapter {
 impl ExternalFinalityAdapter for PoSpaceVdfAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        !self.network.trim().is_empty()
+            && self
+                .pinned
+                .as_ref()
+                .is_some_and(|p| Self::validate_pin(p).is_ok())
     }
 
     fn verify(
@@ -1396,5 +1412,32 @@ mod tests {
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
         );
+    }
+
+    #[test]
+    fn pospace_vdf_enforces_policy_min_depth_wrong_adapter_and_trust_anchor() {
+        let (adapter, _pinned, _ev, raw, _pq) = build_fixture("chia-pq-mainnet", 5, 2, true);
+        assert!(adapter.has_pinned_trust_anchor());
+        assert!(!PoSpaceVdfAdapter::new("chia-pq-mainnet", None).has_pinned_trust_anchor());
+
+        let mut deeper_policy = VerificationPolicy::strict(110);
+        deeper_policy.require_slashable = false;
+        deeper_policy.min_depth = 6;
+        assert!(
+            matches!(
+                adapter.verify(&raw, &deeper_policy),
+                Err(AdapterError::InsufficientDepth { .. })
+            ),
+            "caller policy.min_depth exceeding observed confirmations must fail closed"
+        );
+
+        let mut wrong_adapter_raw = raw;
+        wrong_adapter_raw.adapter = AdapterId::from_name("foreign-pospace-v1");
+        let mut base_policy = VerificationPolicy::strict(110);
+        base_policy.require_slashable = false;
+        assert!(matches!(
+            adapter.verify(&wrong_adapter_raw, &base_policy),
+            Err(AdapterError::WrongAdapter { .. })
+        ));
     }
 }
