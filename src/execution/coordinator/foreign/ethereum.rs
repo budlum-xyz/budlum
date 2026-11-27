@@ -566,6 +566,34 @@ fn decode_eip1559(
     })
 }
 
+fn verify_auth_tuples(
+    tuples: &[EvmAuthTuple],
+    expected_chain_id: u64,
+) -> Result<(), EthereumEnvelopeError> {
+    for tuple in tuples {
+        if tuple.chain_id != 0 && tuple.chain_id != expected_chain_id {
+            return Err(EthereumEnvelopeError::WrongChainId {
+                expected: expected_chain_id,
+                got: tuple.chain_id,
+            });
+        }
+        if tuple.nonce == u64::MAX {
+            return Err(EthereumEnvelopeError::InvalidSignature(String::from(
+                "EIP-7702 authorization nonce overflow",
+            )));
+        }
+        let mut preimage = vec![0x05];
+        preimage.extend_from_slice(&rlp::encode(&Item::List(vec![
+            encode_u128_item(u128::from(tuple.chain_id)),
+            Item::String(tuple.address.to_vec()),
+            encode_u128_item(u128::from(tuple.nonce)),
+        ])));
+        let auth_digest: [u8; 32] = Keccak256::digest(&preimage).into();
+        let _authority = recover_from_sig_parts(&auth_digest, tuple.y_parity, &tuple.r, &tuple.s)?;
+    }
+    Ok(())
+}
+
 fn decode_eip7702(
     payload: &[u8],
     tx_hash: [u8; 32],
@@ -613,6 +641,7 @@ fn decode_eip7702(
     if authorization_list.is_empty() {
         return Err(EthereumEnvelopeError::Type4EmptyAuthorizationList);
     }
+    verify_auth_tuples(&authorization_list, expected_chain_id)?;
     let y_u64 = rlp::decode_uint(fields.get(10).ok_or(EthereumEnvelopeError::Empty)?)
         .map_err(|e| EthereumEnvelopeError::MalformedRlp(e.to_string()))?;
     let y_parity = u8::try_from(y_u64).map_err(|_| {
@@ -731,5 +760,129 @@ mod tests {
         assert_eq!(decoded.nonce, 7);
         assert_eq!(decoded.value_wei, 12_345);
         assert!(decode_ethereum_tx(&raw, 1).is_err());
+    }
+
+    fn build_signed_eip7702_tx(tx_sk: &[u8; 32], auth_tuples: Vec<EvmAuthTuple>) -> Vec<u8> {
+        use k256::ecdsa::SigningKey;
+        let signing_key = SigningKey::from_bytes(tx_sk.into()).unwrap();
+        let auth_items: Vec<Item> = auth_tuples
+            .iter()
+            .map(|t| {
+                Item::List(vec![
+                    encode_u128_item(u128::from(t.chain_id)),
+                    Item::String(t.address.to_vec()),
+                    encode_u128_item(u128::from(t.nonce)),
+                    encode_u128_item(u128::from(t.y_parity)),
+                    Item::String(t.r.iter().skip_while(|b| **b == 0).copied().collect()),
+                    Item::String(t.s.iter().skip_while(|b| **b == 0).copied().collect()),
+                ])
+            })
+            .collect();
+        let mut fields = vec![
+            encode_u128_item(u128::from(BUDLUM_EVM_CHAIN_ID)),
+            encode_u128_item(0),
+            encode_u128_item(1_000),
+            encode_u128_item(2_000),
+            encode_u128_item(50_000),
+            Item::String([0x44u8; 20].to_vec()),
+            encode_u128_item(0),
+            Item::String(Vec::new()),
+            Item::List(Vec::new()),
+            Item::List(auth_items),
+        ];
+        let mut preimage = vec![0x04];
+        preimage.extend_from_slice(&rlp::encode(&Item::List(fields.clone())));
+        let digest: [u8; 32] = Keccak256::digest(&preimage).into();
+        let (sig, rec_id) = signing_key.sign_prehash_recoverable(&digest);
+        let sig_bytes = sig.to_bytes();
+        let r_slice = &sig_bytes[..32];
+        let s_slice = &sig_bytes[32..64];
+        fields.push(encode_u128_item(u128::from(rec_id.to_byte())));
+        fields.push(Item::String(
+            r_slice.iter().skip_while(|b| **b == 0).copied().collect(),
+        ));
+        fields.push(Item::String(
+            s_slice.iter().skip_while(|b| **b == 0).copied().collect(),
+        ));
+        let mut raw = vec![0x04];
+        raw.extend_from_slice(&rlp::encode(&Item::List(fields)));
+        raw
+    }
+
+    fn sign_eip7702_auth(
+        auth_sk: &[u8; 32],
+        chain_id: u64,
+        address: [u8; 20],
+        nonce: u64,
+    ) -> EvmAuthTuple {
+        use k256::ecdsa::SigningKey;
+        let signing_key = SigningKey::from_bytes(auth_sk.into()).unwrap();
+        let mut preimage = vec![0x05];
+        preimage.extend_from_slice(&rlp::encode(&Item::List(vec![
+            encode_u128_item(u128::from(chain_id)),
+            Item::String(address.to_vec()),
+            encode_u128_item(u128::from(nonce)),
+        ])));
+        let digest: [u8; 32] = Keccak256::digest(&preimage).into();
+        let (sig, rec_id) = signing_key.sign_prehash_recoverable(&digest);
+        let sig_bytes = sig.to_bytes();
+        let mut r = [0u8; 32];
+        let mut s = [0u8; 32];
+        r.copy_from_slice(&sig_bytes[..32]);
+        s.copy_from_slice(&sig_bytes[32..64]);
+        EvmAuthTuple {
+            chain_id,
+            address,
+            nonce,
+            y_parity: rec_id.to_byte(),
+            r,
+            s,
+        }
+    }
+
+    #[test]
+    fn eip7702_rejects_forged_high_s_wrong_chain_and_max_nonce_auth_tuples() {
+        let tx_sk = [0x33u8; 32];
+        let auth_sk = [0x77u8; 32];
+
+        // 1. Valid auth tuple on BUDLUM_EVM_CHAIN_ID and cross-chain chain_id=0 succeed.
+        let valid_auth = sign_eip7702_auth(&auth_sk, BUDLUM_EVM_CHAIN_ID, [0x99; 20], 0);
+        let valid_raw = build_signed_eip7702_tx(&tx_sk, vec![valid_auth.clone()]);
+        assert!(decode_ethereum_tx(&valid_raw, BUDLUM_EVM_CHAIN_ID).is_ok());
+
+        let zero_chain_auth = sign_eip7702_auth(&auth_sk, 0, [0x99; 20], 1);
+        let zero_chain_raw = build_signed_eip7702_tx(&tx_sk, vec![zero_chain_auth]);
+        assert!(decode_ethereum_tx(&zero_chain_raw, BUDLUM_EVM_CHAIN_ID).is_ok());
+
+        // 2. Zero / forged r, s auth tuple must be rejected.
+        let zero_auth = EvmAuthTuple {
+            chain_id: BUDLUM_EVM_CHAIN_ID,
+            address: [0x99; 20],
+            nonce: 0,
+            y_parity: 0,
+            r: [0u8; 32],
+            s: [0u8; 32],
+        };
+        let zero_raw = build_signed_eip7702_tx(&tx_sk, vec![zero_auth]);
+        assert!(decode_ethereum_tx(&zero_raw, BUDLUM_EVM_CHAIN_ID).is_err());
+
+        // 3. High-s auth tuple must be rejected.
+        let mut high_s = valid_auth.clone();
+        high_s.s[0] = 0xff;
+        let high_s_raw = build_signed_eip7702_tx(&tx_sk, vec![high_s]);
+        assert!(decode_ethereum_tx(&high_s_raw, BUDLUM_EVM_CHAIN_ID).is_err());
+
+        // 4. Wrong chain_id (e.g., Ethereum mainnet 1) in auth tuple must be rejected.
+        let wrong_chain_auth = sign_eip7702_auth(&auth_sk, 1, [0x99; 20], 0);
+        let wrong_chain_raw = build_signed_eip7702_tx(&tx_sk, vec![wrong_chain_auth]);
+        assert!(matches!(
+            decode_ethereum_tx(&wrong_chain_raw, BUDLUM_EVM_CHAIN_ID),
+            Err(EthereumEnvelopeError::WrongChainId { .. })
+        ));
+
+        // 5. u64::MAX nonce in auth tuple must be rejected.
+        let max_nonce_auth = sign_eip7702_auth(&auth_sk, BUDLUM_EVM_CHAIN_ID, [0x99; 20], u64::MAX);
+        let max_nonce_raw = build_signed_eip7702_tx(&tx_sk, vec![max_nonce_auth]);
+        assert!(decode_ethereum_tx(&max_nonce_raw, BUDLUM_EVM_CHAIN_ID).is_err());
     }
 }
