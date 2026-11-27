@@ -25,6 +25,9 @@ slh-dsa = { version = "=0.2.0-rc.5", features = ["zeroize"] }
 # scheme.rs hashes with it; the shared presence vector test uses it as an
 # implementation independent of budlum-types' sha3 0.12.
 sha3 = "0.10"
+# `src/crypto/scheme.rs` is compiled here too, and its ids derive
+# Serialize/Deserialize so a scheme id can travel in a signed payload.
+serde = { version = "1", features = ["derive"] }
 zeroize = { version = "=1.9.1", features = ["derive"] }
 
 [dev-dependencies]

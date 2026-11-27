@@ -27,6 +27,9 @@ sha3 = "0.12"
 sha2 = "0.11"
 hex = "0.4"
 zeroize = { version = "=1.9.1", features = ["derive"] }
+# `src/crypto/scheme.rs` is compiled here too, and its ids derive
+# Serialize/Deserialize so a scheme id can travel in a signed payload.
+serde = { version = "1", features = ["derive"] }
 # SHAKE256 of the key derivation, the same crate and pin as the root manifest.
 shake = "=0.1.0"
 # the wallet password is NFKD normalized before the root derivation.
