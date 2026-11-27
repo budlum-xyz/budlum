@@ -126,6 +126,21 @@ fn parse_felt_hex(raw: &str) -> Option<[u8; 32]> {
     Some(arr)
 }
 
+fn is_valid_block_id(block_id: &Value) -> bool {
+    match block_id {
+        Value::String(s) => s == "latest" || s == "pending" || parse_felt_hex(s).is_some(),
+        Value::Object(obj) => {
+            obj.len() == 1
+                && (obj.get("block_number").is_some_and(Value::is_u64)
+                    || obj
+                        .get("block_hash")
+                        .and_then(Value::as_str)
+                        .is_some_and(|h| parse_felt_hex(h).is_some()))
+        }
+        _ => false,
+    }
+}
+
 /// Handle a read-only Starknet JSON-RPC v0.7 request.
 ///
 /// Convenience: entry point for the Starknet compatibility gateway.
@@ -161,20 +176,11 @@ pub fn handle_starknet_rpc(
         }
         "starknet_blockNumber" => StarknetRpcResponse::ok(req.id, json!(policy.block_height)),
         "starknet_getNonce" => {
-            // block_id validation: must be present and valid.
-            if let Some(block_id) = req.params.first() {
-                let valid = match block_id {
-                    Value::String(s) => {
-                        s == "latest" || s == "pending" || parse_felt_hex(s).is_some()
-                    }
-                    Value::Object(obj) => {
-                        obj.contains_key("block_number") || obj.contains_key("block_hash")
-                    }
-                    _ => false,
-                };
-                if !valid {
-                    return StarknetRpcResponse::err(req.id, -32602, "invalid block_id");
-                }
+            let Some(block_id) = req.params.first() else {
+                return StarknetRpcResponse::err(req.id, -32602, "missing block_id");
+            };
+            if !is_valid_block_id(block_id) {
+                return StarknetRpcResponse::err(req.id, -32602, "invalid block_id");
             }
             let Some(addr_str) = req.params.get(1).and_then(Value::as_str) else {
                 return StarknetRpcResponse::err(req.id, -32602, "missing contract_address");
@@ -194,9 +200,19 @@ pub fn handle_starknet_rpc(
             if parse_felt_hex(addr_str).is_none() || parse_felt_hex(key_str).is_none() {
                 return StarknetRpcResponse::err(req.id, -32602, "invalid Starknet felt252");
             }
+            if let Some(block_id) = req.params.get(2) {
+                if !is_valid_block_id(block_id) {
+                    return StarknetRpcResponse::err(req.id, -32602, "invalid block_id");
+                }
+            }
             StarknetRpcResponse::ok(req.id, json!("0x0"))
         }
         "starknet_getClassHashAt" => {
+            if let Some(block_id) = req.params.first() {
+                if !is_valid_block_id(block_id) {
+                    return StarknetRpcResponse::err(req.id, -32602, "invalid block_id");
+                }
+            }
             let Some(addr_str) = req.params.get(1).and_then(Value::as_str) else {
                 return StarknetRpcResponse::err(req.id, -32602, "missing contract_address");
             };
@@ -310,5 +326,46 @@ mod tests {
     #[test]
     fn max_starknet_rpc_request_bytes_is_bounded() {
         assert_eq!(MAX_STARKNET_RPC_REQUEST_BYTES, 1 << 20);
+    }
+
+    #[test]
+    fn starknet_get_nonce_requires_valid_block_id_and_rejects_malformed_block_id_object() {
+        let state = AccountState::new();
+        let policy = StarknetActivationPolicy {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: 100,
+            activation_height: Some(100),
+        };
+        let missing = handle_starknet_rpc(
+            &state,
+            policy,
+            StarknetRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: json!(1),
+                method: "starknet_getNonce".into(),
+                params: vec![],
+            },
+        );
+        assert!(missing.result.is_none() && missing.error.is_some());
+        assert!(missing.error.unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .contains("block_id"));
+
+        let bad_obj = handle_starknet_rpc(
+            &state,
+            policy,
+            StarknetRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: json!(2),
+                method: "starknet_getNonce".into(),
+                params: vec![json!({"block_number": "not-a-number"}), json!("0x1234")],
+            },
+        );
+        assert!(bad_obj.result.is_none() && bad_obj.error.is_some());
+        assert!(bad_obj.error.unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .contains("block_id"));
     }
 }

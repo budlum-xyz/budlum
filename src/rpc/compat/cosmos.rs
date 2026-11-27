@@ -160,6 +160,31 @@ impl CosmosCompatGateway {
                     );
                 }
                 let data = hex::decode(data_hex).unwrap_or_default();
+                if path == "/cosmwasm.wasm.v1.Query/SmartContractState" {
+                    let valid_smart = serde_json::from_slice::<serde_json::Value>(&data)
+                        .ok()
+                        .and_then(|v| {
+                            let c = v.get("contract").and_then(serde_json::Value::as_str)?;
+                            let k = v.get("key").and_then(serde_json::Value::as_str)?;
+                            if c.is_empty()
+                                || k.is_empty()
+                                || c.bytes().any(|b| b.is_ascii_control())
+                                || k.bytes().any(|b| b.is_ascii_control())
+                            {
+                                None
+                            } else {
+                                Some(())
+                            }
+                        })
+                        .is_some();
+                    if !valid_smart {
+                        return JsonRpcResponse::err(
+                            id,
+                            JSONRPC_INVALID_PARAMS,
+                            "SmartContractState requires JSON object with non-empty contract and key",
+                        );
+                    }
+                }
                 let resp_bytes = execute_abci_query(path, &data, state);
                 JsonRpcResponse::ok(
                     id,
@@ -188,11 +213,19 @@ impl CosmosCompatGateway {
                 let Ok(tx_raw_bytes) = hex::decode(tx_hex.trim_start_matches("0x")) else {
                     return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "invalid tx hex");
                 };
-                let acct_num = req
-                    .params
-                    .get("account_number")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
+                let acct_num = match req.params.get("account_number") {
+                    None | Some(serde_json::Value::Null) => 0,
+                    Some(v) => match v.as_u64() {
+                        Some(n) => n,
+                        None => {
+                            return JsonRpcResponse::err(
+                                id,
+                                JSONRPC_INVALID_PARAMS,
+                                "account_number must be an unsigned 64-bit integer",
+                            );
+                        }
+                    },
+                };
                 let env = ForeignTx::Cosmos {
                     tx_raw_bytes,
                     chain_id: String::from(BUDLUM_COSMOS_CHAIN_ID),
@@ -215,11 +248,33 @@ impl CosmosCompatGateway {
                 }
             }
             "tx_search" => {
-                let per_page = req
-                    .params
-                    .get("per_page")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(30) as usize;
+                let per_page_u64 = match req.params.get("per_page") {
+                    None | Some(serde_json::Value::Null) => 30u64,
+                    Some(v) => match v.as_u64() {
+                        Some(n) => n,
+                        None => {
+                            return JsonRpcResponse::err(
+                                id,
+                                JSONRPC_INVALID_PARAMS,
+                                "per_page must be a positive integer",
+                            );
+                        }
+                    },
+                };
+                if per_page_u64 == 0 {
+                    return JsonRpcResponse::err(
+                        id,
+                        JSONRPC_INVALID_PARAMS,
+                        "per_page must be >= 1",
+                    );
+                }
+                let Ok(per_page) = usize::try_from(per_page_u64) else {
+                    return JsonRpcResponse::err(
+                        id,
+                        JSONRPC_LIMIT_EXCEEDED,
+                        "per_page exceeds max_tx_search_results",
+                    );
+                };
                 if per_page > self.config.max_tx_search_results {
                     return JsonRpcResponse::err(
                         id,
@@ -313,6 +368,17 @@ pub fn handle_cosmos_rest(
         ),
         ("GET", p) if p.starts_with("/cosmwasm/wasm/v1/contract/") => {
             let rest = p.trim_start_matches("/cosmwasm/wasm/v1/contract/");
+            if rest.is_empty()
+                || rest.contains('/')
+                || rest.contains("..")
+                || rest.bytes().any(|b| b.is_ascii_control())
+            {
+                return (
+                    400,
+                    serde_json::json!({ "message": "invalid CosmWasm contract address" })
+                        .to_string(),
+                );
+            }
             let info = execute_abci_query(
                 "/cosmwasm.wasm.v1.Query/ContractInfo",
                 rest.as_bytes(),
@@ -465,5 +531,60 @@ mod tests {
             resp.error.as_ref().map(|e| e.code),
             Some(JSONRPC_INVALID_PARAMS)
         );
+    }
+
+    #[test]
+    fn cosmos_rejects_malformed_account_number_per_page_smart_query_and_bad_rest_path() {
+        let state = AccountState::new();
+        let mut gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
+
+        let bad_acct = JsonRpcRequest {
+            jsonrpc: String::from("2.0"),
+            id: serde_json::json!(1),
+            method: String::from("broadcast_tx_sync"),
+            params: serde_json::json!({
+                "tx": "deadbeef",
+                "account_number": "not-a-number",
+            }),
+        };
+        let r1 = gw.handle_rpc_for_peer("peer-1", &bad_acct, &state);
+        assert_eq!(
+            r1.error.as_ref().map(|e| e.code),
+            Some(JSONRPC_INVALID_PARAMS)
+        );
+
+        let bad_page = JsonRpcRequest {
+            jsonrpc: String::from("2.0"),
+            id: serde_json::json!(2),
+            method: String::from("tx_search"),
+            params: serde_json::json!({ "per_page": 0 }),
+        };
+        let r2 = gw.handle_rpc_for_peer("peer-2", &bad_page, &state);
+        assert_eq!(
+            r2.error.as_ref().map(|e| e.code),
+            Some(JSONRPC_INVALID_PARAMS)
+        );
+
+        let bad_smart = JsonRpcRequest {
+            jsonrpc: String::from("2.0"),
+            id: serde_json::json!(3),
+            method: String::from("abci_query"),
+            params: serde_json::json!({
+                "path": "/cosmwasm.wasm.v1.Query/SmartContractState",
+                "data": hex::encode(b"{not json}"),
+            }),
+        };
+        let r3 = gw.handle_rpc_for_peer("peer-3", &bad_smart, &state);
+        assert_eq!(
+            r3.error.as_ref().map(|e| e.code),
+            Some(JSONRPC_INVALID_PARAMS)
+        );
+
+        let (code_empty, _) =
+            handle_cosmos_rest(&state, "GET", "/cosmwasm/wasm/v1/contract/", None);
+        assert_eq!(code_empty, 400);
+        let (code_trav, _) =
+            handle_cosmos_rest(&state, "GET", "/cosmwasm/wasm/v1/contract/../secret", None);
+        assert_eq!(code_trav, 400);
     }
 }

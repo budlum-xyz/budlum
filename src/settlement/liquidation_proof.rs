@@ -233,16 +233,77 @@ fn validate_observations(observations: &[AmmReserveSnapshot]) -> Result<(), Liqu
     Ok(())
 }
 
+/// Exact 256-bit `floor(a * b / denom)` returning `None` on division by zero or
+/// `u128` quotient overflow.
+fn mul_div_u128(a: u128, b: u128, denom: u128) -> Option<u128> {
+    if denom == 0 {
+        return None;
+    }
+    if a == 0 || b == 0 {
+        return Some(0);
+    }
+    let mask64 = u128::from(u64::MAX);
+    let a0 = a & mask64;
+    let a1 = a >> 64;
+    let b0 = b & mask64;
+    let b1 = b >> 64;
+
+    let p00 = a0 * b0;
+    let p01 = a0 * b1;
+    let p10 = a1 * b0;
+    let p11 = a1 * b1;
+
+    let mid = (p00 >> 64) + (p01 & mask64) + (p10 & mask64);
+    let lo = (p00 & mask64) | ((mid & mask64) << 64);
+    let hi = p11 + (p01 >> 64) + (p10 >> 64) + (mid >> 64);
+
+    if hi == 0 {
+        return Some(lo / denom);
+    }
+    if hi >= denom {
+        return None;
+    }
+    let mut r = hi;
+    let mut q = 0u128;
+    for i in (0..128).rev() {
+        let bit = (lo >> i) & 1;
+        let carry = r >> 127;
+        r = (r << 1) | bit;
+        if carry != 0 || r >= denom {
+            r = r.wrapping_sub(denom);
+            q |= 1u128 << i;
+        }
+    }
+    Some(q)
+}
+
+/// Compute `floor(amount * price_scaled * mult_bps / (1e18 * BPS_DEN))` without
+/// intermediate `u128` clamping on 18-decimal inputs.
+fn scaled_debt_value_y(
+    debt_x: u128,
+    price_scaled: u128,
+    mult_bps: u64,
+    scale: u128,
+) -> Result<u128, LiquidationError> {
+    let bps_den = u128::from(BPS_DEN);
+    if let Some(num) = debt_x
+        .checked_mul(price_scaled)
+        .and_then(|v| v.checked_mul(u128::from(mult_bps)))
+    {
+        return Ok(num / (scale * bps_den));
+    }
+    let unpenalized =
+        mul_div_u128(debt_x, price_scaled, scale).ok_or(LiquidationError::PriceOverflow)?;
+    mul_div_u128(unpenalized, u128::from(mult_bps), bps_den).ok_or(LiquidationError::PriceOverflow)
+}
+
 /// Compute the instantaneous price from a constant-product AMM.
 /// Returns price as `reserve_y / reserve_x` scaled by `1e18`.
 fn instant_price_scaled(reserve_x: u128, reserve_y: u128) -> Result<u128, LiquidationError> {
     // price = reserve_y / reserve_x, scaled by 1e18
     // = (reserve_y * 1e18) / reserve_x
     let scale: u128 = 1_000_000_000_000_000_000; // 1e18
-    reserve_y
-        .checked_mul(scale)
-        .and_then(|num| num.checked_div(reserve_x))
-        .ok_or(LiquidationError::PriceOverflow)
+    mul_div_u128(reserve_y, scale, reserve_x).ok_or(LiquidationError::PriceOverflow)
 }
 
 /// Validate that the TWAP price is a rational number (non-zero reserves).
@@ -273,12 +334,15 @@ fn compute_twap_price(observations: &[AmmReserveSnapshot]) -> Result<u128, Liqui
         let duration = observations.get(i + 1).map_or(1u128, |next| {
             u128::from(next.epoch.saturating_sub(obs.epoch))
         });
-        weighted_sum = weighted_sum.saturating_add(
-            price
-                .checked_mul(duration)
-                .ok_or(LiquidationError::PriceOverflow)?,
-        );
-        total_duration = total_duration.saturating_add(duration);
+        let term = price
+            .checked_mul(duration)
+            .ok_or(LiquidationError::PriceOverflow)?;
+        weighted_sum = weighted_sum
+            .checked_add(term)
+            .ok_or(LiquidationError::PriceOverflow)?;
+        total_duration = total_duration
+            .checked_add(duration)
+            .ok_or(LiquidationError::PriceOverflow)?;
     }
 
     if total_duration == 0 {
@@ -297,20 +361,14 @@ fn compute_seized_collateral(
     debt_x: u128,
     collateral_y: u128,
     twap_price_scaled: u128,
-) -> (u128, u128, u128) {
+) -> Result<(u128, u128, u128), LiquidationError> {
     let scale: u128 = 1_000_000_000_000_000_000; // 1e18
     let penalty_multiplier = BPS_DEN + LIQUIDATION_PENALTY_BPS; // 10500
 
-    // debt_in_y = debt_x * price * (1 + penalty) / scale / BPS_DEN
-    // = debt_x * twap_price_scaled * penalty_multiplier / (scale * BPS_DEN)
-    let debt_in_y = debt_x
-        .saturating_mul(twap_price_scaled)
-        .saturating_mul(u128::from(penalty_multiplier))
-        / (scale * u128::from(BPS_DEN));
-
+    let debt_in_y = scaled_debt_value_y(debt_x, twap_price_scaled, penalty_multiplier, scale)?;
     let seized = debt_in_y.min(collateral_y);
     let remainder = collateral_y.saturating_sub(seized);
-    (seized, debt_x, remainder)
+    Ok((seized, debt_x, remainder))
 }
 
 /// Validate the liquidation parameters are well-formed.
@@ -367,13 +425,11 @@ pub fn execute_liquidation(
         }
 
         // Health factor = (collateral_y * scale / twap_price) / debt_x * 10000
-        // = collateral_y * scale * 10000 / (twap_price * debt_x)
-        let collateral_value_x = pos.collateral_y.saturating_mul(scale) / twap_price.max(1);
+        let collateral_value_x = mul_div_u128(pos.collateral_y, scale, twap_price.max(1))
+            .ok_or(LiquidationError::PriceOverflow)?;
 
         // health_bps = collateral_value_x * 10000 / debt_x
-        let health_bps = collateral_value_x
-            .saturating_mul(u128::from(BPS_DEN))
-            .checked_div(pos.debt_x)
+        let health_bps = mul_div_u128(collateral_value_x, u128::from(BPS_DEN), pos.debt_x)
             .unwrap_or(u128::from(u64::MAX));
 
         if health_bps > u128::from(pos.maintenance_threshold_bps) {
@@ -382,7 +438,7 @@ pub fn execute_liquidation(
         }
 
         let (seized, repaid, remainder) =
-            compute_seized_collateral(pos.debt_x, pos.collateral_y, twap_price);
+            compute_seized_collateral(pos.debt_x, pos.collateral_y, twap_price)?;
 
         outcomes.push(LiquidationOutcome {
             position_id: pos.position_id,
@@ -574,9 +630,16 @@ pub fn prove_position_health(
         });
     }
 
+    let expected_amm_domain = observations.first().map(|o| o.domain_id);
     let mut snapshots = Vec::with_capacity(observations.len());
     let mut obs_digests = Vec::with_capacity(observations.len());
     for obs in observations {
+        if Some(obs.domain_id) != expected_amm_domain {
+            return Err(LiquidationError::InvalidReserveProof {
+                domain_id: obs.domain_id,
+                epoch: obs.snapshot.epoch,
+            });
+        }
         let Some(certified_root) = certified_roots.get(&(obs.domain_id, obs.snapshot.epoch)) else {
             return Err(LiquidationError::InvalidReserveProof {
                 domain_id: obs.domain_id,
@@ -593,10 +656,9 @@ pub fn prove_position_health(
     let twap_epoch = snapshots.last().map_or(0, |s| s.epoch);
 
     let scale: u128 = 1_000_000_000_000_000_000;
-    let collateral_value_x = position.collateral_y.saturating_mul(scale) / twap_price_scaled.max(1);
-    let health_bps_u128 = collateral_value_x
-        .saturating_mul(u128::from(BPS_DEN))
-        .checked_div(position.debt_x)
+    let collateral_value_x = mul_div_u128(position.collateral_y, scale, twap_price_scaled.max(1))
+        .ok_or(LiquidationError::PriceOverflow)?;
+    let health_bps_u128 = mul_div_u128(collateral_value_x, u128::from(BPS_DEN), position.debt_x)
         .unwrap_or(u128::from(u64::MAX));
     let health_bps = u64::try_from(health_bps_u128).unwrap_or(u64::MAX);
     let liquidatable = health_bps <= position.maintenance_threshold_bps;
@@ -682,11 +744,18 @@ pub fn execute_proven_cross_domain_liquidation(
         )));
     }
 
+    let mut seen_legs = std::collections::BTreeSet::new();
     let mut total_leg_collateral = 0u128;
     for leg in collateral_legs {
         if leg.custody_or_remote_root == [0u8; 32] {
             return Err(LiquidationError::MissingProofAnchor(format!(
                 "collateral leg on domain {} missing non-zero custody/remote root",
+                leg.domain_id
+            )));
+        }
+        if !seen_legs.insert((leg.domain_id, leg.asset_id)) {
+            return Err(LiquidationError::MissingProofAnchor(format!(
+                "duplicate collateral leg on domain {}",
                 leg.domain_id
             )));
         }
@@ -714,10 +783,12 @@ pub fn execute_proven_cross_domain_liquidation(
         });
     }
 
-    let max_repay = (position
-        .debt_x
-        .saturating_mul(u128::from(LIQ_CLOSE_FACTOR_MAX_BPS))
-        / u128::from(BPS_DEN))
+    let max_repay = mul_div_u128(
+        position.debt_x,
+        u128::from(LIQ_CLOSE_FACTOR_MAX_BPS),
+        u128::from(BPS_DEN),
+    )
+    .ok_or(LiquidationError::PriceOverflow)?
     .max(1)
     .min(position.debt_x);
     if params.repay_debt_x == 0 || params.repay_debt_x > max_repay {
@@ -728,12 +799,13 @@ pub fn execute_proven_cross_domain_liquidation(
     }
 
     let scale: u128 = 1_000_000_000_000_000_000;
-    let bonus_mult = u128::from(BPS_DEN.saturating_add(params.bonus_bps));
-    let mut target_seize_y = params
-        .repay_debt_x
-        .saturating_mul(health.twap_price_scaled)
-        .saturating_mul(bonus_mult)
-        / (scale * u128::from(BPS_DEN));
+    let bonus_mult = BPS_DEN.saturating_add(params.bonus_bps);
+    let mut target_seize_y = scaled_debt_value_y(
+        params.repay_debt_x,
+        health.twap_price_scaled,
+        bonus_mult,
+        scale,
+    )?;
     target_seize_y = target_seize_y.min(position.collateral_y);
 
     // Deterministic canonical ordering by `(domain_id, asset_id)` so seizure is
@@ -941,5 +1013,234 @@ mod tests {
         let obs = make_observations(&[(1, 100, 200), (2, 100, 200), (3, 100, 200)]);
         let outcomes = execute_liquidation(&obs, &[]).expect("ok");
         assert!(outcomes.is_empty());
+    }
+
+    #[test]
+    fn healthy_18dec_position_is_not_falsely_liquidated_by_u128_saturation() {
+        let one: u128 = 1_000_000_000_000_000_000;
+        // Price Y/X = 1.0 (equal 18-decimal reserves).
+        let obs = make_observations(&[
+            (1, 1_000_000 * one, 1_000_000 * one),
+            (2, 1_000_000 * one, 1_000_000 * one),
+            (3, 1_000_000 * one, 1_000_000 * one),
+        ]);
+        // 10_000e18 collateral against 1_000e18 debt = 100_000 bps (10x), well above 15_000 bps.
+        let healthy = LiquidationPosition {
+            position_id: 42,
+            debt_x: 1_000 * one,
+            collateral_y: 10_000 * one,
+            maintenance_threshold_bps: 15_000,
+        };
+        let outcomes =
+            execute_liquidation(&obs, std::slice::from_ref(&healthy)).expect("healthy check");
+        assert!(
+            outcomes.is_empty(),
+            "10x-collateralized 18-decimal position must not be liquidated due to u128*1e18 clamping"
+        );
+
+        let mut certified_roots = std::collections::BTreeMap::new();
+        let mut proven_obs = Vec::new();
+        for (epoch, rx, ry) in [
+            (1u64, 1_000_000 * one, 1_000_000 * one),
+            (2, 1_000_000 * one, 1_000_000 * one),
+            (3, 1_000_000 * one, 1_000_000 * one),
+        ] {
+            let leaf = reserve_observation_leaf(10, epoch, rx, ry);
+            let leaves = [leaf, [0x11; 32]];
+            let root = build_reserve_state_root(&leaves);
+            let proof = build_reserve_inclusion_proof(&leaves, 0).expect("proof");
+            certified_roots.insert((10, epoch), root);
+            proven_obs.push(ProvenReserveObservation {
+                domain_id: 10,
+                snapshot: AmmReserveSnapshot {
+                    state_root: root,
+                    epoch,
+                    reserve_x: rx,
+                    reserve_y: ry,
+                    proof,
+                },
+                leaf_index: 0,
+                leaf_count: leaves.len(),
+            });
+        }
+        let health =
+            prove_position_health(&healthy, 1, &certified_roots, &proven_obs).expect("proven");
+        assert!(!health.liquidatable);
+        assert_eq!(health.health_bps, 100_000);
+    }
+
+    #[test]
+    fn seized_collateral_scales_accurately_for_18dec_debt_without_u128_clamping() {
+        let one: u128 = 1_000_000_000_000_000_000;
+        let obs = make_observations(&[
+            (1, 1_000_000 * one, 1_000_000 * one),
+            (2, 1_000_000 * one, 1_000_000 * one),
+            (3, 1_000_000 * one, 1_000_000 * one),
+        ]);
+        // Debt = 1_000e18, Collateral = 1_200e18 -> health 12_000 bps < 15_000 bps.
+        // At 5% bonus, exact seizure must be 1_050e18 (not clamped near 0.034e18).
+        let pos = LiquidationPosition {
+            position_id: 43,
+            debt_x: 1_000 * one,
+            collateral_y: 1_200 * one,
+            maintenance_threshold_bps: 15_000,
+        };
+        let outcomes = execute_liquidation(&obs, std::slice::from_ref(&pos)).expect("liquidation");
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].seized_collateral_y, 1_050 * one);
+        assert_eq!(outcomes[0].remainder_y, 150 * one);
+
+        let mut certified_roots = std::collections::BTreeMap::new();
+        let mut proven_obs = Vec::new();
+        for epoch in [1u64, 2, 3] {
+            let leaf = reserve_observation_leaf(10, epoch, 1_000_000 * one, 1_000_000 * one);
+            let leaves = [leaf, [0x22; 32]];
+            let root = build_reserve_state_root(&leaves);
+            let proof = build_reserve_inclusion_proof(&leaves, 0).expect("proof");
+            certified_roots.insert((10, epoch), root);
+            proven_obs.push(ProvenReserveObservation {
+                domain_id: 10,
+                snapshot: AmmReserveSnapshot {
+                    state_root: root,
+                    epoch,
+                    reserve_x: 1_000_000 * one,
+                    reserve_y: 1_000_000 * one,
+                    proof,
+                },
+                leaf_index: 0,
+                leaf_count: leaves.len(),
+            });
+        }
+        let legs = vec![CollateralLegSpec {
+            domain_id: 20,
+            asset_id: [0x20; 32],
+            custody_or_remote_root: [0xAA; 32],
+            available_y: 1_200 * one,
+        }];
+        let proven = execute_proven_cross_domain_liquidation(
+            &pos,
+            &certified_roots,
+            &proven_obs,
+            &legs,
+            &CrossDomainLiquidationParams {
+                debt_domain_id: 1,
+                repay_debt_x: 500 * one,
+                bonus_bps: 500,
+                delivery_proof_root: [0xDD; 32],
+            },
+        )
+        .expect("proven liquidation");
+        assert_eq!(proven.seized_legs.len(), 1);
+        assert_eq!(proven.seized_legs[0].seized_y, 525 * one);
+    }
+
+    #[test]
+    fn twap_overflow_mixed_observation_domains_and_duplicate_legs_fail_closed() {
+        // 1. TWAP weighted_sum overflow must return PriceOverflow, never saturate.
+        let huge_obs = make_observations(&[
+            (1, 1, u128::MAX / 1_000_000_000_000_000_000),
+            (
+                1_000_000_000_000_000_000,
+                1,
+                u128::MAX / 1_000_000_000_000_000_000,
+            ),
+            (
+                1_000_000_000_000_000_001,
+                1,
+                u128::MAX / 1_000_000_000_000_000_000,
+            ),
+        ]);
+        let pos = LiquidationPosition {
+            position_id: 9,
+            debt_x: 100,
+            collateral_y: 50,
+            maintenance_threshold_bps: 15_000,
+        };
+        let ov_err = execute_liquidation(&huge_obs, std::slice::from_ref(&pos));
+        assert!(
+            matches!(ov_err, Err(LiquidationError::PriceOverflow)),
+            "TWAP overflow must fail closed with PriceOverflow: {ov_err:?}"
+        );
+
+        // 2. Interleaving observations from different AMM domain_ids must fail closed.
+        let mut certified_roots = std::collections::BTreeMap::new();
+        let mut mixed_obs = Vec::new();
+        for (idx, epoch) in [1u64, 2, 3].into_iter().enumerate() {
+            let dom = if idx == 1 { 11 } else { 10 };
+            let leaf = reserve_observation_leaf(dom, epoch, 100, 200);
+            let leaves = [leaf, [0x33; 32]];
+            let root = build_reserve_state_root(&leaves);
+            let proof = build_reserve_inclusion_proof(&leaves, 0).expect("proof");
+            certified_roots.insert((dom, epoch), root);
+            mixed_obs.push(ProvenReserveObservation {
+                domain_id: dom,
+                snapshot: AmmReserveSnapshot {
+                    state_root: root,
+                    epoch,
+                    reserve_x: 100,
+                    reserve_y: 200,
+                    proof,
+                },
+                leaf_index: 0,
+                leaf_count: leaves.len(),
+            });
+        }
+        assert!(
+            prove_position_health(&pos, 1, &certified_roots, &mixed_obs).is_err(),
+            "mixed observation domains must be rejected"
+        );
+
+        // 3. Duplicate (domain_id, asset_id) legs must fail closed.
+        let mut same_dom_obs = Vec::new();
+        let mut roots2 = std::collections::BTreeMap::new();
+        for epoch in [1u64, 2, 3] {
+            let leaf = reserve_observation_leaf(10, epoch, 100, 200);
+            let leaves = [leaf, [0x44; 32]];
+            let root = build_reserve_state_root(&leaves);
+            let proof = build_reserve_inclusion_proof(&leaves, 0).expect("proof");
+            roots2.insert((10, epoch), root);
+            same_dom_obs.push(ProvenReserveObservation {
+                domain_id: 10,
+                snapshot: AmmReserveSnapshot {
+                    state_root: root,
+                    epoch,
+                    reserve_x: 100,
+                    reserve_y: 200,
+                    proof,
+                },
+                leaf_index: 0,
+                leaf_count: leaves.len(),
+            });
+        }
+        let dup_legs = vec![
+            CollateralLegSpec {
+                domain_id: 20,
+                asset_id: [0x20; 32],
+                custody_or_remote_root: [0xAA; 32],
+                available_y: 25,
+            },
+            CollateralLegSpec {
+                domain_id: 20,
+                asset_id: [0x20; 32],
+                custody_or_remote_root: [0xBB; 32],
+                available_y: 25,
+            },
+        ];
+        assert!(
+            execute_proven_cross_domain_liquidation(
+                &pos,
+                &roots2,
+                &same_dom_obs,
+                &dup_legs,
+                &CrossDomainLiquidationParams {
+                    debt_domain_id: 1,
+                    repay_debt_x: 10,
+                    bonus_bps: 500,
+                    delivery_proof_root: [0xDD; 32],
+                },
+            )
+            .is_err(),
+            "duplicate collateral legs must be rejected"
+        );
     }
 }

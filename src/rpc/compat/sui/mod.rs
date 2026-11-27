@@ -68,6 +68,9 @@ impl SuiRpcResponse {
 
 fn parse_sui_hex32(raw: &str) -> Option<[u8; 32]> {
     let trimmed = raw.strip_prefix("0x").unwrap_or(raw);
+    if trimmed.len() != 64 || !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
     let bytes = hex::decode(trimmed).ok()?;
     bytes.as_slice().try_into().ok()
 }
@@ -167,7 +170,15 @@ pub fn handle_sui_rpc(
             let Some(hex_env) = req.params.first().and_then(Value::as_str) else {
                 return SuiRpcResponse::err(req.id, -32602, "missing hex envelope");
             };
-            let Ok(raw) = hex::decode(hex_env.strip_prefix("0x").unwrap_or(hex_env)) else {
+            let clean_hex = hex_env.strip_prefix("0x").unwrap_or(hex_env);
+            if clean_hex.len() > MAX_SUI_RPC_REQUEST_BYTES.saturating_mul(2) {
+                return SuiRpcResponse::err(
+                    req.id,
+                    -32602,
+                    "hex envelope exceeds MAX_SUI_RPC_REQUEST_BYTES",
+                );
+            }
+            let Ok(raw) = hex::decode(clean_hex) else {
                 return SuiRpcResponse::err(req.id, -32602, "invalid hex envelope");
             };
             match decode_and_recover_sui_tx(&raw, policy) {
@@ -274,5 +285,33 @@ mod tests {
     #[test]
     fn max_sui_rpc_request_bytes_is_bounded() {
         assert_eq!(MAX_SUI_RPC_REQUEST_BYTES, 1 << 20);
+    }
+
+    #[test]
+    fn sui_rejects_oversized_tx_hex_and_non_64_char_hex32() {
+        let state = AccountState::new();
+        let policy = SuiActivationPolicy {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: 100,
+            activation_height: Some(100),
+        };
+        let huge_hex = "zz".repeat(MAX_SUI_RPC_REQUEST_BYTES + 8);
+        let resp = handle_sui_rpc(
+            &state,
+            policy,
+            SuiRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: json!(1),
+                method: "sui_executeTransactionBlock".into(),
+                params: vec![json!(huge_hex)],
+            },
+        );
+        assert!(resp.result.is_none() && resp.error.is_some());
+        let msg = resp.error.unwrap()["message"].as_str().unwrap().to_string();
+        assert!(
+            msg.contains("MAX_SUI_RPC_REQUEST_BYTES"),
+            "oversized tx hex must be refused before decode: {msg}"
+        );
+        assert!(parse_sui_hex32(&"ab".repeat(1024)).is_none());
     }
 }
