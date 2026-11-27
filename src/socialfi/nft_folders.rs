@@ -230,10 +230,12 @@ impl NftFolderRegistry {
         if let Some(meta) = self.commitments.get_mut(&id) {
             meta.owner = to;
         }
-        if let Some(fids) = self.owner_folders.get(caller).cloned() {
-            for fid in fids {
-                if let Some(folder) = self.folders.get_mut(&fid) {
-                    folder.nft_ids.retain(|&x| x != id);
+        if caller != &to {
+            if let Some(fids) = self.owner_folders.get(caller).cloned() {
+                for fid in fids {
+                    if let Some(folder) = self.folders.get_mut(&fid) {
+                        folder.nft_ids.retain(|&x| x != id);
+                    }
                 }
             }
         }
@@ -301,18 +303,29 @@ impl NftFolderRegistry {
     ///
     /// Returns [`SocialFiBud3Error`] if the name or folder count is out of bounds.
     pub fn create_folder(&mut self, caller: Address, name: &str) -> Result<u64, SocialFiBud3Error> {
+        const MAX_TOTAL_NFT_FOLDERS: usize = 1_000_000;
+        if caller == Address::zero() {
+            return Err(SocialFiBud3Error::Nft(NftError::NotOwner.to_string()));
+        }
         let trimmed = name.trim();
-        if trimmed.is_empty() || trimmed.len() > MAX_FOLDER_NAME_BYTES {
+        if trimmed.is_empty()
+            || trimmed.len() > MAX_FOLDER_NAME_BYTES
+            || trimmed.chars().any(super::is_disallowed_metadata_char)
+        {
             return Err(SocialFiBud3Error::InvalidFolderName);
         }
-        if self
-            .owner_folders
-            .get(&caller)
-            .is_some_and(|list| list.len() >= MAX_FOLDERS_PER_OWNER)
+        if self.folders.len() >= MAX_TOTAL_NFT_FOLDERS
+            || self
+                .owner_folders
+                .get(&caller)
+                .is_some_and(|list| list.len() >= MAX_FOLDERS_PER_OWNER)
         {
             return Err(SocialFiBud3Error::FolderLimitExceeded);
         }
         let folder_id = self.next_folder_id;
+        if self.folders.contains_key(&folder_id) {
+            return Err(SocialFiBud3Error::FolderLimitExceeded);
+        }
         self.next_folder_id = self.next_folder_id.saturating_add(1);
         self.folders.insert(
             folder_id,
