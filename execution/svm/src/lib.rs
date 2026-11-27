@@ -346,7 +346,7 @@ fn handle_system_program(
         }
         // 2 = Transfer { lamports: u64 }
         2 => {
-            if ix.data.len() < 12 || ix.accounts.len() < 2 {
+            if ix.data.len() != 12 || ix.accounts.len() < 2 {
                 return Err((OutcomeStatus::Revert, String::from("bad Transfer")));
             }
             let from = ix.accounts.first().ok_or_else(|| {
@@ -427,15 +427,37 @@ fn handle_spl_token(
         // The seed is not the address: the mint lives at `derive_spl_mint_address(caller,
         // seed)` and that address is the output.
         0 => {
+            if ix.data.len() != 34 {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("InitializeMint expects 34-byte instruction data"),
+                ));
+            }
             let Some(seed_meta) = ix.accounts.first() else {
                 return Err((OutcomeStatus::Revert, String::from("missing mint seed")));
             };
-            let decimals = ix.data.get(1).copied().unwrap_or(9);
+            let decimals = *ix.data.get(1).ok_or_else(|| {
+                (
+                    OutcomeStatus::Revert,
+                    String::from("missing InitializeMint decimals"),
+                )
+            })?;
+            if decimals > 18 {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("InitializeMint decimals exceed 18"),
+                ));
+            }
             let auth: [u8; 32] = ix
                 .data
                 .get(2..34)
                 .and_then(|s| s.try_into().ok())
-                .unwrap_or(*caller);
+                .ok_or_else(|| {
+                    (
+                        OutcomeStatus::Revert,
+                        String::from("missing InitializeMint authority"),
+                    )
+                })?;
             // The worker receives only the authenticated outer caller, so the mint address
             // is derived from it rather than taken as named, and the caller is the
             // authority. Otherwise any account could take a mint address before its issuer
@@ -2168,5 +2190,119 @@ mod tests {
             OutcomeStatus::OutOfGas,
             "HostError::OutOfGas while reading SVM program account must return OutOfGas"
         );
+    }
+
+    #[test]
+    fn system_transfer_and_spl_initialize_mint_enforce_signer_recipient_and_wire_length() {
+        let mut worker = SvmWorker;
+        let ctx = test_ctx();
+        let alice = [0x11u8; 32]; // matches test_call outer caller!
+        let bob = [0x55u8; 32];
+        let mut host = MemoryHost::new(2_000_000);
+        host.balances.insert(
+            EeIdentity {
+                ee: EeId::SVM,
+                id: alice.to_vec(),
+            },
+            1_000_000 * ATTOS_PER_LAMPORT,
+        );
+
+        // 1. System Transfer where accounts[0].pubkey != caller or !is_signer must revert.
+        let mut transfer_data = 2u32.to_le_bytes().to_vec();
+        transfer_data.extend_from_slice(&500u64.to_le_bytes());
+        let spoofed_from = SvmInstructionEnvelope {
+            accounts: vec![
+                SvmAccountMeta {
+                    pubkey: [0x99u8; 32],
+                    is_signer: true,
+                    is_writable: true,
+                },
+                SvmAccountMeta {
+                    pubkey: bob,
+                    is_signer: false,
+                    is_writable: true,
+                },
+            ],
+            data: transfer_data.clone(),
+        };
+        let out_spoof = worker
+            .execute(
+                &ctx,
+                &test_call(
+                    SYSTEM_PROGRAM_ID,
+                    EeCallKind::Call,
+                    serde_json::to_vec(&spoofed_from).unwrap(),
+                    100_000,
+                ),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(
+            out_spoof.status,
+            OutcomeStatus::Revert,
+            "System Transfer with mismatched source account must revert"
+        );
+
+        // 2. System Transfer to zero address `[0u8; 32]` must revert.
+        let zero_dst = SvmInstructionEnvelope {
+            accounts: vec![
+                SvmAccountMeta {
+                    pubkey: alice,
+                    is_signer: true,
+                    is_writable: true,
+                },
+                SvmAccountMeta {
+                    pubkey: [0u8; 32],
+                    is_signer: false,
+                    is_writable: true,
+                },
+            ],
+            data: transfer_data,
+        };
+        let out_zero = worker
+            .execute(
+                &ctx,
+                &test_call(
+                    SYSTEM_PROGRAM_ID,
+                    EeCallKind::Call,
+                    serde_json::to_vec(&zero_dst).unwrap(),
+                    100_000,
+                ),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(
+            out_zero.status,
+            OutcomeStatus::Revert,
+            "System Transfer to zero address must revert"
+        );
+
+        // 3. Truncated 1-byte (`[0]`) or trailing-garbage 35-byte SPL InitializeMint and decimals > 18 must revert.
+        let mut overlong_mint_data = vec![0, 6];
+        overlong_mint_data.extend_from_slice(&alice);
+        overlong_mint_data.push(0xFF);
+        for bad_mint_data in [vec![0], overlong_mint_data] {
+            let bad_mint = SvmInstructionEnvelope {
+                accounts: vec![meta([0x22u8; 32])],
+                data: bad_mint_data,
+            };
+            let out_bad = worker
+                .execute(
+                    &ctx,
+                    &test_call(
+                        SPL_TOKEN_PROGRAM_ID,
+                        EeCallKind::Call,
+                        serde_json::to_vec(&bad_mint).unwrap(),
+                        100_000,
+                    ),
+                    &mut host,
+                )
+                .unwrap();
+            assert_eq!(
+                out_bad.status,
+                OutcomeStatus::Revert,
+                "malformed-length InitializeMint must revert"
+            );
+        }
     }
 }
