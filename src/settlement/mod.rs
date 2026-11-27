@@ -16,6 +16,8 @@ pub mod registries;
 pub mod reseal;
 pub mod root_seal;
 pub mod shared_security;
+pub mod unified_balance;
+pub mod universal_asset;
 pub mod universal_finality;
 
 #[cfg(test)]
