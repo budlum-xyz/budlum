@@ -319,6 +319,21 @@ enum Command {
         #[arg(long, default_value_t = budlum_core::settlement::liquidation_proof::DEFAULT_QUOTE_DEVIATION_WARN_BPS)]
         warn_bps: u64,
     },
+    /// Validate a canonical `budlum:pay/v1?...` payment request URI and check expiry.
+    PaymentUri {
+        /// Canonical payment request URI string.
+        #[arg(long, required = true)]
+        uri: String,
+        /// Current Unix timestamp in seconds for deadline verification.
+        #[arg(long, required = true)]
+        now_unix_secs: u64,
+    },
+    /// Verify a merchant ML-DSA-87 signed refund bundle JSON offline.
+    RefundVerify {
+        /// Path to JSON file containing `{original_receipt, original_intent, refund, merchant_pubkey_hex, merchant_sig_hex}`.
+        #[arg(long, required = true)]
+        bundle: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4881,11 +4896,88 @@ fn main() {
             quoted_price_scaled,
             warn_bps,
         } => run_quote_check(observations, *quoted_price_scaled, *warn_bps),
+        Command::PaymentUri { uri, now_unix_secs } => run_payment_uri(uri, *now_unix_secs),
+        Command::RefundVerify { bundle } => run_refund_verify(bundle),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+fn run_payment_uri(uri: &str, now_unix_secs: u64) -> Result<(), String> {
+    use budlum_core::unification::UniversalPaymentRequestUri;
+    let parsed = UniversalPaymentRequestUri::decode_canonical(uri)
+        .map_err(|e| format!("invalid payment URI: {e:?}"))?;
+    parsed
+        .validate_not_expired(now_unix_secs)
+        .map_err(|e| format!("payment URI expired or unbound: {e:?}"))?;
+    let out = serde_json::json!({
+        "canonical": parsed.encode_canonical().map_err(|e| format!("{e:?}"))?,
+        "requestDigest": format!("0x{}", hex::encode(parsed.request_digest())),
+        "targetDomain": parsed.target_domain,
+        "targetAmount": parsed.target_amount.to_string(),
+        "deadlineUnixSecs": parsed.deadline_unix_secs,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&out).map_err(|e| format!("{e}"))?
+    );
+    Ok(())
+}
+
+fn run_refund_verify(bundle_path: &str) -> Result<(), String> {
+    use budlum_core::unification::{
+        RefundIntent, RefundRegistry, UniversalPaymentIntent, UniversalPaymentReceipt,
+    };
+    #[derive(serde::Deserialize)]
+    struct RefundBundle {
+        original_receipt: UniversalPaymentReceipt,
+        original_intent: UniversalPaymentIntent,
+        refund: RefundIntent,
+        merchant_pubkey_hex: String,
+        merchant_sig_hex: String,
+    }
+    let raw = budlum_core::crypto::key_file::read_regular_bounded(
+        std::path::Path::new(bundle_path),
+        16 * 1024 * 1024,
+        "refund bundle",
+    )
+    .map_err(|e| format!("failed to read refund bundle `{bundle_path}`: {e}"))?;
+    let parsed: RefundBundle =
+        serde_json::from_slice(&raw).map_err(|e| format!("invalid refund bundle JSON: {e}"))?;
+    let pk = hex::decode(
+        parsed
+            .merchant_pubkey_hex
+            .strip_prefix("0x")
+            .unwrap_or(&parsed.merchant_pubkey_hex),
+    )
+    .map_err(|e| format!("invalid merchant_pubkey_hex: {e}"))?;
+    let sig = hex::decode(
+        parsed
+            .merchant_sig_hex
+            .strip_prefix("0x")
+            .unwrap_or(&parsed.merchant_sig_hex),
+    )
+    .map_err(|e| format!("invalid merchant_sig_hex: {e}"))?;
+    let mut registry = RefundRegistry::default();
+    let refund_id = registry
+        .record_signed_refund(
+            &parsed.original_receipt,
+            &parsed.original_intent,
+            &parsed.refund,
+            &pk,
+            &sig,
+        )
+        .map_err(|e| format!("refund verification refused: {e:?}"))?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "verified": true,
+            "refundId": format!("0x{}", hex::encode(refund_id)),
+        })
+    );
+    Ok(())
 }
 
 fn run_quote_check(
