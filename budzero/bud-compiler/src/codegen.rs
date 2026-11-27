@@ -128,7 +128,7 @@ impl Codegen {
                 jump_to_main_idx,
                 (*main_idx as i32) - (jump_to_main_idx as i32),
             );
-        } else {
+        } else if self.error.is_none() {
             self.error = Some(CompileError::CodegenError(
                 "main function not found".to_string(),
             ));
@@ -138,7 +138,7 @@ impl Codegen {
         for (call_idx, func_name) in unpatched {
             if let Some(target_idx) = func_offsets.get(&func_name) {
                 self.patch_jump(call_idx, (*target_idx as i32) - (call_idx as i32));
-            } else {
+            } else if self.error.is_none() {
                 self.error = Some(CompileError::CodegenError(format!(
                     "Undefined function {}",
                     func_name
@@ -944,10 +944,26 @@ impl Codegen {
             }
             Expr::Call(name, args) => {
                 if name == "poseidon" {
+                    let (Some(arg0), Some(arg1)) = (args.first(), args.get(1)) else {
+                        if self.error.is_none() {
+                            self.error = Some(CompileError::CodegenError(
+                                "poseidon requires 2 arguments".to_string(),
+                            ));
+                        }
+                        return 0;
+                    };
+                    if args.len() != 2 {
+                        if self.error.is_none() {
+                            self.error = Some(CompileError::CodegenError(
+                                "poseidon requires exactly 2 arguments".to_string(),
+                            ));
+                        }
+                        return 0;
+                    }
                     let saved1 = self.next_reg;
-                    let r1 = self.generate_expr(&args[0], scope, storage);
+                    let r1 = self.generate_expr(arg0, scope, storage);
                     let saved2 = self.next_reg;
-                    let r2 = self.generate_expr(&args[1], scope, storage);
+                    let r2 = self.generate_expr(arg1, scope, storage);
 
                     let res = if r1 >= saved1 {
                         r1
@@ -982,7 +998,15 @@ impl Codegen {
                     // Reject dynamic expressions and out-of-range literals
                     // Explicitly instead of silently truncating a register
                     // Number (the old `r_path as i32` bug).
-                    let path_addr = match &args[0] {
+                    let Some(first_arg) = args.first().filter(|_| args.len() == 1) else {
+                        if self.error.is_none() {
+                            self.error = Some(CompileError::CodegenError(
+                                "verify_merkle_proof requires exactly 1 argument".to_string(),
+                            ));
+                        }
+                        return 0;
+                    };
+                    let path_addr = match first_arg {
                         Expr::Int(v) => *v,
                         _ => {
                             if self.error.is_none() {

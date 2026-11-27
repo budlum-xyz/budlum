@@ -131,6 +131,11 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
     /// [`BpqsSigner::fresh_device`]).
     pub fn ceremonial_keygen(root_seed: [u8; 32], window: EpochWindow) -> Result<Self, BpqsError> {
         crate::params::ensure_valid_params::<P>()?;
+        if root_seed == [0u8; 32] {
+            return Err(BpqsError::Malformed(
+                "all-zero ceremony root seed is forbidden",
+            ));
+        }
         let mut vks = Vec::with_capacity(1usize << P::T_LOG2);
         for epoch in 0..(1u32 << P::T_LOG2) {
             let seed = prf_epoch_seed::<H>(&root_seed, epoch);
@@ -404,14 +409,17 @@ pub fn verify_at_height<H: BpqsHash, P: BpqsParams>(
     merkle::verify_path::<H, P>(&rebuilt, sig.epoch as usize, &sig.path, &public.root)
 }
 
-/// Stateful verifier-side ceremony log enforcing one-time epoch consumption
-/// (`Q_MAX = 1`) and refusing non-production parameter rows unless
+/// Maximum distinct committee public keys tracked in one [`BpqsVerifierLog`].
+const MAX_VERIFIER_LOG_KEYS: usize = 4_096;
+
+/// Stateful verifier-side ceremony log enforcing one-time monotonic epoch
+/// consumption (`Q_MAX = 1`) and refusing non-production parameter rows unless
 /// explicitly constructed for tests.
 ///
 /// WIRING: anchor family verifier log for research line F2.
 #[derive(Clone, Debug, Default)]
 pub struct BpqsVerifierLog {
-    seen_epochs: alloc::collections::BTreeSet<([u8; 32], &'static str, u64, u32)>,
+    highest_epoch_by_key: alloc::collections::BTreeMap<([u8; 32], &'static str, u64), u32>,
     allow_test_params: bool,
 }
 
@@ -423,7 +431,7 @@ impl BpqsVerifierLog {
     #[must_use]
     pub const fn new_production() -> Self {
         Self {
-            seen_epochs: alloc::collections::BTreeSet::new(),
+            highest_epoch_by_key: alloc::collections::BTreeMap::new(),
             allow_test_params: false,
         }
     }
@@ -435,13 +443,13 @@ impl BpqsVerifierLog {
     #[must_use]
     pub const fn new_allow_test_params() -> Self {
         Self {
-            seen_epochs: alloc::collections::BTreeSet::new(),
+            highest_epoch_by_key: alloc::collections::BTreeMap::new(),
             allow_test_params: true,
         }
     }
 
     /// Verify `sig` at `height` and atomically record `(public.root, sig.epoch)`
-    /// as spent so any second signature under the same key and epoch is refused.
+    /// as spent so any duplicate or lower epoch under the same key is refused.
     ///
     /// WIRING: stateful verifier entry point pairing `verify_at_height` with
     /// one-time epoch tracking.
@@ -458,15 +466,25 @@ impl BpqsVerifierLog {
             ));
         }
         verify_at_height::<H, P>(public, height, msg, sig)?;
-        if !self
-            .seen_epochs
-            .insert((public.root, P::NAME, public.window.0, sig.epoch))
-        {
-            return Err(BpqsError::QuotaExceeded {
-                epoch: sig.epoch,
-                attempted: 2,
-            });
+        let key_id = (public.root, P::NAME, public.window.0);
+        if let Some(&highest) = self.highest_epoch_by_key.get(&key_id) {
+            if sig.epoch == highest {
+                return Err(BpqsError::QuotaExceeded {
+                    epoch: sig.epoch,
+                    attempted: 2,
+                });
+            }
+            if sig.epoch < highest {
+                return Err(BpqsError::Malformed(
+                    "epoch regression below already-accepted epoch for this key",
+                ));
+            }
+        } else if self.highest_epoch_by_key.len() >= MAX_VERIFIER_LOG_KEYS {
+            return Err(BpqsError::Malformed(
+                "verifier log tracked-key capacity exceeded",
+            ));
         }
+        self.highest_epoch_by_key.insert(key_id, sig.epoch);
         Ok(())
     }
 }
@@ -834,5 +852,45 @@ mod tests {
             verify_at_height::<H, ParamsTestFast>(&zero_pk, 0, b"m", &signed_fast()),
             Err(BpqsError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn keygen_refuses_all_zero_seed_and_verifier_log_refuses_epoch_regression() {
+        let window = EpochWindow(4);
+        assert!(
+            matches!(
+                BpqsSigner::<ParamsTestFast, H>::fresh_device([0u8; 32], window),
+                Err(BpqsError::Malformed(_))
+            ),
+            "all-zero ceremony root seed must be refused"
+        );
+
+        let mut signer_early =
+            BpqsSigner::<ParamsTestFast, H>::fresh_device([9u8; 32], window).unwrap();
+        let mut signer_late =
+            BpqsSigner::<ParamsTestFast, H>::fresh_device([9u8; 32], window).unwrap();
+        let sig_epoch_1 = signer_early.sign_at_height(4, b"old-epoch").unwrap();
+        let sig_epoch_3 = signer_late.sign_at_height(12, b"new-epoch").unwrap();
+
+        let mut log = BpqsVerifierLog::new_allow_test_params();
+        log.accept_at_height::<H, ParamsTestFast>(
+            signer_late.public(),
+            12,
+            b"new-epoch",
+            &sig_epoch_3,
+        )
+        .expect("epoch 3 accepted");
+        assert!(
+            matches!(
+                log.accept_at_height::<H, ParamsTestFast>(
+                    signer_early.public(),
+                    4,
+                    b"old-epoch",
+                    &sig_epoch_1,
+                ),
+                Err(BpqsError::Malformed(_))
+            ),
+            "historical epoch < highest accepted epoch must be refused"
+        );
     }
 }

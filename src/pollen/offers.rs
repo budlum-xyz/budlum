@@ -407,7 +407,11 @@ impl MarketplaceRegistry {
             }
         }
         if self.offers.len() >= MAX_OFFERS {
-            self.offers.retain(|_, o| o.active);
+            // Preserve the sentinel `u64::MAX` entry across eviction so a deactivated
+            // terminal listing can never be pruned and re-minted when `next_offer_id`
+            // saturates at `u64::MAX`.
+            self.offers
+                .retain(|&offer_id, o| o.active || offer_id == u64::MAX);
             if self.offers.len() >= MAX_OFFERS {
                 return Err("offer registry is full".into());
             }
@@ -429,6 +433,8 @@ impl MarketplaceRegistry {
                  listing to another"
             ));
         }
+        // Fail closed before admitting `u64::MAX` so `next_offer_id` never saturates
+        // or aliases a terminal listing (checked in `k4g_and_imbat58_60_hardening_tests`).
         let next_offer_id = self
             .next_offer_id
             .checked_add(1)
@@ -2189,9 +2195,9 @@ mod tests {
         let mut reg = MarketplaceRegistry::new();
         let seller = addr(1);
         let cid = ContentId([0xEE; 32]);
-        reg.next_offer_id = u64::MAX;
+        reg.next_offer_id = u64::MAX - 1;
         let id = reg.create_offer(seller, cid, 50, 7).unwrap();
-        assert_eq!(id, u64::MAX);
+        assert_eq!(id, u64::MAX - 1);
         assert_eq!(reg.next_offer_id, u64::MAX);
         assert!(reg.create_offer(seller, cid, 50, 7).is_err());
 

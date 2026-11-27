@@ -67,7 +67,10 @@ contract BudlumRemoteAccount is BudlumPaymentReceiver {
         nonReentrant
         returns (bytes memory result)
     {
-        if (msg.sender == address(0) || target == address(0) || target == address(this)) {
+        if (
+            msg.sender == address(0) || target == address(0) || target == address(this)
+                || ((data.length > 0 || value == 0) && target.code.length == 0)
+        ) {
             revert InvalidCallTarget();
         }
         FinalityMode mode = finality.finalityModeAtHeight(proof.header.checkpointHeight);

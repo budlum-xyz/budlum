@@ -334,12 +334,17 @@ impl ContextRegistry {
     ///
     /// # Errors
     ///
-    /// Refuses retirement while `ref_count > 0`.
+    /// Refuses retirement unless `status == Deprecated` and `ref_count == 0`.
     pub fn retire(&mut self, context_id: u32) -> Result<(), CodecError> {
         let ctx = self
             .contexts
             .get_mut(&context_id)
             .ok_or_else(|| CodecError::Malformed(String::from("unknown context_id")))?;
+        if ctx.status != ContextStatus::Deprecated {
+            return Err(CodecError::Encode(String::from(
+                "context must be Deprecated before retirement",
+            )));
+        }
         if ctx.ref_count != 0 {
             return Err(CodecError::Encode(String::from(
                 "cannot retire context while ref_count > 0",
@@ -396,6 +401,11 @@ impl ContextRegistry {
             .contexts
             .get(&context_id)
             .ok_or_else(|| CodecError::Malformed(String::from("unknown context_id")))?;
+        if ctx.status == ContextStatus::Retired {
+            return Err(CodecError::Malformed(String::from(
+                "retired context cannot decode payloads",
+            )));
+        }
         let want = u64::try_from(content_len).map_err(|_| CodecError::TooLong { max: u64::MAX })?;
         decode_with_shared_dict(&ctx.dict_bytes, payload, want)
     }

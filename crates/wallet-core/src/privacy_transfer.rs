@@ -253,9 +253,11 @@ impl PrivateTransferRequest {
         validate_canonical_field("input.recipient_tag", self.input.recipient_tag)?;
         validate_canonical_field("input.blinding", self.input.blinding)?;
         validate_canonical_field("output_blinding", self.output_blinding)?;
-        if self.output_blinding == self.input.blinding {
+        if self.output_blinding == self.input.blinding
+            || self.output_blinding == self.input.spend_secret
+        {
             return Err(WalletError::InvalidPrivateTransfer(
-                "output_blinding must differ from input.blinding".into(),
+                "output_blinding must differ from input.blinding and input.spend_secret".into(),
             ));
         }
         let change = self.input.amount - self.send_amount;
@@ -272,11 +274,18 @@ impl PrivateTransferRequest {
             };
             validate_canonical_field("change_recipient_tag", change_tag)?;
             validate_canonical_field("change_blinding", cb)?;
-            if cb == self.output_blinding || cb == self.input.blinding {
+            if cb == self.output_blinding
+                || cb == self.input.blinding
+                || cb == self.input.spend_secret
+            {
                 return Err(WalletError::InvalidPrivateTransfer(
-                    "change_blinding must differ from input.blinding and output_blinding".into(),
+                    "change_blinding must differ from input.blinding, input.spend_secret, and output_blinding".into(),
                 ));
             }
+        } else if self.change_recipient_tag.is_some() || self.change_blinding.is_some() {
+            return Err(WalletError::InvalidPrivateTransfer(
+                "exact spend must not carry stray change_recipient_tag or change_blinding".into(),
+            ));
         }
         Ok(())
     }
@@ -540,5 +549,34 @@ mod change_output_tests {
             "recipient_tag opening must be zeroized"
         );
         assert_eq!(input.blinding, 0, "blinding opening must be zeroized");
+
+        // 7. Reusing input.spend_secret as output_blinding or change_blinding leaks the
+        //    nullifier secret, and stray change secrets on an exact spend must be refused.
+        let mut leak_out = request_with_change(Some(19), Some(23));
+        leak_out.output_blinding = leak_out.input.spend_secret;
+        assert!(
+            matches!(
+                leak_out.validate_conservation(),
+                Err(WalletError::InvalidPrivateTransfer(_))
+            ),
+            "output_blinding == input.spend_secret must be refused"
+        );
+        let leak_change = request_with_change(Some(19), Some(13));
+        assert!(
+            matches!(
+                leak_change.validate_conservation(),
+                Err(WalletError::InvalidPrivateTransfer(_))
+            ),
+            "change_blinding == input.spend_secret must be refused"
+        );
+        let mut stray = request_with_change(None, Some(23));
+        stray.send_amount = stray.input.amount;
+        assert!(
+            matches!(
+                stray.validate_conservation(),
+                Err(WalletError::InvalidPrivateTransfer(_))
+            ),
+            "exact spend carrying stray change_blinding must be refused"
+        );
     }
 }

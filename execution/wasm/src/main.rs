@@ -4,8 +4,9 @@
 
 use std::env;
 use std::fs;
+use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use budlum_ee_wasm::WasmWorker;
@@ -29,6 +30,28 @@ fn parse_socket_arg() -> Result<PathBuf, String> {
     Err("usage: budlum-ee-wasm --socket <unix-socket-path>".into())
 }
 
+fn bind_worker_socket(socket_path: &Path) -> Result<UnixListener, String> {
+    if let Ok(meta) = fs::symlink_metadata(socket_path) {
+        if !meta.file_type().is_socket() {
+            return Err(format!(
+                "refusing to unlink non-socket path {}",
+                socket_path.display()
+            ));
+        }
+        fs::remove_file(socket_path).map_err(|e| {
+            format!(
+                "failed to remove stale socket {}: {e}",
+                socket_path.display()
+            )
+        })?;
+    }
+    let listener = UnixListener::bind(socket_path)
+        .map_err(|e| format!("failed to bind {}: {e}", socket_path.display()))?;
+    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("failed to chmod 0600 {}: {e}", socket_path.display()))?;
+    Ok(listener)
+}
+
 fn main() -> ExitCode {
     let socket_path = match parse_socket_arg() {
         Ok(p) => p,
@@ -37,13 +60,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if socket_path.exists() {
-        let _ = fs::remove_file(&socket_path);
-    }
-    let listener = match UnixListener::bind(&socket_path) {
+    let listener = match bind_worker_socket(&socket_path) {
         Ok(l) => l,
         Err(err) => {
-            eprintln!("failed to bind {}: {err}", socket_path.display());
+            eprintln!("{err}");
             return ExitCode::from(1);
         }
     };
@@ -63,4 +83,38 @@ fn main() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bind_worker_socket;
+    use std::fs;
+    use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+    #[test]
+    fn bind_worker_socket_sets_mode_0600_and_refuses_symlinks_or_files() {
+        let dir = std::env::temp_dir().join(format!("budlum-wasm-uds-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir");
+        let regular = dir.join("important.txt");
+        fs::write(&regular, b"keep").expect("write");
+        assert!(bind_worker_socket(&regular).is_err());
+        assert_eq!(fs::read(&regular).expect("still intact"), b"keep");
+
+        let link = dir.join("sock.lnk");
+        symlink(&regular, &link).expect("symlink");
+        assert!(bind_worker_socket(&link).is_err());
+        assert_eq!(fs::read(&regular).expect("target intact"), b"keep");
+
+        let sock = dir.join("worker.sock");
+        let listener = bind_worker_socket(&sock).expect("bind");
+        let mode = fs::symlink_metadata(&sock)
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        drop(listener);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

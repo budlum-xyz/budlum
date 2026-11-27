@@ -486,6 +486,9 @@ pub fn bud_addr_humanize(canonical: &[u8]) -> Result<String, String> {
             canonical.len()
         ));
     }
+    if canonical.iter().all(|&b| b == 0) {
+        return Err(String::from("canonical address cannot be all zeros"));
+    }
     let data5 = convert_bits(canonical, 8, 5, true)?;
     let mut values = bech32_hrp_expand(BUD_BECH32_HRP);
     values.extend_from_slice(&data5);
@@ -549,6 +552,9 @@ pub fn bud_addr_canonicalize(human: &str) -> Result<Vec<u8>, String> {
             "decoded address must be 20 or 32 bytes, got {}",
             raw.len()
         ));
+    }
+    if raw.iter().all(|&b| b == 0) {
+        return Err(String::from("decoded address cannot be all zeros"));
     }
     Ok(raw)
 }
