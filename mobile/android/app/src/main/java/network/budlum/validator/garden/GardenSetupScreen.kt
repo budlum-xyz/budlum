@@ -17,193 +17,214 @@ import androidx.compose.ui.unit.dp
 import network.budlum.validator.R
 
 /**
- * What this phone has to be allowed to do before it validates anything.
+ * Validator readiness checklist shown on first run (and reachable any time).
  *
- * The old version of this screen explained all of it in four paragraphs
- * of prose - what a Garden is, why Android sleeps background apps, what
- * the camera is for. A person opening an app for the first time does
- * not read that. Each requirement is now one row: what it is, where it
- * stands, and the way to fix it if it does not stand.
+ * Each requirement is a single contrast-safe row inside a Figma Sheet:
+ * self-test status, notification permission, battery guidance, and camera note.
  */
 @Composable
-fun SetupScreen(model: GardenModel, onReady: () -> Unit) {
+fun SetupScreen(
+    model: GardenModel,
+    onReady: () -> Unit,
+    onBack: (() -> Unit)? = null,
+    spotlight: List<SpotlightEntry> = emptyList(),
+) {
     val context = LocalContext.current
     val state = model.state
+    val skin = model.skin
     val ready = state.readiness
     val checksDone = state.selfTest.isNotEmpty()
     val checksPassed = checksDone && state.selfTest.all { it.passed }
 
     BudlumPage(
-        skin = model.skin,
-        menu = listOf(
-            stringResource(R.string.w_menu_ao),
-            stringResource(R.string.w_menu_market),
-            stringResource(R.string.w_menu_ecosystem),
-            stringResource(R.string.w_menu_participation),
-        ),
+        skin = skin,
+        onSkinChange = { model.selectSkin(it) },
+        onBack = onBack,
         searchHint = stringResource(R.string.w_search_hint),
+        spotlight = spotlight,
     ) {
         Column(
             modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // The ask itself, in the size the file gives a heading, so
-            // that the first thing read is what the app wants of this
-            // phone rather than a permissions audit.
-            Text(
-                stringResource(R.string.g_become_validator),
-                style = MaterialTheme.typography.headlineSmall,
-                color = model.skin.ink,
-            )
-            Text(
-                stringResource(R.string.g_becomes_validator),
-                style = MaterialTheme.typography.bodySmall,
-                color = model.skin.ink,
-                modifier = Modifier.padding(top = 6.dp, bottom = 20.dp),
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Label(
+                    text = stringResource(R.string.g_step_label, 1, 3),
+                    skin = skin,
+                    color = skin.muted,
+                )
+                Text(
+                    text = stringResource(R.string.g_become_validator),
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = skin.ink,
+                )
+                Text(
+                    text = stringResource(R.string.g_becomes_validator),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = skin.ink,
+                )
+            }
 
-            Slab(modifier = Modifier.fillMaxWidth()) {
-                Column {
+            Sheet(skin = skin) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Fact(
-                        stringResource(R.string.g_self_test),
-                        when {
+                        name = stringResource(R.string.g_self_test),
+                        value = when {
                             !checksDone -> stringResource(R.string.g_checking)
                             checksPassed -> stringResource(R.string.g_passed) +
                                 " · " + state.selfTestMs + " ms"
                             else -> stringResource(R.string.g_failed)
                         },
+                        skin = skin,
+                        valueColor = when {
+                            !checksDone -> skin.surfaceMuted
+                            checksPassed -> skin.accentOnSurface
+                            else -> skin.danger
+                        },
                     )
-                    // Only a failing line is worth the room. Four green
-                    // rows telling a person their phone works are four
-                    // rows of nothing.
                     state.selfTest.filterNot { it.passed }.forEach { step ->
-                        Rule()
+                        Rule(skin = skin)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 14.dp, vertical = 7.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
-                            Label(step.name, color = Flow)
-                            Label(step.detail, color = Flow)
+                            Label(step.name, skin = skin, color = skin.danger)
+                            Label(step.detail, skin = skin, color = skin.danger)
                         }
                     }
-                }
-            }
+                    if (checksDone && !checksPassed) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            RuleButton(
+                                text = stringResource(R.string.g_recheck),
+                                onTap = { model.runSelfTest() },
+                                enabled = !state.busy,
+                                skin = skin,
+                            )
+                        }
+                    }
 
-            Rule()
+                    Rule(skin = skin)
 
-            Slab(modifier = Modifier.fillMaxWidth()) {
-                Column {
                     Need(
                         name = stringResource(R.string.g_notifications),
                         met = ready.notifications,
                         why = stringResource(R.string.g_why_notifications),
+                        skin = skin,
                         onFix = { model.askForNotifications() },
                         onSettings = {
                             context.startActivity(GardenReadiness.notificationSettings(context))
                         },
                     )
-                    Rule()
+
+                    Rule(skin = skin)
+
                     Need(
                         name = stringResource(R.string.g_battery),
                         met = ready.batteryUnrestricted,
                         why = stringResource(R.string.g_why_battery) +
-                            " · " + ready.batteryPath,
+                            if (ready.batteryPath.isNotEmpty()) " · " + ready.batteryPath else "",
+                        skin = skin,
                         onFix = null,
                         onSettings = {
                             context.startActivity(GardenReadiness.batterySettings(context))
                         },
                     )
+
+                    Rule(skin = skin)
+
+                    Fact(
+                        name = stringResource(R.string.g_camera),
+                        value = stringResource(R.string.g_only_for_qr),
+                        skin = skin,
+                        valueColor = skin.surfaceMuted,
+                    )
                 }
             }
 
-            Rule()
-            Fact(stringResource(R.string.g_camera), stringResource(R.string.g_only_for_qr))
-
-            // This button used to be shut unless the self test passed
-            // and notifications were granted, which made the first
-            // screen of the app a wall: deny the Android prompt twice
-            // and it never appears again, so the only button left was
-            // dark and there was no way further in. A person in that
-            // state cannot become a validator at all, which is the one
-            // thing this app exists to ask of them.
-            //
-            // Notifications are what keeps the duty service alive in
-            // the background; without them this phone validates while
-            // the screen is on and stops when it is not. That is worse,
-            // not impossible, so it is said plainly above and the door
-            // stays open.
-            RuleButton(
+            PillButton(
                 text = when {
                     !checksDone -> stringResource(R.string.g_checking)
-                    !checksPassed -> stringResource(R.string.g_become_anyway)
-                    !ready.notifications -> stringResource(R.string.g_become_anyway)
+                    !checksPassed || !ready.notifications -> stringResource(R.string.g_become_anyway)
                     else -> stringResource(R.string.g_become_validator)
                 },
                 onTap = onReady,
                 enabled = checksDone,
-                modifier = Modifier.padding(top = 20.dp),
+                skin = skin,
+                primary = checksDone && checksPassed && ready.notifications,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp),
             )
 
-            // What taking that button means while something is still
-            // unmet, said once, under it.
             if (checksDone && (!checksPassed || !ready.notifications)) {
                 Label(
-                    if (!checksPassed) {
+                    text = if (!checksPassed) {
                         stringResource(R.string.g_self_test_failed_why)
                     } else {
                         stringResource(R.string.g_without_notifications)
                     },
-                    color = Flow,
-                    modifier = Modifier.padding(top = 8.dp),
+                    skin = skin,
+                    color = skin.danger,
                 )
             }
 
             if (state.message.isNotEmpty()) {
-                Label(state.message, color = Flow, modifier = Modifier.padding(top = 12.dp))
+                Label(state.message, skin = skin, color = skin.danger)
             }
         }
     }
 }
 
-/**
- * One thing Android has to allow: its name, whether it is allowed, and
- * the shortest way to change that. The reason shows only while the
- * answer is no, because a reason for something already done is noise.
- */
 @Composable
 private fun Need(
     name: String,
     met: Boolean,
     why: String,
+    skin: Skin,
     onFix: (() -> Unit)?,
     onSettings: () -> Unit,
 ) {
-    Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
+    Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Label(name, color = Ink)
+            Label(name, skin = skin, color = skin.surfaceInk)
             if (met) {
-                Label(stringResource(R.string.g_allowed))
+                Label(stringResource(R.string.g_allowed), skin = skin, color = skin.accentOnSurface)
             } else {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     if (onFix != null) {
-                        RuleButton(stringResource(R.string.g_allow), onTap = onFix)
+                        RuleButton(
+                            text = stringResource(R.string.g_allow),
+                            onTap = onFix,
+                            skin = skin,
+                        )
                     }
                     Label(
-                        stringResource(R.string.g_settings),
-                        color = Flow,
-                        modifier = Modifier.clickable(onClick = onSettings),
+                        text = stringResource(R.string.g_settings),
+                        skin = skin,
+                        color = skin.danger,
+                        modifier = Modifier
+                            .clickable(onClick = onSettings)
+                            .padding(vertical = 4.dp),
                     )
                 }
             }
         }
         if (!met) {
-            Label(why, modifier = Modifier.padding(top = 4.dp))
+            Label(why, skin = skin, modifier = Modifier.padding(top = 4.dp))
         }
     }
 }

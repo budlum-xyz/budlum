@@ -4,9 +4,12 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.Image
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,217 +17,437 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
+import androidx.compose.material3.TabRowDefaults
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import network.budlum.validator.R
 import org.json.JSONObject
 
 /**
- * The app, which is three places: the room, the people, and the work.
+ * Root Budlum Garden navigator.
  *
- * It used to be Room, Invite and Status, and the Invite tab opened on
- * four paragraphs explaining what a network is. The sheets do not
- * explain anything - they put a thing on screen and name it in one
- * lowercase word. Everything that was a paragraph here is now a label
- * and a value, and the invite is six digits on the people screen,
- * beside the people it is for.
+ * Routes returning validators straight to their active Garden, honours incoming
+ * deep-links, guards seed screens with FLAG_SECURE, animates transitions with
+ * Figma's 320ms cubic-bezier easing, and eliminates stacked duplicate chrome.
  */
 @Composable
-fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
+fun GardenApp(
+    model: GardenModel,
+    onSecureScreen: (Boolean) -> Unit = {},
+    onTestnet: () -> Unit,
+) {
+    val state = model.state
+    val skin = model.skin
     var step by remember { mutableStateOf(Step.Blocks) }
-    val gardenTitle = stringResource(R.string.g_default_title)
-    // Whether this phone holds a wallet, and which address it is, asked
-    // once when the app opens rather than on every draw.
-    LaunchedEffect(Unit) { model.readWallet() }
-    var tab by remember { mutableStateOf(0) }
-    // Set when a block asked for testnet on a phone with no wallet, so
-    // that making one carries on to where the tap was going instead of
-    // dropping the person somewhere else.
+    var initialRouteApplied by remember { mutableStateOf(false) }
+    var walletReturnStep by remember { mutableStateOf(Step.Blocks) }
     var wantedTestnet by remember { mutableStateOf(false) }
+    var tab by remember { mutableIntStateOf(0) }
+    val gardenTitle = stringResource(R.string.g_default_title)
+
+    // Enable FLAG_SECURE while 24-word recovery phrases are on screen.
+    val isSecretStep = step == Step.Seed || step == Step.SeedVerify
+    LaunchedEffect(isSecretStep) {
+        onSecureScreen(isSecretStep)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onSecureScreen(false) }
+    }
+
+    // Apply smart landing step once initial wallet & seat checks finish.
+    LaunchedEffect(state.walletLoaded, state.resumeChecked) {
+        if (!initialRouteApplied && state.walletLoaded && state.resumeChecked) {
+            initialRouteApplied = true
+            val next = GardenLogic.resolveInitialStep(
+                hasPendingLink = state.pendingJoinLink.isNotEmpty(),
+                seated = state.seated,
+                walletExists = state.walletExists,
+                canValidate = state.readiness.canValidate,
+            )
+            step = next
+            if (next == Step.Join) {
+                model.consumePendingJoinLink()
+            }
+        }
+    }
+
+    // Deep-link arriving while the app is already open routes directly to Join.
+    LaunchedEffect(state.pendingJoinLink) {
+        if (state.pendingJoinLink.isNotEmpty() && initialRouteApplied) {
+            step = Step.Join
+            model.consumePendingJoinLink()
+        }
+    }
+
+    // Local spotlight quick-jump destinations (zero network calls).
+    val spotlight = listOf(
+        SpotlightEntry(
+            title = stringResource(R.string.g_search_jump_room),
+            detail = stringResource(R.string.g_room),
+            keywords = "chat message room oda sohbet",
+            onSelect = {
+                if (state.seated) {
+                    tab = 0
+                    step = Step.Garden
+                } else {
+                    model.create(gardenTitle) {
+                        tab = 0
+                        step = Step.Garden
+                    }
+                }
+            },
+        ),
+        SpotlightEntry(
+            title = stringResource(R.string.g_search_jump_people),
+            detail = stringResource(R.string.g_people),
+            keywords = "people invite code qr kisiler davet",
+            onSelect = {
+                if (state.seated) {
+                    tab = 1
+                    step = Step.Garden
+                } else {
+                    step = Step.Join
+                }
+            },
+        ),
+        SpotlightEntry(
+            title = stringResource(R.string.g_search_jump_status),
+            detail = stringResource(R.string.g_status),
+            keywords = "status validator bud3 parts durum",
+            onSelect = {
+                if (state.seated) {
+                    tab = 2
+                    step = Step.Garden
+                } else {
+                    step = Step.Setup
+                }
+            },
+        ),
+        SpotlightEntry(
+            title = stringResource(R.string.g_search_jump_wallet),
+            detail = stringResource(R.string.w_wallet),
+            keywords = "wallet address seed key cuzdan",
+            onSelect = {
+                walletReturnStep = if (step == Step.Setup) Step.Setup else Step.Choose
+                step = Step.Wallet
+            },
+        ),
+        SpotlightEntry(
+            title = stringResource(R.string.g_search_jump_join),
+            detail = stringResource(R.string.g_code_label),
+            keywords = "join code link katil kod",
+            onSelect = { step = Step.Join },
+        ),
+        SpotlightEntry(
+            title = stringResource(R.string.g_search_jump_scan),
+            detail = "QR",
+            keywords = "qr camera scan okut",
+            onSelect = {
+                step = Step.Join
+                model.scan()
+            },
+        ),
+        SpotlightEntry(
+            title = stringResource(R.string.g_search_jump_setup),
+            detail = stringResource(R.string.g_self_test),
+            keywords = "setup permissions battery notifications hazirlik",
+            onSelect = { step = Step.Setup },
+        ),
+        SpotlightEntry(
+            title = stringResource(R.string.g_search_jump_testnet),
+            detail = stringResource(R.string.g_testnet),
+            keywords = "testnet faucet rpc balance musluk",
+            onSelect = onTestnet,
+        ),
+    )
 
     BackHandler(enabled = step != Step.Blocks) {
         step = when (step) {
-            Step.Setup -> Step.Blocks
-            Step.Choose, Step.Wallet -> Step.Blocks
-            // The words are shown once. Going back out of them without
-            // saying they are written down would be a way to lose a
-            // wallet by pressing a system button, so that door stays
-            // shut and the screen's own button is the only way on.
+            // The words are shown once; block system back so the user never loses
+            // their recovery phrase by accident before confirming they noted it.
             Step.Seed -> Step.Seed
-            // Same reason: backing out of the check would leave a
-            // wallet whose words were never confirmed, and the words
-            // are gone from this screen onward.
-            Step.SeedVerify -> Step.SeedVerify
-            else -> Step.Choose
+            Step.SeedVerify -> Step.Seed
+            Step.Wallet -> {
+                wantedTestnet = false
+                walletReturnStep
+            }
+            Step.Setup, Step.Choose, Step.Garden, Step.Join -> Step.Blocks
+            Step.Blocks -> Step.Blocks
         }
     }
 
-    when (step) {
-        // The field the design opens on. A block is not a menu row: it
-        // can be picked up and put somewhere else, and tapping it goes
-        // where it leads. Testnet is the one the file puts a lit block
-        // on, and it needs a wallet to pay into, so a phone without one
-        // is sent to make it first and lands on testnet after.
-        Step.Blocks -> BlockFieldScreen(model.skin) { goes ->
-            when (goes) {
-                BlockGoes.Testnet ->
+    AnimatedContent(
+        targetState = step,
+        transitionSpec = {
+            fadeIn(tween(GardenMotion.BASE_MS, easing = GardenMotion.Ease)) togetherWith
+                fadeOut(tween(GardenMotion.FAST_MS, easing = GardenMotion.Ease))
+        },
+        label = "gardenStep",
+    ) { current ->
+        when (current) {
+            Step.Blocks -> BlockFieldScreen(
+                model = model,
+                onGo = { goes ->
+                    when (goes) {
+                        BlockGoes.Testnet -> {
+                            if (model.state.walletExists) {
+                                onTestnet()
+                            } else {
+                                wantedTestnet = true
+                                walletReturnStep = Step.Blocks
+                                step = Step.Wallet
+                            }
+                        }
+                        BlockGoes.Validator -> step = Step.Setup
+                        BlockGoes.Wallet -> {
+                            wantedTestnet = false
+                            walletReturnStep = Step.Blocks
+                            step = Step.Wallet
+                        }
+                        BlockGoes.Garden -> {
+                            if (model.state.seated) {
+                                tab = 0
+                                step = Step.Garden
+                            } else {
+                                model.create(gardenTitle) {
+                                    tab = 0
+                                    step = Step.Garden
+                                }
+                            }
+                        }
+                        BlockGoes.Nowhere -> Unit
+                    }
+                },
+                onJoin = { step = Step.Join },
+                onChoose = { step = Step.Choose },
+                onReviewClipboardInvite = { link ->
+                    model.preview(link)
+                    model.dismissClipboardInvite()
+                    step = Step.Join
+                },
+                spotlight = spotlight,
+            )
+
+            Step.Setup -> SetupScreen(
+                model = model,
+                onBack = { step = Step.Blocks },
+                onReady = {
                     if (model.state.walletExists) {
-                        onTestnet()
+                        step = Step.Choose
                     } else {
-                        wantedTestnet = true
+                        wantedTestnet = false
+                        walletReturnStep = Step.Setup
                         step = Step.Wallet
                     }
-                BlockGoes.Validator -> step = Step.Setup
-                BlockGoes.Wallet -> step = Step.Wallet
-                BlockGoes.Garden -> {
-                    if (!model.state.status.contains("\"chain_id\"")) {
-                        model.create(gardenTitle)
+                },
+                spotlight = spotlight,
+            )
+
+            Step.Wallet -> {
+                val hadOneAlready = remember { model.state.walletExists }
+                if (hadOneAlready) {
+                    WalletScreen(
+                        model = model,
+                        onBack = { step = walletReturnStep },
+                        onTestnet = onTestnet,
+                        spotlight = spotlight,
+                    )
+                } else {
+                    WalletStartScreen(
+                        model = model,
+                        onBack = {
+                            wantedTestnet = false
+                            step = walletReturnStep
+                        },
+                        spotlight = spotlight,
+                    )
+                    val madeNow = model.state.mnemonic.isNotEmpty()
+                    val restoredNow = model.state.walletExists && !madeNow
+                    LaunchedEffect(madeNow, restoredNow) {
+                        if (madeNow) {
+                            step = Step.Seed
+                        } else if (restoredNow) {
+                            if (wantedTestnet) {
+                                wantedTestnet = false
+                                onTestnet()
+                                step = Step.Blocks
+                            } else {
+                                step = Step.Choose
+                            }
+                        }
                     }
-                    step = Step.Garden
-                    tab = 0
                 }
-                BlockGoes.Nowhere -> Unit
             }
-        }
-        // The validator checks pass first, then the key. A phone that
-        // cannot do the duties has no use for a wallet, and a phone that
-        // already holds one is not asked twice.
-        Step.Setup -> SetupScreen(model) {
-            step = if (model.state.walletExists) Step.Choose else Step.Wallet
-        }
-        Step.Wallet -> {
-            // The same door serves both states, told apart by what was
-            // true when it opened rather than by what is true now: a
-            // phone that already had a wallet is shown it, and a phone
-            // that did not is asked to make one and then moved on. If
-            // the two were told apart by the live value instead, making
-            // a wallet would turn this into the other screen mid-visit.
-            // There is no list in either case, because there is never
-            // more than one wallet.
-            val hadOneAlready = remember { model.state.walletExists }
-            if (hadOneAlready) {
-                WalletScreen(model)
-            } else {
-                WalletStartScreen(model)
-                // Words arriving is what means a wallet was just made,
-                // so moving to the screen that shows them is an effect
-                // of that rather than a decision taken while drawing.
-                val madeNow = model.state.mnemonic.isNotEmpty()
-                val restoredNow = model.state.walletExists && !madeNow
-                LaunchedEffect(madeNow, restoredNow) {
-                    if (madeNow) {
-                        step = Step.Seed
-                    } else if (restoredNow) {
+
+            Step.Seed -> SeedPhraseScreen(model) {
+                step = Step.SeedVerify
+            }
+
+            Step.SeedVerify -> SeedVerifyScreen(
+                model = model,
+                onBackToWords = { step = Step.Seed },
+                onVerified = {
+                    if (wantedTestnet) {
+                        wantedTestnet = false
+                        onTestnet()
+                        step = Step.Blocks
+                    } else {
                         step = Step.Choose
                     }
-                }
-            }
-        }
-        Step.Seed -> SeedPhraseScreen(model) { step = Step.SeedVerify }
-        Step.SeedVerify -> SeedVerifyScreen(model) {
-            // The words are confirmed, so the wallet is real. If a
-            // block asked for testnet to get here, that is where the
-            // tap was going.
-            if (wantedTestnet) {
-                wantedTestnet = false
-                onTestnet()
-                step = Step.Blocks
-            } else {
-                step = Step.Choose
-            }
-        }
-        Step.Choose -> ChooseScreen(
-            model = model,
-            // This used to only change the tab. `create` existed on
-            // the model and nothing anywhere called it, so tapping the
-            // line that is supposed to make this phone a validator
-            // moved to an empty screen and left the person reading
-            // that they were in no Garden. It now starts one.
-            onStartOwn = {
-                if (!model.state.status.contains("\"chain_id\"")) {
-                    model.create(gardenTitle)
-                }
-                step = Step.Garden
-                tab = 0
-            },
-            onHaveInvite = { step = Step.Join },
-            onTestnet = onTestnet,
-            onWallet = { step = Step.Wallet },
-            onBack = { step = Step.Setup },
-        )
-        Step.Join -> CubeFloor(model.skin) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                TopBar(stringResource(R.string.g_join_network)) { step = Step.Choose }
-                Wordmark(modifier = Modifier.align(Alignment.CenterHorizontally))
-                CodeJoinScreen(model)
-                // Asking got this phone into the waiting row, so the
-                // join screen has done its job and the people screen
-                // is where the host's answer will show up. Moving on
-                // is an effect of the key arriving, not something
-                // decided while drawing - a screen that reassigns its
-                // own state mid-draw redraws forever.
-                val seated = model.state.myKey.isNotEmpty()
-                LaunchedEffect(seated) {
-                    if (seated) {
+                },
+            )
+
+            Step.Choose -> ChooseScreen(
+                model = model,
+                onBack = { step = Step.Blocks },
+                onStartOwn = {
+                    if (model.state.seated) {
                         step = Step.Garden
-                        tab = 1
+                        tab = 0
+                    } else {
+                        model.create(gardenTitle) {
+                            step = Step.Garden
+                            tab = 0
+                        }
+                    }
+                },
+                onHaveInvite = { step = Step.Join },
+                onReviewClipboardInvite = { link ->
+                    model.preview(link)
+                    model.dismissClipboardInvite()
+                    step = Step.Join
+                },
+                onTestnet = onTestnet,
+                onWallet = {
+                    wantedTestnet = false
+                    walletReturnStep = Step.Choose
+                    step = Step.Wallet
+                },
+                onSetup = { step = Step.Setup },
+                spotlight = spotlight,
+            )
+
+            Step.Join -> CubeFloor(skin) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .statusBarsPadding(),
+                ) {
+                    TopBar(
+                        title = stringResource(R.string.g_join_network),
+                        skin = skin,
+                        onSkinChange = { model.selectSkin(it) },
+                        onBack = { step = Step.Choose },
+                    )
+                    CodeJoinScreen(
+                        model = model,
+                        onJoined = {
+                            tab = 1
+                            step = Step.Garden
+                        },
+                    )
+                    val seated = model.state.myKey.isNotEmpty() && model.state.seated
+                    LaunchedEffect(seated) {
+                        if (seated) {
+                            tab = 1
+                            step = Step.Garden
+                        }
                     }
                 }
             }
-        }
-        Step.Garden -> CubeFloor(model.skin) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                TopBar(stringResource(R.string.g_my_network), model) { step = Step.Choose }
-                // The wordmark heads every sheet in the design file.
-                // It was on none of them here, which is the first
-                // thing anyone opening the app would notice missing.
-                Wordmark(modifier = Modifier.align(Alignment.CenterHorizontally))
-                val titles = listOf(
-                    stringResource(R.string.g_room),
-                    stringResource(R.string.g_people),
-                    stringResource(R.string.g_status),
-                )
-                TabRow(
-                    selectedTabIndex = tab,
-                    containerColor = Color.Transparent,
-                    contentColor = model.skin.ink,
+
+            Step.Garden -> CubeFloor(skin) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .statusBarsPadding(),
                 ) {
-                    titles.forEachIndexed { index, title ->
-                        Tab(
-                            selected = tab == index,
-                            onClick = { tab = index },
-                            text = {
-                                Label(
-                                    title,
-                                    color = if (tab == index) model.skin.ink else Mute,
-                                )
-                            },
-                        )
+                    val activeTitle = remember(state.status) {
+                        runCatching {
+                            JSONObject(state.status)
+                                .optJSONObject("garden")
+                                ?.optString("title")
+                                .orEmpty()
+                        }.getOrDefault("")
+                    }.ifBlank { stringResource(R.string.g_my_network) }
+
+                    TopBar(
+                        title = activeTitle,
+                        skin = skin,
+                        onSkinChange = { model.selectSkin(it) },
+                        onBack = { step = Step.Choose },
+                    )
+                    val peopleLabel = if (state.waitingCount > 0) {
+                        stringResource(R.string.g_people) + " · " + state.waitingCount
+                    } else {
+                        stringResource(R.string.g_people)
                     }
-                }
-                when (tab) {
-                    0 -> ChatScreen(model)
-                    1 -> PeopleScreen(model)
-                    else -> WorkScreen(model)
+                    val titles = listOf(
+                        stringResource(R.string.g_room),
+                        peopleLabel,
+                        stringResource(R.string.g_status),
+                    )
+                    TabRow(
+                        selectedTabIndex = tab,
+                        containerColor = skin.surface.copy(alpha = 0.88f),
+                        contentColor = skin.surfaceInk,
+                        indicator = { positions ->
+                            if (tab < positions.size) {
+                                TabRowDefaults.SecondaryIndicator(
+                                    modifier = Modifier.tabIndicatorOffset(positions[tab]),
+                                    color = skin.accentOnSurface,
+                                )
+                            }
+                        },
+                        divider = { Rule(skin = skin, color = skin.rule) },
+                    ) {
+                        titles.forEachIndexed { index, title ->
+                            Tab(
+                                selected = tab == index,
+                                onClick = { tab = index },
+                                text = {
+                                    Label(
+                                        text = title,
+                                        skin = skin,
+                                        color = if (tab == index) {
+                                            skin.surfaceInk
+                                        } else {
+                                            skin.surfaceMuted
+                                        },
+                                    )
+                                },
+                            )
+                        }
+                    }
+                    when (tab) {
+                        0 -> ChatScreen(model)
+                        1 -> PeopleScreen(model)
+                        else -> WorkScreen(model) {
+                            tab = 0
+                        }
+                    }
                 }
             }
         }
@@ -232,195 +455,258 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
 }
 
 /**
- * The wordmark, the way back, and the three skins.
- *
- * The switch is the one in the sheets at 186:44: three squares, white,
- * black and sage, and the floor changes under everything. It is the one
- * ornament the design actually asks for.
+ * Unified top bar for Join and Garden workspaces: single centered Budlum
+ * wordmark, back chevron, subtitle and top-right 3-square skin switch.
  */
 @Composable
-private fun TopBar(title: String, model: GardenModel? = null, onBack: () -> Unit) {
-    Column(modifier = Modifier.fillMaxWidth()) {
+private fun TopBar(
+    title: String,
+    skin: Skin,
+    onSkinChange: (Skin) -> Unit,
+    onBack: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(skin.behind.copy(alpha = 0.90f)),
+    ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 8.dp, bottom = 4.dp),
-            contentAlignment = Alignment.Center,
+                .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
-            Image(
-                painter = painterResource(R.drawable.budlum_wordmark),
-                contentDescription = "Budlum",
-                modifier = Modifier.height(20.dp),
-            )
             Row(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                    .align(Alignment.CenterStart)
+                    .clickable(role = Role.Button, onClick = onBack)
+                    .padding(vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Label(stringResource(R.string.g_back), modifier = Modifier.clickable(onClick = onBack))
-                if (model != null) SkinSwitch(model)
+                BackChevronIcon(tint = skin.ink)
+                Label(stringResource(R.string.g_back), skin = skin, color = skin.ink)
             }
-        }
-        Label(title, modifier = Modifier.padding(start = 14.dp, bottom = 6.dp))
-        Rule()
-    }
-}
-
-/** Three squares. Tapping one changes the floor. */
-@Composable
-private fun SkinSwitch(model: GardenModel) {
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        Skin.entries.forEach { skin ->
-            Box(
-                modifier = Modifier
-                    .size(16.dp)
-                    .background(skin.behind, RectangleShape)
-                    .border(
-                        1.dp,
-                        if (model.skin == skin) Ink else Faint,
-                        RectangleShape,
-                    )
-                    .clickable { model.skin = skin },
+            Wordmark(
+                skin = skin,
+                modifier = Modifier.align(Alignment.Center),
+            )
+            SkinSwitch(
+                current = skin,
+                onSelect = onSkinChange,
+                modifier = Modifier.align(Alignment.CenterEnd),
             )
         }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Label(title, skin = skin, color = skin.ink)
+            GardenBrandMark(skin = skin, height = 11.dp, onSurface = false)
+        }
+        Rule(skin = skin, color = skin.rule)
     }
 }
 
 /**
- * What this phone is doing for the group.
- *
- * Four numbers, because four are the ones that answer the question
- * people actually ask - how can a phone hold what the network sends?
- * It does not hold all of it. An object is coded into segments, each
- * segment into repair symbols, and the placement table puts each
- * segment on three validators out of however many there are. This
- * phone holds its share, serves it when asked, and the counters say
- * how much.
+ * Validator status and B.U.D. 3.0 storage counters, with Return-to-Garden
+ * recovery when stepped out and two-step confirmation before leaving.
  */
 @Composable
-private fun WorkScreen(model: GardenModel) {
+private fun WorkScreen(
+    model: GardenModel,
+    onReturned: () -> Unit,
+) {
     val state = model.state
-    // stored_object_bytes sits beside work, not inside it - the disk is
-    // the node's, the counters are the work's.
-    val garden = runCatching {
-        JSONObject(state.status).optJSONObject("garden")
-    }.getOrNull()
+    val skin = model.skin
+    var confirmingLeave by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        model.refreshStatus()
+    }
+
+    val garden = remember(state.status) {
+        runCatching { JSONObject(state.status).optJSONObject("garden") }.getOrNull()
+    }
     val work = garden?.optJSONObject("work")
     val bud3 = work?.optJSONObject("bud3")
+    val chainId = garden?.optString("chain_id").orEmpty()
+    val hasSeat = GardenLogic.hasGardenSeat(state.status)
+    val canReturn = state.canReturn || GardenLogic.canReturnToGarden(state.status)
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
+            .navigationBarsPadding()
+            .verticalScroll(rememberScrollState())
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Sheet(model.skin, modifier = Modifier.padding(14.dp)) {
+        if (canReturn) {
+            Sheet(skin = skin) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = stringResource(R.string.g_away_notice),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = skin.surfaceInk,
+                    )
+                    PillButton(
+                        text = stringResource(R.string.g_return_to_garden),
+                        onTap = { model.returnToGarden(onSuccess = onReturned) },
+                        enabled = !state.busy,
+                        skin = skin,
+                        primary = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        }
+
+        Sheet(skin = skin) {
             Column {
+                if (chainId.isNotEmpty()) {
+                    Fact(
+                        name = stringResource(R.string.g_chain_id_label),
+                        value = GardenLogic.shortAddress(chainId),
+                        skin = skin,
+                    )
+                    Rule(skin = skin)
+                }
                 Fact(
-                    stringResource(R.string.g_parts_held),
-                    (work?.optLong("parts_held") ?: 0L).toString(),
+                    name = stringResource(R.string.g_parts_held),
+                    value = (work?.optLong("parts_held") ?: 0L).toString(),
+                    skin = skin,
                 )
-                Rule()
+                Rule(skin = skin)
                 Fact(
-                    stringResource(R.string.g_stored),
-                    megabytes(garden?.optLong("stored_object_bytes") ?: 0L),
+                    name = stringResource(R.string.g_stored),
+                    value = GardenLogic.formatBytes(garden?.optLong("stored_object_bytes") ?: 0L),
+                    skin = skin,
                 )
-                Rule()
+                Rule(skin = skin)
                 Fact(
-                    stringResource(R.string.g_coded),
-                    (bud3?.optLong("objects_coded") ?: 0L).toString(),
+                    name = stringResource(R.string.g_coded),
+                    value = (bud3?.optLong("objects_coded") ?: 0L).toString(),
+                    skin = skin,
                 )
-                Rule()
+                Rule(skin = skin)
                 Fact(
-                    stringResource(R.string.g_symbols),
-                    (bud3?.optLong("symbols_made") ?: 0L).toString(),
+                    name = stringResource(R.string.g_symbols),
+                    value = (bud3?.optLong("symbols_made") ?: 0L).toString(),
+                    skin = skin,
                 )
-                Rule()
+                Rule(skin = skin)
                 Fact(
-                    stringResource(R.string.g_validators),
-                    (garden?.optInt("active_validators") ?: 0).toString(),
+                    name = stringResource(R.string.g_validators),
+                    value = (garden?.optInt("active_validators") ?: 0).toString(),
+                    skin = skin,
                 )
             }
         }
-        Rule()
+
         PermissionRows(model)
-        Rule()
-        Row(
-            modifier = Modifier.padding(14.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            RuleButton(
-                text = stringResource(R.string.g_leave),
-                onTap = { model.leave() },
-                enabled = !state.busy && state.record.isNotEmpty(),
-                rule = Flow,
-                ink = Flow,
-            )
+
+        if (hasSeat) {
+            Sheet(skin = skin) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (confirmingLeave) {
+                        Text(
+                            text = stringResource(R.string.g_leave_confirm_body),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = skin.surfaceInk,
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            RuleButton(
+                                text = stringResource(R.string.g_leave_confirm),
+                                onTap = {
+                                    confirmingLeave = false
+                                    model.leave()
+                                },
+                                enabled = !state.busy,
+                                skin = skin,
+                                rule = skin.danger,
+                                ink = skin.danger,
+                                modifier = Modifier.weight(1f),
+                            )
+                            RuleButton(
+                                text = stringResource(R.string.g_stay),
+                                onTap = { confirmingLeave = false },
+                                skin = skin,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    } else {
+                        RuleButton(
+                            text = stringResource(R.string.g_leave),
+                            onTap = { confirmingLeave = true },
+                            enabled = !state.busy,
+                            skin = skin,
+                            rule = skin.danger,
+                            ink = skin.danger,
+                        )
+                    }
+                }
+            }
         }
+
         if (state.message.isNotEmpty()) {
-            Label(state.message, color = Flow, modifier = Modifier.padding(14.dp))
+            Label(state.message, skin = skin, color = skin.danger)
         }
     }
 }
 
-/** Bytes as a person reads them. */
-private fun megabytes(bytes: Long): String = when {
-    bytes <= 0 -> "0"
-    bytes < 1024 -> "$bytes B"
-    bytes < 1024 * 1024 -> "${bytes / 1024} KB"
-    else -> "${bytes / 1024 / 1024} MB"
-}
-
-/**
- * What Android is allowing, as rows rather than a card of prose.
- *
- * A person revokes notifications a week later, or a cleaner app
- * restricts the battery on its own, and the validator goes quiet with
- * nothing on screen to say why. Two rows, each with a way to fix it.
- */
 @Composable
 private fun PermissionRows(model: GardenModel) {
     val context = LocalContext.current
     val ready = model.state.readiness
+    val skin = model.skin
     if (ready.notifications && ready.batteryUnrestricted) return
-    Column {
-        if (!ready.notifications) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Label(stringResource(R.string.g_notifications_off), color = Flow)
-                RuleButton(stringResource(R.string.g_fix), onTap = { model.askForNotifications() })
+
+    Sheet(skin = skin) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (!ready.notifications) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Label(stringResource(R.string.g_notifications_off), skin = skin, color = skin.danger)
+                    RuleButton(
+                        text = stringResource(R.string.g_fix),
+                        onTap = { model.askForNotifications() },
+                        skin = skin,
+                    )
+                }
             }
-        }
-        if (!ready.batteryUnrestricted) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Label(stringResource(R.string.g_battery_limited), color = Flow)
-                RuleButton(
-                    stringResource(R.string.g_fix),
-                    onTap = {
-                        context.startActivity(
-                            Intent(
-                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                Uri.fromParts("package", context.packageName, null),
-                            ),
-                        )
-                    },
-                )
+            if (!ready.notifications && !ready.batteryUnrestricted) {
+                Rule(skin = skin)
+            }
+            if (!ready.batteryUnrestricted) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Label(stringResource(R.string.g_battery_limited), skin = skin, color = skin.danger)
+                    RuleButton(
+                        text = stringResource(R.string.g_fix),
+                        onTap = {
+                            context.startActivity(
+                                Intent(
+                                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    Uri.fromParts("package", context.packageName, null),
+                                ),
+                            )
+                        },
+                        skin = skin,
+                    )
+                }
             }
         }
     }
 }
-
-// The palette lives in GardenTheme, which already measured it from the
-// design file. Naming it twice is how two screens drift apart.

@@ -1,14 +1,19 @@
 package network.budlum.validator.ui
 
+import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -30,10 +35,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.LaunchedEffect
+import androidx.core.view.WindowCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import network.budlum.validator.garden.GardenHolder
+import network.budlum.validator.garden.Skin
 import network.budlum.validator.R
 import network.budlum.validator.core.AccountBalanceResult
 import network.budlum.validator.core.FaucetResult
@@ -42,13 +49,32 @@ import network.budlum.validator.core.TestnetFaucetClient
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        val savedSkin = Skin.fromName(
+            getSharedPreferences("budlum_garden_ui", Context.MODE_PRIVATE)
+                .getString("skin", null),
+        )
         setContent {
-            // The same surface as the Garden, so one app does not look
+            LaunchedEffect(savedSkin) {
+                val controller = WindowCompat.getInsetsController(window, window.decorView)
+                controller.isAppearanceLightStatusBars = !savedSkin.isDark
+                controller.isAppearanceLightNavigationBars = !savedSkin.isDark
+            }
+            // The same surface and skin as the Garden, so one app does not look
             // like two, and a plain way back to the choice that led here.
-            network.budlum.validator.garden.GardenTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    Column(modifier = Modifier.fillMaxSize()) {
+            network.budlum.validator.garden.GardenTheme(skin = savedSkin) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = savedSkin.behind,
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .statusBarsPadding()
+                            .navigationBarsPadding()
+                            .imePadding(),
+                    ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -61,9 +87,10 @@ class MainActivity : ComponentActivity() {
                             Text(
                                 stringResource(R.string.g_testnet),
                                 style = MaterialTheme.typography.labelSmall,
+                                color = savedSkin.ink,
                             )
                         }
-                        ValidatorDashboardScreen()
+                        ValidatorDashboardScreen(skin = savedSkin)
                     }
                 }
             }
@@ -75,6 +102,7 @@ class MainActivity : ComponentActivity() {
 fun ValidatorDashboardScreen(
     client: TestnetFaucetClient = remember { TestnetFaucetClient() },
     accountReader: TestnetAccountReader = remember { TestnetAccountReader() },
+    skin: Skin = Skin.Page,
 ) {
     val scope = rememberCoroutineScope()
     var endpoint by rememberSaveable { mutableStateOf("") }
@@ -116,6 +144,7 @@ fun ValidatorDashboardScreen(
     ) {
         // The same wordmark that heads every sheet in the design file.
         network.budlum.validator.garden.Wordmark(
+            skin = skin,
             modifier = Modifier.align(Alignment.CenterHorizontally),
         )
         Text(text = stringResource(R.string.onboarding_disclosure))

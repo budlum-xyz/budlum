@@ -1,20 +1,25 @@
 package network.budlum.validator.garden
 
+import android.content.ClipboardManager
 import android.content.Intent
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.LaunchedEffect
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 
 /**
- * The Garden app: three screens and nothing else (section 2.4).
+ * The Budlum Garden host activity.
  *
- * It also answers the invite link itself. Section 5.12 says an invite that
- * arrives by a deliberate act, which tapping a link is, joins directly, so
- * a `budlum://garden/join#...` link and the `http://<address>/g#...` a QR
- * carries both land here.
+ * Enables API 36 edge-to-edge layout with live light/dark system bar polarity,
+ * protects recovery-word screens with FLAG_SECURE, routes `budlum://garden/...`
+ * and `/g#...` deep links directly into Join, and inspects the clipboard
+ * strictly for Garden invite prefixes on resume (section 5.9).
  */
 class GardenActivity : ComponentActivity() {
 
@@ -27,37 +32,39 @@ class GardenActivity : ComponentActivity() {
         }
     }
 
-    // Android shows a permission prompt for an activity, never for a
-    // model, so the activity owns the asking and the model owns the why.
     private val ask = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         model.readPermissions()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         model = GardenModel(this, lifecycleScope)
         model.scanner = { scan.launch(Intent(this, QrScanActivity::class.java)) }
         model.permissionAsker = { permission -> ask.launch(permission) }
         model.readPermissions()
-        // Section 4: the self test runs at first open, before the person is
-        // offered anything to join.
+        model.readWallet()
         model.runSelfTest()
-        // A seat survives the process. If this phone is already in a
-        // Garden, the validator goes back on the network as the app opens
-        // rather than waiting to be asked.
         model.resumeIfSeated()
         handle(intent)
         setContent {
-            GardenTheme {
-                Surface {
-                    GardenApp(model) {
-                        // The testnet is the other duty a validator can
-                        // take on, reached by choosing it rather than by
-                        // being dropped into it.
-                        startActivity(
-                            Intent(this, network.budlum.validator.ui.MainActivity::class.java),
-                        )
-                    }
+            val skin = model.skin
+            LaunchedEffect(skin) {
+                val controller = WindowCompat.getInsetsController(window, window.decorView)
+                controller.isAppearanceLightStatusBars = !skin.isDark
+                controller.isAppearanceLightNavigationBars = !skin.isDark
+            }
+            GardenTheme(skin = skin) {
+                Surface(color = skin.behind) {
+                    GardenApp(
+                        model = model,
+                        onSecureScreen = { secure -> setSecureWindow(secure) },
+                        onTestnet = {
+                            startActivity(
+                                Intent(this, network.budlum.validator.ui.MainActivity::class.java),
+                            )
+                        },
+                    )
                 }
             }
         }
@@ -65,10 +72,8 @@ class GardenActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // The person may have changed any of this in settings and walked
-        // back, so what Android allows is read again rather than
-        // remembered from the last time the app looked.
         model.readPermissions()
+        inspectClipboardForInvite()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -79,7 +84,27 @@ class GardenActivity : ComponentActivity() {
     private fun handle(intent: Intent?) {
         val link = intent?.data?.toString() ?: return
         if (link.isNotBlank()) {
-            model.preview(link)
+            model.receiveInviteLink(link)
+        }
+    }
+
+    /**
+     * Section 5.9: inspect clipboard only for a Budlum Garden invite prefix.
+     * Ordinary clipboard content is ignored immediately and never stored.
+     */
+    private fun inspectClipboardForInvite() {
+        val manager = getSystemService(ClipboardManager::class.java) ?: return
+        val clip = runCatching { manager.primaryClip }.getOrNull() ?: return
+        if (clip.itemCount <= 0) return
+        val text = runCatching { clip.getItemAt(0)?.coerceToText(this)?.toString() }.getOrNull()
+        model.checkClipboardInvite(text)
+    }
+
+    private fun setSecureWindow(secure: Boolean) {
+        if (secure) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
     }
 }

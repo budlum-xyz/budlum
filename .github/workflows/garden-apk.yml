@@ -121,6 +121,10 @@ jobs:
             fi
           done
 
+      - name: Run Android JVM unit tests
+        working-directory: mobile/android
+        run: gradle testDebugUnitTest --no-daemon
+
       # Section 3.1 asks for one file. A split build would hand a person two.
       - name: Check that it is one file carrying both ABIs
         run: |

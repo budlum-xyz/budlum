@@ -3,128 +3,230 @@ package network.budlum.validator.garden
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import network.budlum.validator.R
 
-/** Where in the app the person is. Nothing is a dead end. */
+/** Where in Budlum Garden the person is. Nothing is a dead end. */
 enum class Step {
-    /**
-     * The field of blocks the design opens on, and the first thing the
-     * app shows. A block is picked up with a long press and tapped to
-     * go where it leads.
-     */
+    /** The interactive field of blocks the Figma home sheet opens on. */
     Blocks,
 
-    /** What this phone must be allowed to do before it validates anything. */
+    /** Validator permissions and local self-test. */
     Setup,
 
-    /** Which network this validator serves. */
+    /** Choosing between hosting a Garden, joining one, Wallet or Testnet. */
     Choose,
 
-    /** Starting a network, or taking an invite to one. */
+    /** Active Garden workspace: Room, People and Status tabs. */
     Garden,
 
-    /** Taking an invite, reached straight from the choice. */
+    /** Joining via six-digit code, QR scan or pasted invite record. */
     Join,
 
-    /**
-     * Making this phone's wallet, or putting back one it already had.
-     *
-     * It sits after the validator checks because that is the order the
-     * app asks for things: be a validator first, then hold a key. A
-     * phone that cannot do the duties has no use for the key.
-     */
+    /** Making, restoring or unlocking this phone's wallet. */
     Wallet,
 
-    /** The twenty-four words, shown once, before anything else happens. */
+    /** Twenty-four recovery words, shown once under FLAG_SECURE. */
     Seed,
 
-    /**
-     * Three of those words, asked back.
-     *
-     * Without it the previous screen is a button that says a thing was
-     * done rather than a check that it was.
-     */
+    /** Confirming three words before releasing them from memory. */
     SeedVerify,
 }
 
 /**
- * The choice, as the sheets would put it: a few lowercase lines.
- *
- * This screen used to carry five paragraphs explaining what a network
- * is, what a token is not, and what the testnet is for. The design
- * file has a menu in its bottom left corner reading "a.o / market /
- * ecosystem / participation" - four words, no sentences - and that is
- * the voice this app is supposed to have. Someone who needs to know
- * what the thing is reads the one line that says it; everyone else
- * taps the line they came for.
+ * The network hub screen, faithful to Figma's clean typographic hierarchy with
+ * guaranteed contrast on Page, Sage and Ground skins plus section 5.9 clipboard
+ * invite awareness.
  */
 @Composable
 fun ChooseScreen(
     model: GardenModel,
+    onBack: (() -> Unit)? = null,
     onStartOwn: () -> Unit,
     onHaveInvite: () -> Unit,
+    onReviewClipboardInvite: (String) -> Unit,
     onTestnet: () -> Unit,
     onWallet: () -> Unit,
-    onBack: () -> Unit,
+    onSetup: () -> Unit,
+    spotlight: List<SpotlightEntry> = emptyList(),
 ) {
     val state = model.state
-    val seated = state.status.contains("\"chain_id\"")
+    val skin = model.skin
+    val seated = state.seated
+
     BudlumPage(
-        skin = model.skin,
-        menu = listOf(
-            stringResource(R.string.w_menu_ao),
-            stringResource(R.string.w_menu_market),
-            stringResource(R.string.w_menu_ecosystem),
-            stringResource(R.string.w_menu_participation),
-        ),
+        skin = skin,
+        onSkinChange = { model.selectSkin(it) },
+        onBack = onBack,
         searchHint = stringResource(R.string.w_search_hint),
+        spotlight = spotlight,
     ) {
         Column(
             modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            if (state.clipboardInvite.isNotEmpty()) {
+                Sheet(skin = skin) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Label(
+                                text = stringResource(R.string.g_clipboard_invite),
+                                skin = skin,
+                                color = skin.accentOnSurface,
+                            )
+                            Text(
+                                text = GardenLogic.shortAddress(state.clipboardInvite),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = skin.surfaceInk,
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            RuleButton(
+                                text = stringResource(R.string.g_clipboard_join),
+                                onTap = { onReviewClipboardInvite(state.clipboardInvite) },
+                                skin = skin,
+                                filled = true,
+                            )
+                            RuleButton(
+                                text = stringResource(R.string.g_dismiss),
+                                onTap = { model.dismissClipboardInvite() },
+                                skin = skin,
+                            )
+                        }
+                    }
+                }
+            }
+
             Text(
-                stringResource(R.string.g_data_not_money),
+                text = stringResource(R.string.g_data_not_money),
                 style = MaterialTheme.typography.bodySmall,
-                color = model.skin.ink,
-                modifier = Modifier.padding(bottom = 22.dp),
+                color = skin.ink,
+                modifier = Modifier.padding(bottom = 4.dp),
             )
 
-            if (seated) {
-                MenuLine(stringResource(R.string.g_my_network), onStartOwn)
-            } else {
-                MenuLine(stringResource(R.string.g_start_own), onStartOwn)
-                MenuLine(stringResource(R.string.g_was_invited), onHaveInvite)
+            Sheet(skin = skin) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    if (seated) {
+                        MenuLine(
+                            text = stringResource(R.string.g_my_network),
+                            badge = if (state.waitingCount > 0) {
+                                state.waitingCount.toString() + " " +
+                                    stringResource(R.string.g_waiting)
+                            } else {
+                                stringResource(R.string.g_active_badge)
+                            },
+                            skin = skin,
+                            onTap = onStartOwn,
+                        )
+                    } else {
+                        MenuLine(
+                            text = stringResource(R.string.g_start_own),
+                            badge = "",
+                            skin = skin,
+                            onTap = onStartOwn,
+                        )
+                        Rule(skin = skin)
+                        MenuLine(
+                            text = stringResource(R.string.g_was_invited),
+                            badge = "",
+                            skin = skin,
+                            onTap = onHaveInvite,
+                        )
+                    }
+                    Rule(skin = skin)
+                    MenuLine(
+                        text = stringResource(R.string.w_wallet),
+                        badge = if (state.walletAddress.isNotEmpty()) {
+                            GardenLogic.shortAddress(state.walletAddress)
+                        } else {
+                            ""
+                        },
+                        skin = skin,
+                        onTap = onWallet,
+                    )
+                    Rule(skin = skin)
+                    MenuLine(
+                        text = stringResource(R.string.g_testnet),
+                        badge = "",
+                        skin = skin,
+                        onTap = onTestnet,
+                    )
+                    Rule(skin = skin)
+                    MenuLine(
+                        text = stringResource(R.string.g_search_jump_setup),
+                        badge = if (state.readiness.notifications) {
+                            stringResource(R.string.g_allowed)
+                        } else {
+                            stringResource(R.string.g_notifications_off)
+                        },
+                        skin = skin,
+                        onTap = onSetup,
+                    )
+                }
             }
-            MenuLine(stringResource(R.string.w_wallet), onWallet)
-            MenuLine(stringResource(R.string.g_testnet), onTestnet)
-            MenuLine(stringResource(R.string.g_back), onBack)
+
+            if (state.canReturn && !seated) {
+                Sheet(skin = skin) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            text = stringResource(R.string.g_away_notice),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = skin.surfaceInk,
+                        )
+                        PillButton(
+                            text = stringResource(R.string.g_return_to_garden),
+                            onTap = { model.returnToGarden(onSuccess = onStartOwn) },
+                            enabled = !state.busy,
+                            skin = skin,
+                            primary = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            }
 
             if (state.message.isNotEmpty()) {
-                Label(state.message, color = Flow, modifier = Modifier.padding(top = 18.dp))
+                Label(state.message, skin = skin, color = skin.danger)
             }
         }
     }
 }
 
-/** One line of the menu: lowercase, no box, no shadow, just a word. */
 @Composable
-private fun MenuLine(text: String, onTap: () -> Unit) {
-    Text(
-        text = text.lowercase(),
-        style = MaterialTheme.typography.titleMedium,
-        color = Sage,
+private fun MenuLine(
+    text: String,
+    badge: String,
+    skin: Skin,
+    onTap: () -> Unit,
+) {
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onTap)
-            .padding(vertical = 9.dp),
-    )
+            .padding(vertical = 12.dp, horizontal = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = text.lowercase(),
+            style = MaterialTheme.typography.titleMedium,
+            color = skin.accentOnSurface,
+        )
+        if (badge.isNotEmpty()) {
+            Label(badge, skin = skin, color = skin.surfaceMuted)
+        }
+    }
 }

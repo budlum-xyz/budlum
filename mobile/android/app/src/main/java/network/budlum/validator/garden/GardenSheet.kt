@@ -1,6 +1,8 @@
 package network.budlum.validator.garden
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -13,8 +15,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -24,47 +29,51 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import network.budlum.validator.R
 
 /**
- * The parts the design sheets are actually built from.
- *
- * The rest of this app is drawn with `Slab`, which is a square box with
- * one hairline, because the chat sheets are laid out on a hard grid.
- * The wallet sheets are not: they put a single soft-cornered panel over
- * the floor, fill it with a portrait and a few facts, and finish with a
- * rounded outlined button. Drawing those screens out of `Slab` produced
- * something that belonged to neither sheet.
- *
- * Measurements are the file's own, divided by three: the frames are
- * 1080 wide at three times density, so 1080 px is 360 dp.
+ * The sheet primitives measured directly from the Budlum Figma file
+ * (7tASYNmfotWyIrXpJ4ktrW): floating panels over the cube lattice, numbered
+ * phrase cells, pill buttons, local spotlight jump bar and unified header.
  */
 
-/** The panel radius, 16 px in the file. */
+/** The panel radius, 16 px in the file at 3x density. */
 internal val SHEET_RADIUS = 6.dp
 
-/** The control radius the buttons and word boxes use, 12 px in the file. */
+/** The control radius the buttons and word boxes use. */
 internal val CONTROL_RADIUS = 4.dp
 
-/** The portrait square beside a name, 100 px in the file. */
+/** The portrait square beside a name, 100 px in the wallet sheets. */
 internal val PORTRAIT = 34.dp
 
-/** The round portrait the chat sheets use, 80 px on the 1080 px sheet. */
+/** The round portrait in chat and people lists, 80 px on the 1080 px sheet. */
 internal val PORTRAIT_ROUND = 26.7.dp
 
-/**
- * The panel the wallet sheets hang everything on.
- *
- * In the file it is docked to the right edge of a wide canvas. A phone
- * has no right edge to spare, so it spans the width and keeps its own
- * fill, radius and hairline, which is what makes it read as a panel
- * floating over the floor rather than as the screen itself.
- */
+/** One jump target surfaced by the local spotlight bar (zero network traffic). */
+data class SpotlightEntry(
+    val title: String,
+    val detail: String = "",
+    val keywords: String = "",
+    val onSelect: () -> Unit,
+)
+
+/** A floating panel lifted cleanly over the cube floor in every skin. */
 @Composable
 fun Sheet(
     skin: Skin,
@@ -74,79 +83,79 @@ fun Sheet(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .background(sheetFill(skin), RoundedCornerShape(SHEET_RADIUS))
-            .border(1.dp, skin.rule, RoundedCornerShape(SHEET_RADIUS))
-            .padding(horizontal = 18.dp, vertical = 20.dp),
+            .background(skin.surface, RoundedCornerShape(SHEET_RADIUS))
+            .border(1.dp, skin.surfaceRule, RoundedCornerShape(SHEET_RADIUS))
+            .padding(horizontal = 18.dp, vertical = 18.dp),
     ) {
         content()
     }
 }
 
-/**
- * The panel sits on the floor, so it cannot be the floor's own colour.
- * On the dark skin the file lifts it a little; on the light one it is
- * the page white against a tinted floor.
- */
-private fun sheetFill(skin: Skin): Color = when (skin) {
-    Skin.Page -> Color(0xFFFBFCFA)
-    Skin.Sage -> Color(0xFFFBFCFA)
-    Skin.Ground -> Color(0xFF0E0F0C)
-}
-
-/**
- * The square portrait the file puts beside a name: flat sage, soft
- * corners, no picture in it.
- */
+/** The portrait beside a name: square on wallet sheets, 80 px circle in chat/people. */
 @Composable
-fun Portrait(modifier: Modifier = Modifier, round: Boolean = false) {
+fun Portrait(
+    modifier: Modifier = Modifier,
+    fill: Color = Sage,
+    round: Boolean = false,
+) {
+    val shape = if (round) CircleShape else RoundedCornerShape(CONTROL_RADIUS)
     Box(
         modifier = modifier
             .size(if (round) PORTRAIT_ROUND else PORTRAIT)
-            .background(
-                Sage,
-                if (round) CircleShape else RoundedCornerShape(CONTROL_RADIUS),
-            ),
+            .background(fill, shape)
+            .border(1.dp, SageRule, shape),
     )
 }
 
-/**
- * Who this is: the portrait, the name, and the address under it broken
- * the way the file breaks it.
- */
+/** Header row of a sheet: portrait, name, address/subtext and optional trailing control. */
 @Composable
-fun SheetHead(name: String, address: String, under: String, skin: Skin) {
+fun SheetHead(
+    name: String,
+    address: String,
+    under: String,
+    skin: Skin,
+    trailing: (@Composable () -> Unit)? = null,
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         Portrait()
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                name,
+                text = name,
                 style = MaterialTheme.typography.bodyLarge,
-                color = skin.ink,
+                color = skin.surfaceInk,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
-            Text(
-                address,
-                style = MaterialTheme.typography.bodyMedium,
-                color = skin.ink,
-            )
-            if (under.isNotEmpty()) {
+            if (address.isNotEmpty()) {
                 Text(
-                    under,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Sage,
+                    text = address,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = skin.surfaceInk,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
+            if (under.isNotEmpty()) {
+                Text(
+                    text = under,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = skin.accentOnSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (trailing != null) {
+            trailing()
         }
     }
 }
 
-/**
- * A line of the panel: a small square mark on the left, then one or two
- * facts stacked beside it. The file uses it for the token counts and
- * for the balance.
- */
+/** A line of a panel: square mark on the left, one or two facts stacked beside it. */
 @Composable
 fun SheetRow(
     first: String,
@@ -165,92 +174,106 @@ fun SheetRow(
                 .background(markFill, RoundedCornerShape(2.dp)),
         )
         Column(modifier = Modifier.weight(1f)) {
-            Text(first, style = MaterialTheme.typography.bodyMedium, color = skin.ink)
+            Text(first, style = MaterialTheme.typography.bodyMedium, color = skin.surfaceInk)
             if (second.isNotEmpty()) {
-                Text(second, style = MaterialTheme.typography.bodyMedium, color = skin.ink)
+                Text(second, style = MaterialTheme.typography.bodySmall, color = skin.surfaceMuted)
             }
         }
     }
 }
 
-/**
- * The button the file ends every panel with: a rounded hairline box,
- * sage on both the edge and the text, nothing filled in.
- *
- * `RuleButton` is the same idea with square corners, which is right for
- * the chat sheets and wrong for these.
- */
+/** Outlined or primary pill button matching the Figma wallet panels. */
 @Composable
 fun PillButton(
     text: String,
     onTap: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    skin: Skin = Skin.Page,
+    primary: Boolean = false,
 ) {
-    val edge = if (enabled) Sage else Mute
+    val haptic = LocalHapticFeedback.current
+    val activeEdge = skin.accentOnSurface
+    val disabledColor = if (skin.isDark) Color(0xFF4A5047) else Color(0xFFA7ACA4)
+    val edge = if (enabled) activeEdge else disabledColor
+    val fill = when {
+        !primary -> Color.Transparent
+        enabled -> activeEdge
+        else -> disabledColor.copy(alpha = 0.25f)
+    }
+    val textColor = when {
+        !enabled -> disabledColor
+        primary -> if (skin.isDark) Ink else Chalk
+        else -> activeEdge
+    }
     Box(
         modifier = modifier
+            .background(fill, RoundedCornerShape(CONTROL_RADIUS))
             .border(BorderStroke(1.dp, edge), RoundedCornerShape(CONTROL_RADIUS))
-            .clickable(enabled = enabled, onClick = onTap)
-            .padding(horizontal = 18.dp, vertical = 9.dp),
+            .clickable(enabled = enabled, role = Role.Button) {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                onTap()
+            }
+            .padding(horizontal = 16.dp, vertical = 10.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = text,
             style = MaterialTheme.typography.bodyMedium,
-            color = edge,
+            color = textColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
 
-/**
- * One cell of the phrase grid: the position in a small box on the left,
- * the word in a wider box beside it, both hairline and soft-cornered.
- *
- * The file draws twelve of these in two columns. There are twenty-four
- * here because a Budlum phrase is twenty-four words; the cell is the
- * file's, the count is the chain's.
- */
+/** One cell of the 24-word recovery grid: position index box + word box. */
 @Composable
 fun WordCell(
     number: Int,
     word: String,
     skin: Skin,
     modifier: Modifier = Modifier,
+    masked: Boolean = false,
 ) {
-    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
         Box(
             modifier = Modifier
-                .border(1.dp, skin.rule, RoundedCornerShape(CONTROL_RADIUS))
-                .padding(horizontal = 5.dp, vertical = 5.dp),
+                .width(30.dp)
+                .height(34.dp)
+                .border(1.dp, skin.surfaceRule, RoundedCornerShape(CONTROL_RADIUS)),
+            contentAlignment = Alignment.Center,
         ) {
             Text(
                 "$number.",
                 style = MaterialTheme.typography.labelSmall,
-                color = skin.ink,
+                color = skin.surfaceMuted,
             )
         }
         Box(
             modifier = Modifier
                 .weight(1f)
-                .height(30.dp)
-                .border(1.dp, skin.rule, RoundedCornerShape(CONTROL_RADIUS))
+                .height(34.dp)
+                .border(1.dp, skin.surfaceRule, RoundedCornerShape(CONTROL_RADIUS))
                 .padding(horizontal = 8.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
             Text(
-                word,
+                text = if (masked) "******" else word,
                 style = MaterialTheme.typography.bodySmall,
-                color = skin.ink,
+                color = if (masked) skin.surfaceMuted else skin.surfaceInk,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
 }
 
-/**
- * The same cell with the word box empty and typeable, which is how the
- * file asks the phrase back.
- */
+/** Typeable cell for recovery-word verification with instant match feedback. */
 @Composable
 fun WordField(
     number: Int,
@@ -258,141 +281,257 @@ fun WordField(
     onValue: (String) -> Unit,
     skin: Skin,
     modifier: Modifier = Modifier,
+    matched: Boolean = false,
 ) {
-    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
+    val border = if (matched) skin.accentOnSurface else skin.surfaceRule
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
         Box(
             modifier = Modifier
-                .border(1.dp, skin.rule, RoundedCornerShape(CONTROL_RADIUS))
-                .padding(horizontal = 5.dp, vertical = 5.dp),
+                .width(34.dp)
+                .height(38.dp)
+                .border(1.dp, border, RoundedCornerShape(CONTROL_RADIUS)),
+            contentAlignment = Alignment.Center,
         ) {
             Text(
                 "$number.",
                 style = MaterialTheme.typography.labelSmall,
-                color = skin.ink,
+                color = if (matched) skin.accentOnSurface else skin.surfaceMuted,
             )
         }
         Box(
             modifier = Modifier
                 .weight(1f)
-                .height(30.dp)
-                .border(1.dp, skin.rule, RoundedCornerShape(CONTROL_RADIUS))
-                .padding(horizontal = 8.dp),
+                .height(38.dp)
+                .border(if (matched) 1.5.dp else 1.dp, border, RoundedCornerShape(CONTROL_RADIUS))
+                .padding(horizontal = 10.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
             BasicTextField(
                 value = value,
                 onValueChange = onValue,
                 singleLine = true,
-                textStyle = MaterialTheme.typography.bodySmall.copy(color = skin.ink),
-                cursorBrush = SolidColor(Sage),
+                textStyle = MaterialTheme.typography.bodyMedium.copy(color = skin.surfaceInk),
+                cursorBrush = SolidColor(skin.accentOnSurface),
                 modifier = Modifier.fillMaxWidth(),
             )
         }
     }
 }
 
-/**
- * The faint search bar the file runs under the wordmark. It is not a
- * control yet; it is part of how the page reads, so it is drawn and
- * left alone rather than left out and missed.
- */
+/** The Budlum wordmark, tinted to stay crisp on every skin (including Sage). */
 @Composable
-fun SearchBar(hint: String, skin: Skin, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(26.dp)
-            .background(skin.rule.copy(alpha = 0.35f), RoundedCornerShape(CONTROL_RADIUS)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            hint,
-            style = MaterialTheme.typography.labelSmall,
-            color = skin.ink.copy(alpha = 0.45f),
-            textAlign = TextAlign.Center,
-        )
+fun Wordmark(
+    skin: Skin = Skin.Page,
+    modifier: Modifier = Modifier,
+) {
+    val tint = when (skin) {
+        Skin.Sage -> Ink
+        Skin.Ground -> Sage
+        Skin.Page -> null
     }
-}
-
-/**
- * The wordmark, which is the first thing the file puts on every sheet
- * and the first thing this app was missing.
- *
- * It is the house face at a size you can see, in sage, centred. The
- * face carries 79 glyphs, which is not enough for a sentence and is
- * exactly enough for this word.
- */
-@Composable
-fun Wordmark(modifier: Modifier = Modifier) {
-    Text(
-        text = "budlum",
-        style = MaterialTheme.typography.displaySmall,
-        color = Sage,
-        modifier = modifier,
+    Image(
+        painter = painterResource(R.drawable.budlum_wordmark),
+        contentDescription = stringResource(R.string.app_name),
+        colorFilter = tint?.let { ColorFilter.tint(it) },
+        modifier = modifier.height(22.dp),
     )
 }
 
 /**
- * Every sheet in the file, from the outside in: the tiled floor, the
- * wordmark, the faint search bar, whatever the screen is about, and
- * the lowercase menu down in the corner.
+ * Local spotlight bar matching the Figma top search strip.
  *
- * Screens used to each build their own column and their own padding,
- * which is how they drifted into looking like different applications.
- * The frame belongs here now and a screen only says what goes in the
- * middle of it.
+ * Strictly local: never touches the network. Typing filters local destinations
+ * so every screen and action is one tap away.
  */
 @Composable
-fun BudlumPage(
+fun SpotlightBar(
+    hint: String,
     skin: Skin,
-    menu: List<String>,
-    searchHint: String,
+    entries: List<SpotlightEntry>,
     modifier: Modifier = Modifier,
-    scroll: Boolean = true,
-    content: @Composable ColumnScope.() -> Unit,
 ) {
-    CubeFloor(skin) {
-        Column(
-            modifier = modifier
-                .fillMaxSize()
-                .then(
-                    if (scroll) {
-                        Modifier.verticalScroll(rememberScrollState())
-                    } else {
-                        Modifier
-                    },
-                )
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+    if (entries.isEmpty()) return
+    var query by remember { mutableStateOf("") }
+    val trimmed = query.trim().lowercase()
+    val matches = remember(trimmed, entries) {
+        if (trimmed.isEmpty()) {
+            emptyList()
+        } else {
+            entries.filter { item ->
+                item.title.lowercase().contains(trimmed) ||
+                    item.detail.lowercase().contains(trimmed) ||
+                    item.keywords.lowercase().contains(trimmed)
+            }
+        }
+    }
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(38.dp)
+                .background(skin.surface.copy(alpha = 0.92f), RoundedCornerShape(CONTROL_RADIUS))
+                .border(1.dp, skin.surfaceRule, RoundedCornerShape(CONTROL_RADIUS))
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Wordmark()
-            Spacer(modifier = Modifier.height(10.dp))
-            SearchBar(searchHint, skin)
-            Spacer(modifier = Modifier.height(22.dp))
+            GardenBrandMark(skin = skin, height = 11.dp, onSurface = true)
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                if (query.isEmpty()) {
+                    Text(
+                        text = hint,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = skin.surfaceMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                BasicTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodySmall.copy(color = skin.surfaceInk),
+                    cursorBrush = SolidColor(skin.accentOnSurface),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (query.isNotEmpty()) {
+                Label(
+                    text = stringResource(R.string.g_close),
+                    skin = skin,
+                    color = skin.accentOnSurface,
+                    modifier = Modifier.clickable { query = "" },
+                )
+            }
+        }
 
-            content()
-
-            Spacer(modifier = Modifier.height(28.dp))
-            Box(modifier = Modifier.fillMaxWidth()) {
-                CornerMenu(menu, skin, modifier = Modifier.align(Alignment.CenterStart))
+        AnimatedVisibility(visible = trimmed.isNotEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp)
+                    .background(skin.surface, RoundedCornerShape(CONTROL_RADIUS))
+                    .border(1.dp, skin.surfaceRule, RoundedCornerShape(CONTROL_RADIUS)),
+            ) {
+                if (matches.isEmpty()) {
+                    Label(
+                        text = stringResource(R.string.g_search_no_results),
+                        skin = skin,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    )
+                } else {
+                    matches.take(5).forEachIndexed { idx, item ->
+                        if (idx > 0) Rule(skin = skin)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    query = ""
+                                    item.onSelect()
+                                }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = item.title,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = skin.surfaceInk,
+                            )
+                            if (item.detail.isNotEmpty()) {
+                                Label(item.detail, skin = skin, color = skin.accentOnSurface)
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 }
 
 /**
- * The menu the file keeps in the bottom left corner of every sheet:
- * four lowercase words, no box, no icons.
+ * The shared Budlum page chrome with edge-to-edge system bar insets, unified
+ * header (optional back button, centered wordmark, always-reachable 3-square
+ * skin switch), optional local spotlight bar, scrollable body, and brand crest.
  */
 @Composable
-fun CornerMenu(words: List<String>, skin: Skin, modifier: Modifier = Modifier) {
-    Column(modifier = modifier.width(160.dp)) {
-        words.forEach { word ->
-            Text(
-                word.lowercase(),
-                style = MaterialTheme.typography.titleSmall,
-                color = skin.ink,
-            )
+fun BudlumPage(
+    skin: Skin,
+    onSkinChange: (Skin) -> Unit,
+    onBack: (() -> Unit)? = null,
+    searchHint: String = "",
+    spotlight: List<SpotlightEntry> = emptyList(),
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    CubeFloor(skin) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .imePadding()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 14.dp),
+            ) {
+                if (onBack != null) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .clickable(role = Role.Button, onClick = onBack)
+                            .padding(vertical = 6.dp, horizontal = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        BackChevronIcon(tint = skin.ink)
+                        Label(
+                            text = stringResource(R.string.g_back),
+                            skin = skin,
+                            color = skin.ink,
+                        )
+                    }
+                }
+                Wordmark(
+                    skin = skin,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+                SkinSwitch(
+                    current = skin,
+                    onSelect = onSkinChange,
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                )
+            }
+
+            if (spotlight.isNotEmpty() && searchHint.isNotEmpty()) {
+                SpotlightBar(
+                    hint = searchHint,
+                    skin = skin,
+                    entries = spotlight,
+                    modifier = Modifier.padding(bottom = 16.dp),
+                )
+            }
+
+            content()
+
+            Spacer(modifier = Modifier.height(24.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                GardenBrandMark(skin = skin, height = 16.dp, onSurface = false)
+            }
         }
     }
 }

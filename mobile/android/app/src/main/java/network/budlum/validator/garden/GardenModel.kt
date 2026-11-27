@@ -1,6 +1,5 @@
 package network.budlum.validator.garden
 
-import android.app.Activity
 import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -13,25 +12,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import network.budlum.validator.R
+import org.json.JSONArray
 import org.json.JSONObject
+import uniffi.budlum_garden_ffi.GardenAnswer
 import uniffi.budlum_garden_ffi.GardenPhone
 import uniffi.budlum_garden_ffi.SelfTestStep
 
-/** Everything the three screens read. */
-/**
- * One line of the conversation, as the chain holds it.
- *
- * `height` is the block the line landed in, which is the only order the
- * group agrees on - a phone's own clock is its own opinion.
- */
-/**
- * Somebody the chain knows about.
- *
- * `waiting` is the whole point of the people screen: a key that holds an
- * invite is in the record but not in the group, and somebody has to say
- * yes. Nothing about a person here is self-reported - the name travels
- * with the join, the key is what signs, and the state is the chain's.
- */
+/** Somebody the chain knows about in the active Garden. */
 data class Person(
     val key: String,
     val name: String,
@@ -40,11 +27,13 @@ data class Person(
 ) {
     val waiting: Boolean get() = state == "Waiting"
     val active: Boolean get() = state == "Active"
-    /** The short form a person reads, like the design shows addresses. */
+
+    /** The short form shown in lists, matching the Figma account rows. */
     val shortKey: String
         get() = if (key.length > 16) key.take(7) + "..." + key.takeLast(7) else key
 }
 
+/** One line of the conversation, as verified from the chain or optimistically pending. */
 data class ChatLine(
     val id: String,
     val author: String,
@@ -56,80 +45,24 @@ data class ChatLine(
     val height: Long,
     val heldHere: Boolean,
     val verified: Boolean = false,
-    /** Decoded once, when the line is a picture the chain handed back. */
     val picture: androidx.compose.ui.graphics.ImageBitmap? = null,
-    /** True while a line is published but no block carries it yet. */
     val sending: Boolean = false,
 ) {
-    /** True when this line is a file rather than something typed. */
-    val isFile: Boolean get() = text == null
+    val isFile: Boolean get() = !mime.startsWith("text/") || picture != null
 }
 
-/** Hex, because that is the binary encoding the core's publish takes. */
-internal fun ByteArray.toHex(): String {
-    val digits = "0123456789abcdef"
-    val out = StringBuilder(size * 2)
-    for (byte in this) {
-        val value = byte.toInt() and 0xff
-        out.append(digits[value shr 4]).append(digits[value and 0x0f])
-    }
-    return out.toString()
-}
-
+/** Complete observable UI state for Budlum Garden screens. */
 data class GardenState(
-    val record: String = "",
-    val recordQr: String = "",
-    val expiry: String = "",
-    val uses: Int = 0,
-    /**
-     * The core's own status JSON, or empty before there is any.
-     *
-     * It used to default to the sentence "This phone is in no Garden.",
-     * which is not status and reads as a fault on a phone that has
-     * simply not started one yet. Nothing displays it; everything that
-     * reads it looks for a chain id, and empty answers that correctly.
-     */
     val status: String = "",
+    val record: String = "",
     val preview: String = "",
-    val message: String = "",
-    val busy: Boolean = false,
-    val selfTest: List<SelfTestStep> = emptyList(),
-    /** The conversation, oldest first. */
-    val messages: List<ChatLine> = emptyList(),
-    /** This phone's validator key, so its own lines can be told apart. */
-    val myKey: String = "",
-    /** True while this phone is the only validator of its network. */
-    val aloneHere: Boolean = false,
-    /** Everyone the chain knows about, seated or waiting. */
-    val people: List<Person> = emptyList(),
-    /** The six digits this phone is answering, while they last. */
-    val code: String = "",
-    /** Seconds before the code stops working. */
-    val codeSecondsLeft: Long = 0,
-    /** True when this phone is waiting for somebody else's answer. */
-    val waitingForHost: Boolean = false,
-    /** True when this phone started the network. */
-    val iAmHost: Boolean = false,
-    /** True once this phone holds a wallet. One phone holds one. */
-    val walletExists: Boolean = false,
-    /** The address of that wallet, readable without the password. */
-    val walletAddress: String = "",
-    /**
-     * The twenty-four words, held only between making a wallet and the
-     * person saying they have written them down. Never read back off
-     * disk: the sealed file does not hold them in the clear.
-     */
-    val mnemonic: List<String> = emptyList(),
-    /** True once the password has been shown to open the wallet. */
-    val walletUnlocked: Boolean = false,
-    /** The record behind the preview, kept so one tap can act on it. */
     val previewRecord: String = "",
-    /** What the group has sent, as the core reports it. */
     val feed: String = "",
-    /** One piece of data pulled back out and checked. */
     val fetched: String = "",
+    val busy: Boolean = false,
+    val message: String = "",
+    val selfTest: List<SelfTestStep> = emptyList(),
     val selfTestMs: Long = 0,
-    /** What Android still has to be told to allow. */
     val readiness: Readiness = Readiness(
         notifications = false,
         batteryUnrestricted = true,
@@ -137,118 +70,146 @@ data class GardenState(
         batteryPath = "",
         batteryFamily = "",
     ),
-)
+    val messages: List<ChatLine> = emptyList(),
+    val myKey: String = "",
+    val aloneHere: Boolean = true,
+    val people: List<Person> = emptyList(),
+    val waitingForHost: Boolean = false,
+    val iAmHost: Boolean = false,
+    val code: String = "",
+    val codeSecondsLeft: Long = 0,
+    val walletExists: Boolean = false,
+    val walletAddress: String = "",
+    val mnemonic: List<String> = emptyList(),
+    val walletUnlocked: Boolean = false,
+    val walletLoaded: Boolean = false,
+    val resumeChecked: Boolean = false,
+    val canReturn: Boolean = false,
+    val pendingJoinLink: String = "",
+    val clipboardInvite: String = "",
+    val dismissedClipboardInvite: String = "",
+) {
+    val waitingCount: Int get() = people.count { it.waiting }
+    val seated: Boolean get() = GardenLogic.isGardenSeated(status)
+}
 
 /**
- * The bridge between the three screens and the Garden the phone runs.
+ * Coordinates the native Budlum Garden validator core with the Compose UI.
  *
- * Every call goes to `budlum-core`'s own Garden through UniFFI. This class
- * holds no Garden rules of its own: it moves text between a screen and the
- * core, and it keeps the one rule section 4 puts on the app, which is that
- * nothing is created or joined until the self test has passed.
+ * Every FFI call runs off the main thread on `Dispatchers.IO`, failures stay
+ * visible to the user, and wallet / readiness state is never wiped when
+ * stepping out of a Garden.
  */
 class GardenModel(
     context: Context,
     private val scope: CoroutineScope,
 ) {
-    private val app: Context = context.applicationContext
+    private val app = context.applicationContext
+    private val prefs = app.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
 
-    // One validator per process, shared with the service that keeps it
-    // running while no screen is up.
-    private val phone: GardenPhone = GardenHolder.phone(context)
-    private val name: String = android.os.Build.MODEL ?: "phone"
+    private val phone: GardenPhone by lazy { GardenHolder.phone(app) }
 
     var state by mutableStateOf(GardenState())
         private set
 
-    /** The share text of section 5.7: where to get the app, then the invite. */
-    fun shareText(): String =
-        "Budlum Garden: " + APK_SOURCE + "\n" + state.record
+    /** The active floor skin, persisted as a non-secret UI preference. */
+    var skin by mutableStateOf(Skin.fromName(prefs.getString(PREF_SKIN, null)))
+        private set
 
-    /**
-     * Section 4: run the self test at first open, before anything else is
-     * offered. A Garden is not created or joined while it fails.
-     */
+    fun selectSkin(next: Skin) {
+        if (skin == next) return
+        skin = next
+        prefs.edit().putString(PREF_SKIN, next.name).apply()
+    }
+
+    /** Name this phone announces when founding or joining a Garden. */
+    private val name: String
+        get() = listOf(android.os.Build.MANUFACTURER, android.os.Build.MODEL)
+            .filter { !it.isNullOrBlank() }
+            .joinToString(" ")
+            .ifBlank { "phone" }
+
+    var scanner: (() -> Unit)? = null
+    var permissionAsker: ((String) -> Unit)? = null
+
+    fun clearMessage() {
+        if (state.message.isNotEmpty()) {
+            state = state.copy(message = "")
+        }
+    }
+
     fun runSelfTest() = background {
         val report = phone.selfTest()
         state = state.copy(
             selfTest = report.steps,
             selfTestMs = report.elapsedMs.toLong(),
-            message = if (report.passed) {
-                ""
-            } else {
-                "This phone did not pass its own check, so it will not join a Garden."
-            },
         )
     }
 
-    /**
-     * Start a Garden, which is how this phone becomes a validator of one.
-     *
-     * This used to return without a word when the self test had not
-     * passed, so the one tap that makes somebody a validator could do
-     * nothing at all and say nothing about it. The check still stands,
-     * but it now says so.
-     */
-    fun create(title: String) = background {
-        if (!selfTestPassed()) {
-            state = state.copy(message = app.getString(R.string.g_self_test_failed_why))
-            return@background
+    fun create(title: String, onSuccess: () -> Unit = {}) {
+        val clean = title.trim()
+        if (clean.isEmpty()) {
+            state = state.copy(message = app.getString(R.string.g_err_create_title))
+            return
         }
-        val answer = phone.create(title, name, null)
-        readInvite(phone.invite())
-        state = state.copy(status = answer.json)
-        // The network exists the moment the core says so. Whether Android
-        // also allows the ongoing notice is a separate question, and a
-        // refusal there must not be reported as a network that failed to
-        // start - it is a network running without its notice.
-        val refused = runCatching { startValidating() }.exceptionOrNull()
-        state = state.copy(
-            message = if (refused == null) {
-                "Your network is running. Invite someone from this screen."
-            } else {
-                "Your network is running, but Android refused the ongoing " +
-                    "notice: " + (refused.message ?: "no reason given") +
-                    ". The Garden keeps working while this screen is open."
-            },
+        if (!selfTestPassed()) return
+        background(onSuccess = onSuccess) {
+            val answer = phone.create(clean, name)
+            state = state.copy(
+                status = answer.json,
+                canReturn = false,
+            )
+            runCatching { readInvite(phone.invite()) }
+            startValidating()
+            refreshChatLocked()
+            syncCodeLocked()
+        }
+    }
+
+    fun say(text: String) {
+        val clean = text.trim()
+        if (clean.isEmpty()) return
+        val pendingId = "pending-" + System.nanoTime().toString()
+        val lastHeight = state.messages.lastOrNull()?.height ?: 0L
+        val optimistic = ChatLine(
+            id = pendingId,
+            author = state.myKey,
+            who = app.getString(R.string.g_you),
+            text = clean,
+            caption = "",
+            mime = "text/plain",
+            size = clean.toByteArray().size,
+            height = lastHeight,
+            heldHere = true,
+            verified = false,
+            sending = true,
         )
+        state = state.copy(
+            messages = state.messages + optimistic,
+            message = "",
+        )
+        background(
+            quiet = true,
+            onFailure = {
+                state = state.copy(messages = state.messages.filterNot { it.id == pendingId })
+            },
+        ) {
+            phone.send(clean, "")
+            refreshChatLocked()
+        }
     }
 
-    /**
-     * Say something in the Garden.
-     *
-     * There is no token and nothing to pay. The line is signed by this
-     * phone, coded into parts by B.U.D. 3.0 and spread over the group,
-     * and it comes back out of the chain verified rather than trusted.
-     */
-    fun say(text: String) = background {
-        if (text.isBlank()) return@background
-        phone.send(text, "")
-        readChat()
-    }
-
-    /**
-     * Send the contents of a file the person picked.
-     *
-     * Read here rather than in the screen because the screen does not
-     * outlive a rotation and a large file does.
-     */
     fun sendFile(uri: android.net.Uri) = background {
         val resolver = app.contentResolver
         val mime = resolver.getType(uri) ?: "application/octet-stream"
-        val name = fileName(uri)
+        val caption = fileName(uri)
         val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
         if (bytes == null) {
             state = state.copy(message = app.getString(R.string.g_file_unreadable))
             return@background
         }
-        // The ceiling on one object is a chain parameter, not a number
-        // this app gets to pick. It was hardcoded here at four megabytes,
-        // which happens to match the founding default and stops being
-        // true the moment a Garden is founded with another one. The
-        // chain publishes the real figure in its status, so that is what
-        // is read; when there is no status to read, nothing is refused
-        // here and the core answers for it, with its own reason.
+        // The object size ceiling is a chain parameter published in status;
+        // read it dynamically and let the core enforce when no status is present.
         val ceiling = objectCeiling()
         if (ceiling != null && bytes.size > ceiling) {
             state = state.copy(
@@ -256,16 +217,10 @@ class GardenModel(
             )
             return@background
         }
-        phone.sendFile(bytes.toHex(), mime, name)
-        readChat()
+        phone.sendFile(bytes.toHex(), mime, caption)
+        refreshChatLocked()
     }
 
-    /**
-     * The largest single object this Garden takes, as the chain says.
-     *
-     * `null` when there is no status yet, which means this phone has no
-     * figure of its own to apply and should not invent one.
-     */
     private fun objectCeiling(): Int? = runCatching {
         JSONObject(state.status)
             .optJSONObject("garden")
@@ -274,7 +229,6 @@ class GardenModel(
             ?.takeIf { it > 0 }
     }.getOrNull()
 
-    /** The name the picker knows the file by, for the caption. */
     private fun fileName(uri: android.net.Uri): String {
         val cursor = app.contentResolver.query(uri, null, null, null, null) ?: return "file"
         return cursor.use {
@@ -283,27 +237,23 @@ class GardenModel(
         }
     }
 
-    /**
-     * The conversation, rebuilt from the chain.
-     *
-     * The feed names what was published; the bytes of each line live in
-     * the parts the validators hold, so each one is fetched and checked
-     * against its content id. Already-seen lines are kept, because the
-     * chain does not change its mind about them.
-     */
     fun readChat() = background(quiet = true) {
-        val status = runCatching { phone.status().json }.getOrNull() ?: return@background
-        val garden = JSONObject(status).optJSONObject("garden")
+        refreshChatLocked()
+    }
+
+    private suspend fun refreshChatLocked() {
+        val status = runCatching { phone.status().json }.getOrNull() ?: return
+        val garden = runCatching { JSONObject(status).optJSONObject("garden") }.getOrNull()
         val mine = garden?.optJSONObject("me")
         val me = mine?.optString("key").orEmpty()
         val alone = (garden?.optInt("active_validators", 0) ?: 0) <= 1
         val folk = readPeople(garden, me)
-        val feed = phone.feed(FEED_LIMIT).json
+        val feed = runCatching { phone.feed(FEED_LIMIT).json }.getOrElse { "" }
         val items = runCatching {
-            JSONObject(feed).optJSONArray("items") ?: org.json.JSONArray()
-        }.getOrElse { org.json.JSONArray() }
+            JSONObject(feed).optJSONArray("items") ?: JSONArray()
+        }.getOrElse { JSONArray() }
 
-        val known = state.messages.associateBy { it.id }
+        val known = state.messages.filterNot { it.sending }.associateBy { it.id }
         val lines = mutableListOf<ChatLine>()
         for (index in 0 until items.length()) {
             val item = items.optJSONObject(index) ?: continue
@@ -314,9 +264,6 @@ class GardenModel(
                 continue
             }
             val mime = item.optString("mime")
-            // The words are fetched rather than remembered: the core
-            // hands the bytes back checked against the content id, and
-            // says so. What the Room shows is what the chain holds.
             var verified = false
             var picture: androidx.compose.ui.graphics.ImageBitmap? = null
             var text: String? = null
@@ -325,16 +272,13 @@ class GardenModel(
                     val got = JSONObject(phone.fetch(id).json)
                     verified = got.optBoolean("verified")
                     if (mime.startsWith("image/")) {
-                        // A picture is worth fetching whole: the chain
-                        // hands the bytes back checked, and a thumbnail
-                        // nobody can see is not a message.
                         picture = pictureFrom(got.optString("hex"))
                     } else {
                         text = got.optString("text").takeIf {
                             it.isNotEmpty() && it != "null"
                         }
                     }
-                }.getOrNull()
+                }
             }
             lines.add(
                 ChatLine(
@@ -353,13 +297,10 @@ class GardenModel(
                 ),
             )
         }
-        // The feed is newest first, already in the order the chain put
-        // things in - by block, and within a block by where the
-        // transaction sits in it. Two lines often share a block, so
-        // sorting by height alone would reorder them and sorting by
-        // content id would scramble them outright. Reversing the feed
-        // keeps the order the group agreed on.
+        val activeCode = runCatching { phone.codeNow() }.getOrNull()
         state = state.copy(
+            status = status,
+            canReturn = GardenLogic.canReturnToGarden(status),
             messages = lines.asReversed(),
             myKey = me,
             aloneHere = alone,
@@ -367,10 +308,11 @@ class GardenModel(
             waitingForHost = mine?.optString("member") == "Waiting",
             iAmHost = mine?.optBoolean("host") == true,
             feed = feed,
+            code = activeCode?.code ?: state.code.takeIf { state.codeSecondsLeft > 0 }.orEmpty(),
+            codeSecondsLeft = activeCode?.secondsLeft?.toLong() ?: 0L,
         )
     }
 
-    /** Everyone in the chain's identity record, me first, waiting next. */
     private fun readPeople(garden: JSONObject?, me: String): List<Person> {
         val list = garden?.optJSONArray("validators") ?: return emptyList()
         val folk = mutableListOf<Person>()
@@ -387,8 +329,6 @@ class GardenModel(
                 ),
             )
         }
-        // Me at the top, then whoever is waiting on an answer, then the
-        // rest. The people waiting are the only ones needing anything.
         return folk.sortedWith(
             compareByDescending<Person> { it.isMe }
                 .thenByDescending { it.waiting }
@@ -396,229 +336,276 @@ class GardenModel(
         )
     }
 
-    /**
-     * Which of the three floors is showing.
-     *
-     * The sheets put this switch in the corner of every page, so it
-     * lives on the model rather than inside one screen - the floor is
-     * under all of them.
-     */
-    var skin by mutableStateOf(Skin.Page)
-
-    /** Let somebody in, or turn them away. Only the host may. */
     fun answerRequest(key: String, accept: Boolean) = background {
         phone.admit(key, accept)
-        readChat()
+        refreshChatLocked()
     }
 
-    /** Open six digits that stand for this Garden's invite for an hour. */
-    /**
-     * What this phone knows about its own wallet without being told a
-     * password: whether there is one, and which address it is.
-     */
     fun readWallet() = background(quiet = true) {
-        val here = phone.walletExists()
-        val address = if (here) runCatching { phone.walletAddress() }.getOrNull() ?: "" else ""
-        state = state.copy(walletExists = here, walletAddress = address)
+        val here = runCatching { phone.walletExists() }.getOrDefault(false)
+        val address = if (here) runCatching { phone.walletAddress() }.getOrNull().orEmpty() else ""
+        state = state.copy(
+            walletExists = here,
+            walletAddress = address,
+            walletLoaded = true,
+        )
     }
 
-    /**
-     * Make this phone's wallet.
-     *
-     * The words come back once and are held in state only until the
-     * person says they have written them down, because the sealed file
-     * keeps no clear copy to show them again.
-     */
     fun createWallet(password: String) = background {
         val seed = phone.walletCreate(password)
         state = state.copy(
             walletExists = true,
             walletAddress = seed.address,
-            mnemonic = seed.mnemonic.trim().split(" ").filter { it.isNotEmpty() },
+            mnemonic = GardenLogic.normalizeMnemonicWords(seed.mnemonic),
             walletUnlocked = true,
+            walletLoaded = true,
         )
     }
 
-    /** Put back a wallet from words the person already had. */
     fun restoreWallet(words: String, password: String) = background {
-        val address = phone.walletRestore(words.trim().lowercase(), password)
+        val normalized = GardenLogic.normalizeMnemonicWords(words).joinToString(" ")
+        val address = phone.walletRestore(normalized, password)
         state = state.copy(
             walletExists = true,
             walletAddress = address,
             mnemonic = emptyList(),
             walletUnlocked = true,
+            walletLoaded = true,
         )
     }
 
-    /** Show that the password opens this phone's wallet. */
     fun unlockWallet(password: String) = background {
         val address = phone.walletOpen(password)
         state = state.copy(walletUnlocked = true, walletAddress = address)
     }
 
-    /**
-     * Drop the words from memory once they have been written down.
-     *
-     * Called by the screen that showed them, so they are not sitting in
-     * state behind every later screen.
-     */
+    fun lockWallet() {
+        state = state.copy(walletUnlocked = false)
+    }
+
     fun forgetMnemonic() {
         state = state.copy(mnemonic = emptyList())
     }
 
-    /** How many words a phrase has, asked of the core rather than assumed. */
-    fun wordCount(): Int = phone.walletWordCount().toInt()
+    fun wordCount(): Int = runCatching { phone.walletWordCount().toInt() }.getOrDefault(24)
 
     fun openCode() = background {
         val opened = phone.openCode()
-        state = state.copy(code = opened.code, codeSecondsLeft = opened.secondsLeft.toLong())
+        state = state.copy(
+            code = opened.code,
+            codeSecondsLeft = opened.secondsLeft.toLong(),
+            record = opened.record.ifBlank { state.record },
+        )
     }
 
-    /** Join the network six digits point at. */
-    fun joinWithCode(code: String) = background {
-        phone.joinWithCode(code.trim(), name)
-        readChat()
+    fun syncCode() = background(quiet = true) {
+        syncCodeLocked()
     }
 
-    /** Pull one piece of data back out and check it against the chain. */
+    private fun syncCodeLocked() {
+        val current = runCatching { phone.codeNow() }.getOrNull()
+        if (current != null) {
+            state = state.copy(
+                code = current.code,
+                codeSecondsLeft = current.secondsLeft.toLong(),
+                record = current.record.ifBlank { state.record },
+            )
+        } else if (state.code.isNotEmpty()) {
+            state = state.copy(code = "", codeSecondsLeft = 0L)
+        }
+    }
+
+    /** Tick down the visible code counter locally between core syncs. */
+    fun tickCode() {
+        val remaining = state.codeSecondsLeft
+        if (remaining > 1L) {
+            state = state.copy(codeSecondsLeft = remaining - 1L)
+        } else if (remaining == 1L) {
+            state = state.copy(code = "", codeSecondsLeft = 0L)
+        }
+    }
+
+    fun joinWithCode(code: String, onSuccess: () -> Unit = {}) {
+        if (!selfTestPassed()) return
+        background(onSuccess = onSuccess) {
+            val answer = phone.joinWithCode(code.trim(), name)
+            state = state.copy(
+                status = answer.json,
+                preview = "",
+                previewRecord = "",
+                canReturn = false,
+            )
+            runCatching { readInvite(phone.invite()) }
+            startValidating()
+            refreshChatLocked()
+        }
+    }
+
     fun fetch(contentId: String) = background {
         if (contentId.isBlank()) return@background
         state = state.copy(fetched = phone.fetch(contentId.trim()).json)
     }
 
-    fun refreshInvite() = background {
-        readInvite(phone.invite())
+    fun refreshInvite() = background(quiet = true) {
+        runCatching { readInvite(phone.invite()) }
     }
 
-    /** Show who is inviting before anybody agrees to anything. */
+    /** Handle an incoming invite deep-link and signal the navigator to open Join. */
+    fun receiveInviteLink(link: String) {
+        val clean = link.trim()
+        if (clean.isEmpty()) return
+        state = state.copy(pendingJoinLink = clean)
+        preview(clean)
+    }
+
+    fun consumePendingJoinLink() {
+        if (state.pendingJoinLink.isNotEmpty()) {
+            state = state.copy(pendingJoinLink = "")
+        }
+    }
+
+    /**
+     * Section 5.9: inspect clipboard strictly for a Garden invite prefix.
+     * Any other clipboard content is ignored and never stored.
+     */
+    fun checkClipboardInvite(rawClipboard: String?) {
+        val invite = GardenLogic.extractClipboardInvite(rawClipboard) ?: return
+        if (invite == state.dismissedClipboardInvite || invite == state.record) return
+        if (state.seated) return
+        state = state.copy(clipboardInvite = invite)
+    }
+
+    fun dismissClipboardInvite() {
+        state = state.copy(
+            dismissedClipboardInvite = state.clipboardInvite,
+            clipboardInvite = "",
+        )
+    }
+
+    /** Preview who is inviting and when the record expires before joining. */
     fun preview(record: String) {
-        if (record.isBlank()) {
+        val trimmed = record.trim()
+        if (trimmed.isEmpty()) {
             state = state.copy(preview = "", previewRecord = "")
             return
         }
         scope.launch {
             val shown = withContext(Dispatchers.IO) {
                 runCatching {
-                    val json = JSONObject(phone.readRecord(record.trim()).json)
+                    val json = JSONObject(phone.readRecord(trimmed).json)
                     val owner = json.optString("owner").take(16)
                     val until = stamp(json.optLong("expires_at_ms"))
-                    "validator " + owner + ", good until " + until
+                    app.getString(R.string.g_preview_invited, owner, until)
                 }.getOrElse { "" }
             }
             state = state.copy(
                 preview = shown,
-                previewRecord = if (shown.isEmpty()) "" else record.trim(),
+                previewRecord = if (shown.isEmpty()) "" else trimmed,
+                message = if (shown.isEmpty()) app.getString(R.string.g_preview_invalid) else "",
             )
         }
     }
 
-    fun join(record: String) = background {
-        if (!selfTestPassed()) return@background
-        val answer = phone.join(record.trim(), name)
-        state = state.copy(status = answer.json, preview = "", previewRecord = "")
-        readInvite(phone.invite())
-        startValidating()
+    fun join(record: String, onSuccess: () -> Unit = {}) {
+        if (!selfTestPassed()) return
+        background(onSuccess = onSuccess) {
+            val answer = phone.join(record.trim(), name)
+            state = state.copy(
+                status = answer.json,
+                preview = "",
+                previewRecord = "",
+                clipboardInvite = "",
+                canReturn = false,
+            )
+            runCatching { readInvite(phone.invite()) }
+            startValidating()
+            refreshChatLocked()
+        }
     }
 
     fun refreshStatus() = background(quiet = true) {
-        state = state.copy(status = phone.status().json)
+        val status = phone.status().json
+        state = state.copy(
+            status = status,
+            canReturn = GardenLogic.canReturnToGarden(status),
+        )
     }
 
-    /**
-     * Return to the Garden this phone stepped out of.
-     *
-     * Leaving keeps the seat unless it was the second leave, and the answer
-     * says so in can_return. Without this the only way back was the invite
-     * again, which the person who left may no longer have.
-     */
-    fun returnToGarden() = background {
+    fun returnToGarden(onSuccess: () -> Unit = {}) = background(onSuccess = onSuccess) {
         val answer = phone.rejoin()
-        state = state.copy(status = answer.json, preview = "")
-        readInvite(phone.invite())
+        state = state.copy(
+            status = answer.json,
+            preview = "",
+            canReturn = false,
+        )
+        runCatching { readInvite(phone.invite()) }
         startValidating()
+        refreshChatLocked()
     }
 
     fun leave() = background {
         val answer = phone.leave()
-        // Stepping out keeps the seat and the way back; retiring gives the
-        // Garden up. Only the second ends the duty, so only the second
-        // takes the notification away.
-        if (!answer.json.contains("\"can_return\":true")) {
+        val canReturn = GardenLogic.canReturnToGarden(answer.json)
+        if (!canReturn) {
             GardenValidatorService.stop(app)
         }
-        state = GardenState(
+        // Preserve wallet, readiness and self-test state across stepping out or retiring.
+        state = state.copy(
             status = answer.json,
-            selfTest = state.selfTest,
-            selfTestMs = state.selfTestMs,
+            record = "",
+            preview = "",
+            previewRecord = "",
+            feed = "",
+            fetched = "",
+            messages = emptyList(),
+            myKey = "",
+            aloneHere = true,
+            people = emptyList(),
+            waitingForHost = false,
+            iAmHost = false,
+            code = "",
+            codeSecondsLeft = 0L,
+            canReturn = canReturn,
+            message = "",
         )
     }
 
-    /**
-     * Pick up a Garden this phone already belongs to.
-     *
-     * The seat survives the process, so opening the app after it was
-     * closed - or after the phone was switched off - finds the Garden
-     * still there and puts the validator back on the network without
-     * asking for the invite again.
-     */
-    fun resumeIfSeated() = background {
-        if (!GardenHolder.hasGarden(app)) return@background
+    fun resumeIfSeated() = background(quiet = true) {
+        if (!GardenHolder.hasGarden(app)) {
+            state = state.copy(resumeChecked = true)
+            return@background
+        }
         startValidating()
-        state = state.copy(status = phone.status().json)
+        val status = runCatching { phone.status().json }.getOrDefault("")
+        state = state.copy(
+            status = status,
+            canReturn = GardenLogic.canReturnToGarden(status),
+            resumeChecked = true,
+        )
         runCatching { readInvite(phone.invite()) }
-        // A seat is a way back into a Garden that still exists. The one
-        // case where it is not is a network this phone founded alone: the
-        // chain lives in the running app, so nobody kept it while the app
-        // was gone. Saying "no Garden" there reads as a fault; it is not.
-        if (!state.status.contains("\"chain_id\"")) {
-            state = state.copy(
-                message = app.getString(R.string.g_network_ended),
-            )
+        refreshChatLocked()
+        if (!GardenLogic.hasGardenSeat(state.status)) {
+            state = state.copy(message = app.getString(R.string.g_network_ended))
         }
     }
 
-    /** Hand the scan off to the activity, which owns the camera. */
     fun scan() {
         (scanner ?: return).invoke()
     }
 
-    /** Set by the activity so the model does not reach for an Activity. */
-    var scanner: (() -> Unit)? = null
-
-    /**
-     * Set by the activity, which owns the permission dialog.
-     *
-     * The model asks; the activity is the only thing Android will show a
-     * permission prompt for.
-     */
-    var permissionAsker: ((String) -> Unit)? = null
-
-    /** Ask Android for the one permission the background work needs. */
     fun askForNotifications() {
         val permission = GardenReadiness.notificationPermission()
         if (permission == null) {
-            // Before Android 13 there is nothing to ask for; the switch in
-            // settings is the only thing that can be off.
             readPermissions()
             return
         }
         permissionAsker?.invoke(permission)
     }
 
-    /** Read what Android currently allows. Cheap, so it runs on every resume. */
     fun readPermissions() {
         state = state.copy(readiness = GardenReadiness.read(app))
     }
 
-    /**
-     * Hand the duty to the service that outlives the screen.
-     *
-     * Android refuses to start a foreground service in more cases every
-     * release. A refusal here does not undo the Garden this phone just
-     * joined, so it is reported as what it is - the validator is seated
-     * but not running in the background - instead of being thrown over
-     * the join itself or, worse, swallowed.
-     */
     private fun startValidating() {
         val failure = runCatching { GardenValidatorService.start(app) }.exceptionOrNull()
             ?: return
@@ -628,78 +615,72 @@ class GardenModel(
         )
     }
 
-    /** Section 5.12: a scanned invite joins without a second detour. */
-    fun scanned(record: String) {
-        preview(record)
-        join(record)
+    /** Section 5.12: a scanned QR invite joins immediately when valid. */
+    fun scanned(record: String, onSuccess: () -> Unit = {}) {
+        join(record, onSuccess)
     }
 
     private fun selfTestPassed(): Boolean {
         val passed = state.selfTest.isNotEmpty() && state.selfTest.all { it.passed }
         if (!passed) {
-            state = state.copy(
-                message = app.getString(R.string.g_self_test_first),
-            )
+            state = state.copy(message = app.getString(R.string.g_self_test_first))
         }
         return passed
     }
 
-    private fun readInvite(answer: uniffi.budlum_garden_ffi.GardenAnswer) {
-        val json = JSONObject(answer.json)
-        val record = json.optString("record")
-        state = state.copy(
-            record = if (record == "null") "" else record,
-            recordQr = json.optString("record_qr"),
-            expiry = stamp(json.optLong("expires_at_ms")),
-            uses = json.optInt("uses"),
-            message = json.optString("record_refused"),
-        )
+    private fun readInvite(answer: GardenAnswer) {
+        val json = runCatching { JSONObject(answer.json) }.getOrNull() ?: return
+        val record = json.optString("record").ifBlank { json.optString("invite") }
+        if (record.isNotEmpty()) {
+            state = state.copy(record = record)
+        }
     }
 
-    private fun stamp(millis: Long): String =
-        if (millis <= 0) {
-            "unknown"
-        } else {
-            SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(millis))
-        }
+    private fun stamp(millis: Long): String {
+        if (millis <= 0L) return ""
+        return SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(millis))
+    }
 
-    /**
-     * Run something off the main thread.
-     *
-     * `quiet` is for work nobody asked for - the timer that re-reads the
-     * chain. Letting that work raise the busy flag was a real bug: the
-     * Room polls every three seconds, the poll takes a moment, and the
-     * send and attach buttons are disabled while it runs, so for most of
-     * any given second they could not be tapped at all. Quiet work also
-     * leaves the message alone, because wiping it every three seconds
-     * meant an error was gone before it could be read.
-     */
-    private fun background(quiet: Boolean = false, work: suspend () -> Unit) {
+    private fun background(
+        quiet: Boolean = false,
+        onSuccess: (() -> Unit)? = null,
+        onFailure: (() -> Unit)? = null,
+        work: suspend () -> Unit,
+    ) {
         scope.launch {
             if (!quiet) {
                 state = state.copy(busy = true, message = "")
             }
-            val failure = withContext(Dispatchers.IO) {
+            val err = withContext(Dispatchers.IO) {
                 runCatching { work() }.exceptionOrNull()
             }
-            if (failure != null) {
-                state = state.copy(message = failure.message ?: "that did not work")
-            }
-            if (!quiet) {
-                state = state.copy(busy = false)
+            if (err != null) {
+                onFailure?.invoke()
+                state = state.copy(
+                    busy = false,
+                    message = err.message ?: err.toString(),
+                )
+            } else {
+                if (!quiet) {
+                    state = state.copy(busy = false)
+                }
+                onSuccess?.invoke()
             }
         }
     }
 
-    private companion object {
-        /** Section 5.7 asks the share text to say where the app comes from. */
-        /** Enough of the feed to see what the group has sent. */
-        const val FEED_LIMIT = 100u
+    private fun ByteArray.toHex(): String = buildString(size * 2) {
+        for (byte in this@toHex) {
+            val v = byte.toInt() and 0xFF
+            append(HEX[v ushr 4])
+            append(HEX[v and 0x0F])
+        }
+    }
 
-
-        const val APK_SOURCE = "https://github.com/budlum-xyz/budlum/releases"
+    companion object {
+        private const val UI_PREFS = "budlum_garden_ui"
+        private const val PREF_SKIN = "skin"
+        private const val FEED_LIMIT = 100u
+        private val HEX = "0123456789abcdef".toCharArray()
     }
 }
-
-/** Convenience for an Activity that owns a scope. */
-fun Activity.gardenModel(scope: CoroutineScope): GardenModel = GardenModel(this, scope)

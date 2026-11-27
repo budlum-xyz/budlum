@@ -15,6 +15,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import network.budlum.validator.R
 import org.json.JSONObject
 
 /**
@@ -40,7 +41,10 @@ class GardenValidatorService : Service() {
     override fun onCreate() {
         super.onCreate()
         channel()
-        startForeground(NOTE_ID, note("Garden", "Starting the validator"))
+        startForeground(
+            NOTE_ID,
+            note(getString(R.string.app_name), getString(R.string.g_notif_starting)),
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -67,13 +71,17 @@ class GardenValidatorService : Service() {
             return
         }
         if (GardenHolder.isAway(this)) {
-            runCatching { phone.rejoin() }
-                .onFailure { update("Garden", "Could not return yet: " + (it.message ?: "")) }
+            runCatching { phone.rejoin() }.onFailure {
+                update(
+                    getString(R.string.app_name),
+                    getString(R.string.g_notif_rejoin_failed, it.message ?: ""),
+                )
+            }
         }
         while (scope.isActive) {
             val status = runCatching { phone.status().json }.getOrNull()
             if (status == null) {
-                update("Garden", "The validator is not answering")
+                update(getString(R.string.app_name), getString(R.string.g_notif_unresponsive))
             } else {
                 update(title(status), detail(status))
             }
@@ -82,19 +90,19 @@ class GardenValidatorService : Service() {
     }
 
     private fun title(status: String): String =
-        garden(status)?.optString("title").orEmpty().ifBlank { "Garden" }
+        garden(status)?.optString("title").orEmpty().ifBlank { getString(R.string.app_name) }
 
     /** The one line worth putting in a status bar. */
     private fun detail(status: String): String {
-        val garden = garden(status) ?: return "Not in a Garden"
+        val garden = garden(status) ?: return getString(R.string.g_notif_not_seated)
         return when (garden.optString("status")) {
-            "Away" -> "Stepped out. Tap to return."
-            "" -> "Not in a Garden"
+            "Away" -> getString(R.string.g_notif_away)
+            "" -> getString(R.string.g_notif_not_seated)
             else -> {
                 val height = garden.optLong("height", 0)
                 val validators = garden.optInt("active_validators", 0)
                 val parts = garden.optJSONObject("work")?.optLong("parts_held", 0) ?: 0
-                "Validating - block $height, $validators validators, $parts parts held"
+                getString(R.string.g_notif_validating, height, validators, parts)
             }
         }
     }
@@ -124,7 +132,7 @@ class GardenValidatorService : Service() {
         return builder
             .setContentTitle(title)
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_menu_compass)
+            .setSmallIcon(R.drawable.ic_stat_budlum_garden)
             .setContentIntent(open)
             .setOngoing(true)
             .build()
@@ -136,10 +144,10 @@ class GardenValidatorService : Service() {
         manager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL,
-                "Garden validator",
+                getString(R.string.g_validator_notif_channel),
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
-                description = "Shown while this phone is validating a Garden."
+                description = getString(R.string.g_validator_notif_desc)
             },
         )
     }

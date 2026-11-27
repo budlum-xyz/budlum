@@ -23,6 +23,7 @@ use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// The port both sides agree on. Chosen high and fixed so neither phone
@@ -42,39 +43,63 @@ const TELL: &str = "BUDLUM-GARDEN-TELL ";
 /// hundred bytes; this leaves room without inviting a flood.
 const MAX_DATAGRAM: usize = 4096;
 
+/// Longest invite record accepted from a local-network reply.
+const MAX_RECORD_LEN: usize = 2048;
+
+/// Number of six-digit codes (`000000` through `999999`).
+const CODE_SPACE: u32 = 1_000_000;
+
+/// Largest multiple of `CODE_SPACE` that fits in `u32`, for rejection sampling
+/// without modulo bias.
+const UNIFORM_BOUND: u32 = (u32::MAX / CODE_SPACE) * CODE_SPACE;
+
 /// A code being answered on this network, and the record it stands for.
 pub struct Desk {
     code: String,
     record: String,
+    port: u16,
     born: Instant,
     stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl Desk {
-    /// Start answering `code` with `record` until the code expires.
+    /// Start answering `code` with `record` on [`PORT`] until the code expires.
     ///
     /// The socket is bound before the thread starts so that a port
     /// already taken is reported to the caller rather than swallowed by
     /// a background thread nobody is watching.
     pub fn open(code: String, record: String) -> Result<Self, String> {
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, PORT))
-            .map_err(|e| format!("the code desk could not open on {PORT}: {e}"))?;
+        Self::open_on(PORT, code, record)
+    }
+
+    /// Start answering `code` with `record` on `port` until the code expires.
+    pub fn open_on(port: u16, code: String, record: String) -> Result<Self, String> {
+        if !is_valid_code(&code) {
+            return Err("a code is six digits".into());
+        }
+        if !is_valid_record(&record) {
+            return Err("the invite record is empty or malformed".into());
+        }
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))
+            .map_err(|e| format!("the code desk could not open on {port}: {e}"))?;
+        let bound_port = socket
+            .local_addr()
+            .map(|addr| addr.port())
+            .unwrap_or(port);
         socket
             .set_read_timeout(Some(Duration::from_millis(400)))
             .map_err(|e| e.to_string())?;
 
         let stop = Arc::new(AtomicBool::new(false));
-        let desk = Self {
-            code: code.clone(),
-            record: record.clone(),
-            born: Instant::now(),
-            stop: Arc::clone(&stop),
-        };
-        let born = desk.born;
+        let born = Instant::now();
+        let stop_flag = Arc::clone(&stop);
+        let match_code = code.clone();
+        let reply_record = record.clone();
 
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let mut buffer = [0u8; MAX_DATAGRAM];
-            while !stop.load(Ordering::Relaxed) {
+            while !stop_flag.load(Ordering::Acquire) {
                 if born.elapsed() >= LIFETIME {
                     break;
                 }
@@ -85,21 +110,31 @@ impl Desk {
                     Err(e) if e.kind() == ErrorKind::TimedOut => continue,
                     Err(_) => continue,
                 };
+                if stop_flag.load(Ordering::Acquire) {
+                    break;
+                }
                 let Ok(text) = std::str::from_utf8(&buffer[..read]) else {
                     continue;
                 };
                 let Some(asked) = text.trim().strip_prefix(ASK) else {
                     continue;
                 };
-                if asked.trim() != code {
+                if asked.trim() != match_code {
                     continue;
                 }
-                let reply = format!("{TELL}{record}");
+                let reply = format!("{TELL}{reply_record}");
                 let _ = socket.send_to(reply.as_bytes(), from);
             }
         });
 
-        Ok(desk)
+        Ok(Self {
+            code,
+            record,
+            port: bound_port,
+            born,
+            stop,
+            handle: Some(handle),
+        })
     }
 
     /// The six digits a person reads out.
@@ -110,6 +145,11 @@ impl Desk {
     /// The record the code stands for.
     pub fn record(&self) -> &str {
         &self.record
+    }
+
+    /// The UDP port this desk is bound to.
+    pub fn port(&self) -> u16 {
+        self.port
     }
 
     /// Seconds left before the code stops working.
@@ -125,7 +165,15 @@ impl Desk {
 
 impl Drop for Desk {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.stop.store(true, Ordering::Release);
+        // Nudge the blocked recv_from on loopback so the thread exits and
+        // releases the UDP port immediately rather than waiting for timeout.
+        if let Ok(wake) = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)) {
+            let _ = wake.send_to(b"", (Ipv4Addr::LOCALHOST, self.port));
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -136,7 +184,7 @@ impl Drop for Desk {
 /// processes on one machine - and how a phone could be pointed at a
 /// known address later.
 pub fn ask(code: &str, timeout: Duration, extra: Option<SocketAddr>) -> Result<String, String> {
-    if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
+    if !is_valid_code(code) {
         return Err("a code is six digits".into());
     }
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
@@ -178,13 +226,30 @@ pub fn ask(code: &str, timeout: Duration, extra: Option<SocketAddr>) -> Result<S
                 continue;
             };
             if let Some(record) = text.trim().strip_prefix(TELL) {
-                if !record.trim().is_empty() {
-                    return Ok(record.trim().to_string());
+                let candidate = record.trim();
+                if is_valid_record(candidate) {
+                    return Ok(candidate.to_string());
                 }
             }
         }
     }
     Err("nobody on this Wi-Fi answered that code".into())
+}
+
+/// True when `code` is exactly six ASCII digits.
+fn is_valid_code(code: &str) -> bool {
+    code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// True when a local-network reply carries a bounded, printable invite record
+/// with no control characters.
+fn is_valid_record(record: &str) -> bool {
+    let trimmed = record.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= MAX_RECORD_LEN
+        && trimmed
+            .bytes()
+            .all(|b| b.is_ascii_graphic() || b == b' ')
 }
 
 /// Broadcast addresses worth shouting at besides 255.255.255.255.
@@ -230,23 +295,85 @@ fn local_addresses() -> Vec<Ipv4Addr> {
 /// If the kernel cannot be read the call fails rather than quietly
 /// handing back something predictable.
 ///
-/// Leading zeros are kept: a code is a string of six digits, not a
-/// number, so 000123 is a code and not 123.
+/// Rejection sampling keeps all one million six-digit codes strictly
+/// uniform. Leading zeros are kept: a code is a string of six digits,
+/// not a number, so 000123 is a code and not 123.
 pub fn fresh_code() -> Result<String, String> {
-    // Four bytes, read exactly. /dev/urandom never ends, so reading the
-    // whole file would never return.
     use std::io::Read;
     let mut file = std::fs::File::open("/dev/urandom")
         .map_err(|e| format!("this phone would not give out randomness: {e}"))?;
     let mut bytes = [0u8; 4];
-    file.read_exact(&mut bytes)
-        .map_err(|e| format!("this phone would not give out randomness: {e}"))?;
-    let value = u32::from_be_bytes(bytes);
-    Ok(format!("{:06}", value % 1_000_000))
+    for _ in 0..64 {
+        file.read_exact(&mut bytes)
+            .map_err(|e| format!("this phone would not give out randomness: {e}"))?;
+        let value = u32::from_be_bytes(bytes);
+        if value < UNIFORM_BOUND {
+            return Ok(format!("{:06}", value % CODE_SPACE));
+        }
+    }
+    Err("this phone would not give out unbiased randomness".into())
 }
 
 /// The address a caller can hand to [`ask`] to reach a desk on this
 /// same machine, used by the checks that cannot rely on broadcast.
 pub fn loopback_desk() -> SocketAddr {
     SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), PORT))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reopening_desk_immediately_after_drop_releases_port() {
+        let first = Desk::open_on(0, "123456".into(), "budlum://garden/join#first".into())
+            .expect("first desk opens");
+        let port = first.port();
+        drop(first);
+
+        let second = Desk::open_on(port, "654321".into(), "budlum://garden/join#second".into())
+            .expect("second desk rebinds immediately after drop");
+        let addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+        let got = ask("654321", Duration::from_secs(2), Some(addr))
+            .expect("ask receives refreshed record");
+        assert_eq!(got, "budlum://garden/join#second");
+        drop(second);
+    }
+
+    #[test]
+    fn wrong_code_is_not_answered() {
+        let desk = Desk::open_on(0, "004219".into(), "budlum://garden/join#secret".into())
+            .expect("desk opens");
+        let addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), desk.port()));
+        let err = ask("999999", Duration::from_millis(500), Some(addr))
+            .expect_err("wrong code must time out");
+        assert!(err.contains("answered"));
+        drop(desk);
+    }
+
+    #[test]
+    fn invalid_codes_are_refused_fail_closed() {
+        for bad in ["", "12345", "1234567", "12a456", " 12345"] {
+            assert!(ask(bad, Duration::from_millis(50), None).is_err());
+            assert!(Desk::open_on(0, bad.into(), "budlum://garden/join#x".into()).is_err());
+        }
+    }
+
+    #[test]
+    fn spoofed_control_char_or_oversized_tell_is_ignored() {
+        assert!(!is_valid_record(""));
+        assert!(!is_valid_record("   "));
+        assert!(!is_valid_record("budlum://garden/join#a\nInjected: 1"));
+        assert!(!is_valid_record(&"a".repeat(MAX_RECORD_LEN + 1)));
+        assert!(is_valid_record("budlum://garden/join#abc123"));
+    }
+
+    #[test]
+    fn fresh_code_is_always_six_ascii_digits() {
+        for _ in 0..32 {
+            let code = fresh_code().expect("fresh code");
+            assert_eq!(code.len(), 6);
+            assert!(code.bytes().all(|b| b.is_ascii_digit()));
+        }
+    }
 }

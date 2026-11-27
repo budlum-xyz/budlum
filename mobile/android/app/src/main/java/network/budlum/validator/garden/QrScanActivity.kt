@@ -13,6 +13,7 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -20,6 +21,8 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
 import com.google.zxing.LuminanceSource
@@ -28,6 +31,7 @@ import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
 import java.util.EnumMap
 import java.util.concurrent.Executors
+import network.budlum.validator.R
 
 /**
  * The camera half of section 2.6.
@@ -35,15 +39,6 @@ import java.util.concurrent.Executors
  * It reads a QR and hands the text back. It does not decide whether the
  * text is an invite: the core does that, and a scanner that judged
  * invites would be a second copy of the rules.
- *
- * It used to show the camera and never read anything. Two reasons, both
- * of them in the frame handling. A camera plane is padded - `rowStride`
- * is usually wider than the image - and the old code handed zxing the
- * image width as the row width, so every row after the first was read
- * from the wrong offset and the picture zxing saw was sheared. And the
- * frames arrive in the sensor's orientation, not the phone's, so a code
- * held upright in a portrait app arrives on its side. Both are handled
- * here, and the reader is told it may work harder on a blurry frame.
  */
 class QrScanActivity : ComponentActivity() {
 
@@ -53,9 +48,6 @@ class QrScanActivity : ComponentActivity() {
 
     private val reader = QRCodeReader()
     private val hints = EnumMap<DecodeHintType, Any>(DecodeHintType::class.java).apply {
-        // A phone in a hand is never quite still and a 413 byte record is a
-        // dense code. Trying harder costs milliseconds on a frame that was
-        // going to be thrown away anyway.
         put(DecodeHintType.TRY_HARDER, true)
         put(DecodeHintType.CHARACTER_SET, "UTF-8")
     }
@@ -68,7 +60,7 @@ class QrScanActivity : ComponentActivity() {
         } else {
             Toast.makeText(
                 this,
-                "Without the camera you can still paste the invite on the Join screen.",
+                getString(R.string.g_err_camera_denied),
                 Toast.LENGTH_LONG,
             ).show()
             cancel()
@@ -76,6 +68,7 @@ class QrScanActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         val frame = FrameLayout(this)
         val view = PreviewView(this)
@@ -86,8 +79,16 @@ class QrScanActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
             ),
         )
-        frame.addView(hint())
-        frame.addView(backButton())
+        val hintView = hint()
+        val cancelView = backButton()
+        frame.addView(hintView)
+        frame.addView(cancelView)
+        ViewCompat.setOnApplyWindowInsetsListener(frame) { _, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            hintView.setPadding(32, 24 + bars.top, 32, 24)
+            (cancelView.layoutParams as FrameLayout.LayoutParams).bottomMargin = 48 + bars.bottom
+            insets
+        }
         setContentView(frame)
         preview = view
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
@@ -101,9 +102,9 @@ class QrScanActivity : ComponentActivity() {
 
     /** Say what the camera is for, so the view is not a bare picture. */
     private fun hint(): TextView = TextView(this).apply {
-        text = context.getString(network.budlum.validator.R.string.g_point_at_qr)
+        text = context.getString(R.string.g_point_at_qr)
         setTextColor(Color.WHITE)
-        setBackgroundColor(Color.argb(140, 0, 0, 0))
+        setBackgroundColor(Color.argb(160, 6, 7, 5))
         setPadding(32, 24, 32, 24)
         layoutParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -112,15 +113,9 @@ class QrScanActivity : ComponentActivity() {
         )
     }
 
-    /**
-     * A way out that does not depend on knowing the gesture.
-     *
-     * Leaving this screen used to mean finding the system back gesture and
-     * hoping. A camera that is pointed at nothing should always have a
-     * door next to it.
-     */
+    /** A way out that does not depend on knowing the system gesture. */
     private fun backButton(): Button = Button(this).apply {
-        text = context.getString(network.budlum.validator.R.string.g_cancel)
+        text = context.getString(R.string.g_cancel)
         setOnClickListener { cancel() }
         layoutParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -155,8 +150,11 @@ class QrScanActivity : ComponentActivity() {
                     analysis,
                 )
             }.onFailure {
-                Toast.makeText(this, "The camera would not open: " + it.message, Toast.LENGTH_LONG)
-                    .show()
+                Toast.makeText(
+                    this,
+                    getString(R.string.g_err_camera_open, it.message ?: ""),
+                    Toast.LENGTH_LONG,
+                ).show()
                 cancel()
             }
         }, ContextCompat.getMainExecutor(this))
@@ -178,13 +176,6 @@ class QrScanActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * One frame, tried the way it arrived and then turned.
-     *
-     * The Y plane alone is the luminance zxing wants, but it is padded to
-     * `rowStride`, so that - not the image width - is the width of the
-     * buffer. The crop is then the real image inside it.
-     */
     private fun decode(image: ImageProxy): String? {
         val plane = image.planes.firstOrNull() ?: return null
         val buffer = plane.buffer
@@ -204,8 +195,6 @@ class QrScanActivity : ComponentActivity() {
             height,
             false,
         )
-        // Four turns covers every way the sensor can be mounted against
-        // the way the phone is being held.
         repeat(4) {
             reader.reset()
             val text = runCatching {

@@ -228,14 +228,18 @@ impl GardenPhone {
                 reason: "this Garden gave out no invite to stand behind a code".into(),
             })?;
         let code = rendezvous::fresh_code().map_err(|e| GardenError::Refused { reason: e })?;
-        let desk = rendezvous::Desk::open(code.clone(), record.clone())
+        let mut guard = self.desk.lock().unwrap_or_else(|e| e.into_inner());
+        // Drop and join any active desk first so the shared UDP port is freed
+        // before opening a fresh code.
+        *guard = None;
+        let desk = rendezvous::Desk::open(code, record.clone())
             .map_err(|e| GardenError::Refused { reason: e })?;
         let answer = GardenCode {
             code: desk.code().to_owned(),
             seconds_left: desk.seconds_left(),
             record,
         };
-        *self.desk.lock().unwrap_or_else(|e| e.into_inner()) = Some(desk);
+        *guard = Some(desk);
         Ok(answer)
     }
 
@@ -296,6 +300,7 @@ impl GardenPhone {
 
     /// Leave, and wipe the Garden from this phone.
     pub fn leave(&self) -> Result<GardenAnswer, GardenError> {
+        *self.desk.lock().unwrap_or_else(|e| e.into_inner()) = None;
         answer(self.runtime.block_on(self.service.leave()))
     }
 
