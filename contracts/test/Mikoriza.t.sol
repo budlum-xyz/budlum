@@ -84,6 +84,15 @@ contract RegistrarHarness is BudlumRegistrar {
         boundKeys[row][keccak256(uncompressedKey)] = true;
         validatorOf[operator] = validator;
     }
+
+    function bindVerified(
+        address operator,
+        bytes32 validator,
+        bytes memory compressedKey,
+        bytes memory uncompressedKey
+    ) external {
+        _recordBinding(operator, validator, compressedKey, uncompressedKey);
+    }
 }
 
 contract MikorizaTest is Harness {
@@ -345,5 +354,38 @@ contract MikorizaTest is Harness {
         vm.prank(address(registrar.slasher()));
         vm.expectPartialRevert(BudlumRegistrar.InvalidStakeMatrix.selector);
         registrar.slashForDoubleVote(OPERATOR, "double vote");
+    }
+
+    function test_multi_hop_rebind_with_earlier_key_retires_stale_validator_row() public {
+        bytes32 v1 = bytes32(uint256(1));
+        bytes32 v2 = bytes32(uint256(2));
+        bytes32 v3 = bytes32(uint256(3));
+
+        registrar.bindVerified(OPERATOR, v1, hex"aa", hex"01");
+        registrar.bindVerified(OPERATOR, v2, hex"bb", hex"02");
+        registrar.bindVerified(OPERATOR, v3, hex"aa", hex"01");
+
+        assertEq(registrar.compressedKeyOf(v1, OPERATOR).length, 0, "v1 row must retire when key aa moves to v3");
+        assertEq(keccak256(registrar.compressedKeyOf(v2, OPERATOR)), keccak256(hex"bb"), "v2 rotated key stays");
+        assertEq(keccak256(registrar.compressedKeyOf(v3, OPERATOR)), keccak256(hex"aa"), "v3 holds key aa");
+    }
+
+    function test_slasher_rejects_zero_height_double_vote() public {
+        BudlumSlasher slasher = registrar.slasher();
+        vm.expectPartialRevert(BudlumSlasher.InvalidDoubleVote.selector);
+        slasher.slashDoubleVote(
+            DoubleVote({
+                budlumValidator: bytes32(uint256(2)),
+                operator: OPERATOR,
+                epoch: 1,
+                height: 0,
+                hashA: hex"aa",
+                negSigA: hex"01",
+                hashB: hex"bb",
+                negSigB: hex"02"
+            }),
+            hex"01",
+            bytes("generator")
+        );
     }
 }

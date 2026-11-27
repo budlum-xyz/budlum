@@ -90,13 +90,16 @@ contract BudlumSlasher {
         nonReentrant
     {
         if (
-            vote.budlumValidator == bytes32(0) || vote.operator == address(0) || vote.hashA.length == 0
-                || vote.hashB.length == 0
+            vote.budlumValidator == bytes32(0) || vote.operator == address(0) || vote.height == 0
+                || vote.hashA.length == 0 || vote.hashB.length == 0
         ) {
             revert InvalidDoubleVote();
         }
         if (keccak256(vote.hashA) == keccak256(vote.hashB)) {
             revert SameHash();
+        }
+        if (pubkey.length == 0) {
+            revert InvalidDoubleVote();
         }
         if (keccak256(g2Generator) != g2GeneratorHash) {
             revert UntrustedGenerator();

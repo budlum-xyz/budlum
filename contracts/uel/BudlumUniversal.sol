@@ -53,7 +53,10 @@ library BudlumUniversal {
     /// @notice Emitted by `PRECOMPILE` for EVM receipt/log indexers.
     event UniversalCallExecuted(uint8 ee, bytes target, bool ok);
 
+    error InvalidUniversalCall();
     error PrecompileTransportFailed();
+
+    uint256 private constant MIN_CALL_RETURNDATA_BYTES = 96;
 
     /// @notice Invokes `target` in environment `ee` with `valueAttos` attoBUD and `gasBgu`.
     function call(
@@ -63,12 +66,15 @@ library BudlumUniversal {
         uint256 valueAttos,
         uint64 gasBgu
     ) internal returns (bool ok, bytes memory ret) {
+        if (ee > EE_RV32 || target.length == 0 || gasBgu == 0 || valueAttos > type(uint128).max) {
+            revert InvalidUniversalCall();
+        }
         bytes memory payload = abi.encodeCall(
             IBudlumUniversal.call,
             (ee, target, input, valueAttos, gasBgu)
         );
         (bool precompileOk, bytes memory rawOut) = PRECOMPILE.call(payload);
-        if (!precompileOk) {
+        if (!precompileOk || rawOut.length < MIN_CALL_RETURNDATA_BYTES) {
             revert PrecompileTransportFailed();
         }
         return abi.decode(rawOut, (bool, bytes));
@@ -81,12 +87,15 @@ library BudlumUniversal {
         bytes memory input,
         uint64 gasBgu
     ) internal view returns (bool ok, bytes memory ret) {
+        if (ee > EE_RV32 || target.length == 0 || gasBgu == 0) {
+            revert InvalidUniversalCall();
+        }
         bytes memory payload = abi.encodeCall(
             IBudlumUniversal.staticCall,
             (ee, target, input, gasBgu)
         );
         (bool precompileOk, bytes memory rawOut) = PRECOMPILE.staticcall(payload);
-        if (!precompileOk) {
+        if (!precompileOk || rawOut.length < MIN_CALL_RETURNDATA_BYTES) {
             revert PrecompileTransportFailed();
         }
         return abi.decode(rawOut, (bool, bytes));
@@ -126,19 +135,25 @@ library BudlumUol {
     address internal constant UOL_PRECOMPILE =
         0x000000000000000000000000000000000000B002;
 
+    uint256 private constant MIN_WORD_RETURNDATA_BYTES = 32;
+    uint256 private constant MIN_DYN_BYTES_RETURNDATA_BYTES = 64;
+
+    error InvalidUolRequest();
     error UolPrecompileFailed();
 
     function balanceOf(bytes32 classId, bytes memory holder) internal view returns (uint128) {
+        if (classId == bytes32(0) || holder.length == 0) revert InvalidUolRequest();
         bytes memory payload = abi.encodeCall(IBudlumUol.balanceOf, (classId, holder));
         (bool ok, bytes memory raw) = UOL_PRECOMPILE.staticcall(payload);
-        if (!ok) revert UolPrecompileFailed();
+        if (!ok || raw.length < MIN_WORD_RETURNDATA_BYTES) revert UolPrecompileFailed();
         return abi.decode(raw, (uint128));
     }
 
     function holderOf(bytes32 assetId) internal view returns (bytes memory) {
+        if (assetId == bytes32(0)) revert InvalidUolRequest();
         bytes memory payload = abi.encodeCall(IBudlumUol.holderOf, (assetId));
         (bool ok, bytes memory raw) = UOL_PRECOMPILE.staticcall(payload);
-        if (!ok) revert UolPrecompileFailed();
+        if (!ok || raw.length < MIN_DYN_BYTES_RETURNDATA_BYTES) revert UolPrecompileFailed();
         return abi.decode(raw, (bytes));
     }
 
@@ -148,9 +163,12 @@ library BudlumUol {
         bytes memory to,
         uint128 amount
     ) internal returns (bool) {
+        if ((classId == bytes32(0) && assetId == bytes32(0)) || to.length == 0 || amount == 0) {
+            revert InvalidUolRequest();
+        }
         bytes memory payload = abi.encodeCall(IBudlumUol.transfer, (classId, assetId, to, amount));
         (bool ok, bytes memory raw) = UOL_PRECOMPILE.call(payload);
-        if (!ok) revert UolPrecompileFailed();
+        if (!ok || raw.length < MIN_WORD_RETURNDATA_BYTES) revert UolPrecompileFailed();
         return abi.decode(raw, (bool));
     }
 
@@ -162,19 +180,23 @@ library BudlumUol {
         uint128 amount,
         uint64 expiry
     ) internal returns (bytes32) {
+        if ((classId == bytes32(0) && assetId == bytes32(0)) || amount == 0) {
+            revert InvalidUolRequest();
+        }
         bytes memory payload = abi.encodeCall(
             IBudlumUol.offer,
             (classId, assetId, taker, payment, amount, expiry)
         );
         (bool ok, bytes memory raw) = UOL_PRECOMPILE.call(payload);
-        if (!ok) revert UolPrecompileFailed();
+        if (!ok || raw.length < MIN_WORD_RETURNDATA_BYTES) revert UolPrecompileFailed();
         return abi.decode(raw, (bytes32));
     }
 
     function accept(bytes32 offerId) internal returns (bool) {
+        if (offerId == bytes32(0)) revert InvalidUolRequest();
         bytes memory payload = abi.encodeCall(IBudlumUol.accept, (offerId));
         (bool ok, bytes memory raw) = UOL_PRECOMPILE.call(payload);
-        if (!ok) revert UolPrecompileFailed();
+        if (!ok || raw.length < MIN_WORD_RETURNDATA_BYTES) revert UolPrecompileFailed();
         return abi.decode(raw, (bool));
     }
 }
