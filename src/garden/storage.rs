@@ -507,7 +507,7 @@ impl GardenContentStore {
             Some(path) => fs::read(path).ok()?,
             None => self.memory.get(content_id)?.clone(),
         };
-        (ContentId::of(&bytes).0 == *content_id).then_some(bytes)
+        (ContentId::of(&bytes).digest == *content_id).then_some(bytes)
     }
 
     pub fn contains(&self, content_id: &Hash32) -> bool {
