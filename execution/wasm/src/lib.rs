@@ -61,6 +61,12 @@ pub const QUERY_FUEL_LIMIT: u64 = 24_000_000;
 pub const ATTOS_PER_UBUD: u128 = 1_000_000_000_000;
 /// Maximum nested submessage depth within WASM (`8`).
 pub const MAX_SUBMSG_DEPTH: u32 = 8;
+/// Maximum open `db_scan` iterators per Wasm invocation (`64`).
+const MAX_OPEN_ITERATORS: usize = 64;
+/// Maximum total snapshot bytes buffered across open `db_scan` iterators (`16 MiB`).
+const MAX_SCAN_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum CosmWasm contract label length in bytes (`128`).
+const MAX_CONTRACT_LABEL_BYTES: usize = 128;
 
 /// IBC entry points forbidden on Budlum T-Launch (`Section 8.15`,  item 2).
 pub const FORBIDDEN_IBC_EXPORTS: &[&str] = &[
@@ -118,6 +124,7 @@ struct GuestStoreState {
     kv: BTreeMap<Vec<u8>, Vec<u8>>,
     dirty_keys: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     iterators: BTreeMap<i32, KvIterator>,
+    scan_snapshot_bytes: usize,
     next_iter_id: i32,
     pending_op: Option<PendingHostOp>,
 }
@@ -137,6 +144,7 @@ impl GuestStoreState {
             kv: initial_kv,
             dirty_keys: BTreeMap::new(),
             iterators: BTreeMap::new(),
+            scan_snapshot_bytes: 0,
             next_iter_id: 1,
             pending_op: None,
         }
@@ -525,23 +533,38 @@ fn host_db_scan(
     if order != 1 && order != 2 {
         return Err(WasmiError::new("invalid CosmWasm Order (expected 1 or 2)"));
     }
-    let mut items: Vec<(Vec<u8>, Vec<u8>)> = caller
-        .data()
-        .kv
-        .iter()
-        .filter(|(k, _)| {
-            let after = start.as_ref().is_none_or(|s| k.as_slice() >= s.as_slice());
-            let before = end.as_ref().is_none_or(|e| k.as_slice() < e.as_slice());
-            after && before
-        })
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+    if caller.data().iterators.len() >= MAX_OPEN_ITERATORS {
+        return Err(WasmiError::host(GuestAbort(String::from(
+            "maximum open db_scan iterators exceeded",
+        ))));
+    }
+    let mut snapshot_bytes = caller.data().scan_snapshot_bytes;
+    let mut items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for (k, v) in &caller.data().kv {
+        let after = start.as_ref().is_none_or(|s| k.as_slice() >= s.as_slice());
+        let before = end.as_ref().is_none_or(|e| k.as_slice() < e.as_slice());
+        if after && before {
+            let entry_bytes = k.len().saturating_add(v.len());
+            snapshot_bytes = snapshot_bytes
+                .checked_add(entry_bytes)
+                .filter(|&tot| tot <= MAX_SCAN_SNAPSHOT_BYTES)
+                .ok_or_else(|| {
+                    WasmiError::host(GuestAbort(String::from(
+                        "db_scan snapshot byte budget exceeded",
+                    )))
+                })?;
+            items.push((k.clone(), v.clone()));
+        }
+    }
     if order == 2 {
         items.reverse();
     }
     let st = caller.data_mut();
     let id = st.next_iter_id;
-    st.next_iter_id = st.next_iter_id.saturating_add(1);
+    st.next_iter_id = st.next_iter_id.checked_add(1).ok_or_else(|| {
+        WasmiError::host(GuestAbort(String::from("db_scan iterator id overflow")))
+    })?;
+    st.scan_snapshot_bytes = snapshot_bytes;
     st.iterators.insert(id, KvIterator { items, cursor: 0 });
     Ok(id)
 }
@@ -1448,7 +1471,15 @@ fn dispatch_submsg(
     };
     match msg {
         CwCosmosMsg::Bank(CwBankMsg::Send { to_address, amount }) => {
+            bud_addr_canonicalize(to_address).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
             let ubud = parse_ubud_coins(amount).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
+            if ubud == 0 {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("BankMsg::Send amount must be non-zero"),
+                    0,
+                ));
+            }
             let attos = ubud
                 .checked_mul(ATTOS_PER_UBUD)
                 .ok_or_else(|| (OutcomeStatus::Revert, String::from("attoBUD overflow"), 0))?;
@@ -1645,6 +1676,16 @@ fn execute_instantiate(
     fuel_budget: u64,
     depth: u32,
 ) -> Result<(Vec<u8>, u64), (OutcomeStatus, String, u64)> {
+    if label.trim().is_empty() || label.len() > MAX_CONTRACT_LABEL_BYTES {
+        return Err((
+            OutcomeStatus::Revert,
+            String::from("contract label must be 1..=128 non-blank bytes"),
+            0,
+        ));
+    }
+    if let Some(ref adm) = admin {
+        bud_addr_canonicalize(adm).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
+    }
     let ns_code = ns(NS_WASM_CODE).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
     let ns_contract = ns(NS_WASM_CONTRACT).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
     let Some(meta_bytes) = host
@@ -2010,6 +2051,20 @@ impl WasmWorker {
                     to_address,
                     amount_ubud,
                 } => {
+                    if let Err(m) = bud_addr_canonicalize(&to_address) {
+                        return EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: m.into_bytes(),
+                            gas_used: 0,
+                        };
+                    }
+                    if amount_ubud == 0 {
+                        return EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"BankSend amount_ubud must be non-zero".to_vec(),
+                            gas_used: 0,
+                        };
+                    }
                     let from_id = EeIdentity {
                         ee: EeId::WASM,
                         id: sender.into_bytes(),
@@ -2218,7 +2273,12 @@ mod tests {
 
     use crate::abi::WasmTxAction;
     use crate::budlum_msg::{b64_encode, bud_addr_canonicalize, bud_addr_humanize};
-    use crate::{build_wasm_engine, compile_and_validate_module, WasmWorker};
+    use crate::{
+        build_linker, build_wasm_engine, compile_and_validate_module, GuestStoreState, WasmWorker,
+        ATTOS_PER_UBUD,
+    };
+    use std::collections::BTreeMap;
+    use wasmi::Store;
 
     fn sample_ctx() -> BlockContext {
         BlockContext {
@@ -2737,6 +2797,230 @@ mod tests {
         assert!(
             res.is_err(),
             "memory64 modules must be refused deterministically"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_addresses_unvalidated_bank_recipients_bad_admin_and_unbounded_db_scans() {
+        // 1. All-zero 20B and 32B addresses must be refused by humanize and canonicalize.
+        assert!(
+            bud_addr_humanize(&[0u8; 20]).is_err(),
+            "all-zero 20B address must be refused"
+        );
+        assert!(
+            bud_addr_humanize(&[0u8; 32]).is_err(),
+            "all-zero 32B address must be refused"
+        );
+        // Valid Bech32 encoding of 20 zero bytes (`bud1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq...`):
+        let zero20_data5 = [0u8; 32];
+        let mut chk = Vec::new();
+        for b in b"bud" {
+            chk.push(b >> 5);
+        }
+        chk.push(0);
+        for b in b"bud" {
+            chk.push(b & 0x1f);
+        }
+        chk.extend_from_slice(&zero20_data5);
+        chk.extend_from_slice(&[0u8; 6]);
+        let gen = [
+            0x3b6a_57b2u32,
+            0x2650_8e6d,
+            0x1ea1_19fa,
+            0x3d42_33dd,
+            0x2a14_62b3,
+        ];
+        let mut polymod = 1u32;
+        for &v in &chk {
+            let top = polymod >> 25;
+            polymod = ((polymod & 0x01ff_ffff) << 5) ^ u32::from(v);
+            for (i, &g) in gen.iter().enumerate() {
+                if ((top >> i) & 1) != 0 {
+                    polymod ^= g;
+                }
+            }
+        }
+        polymod ^= 1;
+        let charset = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+        let mut zero_bech32 = String::from("bud1");
+        for _ in 0..32 {
+            zero_bech32.push('q');
+        }
+        for i in 0..6u32 {
+            let d = ((polymod >> (5 * (5 - i))) & 31) as usize;
+            zero_bech32.push(charset[d] as char);
+        }
+        assert!(
+            bud_addr_canonicalize(&zero_bech32).is_err(),
+            "all-zero Bech32 address {zero_bech32} must be refused"
+        );
+
+        // 2. WasmTxAction::BankSend must refuse non-Bech32 recipients and zero amounts.
+        let mut worker = WasmWorker;
+        let mut host = MemoryHost::new(50_000_000);
+        let ctx = sample_ctx();
+        let sender = bud_addr_humanize(&[0x42u8; 32]).expect("valid sender");
+        let caller = EeIdentity {
+            ee: EeId::WASM,
+            id: sender.clone().into_bytes(),
+        };
+        host.balances
+            .insert(caller.clone(), 10_000 * ATTOS_PER_UBUD);
+
+        let bad_send = serde_json::to_vec(&WasmTxAction::BankSend {
+            to_address: String::from("not-a-bech32-address"),
+            amount_ubud: 100,
+        })
+        .expect("serialize");
+        let out_bad_send = worker
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: caller.clone(),
+                    target: EeIdentity {
+                        ee: EeId::WASM,
+                        id: Vec::new(),
+                    },
+                    value: BudAmount(0),
+                    input: bad_send,
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [0xa1; 32],
+                },
+                &mut host,
+            )
+            .expect("no fault");
+        assert_eq!(
+            out_bad_send.status,
+            OutcomeStatus::Revert,
+            "BankSend to non-Bech32 recipient must revert"
+        );
+
+        let valid_rcpt = bud_addr_humanize(&[0x77u8; 20]).expect("valid rcpt");
+        let zero_send = serde_json::to_vec(&WasmTxAction::BankSend {
+            to_address: valid_rcpt,
+            amount_ubud: 0,
+        })
+        .expect("serialize");
+        let out_zero_send = worker
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: caller.clone(),
+                    target: EeIdentity {
+                        ee: EeId::WASM,
+                        id: Vec::new(),
+                    },
+                    value: BudAmount(0),
+                    input: zero_send,
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [0xa2; 32],
+                },
+                &mut host,
+            )
+            .expect("no fault");
+        assert_eq!(
+            out_zero_send.status,
+            OutcomeStatus::Revert,
+            "zero-amount BankSend must revert"
+        );
+
+        // 3. Instantiate must reject invalid admin Bech32 and empty label.
+        let code_bytes = counter_cw_wasm().expect("counter wasm");
+        worker
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Deploy,
+                    caller: caller.clone(),
+                    target: EeIdentity {
+                        ee: EeId::WASM,
+                        id: Vec::new(),
+                    },
+                    value: BudAmount(0),
+                    input: code_bytes,
+                    gas_limit: 5_000_000,
+                    depth: 0,
+                    tx_hash: [0xa3; 32],
+                },
+                &mut host,
+            )
+            .expect("deploy");
+        for (bad_admin, bad_label) in [
+            (Some(String::from("BAD_ADMIN")), String::from("ok-label")),
+            (None, String::from("   ")),
+        ] {
+            let inst = serde_json::to_vec(&WasmTxAction::Instantiate {
+                code_id: 1,
+                admin: bad_admin,
+                label: bad_label,
+                msg_b64: b64_encode(b"{}"),
+                funds_ubud: 0,
+            })
+            .expect("serialize");
+            let res = worker
+                .execute(
+                    &ctx,
+                    &EeCall {
+                        kind: EeCallKind::Call,
+                        caller: caller.clone(),
+                        target: EeIdentity {
+                            ee: EeId::WASM,
+                            id: Vec::new(),
+                        },
+                        value: BudAmount(0),
+                        input: inst,
+                        gas_limit: 5_000_000,
+                        depth: 0,
+                        tx_hash: [0xa4; 32],
+                    },
+                    &mut host,
+                )
+                .expect("no fault");
+            assert_eq!(res.status, OutcomeStatus::Revert);
+        }
+
+        // 4. Unbounded host_db_scan loop (> 64 open iterators) must trap deterministically.
+        let engine = build_wasm_engine();
+        let linker = build_linker(&engine).expect("linker");
+        let scan_wat = r#"
+        (module
+            (import "env" "db_scan" (func $db_scan (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (func (export "allocate") (param i32) (result i32) (i32.const 0))
+            (func (export "deallocate") (param i32))
+            (func (export "run")
+                (local $i i32)
+                (block $done
+                    (loop $lp
+                        (br_if $done (i32.ge_u (local.get $i) (i32.const 70)))
+                        (drop (call $db_scan (i32.const 0) (i32.const 0) (i32.const 1)))
+                        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                        (br $lp)
+                    )
+                )
+            )
+        )
+        "#;
+        let scan_wasm = wat::parse_str(scan_wat).expect("wat");
+        let module = compile_and_validate_module(&engine, &scan_wasm).expect("valid scan wasm");
+        let mut init_kv = BTreeMap::new();
+        init_kv.insert(b"k1".to_vec(), vec![0xabu8; 64]);
+        let mut store = Store::new(&engine, GuestStoreState::new(init_kv, false));
+        store.limiter(|s| &mut s.limits);
+        store.set_fuel(5_000_000).expect("fuel");
+        let instance = linker
+            .instantiate_and_start(&mut store, &module)
+            .expect("instantiate");
+        let run_fn = instance
+            .get_typed_func::<(), ()>(&store, "run")
+            .expect("run export");
+        assert!(
+            run_fn.call(&mut store, ()).is_err(),
+            "opening >64 db_scan iterators must trap instead of growing unboundedly"
         );
     }
 }

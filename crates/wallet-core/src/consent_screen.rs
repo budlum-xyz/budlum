@@ -93,8 +93,16 @@ impl ConsentScreenPrompt {
     /// without a verified `YK6` non-blacklist predicate proof.
     /// exposed for: wallet consent confirmation flow ( Step 9).
     pub fn seal_for_chain(&self, blinding_salt: &[u8; 32]) -> Result<BlindedConsentRecord, String> {
-        if self.scope_label.trim().is_empty() {
-            return Err("consent scope_label must not be empty".to_string());
+        if self.issuer_address == [0u8; 32] || self.content_id == [0u8; 32] {
+            return Err("consent issuer_address and content_id must be non-zero".to_string());
+        }
+        if !matches!(self.mode, ConsentMode::PublicPublish { .. })
+            && self.grantee_address == [0u8; 32]
+        {
+            return Err("non-public consent grantee_address must be non-zero".to_string());
+        }
+        if self.scope_label.trim().is_empty() || self.scope_label.len() > 256 {
+            return Err("consent scope_label must be 1..=256 non-blank bytes".to_string());
         }
         if blinding_salt.iter().all(|&b| b == 0) {
             return Err("consent blinding_salt must be non-zero".to_string());
@@ -222,9 +230,19 @@ pub fn shamir_split_32(
     if threshold < 2 || threshold > total || total == u8::MAX {
         return Err("invalid Shamir (threshold, total) parameters".to_string());
     }
+    if secret.iter().all(|&b| b == 0) {
+        return Err("all-zero secret cannot be split via Shamir".to_string());
+    }
     let needed = usize::from(threshold - 1) * 32;
     if coeff_entropy.len() < needed {
         return Err("insufficient coeff_entropy for Shamir polynomial".to_string());
+    }
+    for deg_slice in coeff_entropy[..needed].chunks_exact(32) {
+        if deg_slice.iter().all(|&b| b == 0) {
+            return Err(
+                "all-zero Shamir polynomial coefficient reduces threshold security".to_string(),
+            );
+        }
     }
     let mut out = Vec::with_capacity(usize::from(total));
     for idx in 1..=total {
@@ -349,5 +367,26 @@ mod tests {
         let sub_b = [shares[1], shares[3], shares[4]];
         assert_eq!(shamir_reconstruct_32(&sub_a, 3).unwrap(), secret);
         assert_eq!(shamir_reconstruct_32(&sub_b, 3).unwrap(), secret);
+
+        // Degenerate all-zero secret or all-zero polynomial coefficients must be refused.
+        assert!(
+            shamir_split_32(&[0u8; 32], 3, 5, &entropy).is_err(),
+            "all-zero Shamir secret must be refused"
+        );
+        assert!(
+            shamir_split_32(&secret, 3, 5, &[0u8; 64]).is_err(),
+            "all-zero Shamir polynomial coefficients leak secret in every share and must be refused"
+        );
+
+        // ConsentScreenPrompt with zero issuer_address or zero content_id must be refused.
+        let zero_issuer = ConsentScreenPrompt {
+            issuer_address: [0u8; 32],
+            grantee_address: [0x22; 32],
+            content_id: [0x33; 32],
+            scope_label: "read".to_string(),
+            expiry_epoch: 10,
+            mode: ConsentMode::BlindGrant,
+        };
+        assert!(zero_issuer.seal_for_chain(&[0x11; 32]).is_err());
     }
 }

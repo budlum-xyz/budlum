@@ -407,7 +407,11 @@ impl MarketplaceRegistry {
             }
         }
         if self.offers.len() >= MAX_OFFERS {
-            self.offers.retain(|_, o| o.active);
+            // Preserve the sentinel `u64::MAX` entry across eviction so a deactivated
+            // terminal listing can never be pruned and re-minted when `next_offer_id`
+            // saturates at `u64::MAX`.
+            self.offers
+                .retain(|&offer_id, o| o.active || offer_id == u64::MAX);
             if self.offers.len() >= MAX_OFFERS {
                 return Err("offer registry is full".into());
             }
@@ -431,11 +435,9 @@ impl MarketplaceRegistry {
         }
         // The counter saturates at u64::MAX rather than refusing the last id.
         // The live-id guard above already refuses to mint over an id that
-        // resolves, so a saturated counter cannot hand one seller's listing to
-        // another: the second attempt at `u64::MAX` is refused by that guard.
-        // `checked_add` refused the id `u64::MAX` itself, which loses the last
-        // value of the space and breaks the recorded contract this module's
-        // test pins.
+        // resolves, and `retain` above preserves any terminal `u64::MAX` entry
+        // across inactive-offer pruning, so a saturated counter cannot hand one
+        // seller's listing to another even after deactivation and eviction.
         let next_offer_id = self.next_offer_id.saturating_add(1);
         let offer = DataOffer {
             id,

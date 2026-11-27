@@ -200,7 +200,10 @@ impl BudManifest {
         if bytes.len() as u64 != self.content_size {
             return false;
         }
-        if self.shards.len() > MAX_MANIFEST_SHARDS
+        if self.erasure_k == 0
+            || self.erasure_k > self.erasure_n
+            || self.shards.len() != self.erasure_n as usize
+            || self.shards.len() > MAX_MANIFEST_SHARDS
             || self
                 .shards
                 .iter()
@@ -208,12 +211,27 @@ impl BudManifest {
         {
             return false;
         }
+        let mut seen_indices = std::collections::BTreeSet::new();
+        for s in &self.shards {
+            if s.index >= self.erasure_n || !seen_indices.insert(s.index) {
+                return false;
+            }
+        }
         let mut data: Vec<&BudShard> = self.shards.iter().filter(|s| !s.parity).collect();
+        if data.len() != self.erasure_k as usize {
+            return false;
+        }
         data.sort_by_key(|s| s.index);
         let data_count = data.len();
         let mut off = 0usize;
         for (position, shard) in data.iter().enumerate() {
             let len = shard.size as usize;
+            if !bytes.is_empty() && (len == 0 || off >= bytes.len()) {
+                return false;
+            }
+            if bytes.is_empty() && (data_count != 1 || len != 0) {
+                return false;
+            }
             let Some(end) = off.checked_add(len) else {
                 return false;
             };
@@ -293,8 +311,13 @@ fn validate_https_url(url: &str) -> Result<(), String> {
         return Err(format!("Target::Https URL is malformed: {url:?}"));
     }
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    if rest[..authority_end].is_empty() {
-        return Err(format!("Target::Https URL has an empty host: {url:?}"));
+    let authority = &rest[..authority_end];
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.contains('\\')
+        || authority.starts_with(':')
+    {
+        return Err(format!("Target::Https URL has an invalid host: {url:?}"));
     }
     Ok(())
 }
@@ -725,5 +748,43 @@ mod tests {
         let tz = Table::with(&hex::encode(&zero_tx), b"permaweb");
         let zero_got = fetch_and_verify(&tz, &Target::Arweave(zero_tx)).unwrap();
         assert_eq!(zero_got.evidence.weakest(), Strength::Refused);
+    }
+
+    #[test]
+    fn describes_refuses_phantom_trailing_zero_shards_erasure_mismatch_and_userinfo_https() {
+        let body = b"hi";
+        let mut phantom = BudManifest::single_shard(body);
+        phantom.shards.push(BudShard {
+            index: 1,
+            shard_id: ContentId::of(&[0u8; 64]),
+            size: 64,
+            parity: false,
+        });
+        phantom.erasure_k = 2;
+        phantom.erasure_n = 2;
+        assert!(
+            !phantom.describes(body),
+            "phantom trailing zero-padded shard past content_size must be refused"
+        );
+
+        let mut bad_erasure = BudManifest::single_shard(body);
+        bad_erasure.erasure_k = 5;
+        bad_erasure.erasure_n = 5;
+        assert!(
+            !bad_erasure.describes(body),
+            "manifest whose shard count disagrees with erasure_k/erasure_n must be refused"
+        );
+
+        for bad_url in [
+            "https://user:pass@example.com/page",
+            "https://:443/page",
+            "https://example.com\\evil/page",
+        ] {
+            let t = Table::with(bad_url, b"<html></html>");
+            assert!(
+                fetch_and_verify(&t, &Target::Https(bad_url.to_string())).is_err(),
+                "{bad_url:?} must be refused"
+            );
+        }
     }
 }

@@ -2254,4 +2254,58 @@ mod tests {
         }
         String::from_utf8_lossy(&bytes).into_owned()
     }
+
+    #[test]
+    fn codegen_direct_ast_refuses_short_builtin_args_without_panicking_and_preserves_first_error() {
+        use crate::ast::{Contract, Expr, Function, Stmt};
+        let empty_merkle = Contract {
+            name: String::from("BadAst"),
+            storage: Vec::new(),
+            witnesses: Vec::new(),
+            structs: Vec::new(),
+            functions: vec![Function {
+                name: String::from("main"),
+                is_pub: true,
+                params: Vec::new(),
+                return_type: None,
+                body: vec![Stmt::Let(
+                    String::from("r"),
+                    Expr::Call(String::from("verify_merkle_proof"), Vec::new()),
+                )],
+            }],
+        };
+        let mut cg = codegen::Codegen::new();
+        assert!(
+            matches!(
+                cg.generate(&empty_merkle),
+                Err(CompileError::CodegenError(_))
+            ),
+            "0-arg verify_merkle_proof AST must return CodegenError instead of panicking"
+        );
+
+        let short_poseidon = Contract {
+            name: String::from("ShortPoseidon"),
+            storage: Vec::new(),
+            witnesses: Vec::new(),
+            structs: Vec::new(),
+            functions: vec![Function {
+                name: String::from("main"),
+                is_pub: true,
+                params: Vec::new(),
+                return_type: None,
+                body: vec![Stmt::Let(
+                    String::from("h"),
+                    Expr::Call(String::from("poseidon"), vec![Expr::Int(1)]),
+                )],
+            }],
+        };
+        let mut cg2 = codegen::Codegen::new();
+        assert!(
+            matches!(
+                cg2.generate(&short_poseidon),
+                Err(CompileError::CodegenError(_))
+            ),
+            "1-arg poseidon AST must return CodegenError instead of panicking"
+        );
+    }
 }

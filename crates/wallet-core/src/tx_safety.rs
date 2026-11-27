@@ -352,7 +352,7 @@ impl AgentSpendGuard {
                 expires_at_height: policy.expires_at_height,
             });
         }
-        if !policy.allowed_targets.iter().any(|t| t == target) {
+        if *target == [0u8; 32] || !policy.allowed_targets.iter().any(|t| t == target) {
             return Err(TxSafetyError::TargetNotAllowlisted { target: *target });
         }
         if amount_atoms > policy.human_veto_above_atoms && !human_countersigned {
