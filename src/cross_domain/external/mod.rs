@@ -110,6 +110,7 @@ pub mod algorand_stateproof;
 pub mod aptos_jolteon_bft;
 pub mod arweave_spora;
 pub mod auxpow_pop;
+pub mod avalanche_warp;
 pub mod babylon_eots;
 pub mod based_preconf;
 pub mod bitcoin_spv;
@@ -169,6 +170,14 @@ pub use aptos_jolteon_bft::{
 pub use arweave_spora::{ArweaveSpOraAdapter, ArweaveSpOraEvidence};
 pub use auxpow_pop::{
     AuxPowPopAdapter, PinnedAuxPowAnchor, PopAnchorSigner, PopEquivocationProof, U256Bytes,
+};
+pub use avalanche_warp::{
+    adjudicate_avalanche_warp_contradiction, advance_avalanche_pchain_set,
+    avalanche_warp_sign_bytes, compute_avalanche_pchain_set_hash,
+    compute_avalanche_warp_block_hash, encode_avalanche_warp_evidence,
+    AvalancheContradictedValidator, AvalancheSubnetValidator, AvalancheWarpAdapter,
+    AvalancheWarpContradictionProof, AvalancheWarpHeader, AvalancheWarpSignature,
+    PinnedAvalancheSubnet,
 };
 pub use babylon_eots::{
     epoch_vote_message, BabylonEotsAdapter, BtcCheckpoint, BtcWeakSubjectivityAnchor,
