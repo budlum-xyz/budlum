@@ -914,6 +914,11 @@ impl GhostdagPowAdapter {
                 accepted: GHOSTDAG_EVIDENCE_VERSION.to_string(),
             });
         }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "ghostdag network identifier cannot be empty".into(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -1071,13 +1076,14 @@ impl GhostdagPowAdapter {
                     rule: "ghostdag selected_parent disagrees with highest-blue-work parent".into(),
                 });
             }
-            if hdr.timestamp_secs < sp_vertex.timestamp_secs {
+            if hdr.timestamp_secs == 0 || hdr.timestamp_secs < sp_vertex.timestamp_secs {
                 return Err(AdapterError::ConsensusRule {
-                    rule: "ghostdag timestamp regresses behind selected parent".into(),
+                    rule: "ghostdag timestamp is zero or regresses behind selected parent".into(),
                 });
             }
-            let max_allowed_ts = policy.now.saturating_add(pinned.max_future_drift_secs);
-            if hdr.timestamp_secs > max_allowed_ts {
+            if policy.max_age > 0
+                && hdr.timestamp_secs > policy.now.saturating_add(pinned.max_future_drift_secs)
+            {
                 return Err(AdapterError::ConsensusRule {
                     rule: "ghostdag header timestamp exceeds future drift bound".into(),
                 });
@@ -1231,19 +1237,21 @@ impl GhostdagPowAdapter {
             }
         }
 
-        // Declaration parity checks (never trust undeclared fields).
-        if evidence.declared_height != fin.daa_score {
-            return Err(AdapterError::DeclarationMismatch { field: "height" });
-        }
-        if !bool::from(
-            evidence
-                .declared_root
-                .as_slice()
-                .ct_eq(fin.utxo_commitment.as_slice()),
-        ) {
-            return Err(AdapterError::DeclarationMismatch {
-                field: "state_root",
-            });
+        // Declaration parity checks.
+        if policy.require_declared_match {
+            if evidence.declared_height != fin.daa_score {
+                return Err(AdapterError::DeclarationMismatch { field: "height" });
+            }
+            if !bool::from(
+                evidence
+                    .declared_root
+                    .as_slice()
+                    .ct_eq(fin.utxo_commitment.as_slice()),
+            ) {
+                return Err(AdapterError::DeclarationMismatch {
+                    field: "state_root",
+                });
+            }
         }
 
         let window_blue_work = tip
@@ -1281,6 +1289,11 @@ impl GhostdagPowAdapter {
 impl ExternalFinalityAdapter for GhostdagPowAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        !self.network.trim().is_empty()
+            && self.pinned.as_ref().is_some_and(|p| p.validate().is_ok())
     }
 
     fn verify(
@@ -1793,5 +1806,42 @@ mod tests {
             ),
             Err(AdapterError::UnslashableBacking)
         ));
+    }
+
+    #[test]
+    fn ghostdag_reports_pinned_anchor_and_does_not_brick_after_relayer_pause_when_max_age_zero() {
+        let mut pinned = test_anchor(3, 1);
+        pinned.anchor_timestamp_secs = 1_750_000_000;
+        let mut dag = TestDagBuilder::new(pinned.clone());
+        let h1 = dag.mine_block(vec![pinned.anchor_hash], 0x11, 0x21, 10_000, TEST_BITS);
+        let tip = dag.mine_block(vec![h1.block_hash], 0x12, 0x22, 10_030, TEST_BITS);
+
+        let adapter = GhostdagPowAdapter::new(NETWORK, Some(pinned.clone()));
+        assert!(adapter.has_pinned_trust_anchor());
+        assert!(!GhostdagPowAdapter::new(NETWORK, None).has_pinned_trust_anchor());
+
+        let ev = GhostdagEvidence {
+            headers: dag.headers,
+            finalized_hash: h1.block_hash,
+            tip_hash: tip.block_hash,
+        };
+        let raw = wrap_evidence(&adapter, &ev, h1.daa_score, h1.utxo_commitment);
+
+        // Live IntakeState::submit sets policy.max_age == 0 and policy.now == old_tip_time.
+        // After a >2h relayer pause (`10_030s > max_future_drift_secs = 120s`), verification
+        // must succeed when `max_age == 0` and still fail closed when `max_age > 0`.
+        let mut paused_intake_policy = VerificationPolicy::strict(pinned.anchor_timestamp_secs);
+        paused_intake_policy.max_age = 0;
+        paused_intake_policy.require_slashable = false;
+        adapter
+            .verify(&raw, &paused_intake_policy)
+            .expect("GHOSTDAG domain must not brick after >2h relayer pause when max_age == 0");
+
+        let mut clocked = paused_intake_policy;
+        clocked.max_age = 86_400;
+        assert!(
+            adapter.verify(&raw, &clocked).is_err(),
+            "future drift above max_future_drift_secs must still fail closed when max_age > 0"
+        );
     }
 }
