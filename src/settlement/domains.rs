@@ -138,6 +138,16 @@ pub enum SettlementTx {
     ///
     /// Appended to preserve existing bincode enum discriminants.
     Denominate(Box<crate::settlement::universal_asset::Denomination>),
+
+    /// A B.U.D. 3.0 Data Market action: list an object for sale, or buy one.
+    ///
+    /// The registry behind this door was complete and unreachable: it moved BUD
+    /// through `settle_purchase_with_grant(&mut AccountState, ...)` and no
+    /// transaction called it, so a purchase could only happen if a node called
+    /// the library directly - which no node does.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    DataMarket(Box<DataMarketTx>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -2055,6 +2065,81 @@ pub fn execute_settlement_tx(
         SettlementTx::Liquidate(request) => execute_liquidation_request(state, ctx, request),
         SettlementTx::Bundle(bundle_tx) => execute_bundle_tx(state, ctx, bundle_tx),
         SettlementTx::Denominate(denomination) => execute_denomination(state, ctx, denomination),
+        SettlementTx::DataMarket(market_tx) => execute_data_market_tx(state, ctx, market_tx),
+    }
+}
+
+/// A Data Market action that belongs on chain.
+///
+/// # Why only listing
+///
+/// The obvious shape would be `Listing | Purchase`, and `Purchase` is
+/// deliberately absent. A purchase carries a `SellerGrantBundle`, which carries
+/// a `ContentKey` - and `ContentKey` is not `Serialize` on purpose: the comment
+/// on it says "it never leaves the owner's devices in the clear". Putting a
+/// purchase in a transaction would mean putting a content key in a signed
+/// message that every node stores forever, which is the one thing the type is
+/// built to prevent.
+///
+/// So the sale path is the seller's grant going to the buyer *off-chain*, and
+/// the buyer proving possession of it through the grant machinery that already
+/// exists (`bud3::grants`). What belongs on chain, and what this variant is, is
+/// the listing: price, object and duration are public facts about a public
+/// offer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DataMarketTx {
+    /// Put a B.U.D. 3.0 object up for sale.
+    Listing {
+        /// Content id of the object being sold.
+        content_id: crate::storage::bud3::content_id::ContentId,
+        /// The object's key in the B.U.D. 3.0 registry.
+        object_key: crate::storage::bud3::registry::ObjectKey,
+        /// The NFT id bound to the object.
+        nft_id: [u8; 32],
+        /// Price in atoms.
+        price_atoms: u64,
+        /// How many epochs an access grant lasts.
+        grant_duration_epochs: u64,
+    },
+}
+
+/// Executes a Data Market transaction.
+///
+/// The chain-level rule on top of the registry's own checks: a purchase's
+/// `auth.buyer` must be the transaction sender. The registry verifies the
+/// buyer's signature, which proves who signed; it does not prove who is
+/// submitting, and letting a third party submit somebody else's signed
+/// purchase would make the sender field a lie.
+fn execute_data_market_tx(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &DataMarketTx,
+) -> Result<(), SettlementTxError> {
+    use crate::data_market::DataMarketError;
+
+    match tx {
+        DataMarketTx::Listing {
+            content_id,
+            object_key,
+            nft_id,
+            price_atoms,
+            grant_duration_epochs,
+        } => {
+            state
+                .settlement
+                .data_market
+                .create_listing(
+                    &state.bud3_registry,
+                    ctx.sender,
+                    (*content_id, *object_key, *nft_id),
+                    *price_atoms,
+                    *grant_duration_epochs,
+                )
+                .map_err(|err: DataMarketError| {
+                    SettlementTxError::Refused(format!("data market listing: {err:?}"))
+                })?;
+            Ok(())
+        }
     }
 }
 

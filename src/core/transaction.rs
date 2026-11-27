@@ -4682,6 +4682,30 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
                 }
             }
         }
+        SettlementTx::DataMarket(market_tx) => {
+            // Tag 14. A listing is public facts about a public offer, and every
+            // one of them is in the preimage: a seller that signed a price must
+            // not have it rewritten before the listing lands.
+            use crate::settlement::domains::DataMarketTx;
+            put_u8(out, 14);
+            match market_tx.as_ref() {
+                DataMarketTx::Listing {
+                    content_id,
+                    object_key,
+                    nft_id,
+                    price_atoms,
+                    grant_duration_epochs,
+                } => {
+                    put_u8(out, 0);
+                    let bytes = postcard::to_allocvec(&(*content_id, *object_key))
+                        .unwrap_or_else(|_| b"budlum/data-market/target-failed".to_vec());
+                    put_bytes(out, &bytes);
+                    put_fixed(out, nft_id);
+                    put_u64(out, *price_atoms);
+                    put_u64(out, *grant_duration_epochs);
+                }
+            }
+        }
         SettlementTx::Denominate(denomination) => {
             // Tag 13. The members and the anchor are the whole claim; the label
             // is display only and is deliberately absent, matching the id rule

@@ -61,6 +61,15 @@ pub struct SettlementRegistries {
     /// declared a denomination, so its presence changes no root until used.
     #[serde(default)]
     pub denominations: crate::settlement::universal_asset::DenominationIndex,
+    /// B.U.D. 3.0 Data Market: listings, purchase receipts and consumed grants.
+    ///
+    /// The registry was fully implemented and lived nowhere: `bud.rs` built an
+    /// empty one to check its API and no `AccountState` held it, so every
+    /// listing was per-process and every sale was forgotten at restart. It is
+    /// here for the same reason every other row is: a market that moves BUD
+    /// must be in the state root, or two nodes disagree about who bought what.
+    #[serde(default)]
+    pub data_market: crate::data_market::DataMarketRegistry,
     /// Open all-or-nothing intent bundles, keyed by bundle id.
     ///
     /// A bundle binds legs that already exist as ordinary intents; it never
