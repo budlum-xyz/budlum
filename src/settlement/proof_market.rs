@@ -522,6 +522,9 @@ impl ProofTask {
                     .into(),
             );
         }
+        if self.difficulty != Self::default_difficulty(&self.kind) {
+            return Err("ProofTask difficulty does not match kind default".into());
+        }
         if !self.verify_id() {
             return Err("ProofTask task_id mismatch".into());
         }
@@ -728,6 +731,9 @@ impl ProofReceipt {
         if self.reward_claimed == 0 || self.reward_claimed > task.reward {
             return Err("ProofReceipt reward_claimed invalid".into());
         }
+        if self.status != ReceiptStatus::Pending {
+            return Err("ProofReceipt status must be pending".into());
+        }
         Ok(())
     }
 
@@ -892,10 +898,21 @@ impl ProofMarketState {
             && self.total_tasks_completed == 0
     }
 
-    fn record_retired_task(&mut self, creator: Address, task_id: [u8; 32], deadline_epoch: u64) {
+    fn record_retired_task(
+        &mut self,
+        creator: Address,
+        task_id: [u8; 32],
+        created_epoch: u64,
+        deadline_epoch: u64,
+    ) {
+        self.last_closed_epoch = self.last_closed_epoch.max(created_epoch);
         let entries = self.retired_tasks_by_creator.entry(creator).or_default();
         match entries.binary_search_by_key(&task_id, |(id, _)| *id) {
-            Ok(idx) => entries[idx].1 = entries[idx].1.max(deadline_epoch),
+            Ok(idx) => {
+                if let Some(entry) = entries.get_mut(idx) {
+                    entry.1 = entry.1.max(deadline_epoch);
+                }
+            }
             Err(idx) => entries.insert(idx, (task_id, deadline_epoch)),
         }
     }
@@ -941,10 +958,17 @@ impl ProofMarketState {
     ///
     /// Returns an error if the operation fails.
     pub fn fund_escrow(&mut self, creator: Address, amount: u64) -> Result<(), String> {
-        let entry = self.escrowed.entry(creator).or_insert(0);
-        *entry = entry
+        if creator == Address::zero() {
+            return Err("ProofMarketState creator cannot be zero".into());
+        }
+        if amount == 0 {
+            return Err("ProofMarketState escrow funding must be positive".into());
+        }
+        let current = self.escrowed.get(&creator).copied().unwrap_or(0);
+        let updated = current
             .checked_add(amount)
             .ok_or_else(|| "ProofMarketState escrow overflow".to_string())?;
+        self.escrowed.insert(creator, updated);
         Ok(())
     }
 
@@ -964,6 +988,9 @@ impl ProofMarketState {
     /// decided before mutation, allowing the settlement door to preflight the
     /// account credit and keep the transfer atomic.
     pub fn withdraw_escrow(&mut self, creator: Address, amount: u64) -> Result<u64, String> {
+        if creator == Address::zero() {
+            return Err("ProofMarketState creator cannot be zero".into());
+        }
         if amount == 0 {
             return Err("ProofMarketState escrow withdrawal must be positive".into());
         }
@@ -1122,9 +1149,13 @@ impl ProofMarketState {
         // time-based takeover would let any bonded prover revoke work another
         // prover is about to deliver. A task whose prover never delivers is
         // returned to its creator by the expiry refund instead.
-        let target_min_stake = self.active_tasks[idx].min_prover_stake;
+        let target_min_stake = self
+            .active_tasks
+            .get(idx)
+            .ok_or("ProofMarketState task not found")?
+            .min_prover_stake;
         let mut open_for_prover = 0usize;
-        let mut committed_stake = 0u64;
+        let mut committed_stake = 0u128;
         for (i, existing) in self.active_tasks.iter().enumerate() {
             if i == idx {
                 continue;
@@ -1132,7 +1163,11 @@ impl ProofMarketState {
             if let ProofTaskStatus::Assigned { prover: p, .. } = existing.status {
                 if p == prover {
                     open_for_prover = open_for_prover.saturating_add(1);
-                    committed_stake = committed_stake.saturating_add(existing.min_prover_stake);
+                    committed_stake = committed_stake
+                        .checked_add(u128::from(existing.min_prover_stake))
+                        .ok_or_else(|| {
+                            "ProofMarketState committed prover stake overflow".to_string()
+                        })?;
                 }
             }
         }
@@ -1142,15 +1177,18 @@ impl ProofMarketState {
             ));
         }
         let required_total_stake = committed_stake
-            .checked_add(target_min_stake)
+            .checked_add(u128::from(target_min_stake))
             .ok_or_else(|| "ProofMarketState committed prover stake overflow".to_string())?;
-        if prover_stake < required_total_stake {
+        if u128::from(prover_stake) < required_total_stake {
             return Err(format!(
                 "prover holds {prover_stake} and open assignments plus this task require {required_total_stake}"
             ));
         }
 
-        self.active_tasks[idx].assign(prover, prover_stake, current_epoch)
+        self.active_tasks
+            .get_mut(idx)
+            .ok_or("ProofMarketState task not found")?
+            .assign(prover, prover_stake, current_epoch)
     }
 
     /// On completion, produces a receipt and removes the task.
@@ -1170,7 +1208,19 @@ impl ProofMarketState {
             .position(|t| t.task_id == task_id)
             .ok_or("Task not found in active tasks")?;
 
-        receipt.validate_for_task(&self.active_tasks[idx])?;
+        if self
+            .pending_receipts
+            .iter()
+            .any(|existing| existing.task_id == task_id)
+        {
+            return Err("ProofMarketState receipt already exists for task".into());
+        }
+
+        let target_task = self
+            .active_tasks
+            .get(idx)
+            .ok_or("Task not found in active tasks")?;
+        receipt.validate_for_task(target_task)?;
         // HIGH (CWE-345, 2026-08-17): a receipt carries only metadata and
         // a non-zero hash, so it must not reach `pending_receipts` without the
         // proof actually being verified. Verification runs through the hook the
@@ -1237,7 +1287,12 @@ impl ProofMarketState {
         if let Some(new_balance) = updated_creator_escrow {
             self.escrowed.insert(task.creator, new_balance);
         }
-        self.record_retired_task(task.creator, task_id, task.deadline_epoch);
+        self.record_retired_task(
+            task.creator,
+            task_id,
+            task.created_epoch,
+            task.deadline_epoch,
+        );
         self.pending_receipts.push(receipt);
         self.total_tasks_completed = total_tasks_completed;
         Ok(())
@@ -1308,6 +1363,15 @@ impl ProofMarketState {
         if reason.is_empty() || reason.len() > 256 {
             return Err("ProofMarketState revoke reason invalid".into());
         }
+        if let Some((rooted_creator, _)) = self
+            .retired_tasks_by_creator
+            .iter()
+            .find(|(_, tasks)| tasks.iter().any(|(id, _)| *id == task_id))
+        {
+            if *rooted_creator != creator {
+                return Err("ProofMarketState revoke creator does not match task creator".into());
+            }
+        }
         let receipt = self
             .pending_receipts
             .iter_mut()
@@ -1360,7 +1424,12 @@ impl ProofMarketState {
         // creator may already have withdrawn every unassigned atom, so no
         // escrow-map row is required here.
         self.active_tasks.remove(index);
-        self.record_retired_task(task.creator, task_id, task.deadline_epoch);
+        self.record_retired_task(
+            task.creator,
+            task_id,
+            task.created_epoch,
+            task.deadline_epoch,
+        );
         Ok((task.creator, task.reward))
     }
 
@@ -1384,7 +1453,11 @@ impl ProofMarketState {
             .iter()
             .position(|task| task.task_id == task_id)
             .ok_or("ProofMarketState task not found")?;
-        let task = self.active_tasks[index].clone();
+        let task = self
+            .active_tasks
+            .get(index)
+            .cloned()
+            .ok_or("ProofMarketState task not found")?;
         if !matches!(task.status, ProofTaskStatus::Assigned { .. }) {
             return Err("ProofMarketState task is not assigned".into());
         }
@@ -1392,7 +1465,12 @@ impl ProofMarketState {
         // also restore it to `escrowed` when returning it to the account. A
         // withdrawn unassigned balance may leave no escrow-map row.
         self.active_tasks.remove(index);
-        self.record_retired_task(task.creator, task_id, task.deadline_epoch);
+        self.record_retired_task(
+            task.creator,
+            task_id,
+            task.created_epoch,
+            task.deadline_epoch,
+        );
         Ok((task.creator, task.reward))
     }
 
@@ -1415,7 +1493,12 @@ impl ProofMarketState {
                 return true;
             };
             escrow_after.insert(task.creator, refunded);
-            retired.push((task.task_id, task.creator, task.reward, task.deadline_epoch));
+            retired.push((
+                task.task_id,
+                task.creator,
+                task.created_epoch,
+                task.deadline_epoch,
+            ));
             false
         });
         self.escrowed = escrow_after;
@@ -1423,8 +1506,8 @@ impl ProofMarketState {
         // have consumed the creator's entire unassigned balance and removed
         // its zero row; the checked map above re-creates that row without
         // risking a silent supply loss.
-        for (id, creator, _reward, deadline_epoch) in retired {
-            self.record_retired_task(creator, id, deadline_epoch);
+        for (id, creator, created_epoch, deadline_epoch) in retired {
+            self.record_retired_task(creator, id, created_epoch, deadline_epoch);
         }
         before - self.active_tasks.len()
     }
@@ -2825,5 +2908,133 @@ mod tests {
             .revoke_receipt_for_task(task_id, creator, "duplicate dispute")
             .is_err());
         assert_eq!(market.total_locked_supply(), initial_supply);
+    }
+
+    #[test]
+    fn rejects_non_pending_receipt_preserving_locked_supply() {
+        let creator = test_address(0x71);
+        let prover = test_address(0x72);
+        let mut market = ProofMarketState::new();
+        market.fund_escrow(creator, 500).unwrap();
+        let task = ProofTask::new(task_kind(), creator, 1, 20, 500, [0x71; 32], 10);
+        let task_id = task.task_id;
+        market.add_task(task, 1).unwrap();
+        market.assign_task(task_id, prover, 100, 2).unwrap();
+        assert_eq!(market.total_locked_supply(), 500);
+
+        let mut paid_receipt = ProofReceipt::new(task_id, prover, 3, [0x72; 32], 500);
+        paid_receipt.mark_paid().unwrap();
+        assert!(
+            market
+                .complete_task(task_id, paid_receipt, |_| Ok(()))
+                .is_err(),
+            "complete_task must reject a pre-settled Paid receipt that would silently burn locked supply"
+        );
+        assert_eq!(
+            market.total_locked_supply(),
+            500,
+            "refused non-pending receipt must preserve exact locked supply"
+        );
+    }
+
+    #[test]
+    fn blocks_same_epoch_replay_after_first_active_epoch_close() {
+        let creator = test_address(0x73);
+        let prover = test_address(0x74);
+        let mut market = ProofMarketState::new();
+
+        // Start of epoch 2 on an unused market: close_epoch(2) skips advancing
+        // last_closed_epoch because the market is empty.
+        market.close_epoch(2);
+        market.fund_escrow(creator, 200).unwrap();
+        let task = task_with(task_kind(), creator, 2, 10, 100);
+        let task_id = task.task_id;
+        market.add_task(task.clone(), 2).unwrap();
+        market.assign_task(task_id, prover, 0, 2).unwrap();
+        market.fail_task(task_id, "invalid proof".into()).unwrap();
+        assert!(market.is_task_retired(&creator, &task_id));
+
+        // A second close_epoch(2) within the same live epoch 2 must NEVER wipe
+        // epoch 2 retirements and reopen exact same-epoch task_id replay.
+        market.close_epoch(2);
+        assert!(
+            market.is_task_retired(&creator, &task_id),
+            "same-epoch retirement from first active epoch must survive close_epoch(2)"
+        );
+        assert!(
+            market.add_task(task, 2).is_err(),
+            "exact same-epoch task_id must not be re-admitted after close_epoch(2)"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_address_and_zero_amount_escrow_funding() {
+        let creator = test_address(0x75);
+        let mut market = ProofMarketState::new();
+        assert!(
+            market.fund_escrow(Address::zero(), 100).is_err(),
+            "zero creator address must not lock escrow"
+        );
+        assert!(
+            market.fund_escrow(creator, 0).is_err(),
+            "zero-amount funding must not insert permanent unwithdrawable escrow rows"
+        );
+        assert!(
+            market.is_empty(),
+            "refused escrow calls must leave market completely empty"
+        );
+    }
+
+    #[test]
+    fn rejects_tampered_difficulty_u64_stake_saturation_and_wrong_revoke_creator() {
+        let creator = test_address(0x76);
+        let attacker = test_address(0x77);
+        let prover = test_address(0x78);
+
+        // (a) Unbound difficulty override must fail validate_shape.
+        let mut tampered = task_with(task_kind(), creator, 1, 20, 100);
+        tampered.difficulty = 0;
+        assert!(
+            tampered.validate_shape().is_err(),
+            "ProofTask with tampered difficulty outside default_difficulty must be rejected"
+        );
+
+        // (b) Existing assigned stakes exceeding u64::MAX must not saturate to u64::MAX
+        // and allow a 0-stake task to slip through for a prover with stake == u64::MAX.
+        let mut market = ProofMarketState::new();
+        let half_plus = (u64::MAX / 2) + 100;
+        let mut t1 = ProofTask::new(task_kind(), creator, 1, 20, 10, [0x71; 32], half_plus);
+        t1.assign(prover, u64::MAX, 1).unwrap();
+        let mut t2 = ProofTask::new(task_kind(), creator, 1, 21, 10, [0x71; 32], half_plus);
+        t2.assign(prover, u64::MAX, 1).unwrap();
+        push_assigned(&mut market, t1);
+        push_assigned(&mut market, t2);
+        market.fund_escrow(creator, 10).unwrap();
+        let t3 = ProofTask::new(task_kind(), creator, 1, 22, 10, [0x71; 32], 0);
+        let t3_id = t3.task_id;
+        market.add_task(t3, 1).unwrap();
+        assert!(
+            market.assign_task(t3_id, prover, u64::MAX, 1).is_err(),
+            "overleveraged prover whose committed stake exceeds u64::MAX must be refused"
+        );
+
+        // (c) Dispute revocation must refuse redirecting escrowed funds to a non-creator address.
+        let mut revoke_market = ProofMarketState::new();
+        revoke_market.fund_escrow(creator, 300).unwrap();
+        let rt = ProofTask::new(task_kind(), creator, 1, 20, 300, [0x71; 32], 0);
+        let rt_id = rt.task_id;
+        revoke_market.add_task(rt, 1).unwrap();
+        revoke_market.assign_task(rt_id, prover, 0, 2).unwrap();
+        let receipt = ProofReceipt::new(rt_id, prover, 3, [0x79; 32], 300);
+        revoke_market
+            .complete_task(rt_id, receipt, |_| Ok(()))
+            .unwrap();
+        assert!(
+            revoke_market
+                .revoke_receipt_for_task(rt_id, attacker, "forged dispute recipient")
+                .is_err(),
+            "revoke_receipt_for_task must not credit a different address than the rooted task creator"
+        );
+        assert_eq!(revoke_market.escrow_balance(&attacker), 0);
     }
 }
