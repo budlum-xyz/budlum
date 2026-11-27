@@ -43,6 +43,7 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
     mapping(bytes32 => mapping(bytes32 => bool)) internal boundKeys;
     mapping(address => bytes32) public validatorOf;
     mapping(address => uint64) public lastReportedBlock;
+    mapping(address => bool) private _hasReported;
     uint256 private _reentrancyLock;
 
     event Bound(address indexed operator, bytes32 indexed budlumValidator, bytes compressedKey);
@@ -63,6 +64,7 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
     error InvalidRegistrarConfig();
     error InvalidValidator();
     error InvalidStakeMatrix();
+    error BlockNumberOverflow(uint256 blockNumber);
     error ReentrantCall();
 
     constructor(
@@ -178,10 +180,14 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         if (validator == bytes32(0) || bindings[bindingKey(validator, operator)].operator == address(0)) {
             revert NotBound(operator);
         }
+        if (block.number > type(uint64).max) {
+            revert BlockNumberOverflow(block.number);
+        }
         uint64 observedEpoch = uint64(block.number);
-        if (lastReportedBlock[operator] == observedEpoch) {
+        if (_hasReported[operator] && lastReportedBlock[operator] == observedEpoch) {
             revert AlreadyReported(observedEpoch);
         }
+        _hasReported[operator] = true;
         lastReportedBlock[operator] = observedEpoch;
         units = allocatedUnits(operator);
         bytes memory key = bindings[bindingKey(validator, operator)].compressedKey;
@@ -195,6 +201,9 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
     }
 
     function allocatedUnits(address operator) public view returns (uint64) {
+        if (block.number > type(uint32).max) {
+            revert BlockNumberOverflow(block.number);
+        }
         OperatorSet memory set = OperatorSet({avs: address(this), id: operatorSetId});
         if (!allocationManager.isMemberOfOperatorSet(operator, set)) {
             return 0;
@@ -248,6 +257,9 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         view
         returns (bool)
     {
+        if (budlumValidator == bytes32(0) || operator == address(0) || uncompressedKey.length == 0) {
+            return false;
+        }
         return boundKeys[bindingKey(budlumValidator, operator)][keccak256(uncompressedKey)];
     }
 
@@ -263,6 +275,9 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         if (msg.sender != address(slasher)) {
             revert OnlySlasher();
         }
+        if (operator == address(0) || bytes(description).length == 0) {
+            revert InvalidStakeMatrix();
+        }
         uint256[] memory wads = new uint256[](strategies.length);
         for (uint256 i = 0; i < wads.length; i++) {
             wads[i] = doubleVoteWad;
@@ -277,6 +292,9 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
                 description: description
             })
         );
+        if (shares.length != strategies.length) {
+            revert InvalidStakeMatrix();
+        }
         emit OperatorSlashed(operator, slashId, shares.length);
     }
 
