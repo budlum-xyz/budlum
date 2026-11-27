@@ -686,10 +686,23 @@ pub struct FfiValidatorSetSnapshot {
     pub total_stake: u64,
 }
 
+/// Maximum validator entries accepted in one UniFFI snapshot to bound allocation.
+const MAX_FFI_VALIDATORS: usize = 16_384;
+/// Maximum relays accepted when constructing a `MobileNode`.
+const MAX_FFI_RELAYS: usize = 64;
+/// Maximum byte length of a single relay multiaddr string.
+const MAX_FFI_RELAY_MULTIADDR_BYTES: usize = 256;
+
 impl TryFrom<FfiValidatorSetSnapshot> for ValidatorSetSnapshot {
     type Error = MobileError;
 
     fn try_from(value: FfiValidatorSetSnapshot) -> Result<Self, Self::Error> {
+        if value.validators.len() > MAX_FFI_VALIDATORS {
+            return Err(MobileError::refused(
+                "mobile_light_validator_count",
+                "validator set exceeds maximum UniFFI snapshot size",
+            ));
+        }
         let mut validators = Vec::with_capacity(value.validators.len());
         for entry in value.validators {
             let address = budlum_types::Address::from_hex(&entry.address_hex)
@@ -919,6 +932,26 @@ impl MobileNode {
                 "an uninitialized owner address cannot start a mobile node",
             ));
         }
+        if relays.len() > MAX_FFI_RELAYS {
+            return Err(MobileError::refused(
+                "mobile_relay_count",
+                "relay list exceeds the 64-entry ceiling",
+            ));
+        }
+        for relay in &relays {
+            if relay.multiaddr.is_empty()
+                || relay.multiaddr.len() > MAX_FFI_RELAY_MULTIADDR_BYTES
+                || relay
+                    .multiaddr
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control())
+            {
+                return Err(MobileError::refused(
+                    "mobile_relay_invalid",
+                    "relay multiaddr must be non-empty, <= 256 bytes, and free of whitespace or control chars",
+                ));
+            }
+        }
         let relays = relays.into_iter().map(RelayOffer::from).collect();
         let core = MobileCore::new(owner, class.class(), relays, available_bytes);
         Ok(Arc::new(Self {
@@ -1035,10 +1068,17 @@ impl MobileNode {
     }
 
     /// Queue a resume request after a suspension (section 7.8: it takes
-    /// effect one epoch after inclusion).
+    /// effect one epoch after inclusion). Idempotent while a resume duty is
+    /// already queued in the outbox.
     pub fn resume(&self) {
         let duty = lock(&self.core).resume();
-        self.queue(vec![duty]);
+        let mut outbox = lock(&self.outbox);
+        if !outbox
+            .iter()
+            .any(|queued| matches!(queued, DutyTx::Resume(_)))
+        {
+            outbox.push(duty);
+        }
     }
 
     /// Leave: release every share and stop. Not a penalty. Returns the count
