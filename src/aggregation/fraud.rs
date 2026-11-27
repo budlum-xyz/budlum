@@ -42,7 +42,7 @@
 //! `ChallengeOutcome`, `UnbackedSegmentChallenge`, `SegmentFraudReason`, and
 //! `SegmentFraudReport` provide the watchtower and consensus fraud-proof doors.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use zeroize::Zeroizing;
 
@@ -81,6 +81,18 @@ pub const SEGMENT_CHALLENGE_WINDOW_BLOCKS: u64 = 64;
 
 /// Maximum simultaneously open challenges in [`SegmentChallengeBook`].
 pub const MAX_OPEN_SEGMENT_CHALLENGES: usize = 4_096;
+
+/// Maximum settled challenge IDs retained in [`SegmentChallengeBook`] before
+/// deterministic FIFO eviction bounds resident memory.
+pub const MAX_SETTLED_SEGMENT_CHALLENGES: usize = 65_536;
+
+/// Maximum witness envelopes accepted in a single backing-response payload
+/// before hashing or cryptographic verification runs.
+pub const MAX_BACKING_ENVELOPES_PER_RESPONSE: usize = WIRE_FRAME_LIMITS.max_claims;
+
+/// Maximum cumulative payload bytes across `backing_envelopes` in a single
+/// backing response.
+pub const MAX_BACKING_RESPONSE_BYTES: usize = WIRE_FRAME_LIMITS.max_proof_bytes;
 
 /// Specific violation proven against an attested aggregation [`Segment`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,10 +240,34 @@ pub fn backing_envelopes_digest(envelopes: &[Envelope]) -> Hash32 {
     h(&[TAG_AGG_BACKING_ENV, &count.to_be_bytes(), &folded])
 }
 
+/// Rejects oversized witness envelope slices before hashing or leaf
+/// verification so an unauthenticated caller cannot trigger CPU/memory DoS.
+fn validate_backing_envelopes_bounds(backing_envelopes: &[Envelope]) -> Result<(), String> {
+    if backing_envelopes.len() > MAX_BACKING_ENVELOPES_PER_RESPONSE {
+        return Err(format!(
+            "aggregator fraud: backing_envelopes count {} exceeds limit {MAX_BACKING_ENVELOPES_PER_RESPONSE}",
+            backing_envelopes.len()
+        ));
+    }
+    let mut total_bytes = 0usize;
+    for env in backing_envelopes {
+        total_bytes = total_bytes
+            .checked_add(env.payload.len())
+            .ok_or_else(|| "aggregator fraud: backing_envelopes byte size overflow".to_string())?;
+        if total_bytes > MAX_BACKING_RESPONSE_BYTES {
+            return Err(format!(
+                "aggregator fraud: backing_envelopes payload bytes {total_bytes} exceed limit {MAX_BACKING_RESPONSE_BYTES}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Canonical 32-byte message signed by `segment.aggregator` when answering a
-/// backing challenge over `(domain, segment)`.
+/// backing challenge over `(chain_id, domain, segment)`.
 #[must_use]
 pub fn backing_response_message(
+    chain_id: u64,
     domain: DomainId,
     segment: &Segment,
     backing_envelopes: &[Envelope],
@@ -240,6 +276,7 @@ pub fn backing_response_message(
     let env_digest = backing_envelopes_digest(backing_envelopes);
     h(&[
         TAG_AGG_BACKING_RESP,
+        &chain_id.to_be_bytes(),
         &domain.to_be_bytes(),
         &pi,
         &env_digest,
@@ -247,18 +284,19 @@ pub fn backing_response_message(
 }
 
 /// Signs `backing_envelopes` as `aggregator`'s official backing response for
-/// `(domain, segment)` under [`ctx::AGG_SEGMENT_V1`].
+/// `(chain_id, domain, segment)` under [`ctx::AGG_SEGMENT_V1`].
 ///
 /// # Errors
 ///
 /// Returns [`FrameError::InvalidAttestation`] if ML-DSA-87 signing fails.
 pub fn sign_backing_response(
     signer_seed: &[u8; 32],
+    chain_id: u64,
     domain: DomainId,
     segment: &Segment,
     backing_envelopes: &[Envelope],
 ) -> Result<Box<[u8; ML_DSA_87_SIGNATURE_LEN]>, FrameError> {
-    let msg = backing_response_message(domain, segment, backing_envelopes);
+    let msg = backing_response_message(chain_id, domain, segment, backing_envelopes);
     let mut rnd = Zeroizing::new([0u8; 32]);
     if rand_core::RngCore::try_fill_bytes(&mut rand_core::OsRng, rnd.as_mut_slice()).is_err() {
         rnd.copy_from_slice(&[0u8; 32]);
@@ -278,15 +316,16 @@ pub fn sign_backing_response(
 }
 
 /// Verifies that `response_signature` was produced by `segment.attestation.public_key`
-/// over `(domain, segment, backing_envelopes)` under [`ctx::AGG_SEGMENT_V1`].
+/// over `(chain_id, domain, segment, backing_envelopes)` under [`ctx::AGG_SEGMENT_V1`].
 fn verify_backing_response_signature(
     registry: &SchemeStatusRegistry,
+    chain_id: u64,
     domain: DomainId,
     segment: &Segment,
     backing_envelopes: &[Envelope],
     response_signature: &[u8; ML_DSA_87_SIGNATURE_LEN],
 ) -> Result<(), String> {
-    let msg = backing_response_message(domain, segment, backing_envelopes);
+    let msg = backing_response_message(chain_id, domain, segment, backing_envelopes);
     pq::verify_in(
         registry,
         SchemeId::ML_DSA_87,
@@ -306,7 +345,8 @@ fn verify_backing_response_signature(
 /// # Errors
 ///
 /// Returns `Err` if `frame` fails structural checks, any ML-DSA-87 segment
-/// attestation is invalid, or `segment_index` is out of range.
+/// attestation is invalid, `backing_envelopes` exceeds wire bounds, or
+/// `segment_index` is out of range.
 pub fn verify_segment_backing(
     registry: &SchemeStatusRegistry,
     domain: DomainId,
@@ -314,6 +354,7 @@ pub fn verify_segment_backing(
     segment_index: usize,
     backing_envelopes: &[Envelope],
 ) -> Result<Result<(), (usize, SegmentFraudReason)>, String> {
+    validate_backing_envelopes_bounds(backing_envelopes)?;
     frame
         .check_structure(domain, &WIRE_FRAME_LIMITS)
         .map_err(|e| format!("invalid frame structure: {e}"))?;
@@ -405,8 +446,8 @@ fn apply_aggregator_slash(
     if whistleblower == aggregator {
         return Err("aggregator fraud: self-challenge is prohibited".into());
     }
-    if whistleblower == Address::zero() {
-        return Err("aggregator fraud: zero whistleblower address is prohibited".into());
+    if whistleblower == Address::zero() || state.burn_reserve_address == Some(whistleblower) {
+        return Err("aggregator fraud: invalid or burn-reserve whistleblower is prohibited".into());
     }
     let has_unbonding = state
         .unbonding_queue
@@ -495,20 +536,30 @@ pub fn slash_unbacked_segment(
     registry: &SchemeStatusRegistry,
     challenge: &UnbackedSegmentChallenge<'_>,
 ) -> Result<SegmentFraudReport, String> {
+    if challenge.whistleblower == Address::zero()
+        || state.burn_reserve_address == Some(challenge.whistleblower)
+    {
+        return Err("aggregator fraud: invalid or burn-reserve whistleblower is prohibited".into());
+    }
+    validate_backing_envelopes_bounds(challenge.backing_envelopes)?;
+    let (segment, _) = segment_claim_slice(challenge.frame, challenge.segment_index)?;
+    if challenge.whistleblower == segment.aggregator {
+        return Err("aggregator fraud: self-challenge is prohibited".into());
+    }
+    verify_backing_response_signature(
+        registry,
+        challenge.chain_id,
+        challenge.domain,
+        segment,
+        challenge.backing_envelopes,
+        challenge.aggregator_response_sig,
+    )?;
     let outcome = verify_segment_backing(
         registry,
         challenge.domain,
         challenge.frame,
         challenge.segment_index,
         challenge.backing_envelopes,
-    )?;
-    let (segment, _) = segment_claim_slice(challenge.frame, challenge.segment_index)?;
-    verify_backing_response_signature(
-        registry,
-        challenge.domain,
-        segment,
-        challenge.backing_envelopes,
-        challenge.aggregator_response_sig,
     )?;
     let Err((claim_index, reason)) = outcome else {
         return Err("aggregator fraud: segment is validly backed by witness envelopes".into());
@@ -694,6 +745,7 @@ struct PendingSegmentChallenge {
     aggregator: Address,
     challenger: Address,
     challenger_bond_atoms: u64,
+    opened_height: u64,
     deadline_height: u64,
 }
 
@@ -703,6 +755,7 @@ struct PendingSegmentChallenge {
 pub struct SegmentChallengeBook {
     open: BTreeMap<Hash32, PendingSegmentChallenge>,
     settled: BTreeSet<Hash32>,
+    settled_order: VecDeque<Hash32>,
 }
 
 impl SegmentChallengeBook {
@@ -717,6 +770,28 @@ impl SegmentChallengeBook {
     #[must_use]
     pub fn pending_len(&self) -> usize {
         self.open.len()
+    }
+
+    /// Number of currently retained settled challenge identifiers.
+    #[cfg(test)]
+    #[must_use]
+    pub fn settled_len(&self) -> usize {
+        self.settled.len()
+    }
+
+    /// Records a settled challenge ID while enforcing [`MAX_SETTLED_SEGMENT_CHALLENGES`]
+    /// via deterministic FIFO eviction.
+    fn record_settled(&mut self, id: Hash32) {
+        if self.settled.insert(id) {
+            self.settled_order.push_back(id);
+            while self.settled.len() > MAX_SETTLED_SEGMENT_CHALLENGES {
+                if let Some(oldest) = self.settled_order.pop_front() {
+                    self.settled.remove(&oldest);
+                } else {
+                    break;
+                }
+            }
+        }
     }
 
     /// Deterministic identifier for a segment challenge `(chain_id, domain, tick_pi)`.
@@ -755,8 +830,11 @@ impl SegmentChallengeBook {
         verify_segment_attestations(registry, req.domain, &req.frame.segments)
             .map_err(|e| format!("aggregator fraud: invalid segment attestation: {e}"))?;
         let (segment, seg_claims) = segment_claim_slice(req.frame, req.segment_index)?;
-        if req.challenger == Address::zero() || req.challenger == segment.aggregator {
-            return Err("aggregator fraud: invalid or self challenger".into());
+        if req.challenger == Address::zero()
+            || req.challenger == segment.aggregator
+            || state.burn_reserve_address == Some(req.challenger)
+        {
+            return Err("aggregator fraud: invalid, burn-reserve, or self challenger".into());
         }
         let has_unbonding = state
             .unbonding_queue
@@ -783,7 +861,10 @@ impl SegmentChallengeBook {
             );
         }
         let challenger_acct = state.get_or_create(&req.challenger);
-        challenger_acct.balance = challenger_acct.balance.saturating_sub(bond);
+        challenger_acct.balance = challenger_acct
+            .balance
+            .checked_sub(bond)
+            .ok_or_else(|| "aggregator fraud: challenger balance underflow".to_string())?;
         self.open.insert(
             id,
             PendingSegmentChallenge {
@@ -795,6 +876,7 @@ impl SegmentChallengeBook {
                 aggregator: segment.aggregator,
                 challenger: req.challenger,
                 challenger_bond_atoms: bond,
+                opened_height: req.opened_height,
                 deadline_height,
             },
         );
@@ -808,7 +890,8 @@ impl SegmentChallengeBook {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if `challenge_id` is unknown, the window already expired,
+    /// Returns `Err` if `challenge_id` is unknown, `current_height` lies outside
+    /// `[opened_height, deadline_height]`, `backing_envelopes` exceeds wire bounds,
     /// or `response_signature` does not verify under the challenged segment's
     /// ML-DSA-87 public key (leaving the challenge open so forged third-party
     /// responses cannot close or prematurely slash it).
@@ -823,11 +906,16 @@ impl SegmentChallengeBook {
             .get(&req.challenge_id)
             .cloned()
             .ok_or_else(|| "aggregator fraud: unknown challenge id".to_string())?;
+        if req.current_height < entry.opened_height {
+            return Err("aggregator fraud: response height precedes challenge opening".into());
+        }
         if req.current_height > entry.deadline_height {
             return Err("aggregator fraud: challenge response window expired".into());
         }
+        validate_backing_envelopes_bounds(req.backing_envelopes)?;
         verify_backing_response_signature(
             registry,
+            entry.chain_id,
             entry.domain,
             &entry.segment,
             req.backing_envelopes,
@@ -835,7 +923,7 @@ impl SegmentChallengeBook {
         )?;
         // Past every refusal: commit removal and settlement atomically.
         self.open.remove(&req.challenge_id);
-        self.settled.insert(req.challenge_id);
+        self.record_settled(req.challenge_id);
         match evaluate_claim_backing(registry, entry.domain, &entry.claims, req.backing_envelopes) {
             Ok(()) => {
                 let candidate = u64::try_from(
@@ -907,7 +995,7 @@ impl SegmentChallengeBook {
         }
         // Past every refusal: commit removal and settlement atomically.
         self.open.remove(challenge_id);
-        self.settled.insert(*challenge_id);
+        self.record_settled(*challenge_id);
         refund_challenger_bond(state, &entry.challenger, entry.challenger_bond_atoms);
         if let Ok(report) = apply_aggregator_slash(
             state,
@@ -925,5 +1013,283 @@ impl SegmentChallengeBook {
                 bond: entry.challenger_bond_atoms,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod segment_challenge_hardening_tests {
+    use super::*;
+    use crate::aggregation::claim::Claim;
+    use crate::aggregation::envelope::{Envelope, ObjectKind};
+    use crate::aggregation::frame::{aggregator_address_from_seed, SegmentAttestation, SHAPE_TICK};
+    use crate::aggregation::hash::segment_auth_message;
+    use crate::aggregation::merkle::claims_root;
+    use crate::core::chain_config::Network;
+
+    fn make_attested_frame(
+        seed: &[u8; 32],
+        domain: DomainId,
+        tag_byte: u8,
+    ) -> (ClaimFrame, Address) {
+        let aggregator = aggregator_address_from_seed(seed).expect("aggregator addr");
+        let pk_vec = pq::ml_dsa_public_key(SchemeId::ML_DSA_87, seed).expect("ml-dsa pk");
+        let pk: Box<[u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN]> =
+            Box::new(pk_vec.try_into().expect("pk len"));
+        let claim = Claim::Prog {
+            program_hash: [tag_byte; 32],
+            input_hash: [tag_byte.wrapping_add(1); 32],
+            output_hash: [tag_byte.wrapping_add(2); 32],
+        };
+        let digest = claim.digest(domain);
+        let root = claims_root(&[digest]).expect("claims root");
+        let pi = super::super::frame::tick_pi_of(domain, &root, 1, &aggregator);
+        let msg = segment_auth_message(&pi);
+        let rnd = [0u8; 32];
+        let sig_vec = pq::ml_dsa_sign(SchemeId::ML_DSA_87, seed, &msg, ctx::AGG_SEGMENT_V1, &rnd)
+            .expect("segment sig");
+        let sig: Box<[u8; ML_DSA_87_SIGNATURE_LEN]> =
+            Box::new(sig_vec.try_into().expect("sig len"));
+        let segment = Segment {
+            claims_root: root,
+            count: 1,
+            aggregator,
+            attestation: SegmentAttestation {
+                public_key: pk,
+                signature: sig,
+            },
+        };
+        let frame = ClaimFrame {
+            segments: vec![segment],
+            shape: vec![SHAPE_TICK],
+            claims: vec![claim],
+            proof: vec![1u8],
+        };
+        (frame, aggregator)
+    }
+
+    #[test]
+    fn rejects_burn_reserve_as_challenger_and_whistleblower() {
+        let registry = SchemeStatusRegistry::genesis();
+        let chain_id = Network::Devnet.chain_id().value();
+        let domain: DomainId = 7;
+        let agg_seed = [0x41u8; 32];
+        let (frame, aggregator) = make_attested_frame(&agg_seed, domain, 0x10);
+
+        let mut state = AccountState::new();
+        let floor = state.validator_stake_floor(chain_id);
+        state.add_validator_with_floor(aggregator, floor, floor);
+        let burn_reserve = Address::from([0xBB; 32]);
+        state.burn_reserve_address = Some(burn_reserve);
+        let bond = required_challenger_bond(&state, chain_id, &aggregator);
+        state.add_balance(&burn_reserve, bond * 10);
+        let reserve_before = state.get_balance(&burn_reserve);
+
+        let mut book = SegmentChallengeBook::new();
+        assert!(
+            book.open_challenge(
+                &mut state,
+                &registry,
+                &SegmentChallengeRequest {
+                    chain_id,
+                    domain,
+                    frame: &frame,
+                    segment_index: 0,
+                    challenger: burn_reserve,
+                    opened_height: 100,
+                },
+            )
+            .is_err(),
+            "burn_reserve_address must never be debited as a challenger (refund destroys its bond)"
+        );
+        assert_eq!(
+            state.get_balance(&burn_reserve),
+            reserve_before,
+            "rejected burn_reserve challenger must not lose balance"
+        );
+
+        let seg0 = frame.segments.first().expect("segment 0");
+        let empty_sig = sign_backing_response(&agg_seed, chain_id, domain, seg0, &[])
+            .expect("empty response sig");
+        assert!(
+            slash_unbacked_segment(
+                &mut state,
+                &registry,
+                &UnbackedSegmentChallenge {
+                    chain_id,
+                    domain,
+                    frame: &frame,
+                    segment_index: 0,
+                    backing_envelopes: &[],
+                    aggregator_response_sig: &empty_sig,
+                    whistleblower: burn_reserve,
+                },
+            )
+            .is_err(),
+            "burn_reserve_address must be refused as whistleblower"
+        );
+    }
+
+    #[test]
+    fn rejects_pre_opening_height_and_oversized_backing_envelopes() {
+        let registry = SchemeStatusRegistry::genesis();
+        let chain_id = Network::Devnet.chain_id().value();
+        let domain: DomainId = 7;
+        let agg_seed = [0x42u8; 32];
+        let (frame, aggregator) = make_attested_frame(&agg_seed, domain, 0x20);
+
+        let mut state = AccountState::new();
+        let floor = state.validator_stake_floor(chain_id);
+        state.add_validator_with_floor(aggregator, floor, floor);
+        let challenger = Address::from([0xCC; 32]);
+        let bond = required_challenger_bond(&state, chain_id, &aggregator);
+        state.add_balance(&challenger, bond * 4);
+
+        let mut book = SegmentChallengeBook::new();
+        let cid = book
+            .open_challenge(
+                &mut state,
+                &registry,
+                &SegmentChallengeRequest {
+                    chain_id,
+                    domain,
+                    frame: &frame,
+                    segment_index: 0,
+                    challenger,
+                    opened_height: 100,
+                },
+            )
+            .expect("open challenge");
+
+        let seg0 = frame.segments.first().expect("segment 0");
+        let empty_sig =
+            sign_backing_response(&agg_seed, chain_id, domain, seg0, &[]).expect("empty sig");
+        // Responding at height 50 < opened_height 100 must be refused while keeping challenge open.
+        assert!(
+            book.respond_challenge(
+                &mut state,
+                &registry,
+                &RespondChallengeRequest {
+                    challenge_id: cid,
+                    current_height: 50,
+                    backing_envelopes: &[],
+                    response_signature: &empty_sig,
+                },
+            )
+            .is_err(),
+            "respond_challenge must refuse current_height < opened_height"
+        );
+        assert_eq!(book.pending_len(), 1);
+
+        // Oversized backing_envelopes exceeding WIRE_FRAME_LIMITS.max_claims must be rejected
+        // BEFORE hashing / verifying signature.
+        let dummy_env = Envelope {
+            kind: ObjectKind::Signature,
+            scheme: SchemeId::ML_DSA_87,
+            domain,
+            tx_hash: [0u8; 32],
+            payload: Vec::new(),
+        };
+        let huge = vec![dummy_env; WIRE_FRAME_LIMITS.max_claims + 1];
+        let bogus_sig = [0u8; ML_DSA_87_SIGNATURE_LEN];
+        let err = book
+            .respond_challenge(
+                &mut state,
+                &registry,
+                &RespondChallengeRequest {
+                    challenge_id: cid,
+                    current_height: 105,
+                    backing_envelopes: &huge,
+                    response_signature: &bogus_sig,
+                },
+            )
+            .expect_err("oversized backing_envelopes must be refused");
+        assert!(
+            err.contains("limit") || err.contains("too many"),
+            "expected cap error before sig verify, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cross_chain_backing_response_replay_is_isolated() {
+        let domain: DomainId = 7;
+        let agg_seed = [0x43u8; 32];
+        let (frame, _aggregator) = make_attested_frame(&agg_seed, domain, 0x30);
+        let seg = frame.segments.first().expect("segment 0");
+        let registry = SchemeStatusRegistry::genesis();
+
+        let devnet_id = Network::Devnet.chain_id().value();
+        let mainnet_id = Network::Mainnet.chain_id().value();
+        assert_ne!(devnet_id, mainnet_id);
+
+        // Aggregator signs an empty response on Devnet; replaying that signature on Mainnet
+        // MUST fail signature verification.
+        let devnet_sig =
+            sign_backing_response(&agg_seed, devnet_id, domain, seg, &[]).expect("devnet sig");
+        let mut mainnet_state = AccountState::new();
+        let floor = mainnet_state.validator_stake_floor(mainnet_id);
+        mainnet_state.add_validator_with_floor(seg.aggregator, floor, floor);
+        let watcher = Address::from([0xDD; 32]);
+        let res = slash_unbacked_segment(
+            &mut mainnet_state,
+            &registry,
+            &UnbackedSegmentChallenge {
+                chain_id: mainnet_id,
+                domain,
+                frame: &frame,
+                segment_index: 0,
+                backing_envelopes: &[],
+                aggregator_response_sig: &devnet_sig,
+                whistleblower: watcher,
+            },
+        );
+        assert!(
+            res.is_err(),
+            "Devnet backing-response signature MUST NOT slash aggregator on Mainnet"
+        );
+        // Same signature DOES slash on the intended Devnet chain.
+        let mut devnet_state = AccountState::new();
+        let dev_floor = devnet_state.validator_stake_floor(devnet_id);
+        devnet_state.add_validator_with_floor(seg.aggregator, dev_floor, dev_floor);
+        assert!(
+            slash_unbacked_segment(
+                &mut devnet_state,
+                &registry,
+                &UnbackedSegmentChallenge {
+                    chain_id: devnet_id,
+                    domain,
+                    frame: &frame,
+                    segment_index: 0,
+                    backing_envelopes: &[],
+                    aggregator_response_sig: &devnet_sig,
+                    whistleblower: watcher,
+                },
+            )
+            .is_ok(),
+            "matching chain_id signature must still slash validly"
+        );
+    }
+
+    #[test]
+    fn settled_challenge_book_remains_bounded() {
+        let mut book = SegmentChallengeBook::new();
+        for i in 0u64..70_000 {
+            let mut id = [0u8; 32];
+            if let Some(prefix) = id.get_mut(..8) {
+                prefix.copy_from_slice(&i.to_le_bytes());
+            }
+            book.record_settled(id);
+        }
+        assert_eq!(
+            book.settled_len(),
+            MAX_SETTLED_SEGMENT_CHALLENGES,
+            "SegmentChallengeBook::settled must cap at MAX_SETTLED_SEGMENT_CHALLENGES"
+        );
+        // Oldest entry (0) evicted; newest entry (69_999) retained.
+        assert!(!book.settled.contains(&[0u8; 32]));
+        let mut latest = [0u8; 32];
+        if let Some(prefix) = latest.get_mut(..8) {
+            prefix.copy_from_slice(&69_999u64.to_le_bytes());
+        }
+        assert!(book.settled.contains(&latest));
     }
 }

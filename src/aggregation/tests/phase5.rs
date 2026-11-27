@@ -992,6 +992,7 @@ fn blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked_or_conflicti
     let honest_seg = frame.segments.first().expect("segment 0");
     let honest_resp_sig = sign_backing_response(
         &agg_seed,
+        devnet_id,
         domain,
         honest_seg,
         std::slice::from_ref(&sig_env),
@@ -1015,7 +1016,8 @@ fn blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked_or_conflicti
     // by passing `&[]` with a stranger's signature or reusing the honest signature.
     let attacker_seed = Zeroizing::new([0xA8u8; 32]);
     let forged_empty_sig =
-        sign_backing_response(&attacker_seed, domain, honest_seg, &[]).expect("attacker sig");
+        sign_backing_response(&attacker_seed, devnet_id, domain, honest_seg, &[])
+            .expect("attacker sig");
     assert!(slash_unbacked_segment(
         &mut state,
         &registry,
@@ -1069,8 +1071,8 @@ fn blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked_or_conflicti
     let forged_frame = ClaimFrame::tick(domain, &agg_seed, vec![forged_claim.clone()], Vec::new())
         .expect("attested tick");
     let forged_seg = forged_frame.segments.first().expect("forged seg");
-    let bad_resp_sig =
-        sign_backing_response(&agg_seed, domain, forged_seg, &[]).expect("agg empty response sig");
+    let bad_resp_sig = sign_backing_response(&agg_seed, devnet_id, domain, forged_seg, &[])
+        .expect("agg empty response sig");
     // Self-challenge is refused.
     assert!(slash_unbacked_segment(
         &mut state,
@@ -1290,6 +1292,7 @@ fn blocks_testnet_refuses_unbonded_aggregators_and_slashes_unbacked_or_conflicti
         .is_err());
     let def_sig = sign_backing_response(
         &def_seed,
+        devnet_id,
         domain,
         def_frame.segments.first().unwrap(),
         std::slice::from_ref(&sig_env),
