@@ -2,11 +2,13 @@
 //! finality is a stake lottery plus a threshold certificate, and whose
 //! certificate is what a light client can actually check.
 //!
-//! WIRING: unwired - this adapter is admitted by `super::selftest::admit` and
-//!   reached through `super::registry::ExternalDomainRegistry` once a
-//!   registration names `ouroboros_mithril::praos_adapter_id`; the dispatch
-//!   table that maps an incoming envelope to an adapter is `super::intake`'s,
-//!   and the entry there lands with the registry's Cardano domain record.
+//! WIRING: reached from `AdapterSpec::OuroborosMithril` through
+//!   `IntakeState::register_domain`, admitted by `super::selftest::admit` and
+//!   recorded in `super::registry::ExternalDomainRegistry` under
+//!   `ouroboros_mithril::praos_adapter_id`. The pin a registration carries is
+//!   [`PinnedPraosEpochs`]: an empty epoch table is not a trust anchor, so an
+//!   unpinned spec is refused at the door with
+//!   `IntakeError::CommitteeNotPinned`.
 //!
 //! # The two layers, and why both are here
 //!
@@ -537,6 +539,39 @@ impl PraosEquivocationProof {
     }
 }
 
+/// The governance-pinned Cardano epoch stake table, as a registration carries
+/// it.
+///
+/// `OuroborosMithrilAdapter` accumulates epochs through `with_epoch_stake`,
+/// one call per epoch. A registration transaction needs the whole table as a
+/// single signed value, so this is that value, and [`Self::build_adapter`] is
+/// the single place it becomes the adapter's epoch list.
+///
+/// The chain id travels with the table rather than beside it: a stake
+/// distribution is only meaningful for the chain it was read from, and
+/// binding the two in one struct means the signature preimage cannot cover
+/// one without the other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedPraosEpochs {
+    /// The Cardano chain this table belongs to.
+    pub chain_id: u64,
+    /// One stake distribution per pinned epoch. An empty table is not an
+    /// anchor: `has_pinned_trust_anchor` reads false and the door refuses it.
+    pub epochs: Vec<EpochStake>,
+}
+
+impl PinnedPraosEpochs {
+    /// Build the adapter this pin anchors.
+    #[must_use]
+    pub fn build_adapter(&self, network: &str) -> OuroborosMithrilAdapter {
+        let mut adapter = OuroborosMithrilAdapter::new(network, self.chain_id);
+        for epoch in &self.epochs {
+            adapter = adapter.with_epoch_stake(epoch.clone());
+        }
+        adapter
+    }
+}
+
 /// The Praos + Mithril finality adapter for one Cardano network.
 #[derive(Debug, Clone)]
 pub struct OuroborosMithrilAdapter {
@@ -574,8 +609,9 @@ impl OuroborosMithrilAdapter {
 
     /// Pin one epoch's stake distribution.
     ///
-    /// WIRING: the registration reads the epoch table from the domain record it
-    /// pins; no production line builds an `EpochStake` yet.
+    /// WIRING: called once per pinned epoch by
+    /// [`PinnedPraosEpochs::build_adapter`], which is the registration path
+    /// for `AdapterSpec::OuroborosMithril`.
     #[must_use]
     pub fn with_epoch_stake(mut self, epoch: EpochStake) -> Self {
         self.epochs.push(epoch);
