@@ -1116,11 +1116,14 @@ pub fn effective_ceiling_from_certificate_row(
         entry.bond_atoms,
         entry.bond_atoms,
     );
-    if cert_bound.safe_value_outflow_ceiling_atoms > 0 {
-        policy_cap.min(cert_bound.safe_value_outflow_ceiling_atoms)
-    } else {
-        policy_cap
-    }
+    // The certificate row is the live finality statement; the policy table is a
+    // static ceiling. When the row prices the route at zero the static table
+    // must not reopen it: `Established` + `admits_cross_domain_value()` + a zero
+    // bond-derived bound is exactly the case where the weakest link says the
+    // outflow is not economically backed. Returning `policy_cap` there made the
+    // guard disagree with the value gate about the same move, and the more
+    // permissive answer was the one the flow was recorded under.
+    policy_cap.min(cert_bound.safe_value_outflow_ceiling_atoms)
 }
 
 /// Consensus-deterministic adaptive escrow ceiling and contradiction slashing
@@ -4292,6 +4295,91 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A certificate row that prices the route at zero must close the bridge,
+    /// not hand the decision back to the static policy table.
+    ///
+    /// Measured before this test existed: an `Established` row whose
+    /// `admits_cross_domain_value()` holds but whose bond-derived
+    /// `safe_value_outflow_ceiling_atoms` is `0` kept the full `policy_cap`,
+    /// while the value gate refused the same move. Two guards answered one
+    /// question two ways and the permissive answer won.
+    #[test]
+    fn certificate_ceiling_of_zero_is_not_reopened_by_the_policy_table() {
+        use crate::crypto::facts::QuantumClass;
+        use crate::settlement::universal_finality::{
+            compose, DomainFinalityEntry, EconomicSecurityBound, FinalityGuarantee,
+            FinalityReversibility, FinalityVerdict, FINALITY_BINDS_ALL,
+        };
+
+        let mut guard = BridgeEconomicGuard::new();
+        let domain_id = 405u32;
+        guard
+            .configure_domain(
+                domain_id,
+                DomainCeilingPolicy {
+                    backing: SecurityBacking::SignatureSet {
+                        scheme: ObservedScheme::Secp256k1,
+                        signers: 4,
+                        required: 3,
+                        total_weight: 300_000,
+                        slashable: true,
+                    },
+                    stake_haircut_bps: 3_333,
+                    window_blocks: 100,
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .expect("configure domain");
+
+        // The row the composer accepts, priced at zero by its own bound: the
+        // guarantee admits value, the bond derives no safe outflow.
+        let entry = DomainFinalityEntry {
+            domain_id,
+            height: 12,
+            checkpoint_height: 50,
+            state_root: [0x11; 32],
+            adapter_id: "cometbft-v1".to_owned(),
+            adapter_version: 1,
+            finality_proof_hash: [0x22; 32],
+            guarantee_backing_hash: [0x33; 32],
+            bond_atoms: 0,
+            binds: crate::settlement::universal_finality::FinalityBinds::ALL,
+            guarantee: FinalityGuarantee {
+                reversibility: FinalityReversibility::DeterministicQuorum,
+                quantum_posture: QuantumClass::Hash,
+                attestation: FINALITY_BINDS_ALL,
+                slashable_backing: true,
+                fault_tolerance_bps: 3_333,
+            },
+            verdict: FinalityVerdict::Established,
+        };
+        // The row must be one the composer would accept, or the ceiling proves
+        // nothing.
+        let composed = compose(std::slice::from_ref(&entry)).expect("the row enters a certificate");
+        assert_eq!(composed.established.len(), 1);
+        assert!(
+            entry.guarantee.admits_cross_domain_value(),
+            "the fixture must reach the zero-bound branch, not the admission refusal"
+        );
+        assert_eq!(
+            EconomicSecurityBound::derive(&entry.guarantee, entry.bond_atoms, entry.bond_atoms)
+                .safe_value_outflow_ceiling_atoms,
+            0,
+            "a zero bond must price the route at zero"
+        );
+        let rec = guard.record(domain_id).expect("record");
+        assert!(
+            effective_ceiling_atoms(rec) > 0,
+            "the policy table must stay open, or the test proves nothing about the fallback"
+        );
+        assert_eq!(
+            effective_ceiling_from_certificate_row(rec, &entry),
+            0,
+            "the certificate's zero ceiling was reopened by the policy table"
+        );
     }
 
     #[test]
