@@ -705,10 +705,47 @@ impl ConsensusEngine for PoAEngine {
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
+        if chain.is_empty() {
+            return 0;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut prev: Option<&Block> = None;
+        for block in chain {
+            if block.hash.len() != 64 || !seen.insert(block.hash.as_str()) {
+                return 0;
+            }
+            if block.index > 0
+                && (!block.vrf_output.is_empty()
+                    || !block.vrf_proof.is_empty()
+                    || block.nonce > MAX_LEADER_ROUNDS)
+            {
+                return 0;
+            }
+            if let Some(parent) = prev {
+                if parent.index.checked_add(1) != Some(block.index)
+                    || block.previous_hash != parent.hash
+                {
+                    return 0;
+                }
+            }
+            prev = Some(block);
+        }
         chain.len() as u128
     }
 
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
+        let current_all_signed = current.len() > 1
+            && current
+                .iter()
+                .skip(1)
+                .all(|b| b.signature.is_some() && b.producer.is_some());
+        let candidate_has_unsigned = candidate
+            .iter()
+            .skip(1)
+            .any(|b| b.signature.is_none() || b.producer.is_none());
+        if current_all_signed && candidate_has_unsigned {
+            return false;
+        }
         let current_score = self.fork_choice_score(current);
         let candidate_score = self.fork_choice_score(candidate);
         if candidate_score != current_score {
@@ -1259,5 +1296,47 @@ mod tests {
             .validate_block(&bad_hash, &[parent], &state)
             .expect_err("tampered hash must fail immediately");
         assert!(hash_err.0.contains("Invalid block hash"));
+    }
+
+    #[test]
+    fn poa_fork_choice_refuses_unsigned_tampered_or_unlinked_garbage_chains() {
+        let alice = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let alice_addr = Address::from(alice.public_key_bytes());
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+
+        let mut genesis = Block::genesis();
+        genesis.timestamp = 1_000_000;
+        genesis.hash = genesis.calculate_hash();
+
+        let mut b1 = Block::new(1, genesis.hash.clone(), vec![]);
+        b1.timestamp = genesis.timestamp + MIN_BLOCK_INTERVAL_MS;
+        b1.producer = Some(alice_addr);
+        b1.sign(&alice);
+        let honest_chain = vec![genesis.clone(), b1];
+        assert!(engine.fork_choice_score(&honest_chain) > 0);
+
+        // Unsigned longer chain or empty-hash spam chain must never displace a signed PoA chain.
+        let mut unsigned_1 = Block::new(1, genesis.hash.clone(), vec![]);
+        unsigned_1.timestamp = genesis.timestamp + MIN_BLOCK_INTERVAL_MS;
+        unsigned_1.hash = unsigned_1.calculate_hash();
+        let mut unsigned_2 = Block::new(2, unsigned_1.hash.clone(), vec![]);
+        unsigned_2.timestamp = unsigned_1.timestamp + MIN_BLOCK_INTERVAL_MS;
+        unsigned_2.hash = unsigned_2.calculate_hash();
+        let unsigned_chain = vec![genesis.clone(), unsigned_1, unsigned_2];
+        assert!(
+            !engine.is_better_chain(&honest_chain, &unsigned_chain),
+            "unsigned PoA chain must never displace a signed PoA chain"
+        );
+        let empty_spam = vec![Block::new(1, String::new(), vec![]); 5];
+        assert_eq!(engine.fork_choice_score(&empty_spam), 0);
+
+        // Broken previous_hash link in signed chain must also score 0.
+        let mut unlinked = Block::new(2, "ff".repeat(32), vec![]);
+        unlinked.timestamp = genesis.timestamp + MIN_BLOCK_INTERVAL_MS * 2;
+        unlinked.producer = Some(alice_addr);
+        unlinked.sign(&alice);
+        let broken_chain = vec![honest_chain[0].clone(), honest_chain[1].clone(), unlinked];
+        assert_eq!(engine.fork_choice_score(&broken_chain), 0);
+        assert!(!engine.is_better_chain(&honest_chain, &broken_chain));
     }
 }
