@@ -16,6 +16,10 @@ fn run_unix() -> ExitCode {
         eprintln!("usage: budlum-ee-mock <socket-path> [ee-id-u8]");
         return ExitCode::from(2);
     };
+    if socket_path.is_empty() {
+        eprintln!("socket-path must not be empty");
+        return ExitCode::from(2);
+    }
     let ee_byte = match args.next() {
         Some(raw) => match raw.parse::<u8>() {
             Ok(id) => id,
@@ -27,13 +31,23 @@ fn run_unix() -> ExitCode {
         None => EeId::EVM.0,
     };
 
-    if let Ok(meta) = std::fs::symlink_metadata(&socket_path) {
-        use std::os::unix::fs::FileTypeExt as _;
-        if !meta.file_type().is_socket() {
-            eprintln!("refusing to overwrite non-socket path `{socket_path}`");
+    match std::fs::symlink_metadata(&socket_path) {
+        Ok(meta) => {
+            use std::os::unix::fs::FileTypeExt as _;
+            if !meta.file_type().is_socket() {
+                eprintln!("refusing to overwrite non-socket path `{socket_path}`");
+                return ExitCode::from(1);
+            }
+            if let Err(err) = std::fs::remove_file(&socket_path) {
+                eprintln!("failed to remove stale socket `{socket_path}`: {err}");
+                return ExitCode::from(1);
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            eprintln!("failed to inspect `{socket_path}`: {err}");
             return ExitCode::from(1);
         }
-        let _ = std::fs::remove_file(&socket_path);
     }
     let listener = match UnixListener::bind(&socket_path) {
         Ok(l) => l,
