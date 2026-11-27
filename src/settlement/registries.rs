@@ -61,6 +61,20 @@ pub struct SettlementRegistries {
     /// declared a denomination, so its presence changes no root until used.
     #[serde(default)]
     pub denominations: crate::settlement::universal_asset::DenominationIndex,
+    /// B.U.D. 3.0 Education Domain: registered artifacts and their shares.
+    ///
+    /// Same shape of gap as the Data Market: a complete registry with a
+    /// `register_artifact` that writes through `Bud3Registry`, held by no
+    /// `AccountState`, written by no transaction. An artifact registered by one
+    /// node did not exist for any other.
+    #[serde(default)]
+    pub education_domain: crate::education_domain::EducationDomainRegistry,
+    /// B.U.D. 3.0 App Registry: verified application metadata.
+    ///
+    /// Also registry-without-a-home: `register_app` existed and nothing
+    /// persisted its result.
+    #[serde(default)]
+    pub app_registry: crate::app_registry::AppRegistry,
     /// B.U.D. 3.0 Data Market: listings, purchase receipts and consumed grants.
     ///
     /// The registry was fully implemented and lived nowhere: `bud.rs` built an

@@ -4682,6 +4682,57 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
                 }
             }
         }
+        SettlementTx::AppRegistry(app_tx) => {
+            // Tag 15. Every field is public metadata about a public listing.
+            use crate::settlement::domains::AppRegistryTx;
+            put_u8(out, 15);
+            match app_tx.as_ref() {
+                AppRegistryTx::Register {
+                    name,
+                    category,
+                    bundle_content_id,
+                    bundle_object_key,
+                    fee_paid_atoms,
+                } => {
+                    put_u8(out, 0);
+                    put_bytes(out, name.as_bytes());
+                    let bytes =
+                        postcard::to_allocvec(&(*category, *bundle_content_id, *bundle_object_key))
+                            .unwrap_or_else(|_| b"budlum/app-registry/fields-failed".to_vec());
+                    put_bytes(out, &bytes);
+                    put_u64(out, *fee_paid_atoms);
+                }
+            }
+        }
+        SettlementTx::Education(edu_tx) => {
+            // Tag 16.
+            use crate::settlement::domains::EducationTx;
+            put_u8(out, 16);
+            match edu_tx.as_ref() {
+                EducationTx::RegisterArtifact {
+                    content_id,
+                    object_key,
+                    artifact_kind,
+                    visibility,
+                    metadata_hash,
+                    created_at,
+                    lifetime_epochs,
+                } => {
+                    put_u8(out, 0);
+                    let bytes = postcard::to_allocvec(&(
+                        *content_id,
+                        *object_key,
+                        *artifact_kind,
+                        *visibility,
+                    ))
+                    .unwrap_or_else(|_| b"budlum/education/fields-failed".to_vec());
+                    put_bytes(out, &bytes);
+                    put_fixed(out, metadata_hash);
+                    put_u64(out, *created_at);
+                    put_u64(out, *lifetime_epochs);
+                }
+            }
+        }
         SettlementTx::DataMarket(market_tx) => {
             // Tag 14. A listing is public facts about a public offer, and every
             // one of them is in the preimage: a seller that signed a price must

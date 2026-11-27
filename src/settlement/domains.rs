@@ -148,6 +148,21 @@ pub enum SettlementTx {
     ///
     /// Appended to preserve existing bincode enum discriminants.
     DataMarket(Box<DataMarketTx>),
+
+    /// Register a B.U.D. 3.0 application in the registry.
+    ///
+    /// `AppRegistry::register_app` existed and nothing persisted its result.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    AppRegistry(Box<AppRegistryTx>),
+
+    /// Register a B.U.D. 3.0 education artifact.
+    ///
+    /// `EducationDomainRegistry::register_artifact` existed and nothing
+    /// persisted its result.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    Education(Box<EducationTx>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -2066,6 +2081,142 @@ pub fn execute_settlement_tx(
         SettlementTx::Bundle(bundle_tx) => execute_bundle_tx(state, ctx, bundle_tx),
         SettlementTx::Denominate(denomination) => execute_denomination(state, ctx, denomination),
         SettlementTx::DataMarket(market_tx) => execute_data_market_tx(state, ctx, market_tx),
+        SettlementTx::AppRegistry(app_tx) => execute_app_registry_tx(state, ctx, app_tx),
+        SettlementTx::Education(edu_tx) => execute_education_tx(state, ctx, edu_tx),
+    }
+}
+
+/// An app-registry action.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AppRegistryTx {
+    /// Register an application. `bundle` names the B.U.D. 3.0 objects that make
+    /// it up, so the registry can check they exist before listing the app.
+    Register {
+        /// The app's name; the registry rejects duplicates.
+        name: String,
+        /// The category.
+        category: crate::app_registry::AppRegistryCategory,
+        /// Content id and object key of the bundle.
+        bundle_content_id: crate::storage::bud3::content_id::ContentId,
+        bundle_object_key: crate::storage::bud3::registry::ObjectKey,
+        /// Fee paid in atoms; the registry has a minimum.
+        fee_paid_atoms: u64,
+    },
+}
+
+/// An education-domain action.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EducationTx {
+    /// Register an artifact whose object is already on `bud3`.
+    RegisterArtifact {
+        /// Content id of the artifact.
+        content_id: crate::storage::bud3::content_id::ContentId,
+        /// The object's key in the B.U.D. 3.0 registry.
+        object_key: crate::storage::bud3::registry::ObjectKey,
+        /// The artifact kind.
+        artifact_kind: crate::education_domain::EducationArtifactKind,
+        /// Who may see it.
+        visibility: crate::education_domain::EducationVisibility,
+        /// Metadata commitment.
+        metadata_hash: [u8; 32],
+        /// Registration time, in unix seconds.
+        created_at: u64,
+        /// How many epochs the artifact lives.
+        lifetime_epochs: u64,
+    },
+}
+
+/// Executes an app-registry transaction.
+///
+/// The developer is the sender: a registry row that names somebody who did not
+/// ask for it would let one account list another's app.
+fn execute_app_registry_tx(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &AppRegistryTx,
+) -> Result<(), SettlementTxError> {
+    use crate::app_registry::AppRegistryError;
+
+    match tx {
+        AppRegistryTx::Register {
+            name,
+            category,
+            bundle_content_id,
+            bundle_object_key,
+            fee_paid_atoms,
+        } => {
+            state
+                .settlement
+                .app_registry
+                .register_app(
+                    &state.bud3_registry,
+                    name,
+                    ctx.sender,
+                    *category,
+                    (*bundle_content_id, *bundle_object_key),
+                    *fee_paid_atoms,
+                )
+                .map_err(|err: AppRegistryError| {
+                    SettlementTxError::Refused(format!("app registry: {err:?}"))
+                })?;
+            Ok(())
+        }
+    }
+}
+
+/// Executes an education-domain transaction.
+///
+/// The contributor is the sender, for the same reason the developer is.
+fn execute_education_tx(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &EducationTx,
+) -> Result<(), SettlementTxError> {
+    use crate::education_domain::{ArtifactRegistrationSpec, EducationDomainError};
+
+    match tx {
+        EducationTx::RegisterArtifact {
+            content_id,
+            object_key,
+            artifact_kind,
+            visibility,
+            metadata_hash,
+            created_at,
+            lifetime_epochs,
+        } => {
+            let spec = ArtifactRegistrationSpec {
+                contributor: ctx.sender,
+                content_id: *content_id,
+                artifact_kind: *artifact_kind,
+                visibility: *visibility,
+                metadata_hash: *metadata_hash,
+                created_at: *created_at,
+            };
+            let record = state
+                .bud3_registry
+                .object(object_key)
+                .map(|obj| obj.record.clone())
+                .ok_or_else(|| {
+                    SettlementTxError::Refused(String::from(
+                        "education: the object is not registered on bud3",
+                    ))
+                })?;
+            let mut bud3 = std::mem::take(&mut state.bud3_registry);
+            let mut edu = std::mem::take(&mut state.settlement.education_domain);
+            let result = edu.register_artifact(
+                &mut bud3,
+                spec,
+                record,
+                Vec::new(),
+                *lifetime_epochs,
+                state.epoch_index,
+            );
+            state.bud3_registry = bud3;
+            state.settlement.education_domain = edu;
+            result.map(|_| ()).map_err(|err: EducationDomainError| {
+                SettlementTxError::Refused(format!("education: {err:?}"))
+            })
+        }
     }
 }
 
