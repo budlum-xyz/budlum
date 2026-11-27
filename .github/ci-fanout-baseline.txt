@@ -15,8 +15,8 @@
 # Re-measure in the same change that moves it:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-pull-request-fanout-is-budgeted --print-baseline
 workflows: 24
-jobs: 88
-fanout: 98
+jobs: 89
+fanout: 99
 opaque: 0
 .github/workflows/audit-guard.yml	1	1	0
 .github/workflows/benchmark.yml	1	1	0
@@ -29,7 +29,7 @@ opaque: 0
 .github/workflows/docker-smoke.yml	2	2	0
 .github/workflows/extra-tooling.yml	5	5	0
 .github/workflows/grype.yml	1	1	0
-.github/workflows/miri.yml	2	2	0
+.github/workflows/miri.yml	3	3	0
 .github/workflows/native-security-review.yml	1	1	0
 .github/workflows/osv-scanner.yml	1	1	0
 .github/workflows/pkcs11-pq.yml	1	1	0

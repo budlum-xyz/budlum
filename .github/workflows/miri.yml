@@ -58,9 +58,15 @@ jobs:
     # timeout-minutes value can ever let this step finish. The step is bounded
     # below instead, and the remainder is reported rather than waited for.
     #
-    # 300 covers crypto (up to ~180 min on slow EPYC runners) + bud-zero (15 min)
-    # + the bounded storage window (40 min; full 32-shard sweep runs in miri-storage-weekly.yml).
-    timeout-minutes: 300
+    # 350 is the ceiling a GitHub-hosted job can carry, and the crypto leg needs
+    # all of it. Measured on 2026-11-26 against PR #215's head (d708fe28fb): the
+    # selection was 144 tests, 121 of them passed in 264.8 minutes with zero UB
+    # findings, and the job was killed at the 300-minute cap with 23 tests unrun.
+    # At the observed mean rate (2.19 min/test) those 23 need about 50 minutes, so
+    # the leg is near 332 minutes including its own build. The bud-vm and storage
+    # legs moved to `miri-budzero-storage`; a full 32-shard sweep runs in
+    # miri-storage-weekly.yml.
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -140,6 +146,45 @@ jobs:
           fi
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
+      # Miri's own output is the only thing that makes a red Miri check
+      # fixable, and it lives on the log host. The command above already tees to
+      # /tmp, so re-reading that file costs nothing: same bytes, nine lines,
+      # verdict unchanged.
+      - name: Miri failure surface (annotations)
+        if: failure()
+        run: |
+          set -o pipefail
+          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/miri-crypto.txt \
+            | grep -E "error|Undefined Behavior|panicked|test result|FAILED|failures:" \
+            | head -n 9 | sed -e "s@^@::error::/tmp/miri-crypto.txt @ "
+
+  miri-budzero-storage:
+    # The bud-vm and storage legs used to sit inside `miri-crypto`. Measured on
+    # 2026-11-26 against PR #215's head (d708fe28fb): the crypto leg alone ran
+    # 121 of its 144 selected tests in 264.8 minutes with zero UB findings and
+    # was killed at the 300-minute job cap with 23 tests unrun. Adding the
+    # bud-vm leg (about 15 min) and the bounded storage window (40 min) puts the
+    # whole job near 387 minutes, which is above the 350-minute ceiling a
+    # GitHub-hosted job can carry at any `timeout-minutes` value. The legs are
+    # split so that each one fits, and so that a slow leg can no longer throw
+    # away the results the other legs already produced.
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned nightly Rust with Miri
+        run: |
+          rustup toolchain install nightly-2026-07-19 --component miri
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: budlum-core
+          cache-on-failure: true
+      - name: Install protoc
+        run: python3 .github/scripts/install_protoc.py
       - name: Miri - budzero bud-vm
         # `bud-vm` is a member of the `budzero/` workspace, not of the root
         # manifest (the root only path-depends on it), so the step runs from
@@ -359,12 +404,12 @@ jobs:
       - name: Miri failure surface (annotations)
         if: failure()
         run: |
-          set +o pipefail
-          for f in /tmp/miri-crypto.txt /tmp/miri-budvm.txt /tmp/miri-storage.txt; do
+          set -o pipefail
+          for f in /tmp/miri-budvm.txt /tmp/miri-storage.txt; do
             [ -s "$f" ] || continue
             sed -e 's/\x1b\[[0-9;]*m//g' "$f" \
               | grep -E "error|Undefined Behavior|panicked|test result|FAILED|failures:" \
-              | head -n 9 | sed -e "s@^@::error::$f @"
+              | head -n 9 | sed -e "s@^@::error::$f @ "
           done
 
   asan:
