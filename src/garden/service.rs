@@ -28,13 +28,11 @@ use tokio::sync::Mutex;
 /// and is reached through the peers it dialed.
 const DEFAULT_LISTEN: &str = "/ip4/0.0.0.0/tcp/0";
 /// Where the seat is kept between runs. It sits beside the content rather
-/// than inside it: content is thrown away and fetched again, a seat cannot
-/// be.
+/// than inside it, so that finding one does not mean reading all of the
+/// other.
 const SEAT_FILE: &str = "seat.json";
 /// How long entering a Garden may take.
 const ENTER_TIMEOUT: Duration = Duration::from_mins(1);
-/// Largest payload a publish request may carry as text, in bytes.
-const MAX_PUBLISH_TEXT_BYTES: usize = 40 * 1024 * 1024;
 
 /// Optional settings of `bud_gardenCreate` and `bud_gardenJoin`.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -221,19 +219,17 @@ impl GardenService {
     ///
     /// `chain` is the node's Budlum chain; with it every Garden registers as
     /// a domain there. `data_dir` is the node's data directory; Garden
-    /// content goes under `garden/` inside it. A validator key never
-    /// survives a restart, so anything a stopped process left there belongs
-    /// to no one and is removed.
+    /// content goes under `garden/` inside it.
+    ///
+    /// Content found there is kept when a seat is found beside it. The seat
+    /// carries the validator secret, so the key does survive a restart, and
+    /// the recipes under it are still this node's to serve. Deleting them
+    /// would make every restart re-fetch a Garden this node is already
+    /// holding, and a phone that is the only validator awake would have
+    /// nowhere to re-fetch from: the Garden's content would be gone for
+    /// good. With no seat nobody can account for what is there, so it goes.
     pub fn new(chain: Option<ChainHandle>, data_dir: Option<PathBuf>) -> Self {
         let content_dir = data_dir.as_ref().map(|dir| dir.join("garden"));
-        // Content is dropped and fetched again; the seat beside it is not.
-        if let Some(dir) = &content_dir {
-            if dir.exists() {
-                if let Err(e) = std::fs::remove_dir_all(dir) {
-                    tracing::warn!(error = %e, "stale garden content could not be removed");
-                }
-            }
-        }
         // A seat found on disk is taken as stepped out, not as running: the
         // network is not touched here. Returning is an act of its own, so
         // the caller decides when, and a caller that never returns leaves
@@ -242,6 +238,15 @@ impl GardenService {
             .as_ref()
             .and_then(|dir| stored_seat(&dir.join(SEAT_FILE), content_dir.clone()))
             .unwrap_or(Slot::Empty);
+        if matches!(slot, Slot::Empty) {
+            if let Some(dir) = &content_dir {
+                if dir.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(dir) {
+                        tracing::warn!(error = %e, "unowned garden content could not be removed");
+                    }
+                }
+            }
+        }
         Self {
             chain,
             data_dir,
@@ -693,9 +698,6 @@ impl GardenService {
         caption: Option<String>,
     ) -> Result<Value, String> {
         let kind = GardenContentKind::parse(&kind)?;
-        if payload.len() > MAX_PUBLISH_TEXT_BYTES {
-            return Err("payload is too large".into());
-        }
         let (bytes, default_mime) = match encoding.as_deref().unwrap_or("utf8") {
             "utf8" => (payload.into_bytes(), "text/plain; charset=utf-8"),
             "hex" => (
@@ -769,6 +771,55 @@ mod tests {
     use crate::core::chain_config::Network;
     use crate::domain::types::DomainStatus;
     use std::path::Path;
+
+    /// An invite line a real run wrote, so the seat parses as one.
+    const SEAT_INVITE: &str = "budlum-garden:1?chain=4741724ef3648084&genesis=a13ed083665f9cc38e90d9e38b8efcf779682b7e5aac669ff8ab5ce68cc76c87&token=c3ef2a879e23204cfafb1446d2b2bb24baa3daeefcad3d2e7a208172b995d295&peer=/ip4/127.0.0.1/tcp/45721/p2p/12D3KooWQrQjxr4NXfV8n4txj3UUAphRazgH6vifSXF7PdDo64FZ";
+
+    /// Content outlives the process that fetched it, as long as the seat does.
+    ///
+    /// The service used to empty the content directory on every start, on
+    /// the grounds that a validator key does not survive a restart. The
+    /// seat carries the secret, so it does. A phone that is the only
+    /// validator awake has nowhere to re-fetch from, so wiping here lost
+    /// the Garden's content outright.
+    #[test]
+    fn content_is_kept_for_a_seat_and_dropped_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let content = data.join("garden").join("0123456789abcdef");
+        std::fs::create_dir_all(&content).unwrap();
+        let recipe = content.join(format!("{}.bud3", hex::encode([7u8; 32])));
+        std::fs::write(&recipe, b"a recipe this node holds").unwrap();
+
+        // No seat: nobody can account for what is there, so it goes.
+        drop(GardenService::new(None, Some(data.clone())));
+        assert!(
+            !recipe.exists(),
+            "content with no seat beside it belongs to no one"
+        );
+
+        std::fs::create_dir_all(&content).unwrap();
+        std::fs::write(&recipe, b"a recipe this node holds").unwrap();
+        let seat = data.join(SEAT_FILE);
+        std::fs::write(
+            &seat,
+            serde_json::json!({
+                "version": 1,
+                "secret": hex::encode([3u8; 32]),
+                "invite": SEAT_INVITE,
+                "name": "Phone",
+                "listen": "/ip4/127.0.0.1/tcp/0",
+                "announce": Value::Null,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        drop(GardenService::new(None, Some(data.clone())));
+        assert!(
+            recipe.exists(),
+            "a seat on disk means the key survives, so the content is still this node's"
+        );
+    }
 
     fn options() -> GardenOptions {
         GardenOptions {
