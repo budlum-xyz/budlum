@@ -160,6 +160,14 @@ pub fn evaluate(
         ));
         return evidence;
     }
+    if resolved.name.is_empty() || resolved.owner == [0u8; 32] {
+        evidence.push(Claim::new(
+            "bns-resolution",
+            Strength::Refused,
+            "the resolved record carries an empty name or zero owner address",
+        ));
+        return evidence;
+    }
 
     match proof {
         BnsInclusionProof::None => {
@@ -186,63 +194,89 @@ pub fn evaluate(
             ));
         }
         BnsInclusionProof::Registry { base_cost, entries } => {
-            let Some(expected) = expected_bns_root else {
-                evidence.push(Claim::new(
-                    "bns-resolution",
-                    Strength::RpcClaimOnly,
-                    "a registry was presented, but no bns_v1 root was given to compare it against",
-                ));
-                return evidence;
-            };
-            let found = entries.iter().find(|e| {
-                e.name == resolved.name
-                    && e.owner == resolved.owner
-                    && e.content_id == resolved.content_id
-                    && e.storage_root == resolved.storage_root
-            });
-            let Some(entry) = found else {
-                evidence.push(Claim::new(
-                    "bns-resolution",
-                    Strength::Refused,
-                    "the resolved record is not in the presented registry; the answer contradicts it",
-                ));
-                return evidence;
-            };
-            if entry.expires_at <= current_epoch {
-                evidence.push(Claim::new(
-                    "bns-resolution",
-                    Strength::Refused,
-                    "the proven entry has expired at the current epoch, whatever the resolver \
-                     reported, and an expired name binds to no content",
-                ));
-                return evidence;
-            }
-            let computed = partial_registry_root(*base_cost, entries);
-            if computed == expected {
-                evidence.push(Claim::new(
-                    "bns-resolution",
-                    Strength::Verified,
-                    "the registry reproduced the bns_v1 root, and the record is in it",
-                ));
-            } else {
-                // This is the expected case: this version does not carry all
-                // of `root()`'s fields. What is wrong is the proof format, not
-                // the registry.
-                evidence.push(Claim::new(
-                    "bns-resolution",
-                    Strength::RpcClaimOnly,
-                    "the presented registry did not reproduce the bns_v1 root. On its own \
-                     that is not a sign of lying: BnsRegistry::root() also writes the \
-                     resolver, address, consensus_domain_id, storage_root, \
-                     storage_domain_id, storage_root_height and subdomains fields, and \
-                     this proof format does not carry them. The proof format is \
-                     incomplete, so the answer is not verified",
-                ));
-            }
+            evidence.push(evaluate_registry_claim(
+                resolved,
+                *base_cost,
+                entries,
+                expected_bns_root,
+                current_epoch,
+            ));
         }
     }
 
     evidence
+}
+
+fn evaluate_registry_claim(
+    resolved: &ResolvedName,
+    base_cost: u64,
+    entries: &[RegistryEntry],
+    expected_bns_root: Option<[u8; 32]>,
+    current_epoch: u64,
+) -> Claim {
+    let Some(expected) = expected_bns_root else {
+        return Claim::new(
+            "bns-resolution",
+            Strength::RpcClaimOnly,
+            "a registry was presented, but no bns_v1 root was given to compare it against",
+        );
+    };
+    if entries
+        .iter()
+        .any(|e| e.name.is_empty() || e.owner == [0u8; 32])
+        || !entries
+            .windows(2)
+            .all(|pair| match (pair.first(), pair.get(1)) {
+                (Some(a), Some(b)) => a.name < b.name,
+                _ => true,
+            })
+    {
+        return Claim::new(
+            "bns-resolution",
+            Strength::Refused,
+            "the presented registry entries are unsorted, duplicated, or zero-owned",
+        );
+    }
+    let found = entries.iter().find(|e| {
+        e.name == resolved.name
+            && e.owner == resolved.owner
+            && e.content_id == resolved.content_id
+            && e.storage_root == resolved.storage_root
+    });
+    let Some(entry) = found else {
+        return Claim::new(
+            "bns-resolution",
+            Strength::Refused,
+            "the resolved record is not in the presented registry; the answer contradicts it",
+        );
+    };
+    if entry.expires_at <= current_epoch {
+        return Claim::new(
+            "bns-resolution",
+            Strength::Refused,
+            "the proven entry has expired at the current epoch, whatever the resolver \
+             reported, and an expired name binds to no content",
+        );
+    }
+    let computed = partial_registry_root(base_cost, entries);
+    if computed == expected {
+        Claim::new(
+            "bns-resolution",
+            Strength::Verified,
+            "the registry reproduced the bns_v1 root, and the record is in it",
+        )
+    } else {
+        Claim::new(
+            "bns-resolution",
+            Strength::RpcClaimOnly,
+            "the presented registry did not reproduce the bns_v1 root. On its own \
+             that is not a sign of lying: BnsRegistry::root() also writes the \
+             resolver, address, consensus_domain_id, storage_root, \
+             storage_domain_id, storage_root_height and subdomains fields, and \
+             this proof format does not carry them. The proof format is \
+             incomplete, so the answer is not verified",
+        )
+    }
 }
 
 fn evaluate_per_name_claim(
@@ -640,6 +674,38 @@ mod tests {
         assert_ne!(
             content_binding("ayaz.bud", [1u8; 32], &content),
             content_binding("ayaz.bud", [4u8; 32], &content)
+        );
+    }
+
+    #[test]
+    fn evaluate_refuses_zero_owner_and_unsorted_or_duplicate_registry_entries() {
+        let mut zero_owner = resolved();
+        zero_owner.owner = [0u8; 32];
+        let ev_zero = evaluate(&zero_owner, &BnsInclusionProof::None, None, 5);
+        assert_eq!(
+            ev_zero.weakest(),
+            Strength::Refused,
+            "zero-owner BNS record must be refused"
+        );
+
+        let entry_a = RegistryEntry {
+            name: String::from("ayaz.bud"),
+            owner: [1u8; 32],
+            expires_at: 20,
+            content_id: resolved().content_id,
+            storage_root: None,
+        };
+        let dup_entries = vec![entry_a.clone(), entry_a];
+        let dup_root = partial_registry_root(100, &dup_entries);
+        let dup_proof = BnsInclusionProof::Registry {
+            base_cost: 100,
+            entries: dup_entries,
+        };
+        let ev_dup = evaluate(&resolved(), &dup_proof, Some(dup_root), 5);
+        assert_eq!(
+            ev_dup.weakest(),
+            Strength::Refused,
+            "duplicate/unsorted RegistryEntry list must be refused"
         );
     }
 }
