@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: b9b05827fac5733dabdd8c22c5f2871a8560bd45049dcd7d6e4e07ae7b375daf
+digest: 2a9bf50221147c3e2fe701223ae715bba0c28eb13b612462fd4b938738bc86dd
 files: 200
 Cargo.lock	7a2830ec9206a455ad5bbaef19dcedd3e88df2aa4eedaca3b5861a2107138856
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
@@ -62,7 +62,7 @@ src/gates/docker_toolchain.rs	6e173303515c645e1ec1aef7742e5c6efc4adf48fdaa63e961
 src/gates/domain_tags.rs	1e080abcd80a89985e1e1f371f78a24d602136571374b6792e8bf19d5a1fbb91
 src/gates/economy_invariants.rs	7b0986c6387642d730ccfb2b8814ef27e5d5128a1690a8b8af48516d2e9244ac
 src/gates/ee_workers_build_with_unwind.rs	b5af86acc6c87b3c9abdc402a308940f8c00350b158a1e360629084634fb4795
-src/gates/every_consensus_family_has_a_door.rs	280fe450aa5db7b972572271e156f30186486bf2ae20f7ba2d78cade98835253
+src/gates/every_consensus_family_has_a_door.rs	c57d347f348ef2d043a15e6aecf8c36d84812fd8ed99cbf25276986cb0177232
 src/gates/every_fuzz_target_is_run.rs	c1459ec72989b0f94d4fe056b30d53223445fde4903241def5912a52f3026fef
 src/gates/every_opcode_forgery.rs	2e286674e416d0ab9a445527a9ee0d8cdc362ebf59dc2b359549a2d4163d29b4
 src/gates/evidence_provenance.rs	68c9d4a6bd85f6ee31f13641158658d887fa856114c4ef63d2af2fcca47be812

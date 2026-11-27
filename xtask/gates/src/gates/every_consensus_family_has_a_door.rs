@@ -398,6 +398,122 @@ fn check_exhaustive_tables(root: &Path) -> Result<usize, String> {
     Ok(checked)
 }
 
+/// Which `AdapterSpec` arms of `for_external_spec_declared` may bind an event
+/// root, and therefore may reach `admits_cross_domain_value`.
+///
+/// # Why this list exists
+///
+/// `FinalityGuarantee::admits_cross_domain_value` refuses before it looks at
+/// anything else unless `attestation.event_root` is set:
+///
+/// ```text
+/// if !self.attestation.event_root || self.fault_tolerance_bps == 0 { return false; }
+/// if self.slashable_backing { return true; }
+/// ```
+///
+/// An event root is the claim "this event happened on that chain". It is the
+/// only binding that lets a foreign domain move value here, and most proof
+/// families cannot make it: an SCP externalise message, a Mithril certificate
+/// or a vault signature set commits to a block or a state root, not to an
+/// event. Declaring `event_root: true` for such a family would hand it value
+/// authority its proof does not support.
+///
+/// The list is therefore a value-authority boundary, not a style rule, and it
+/// is deliberately short. Adding a name to it is a change to who may move
+/// value across domains and must be argued on that basis.
+const EVENT_ROOT_BEARING_SPECS: &[&str] = &[
+    // A chained-HotStuff QC signs the whole commitment, event root included.
+    "HotStuffQc",
+    // A Bullshark certificate carries the same full-commitment signature.
+    "DagCertificate",
+    // Mysticeti commits the full block contents it certifies.
+    "MysticetiDag",
+    // A BitVM2 covenant disproof binds the executed program's outputs.
+    "BitVmCovenant",
+    // HoneyBadger's ACS output is the agreed block in full.
+    "HoneyBadgerBft",
+];
+
+/// Refuse an arm that starts binding an event root without being on the list.
+///
+/// The check is textual on purpose: it reads the same `for_external_spec_declared`
+/// arms a reviewer reads, and the question it answers ("did this arm gain the
+/// ability to set `event_root`?") is a question about the written table.
+fn check_event_root_authority(root: &Path) -> Result<usize, String> {
+    const REL: &str = "src/settlement/universal_finality.rs";
+    let text = std::fs::read_to_string(root.join(REL))
+        .map_err(|e| format!("{REL} could not be read: {e}"))?;
+    let body = function_body(&text, "fn for_external_spec_declared(")
+        .ok_or_else(|| format!("{REL}: fn for_external_spec_declared( not found"))?;
+
+    // Split the match into per-variant segments: each starts at an
+    // `AdapterSpec::<Name>` mention and runs to the next one.
+    let marks: Vec<(usize, String)> = body
+        .match_indices("AdapterSpec::")
+        .map(|(i, _)| {
+            let rest = &body[i + "AdapterSpec::".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            (i, name)
+        })
+        .collect();
+    if marks.is_empty() {
+        return Err(format!("{REL}: for_external_spec_declared names no variants"));
+    }
+
+    let mut bearers: Vec<String> = Vec::new();
+    for (idx, (pos, name)) in marks.iter().enumerate() {
+        let end = marks.get(idx + 1).map_or(body.len(), |(p, _)| *p);
+        let seg = &body[*pos..end];
+        let Some(at) = seg.find("event_root:") else {
+            continue;
+        };
+        let value: String = seg[at + "event_root:".len()..]
+            .chars()
+            .take_while(|c| *c != ',' && *c != '\n')
+            .collect();
+        if value.trim() != "false" {
+            bearers.push(name.clone());
+        }
+    }
+
+    let mut unexpected: Vec<&String> = bearers
+        .iter()
+        .filter(|n| !EVENT_ROOT_BEARING_SPECS.contains(&n.as_str()))
+        .collect();
+    unexpected.sort();
+    unexpected.dedup();
+    if !unexpected.is_empty() {
+        return Err(format!(
+            "{REL}: {} now bind an event root without being declared event-root bearing.              An event root is what lets a foreign domain move value here              (admits_cross_domain_value refuses without it), so this is a change to who holds              value authority. Argue it, then add the name to EVENT_ROOT_BEARING_SPECS.",
+            unexpected
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    let mut missing: Vec<&&str> = EVENT_ROOT_BEARING_SPECS
+        .iter()
+        .filter(|n| !bearers.iter().any(|b| b == *n))
+        .collect();
+    missing.sort();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{REL}: {} are listed as event-root bearing but their arms pin event_root to false.              Remove them from EVENT_ROOT_BEARING_SPECS rather than leaving a stale entry that              would silently authorise a future change.",
+            missing
+                .iter()
+                .map(|s| **s)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(bearers.len())
+}
+
 /// # Errors
 ///
 /// A canonical consensus family that no `AdapterSpec` variant can admit, a
@@ -464,11 +580,13 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     let tables = check_exhaustive_tables(root)?;
+    let bearers = check_event_root_authority(root)?;
 
     Ok(format!(
         "every consensus family has a door: {} canonical families, {} AdapterSpec variants, {} \
-         reachable consensus_kind(s); the model and the registration door agree, and {tables} \
-         per-variant tables stay exhaustive by construction",
+         reachable consensus_kind(s); the model and the registration door agree, {tables} \
+         per-variant tables stay exhaustive by construction, and {bearers} declared families \
+         may bind an event root",
         families.len(),
         specs.len(),
         reachable.len()
@@ -517,11 +635,22 @@ pub fn self_test() -> Result<String, String> {
             "fn encode_adapter_spec(s: &AdapterSpec) {\n    match s {\n        AdapterSpec::AlphaSpec { .. } => 0,\n    }\n}\n",
         )
         .map_err(|e| e.to_string())?;
-        std::fs::write(
-            settlement_dir.join("universal_finality.rs"),
-            "fn for_external_spec_declared(s: &AdapterSpec) {\n    match s {\n        AdapterSpec::AlphaSpec { .. } => 0,\n    }\n}\n",
-        )
-        .map_err(|e| e.to_string())
+        // The canary tree declares the same event-root bearers the real tree
+        // does, so the value-authority check runs against a realistic table
+        // in every canary instead of tripping over a stub that omits them.
+        let mut settlement_src = String::from(
+            "fn for_external_spec_declared(s: &AdapterSpec) {\n    match s {\n",
+        );
+        for bearer in EVENT_ROOT_BEARING_SPECS {
+            settlement_src.push_str(&format!(
+                "        AdapterSpec::{bearer} {{ .. }} => Self {{ event_root: valid, }},\n"
+            ));
+        }
+        settlement_src.push_str(
+            "        AdapterSpec::AlphaSpec { .. } => Self { event_root: false, },\n    }\n}\n",
+        );
+        std::fs::write(settlement_dir.join("universal_finality.rs"), settlement_src)
+            .map_err(|e| e.to_string())
     };
 
     let cleanup = |dir: &Path| {
@@ -679,10 +808,59 @@ pub fn self_test() -> Result<String, String> {
         }
     }
 
+    // Canaries 8 and 9 - the event-root value-authority boundary, both ways.
+    let settlement = settlement_dir.join("universal_finality.rs");
+    let table = |hotstuff: &str, alpha: &str| {
+        let mut out = String::from(
+            "fn for_external_spec_declared(s: &AdapterSpec) {\n    match s {\n",
+        );
+        for bearer in EVENT_ROOT_BEARING_SPECS {
+            let value = if *bearer == "HotStuffQc" { hotstuff } else { "valid" };
+            out.push_str(&format!(
+                "        AdapterSpec::{bearer} {{ .. }} => Self {{ event_root: {value}, }},\n"
+            ));
+        }
+        out.push_str(&format!(
+            "        AdapterSpec::AlphaSpec {{ .. }} => Self {{ event_root: {alpha}, }},\n    }}\n}}\n"
+        ));
+        out
+    };
+    // 8: an undeclared arm starts binding an event root.
+    std::fs::write(&settlement, table("valid", "valid")).map_err(|e| e.to_string())?;
+    match check_event_root_authority(&dir) {
+        Ok(_) => {
+            cleanup(&dir);
+            return Err(String::from(
+                "canary 8: an undeclared arm binding an event root was accepted",
+            ));
+        }
+        Err(e) if !e.contains("AlphaSpec") => {
+            cleanup(&dir);
+            return Err(format!("canary 8: failed without naming the arm: {e}"));
+        }
+        Err(_) => {}
+    }
+    // 9: a declared bearer stops binding one, leaving a stale entry.
+    std::fs::write(&settlement, table("false", "false")).map_err(|e| e.to_string())?;
+    match check_event_root_authority(&dir) {
+        Ok(_) => {
+            cleanup(&dir);
+            return Err(String::from(
+                "canary 9: a stale event-root entry was accepted",
+            ));
+        }
+        Err(e) if !e.contains("HotStuffQc") => {
+            cleanup(&dir);
+            return Err(format!("canary 9: failed without naming the stale entry: {e}"));
+        }
+        Err(_) => {}
+    }
+
     cleanup(&dir);
     Ok(String::from(
-        "every-consensus-family-has-a-door self-test OK: 7 canaries (honest tree, doorless \
+        "every-consensus-family-has-a-door self-test OK: 9 canaries (honest tree, doorless \
          family, name-only match, empty build arm, undeclared adapter kind, wildcard arm in a \
-         per-variant table, underscore-prefixed binding is not a wildcard)",
+         per-variant table, underscore-prefixed binding is not a wildcard, undeclared \
+         event-root binding, stale event-root entry)",
     ))
 }
