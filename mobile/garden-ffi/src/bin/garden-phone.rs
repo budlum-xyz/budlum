@@ -23,8 +23,9 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use budlum_garden_ffi::{GardenAnswer, GardenPhone};
 use serde_json::Value;
@@ -32,11 +33,20 @@ use serde_json::Value;
 /// Loopback bind address so a phone control door is never exposed to LAN peers.
 const STATUS_BIND_ADDR: &str = "127.0.0.1";
 /// Per-connection read and write deadline on the local control door.
-const STATUS_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const STATUS_IO_TIMEOUT: Duration = Duration::from_secs(3);
+/// End-to-end header read deadline to protect worker slots against slowloris peers.
+const STATUS_REQUEST_DEADLINE: Duration = Duration::from_secs(3);
+/// Maximum concurrent worker threads answering status-door requests.
+const MAX_DOOR_WORKERS: usize = 8;
 /// Maximum bytes read for the HTTP request line + headers.
-const MAX_HTTP_HEAD_BYTES: u64 = 4_096;
+const MAX_HTTP_HEAD_BYTES: usize = 4_096;
+/// Maximum HTTP header lines accepted before rejecting with `431`.
+const MAX_HTTP_HEADER_LINES: usize = 64;
 /// Maximum JSON body bytes accepted on local `POST` commands.
 const MAX_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// Default and upper-bound feed limit for CLI & HTTP read endpoints.
+const DEFAULT_FEED_LIMIT: u32 = 50;
+const MAX_FEED_LIMIT: u32 = 200;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -235,7 +245,8 @@ fn main() -> ExitCode {
             let limit = args
                 .get(3)
                 .and_then(|n| n.parse::<u32>().ok())
-                .unwrap_or(20);
+                .unwrap_or(20)
+                .clamp(1, MAX_FEED_LIMIT);
             if !return_first(&phone) {
                 return ExitCode::FAILURE;
             }
@@ -298,35 +309,68 @@ fn return_first(phone: &Arc<GardenPhone>) -> bool {
     }
 }
 
+/// Extract a top-level JSON boolean field without fragile substring matching.
+fn json_bool_field(json: &str, field: &str) -> Option<bool> {
+    let value: Value = serde_json::from_str(json).ok()?;
+    value.get(field)?.as_bool()
+}
+
+/// Extract the validator status label cleanly from either `/garden/status`
+/// or a top-level `status` field without spoofable substring scans.
+fn garden_status_field(json: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(json).ok()?;
+    value
+        .pointer("/garden/status")
+        .or_else(|| value.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
 /// Join, leave, and return - the three taps the Status screen allows.
 fn round_trip(phone: &Arc<GardenPhone>, record: String, name: String) -> Result<(), String> {
     let joined = phone.join(record, name).map_err(|e| e.to_string())?;
     println!("joined:   {}", one_line(&joined.json, "status"));
     let left = phone.leave().map_err(|e| e.to_string())?;
     println!("left:     {}", left.json);
-    if !left.json.contains("\"can_return\":true") {
+    if json_bool_field(&left.json, "can_return") != Some(true) {
         return Err("the seat was not kept, so there is nothing to return to".into());
     }
     let back = phone.rejoin().map_err(|e| e.to_string())?;
     println!("returned: {}", one_line(&back.json, "status"));
     let now = phone.status().map_err(|e| e.to_string())?;
-    if !now.json.contains("\"status\":\"Active\"") {
+    if garden_status_field(&now.json).as_deref() != Some("Active") {
         return Err("the phone came back to something that is not an active Garden".into());
     }
     Ok(())
 }
 
-/// The one field worth printing out of a long status answer.
+/// The one field worth printing out of a long status answer, parsed structurally
+/// so nested objects, trailing braces, or non-ASCII bytes never corrupt or panic.
 fn one_line(json: &str, field: &str) -> String {
-    let needle = format!("\"{field}\":");
-    json.find(&needle).map_or_else(
-        || format!("{} bytes", json.len()),
-        |at| {
-            let rest = &json[at + needle.len()..];
-            let end = rest.find(',').unwrap_or(rest.len());
-            format!("{field} {}", rest[..end].trim_matches('"'))
-        },
-    )
+    serde_json::from_str::<Value>(json)
+        .ok()
+        .and_then(|v| {
+            v.get(field)
+                .cloned()
+                .or_else(|| v.get("garden").and_then(|g| g.get(field)).cloned())
+        })
+        .map_or_else(
+            || format!("{} bytes", json.len()),
+            |val| match val {
+                Value::String(s) => format!("{field} {s}"),
+                other => format!("{field} {other}"),
+            },
+        )
+}
+
+struct WorkerSlotGuard {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for WorkerSlotGuard {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Hold the Garden open and answer local operator queries on loopback `port`.
@@ -339,20 +383,51 @@ fn serve(phone: &Arc<GardenPhone>, port: u16) -> ExitCode {
         }
     };
     println!("the phone is in the Garden; its status is on {STATUS_BIND_ADDR}:{port}");
+    let active_workers = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => answer_one(phone, stream),
+            Ok(mut stream) => {
+                if active_workers
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                        (n < MAX_DOOR_WORKERS).then_some(n + 1)
+                    })
+                    .is_err()
+                {
+                    let _ = stream.set_write_timeout(Some(STATUS_IO_TIMEOUT));
+                    write_http_json(
+                        &mut stream,
+                        "503 SERVICE UNAVAILABLE",
+                        &error_body("door busy"),
+                    );
+                    continue;
+                }
+                let phone = Arc::clone(phone);
+                let active = Arc::clone(&active_workers);
+                if std::thread::Builder::new()
+                    .name("garden-phone-door".into())
+                    .spawn(move || {
+                        let _guard = WorkerSlotGuard { active };
+                        answer_one(&phone, stream);
+                    })
+                    .is_err()
+                {
+                    active_workers.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
             Err(e) => eprintln!("a status reader dropped: {e}"),
         }
     }
     ExitCode::SUCCESS
 }
 
+fn format_http_head(status: &str, body_len: usize) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+    )
+}
+
 fn write_http_json(stream: &mut TcpStream, status: &str, body: &str) {
-    let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
+    let head = format_http_head(status, body.len());
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(body.as_bytes());
     let _ = stream.flush();
@@ -372,105 +447,278 @@ fn answer_result(
     }
 }
 
-fn answer_one(phone: &Arc<GardenPhone>, mut stream: TcpStream) {
-    let _ = stream.set_read_timeout(Some(STATUS_IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(STATUS_IO_TIMEOUT));
+#[derive(Debug, PartialEq, Eq)]
+enum DoorRoute {
+    Status,
+    Invite,
+    Feed(u32),
+    Fetch(String),
+    Send,
+    SendImage,
+}
 
-    let mut reader = BufReader::new((&mut stream).take(MAX_HTTP_HEAD_BYTES));
+#[derive(Debug, PartialEq, Eq)]
+enum RouteRejection {
+    BadRequest(&'static str),
+    NotFound(&'static str),
+    MethodNotAllowed(&'static str),
+}
+
+impl RouteRejection {
+    fn http_status(&self) -> &'static str {
+        match self {
+            Self::BadRequest(_) => "400 BAD REQUEST",
+            Self::NotFound(_) => "404 NOT FOUND",
+            Self::MethodNotAllowed(_) => "405 METHOD NOT ALLOWED",
+        }
+    }
+
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::BadRequest(r) | Self::NotFound(r) | Self::MethodNotAllowed(r) => r,
+        }
+    }
+}
+
+fn route_http_request(first_line: &str) -> Result<DoorRoute, RouteRejection> {
+    let mut parts = first_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or(RouteRejection::BadRequest("malformed request line"))?;
+    let raw_target = parts
+        .next()
+        .ok_or(RouteRejection::BadRequest("malformed request line"))?;
+    let version = parts
+        .next()
+        .ok_or(RouteRejection::BadRequest("malformed request line"))?;
+    if parts.next().is_some()
+        || !matches!(version, "HTTP/1.1" | "HTTP/1.0")
+        || !raw_target.starts_with('/')
+    {
+        return Err(RouteRejection::BadRequest("malformed request line"));
+    }
+    let path = raw_target.split('?').next().unwrap_or(raw_target);
+    if path.contains('\\')
+        || path.contains("..")
+        || path
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+    {
+        return Err(RouteRejection::NotFound("unknown route"));
+    }
+    match method {
+        "GET" => {
+            if path == "/" || path == "/status" {
+                Ok(DoorRoute::Status)
+            } else if path == "/invite" {
+                Ok(DoorRoute::Invite)
+            } else if path == "/feed" {
+                Ok(DoorRoute::Feed(DEFAULT_FEED_LIMIT))
+            } else if let Some(rest) = path.strip_prefix("/feed/") {
+                match rest.parse::<u32>() {
+                    Ok(limit) if (1..=MAX_FEED_LIMIT).contains(&limit) => {
+                        Ok(DoorRoute::Feed(limit))
+                    }
+                    _ => Err(RouteRejection::BadRequest(
+                        "feed limit must be an integer in 1..=200",
+                    )),
+                }
+            } else if let Some(content_id) = path.strip_prefix("/fetch/") {
+                if content_id.len() != 64 || !content_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    Err(RouteRejection::BadRequest(
+                        "content id must be 64 hex digits",
+                    ))
+                } else {
+                    Ok(DoorRoute::Fetch(content_id.to_ascii_lowercase()))
+                }
+            } else {
+                Err(RouteRejection::NotFound("unknown route"))
+            }
+        }
+        "POST" => match path {
+            "/send" => Ok(DoorRoute::Send),
+            "/send-image" => Ok(DoorRoute::SendImage),
+            _ => Err(RouteRejection::NotFound("unknown route")),
+        },
+        _ => Err(RouteRejection::MethodNotAllowed("method not allowed")),
+    }
+}
+
+enum HeadReadError {
+    SilentClose,
+    Rejected(&'static str, &'static str),
+}
+
+struct ParsedHead {
+    first_line: String,
+    content_length: usize,
+    buffered_body_prefix: Vec<u8>,
+}
+
+/// Read the HTTP request line and headers with strict aggregate byte/line limits
+/// and a bounded wall-clock deadline so split or non-terminated headers fail
+/// closed (`400` / `431`) instead of truncating into partial dispatch.
+fn read_http_head<R: Read>(input: R, deadline: Instant) -> Result<ParsedHead, HeadReadError> {
+    let mut reader = BufReader::new(input.take((MAX_HTTP_HEAD_BYTES + 1) as u64));
     let mut first = String::new();
-    if reader.read_line(&mut first).is_err() || first.trim().is_empty() {
-        return;
-    }
-    let mut parts = first.split_whitespace();
-    let method = parts.next().unwrap_or("");
-    let path = parts.next().unwrap_or("");
-    if path.is_empty() || !path.starts_with('/') {
-        write_http_json(
-            &mut stream,
-            "400 BAD REQUEST",
-            &error_body("malformed request line"),
-        );
-        return;
+    match reader.read_line(&mut first) {
+        Ok(0) => return Err(HeadReadError::SilentClose),
+        Ok(_) if first.len() > MAX_HTTP_HEAD_BYTES => {
+            return Err(HeadReadError::Rejected(
+                "431 REQUEST HEADER FIELDS TOO LARGE",
+                "request head exceeds byte limit",
+            ));
+        }
+        Ok(_) if !first.ends_with('\n') => {
+            return Err(HeadReadError::Rejected(
+                "400 BAD REQUEST",
+                "malformed or unterminated request line",
+            ));
+        }
+        Ok(_) if first.trim().is_empty() => return Err(HeadReadError::SilentClose),
+        Ok(_) => {}
+        Err(_) => {
+            return Err(HeadReadError::Rejected(
+                "400 BAD REQUEST",
+                "request line read failed",
+            ));
+        }
     }
 
-    let mut content_length = 0usize;
+    let mut total_bytes = first.len();
+    let mut header_lines = 0usize;
+    let mut content_length: Option<usize> = None;
+
     loop {
+        if Instant::now() > deadline {
+            return Err(HeadReadError::Rejected(
+                "408 REQUEST TIMEOUT",
+                "request header deadline exceeded",
+            ));
+        }
         let mut line = String::new();
         match reader.read_line(&mut line) {
-            Ok(0) => break,
+            Ok(0) => {
+                return Err(HeadReadError::Rejected(
+                    "400 BAD REQUEST",
+                    "unterminated HTTP header block",
+                ));
+            }
             Ok(_) => {
+                total_bytes = total_bytes.saturating_add(line.len());
+                if total_bytes > MAX_HTTP_HEAD_BYTES {
+                    return Err(HeadReadError::Rejected(
+                        "431 REQUEST HEADER FIELDS TOO LARGE",
+                        "request headers exceed byte limit",
+                    ));
+                }
+                if !line.ends_with('\n') {
+                    return Err(HeadReadError::Rejected(
+                        "400 BAD REQUEST",
+                        "unterminated HTTP header line",
+                    ));
+                }
                 let trimmed = line.trim_end_matches(['\r', '\n']);
                 if trimmed.is_empty() {
                     break;
                 }
-                if let Some(val) = trimmed.to_ascii_lowercase().strip_prefix("content-length:") {
-                    match val.trim().parse::<usize>() {
-                        Ok(n) if n <= MAX_HTTP_BODY_BYTES => content_length = n,
-                        _ => {
-                            write_http_json(
-                                &mut stream,
+                header_lines += 1;
+                if header_lines > MAX_HTTP_HEADER_LINES {
+                    return Err(HeadReadError::Rejected(
+                        "431 REQUEST HEADER FIELDS TOO LARGE",
+                        "too many request headers",
+                    ));
+                }
+                let Some((name, val)) = trimmed.split_once(':') else {
+                    return Err(HeadReadError::Rejected(
+                        "400 BAD REQUEST",
+                        "malformed header line",
+                    ));
+                };
+                let lower = name.trim().to_ascii_lowercase();
+                if lower == "transfer-encoding" {
+                    return Err(HeadReadError::Rejected(
+                        "400 BAD REQUEST",
+                        "transfer-encoding is not supported",
+                    ));
+                }
+                if lower == "content-length" {
+                    let parsed = val
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|n| *n <= MAX_HTTP_BODY_BYTES);
+                    let Some(n) = parsed else {
+                        return Err(HeadReadError::Rejected(
+                            "400 BAD REQUEST",
+                            "invalid or oversized content-length",
+                        ));
+                    };
+                    if let Some(prev) = content_length {
+                        if prev != n {
+                            return Err(HeadReadError::Rejected(
                                 "400 BAD REQUEST",
-                                &error_body("invalid or oversized content-length"),
-                            );
-                            return;
+                                "conflicting content-length headers",
+                            ));
                         }
+                    } else {
+                        content_length = Some(n);
                     }
                 }
             }
             Err(_) => {
-                write_http_json(
-                    &mut stream,
+                return Err(HeadReadError::Rejected(
                     "400 BAD REQUEST",
-                    &error_body("header read failed"),
-                );
-                return;
+                    "header read failed",
+                ));
             }
         }
     }
-    let buffered = reader.buffer().to_vec();
-    drop(reader);
 
-    match method {
-        "GET" => {
-            if path == "/" || path == "/status" {
-                answer_result(&mut stream, phone.status());
-            } else if path == "/invite" {
-                answer_result(&mut stream, phone.invite());
-            } else if path == "/feed" {
-                answer_result(&mut stream, phone.feed(50));
-            } else if let Some(rest) = path.strip_prefix("/feed/") {
-                match rest.parse::<u32>() {
-                    Ok(limit) if (1..=200).contains(&limit) => {
-                        answer_result(&mut stream, phone.feed(limit));
-                    }
-                    _ => write_http_json(
-                        &mut stream,
-                        "400 BAD REQUEST",
-                        &error_body("feed limit must be an integer in 1..=200"),
-                    ),
-                }
-            } else if let Some(content_id) = path.strip_prefix("/fetch/") {
-                if content_id.len() != 64 || !content_id.bytes().all(|b| b.is_ascii_hexdigit()) {
-                    write_http_json(
-                        &mut stream,
-                        "400 BAD REQUEST",
-                        &error_body("content id must be 64 hex digits"),
-                    );
-                } else {
-                    answer_result(&mut stream, phone.fetch(content_id.to_string()));
-                }
-            } else {
-                write_http_json(&mut stream, "404 NOT FOUND", &error_body("unknown route"));
+    Ok(ParsedHead {
+        first_line: first,
+        content_length: content_length.unwrap_or(0),
+        buffered_body_prefix: reader.buffer().to_vec(),
+    })
+}
+
+fn answer_one(phone: &Arc<GardenPhone>, mut stream: TcpStream) {
+    let _ = stream.set_read_timeout(Some(STATUS_IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(STATUS_IO_TIMEOUT));
+    let deadline = Instant::now() + STATUS_REQUEST_DEADLINE;
+
+    let head = {
+        match read_http_head(&mut stream, deadline) {
+            Ok(head) => head,
+            Err(HeadReadError::SilentClose) => return,
+            Err(HeadReadError::Rejected(status, reason)) => {
+                write_http_json(&mut stream, status, &error_body(reason));
+                return;
             }
         }
-        "POST" => {
-            let mut body_bytes = Vec::with_capacity(content_length);
-            let take_buf = buffered.len().min(content_length);
-            if let Some(prefix) = buffered.get(..take_buf) {
+    };
+
+    let route = match route_http_request(&head.first_line) {
+        Ok(route) => route,
+        Err(rej) => {
+            write_http_json(&mut stream, rej.http_status(), &error_body(rej.reason()));
+            return;
+        }
+    };
+
+    match route {
+        DoorRoute::Status => answer_result(&mut stream, phone.status()),
+        DoorRoute::Invite => answer_result(&mut stream, phone.invite()),
+        DoorRoute::Feed(limit) => answer_result(&mut stream, phone.feed(limit)),
+        DoorRoute::Fetch(content_id) => answer_result(&mut stream, phone.fetch(content_id)),
+        DoorRoute::Send | DoorRoute::SendImage => {
+            let mut body_bytes = Vec::with_capacity(head.content_length);
+            let take_buf = head.buffered_body_prefix.len().min(head.content_length);
+            if let Some(prefix) = head.buffered_body_prefix.get(..take_buf) {
                 body_bytes.extend_from_slice(prefix);
             }
-            if body_bytes.len() < content_length {
-                let remaining = content_length.saturating_sub(body_bytes.len());
+            if body_bytes.len() < head.content_length {
+                let remaining = head.content_length.saturating_sub(body_bytes.len());
                 let mut tail = vec![0u8; remaining];
                 if stream.read_exact(&mut tail).is_err() {
                     write_http_json(
@@ -489,7 +737,7 @@ fn answer_one(phone: &Arc<GardenPhone>, mut stream: TcpStream) {
                     return;
                 }
             };
-            if path == "/send" {
+            if route == DoorRoute::Send {
                 let Some(text) = payload.get("text").and_then(Value::as_str) else {
                     write_http_json(&mut stream, "400 BAD REQUEST", &error_body("missing text"));
                     return;
@@ -500,7 +748,7 @@ fn answer_one(phone: &Arc<GardenPhone>, mut stream: TcpStream) {
                     .unwrap_or("")
                     .to_string();
                 answer_result(&mut stream, phone.send(text.to_string(), caption));
-            } else if path == "/send-image" {
+            } else {
                 let Some(hex_bytes) = payload.get("hex").and_then(Value::as_str) else {
                     write_http_json(&mut stream, "400 BAD REQUEST", &error_body("missing hex"));
                     return;
@@ -519,15 +767,8 @@ fn answer_one(phone: &Arc<GardenPhone>, mut stream: TcpStream) {
                     &mut stream,
                     phone.send_image(hex_bytes.to_string(), mime, caption),
                 );
-            } else {
-                write_http_json(&mut stream, "404 NOT FOUND", &error_body("unknown route"));
             }
         }
-        _ => write_http_json(
-            &mut stream,
-            "405 METHOD NOT ALLOWED",
-            &error_body("method not allowed"),
-        ),
     }
 }
 
@@ -545,5 +786,155 @@ fn say(result: Result<GardenAnswer, String>) -> ExitCode {
             eprintln!("refused: {reason}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn status_listener_binds_loopback_only_with_bounded_limits() {
+        assert_eq!(STATUS_BIND_ADDR, "127.0.0.1");
+        assert!(STATUS_IO_TIMEOUT >= Duration::from_secs(1));
+        assert!(STATUS_IO_TIMEOUT <= Duration::from_secs(5));
+        const {
+            assert!(MAX_DOOR_WORKERS <= 16);
+        }
+    }
+
+    #[test]
+    fn status_response_omits_wildcard_cors_and_sets_nosniff_and_no_store() {
+        let head = format_http_head("200 OK", 11);
+        assert!(head.contains("X-Content-Type-Options: nosniff"));
+        assert!(head.contains("Cache-Control: no-store"));
+        assert!(!head
+            .to_ascii_lowercase()
+            .contains("access-control-allow-origin"));
+    }
+
+    #[test]
+    fn router_enforces_strict_routes_methods_and_rejects_traversal() {
+        assert_eq!(
+            route_http_request("GET / HTTP/1.1\r\n"),
+            Ok(DoorRoute::Status)
+        );
+        assert_eq!(
+            route_http_request("GET /status HTTP/1.1\r\n"),
+            Ok(DoorRoute::Status)
+        );
+        assert_eq!(
+            route_http_request("GET /invite HTTP/1.1\r\n"),
+            Ok(DoorRoute::Invite)
+        );
+        assert_eq!(
+            route_http_request("GET /feed HTTP/1.1\r\n"),
+            Ok(DoorRoute::Feed(DEFAULT_FEED_LIMIT))
+        );
+        assert_eq!(
+            route_http_request("GET /feed/3 HTTP/1.1\r\n"),
+            Ok(DoorRoute::Feed(3))
+        );
+        assert!(matches!(
+            route_http_request("GET /feed/0 HTTP/1.1\r\n"),
+            Err(RouteRejection::BadRequest(_))
+        ));
+        assert!(matches!(
+            route_http_request("GET /feed/201 HTTP/1.1\r\n"),
+            Err(RouteRejection::BadRequest(_))
+        ));
+        assert!(matches!(
+            route_http_request("GET /feed/two HTTP/1.1\r\n"),
+            Err(RouteRejection::BadRequest(_))
+        ));
+        let valid_hex = "ab".repeat(32);
+        assert_eq!(
+            route_http_request(&format!(
+                "GET /fetch/{} HTTP/1.1\r\n",
+                valid_hex.to_uppercase()
+            )),
+            Ok(DoorRoute::Fetch(valid_hex))
+        );
+        assert!(matches!(
+            route_http_request("GET /fetch/abc HTTP/1.1\r\n"),
+            Err(RouteRejection::BadRequest(_))
+        ));
+        assert!(matches!(
+            route_http_request("GET /../etc/passwd HTTP/1.1\r\n"),
+            Err(RouteRejection::NotFound(_))
+        ));
+        assert!(matches!(
+            route_http_request("GET /unknown-route HTTP/1.1\r\n"),
+            Err(RouteRejection::NotFound(_))
+        ));
+        assert_eq!(
+            route_http_request("POST /send HTTP/1.1\r\n"),
+            Ok(DoorRoute::Send)
+        );
+        assert_eq!(
+            route_http_request("POST /send-image HTTP/1.1\r\n"),
+            Ok(DoorRoute::SendImage)
+        );
+        assert!(matches!(
+            route_http_request("DELETE / HTTP/1.1\r\n"),
+            Err(RouteRejection::MethodNotAllowed(_))
+        ));
+    }
+
+    #[test]
+    fn header_reader_rejects_oversized_split_unterminated_and_smuggled_headers() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // Oversized header > MAX_HTTP_HEAD_BYTES must return 431 instead of truncating.
+        let big = format!(
+            "GET /status HTTP/1.1\r\nX-Pad: {}\r\n\r\n",
+            "a".repeat(MAX_HTTP_HEAD_BYTES)
+        );
+        assert!(matches!(
+            read_http_head(Cursor::new(big.as_bytes()), deadline),
+            Err(HeadReadError::Rejected(
+                "431 REQUEST HEADER FIELDS TOO LARGE",
+                _
+            ))
+        ));
+
+        // Single huge line with NO newline must also return 431 without OOM.
+        let huge_no_nl = "GET /status ".to_string() + &"a".repeat(MAX_HTTP_HEAD_BYTES + 128);
+        assert!(matches!(
+            read_http_head(Cursor::new(huge_no_nl.as_bytes()), deadline),
+            Err(HeadReadError::Rejected(
+                "431 REQUEST HEADER FIELDS TOO LARGE",
+                _
+            ))
+        ));
+
+        // Unterminated header block returns 400.
+        let unterminated = b"GET /status HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+        assert!(matches!(
+            read_http_head(Cursor::new(&unterminated[..]), deadline),
+            Err(HeadReadError::Rejected("400 BAD REQUEST", _))
+        ));
+
+        // Conflicting Content-Length headers fail closed.
+        let dup_cl = b"POST /send HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 10\r\n\r\n";
+        assert!(matches!(
+            read_http_head(Cursor::new(&dup_cl[..]), deadline),
+            Err(HeadReadError::Rejected("400 BAD REQUEST", _))
+        ));
+
+        // Transfer-Encoding is rejected.
+        let chunked = b"POST /send HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+        assert!(matches!(
+            read_http_head(Cursor::new(&chunked[..]), deadline),
+            Err(HeadReadError::Rejected("400 BAD REQUEST", _))
+        ));
+    }
+
+    #[test]
+    fn json_helpers_resist_spoofed_title_substrings() {
+        let spoofed = r#"{"garden":{"chain_id":"01","title":"fake \"can_return\":true \"status\":\"Active\"","status":"Away"},"can_return":false}"#;
+        assert_eq!(json_bool_field(spoofed, "can_return"), Some(false));
+        assert_eq!(garden_status_field(spoofed).as_deref(), Some("Away"));
+        assert_eq!(one_line(spoofed, "status"), "status Away");
     }
 }

@@ -707,7 +707,8 @@ mod tests {
         // Loopback host address may still advertise http://127.0.0.1:<port>/g#
         // or fall back to budlum://garden/join# when no override is set.
         assert!(
-            plain_qr.starts_with("budlum://garden/join#") || plain_qr.starts_with("http://127.0.0.1:"),
+            plain_qr.starts_with("budlum://garden/join#")
+                || plain_qr.starts_with("http://127.0.0.1:"),
             "unexpected cleared QR: {plain_qr}"
         );
 
