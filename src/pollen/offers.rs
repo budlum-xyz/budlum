@@ -227,6 +227,18 @@ pub const MAX_NAME_OFFERS_PER_SELLER: usize = 64;
 /// backstop behind it, the same pair every bounded pool carries.
 const MAX_DATA_OFFERS_PER_SELLER: usize = 256;
 
+/// Active data assets one owner may hold concurrently so a single account
+/// cannot exhaust [`MAX_DATA_ASSETS`].
+const MAX_DATA_ASSETS_PER_OWNER: usize = 256;
+
+/// Active sale authorizations one seller may hold concurrently so a single
+/// account cannot exhaust [`MAX_SALE_AUTHORIZATIONS`].
+const MAX_SALE_AUTHORIZATIONS_PER_SELLER: usize = 256;
+
+/// Active access grants one owner may hold concurrently so a single account
+/// cannot exhaust [`MAX_ACCESS_GRANTS`].
+const MAX_ACCESS_GRANTS_PER_OWNER: usize = 1_024;
+
 /// Highest price a data listing may ask, bounded by total token supply so
 /// settlement arithmetic cannot overflow `u64` and pin an unbuyable slot.
 const MAX_DATA_OFFER_PRICE: u64 = crate::tokenomics::BUD_TOTAL_SUPPLY;
@@ -471,6 +483,16 @@ impl MarketplaceRegistry {
         if self.data_assets.contains_key(&asset.asset_id) {
             return Err("DataAsset already registered".into());
         }
+        let owner_active = self
+            .data_assets
+            .values()
+            .filter(|existing| existing.is_active() && existing.owner == asset.owner)
+            .count();
+        if owner_active >= MAX_DATA_ASSETS_PER_OWNER {
+            return Err(format!(
+                "owner reached maximum active data assets ({MAX_DATA_ASSETS_PER_OWNER})"
+            ));
+        }
         if self.data_assets.len() >= MAX_DATA_ASSETS {
             return Err("data asset registry is full".into());
         }
@@ -556,9 +578,7 @@ impl MarketplaceRegistry {
         if self.access_grants.contains_key(&grant.grant_id) {
             return Err("AccessGrant already registered".into());
         }
-        if self.access_grants.len() >= MAX_ACCESS_GRANTS {
-            return Err("access grant registry is full".into());
-        }
+        self.check_access_grant_capacity(&grant.owner)?;
         // DAO policy is applied here. Until now `encryption_policies` was a
         // record that was only written and read: `set_encryption_policy`
         // validated and stored it, `active_encryption_policies` listed it, and
@@ -572,6 +592,27 @@ impl MarketplaceRegistry {
         let id = grant.grant_id;
         self.access_grants.insert(id, grant);
         Ok(id)
+    }
+
+    /// Single capacity gate shared by every path that inserts into `access_grants`.
+    fn check_access_grant_capacity(&self, owner: &Address) -> Result<(), String> {
+        let owner_active = self
+            .access_grants
+            .values()
+            .filter(|existing| {
+                existing.owner == *owner
+                    && existing.status == super::data_rights::AccessGrantStatus::Active
+            })
+            .count();
+        if owner_active >= MAX_ACCESS_GRANTS_PER_OWNER {
+            return Err(format!(
+                "owner reached maximum active access grants ({MAX_ACCESS_GRANTS_PER_OWNER})"
+            ));
+        }
+        if self.access_grants.len() >= MAX_ACCESS_GRANTS {
+            return Err("access grant registry is full".into());
+        }
+        Ok(())
     }
 
     /// The grant duration ceiling the DAO declares.
@@ -736,6 +777,19 @@ impl MarketplaceRegistry {
         {
             return Err("SaleAuthorization already registered".into());
         }
+        let seller_live = self
+            .sale_authorizations
+            .values()
+            .filter(|existing| {
+                existing.seller == authorization.seller
+                    && existing.grants_issued < existing.max_grants
+            })
+            .count();
+        if seller_live >= MAX_SALE_AUTHORIZATIONS_PER_SELLER {
+            return Err(format!(
+                "seller reached maximum active sale authorizations ({MAX_SALE_AUTHORIZATIONS_PER_SELLER})"
+            ));
+        }
         if self.sale_authorizations.len() >= MAX_SALE_AUTHORIZATIONS {
             return Err("sale authorization registry is full".into());
         }
@@ -848,9 +902,7 @@ impl MarketplaceRegistry {
         if self.access_grants.contains_key(&grant.grant_id) {
             return Err("AccessGrant already registered".into());
         }
-        if self.access_grants.len() >= MAX_ACCESS_GRANTS {
-            return Err("access grant registry is full".into());
-        }
+        self.check_access_grant_capacity(&grant.owner)?;
         // The seller's authorization window is not a SECURITY ceiling: the
         // seller sets it. The DAO's ceiling is applied identically on both
         // paths, or a marketplace purchase would be a side door around it.
@@ -1104,6 +1156,23 @@ impl MarketplaceRegistry {
         requester: &Address,
         current_block: u64,
     ) -> Result<(), String> {
+        let (asset_id, grant_owner) = {
+            let grant = self
+                .access_grants
+                .get(grant_id)
+                .ok_or("AccessGrant not found")?;
+            (grant.asset_id, grant.owner)
+        };
+        let asset = self
+            .data_assets
+            .get(&asset_id)
+            .ok_or("access denied: DataAsset not found")?;
+        if !asset.is_active() {
+            return Err("access denied: DataAsset revoked".into());
+        }
+        if grant_owner != asset.owner {
+            return Err("access denied: grant owner mismatch".into());
+        }
         let grant = self
             .access_grants
             .get_mut(grant_id)
@@ -1254,6 +1323,11 @@ impl MarketplaceRegistry {
         }
 
         let id = self.next_name_offer_id;
+        if self.name_offers.contains_key(&id) {
+            return Err(format!(
+                "name offer id {id} is already live: counter is behind map contents"
+            ));
+        }
         self.next_name_offer_id = id
             .checked_add(1)
             .ok_or_else(|| "Name offer id overflow".to_string())?;
@@ -2278,5 +2352,75 @@ mod tests {
         );
         reg.create_offer(other, ContentId::of(b"other-seller-offer"), 100, 1)
             .expect("independent seller remains able to list");
+    }
+
+    #[test]
+    fn create_name_offer_refuses_stale_counter_overwrite_and_consume_grant_blocks_revoked_asset() {
+        let mut reg = MarketplaceRegistry::default();
+        let seller_a = crate::bns::BNS_PRIMARY_SELLERS[0];
+        let seller_b = addr(8);
+        let id0 = reg
+            .create_name_offer(
+                seller_a,
+                crate::bns::CreateNameOffer {
+                    name: "first.bud".into(),
+                    price_atoms: 1_000,
+                    duration: 365,
+                    kind: crate::bns::OfferKind::Primary,
+                    expires_at_epoch: 500,
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(id0, 0);
+        // Simulate stale counter after snapshot restore: must refuse instead of overwriting seller_a.
+        reg.next_name_offer_id = 0;
+        let overwrite_err = reg
+            .create_name_offer(
+                seller_b,
+                crate::bns::CreateNameOffer {
+                    name: "hijack.bud".into(),
+                    price_atoms: 1,
+                    duration: 365,
+                    kind: crate::bns::OfferKind::Primary,
+                    expires_at_epoch: 500,
+                },
+                1,
+            )
+            .unwrap_err();
+        assert!(overwrite_err.contains("already live"));
+        assert_eq!(reg.get_name_offer(0).unwrap().seller, seller_a);
+
+        // Revoking a DataAsset must block direct consume_ai_read_grant calls.
+        let owner = addr(1);
+        let grantee = addr(2);
+        let asset = DataAsset::new(owner, ContentId::of(b"revokable-asset"), [3u8; 32], true);
+        reg.register_data_asset(asset.clone()).unwrap();
+        let grant_id = reg
+            .create_access_grant_by_owner(signed_grant(&asset, grantee, 5))
+            .unwrap();
+        reg.revoke_data_asset(&asset.asset_id, &owner).unwrap();
+        let consume_err = reg
+            .consume_ai_read_grant(&grant_id, &grantee, 10)
+            .unwrap_err();
+        assert!(consume_err.contains("DataAsset revoked"));
+
+        // Per-owner active DataAsset cap prevents one account from exhausting MAX_DATA_ASSETS.
+        let spammer = addr(4);
+        for i in 0..MAX_DATA_ASSETS_PER_OWNER {
+            let mut key = [0u8; 32];
+            key[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            let a = DataAsset::new(spammer, ContentId::of(&key), key, true);
+            reg.register_data_asset(a).unwrap();
+        }
+        let overflow_asset =
+            DataAsset::new(spammer, ContentId::of(b"257th-asset"), [0xFF; 32], true);
+        assert!(reg
+            .register_data_asset(overflow_asset)
+            .unwrap_err()
+            .contains("maximum active data assets"));
+        // Independent owner can still register.
+        let honest = DataAsset::new(addr(5), ContentId::of(b"honest-asset"), [0xEE; 32], true);
+        reg.register_data_asset(honest).unwrap();
     }
 }

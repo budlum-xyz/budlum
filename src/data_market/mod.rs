@@ -43,6 +43,9 @@ pub const DATA_MARKET_RPC_METHODS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataMarketError {
     ZeroSellerOrPrice,
+    PriceOrDurationOutOfRange,
+    SellerListingLimitReached,
+    DuplicateActiveListing,
     SelfPurchase,
     ExpiryOverflow,
     CapacityExceeded,
@@ -62,6 +65,15 @@ pub enum DataMarketError {
 
 /// Maximum active and historical listings retained in `DataMarketRegistry`.
 pub const MAX_DATA_MARKET_LISTINGS: usize = 65_536;
+
+/// Maximum active B.U.D. 3.0 listings one seller may hold concurrently so a
+/// single account cannot exhaust [`MAX_DATA_MARKET_LISTINGS`].
+const MAX_DATA_MARKET_LISTINGS_PER_SELLER: usize = 256;
+
+/// Longest grant window a B.U.D. 3.0 Data Market listing may advertise,
+/// matching the registry duration ceiling so a seller cannot pin an unbuyable
+/// `ExpiryOverflow` listing.
+const MAX_DATA_MARKET_GRANT_DURATION_EPOCHS: u64 = crate::registry::params::MAX_DURATION;
 
 /// Maximum settled receipts and replay keys retained in `DataMarketRegistry`.
 pub const MAX_DATA_MARKET_RECEIPTS: usize = 262_144;
@@ -192,6 +204,11 @@ impl DataMarketRegistry {
         if seller == Address::zero() || price_atoms == 0 || grant_duration_epochs == 0 {
             return Err(DataMarketError::ZeroSellerOrPrice);
         }
+        if price_atoms > crate::tokenomics::BUD_TOTAL_SUPPLY
+            || grant_duration_epochs > MAX_DATA_MARKET_GRANT_DURATION_EPOCHS
+        {
+            return Err(DataMarketError::PriceOrDurationOutOfRange);
+        }
         let (content_id, object_commitment, nft_id) = target;
         let obj = bud3
             .object(&object_commitment)
@@ -212,10 +229,34 @@ impl DataMarketRegistry {
             &object_commitment,
             &nft_id,
         ]);
+        if self
+            .listings
+            .get(&listing_id)
+            .is_some_and(|existing| existing.active)
+        {
+            return Err(DataMarketError::DuplicateActiveListing);
+        }
+        let seller_active = self
+            .listings
+            .values()
+            .filter(|existing| existing.active && existing.seller == seller)
+            .count();
+        if seller_active >= MAX_DATA_MARKET_LISTINGS_PER_SELLER {
+            return Err(DataMarketError::SellerListingLimitReached);
+        }
         if !self.listings.contains_key(&listing_id)
             && self.listings.len() >= MAX_DATA_MARKET_LISTINGS
         {
-            return Err(DataMarketError::CapacityExceeded);
+            // Check whether sweeping inactive listings will free a slot before mutating.
+            let active_total = self
+                .listings
+                .values()
+                .filter(|existing| existing.active)
+                .count();
+            if active_total >= MAX_DATA_MARKET_LISTINGS {
+                return Err(DataMarketError::CapacityExceeded);
+            }
+            self.listings.retain(|_, existing| existing.active);
         }
         let listing = DataMarketListing {
             listing_id,
@@ -687,5 +728,155 @@ mod tests {
             ),
             Err(DataMarketError::InactiveListing)
         );
+    }
+
+    #[test]
+    fn create_listing_refuses_overflow_bounds_duplicate_live_and_seller_exhaustion() {
+        let seller = Address([0x31u8; 32]);
+        let other = Address([0x32u8; 32]);
+        let mut bud3 = Bud3Registry::new();
+        let cid = ContentId::of(b"bounded-data-market-payload");
+        let obj_key = [0x61u8; 32];
+        bud3.register_object(
+            obj_key,
+            ObjectRecord {
+                content_id: cid,
+                owner: seller.0,
+                declared_bytes: 64,
+                sealed: true,
+                segments: vec![SegmentRecord {
+                    segment_index: 0,
+                    symbol_count: 8,
+                    symbol_size: 8,
+                    root: [0x11u8; 32],
+                }],
+            },
+            &[
+                (
+                    0,
+                    Share {
+                        validator: [3u8; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: [4u8; 32],
+                        class: Class::Full,
+                        first_esi: 4,
+                        symbols: 4,
+                    },
+                ),
+            ],
+            1,
+            40,
+        )
+        .expect("register seller object");
+
+        let other_key = [0x62u8; 32];
+        bud3.register_object(
+            other_key,
+            ObjectRecord {
+                content_id: cid,
+                owner: other.0,
+                declared_bytes: 64,
+                sealed: true,
+                segments: vec![SegmentRecord {
+                    segment_index: 0,
+                    symbol_count: 8,
+                    symbol_size: 8,
+                    root: [0x12u8; 32],
+                }],
+            },
+            &[
+                (
+                    0,
+                    Share {
+                        validator: [3u8; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: [4u8; 32],
+                        class: Class::Full,
+                        first_esi: 4,
+                        symbols: 4,
+                    },
+                ),
+            ],
+            1,
+            40,
+        )
+        .expect("register other object");
+
+        let nft0 = [0x80u8; 32];
+        bud3.bind_nft(nft0, seller.0, Some(seller.0), &obj_key)
+            .expect("bind nft0");
+
+        let mut market = DataMarketRegistry::new();
+        assert_eq!(
+            market.create_listing(&bud3, seller, (cid, obj_key, nft0), u64::MAX, 10),
+            Err(DataMarketError::PriceOrDurationOutOfRange)
+        );
+        assert_eq!(
+            market.create_listing(
+                &bud3,
+                seller,
+                (cid, obj_key, nft0),
+                100,
+                MAX_DATA_MARKET_GRANT_DURATION_EPOCHS + 1,
+            ),
+            Err(DataMarketError::PriceOrDurationOutOfRange)
+        );
+
+        let first = market
+            .create_listing(&bud3, seller, (cid, obj_key, nft0), 100, 10)
+            .expect("first listing");
+        assert_eq!(
+            market.create_listing(&bud3, seller, (cid, obj_key, nft0), 200, 10),
+            Err(DataMarketError::DuplicateActiveListing),
+            "re-listing an already-active id must fail closed instead of mutating price"
+        );
+        // After delisting, re-listing succeeds.
+        market
+            .deactivate_listing(&first.listing_id, &seller)
+            .expect("deactivate");
+        market
+            .create_listing(&bud3, seller, (cid, obj_key, nft0), 200, 10)
+            .expect("relist after deactivate");
+
+        // Fill up to per-seller cap (1 already active, add 255 more distinct NFTs).
+        for idx in 1..MAX_DATA_MARKET_LISTINGS_PER_SELLER {
+            let mut nft = [0u8; 32];
+            nft[0] = 0x90;
+            nft[1..9].copy_from_slice(&(idx as u64).to_le_bytes());
+            bud3.bind_nft(nft, seller.0, Some(seller.0), &obj_key)
+                .expect("bind seller nft");
+            market
+                .create_listing(&bud3, seller, (cid, obj_key, nft), 10, 5)
+                .expect("within per-seller cap");
+        }
+        let extra_nft = [0xEEu8; 32];
+        bud3.bind_nft(extra_nft, seller.0, Some(seller.0), &obj_key)
+            .expect("bind extra nft");
+        assert_eq!(
+            market.create_listing(&bud3, seller, (cid, obj_key, extra_nft), 10, 5),
+            Err(DataMarketError::SellerListingLimitReached)
+        );
+
+        // An independent seller remains unaffected.
+        let other_nft = [0xF1u8; 32];
+        bud3.bind_nft(other_nft, other.0, Some(other.0), &other_key)
+            .expect("bind other nft");
+        market
+            .create_listing(&bud3, other, (cid, other_key, other_nft), 10, 5)
+            .expect("other seller can list");
     }
 }
