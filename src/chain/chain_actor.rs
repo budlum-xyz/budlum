@@ -3902,13 +3902,21 @@ impl ChainActor {
                     let _ = res_tx.send(self.blockchain.state.settlement.external_intake_digest());
                 }
                 ChainCommand::GetUnifiedFinalityRoot(res_tx) => {
-                    let anchor = self.blockchain.state.settlement_root;
-                    let answer = self
-                        .blockchain
-                        .state
-                        .settlement
-                        .external_intake
-                        .unified_finality_root(anchor);
+                    // A chain that has not settled anything has no anchor to
+                    // join. Substituting a made-up root would hand a caller a
+                    // digest that means nothing; the honest answer is that the
+                    // joined root does not exist yet.
+                    let state = &self.blockchain.state;
+                    let answer = if state.settlement_root == [0u8; 32] {
+                        Err(String::from(
+                            "no settlement anchor yet: the joined finality root exists only after the chain settles",
+                        ))
+                    } else {
+                        state
+                            .settlement
+                            .external_intake
+                            .unified_finality_root(state.settlement_root)
+                    };
                     let _ = res_tx.send(answer);
                 }
                 ChainCommand::GetExternalQuorumRound(key, height, res_tx) => {

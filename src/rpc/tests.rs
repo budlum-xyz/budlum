@@ -3982,13 +3982,15 @@ mod rpc_tests {
             RpcSecurityConfig::operator_default(),
             RpcMode::Operator,
         );
-        let answered = operator
-            .unified_finality_root()
-            .await
-            .expect("an operator asks for the joined root");
-        let root = answered.get("root").and_then(|v| v.as_str()).unwrap();
-        assert_eq!(root.len(), 66, "a 32-byte root renders as 0x and 64 hex");
-        assert!(root.starts_with("0x"));
+        // A chain that has settled nothing has no anchor to join, and the
+        // answer says so rather than handing back a digest made of zeros.
+        let answered = operator.unified_finality_root().await;
+        let refused = answered.expect_err("a fresh chain has no joined root");
+        assert!(
+            refused.message().contains("settlement anchor"),
+            "the refusal does not say why: {}",
+            refused.message()
+        );
 
         // Public mode answers nothing: the method is behind the operator door,
         // and the refusal names the method that was refused.
