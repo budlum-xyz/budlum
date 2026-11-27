@@ -115,7 +115,8 @@ impl EvidenceEnvelope {
         out.extend_from_slice(&self.chain_id.to_le_bytes());
         out.extend_from_slice(&self.height.to_le_bytes());
         out.extend_from_slice(&self.header_digest);
-        out.extend_from_slice(&(self.attestation.len() as u32).to_le_bytes());
+        let att_len_u32 = u32::try_from(self.attestation.len()).unwrap_or(u32::MAX);
+        out.extend_from_slice(&att_len_u32.to_le_bytes());
         out.extend_from_slice(&self.attestation);
         let tag = tag_of(&out);
         out.extend_from_slice(&tag);
@@ -169,7 +170,7 @@ impl EvidenceEnvelope {
         if tag_of(tag_body) != src[ATT_OFF + att_len..] {
             return Err(DecodeError::TagMismatch);
         }
-        if family == 0 || chain_id == 0 {
+        if family == 0 || chain_id == 0 || header_digest == [0u8; 32] {
             return Err(DecodeError::UnsetField);
         }
         Ok(Self {

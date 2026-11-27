@@ -69,6 +69,8 @@ pub type Hash32 = [u8; 32];
 /// level fits comfortably inside the interlink vector a header carries.
 pub const MAX_LEVEL: u8 = 32;
 
+const MAX_PROOF_HEADERS: usize = 16_384;
+
 /// The block a verifier already trusts, identified by digest *and* height.
 ///
 /// The height is not decoration: without it the anchor is a 32-byte string that
@@ -192,11 +194,17 @@ impl NipopowProof {
     pub fn verify(&self, anchor: &TrustedAnchor, params: &SecurityParams) -> bool {
         // The head is what a settlement claim is about: a proof with no prefix
         // describes no head, and the junction logic below indexes prefix[0].
-        if self.prefix.is_empty() {
+        if self.prefix.is_empty() || self.anchor != anchor.id {
+            return false;
+        }
+        let Some(total_headers) = self.prefix.len().checked_add(self.suffix.len()) else {
+            return false;
+        };
+        if total_headers > MAX_PROOF_HEADERS {
             return false;
         }
 
-        let mut all: Vec<&PowHeader> = Vec::with_capacity(self.prefix.len() + self.suffix.len());
+        let mut all: Vec<&PowHeader> = Vec::with_capacity(total_headers);
         all.extend(self.prefix.iter());
         all.extend(self.suffix.iter());
 
@@ -208,6 +216,9 @@ impl NipopowProof {
                 return false;
             }
             if h.interlink.len() != h.level as usize {
+                return false;
+            }
+            if h.parent == h.id || h.interlink.contains(&h.id) {
                 return false;
             }
             if leading_zero_bits(&h.id) < u32::from(h.level) {
@@ -258,7 +269,7 @@ impl NipopowProof {
             if down.height >= up.height {
                 return false;
             }
-            let contiguous = down.id == up.parent;
+            let contiguous = down.id == up.parent && down.height.checked_add(1) == Some(up.height);
             let mut interlink_ok = false;
             if !contiguous {
                 for (k, ptr) in up.interlink.iter().enumerate() {
