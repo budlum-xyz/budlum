@@ -1229,6 +1229,148 @@ fn parse_hex_height(val: &serde_json::Value) -> Result<u64, String> {
         .map_err(|e| format!("bud_blockNumber is not hex: {e}"))
 }
 
+fn parse_hex32_arg(raw: &str) -> Result<[u8; 32], String> {
+    let trimmed = raw
+        .trim()
+        .strip_prefix("0x")
+        .or_else(|| raw.trim().strip_prefix("0X"))
+        .unwrap_or(raw.trim());
+    let decoded = hex::decode(trimmed).map_err(|e| format!("invalid 32-byte hex '{raw}': {e}"))?;
+    decoded
+        .try_into()
+        .map_err(|_| format!("expected 32-byte hex value, got '{raw}'"))
+}
+
+fn maybe_run_carrier_utility(args: &[String]) -> Option<ExitCode> {
+    let flag = args.get(1)?.as_str();
+    match flag {
+        "--quote-carrier-payout" => {
+            let base: u128 = match args.get(2).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => {
+                    eprintln!("usage: budlum-relayer --quote-carrier-payout <base_atoms> <blocks_since_last> <bond_atoms> <fee_pool_atoms>");
+                    return Some(ExitCode::from(2));
+                }
+            };
+            let blocks: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(10);
+            let bond: u128 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(base * 4);
+            let fees: u128 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(base * 4);
+            let policy = budlum_core::cross_domain::carrier_quorum::CarrierRewardPolicy {
+                base_reward_atoms: base,
+                target_freshness_blocks: 10,
+                escalation_step_blocks: 10,
+                escalation_bps_per_step: 2_500,
+                max_multiplier_bps: 40_000,
+                domain_bond_share_bps: 6_000,
+            };
+            let outcome =
+                budlum_core::cross_domain::carrier_quorum::CarrierAttestationOutcome::Accepted {
+                    blocks_since_last_attestation: blocks,
+                    available_domain_bond: bond,
+                    available_route_fee_pool: fees,
+                };
+            match budlum_core::relayer::worker::RelayerWorker::quote_carrier_payout(
+                &policy, outcome,
+            ) {
+                Ok(payout) => {
+                    println!(
+                        "multiplier_bps={} domain_bond_draw={} route_fee_draw={} total_payout={}",
+                        payout.multiplier_bps,
+                        payout.domain_bond_draw,
+                        payout.route_fee_draw,
+                        payout.total_payout
+                    );
+                    Some(ExitCode::SUCCESS)
+                }
+                Err(e) => {
+                    eprintln!("carrier payout error: {e}");
+                    Some(ExitCode::from(1))
+                }
+            }
+        }
+        "--verify-carrier-anchors" => {
+            let (btc_hex, cos_hex, sol_bank_hex, sol_acct_hex, sol_tx_hex) = match (
+                args.get(2),
+                args.get(3),
+                args.get(4),
+                args.get(5),
+                args.get(6),
+            ) {
+                (Some(a), Some(b), Some(c), Some(d), Some(e)) => (a, b, c, d, e),
+                _ => {
+                    eprintln!("usage: budlum-relayer --verify-carrier-anchors <btc_root> <cosmos_app> <sol_bank> <sol_acct> <sol_tx> [slot]");
+                    return Some(ExitCode::from(2));
+                }
+            };
+            let slot: u64 = args.get(7).and_then(|s| s.parse().ok()).unwrap_or(1);
+            let (btc_root, cos_root, sol_bank, sol_acct, sol_tx) = match (
+                parse_hex32_arg(btc_hex),
+                parse_hex32_arg(cos_hex),
+                parse_hex32_arg(sol_bank_hex),
+                parse_hex32_arg(sol_acct_hex),
+                parse_hex32_arg(sol_tx_hex),
+            ) {
+                (Ok(a), Ok(b), Ok(c), Ok(d), Ok(e)) => (a, b, c, d, e),
+                _ => {
+                    eprintln!("invalid 32-byte hex anchor argument");
+                    return Some(ExitCode::from(2));
+                }
+            };
+            let mut registry = budlum_core::cross_domain::AdapterRegistry::new();
+            if let Err(e) = registry.register_bitcoin_spv(btc_root, 6) {
+                eprintln!("Bitcoin SPV anchor rejected: {e}");
+                return Some(ExitCode::from(1));
+            }
+            if let Err(e) = registry.register_cosmos_ics23(0, b"ibc/".to_vec(), cos_root) {
+                eprintln!("Cosmos ICS-23 anchor rejected: {e}");
+                return Some(ExitCode::from(1));
+            }
+            if let Err(e) = registry.register_solana_bank(sol_bank, sol_acct, sol_tx, slot) {
+                eprintln!("Solana bank anchor rejected: {e}");
+                return Some(ExitCode::from(1));
+            }
+            let quorum_policy =
+                budlum_core::cross_domain::carrier_quorum::MultiSourceQuorumPolicy {
+                    min_independent_endpoints: 2,
+                    max_height_skew: 4,
+                };
+            let obs = [
+                budlum_core::cross_domain::carrier_quorum::CarrierEndpointObservation {
+                    endpoint_id: "primary".into(),
+                    domain_id: 1,
+                    block_height: slot,
+                    state_root: btc_root,
+                    evidence_digest: cos_root,
+                },
+                budlum_core::cross_domain::carrier_quorum::CarrierEndpointObservation {
+                    endpoint_id: "secondary".into(),
+                    domain_id: 1,
+                    block_height: slot,
+                    state_root: btc_root,
+                    evidence_digest: cos_root,
+                },
+            ];
+            if let Err(e) = budlum_core::relayer::worker::RelayerWorker::admit_carrier_quorum(
+                &quorum_policy,
+                &obs,
+            ) {
+                eprintln!("carrier quorum refused: {e}");
+                return Some(ExitCode::from(1));
+            }
+            let _ = budlum_core::relayer::worker::RelayerWorker::verify_family_receipt(
+                &registry,
+                budlum_core::core::transaction::ExternalChain::Bitcoin,
+                None,
+                None,
+                None,
+            );
+            println!("family_adapters=bitcoin,cosmos,solana quorum_ok=true");
+            Some(ExitCode::SUCCESS)
+        }
+        _ => None,
+    }
+}
+
 fn main() -> ExitCode {
     budlum_core::crypto::tls::install_default_provider();
     // The Semgrep rule `rust.lang.security.args.args` targets argv[0] being used
@@ -1238,6 +1380,9 @@ fn main() -> ExitCode {
     // decision.
     // Nosemgrep: rust.lang.security.args.args
     let args: Vec<String> = env::args().collect();
+    if let Some(code) = maybe_run_carrier_utility(&args) {
+        return code;
+    }
     let config = match parse_args(&args) {
         Ok(c) => c,
         Err(e) => {

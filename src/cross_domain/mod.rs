@@ -1,6 +1,7 @@
 pub mod bridge;
 pub mod bridge_relayer;
 pub mod bridge_tx;
+pub mod carrier_quorum;
 pub mod chain_adapter;
 pub mod economic_guard;
 pub mod event_tree;
@@ -8,6 +9,7 @@ pub mod evm;
 pub mod external;
 pub mod message;
 pub mod message_registry;
+pub mod multi_chain_adapters;
 pub mod nonce;
 pub mod relayer;
 
