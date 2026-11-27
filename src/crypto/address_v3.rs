@@ -195,7 +195,14 @@ pub fn multisig_owner_leaf(
     pq_public_key: &[u8],
     ed25519_public_key: &[u8],
 ) -> Result<[u8; 32], AddressV3Error> {
-    suite.info().ok_or(AddressV3Error::UnknownSuite(suite))?;
+    let info = suite.info().ok_or(AddressV3Error::UnknownSuite(suite))?;
+    let pq_len = pq::public_key_len(info.pq).map_err(|_| AddressV3Error::Unsupported(suite))?;
+    check_len("pq public key", pq_len, pq_public_key.len())?;
+    check_len(
+        "ed25519 public key",
+        ED25519_PUBLIC_KEY_LEN,
+        ed25519_public_key.len(),
+    )?;
     let mut hasher = Sha3_256::new();
     put(&mut hasher, MULTISIG_LEAF_TAG);
     put(&mut hasher, &suite.to_be_bytes());
@@ -220,8 +227,40 @@ pub fn multisig_address_v3(
     recovery_digest: &[u8; 32],
 ) -> Result<[u8; 32], AddressV3Error> {
     required_lengths(suite)?;
+    if owner_leaves.is_empty() || owner_leaves.len() > MAX_MULTISIG_OWNERS {
+        return Err(AddressV3Error::KeyLength {
+            field: "owner leaves",
+            expected: MAX_MULTISIG_OWNERS,
+            got: owner_leaves.len(),
+        });
+    }
+    if threshold == 0 {
+        return Err(AddressV3Error::KeyLength {
+            field: "threshold",
+            expected: 1,
+            got: 0,
+        });
+    }
+    let mut rec_nz = 0u8;
+    for &b in recovery_digest {
+        rec_nz |= b;
+    }
+    if core::hint::black_box(rec_nz) == 0 {
+        return Err(AddressV3Error::KeyLength {
+            field: "recovery digest",
+            expected: 32,
+            got: 0,
+        });
+    }
     let mut sorted = owner_leaves.to_vec();
     sorted.sort_unstable();
+    if sorted.windows(2).any(|pair| pair.first() == pair.get(1)) {
+        return Err(AddressV3Error::KeyLength {
+            field: "unique owner leaves",
+            expected: sorted.len(),
+            got: sorted.len().saturating_sub(1),
+        });
+    }
     let mut hasher = Sha3_256::new();
     put(&mut hasher, MULTISIG_ADDRESS_TAG);
     put(&mut hasher, &suite.to_be_bytes());
