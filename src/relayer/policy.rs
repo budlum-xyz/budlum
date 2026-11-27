@@ -26,6 +26,13 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_RELAYER_INTENTS: usize = 10_000;
 pub const MAX_RELAYER_BIDS_PER_INTENT: usize = 64;
 pub const MAX_RELAYER_SETTLEMENTS: usize = 10_000;
+/// Open intents one owner may hold at once.
+///
+/// `MAX_RELAYER_INTENTS` is a global pool; without a per-owner share one
+/// account could rent every slot for the whole intent lifetime with dust
+/// escrows and lock everyone else out of the intent door. Same share the
+/// app-binding intent table grants a sender.
+pub const MAX_RELAYER_INTENTS_PER_OWNER: usize = 16;
 /// Longest time an intent may hold one of the `MAX_RELAYER_INTENTS` slots.
 ///
 /// The prune sweep keeps every escrowed row until its deadline, so an unbounded
@@ -599,6 +606,16 @@ impl RelayerPolicyRegistry {
         self.prune_expired(current_block);
         if self.intents.contains_key(&intent.intent_id) || self.is_settled(&intent.intent_id) {
             return Err("RelayerPolicyRegistry intent already exists".into());
+        }
+        // The sweep above retired the expired rows, so the per-owner share and
+        // the global cap count the same live population.
+        let owner_rows = self
+            .intents
+            .values()
+            .filter(|open| open.owner == intent.owner)
+            .count();
+        if owner_rows >= MAX_RELAYER_INTENTS_PER_OWNER {
+            return Err("RelayerPolicyRegistry too many open intents for this owner".into());
         }
         if self.intents.len() >= MAX_RELAYER_INTENTS {
             return Err("RelayerPolicyRegistry intent limit exceeded".into());
@@ -1259,6 +1276,53 @@ mod tests {
             .validate(&policy, 10)
             .unwrap_err()
             .contains("spending_cap"));
+    }
+
+    /// One owner cannot rent the whole intent table: the per-owner share
+    /// closes before the global cap, another owner still gets in, and the
+    /// share frees again once the owner's rows expire and are swept.
+    #[test]
+    fn one_owner_cannot_fill_the_intent_table() {
+        let owner = addr(1);
+        let policy = make_policy(owner);
+        let mut registry = RelayerPolicyRegistry::default();
+        for nonce in 0..MAX_RELAYER_INTENTS_PER_OWNER as u64 {
+            let mut row = intent(owner, &policy);
+            row.replay_nonce = nonce;
+            row.intent_id = row.calculate_id();
+            registry
+                .submit_intent(row, &policy, 10)
+                .expect("an owner may hold up to its share");
+        }
+        assert_eq!(registry.intents.len(), MAX_RELAYER_INTENTS_PER_OWNER);
+
+        let mut extra = intent(owner, &policy);
+        extra.replay_nonce = 1_000;
+        extra.intent_id = extra.calculate_id();
+        let err = registry
+            .submit_intent(extra.clone(), &policy, 10)
+            .expect_err("the share must close before the global cap");
+        assert!(err.contains("owner"), "{err}");
+        assert_eq!(registry.intents.len(), MAX_RELAYER_INTENTS_PER_OWNER);
+
+        // A different owner is not starved by the first one's rows.
+        let other = addr(2);
+        let other_policy = make_policy(other);
+        let row = intent(other, &other_policy);
+        registry
+            .submit_intent(row, &other_policy, 10)
+            .expect("another owner still opens an intent");
+
+        // Once the first owner's rows pass their deadline (block 50) and the
+        // sweep retires them, the share is free again.
+        let mut later = intent(owner, &policy);
+        later.replay_nonce = 1_001;
+        later.deadline_block = 90;
+        later.intent_id = later.calculate_id();
+        registry
+            .submit_intent(later, &policy, 60)
+            .expect("the share frees after the owner's rows expire");
+        assert!(registry.intents.len() <= 2);
     }
 
     #[test]
