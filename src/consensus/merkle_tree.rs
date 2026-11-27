@@ -235,6 +235,8 @@ pub fn merkle_rebuild_root(
     Some(cur)
 }
 
+const MAX_MERKLE_PROOF_DEPTH: usize = usize::BITS as usize;
+
 /// The root a verifier rebuilds from a proof alone: `leaf`, its index, and
 /// the sibling list (with [`odd_promotion_sentinel`] marking a promoted
 /// step), walked with the same ordering rule as
@@ -250,13 +252,17 @@ pub fn merkle_root_from_proof(
     combine: fn(&[u8; 32], &[u8; 32]) -> [u8; 32],
     promote: fn(&[u8; 32]) -> [u8; 32],
 ) -> Option<[u8; 32]> {
+    if siblings.len() > MAX_MERKLE_PROOF_DEPTH {
+        return None;
+    }
     let mut cur = *leaf;
     let mut idx = index;
     for sibling in siblings {
         cur = if sibling == &odd_promotion_sentinel() {
-            // Only an even-positioned tail (`idx % 2 == 0`) can ever lack a
-            // partner; an odd index always has a left sibling.
-            if !idx.is_multiple_of(2) {
+            // Every non-root layer has `len >= 2`, so `idx == 0` always pairs
+            // with `layer[1]` and an odd index always pairs with `layer[idx - 1]`.
+            // Only a nonzero even tail (`idx >= 2 && idx % 2 == 0`) can ever be promoted.
+            if idx == 0 || !idx.is_multiple_of(2) {
                 return None;
             }
             promote(&cur)
@@ -486,6 +492,21 @@ mod tests {
         );
         assert_eq!(
             merkle_root_from_proof(&leaves[2], 3, &tail_proof, combine_sha3, promote_sha3),
+            None
+        );
+        assert_eq!(
+            merkle_root_from_proof(
+                &leaves[0],
+                0,
+                &[odd_promotion_sentinel()],
+                combine_sha3,
+                promote_sha3,
+            ),
+            None
+        );
+        let deep = vec![[0xAA; 32]; MAX_MERKLE_PROOF_DEPTH + 1];
+        assert_eq!(
+            merkle_root_from_proof(&leaves[0], 0, &deep, combine_sha3, promote_sha3),
             None
         );
     }
