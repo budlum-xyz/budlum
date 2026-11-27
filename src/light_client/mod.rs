@@ -1214,6 +1214,12 @@ impl LightClient {
             }
             prev_seq = Some(hop.sequence);
 
+            for endpoint in [&hop.source, &hop.destination] {
+                endpoint
+                    .validate()
+                    .map_err(|e| LightClientError::VerificationFailed(e.to_string()))?;
+            }
+
             // O(log D) Merkle inclusion proofs against the verified ULP-1 domain root.
             hop.source_proof
                 .verify(&hop.source, &ulp_header.domains_merkle_root)
@@ -3002,6 +3008,25 @@ mod tests {
             conflict_err,
             LightClientError::GlobalHeaderBinding(_)
         ));
+
+        // 11. Structural ULP snapshot invariant violation (non-advancing height)
+        //     is rejected fail-closed by endpoint.validate() before trusting hop data.
+        let mut bad_route = anchored_pq_route;
+        bad_route.hops[0].source.finalized_height = bad_route.hops[0].source.prev_height;
+        let bad_err = client
+            .verify_multi_hop_light_route(
+                &anchored_cp,
+                &anchored_body,
+                &anchored_header,
+                &bad_route,
+                &UniversalRoutePolicy::strict_value(false),
+                &registry,
+            )
+            .expect_err("non-advancing snapshot height must fail closed");
+        assert!(
+            bad_err.to_string().contains("finalized_height"),
+            "got: {bad_err}"
+        );
     }
 
     #[test]
