@@ -251,11 +251,23 @@ fn decode_chain_key_evidence(payload: &[u8]) -> Result<ChainKeyEvidenceBundle, A
     Ok(decoded)
 }
 
+fn is_valid_pinned_chain_key_root(pinned: &PinnedChainKeyRoot) -> bool {
+    pinned.subnet_id != [0u8; 32]
+        && pinned.dkg_interval_length > 0
+        && pinned.root_bls_pubkey.len() == 96
+        && !pinned.root_pq_pubkey.is_empty()
+}
+
 fn verify_delegation_and_cup(
     network: &str,
     pinned: &PinnedChainKeyRoot,
     bundle: &ChainKeyEvidenceBundle,
 ) -> Result<(), AdapterError> {
+    if network.trim().is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Chain-Key network identifier cannot be empty".into(),
+        });
+    }
     let del = &bundle.delegation;
     let cup = &bundle.cup;
 
@@ -290,11 +302,13 @@ fn verify_delegation_and_cup(
         });
     }
     if cup.height == 0
+        || cup.timestamp_ns == 0
         || pinned.dkg_interval_length == 0
         || !cup.height.is_multiple_of(pinned.dkg_interval_length)
     {
         return Err(AdapterError::ConsensusRule {
-            rule: "Chain-Key CUP height is zero or misaligned with dkg_interval_length".into(),
+            rule: "Chain-Key CUP height/timestamp is zero or misaligned with dkg_interval_length"
+                .into(),
         });
     }
     if cup.state_root == [0u8; 32] || cup.block_hash == [0u8; 32] {
@@ -401,14 +415,20 @@ impl ChainKeyNiDkgAdapter {
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, AdapterError> {
         if evidence.adapter != self.descriptor.id {
-            return Err(AdapterError::ConsensusRule {
-                rule: "evidence adapter ID does not match ChainKeyNiDkgAdapter".into(),
+            return Err(AdapterError::WrongAdapter {
+                expected: self.descriptor.name.clone(),
+                found: hex::encode(evidence.adapter.as_bytes()),
             });
         }
         if evidence.evidence_version != EVIDENCE_VERSION {
             return Err(AdapterError::UnsupportedEvidenceVersion {
                 version: evidence.evidence_version,
                 accepted: EVIDENCE_VERSION.to_string(),
+            });
+        }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Chain-Key pinned network cannot be empty".into(),
             });
         }
         if evidence.network != self.network {
@@ -440,7 +460,13 @@ impl ChainKeyNiDkgAdapter {
                 required: policy.min_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > cup.height {
+        if policy.max_age > 0 {
+            if cup.height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: cup.height - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now - cup.height;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -485,6 +511,14 @@ impl ExternalFinalityAdapter for ChainKeyNiDkgAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        !self.network.trim().is_empty()
+            && self
+                .pinned
+                .as_ref()
+                .is_some_and(is_valid_pinned_chain_key_root)
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,
@@ -500,7 +534,6 @@ impl ExternalFinalityAdapter for ChainKeyNiDkgAdapter {
         observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityAttestation, AdapterError> {
         let att = self.verify_inner(evidence, policy)?;
-        observer.observe(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG));
         observer.observe(ObservedScheme::Scheme(SchemeId::ML_DSA_65));
         Ok(att)
     }
@@ -678,5 +711,45 @@ mod tests {
             adapter.verify(&ev, &VerificationPolicy::strict(0)),
             Err(AdapterError::ConsensusRule { .. })
         ));
+    }
+
+    #[test]
+    fn chain_key_preserves_lattice_quantum_class_pins_anchor_and_refuses_future_cup() {
+        use crate::crypto::facts::{CryptoFacts, QuantumClass};
+
+        let (adapter, ev) = sample_adapter_with_golden();
+        assert!(
+            adapter.has_pinned_trust_anchor(),
+            "valid pinned ChainKeyNiDkgAdapter must report has_pinned_trust_anchor=true"
+        );
+        let unpinned = ChainKeyNiDkgAdapter::new("icp-mainnet", None);
+        assert!(!unpinned.has_pinned_trust_anchor());
+
+        let mut facts = CryptoFacts::default();
+        adapter
+            .verify_observed(&ev, &VerificationPolicy::strict(0), &mut facts)
+            .expect("golden verifies");
+        assert_eq!(
+            facts.quantum_class(),
+            Some(QuantumClass::Lattice),
+            "100% ML-DSA-65 Chain-Key domain must preserve QuantumClass::Lattice"
+        );
+
+        let mut foreign_adapter_ev = ev.clone();
+        foreign_adapter_ev.adapter = AdapterId::from_name("foreign-adapter-v1");
+        assert!(matches!(
+            adapter.verify(&foreign_adapter_ev, &VerificationPolicy::strict(0)),
+            Err(AdapterError::WrongAdapter { .. })
+        ));
+
+        let mut future_policy = VerificationPolicy::strict(4_999);
+        future_policy.max_age = 100;
+        assert!(
+            matches!(
+                adapter.verify(&ev, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future CUP height above policy.now must be refused when max_age > 0"
+        );
     }
 }

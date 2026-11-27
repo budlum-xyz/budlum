@@ -304,6 +304,11 @@ fn verify_tx_merkle_inclusion(
     let mut acc = tx_merkle_leaf(&proof.tx_hash);
     let mut idx = proof.leaf_index;
     for sib in &proof.siblings {
+        if *sib == [0u8; 32] || bool::from(sib.ct_eq(&acc)) {
+            return Err(AdapterError::ConsensusRule {
+                rule: "FOCIL Merkle sibling is zero or duplicates current node".into(),
+            });
+        }
         acc = if idx & 1 == 0 {
             tx_merkle_node(&acc, sib)
         } else {
@@ -798,6 +803,11 @@ impl BasedPreconfAdapter {
             return Err(AdapterError::UnsupportedEvidenceVersion {
                 version: evidence.evidence_version,
                 accepted: EVIDENCE_VERSION.to_string(),
+            });
+        }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "based-preconf network cannot be empty".into(),
             });
         }
         if evidence.network != self.network {
@@ -1371,6 +1381,69 @@ mod tests {
             adapter.verify(&ev, &policy),
             Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("non-empty FOCIL")
         ));
+    }
+
+    #[test]
+    fn focil_merkle_refuses_zero_or_equal_siblings_and_blank_network() {
+        let net = "taiko-based-1";
+        let (pinned, signers, mut bundle, mut ev) = build_fixture(net, [0xB7; 32], true);
+        let adapter = BasedPreconfAdapter::new(net, Some(pinned.clone()));
+        let policy = VerificationPolicy::strict(1_500);
+
+        let tx_hash = [0x10; 32];
+        let leaf = tx_merkle_leaf(&tx_hash);
+
+        for bad_sib in [[0u8; 32], leaf] {
+            let forged_tx_root = tx_merkle_node(&leaf, &bad_sib);
+            let forged_il_root = compute_focil_root(&[tx_hash]);
+            bundle.batch.tx_root = forged_tx_root;
+            bundle.batch.il_root = forged_il_root;
+            bundle.batch.digest = bundle.batch.compute_digest(net);
+            let prop = signers[0].sign(&proposal_sign_bytes(net, &bundle.batch.digest));
+            let cm = preconf_cert_sign_bytes(net, 5, 900, 1_500, &bundle.batch.digest);
+            let ilm = focil_vote_sign_bytes(net, 5, 900, &forged_il_root);
+            let sm = l1_settle_sign_bytes(net, 1, 902, 4, &[0xDD; 32], &bundle.batch.digest);
+            bundle.proposer_ed25519_sig = prop.ed25519_sig;
+            bundle.proposer_pq_sig = prop.pq_sig;
+            bundle.preconf_sigs = vec![
+                signers[0].sign(&cm),
+                signers[1].sign(&cm),
+                signers[2].sign(&cm),
+            ];
+            bundle.focil_proofs = vec![FocilInclusionProof {
+                tx_hash,
+                leaf_index: 0,
+                siblings: vec![bad_sib],
+            }];
+            bundle.focil_sigs = vec![
+                signers[0].sign(&ilm),
+                signers[1].sign(&ilm),
+                signers[2].sign(&ilm),
+            ];
+            bundle.l1_settle_sigs = vec![
+                signers[0].sign(&sm),
+                signers[1].sign(&sm),
+                signers[2].sign(&sm),
+            ];
+            ev.payload = encode_based_evidence(&bundle).unwrap();
+            assert!(
+                matches!(
+                    adapter.verify(&ev, &policy),
+                    Err(AdapterError::ConsensusRule { .. })
+                ),
+                "zero or equal-sibling FOCIL Merkle branch must fail closed"
+            );
+        }
+
+        let (_, _, _, blank_ev) = build_fixture("  ", [0xB8; 32], true);
+        let blank_adapter = BasedPreconfAdapter::new("  ", Some(pinned));
+        assert!(
+            matches!(
+                blank_adapter.verify(&blank_ev, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "blank based-preconf network must fail closed"
+        );
     }
 
     #[test]
