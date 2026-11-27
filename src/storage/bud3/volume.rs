@@ -338,6 +338,9 @@ impl AggregationVolume {
         bytes: &[u8],
         symbol_size: u32,
     ) -> Result<VolumeMember, VolumeError> {
+        if bytes.is_empty() {
+            return Err(VolumeError::LengthMismatch { want: 1, got: 0 });
+        }
         let len = bytes.len() as u64;
         let symbol_size = u64::from(symbol_size);
         if symbol_size == 0 || len >= symbol_size {
@@ -541,6 +544,9 @@ pub fn volume_id_of(visibility: &Visibility, bytes: &[u8]) -> [u8; 32] {
 /// The Merkle path of the member at `index`.
 #[must_use]
 pub fn proof_for(members: &[VolumeMember], index: usize) -> Vec<PathStep> {
+    if members.is_empty() || index >= members.len() {
+        return Vec::new();
+    }
     let mut level: Vec<[u8; 32]> = members
         .iter()
         .enumerate()
@@ -587,7 +593,12 @@ pub fn verify_member(
     member: &VolumeMember,
     path: &[PathStep],
 ) -> bool {
-    if count == 0 || count > MAX_MEMBERS as u64 || index >= count {
+    if count == 0
+        || count > MAX_MEMBERS as u64
+        || index >= count
+        || member.len == 0
+        || member.offset.checked_add(member.len).is_none()
+    {
         return false;
     }
     let mut levels = count;
@@ -603,24 +614,24 @@ pub fn verify_member(
     }
     let mut hash = member.leaf(index);
     let mut pos = index;
+    let mut level_width = count;
     for step in path {
-        match step {
-            Some(sibling) => {
+        let has_sibling = !pos.is_multiple_of(2) || pos.saturating_add(1) < level_width;
+        match (has_sibling, step) {
+            (true, Some(sibling)) => {
                 hash = if pos.is_multiple_of(2) {
                     node_hash(&hash, sibling)
                 } else {
                     node_hash(sibling, &hash)
                 };
             }
-            None => {
-                if pos % 2 == 1 {
-                    return false;
-                }
-            }
+            (false, None) => {}
+            _ => return false,
         }
         pos /= 2;
+        level_width = level_width.div_ceil(2);
     }
-    pos == 0 && root_hash(&hash, count) == *root
+    pos == 0 && level_width == 1 && root_hash(&hash, count) == *root
 }
 
 #[cfg(test)]
@@ -879,5 +890,87 @@ mod tests {
         let two = volume_id_of(&Visibility::Sealed([1u8; 32]), bytes);
         assert_ne!(public, one, "a sealed id never equals a public id");
         assert_ne!(one, two, "the owner is bound");
+    }
+
+    #[test]
+    fn verify_member_rejects_swapped_paired_none_and_unpaired_sibling_path() {
+        let mut volume = AggregationVolume::new(Visibility::Public, 4096).unwrap();
+        let ids: Vec<ContentId> = (0u8..6).map(|i| public(&[i])).collect();
+        for (i, id) in ids.iter().enumerate() {
+            volume
+                .push(id, commitment(i as u8 + 1), &[i as u8 + 1], SYMBOL)
+                .unwrap();
+        }
+        let target_id = *ids.get(4).unwrap();
+        let member = *volume.member(&target_id).unwrap();
+        let canonical = volume.member_proof(&target_id).unwrap();
+        assert_eq!(canonical.len(), 3);
+        assert!(canonical.first().copied().flatten().is_some());
+        assert!(canonical.get(1).copied().flatten().is_none());
+        assert!(canonical.get(2).copied().flatten().is_some());
+        assert!(verify_member(&volume.root(), 6, 4, &member, &canonical));
+
+        // Swapping the paired even-node sibling with the unpaired trailing promotion
+        // computes the same root unless level width is enforced at each Merkle step.
+        let non_canonical = vec![
+            None,
+            canonical.first().copied().flatten(),
+            canonical.get(2).copied().flatten(),
+        ];
+        assert!(
+            !verify_member(&volume.root(), 6, 4, &member, &non_canonical),
+            "non-canonical proof swapping paired None and unpaired Some must be rejected"
+        );
+    }
+
+    #[test]
+    fn proof_for_rejects_out_of_bounds_index() {
+        let mut volume = AggregationVolume::new(Visibility::Public, 4096).unwrap();
+        for i in 0u8..4 {
+            let id = public(&[i]);
+            volume
+                .push(&id, commitment(i + 1), &[i + 1], SYMBOL)
+                .unwrap();
+        }
+        assert!(
+            proof_for(volume.members(), 4).is_empty(),
+            "proof_for must return empty path when index == len"
+        );
+        assert!(
+            proof_for(volume.members(), 99).is_empty(),
+            "proof_for must return empty path when index > len"
+        );
+    }
+
+    #[test]
+    fn push_owned_rejects_zero_length_member() {
+        let mut volume = AggregationVolume::new(Visibility::Public, 8).unwrap();
+        let empty_id = public(b"");
+        assert_eq!(
+            volume.push(&empty_id, commitment(1), b"", SYMBOL),
+            Err(VolumeError::LengthMismatch { want: 1, got: 0 })
+        );
+        assert!(volume.is_empty());
+    }
+
+    #[test]
+    fn verify_member_rejects_zero_length_and_overflowing_member() {
+        let zero_len = VolumeMember {
+            content_id: public(b"z"),
+            offset: 0,
+            len: 0,
+            commitment: commitment(1),
+        };
+        let zero_root = root_of(&[zero_len]);
+        assert!(!verify_member(&zero_root, 1, 0, &zero_len, &[]));
+
+        let overflow = VolumeMember {
+            content_id: public(b"o"),
+            offset: u64::MAX,
+            len: 1,
+            commitment: commitment(2),
+        };
+        let overflow_root = root_of(&[overflow]);
+        assert!(!verify_member(&overflow_root, 1, 0, &overflow, &[]));
     }
 }

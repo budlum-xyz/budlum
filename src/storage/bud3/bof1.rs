@@ -475,6 +475,27 @@ impl Object {
     /// for post-launch flags and [`Bof1Error::UnknownCodec`] for a codec that
     /// is not admitted at launch.
     pub const fn validate_testnet(&self) -> Result<(), Bof1Error> {
+        if self.header.profile().is_none() {
+            return Err(Bof1Error::UnknownProfile(self.header.profile as u64));
+        }
+        if !dictionary_is_registered(self.header.dictionary) {
+            return Err(Bof1Error::UnknownDictionary(self.header.dictionary as u64));
+        }
+        if self.header.flags.has(Flags::SEALED) && self.header.content_len != 0 {
+            return Err(Bof1Error::SealedContentLen);
+        }
+        if self.header.flags.has(Flags::HAS_BASE) && self.header.base.is_none() {
+            return Err(Bof1Error::Truncated("base"));
+        }
+        let actual_payload = self.payload.len() as u64;
+        if actual_payload < self.header.payload_len {
+            return Err(Bof1Error::Truncated("payload"));
+        }
+        if actual_payload > self.header.payload_len {
+            return Err(Bof1Error::TrailingBytes(
+                actual_payload - self.header.payload_len,
+            ));
+        }
         if self.header.flags.has(Flags::LIVE) {
             if self.header.prev_object.is_none() {
                 return Err(Bof1Error::Truncated("prev_object"));
@@ -482,6 +503,9 @@ impl Object {
             return Err(Bof1Error::LiveNotOpen);
         }
         if self.header.flags.has(Flags::HAS_CONTEXT) {
+            if self.header.context_manifest.is_none() {
+                return Err(Bof1Error::Truncated("context_manifest"));
+            }
             return Err(Bof1Error::ContextNotOpen);
         }
         if !codec_is_open_on_testnet(self.header.codec) {
@@ -533,11 +557,29 @@ impl Object {
                 self.header.flags.bits()
             );
         }
-        if let Some(base) = &self.header.base {
+        if self.header.flags.has(Flags::HAS_BASE) {
+            let base = self
+                .header
+                .base
+                .as_ref()
+                .ok_or(Bof1Error::Truncated("base"))?;
             let _ = writeln!(out, "base {}", hex::encode(base));
         }
-        if let Some(prev) = &self.header.prev_object {
+        if self.header.flags.has(Flags::LIVE) {
+            let prev = self
+                .header
+                .prev_object
+                .as_ref()
+                .ok_or(Bof1Error::Truncated("prev_object"))?;
             let _ = writeln!(out, "prev_object {}", hex::encode(prev));
+        }
+        if self.header.flags.has(Flags::HAS_CONTEXT) {
+            let ctx = self
+                .header
+                .context_manifest
+                .as_ref()
+                .ok_or(Bof1Error::Truncated("context_manifest"))?;
+            let _ = writeln!(out, "context_manifest {}", hex::encode(ctx));
         }
         let _ = writeln!(
             out,
@@ -696,6 +738,18 @@ impl Object {
         } else {
             None
         };
+        let expected_context = if flags.has(Flags::HAS_CONTEXT) {
+            let hex_str = next_line
+                .strip_prefix("context_manifest ")
+                .ok_or(Bof1Error::TextFormat("missing context_manifest line"))?;
+            let arr = decode_strict_lower_hex32(hex_str)?;
+            next_line = lines
+                .next()
+                .ok_or(Bof1Error::TextFormat("missing line after context_manifest"))?;
+            Some(arr)
+        } else {
+            None
+        };
 
         let content_rest = next_line
             .strip_prefix("content len=")
@@ -718,10 +772,15 @@ impl Object {
         let sym_size = usize::from(profile.symbol_size);
         let mut raw_object = Vec::new();
         let mut current_second: Option<u64> = None;
+        let mut frames_in_current_second = 0u64;
         let mut frame_ordinal = 0u64;
         let mut cur_seg = 0u64;
         let mut next_source_esi = 0u32;
         let mut next_repair_esi: Option<u32> = None;
+        let mut cur_seg_bytes = 0u64;
+        let mut cur_seg_repairs = 0u32;
+        let mut saw_short_chunk_in_seg = false;
+        let mut seg_stats: Vec<(u64, u32, u32)> = Vec::new();
         let mut saw_end: Option<[u8; 32]> = None;
 
         for line in lines {
@@ -729,16 +788,24 @@ impl Object {
                 return Err(Bof1Error::TextFormat("lines after end"));
             }
             if let Some(commit_hex) = line.strip_prefix("end commitment=") {
+                if current_second.is_some() && frames_in_current_second == 0 {
+                    return Err(Bof1Error::TextFormat("empty second group"));
+                }
                 saw_end = Some(decode_strict_lower_hex32(commit_hex)?);
                 continue;
             }
             if let Some(sec_str) = line.strip_prefix("second ") {
+                meter.charge_steps(1)?;
+                if current_second.is_some() && frames_in_current_second == 0 {
+                    return Err(Bof1Error::TextFormat("empty second group"));
+                }
                 let sec = parse_strict_u64(sec_str)?;
                 let expected_sec = frame_ordinal / fps;
                 if sec != expected_sec || current_second == Some(sec) {
                     return Err(Bof1Error::TextFormat("bad second grouping"));
                 }
                 current_second = Some(sec);
+                frames_in_current_second = 0;
                 continue;
             }
             let expected_sec = frame_ordinal / fps;
@@ -746,6 +813,7 @@ impl Object {
                 return Err(Bof1Error::TextFormat("frame outside second group"));
             }
             if let Some(s_rest) = line.strip_prefix(" S ") {
+                meter.charge_steps(1)?;
                 let parts: Vec<&str> = s_rest.split(' ').collect();
                 if parts.len() != 3 {
                     return Err(Bof1Error::TextFormat("bad S line"));
@@ -767,24 +835,39 @@ impl Object {
                     .copied()
                     .ok_or(Bof1Error::TextFormat("S data"))?;
                 if seg_idx == cur_seg + 1 && next_source_esi > 0 {
+                    seg_stats.push((cur_seg_bytes, next_source_esi, cur_seg_repairs));
                     cur_seg = seg_idx;
                     next_source_esi = 0;
                     next_repair_esi = None;
+                    cur_seg_bytes = 0;
+                    cur_seg_repairs = 0;
+                    saw_short_chunk_in_seg = false;
                 }
                 if seg_idx != cur_seg || next_repair_esi.is_some() || esi != next_source_esi {
                     return Err(Bof1Error::TextFormat("S sequence order"));
+                }
+                if saw_short_chunk_in_seg {
+                    return Err(Bof1Error::TextFormat("non-canonical S chunk size"));
                 }
                 let chunk = base64url_decode(b64)?;
                 if chunk.is_empty() || chunk.len() > sym_size {
                     return Err(Bof1Error::TextFormat("S chunk size"));
                 }
+                if chunk.len() < sym_size {
+                    saw_short_chunk_in_seg = true;
+                }
                 meter.charge_bytes(chunk.len() as u64)?;
                 raw_object.extend_from_slice(&chunk);
+                cur_seg_bytes = cur_seg_bytes
+                    .checked_add(chunk.len() as u64)
+                    .ok_or(Bof1Error::TextFormat("segment byte overflow"))?;
                 next_source_esi = next_source_esi
                     .checked_add(1)
                     .ok_or(Bof1Error::TextFormat("esi overflow"))?;
                 frame_ordinal = frame_ordinal.saturating_add(1);
+                frames_in_current_second = frames_in_current_second.saturating_add(1);
             } else if let Some(r_rest) = line.strip_prefix(" R ") {
+                meter.charge_steps(1)?;
                 let parts: Vec<&str> = r_rest.split(' ').collect();
                 if parts.len() != 3 {
                     return Err(Bof1Error::TextFormat("bad R line"));
@@ -815,15 +898,38 @@ impl Object {
                     esi.checked_add(1)
                         .ok_or(Bof1Error::TextFormat("R esi overflow"))?,
                 );
+                cur_seg_repairs = cur_seg_repairs
+                    .checked_add(1)
+                    .ok_or(Bof1Error::TextFormat("R count overflow"))?;
                 frame_ordinal = frame_ordinal.saturating_add(1);
+                frames_in_current_second = frames_in_current_second.saturating_add(1);
             } else {
                 return Err(Bof1Error::TextFormat("unknown line"));
             }
         }
 
+        if next_source_esi > 0 {
+            seg_stats.push((cur_seg_bytes, next_source_esi, cur_seg_repairs));
+        }
+
         let expected_commitment = saw_end.ok_or(Bof1Error::TextFormat("missing end commitment"))?;
         let raw_seg = super::segment::Segmentation::new(raw_object.len() as u64, &profile)
             .ok_or(Bof1Error::CommitmentMismatch)?;
+        if seg_stats.len() as u64 != raw_seg.count() {
+            return Err(Bof1Error::TextFormat("non-canonical segment count"));
+        }
+        let expected_repairs = seg_stats.first().map(|s| s.2);
+        for (i, &(seg_bytes, k_seen, repairs)) in seg_stats.iter().enumerate() {
+            let seg_idx = i as u64;
+            if raw_seg.len(seg_idx) != Some(seg_bytes)
+                || raw_seg.source_symbols(seg_idx) != Some(u64::from(k_seen))
+            {
+                return Err(Bof1Error::TextFormat("non-canonical segment framing"));
+            }
+            if expected_repairs != Some(repairs) {
+                return Err(Bof1Error::TextFormat("non-canonical repair count"));
+            }
+        }
         let digests: Vec<[u8; 32]> = (0..raw_seg.count())
             .filter_map(|i| {
                 let r = raw_seg.byte_range(i)?;
@@ -846,6 +952,7 @@ impl Object {
             || decoded.header.dictionary != dict_id
             || decoded.header.base != expected_base
             || decoded.header.prev_object != expected_prev
+            || decoded.header.context_manifest != expected_context
             || decoded.header.content_len != expected_content_len
             || decoded.header.content_digest != expected_digest
             || decoded.header.payload_len != expected_payload_len
@@ -909,9 +1016,6 @@ fn base64url_decode(s: &str) -> Result<Vec<u8>, Bof1Error> {
         out.push((v0 << 2) | (v1 >> 4));
         if let Some(&c2) = quad.get(2) {
             let v2 = b64url_val(c2).ok_or(Bof1Error::TextFormat("bad base64url char"))?;
-            if quad.len() == 2 && (v1 & 0x0f) != 0 {
-                return Err(Bof1Error::TextFormat("non-zero base64url tail bits"));
-            }
             out.push(((v1 & 0x0f) << 4) | (v2 >> 2));
             if let Some(&c3) = quad.get(3) {
                 let v3 = b64url_val(c3).ok_or(Bof1Error::TextFormat("bad base64url char"))?;
@@ -1183,5 +1287,111 @@ mod tests {
         );
         obj.header.prev_object = Some([4u8; 32]);
         assert_eq!(obj.validate_testnet(), Err(Bof1Error::LiveNotOpen));
+    }
+
+    #[test]
+    fn decode_text_charges_meter_for_repair_and_second_lines() {
+        let obj = Object::raw_public(b"abc");
+        let text = obj.encode_text(200).unwrap();
+        let mut tight = Meter::new(1 << 20, 50);
+        assert!(matches!(
+            Object::decode_text(&text, &mut tight),
+            Err(Bof1Error::Budget(MeterError::Steps { .. }))
+        ));
+    }
+
+    #[test]
+    fn decode_text_rejects_non_canonical_source_splitting_and_empty_second() {
+        let content = b"canonical-split-test".repeat(10);
+        let obj = Object::raw_public(&content);
+        let bin = obj.encode();
+        let commitment = super::super::segment::commit_object(&bin, &Profile::P0).unwrap();
+        let mid = bin.len() / 2;
+        let forged_split = format!(
+            "BUD3-OBJECT 1\nprofile 0 codec 0 dictionary 0\ncontent len={} digest={}\npayload len={}\nsecond 0\n S 0 0 {}\n S 0 1 {}\nend commitment={}\n",
+            obj.header.content_len,
+            hex::encode(obj.header.content_digest),
+            obj.payload.len(),
+            base64url_encode(bin.get(..mid).unwrap_or(&[])),
+            base64url_encode(bin.get(mid..).unwrap_or(&[])),
+            hex::encode(commitment),
+        );
+        assert!(
+            Object::decode_text(&forged_split, &mut meter()).is_err(),
+            "non-canonical mid-segment split must be rejected"
+        );
+
+        // Exactly Profile::P0.fps (30) frames fills second 0; trailing empty second 1 must fail.
+        let one_sec_text = Object::raw_public(b"abc")
+            .encode_text(u32::from(Profile::P0.fps) - 1)
+            .unwrap();
+        let with_empty_second =
+            one_sec_text.replace("end commitment=", "second 1\nend commitment=");
+        assert!(
+            Object::decode_text(&with_empty_second, &mut meter()).is_err(),
+            "empty trailing second group must be rejected"
+        );
+    }
+
+    #[test]
+    fn text_format_round_trips_context_manifest_and_rejects_mismatch() {
+        let mut obj = Object::raw_public(b"context-bound");
+        obj.header.flags = Flags::from_byte(Flags::HAS_CONTEXT).unwrap();
+        obj.header.context_manifest = Some([0x7Au8; 32]);
+        let text = obj.encode_text(1).unwrap();
+        assert!(
+            text.contains(&format!("context_manifest {}\n", hex::encode([0x7Au8; 32]))),
+            "encode_text must emit context_manifest line when HAS_CONTEXT is set"
+        );
+        let decoded = Object::decode_text(&text, &mut meter()).unwrap();
+        assert_eq!(decoded, obj);
+
+        let tampered = text.replacen(
+            &format!("context_manifest {}", hex::encode([0x7Au8; 32])),
+            &format!("context_manifest {}", hex::encode([0x7Bu8; 32])),
+            1,
+        );
+        assert!(
+            Object::decode_text(&tampered, &mut meter()).is_err(),
+            "tampered context_manifest header line must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_testnet_rejects_inconsistent_header_fields() {
+        let mut sealed_nonzero = Object::raw_public(b"abc");
+        sealed_nonzero.header.flags = Flags::from_byte(Flags::SEALED).unwrap();
+        assert_eq!(
+            sealed_nonzero.validate_testnet(),
+            Err(Bof1Error::SealedContentLen)
+        );
+
+        let mut missing_base = Object::raw_public(b"abc");
+        missing_base.header.flags = Flags::from_byte(Flags::HAS_BASE).unwrap();
+        assert_eq!(
+            missing_base.validate_testnet(),
+            Err(Bof1Error::Truncated("base"))
+        );
+
+        let mut bad_profile = Object::raw_public(b"abc");
+        bad_profile.header.profile = 99;
+        assert_eq!(
+            bad_profile.validate_testnet(),
+            Err(Bof1Error::UnknownProfile(99))
+        );
+
+        let mut bad_dict = Object::raw_public(b"abc");
+        bad_dict.header.dictionary = 7;
+        assert_eq!(
+            bad_dict.validate_testnet(),
+            Err(Bof1Error::UnknownDictionary(7))
+        );
+
+        let mut bad_payload_len = Object::raw_public(b"abc");
+        bad_payload_len.header.payload_len = 999;
+        assert_eq!(
+            bad_payload_len.validate_testnet(),
+            Err(Bof1Error::Truncated("payload"))
+        );
     }
 }
