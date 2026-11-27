@@ -17,12 +17,37 @@ pub struct RelayPool {
     current: usize,
 }
 
+const MAX_MULTIADDR_LEN: usize = 512;
+
+fn is_valid_relay_offer(offer: &RelayOffer) -> bool {
+    offer.capacity_kbps > 0
+        && offer.multiaddr.starts_with('/')
+        && offer.multiaddr.len() <= MAX_MULTIADDR_LEN
+        && !offer
+            .multiaddr
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+}
+
 impl RelayPool {
-    /// A pool over `relays`. The first entry is current when the list is not
-    /// empty.
+    /// A pool over `relays`. Invalid, zero-capacity, or duplicate multiaddr
+    /// entries are filtered out; the first valid entry is current.
     #[must_use]
     pub fn new(relays: Vec<RelayOffer>) -> Self {
-        Self { relays, current: 0 }
+        let mut filtered: Vec<RelayOffer> = Vec::with_capacity(relays.len());
+        for offer in relays {
+            if is_valid_relay_offer(&offer)
+                && !filtered
+                    .iter()
+                    .any(|existing| existing.multiaddr == offer.multiaddr)
+            {
+                filtered.push(offer);
+            }
+        }
+        Self {
+            relays: filtered,
+            current: 0,
+        }
     }
 
     /// The currently bound relay.

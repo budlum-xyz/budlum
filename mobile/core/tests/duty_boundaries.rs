@@ -120,6 +120,62 @@ fn mobile_floor_release_keeps_a_valid_user_quota() -> Result<(), Box<dyn std::er
 }
 
 #[test]
+fn mobile_rejects_zero_metered_cap_and_filters_malformed_or_duplicate_relays() {
+    let mut c = MobileCore::new(
+        [9; 32],
+        ValidatorClass::Mobile,
+        vec![
+            budlum_mobile_core::RelayOffer {
+                multiaddr: String::new(),
+                capacity_kbps: 1_000,
+            },
+            budlum_mobile_core::RelayOffer {
+                multiaddr: "/ip4/192.0.2.1/tcp/4001".into(),
+                capacity_kbps: 0,
+            },
+            budlum_mobile_core::RelayOffer {
+                multiaddr: "/ip4/192.0.2.10/tcp/4001\ninjected".into(),
+                capacity_kbps: 1_000,
+            },
+            budlum_mobile_core::RelayOffer {
+                multiaddr: "/ip4/192.0.2.20/tcp/4001".into(),
+                capacity_kbps: 1_000,
+            },
+            budlum_mobile_core::RelayOffer {
+                multiaddr: "/ip4/192.0.2.20/tcp/4001".into(),
+                capacity_kbps: 1_000,
+            },
+            budlum_mobile_core::RelayOffer {
+                multiaddr: "/ip4/192.0.2.21/tcp/4001".into(),
+                capacity_kbps: 1_000,
+            },
+        ],
+        FREE_SPACE_FLOOR_BYTES + 1_000_000,
+    );
+
+    // Invalid/empty/zero-capacity/newline relays must be rejected at pool construction;
+    // duplicate multiaddrs must be deduplicated so on_relay_drop advances to a distinct relay.
+    assert_eq!(
+        c.status().connection,
+        budlum_mobile_core::Connection::Relay(budlum_mobile_core::RelayOffer {
+            multiaddr: "/ip4/192.0.2.20/tcp/4001".into(),
+            capacity_kbps: 1_000,
+        })
+    );
+    assert_eq!(
+        c.on_relay_drop().map(|r| r.multiaddr),
+        Some("/ip4/192.0.2.21/tcp/4001".to_string())
+    );
+
+    let zero_metered = Policy {
+        network: budlum_mobile_core::NetworkPolicy::Metered { daily_cap_mb: 0 },
+        ..Policy::default()
+    };
+    let err = refusal(c.set_policy(zero_metered));
+    assert_eq!(err.code, "mobile_metered_cap_zero");
+}
+
+#[test]
 fn mobile_unknown_object_audit_does_not_fall_back_to_another_object(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut core = core(FREE_SPACE_FLOOR_BYTES + 256);

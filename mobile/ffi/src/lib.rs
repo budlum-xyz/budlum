@@ -880,14 +880,22 @@ impl MobileNode {
     }
 
     /// Queue duties for the network and return the shares they release. A
-    /// release of no shares carries nothing and is not queued.
+    /// release of no shares carries nothing and is not queued; duplicate
+    /// pending resume requests are coalesced so offline taps do not flood the outbox.
     fn queue(&self, duties: Vec<DutyTx>) -> u64 {
         let duties: Vec<DutyTx> = duties
             .into_iter()
             .filter(|duty| !matches!(duty, DutyTx::ReleaseShares { shares } if shares.is_empty()))
             .collect();
         let released = released_shares(&duties);
-        lock(&self.outbox).extend(duties);
+        let mut outbox = lock(&self.outbox);
+        for duty in duties {
+            if matches!(duty, DutyTx::Resume(_)) && outbox.iter().any(|existing| existing == &duty)
+            {
+                continue;
+            }
+            outbox.push(duty);
+        }
         released
     }
 }
@@ -1214,6 +1222,40 @@ mod tests {
                 Ok(_) => panic!("a malformed owner was accepted"),
             }
         }
+    }
+
+    #[test]
+    fn mobile_ffi_deduplicates_offline_resume_flood_and_rejects_empty_sealed_key() {
+        struct PanickingVault;
+        impl PlatformVault for PanickingVault {
+            fn seal(&self, _secret: Vec<u8>, _context: Vec<u8>) -> Result<Vec<u8>, VaultFailure> {
+                panic!("vault must not be invoked on malformed empty sealed key");
+            }
+            fn open(&self, _sealed: Vec<u8>, _context: Vec<u8>) -> Result<Vec<u8>, VaultFailure> {
+                panic!("vault must not be invoked on malformed empty sealed key");
+            }
+        }
+
+        assert_eq!(
+            refusal_code(open_operator_key(
+                SealedKey {
+                    public_key: Vec::new(),
+                    sealed_seed: vec![1, 2, 3],
+                },
+                Arc::new(PanickingVault),
+            )),
+            "mobile_operator_key_sealed"
+        );
+
+        let n = node(PhoneClass::Mobile);
+        for _ in 0..50 {
+            n.resume();
+        }
+        assert_eq!(
+            n.pending_duties(),
+            1,
+            "repeated offline resume() calls must not flood the outbox with duplicate ResumeValidator txs"
+        );
     }
 
     #[test]
