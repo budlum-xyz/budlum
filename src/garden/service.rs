@@ -577,11 +577,31 @@ impl GardenService {
                         }),
                     None => None,
                 };
+                // What this node is still holding for the Garden it
+                // stepped out of. The recipes are on disk whether or not a
+                // validator is awake to answer for them, and a phone that
+                // reopens its app and is told it holds nothing has no way
+                // to tell a kept Garden from a lost one.
+                let held = self.content_dir.as_ref().map(|dir| {
+                    let root = dir.join(format!("{:016x}", invite.chain_id));
+                    let counts = super::storage::count_recipes_on_disk(&root);
+                    json!({
+                        "stored_object_bytes": super::storage::scan_disk_bytes(&root),
+                        "bud3": {
+                            "objects_coded": counts.objects_coded,
+                            "segments_coded": counts.segments_coded,
+                            "symbols_made": counts.symbols_made,
+                            "symbols_repair": counts.symbols_repair,
+                            "symbol_roots": counts.symbol_roots,
+                        },
+                    })
+                });
                 return Ok(json!({
                     "garden": {
                         "chain_id": format!("{:016x}", invite.chain_id),
                         "status": "Away",
                         "budlum": budlum,
+                        "kept_here": held,
                     }
                 }));
             }
@@ -771,6 +791,69 @@ mod tests {
     use crate::core::chain_config::Network;
     use crate::domain::types::DomainStatus;
     use std::path::Path;
+
+    /// Stepping out does not mean holding nothing.
+    ///
+    /// A phone that reopens its app before any other validator is awake
+    /// gets the Away branch. It still holds every recipe it fetched, so
+    /// the answer says how many and how large, rather than leaving the
+    /// screen unable to tell a kept Garden from a lost one.
+    #[tokio::test]
+    async fn an_away_node_reports_the_recipes_it_still_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        std::fs::write(
+            data.join(SEAT_FILE),
+            serde_json::json!({
+                "version": 1,
+                "secret": hex::encode([3u8; 32]),
+                "invite": SEAT_INVITE,
+                "name": "Phone",
+                "listen": "/ip4/127.0.0.1/tcp/0",
+                "announce": Value::Null,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let chain = GardenInvite::parse(SEAT_INVITE).unwrap().chain_id;
+        let root = data.join("garden").join(format!("{chain:016x}"));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let service = GardenService::new(None, Some(data.clone()));
+        let empty = service.status().await.unwrap();
+        assert_eq!(text(&empty, "/garden/status"), "Away");
+        assert_eq!(
+            empty.pointer("/garden/kept_here/stored_object_bytes"),
+            Some(&json!(0)),
+            "nothing on disk is nothing held"
+        );
+
+        // A real recipe, written by a real run of the store.
+        let mut store =
+            crate::garden::storage::GardenContentStore::open(Some(&root), 1 << 20).unwrap();
+        let payload = vec![0x5Au8; 9_000];
+        store.put(&payload).unwrap();
+        drop(store);
+
+        let service = GardenService::new(None, Some(data));
+        let answer = service.status().await.unwrap();
+        assert_eq!(text(&answer, "/garden/status"), "Away");
+        let bytes = answer
+            .pointer("/garden/kept_here/stored_object_bytes")
+            .and_then(Value::as_u64)
+            .unwrap();
+        assert!(bytes > 0, "the recipe on disk is held: {answer}");
+        assert_eq!(
+            answer.pointer("/garden/kept_here/bud3/objects_coded"),
+            Some(&json!(1)),
+            "one object was coded into that recipe: {answer}"
+        );
+        let repair = answer
+            .pointer("/garden/kept_here/bud3/symbols_repair")
+            .and_then(Value::as_u64)
+            .unwrap();
+        assert!(repair > 0, "a recipe with no repair symbols is just a copy");
+    }
 
     /// An invite line a real run wrote, so the seat parses as one.
     const SEAT_INVITE: &str = "budlum-garden:1?chain=4741724ef3648084&genesis=a13ed083665f9cc38e90d9e38b8efcf779682b7e5aac669ff8ab5ce68cc76c87&token=c3ef2a879e23204cfafb1446d2b2bb24baa3daeefcad3d2e7a208172b995d295&peer=/ip4/127.0.0.1/tcp/45721/p2p/12D3KooWQrQjxr4NXfV8n4txj3UUAphRazgH6vifSXF7PdDo64FZ";

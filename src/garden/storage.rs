@@ -174,7 +174,7 @@ struct RecipeHead {
 /// plain object files earlier versions wrote under a bare content id.
 const RECIPE_SUFFIX: &str = ".bud3";
 
-fn scan_disk_bytes(root: &Path) -> u64 {
+pub fn scan_disk_bytes(root: &Path) -> u64 {
     let mut total = 0u64;
     if let Ok(entries) = fs::read_dir(root) {
         for entry in entries.flatten() {
@@ -221,7 +221,7 @@ fn scan_disk_bytes(root: &Path) -> u64 {
 ///
 /// Only the record at the head of each recipe is read. The symbols are
 /// the bulk of the file and the record already says how many there are.
-fn count_recipes_on_disk(root: &Path) -> Bud3PartCounts {
+pub fn count_recipes_on_disk(root: &Path) -> Bud3PartCounts {
     let mut counts = Bud3PartCounts::default();
     let Ok(entries) = fs::read_dir(root) else {
         return counts;
