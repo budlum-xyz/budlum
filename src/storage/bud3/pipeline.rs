@@ -267,6 +267,9 @@ pub fn prepare_volume_upload(
         limits
             .admit_content(object.bytes.len() as u64)
             .map_err(PipelineError::Limit)?;
+        if commit_object(&object.bytes, profile) != Some(object.commitment) {
+            return Err(PipelineError::CommitmentMismatch);
+        }
         volume.push_owned(
             &object.content_id,
             object.owner,
@@ -334,27 +337,42 @@ where
             max: MAX_SYMBOLS_PER_SEGMENT,
         });
     }
+    if record.content_id.kind != super::content_id::ContentIdKind::Public {
+        return Err(PipelineError::ContentMismatch);
+    }
     let seg = Segmentation::new(record.object_len, &record.profile)
         .ok_or(PipelineError::Fountain(FountainError::InvalidProfile))?;
     let seg_count = seg.count();
     let _ = usize::try_from(seg_count).map_err(|_| PipelineError::TooLarge)?;
     let mut decoders: std::collections::BTreeMap<u64, SegmentDecoder> =
         std::collections::BTreeMap::new();
-    let mut seen_esis: std::collections::BTreeSet<(u64, u32)> = std::collections::BTreeSet::new();
-    let step_budget = u64::from(
+    let mut seen_esis: std::collections::BTreeMap<u64, std::collections::BTreeSet<u32>> =
+        std::collections::BTreeMap::new();
+    let per_seg_budget = u64::from(
         record
             .symbols_per_segment
             .saturating_add(super::fountain::MAX_EXTRA_SYMBOLS),
-    )
-    .saturating_mul(seg_count);
+    );
+    let step_budget = per_seg_budget.saturating_mul(seg_count);
     let byte_budget = step_budget
         .saturating_mul(u64::from(record.profile.symbol_size))
         .max(record.object_len.saturating_mul(4).saturating_add(1 << 20));
     let mut meter = Meter::new(byte_budget, step_budget);
     for s in symbols {
-        if s.segment >= seg_count || !seen_esis.insert((s.segment, s.esi)) {
+        if s.segment >= seg_count {
             continue;
         }
+        if decoders
+            .get(&s.segment)
+            .is_some_and(SegmentDecoder::is_done)
+        {
+            continue;
+        }
+        let seg_seen = seen_esis.entry(s.segment).or_default();
+        if seg_seen.contains(&s.esi) || seg_seen.len() as u64 >= per_seg_budget {
+            continue;
+        }
+        seg_seen.insert(s.esi);
         if let std::collections::btree_map::Entry::Vacant(e) = decoders.entry(s.segment) {
             let len = seg.len(s.segment).ok_or(PipelineError::TooLarge)?;
             e.insert(SegmentDecoder::new(s.segment, len, &record.profile)?);
@@ -362,9 +380,6 @@ where
         let Some(dec) = decoders.get_mut(&s.segment) else {
             continue;
         };
-        if dec.is_done() {
-            continue;
-        }
         // A malformed symbol from one holder does not stop the view.
         let _ = dec.push(s, &mut meter);
     }
@@ -384,7 +399,8 @@ where
     }
     let mut parse_meter = Meter::for_object(record.object_len);
     let parsed = Object::decode(&object, &mut parse_meter)?;
-    if parsed.header.codec != record.codec
+    if parsed.header.profile != record.profile.id
+        || parsed.header.codec != record.codec
         || parsed.header.content_digest != record.content_id.digest
         || parsed.header.content_len != record.content_id.len
     {
@@ -414,6 +430,12 @@ pub fn view_volume_bytes<I>(record: &VolumeRecord, symbols: I) -> Result<Vec<u8>
 where
     I: IntoIterator<Item = Symbol>,
 {
+    if record.symbols_per_segment > MAX_SYMBOLS_PER_SEGMENT {
+        return Err(PipelineError::TooManySymbols {
+            want: record.symbols_per_segment,
+            max: MAX_SYMBOLS_PER_SEGMENT,
+        });
+    }
     if record.members.is_empty() {
         return Err(PipelineError::Volume(VolumeError::EmptyVolume));
     }
@@ -422,6 +444,9 @@ where
             count: record.members.len(),
             max: volume::MAX_MEMBERS,
         }));
+    }
+    if record.bytes_len == 0 {
+        return Err(PipelineError::Volume(VolumeError::EmptyVolume));
     }
     let capacity = record.profile.segment_bytes();
     if record.bytes_len > capacity {
@@ -432,14 +457,27 @@ where
         }));
     }
     let mut decoder = SegmentDecoder::new(0, record.bytes_len, &record.profile)?;
+    let max_seen = u64::from(
+        record
+            .symbols_per_segment
+            .saturating_add(super::fountain::MAX_EXTRA_SYMBOLS),
+    );
+    let mut seen_esis: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     let mut meter = Meter::new(
         record.bytes_len.saturating_mul(4).saturating_add(1 << 20),
         u64::from(record.symbols_per_segment),
     );
     for symbol in symbols {
-        if symbol.segment != 0 || decoder.is_done() {
+        if decoder.is_done() {
+            break;
+        }
+        if symbol.segment != 0
+            || seen_esis.contains(&symbol.esi)
+            || seen_esis.len() as u64 >= max_seen
+        {
             continue;
         }
+        seen_esis.insert(symbol.esi);
         // A malformed symbol from one holder does not stop the view.
         let _ = decoder.push(symbol, &mut meter);
     }
@@ -456,31 +494,29 @@ where
     if volume::volume_id_of(&record.visibility, &bytes) != record.volume_id {
         return Err(PipelineError::Volume(VolumeError::IdMismatch));
     }
-    check_volume_layout(&record.members, &bytes)?;
+    check_volume_layout(
+        &record.visibility,
+        u64::from(record.profile.symbol_size),
+        &record.members,
+        &bytes,
+    )?;
     if volume::root_of(&record.members) != record.root {
         return Err(PipelineError::Volume(VolumeError::RootMismatch));
     }
-    if record.symbol_root != [0u8; 32] {
-        if record.symbols_per_segment > MAX_SYMBOLS_PER_SEGMENT {
-            return Err(PipelineError::TooManySymbols {
-                want: record.symbols_per_segment,
-                max: MAX_SYMBOLS_PER_SEGMENT,
-            });
-        }
-        let enc = SegmentEncoder::new(0, &bytes, &record.profile)?;
-        let repair_count = record.symbols_per_segment.checked_sub(enc.k()).ok_or(
-            PipelineError::TooFewSymbols {
+    let enc = SegmentEncoder::new(0, &bytes, &record.profile)?;
+    let repair_count =
+        record
+            .symbols_per_segment
+            .checked_sub(enc.k())
+            .ok_or(PipelineError::TooFewSymbols {
                 want: record.symbols_per_segment,
                 k: enc.k(),
-            },
-        )?;
-        let mut syms = enc.source_symbols();
-        syms.extend(enc.repair_symbols(0, repair_count)?);
-        let leaves: Vec<(u32, [u8; 32])> =
-            syms.iter().map(|s| (s.esi, symbol_leaf(&s.data))).collect();
-        if symbol_root(&leaves) != record.symbol_root {
-            return Err(PipelineError::CommitmentMismatch);
-        }
+            })?;
+    let mut syms = enc.source_symbols();
+    syms.extend(enc.repair_symbols(0, repair_count)?);
+    let leaves: Vec<(u32, [u8; 32])> = syms.iter().map(|s| (s.esi, symbol_leaf(&s.data))).collect();
+    if symbol_root(&leaves) != record.symbol_root {
+        return Err(PipelineError::CommitmentMismatch);
     }
     Ok(bytes)
 }
@@ -534,11 +570,42 @@ where
     Ok(out.to_vec())
 }
 
-/// The member table must tile the volume bytes. A slot freed by a deletion is
-/// zeroed, so a hole is all zero bytes.
-fn check_volume_layout(members: &[VolumeMember], bytes: &[u8]) -> Result<(), PipelineError> {
+/// The member table must tile the volume bytes, match the volume visibility,
+/// contain unique content ids, and hold only non-empty sub-symbol members. A
+/// slot freed by a deletion is zeroed, so a hole is all zero bytes.
+fn check_volume_layout(
+    visibility: &Visibility,
+    symbol_size: u64,
+    members: &[VolumeMember],
+    bytes: &[u8],
+) -> Result<(), PipelineError> {
+    let expected_kind = match visibility {
+        Visibility::Public => super::content_id::ContentIdKind::Public,
+        Visibility::Sealed(_) => super::content_id::ContentIdKind::Sealed,
+    };
+    let mut seen_ids: std::collections::BTreeSet<(u8, [u8; 32], u64)> =
+        std::collections::BTreeSet::new();
     let mut expect = 0usize;
     for member in members {
+        if member.content_id.kind != expected_kind {
+            return Err(PipelineError::Volume(VolumeError::MixedVisibility));
+        }
+        let kind_byte = match member.content_id.kind {
+            super::content_id::ContentIdKind::Public => 0u8,
+            super::content_id::ContentIdKind::Sealed => 1u8,
+        };
+        if !seen_ids.insert((kind_byte, member.content_id.digest, member.content_id.len)) {
+            return Err(PipelineError::Volume(VolumeError::DuplicateMember));
+        }
+        if member.len == 0 {
+            return Err(PipelineError::Volume(VolumeError::LayoutMismatch));
+        }
+        if symbol_size == 0 || member.len >= symbol_size {
+            return Err(PipelineError::Volume(VolumeError::NotSmall {
+                len: member.len,
+                symbol_size,
+            }));
+        }
         let offset = usize::try_from(member.offset).map_err(|_| PipelineError::TooLarge)?;
         let len = usize::try_from(member.len).map_err(|_| PipelineError::TooLarge)?;
         let end = offset.checked_add(len).ok_or(PipelineError::TooLarge)?;
@@ -599,6 +666,15 @@ pub fn view_public_optical(
     record: &ObjectRecord,
     seconds: &[super::qr::OpticalSecond],
 ) -> Result<Vec<u8>, PipelineError> {
+    if record.symbols_per_segment > MAX_SYMBOLS_PER_SEGMENT {
+        return Err(PipelineError::TooManySymbols {
+            want: record.symbols_per_segment,
+            max: MAX_SYMBOLS_PER_SEGMENT,
+        });
+    }
+    if record.content_id.kind != super::content_id::ContentIdKind::Public {
+        return Err(PipelineError::ContentMismatch);
+    }
     let mut meter = Meter::for_object(record.object_len.saturating_mul(8).saturating_add(1 << 20));
     let obj = super::two_path::extract_object_from_optical_seconds(seconds, &mut meter)?;
     let obj_bytes = obj.encode();
@@ -607,7 +683,8 @@ pub fn view_public_optical(
     {
         return Err(PipelineError::CommitmentMismatch);
     }
-    if obj.header.codec != record.codec
+    if obj.header.profile != record.profile.id
+        || obj.header.codec != record.codec
         || obj.header.content_digest != record.content_id.digest
         || obj.header.content_len != record.content_id.len
     {
@@ -798,27 +875,48 @@ pub fn view_sealed<I>(
 where
     I: IntoIterator<Item = Symbol>,
 {
+    if record.symbols_per_segment > MAX_SYMBOLS_PER_SEGMENT {
+        return Err(PipelineError::TooManySymbols {
+            want: record.symbols_per_segment,
+            max: MAX_SYMBOLS_PER_SEGMENT,
+        });
+    }
+    if record.content_id.kind != super::content_id::ContentIdKind::Sealed {
+        return Err(PipelineError::ContentMismatch);
+    }
     let seg = Segmentation::new(record.object_len, &record.profile)
         .ok_or(PipelineError::Fountain(FountainError::InvalidProfile))?;
     let seg_count = seg.count();
     let _ = usize::try_from(seg_count).map_err(|_| PipelineError::TooLarge)?;
     let mut decoders: std::collections::BTreeMap<u64, SegmentDecoder> =
         std::collections::BTreeMap::new();
-    let mut seen_esis: std::collections::BTreeSet<(u64, u32)> = std::collections::BTreeSet::new();
-    let step_budget = u64::from(
+    let mut seen_esis: std::collections::BTreeMap<u64, std::collections::BTreeSet<u32>> =
+        std::collections::BTreeMap::new();
+    let per_seg_budget = u64::from(
         record
             .symbols_per_segment
             .saturating_add(super::fountain::MAX_EXTRA_SYMBOLS),
-    )
-    .saturating_mul(seg_count);
+    );
+    let step_budget = per_seg_budget.saturating_mul(seg_count);
     let byte_budget = step_budget
         .saturating_mul(u64::from(record.profile.symbol_size))
         .max(record.object_len.saturating_mul(4).saturating_add(1 << 20));
     let mut meter = Meter::new(byte_budget, step_budget);
     for s in symbols {
-        if s.segment >= seg_count || !seen_esis.insert((s.segment, s.esi)) {
+        if s.segment >= seg_count {
             continue;
         }
+        if decoders
+            .get(&s.segment)
+            .is_some_and(SegmentDecoder::is_done)
+        {
+            continue;
+        }
+        let seg_seen = seen_esis.entry(s.segment).or_default();
+        if seg_seen.contains(&s.esi) || seg_seen.len() as u64 >= per_seg_budget {
+            continue;
+        }
+        seg_seen.insert(s.esi);
         if let std::collections::btree_map::Entry::Vacant(e) = decoders.entry(s.segment) {
             let len = seg.len(s.segment).ok_or(PipelineError::TooLarge)?;
             e.insert(SegmentDecoder::new(s.segment, len, &record.profile)?);
@@ -826,9 +924,6 @@ where
         let Some(dec) = decoders.get_mut(&s.segment) else {
             continue;
         };
-        if dec.is_done() {
-            continue;
-        }
         let _ = dec.push(s, &mut meter);
     }
     let cap = usize::try_from(record.object_len).map_err(|_| PipelineError::TooLarge)?;
@@ -847,8 +942,8 @@ where
     }
     let mut parse_meter = Meter::for_object(record.object_len);
     let parsed = Object::decode(&object, &mut parse_meter)?;
-    if parsed.header.codec != record.codec
-        || record.content_id.kind != super::content_id::ContentIdKind::Sealed
+    if parsed.header.profile != record.profile.id
+        || parsed.header.codec != record.codec
         || parsed.header.content_digest != record.content_id.digest
     {
         return Err(PipelineError::ContentMismatch);
@@ -1271,6 +1366,153 @@ mod tests {
         assert_eq!(
             view_volume_bytes(&tampered, prepared.symbols),
             Err(PipelineError::CommitmentMismatch)
+        );
+    }
+
+    #[test]
+    fn view_volume_bytes_rejects_zero_symbol_root_and_excess_symbols_per_segment() {
+        let objects = vec![small_object(b"volume symbol root required")];
+        let prepared = prepare_volume_upload(
+            &objects,
+            Visibility::Public,
+            &SMALL,
+            &Bud3Limits::default(),
+            4,
+        )
+        .unwrap();
+
+        let mut zero_root = prepared.record.clone();
+        zero_root.symbol_root = [0u8; 32];
+        assert_eq!(
+            view_volume_bytes(&zero_root, prepared.symbols.clone()),
+            Err(PipelineError::CommitmentMismatch)
+        );
+
+        let mut huge_sps = prepared.record;
+        huge_sps.symbol_root = [0u8; 32];
+        huge_sps.symbols_per_segment = MAX_SYMBOLS_PER_SEGMENT + 1;
+        assert_eq!(
+            view_volume_bytes(&huge_sps, prepared.symbols),
+            Err(PipelineError::TooManySymbols {
+                want: MAX_SYMBOLS_PER_SEGMENT + 1,
+                max: MAX_SYMBOLS_PER_SEGMENT,
+            })
+        );
+    }
+
+    #[test]
+    fn view_volume_bytes_rejects_mixed_visibility_duplicate_and_zero_size_members() {
+        use super::super::content_id::ContentKey;
+
+        let a = b"member-one";
+        let b = b"member-two";
+        let prepared = prepare_volume_upload(
+            &[small_object(a), small_object(b)],
+            Visibility::Public,
+            &SMALL,
+            &Bud3Limits::default(),
+            8,
+        )
+        .unwrap();
+
+        // 1. Forged record with a sealed member inside a public volume.
+        let mut mixed = prepared.record.clone();
+        if let Some(first) = mixed.members.first_mut() {
+            first.content_id = ContentId::sealed(&ContentKey([0x42u8; 32]), a);
+        }
+        mixed.root = volume::root_of(&mixed.members);
+        assert_eq!(
+            view_volume_bytes(&mixed, prepared.symbols.clone()),
+            Err(PipelineError::Volume(VolumeError::MixedVisibility))
+        );
+
+        // 2. Forged record with duplicate content_id entries tiling the volume bytes.
+        let mut dup = prepared.record.clone();
+        let first_id = dup.members.first().map(|m| m.content_id).unwrap();
+        if let Some(second) = dup.members.get_mut(1) {
+            second.content_id = first_id;
+        }
+        dup.root = volume::root_of(&dup.members);
+        assert_eq!(
+            view_volume_bytes(&dup, prepared.symbols.clone()),
+            Err(PipelineError::Volume(VolumeError::DuplicateMember))
+        );
+
+        // 3. Forged record with a zero-length phantom member tiling the volume bytes.
+        let mut zero_member = prepared.record;
+        zero_member.members.insert(
+            0,
+            VolumeMember {
+                content_id: ContentId::public(b"phantom"),
+                offset: 0,
+                len: 0,
+                commitment: [0x11u8; 32],
+            },
+        );
+        zero_member.root = volume::root_of(&zero_member.members);
+        assert_eq!(
+            view_volume_bytes(&zero_member, prepared.symbols),
+            Err(PipelineError::Volume(VolumeError::LayoutMismatch))
+        );
+    }
+
+    #[test]
+    fn view_sealed_rejects_excess_symbols_and_prepare_volume_checks_commitment() {
+        use super::super::content_id::ContentKey;
+
+        let key = ContentKey([0x77u8; 32]);
+        let secret = b"sealed ceiling check payload";
+        let up =
+            prepare_sealed_upload_csprng(secret, &key, &SMALL, &Bud3Limits::default(), 8).unwrap();
+        let mut huge = up.record;
+        huge.symbols_per_segment = MAX_SYMBOLS_PER_SEGMENT + 1;
+        assert_eq!(
+            view_sealed(&huge, &key, up.segments.concat()),
+            Err(PipelineError::TooManySymbols {
+                want: MAX_SYMBOLS_PER_SEGMENT + 1,
+                max: MAX_SYMBOLS_PER_SEGMENT,
+            })
+        );
+
+        let mut bad_obj = small_object(b"mismatched commitment");
+        bad_obj.commitment[0] ^= 0xFF;
+        assert_eq!(
+            prepare_volume_upload(
+                &[bad_obj],
+                Visibility::Public,
+                &SMALL,
+                &Bud3Limits::default(),
+                4,
+            )
+            .map(|_| ()),
+            Err(PipelineError::CommitmentMismatch)
+        );
+    }
+
+    #[test]
+    fn view_public_optical_rejects_excess_symbols_and_profile_id_mismatch() {
+        let payload = b"optical profile and ceiling verification".repeat(4);
+        let (up, _) =
+            prepare_public_upload_two_path(&payload, &SMALL, &Bud3Limits::default(), 16).unwrap();
+        let selected = bud_codec::select(&payload);
+        let obj = Object::public_coded(selected.codec, selected.payload, &payload).unwrap();
+        let seconds = super::super::qr::render_optical_seconds(&obj, &SMALL, 2).unwrap();
+
+        let mut huge_sps = up.record.clone();
+        huge_sps.symbols_per_segment = MAX_SYMBOLS_PER_SEGMENT + 1;
+        assert_eq!(
+            view_public_optical(&huge_sps, &seconds),
+            Err(PipelineError::TooManySymbols {
+                want: MAX_SYMBOLS_PER_SEGMENT + 1,
+                max: MAX_SYMBOLS_PER_SEGMENT,
+            })
+        );
+
+        let mut wrong_profile = up.record;
+        wrong_profile.profile.id = 1;
+        assert_eq!(
+            view_public_optical(&wrong_profile, &seconds),
+            Err(PipelineError::ContentMismatch)
         );
     }
 }
