@@ -107,6 +107,7 @@ contract BudlumRemoteAccountFactory {
 
     error InvalidFactoryConfig();
     error InvalidAccountParams();
+    error AccountAlreadyDeployed(address account);
 
     constructor(IBudlumFinality finality_) {
         if (address(finality_) == address(0) || address(finality_).code.length == 0) {
@@ -119,7 +120,7 @@ contract BudlumRemoteAccountFactory {
         return bytes.concat(type(BudlumRemoteAccount).creationCode, abi.encode(finality, appBindingId, budlumOwner));
     }
 
-    function accountAddress(bytes32 appBindingId, bytes32 budlumOwner) external view returns (address) {
+    function accountAddress(bytes32 appBindingId, bytes32 budlumOwner) public view returns (address) {
         bytes32 salt = keccak256(abi.encode(appBindingId, budlumOwner));
         bytes32 digest = keccak256(
             bytes.concat(bytes1(0xff), bytes20(address(this)), salt, keccak256(_bytecode(appBindingId, budlumOwner)))
@@ -130,6 +131,10 @@ contract BudlumRemoteAccountFactory {
     function deploy(bytes32 appBindingId, bytes32 budlumOwner) external returns (address account) {
         if (appBindingId == bytes32(0) || budlumOwner == bytes32(0)) {
             revert InvalidAccountParams();
+        }
+        address predicted = accountAddress(appBindingId, budlumOwner);
+        if (predicted.code.length != 0) {
+            revert AccountAlreadyDeployed(predicted);
         }
         bytes32 salt = keccak256(abi.encode(appBindingId, budlumOwner));
         account = address(new BudlumRemoteAccount{salt: salt}(finality, appBindingId, budlumOwner));

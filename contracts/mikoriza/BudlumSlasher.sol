@@ -35,6 +35,7 @@ contract BudlumSlasher {
     bytes32 public immutable g2GeneratorHash;
 
     mapping(bytes32 => bool) public slashed;
+    uint256 private constant MAX_CHECKPOINT_HASH_BYTES = 256;
     uint256 private _reentrancyLock;
 
     event DoubleVoteSlashed(bytes32 indexed budlumValidator, address indexed operator, uint64 epoch, uint64 height);
@@ -91,7 +92,8 @@ contract BudlumSlasher {
     {
         if (
             vote.budlumValidator == bytes32(0) || vote.operator == address(0) || vote.hashA.length == 0
-                || vote.hashB.length == 0
+                || vote.hashB.length == 0 || vote.hashA.length > MAX_CHECKPOINT_HASH_BYTES
+                || vote.hashB.length > MAX_CHECKPOINT_HASH_BYTES
         ) {
             revert InvalidDoubleVote();
         }
@@ -117,6 +119,9 @@ contract BudlumSlasher {
     {
         if (!registrar.wasBound(vote.budlumValidator, vote.operator, pubkey)) {
             revert NotBound(vote.budlumValidator);
+        }
+        if (keccak256(vote.negSigA) == keccak256(vote.negSigB)) {
+            revert SignatureInvalid("duplicate");
         }
         if (
             !BudlumBls.verify(

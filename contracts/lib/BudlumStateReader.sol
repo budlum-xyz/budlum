@@ -11,8 +11,9 @@ import {FinalityMode, IBudlumFinality} from "../external-domain/BudlumFinalityVe
 ///         (account balance, bridge burn record, AppBinding payment, and
 ///         cross-domain message) against any `IBudlumFinality` verifier.
 library BudlumStateReader {
-    /// Fail-closed check: returns true only when `height` is finalized with a
-    /// non-None finality mode, a non-zero state root, and a valid Merkle proof.
+    /// Fail-closed check: returns true only when `finality` carries contract
+    /// code, `height` is finalized in `Hybrid` mode, and the Merkle proof
+    /// matches the non-zero finalized state root.
     function verifyLeafAtHeight(
         IBudlumFinality finality,
         uint64 height,
@@ -20,13 +21,13 @@ library BudlumStateReader {
         uint256 index,
         bytes32[] memory siblings
     ) internal view returns (bool) {
-        if (address(finality) == address(0)) {
+        if (address(finality) == address(0) || address(finality).code.length == 0) {
             return false;
         }
         if (!finality.heightFinal(height)) {
             return false;
         }
-        if (finality.finalityModeAtHeight(height) == FinalityMode.None) {
+        if (finality.finalityModeAtHeight(height) != FinalityMode.Hybrid) {
             return false;
         }
         bytes32 finalizedRoot = finality.rootAtHeight(height);

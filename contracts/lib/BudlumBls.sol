@@ -102,10 +102,14 @@ library BudlumBls {
         }
         bool largest = flags & 0x20 != 0;
         for (uint256 c = 0; c < G2_COORD_COUNT; c++) {
+            uint256 padStart = c * FP_PADDED_LEN;
             for (uint256 i = 0; i < FP_PAD_PREFIX_LEN; i++) {
-                if (uncompressed[c * FP_PADDED_LEN + i] != 0) {
+                if (uncompressed[padStart + i] != 0) {
                     return false;
                 }
+            }
+            if (!_lessThanModulus(uncompressed, padStart + FP_PAD_PREFIX_LEN)) {
+                return false;
             }
         }
         for (uint256 i = 0; i < FP_BYTE_LEN; i++) {
@@ -135,6 +139,18 @@ library BudlumBls {
             }
         }
         return true;
+    }
+
+    function _lessThanModulus(bytes memory buf, uint256 offset) private pure returns (bool) {
+        bytes memory modulus = FIELD_MODULUS;
+        for (uint256 i = 0; i < FP_BYTE_LEN; i++) {
+            uint8 a = uint8(buf[offset + i]);
+            uint8 b = uint8(modulus[i]);
+            if (a != b) {
+                return a < b;
+            }
+        }
+        return false;
     }
 
     function _greaterThanHalfModulus(bytes memory buf, uint256 offset) private pure returns (bool) {

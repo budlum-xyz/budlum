@@ -311,4 +311,46 @@ contract MikorizaTest is Harness {
         assertTrue(registrar.wasBound(validator, OPERATOR, hex"02"), "the key it rotated to is too");
         assertTrue(!registrar.wasBound(validator, OPERATOR, hex"ff"), "a key never bound is not");
     }
+
+    function test_slasher_rejects_oversized_checkpoint_hash_and_duplicate_signatures() public {
+        BudlumSlasher slasher = registrar.slasher();
+        bytes32 validator = bytes32(uint256(99));
+        registrar.forceBind(OPERATOR, validator, hex"aa");
+
+        bytes memory oversized = new bytes(257);
+        oversized[0] = 0xAA;
+        vm.expectPartialRevert(BudlumSlasher.InvalidDoubleVote.selector);
+        slasher.slashDoubleVote(
+            DoubleVote({
+                budlumValidator: validator,
+                operator: OPERATOR,
+                epoch: 7,
+                height: 100,
+                hashA: oversized,
+                hashB: hex"bb",
+                negSigA: new bytes(128),
+                negSigB: new bytes(128)
+            }),
+            hex"01",
+            bytes("generator")
+        );
+
+        bytes memory sig = new bytes(128);
+        sig[47] = 0x03;
+        vm.expectRevert(abi.encodeWithSelector(BudlumSlasher.SignatureInvalid.selector, "duplicate"));
+        slasher.slashDoubleVote(
+            DoubleVote({
+                budlumValidator: validator,
+                operator: OPERATOR,
+                epoch: 7,
+                height: 100,
+                hashA: hex"aa",
+                hashB: hex"bb",
+                negSigA: sig,
+                negSigB: sig
+            }),
+            hex"01",
+            bytes("generator")
+        );
+    }
 }
