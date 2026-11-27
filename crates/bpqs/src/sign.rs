@@ -131,6 +131,9 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
     /// [`BpqsSigner::fresh_device`]).
     pub fn ceremonial_keygen(root_seed: [u8; 32], window: EpochWindow) -> Result<Self, BpqsError> {
         crate::params::ensure_valid_params::<P>()?;
+        if root_seed == [0u8; 32] {
+            return Err(BpqsError::Malformed("all-zero root seed is forbidden"));
+        }
         let mut vks = Vec::with_capacity(1usize << P::T_LOG2);
         for epoch in 0..(1u32 << P::T_LOG2) {
             let seed = prf_epoch_seed::<H>(&root_seed, epoch);
@@ -411,7 +414,10 @@ pub fn verify_at_height<H: BpqsHash, P: BpqsParams>(
 /// WIRING: anchor family verifier log for research line F2.
 #[derive(Clone, Debug, Default)]
 pub struct BpqsVerifierLog {
-    seen_epochs: alloc::collections::BTreeSet<([u8; 32], &'static str, u64, u32)>,
+    /// Keyed strictly by `(public.root, P::NAME, sig.epoch)` (omitting
+    /// `EpochWindow`) so swapping `EpochWindow` on the same Merkle root can
+    /// never replay a spent one-time epoch signature.
+    seen_epochs: alloc::collections::BTreeSet<([u8; 32], &'static str, u32)>,
     allow_test_params: bool,
 }
 
@@ -458,10 +464,7 @@ impl BpqsVerifierLog {
             ));
         }
         verify_at_height::<H, P>(public, height, msg, sig)?;
-        if !self
-            .seen_epochs
-            .insert((public.root, P::NAME, public.window.0, sig.epoch))
-        {
+        if !self.seen_epochs.insert((public.root, P::NAME, sig.epoch)) {
             return Err(BpqsError::QuotaExceeded {
                 epoch: sig.epoch,
                 attempted: 2,
