@@ -10,13 +10,13 @@
 //!
 //! Two pieces of this already existed and never met:
 //!
-//! - [`UniversalExecutionReceipt`](crate::execution::uer::UniversalExecutionReceipt)
+//! - [`UniversalExecutionReceipt`]
 //!   records *what* ran: status, gas, `output_digest`, block height, a batch
 //!   inclusion proof against a root. It is a description, not a warrant. A
 //!   receipt with a fabricated `output_digest` verifies as an inclusion just
 //!   as cleanly as an honest one, because a Merkle path proves only that some
 //!   node *said* this - not that it is true.
-//! - [`ProofVerifier`](crate::execution::proof_verifier::ProofVerifier)
+//! - [`ProofVerifier`]
 //!   verifies a STARK against `ExecutionPublicInputs`, which carry
 //!   `exit_code`, `final_state_root`, `event_digest` and `state_writes_digest`.
 //!   That is exactly the warrant. But it was reachable only from a caller who
