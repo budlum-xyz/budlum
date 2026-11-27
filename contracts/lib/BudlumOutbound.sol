@@ -14,12 +14,17 @@ abstract contract BudlumOutboundEmitter {
         bytes32 payloadHash
     );
 
+    error InvalidOutboundMessage();
+
     function _emitOutbound(
         bytes memory kind,
         bytes32 recipient,
         bytes32 correlationId,
         bytes32 payloadHash
     ) internal {
+        if (kind.length == 0 || correlationId == bytes32(0) || payloadHash == bytes32(0)) {
+            revert InvalidOutboundMessage();
+        }
         emit BudlumOutbound(kind, recipient, correlationId, payloadHash);
     }
 }

@@ -12,7 +12,9 @@ contract AppBindingExecutor is BudlumOutboundEmitter {
     bytes internal constant FULFILLED_KIND = "budlum/app_binding/fulfilled/v1";
     uint64 private constant EVM_ADDRESS_BYTE_LEN = 20;
     uint256 private constant FULFILLED_PAYLOAD_FIELDS = 9;
-    uint256 private constant POST_CALL_GAS_RESERVE = 8_000;
+    uint256 private constant POST_CALL_GAS_RESERVE = 48_000;
+    uint256 private constant MAX_RETURN_DATA_BYTES = 1_024;
+    uint256 private constant WORD_LEN = 32;
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
 
@@ -94,7 +96,7 @@ contract AppBindingExecutor is BudlumOutboundEmitter {
         }
         if (
             intentId == bytes32(0) || solver == address(0) || budlumSolver == bytes32(0) || target == address(0)
-                || target == address(this)
+                || target == address(this) || calldataHash == bytes32(0) || beneficiaryHash == bytes32(0)
         ) {
             revert InvalidAuthorization();
         }
@@ -141,18 +143,40 @@ contract AppBindingExecutor is BudlumOutboundEmitter {
         if (target.code.length == 0) {
             revert CallFailed(intentId, "target has no code");
         }
+        fulfilled[intentId] = true;
         uint256 availableGas = gasleft();
         if (availableGas <= POST_CALL_GAS_RESERVE) {
             revert CallFailed(intentId, "insufficient gas");
         }
-        fulfilled[intentId] = true;
         uint256 callGas = availableGas - POST_CALL_GAS_RESERVE;
         bool ok;
-        (ok, result) = target.call{gas: callGas, value: msg.value}(data);
+        (ok, result) = _boundedCall(target, msg.value, callGas, data);
         if (!ok) {
             revert CallFailed(intentId, result);
         }
         _emitFulfilled(intentId, authorization.budlumSolver, target, callHash, beneficiary);
+    }
+
+    function _boundedCall(address target, uint256 callValue, uint256 callGas, bytes calldata data)
+        private
+        returns (bool ok, bytes memory result)
+    {
+        bytes memory callBuf = data;
+        uint256 maxCopy = MAX_RETURN_DATA_BYTES;
+        uint256 wordLen = WORD_LEN;
+        assembly {
+            ok := call(callGas, target, callValue, add(callBuf, wordLen), mload(callBuf), 0, 0)
+            let copyLen := returndatasize()
+            if gt(copyLen, maxCopy) {
+                copyLen := maxCopy
+            }
+            result := mload(0x40)
+            mstore(result, copyLen)
+            let dataPtr := add(result, wordLen)
+            returndatacopy(dataPtr, 0, copyLen)
+            let padded := and(add(copyLen, sub(wordLen, 1)), not(sub(wordLen, 1)))
+            mstore(0x40, add(dataPtr, padded))
+        }
     }
 
     function _emitFulfilled(
@@ -204,9 +228,13 @@ abstract contract BudlumAppBindingClaimer is BudlumOutboundEmitter {
 
     event BudlumAppBindingClaim(bytes32 indexed appBindingId, bytes32 payout);
 
+    error InvalidDomainKey();
     error InvalidPayout();
 
     function budlumAppBindingId(uint32 domainKey) public view returns (bytes32) {
+        if (domainKey == 0) {
+            revert InvalidDomainKey();
+        }
         bytes memory origin = bytes.concat(bytes20(address(this)));
         bytes[] memory fields = new bytes[](APP_BINDING_APP_FIELDS);
         fields[0] = "BDLM_APP_BINDING_APP_V1";

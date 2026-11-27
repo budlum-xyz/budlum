@@ -65,7 +65,13 @@ library BudlumHash {
         bytes[] memory sentinelFields = new bytes[](SENTINEL_FIELDS);
         sentinelFields[0] = "BDLM_MERKLE_ODD_SENTINEL_V1";
         bytes32 sentinel = hashFields(sentinelFields);
+        if (leaf == bytes32(0) || leaf == sentinel) {
+            return (false, bytes32(0));
+        }
         for (uint256 i = 0; i < siblings.length; i++) {
+            if (siblings[i] == bytes32(0)) {
+                return (false, bytes32(0));
+            }
             if (siblings[i] == sentinel) {
                 if (idx % MERKLE_PAIR_ARITY != 0) {
                     return (false, bytes32(0));
