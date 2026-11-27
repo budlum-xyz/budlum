@@ -47,17 +47,22 @@ fn is_reserved_label(label: &str) -> bool {
     RESERVED_LABELS.contains(&label)
 }
 
-/// Strip the port from a `Host` header value.
+/// Strip the port from a `Host` header value, returning `None` when a `:port`
+/// suffix is present with a port outside `1..=65535`.
 ///
 /// `ayaz.budlum.xyz:8443` and `ayaz.budlum.xyz` are the same address. An IPv6
 /// literal in brackets is never a gateway address, so it strips to something
 /// the suffix match then rejects.
-fn strip_port(host: &str) -> &str {
+fn strip_port(host: &str) -> Option<&str> {
     match host.rsplit_once(':') {
-        // A bare `:` in a bracketed IPv6 literal keeps its last group, so only
-        // treat the tail as a port when it is all digits.
-        Some((head, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) => head,
-        _ => host,
+        Some((head, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) => {
+            let port: u16 = tail.parse().ok()?;
+            if port == 0 {
+                return None;
+            }
+            Some(head)
+        }
+        _ => Some(host),
     }
 }
 
@@ -73,7 +78,7 @@ fn strip_port(host: &str) -> &str {
 /// one certificate.
 #[must_use]
 pub fn parse_host(host: &str, suffix: &str) -> Option<Target> {
-    let host = strip_port(host.trim()).to_ascii_lowercase();
+    let host = strip_port(host.trim())?.to_ascii_lowercase();
     if host.is_empty() || suffix.is_empty() {
         return None;
     }
@@ -104,7 +109,7 @@ pub fn parse_host(host: &str, suffix: &str) -> Option<Target> {
         return None;
     }
     if let Some(sub) = &sub {
-        if !BnsRegistry::is_valid_label(sub) {
+        if !BnsRegistry::is_valid_label(sub) || sub.chars().count() > 32 {
             return None;
         }
     }
@@ -248,5 +253,17 @@ mod tests {
         assert_eq!(parse("XN--PPLE-43D.budlum.xyz"), None);
         assert_eq!(parse("xn--80ak6aa92e.ayaz.budlum.xyz"), None);
         assert_eq!(parse("shop.xn--80ak6aa92e.budlum.xyz"), None);
+    }
+
+    #[test]
+    fn out_of_range_ports_and_overlong_subdomains_are_refused() {
+        assert_eq!(parse("ayaz.budlum.xyz:0"), None);
+        assert_eq!(parse("ayaz.budlum.xyz:65536"), None);
+        assert_eq!(parse("ayaz.budlum.xyz:999999"), None);
+        assert_eq!(
+            parse(&format!("{}.ayaz.budlum.xyz", "s".repeat(33))),
+            None,
+            "subdomain label exceeding 32 chars must be refused"
+        );
     }
 }

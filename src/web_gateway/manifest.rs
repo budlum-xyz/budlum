@@ -83,10 +83,11 @@ pub enum RouteError {
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 
 /// Reject percent-encoded dot, separator, or NUL sequences (`%2e`, `%2f`,
-/// `%5c`, `%00`, case-insensitive) so a proxy/client mismatch cannot sneak a
-/// traversal or NUL segment through `is_well_formed_path`.
+/// `%5c`, `%00`, including double-encoded `%252e`, `%252f`, `%255c`, `%2500`,
+/// case-insensitive) so a proxy/client mismatch cannot sneak a traversal or NUL
+/// segment through `is_well_formed_path`.
 fn contains_encoded_traversal_or_nul(path: &str) -> bool {
-    path.as_bytes().windows(3).any(|triple| {
+    let single = path.as_bytes().windows(3).any(|triple| {
         matches!(
             triple,
             [b'%', a, b]
@@ -95,20 +96,42 @@ fn contains_encoded_traversal_or_nul(path: &str) -> bool {
                     b"2e" | b"2f" | b"5c" | b"00"
                 )
         )
-    })
+    });
+    let double = path.as_bytes().windows(5).any(|five| {
+        matches!(
+            five,
+            [b'%', b'2', b'5', a, b]
+                if matches!(
+                    &[a.to_ascii_lowercase(), b.to_ascii_lowercase()],
+                    b"2e" | b"2f" | b"5c" | b"00"
+                )
+        )
+    });
+    single || double
+}
+
+fn is_valid_public_route_content(content: &ContentRef) -> bool {
+    content.content_id.kind == crate::storage::bud3::content_id::ContentIdKind::Public
+        && ContentRef::new(
+            content.content_id,
+            content.object_commitment,
+            content.nft_id,
+        )
+        .is_ok()
 }
 
 /// Check a request path before it is used to look anything up.
 ///
-/// Rejects, in this order: a missing leading slash, a NUL byte, a backslash
-/// (some stacks fold it into a separator), percent-encoded traversal/separator
-/// bytes, any `.`/`..` segment, and any empty segment other than the single
-/// trailing slash. A query string is not part of the path and must already have
-/// been stripped by the caller.
+/// Rejects, in this order: a missing leading slash, any ASCII control byte,
+/// a backslash, unstripped query/fragment delimiters (`?`, `#`),
+/// percent-encoded traversal/separator bytes, any `.`/`..` segment, and any
+/// empty segment other than the single trailing slash.
 fn is_well_formed_path(path: &str) -> bool {
     if !path.starts_with('/')
-        || path.contains('\0')
+        || path.bytes().any(|b| b < 0x20 || b == 0x7F)
         || path.contains('\\')
+        || path.contains('?')
+        || path.contains('#')
         || contains_encoded_traversal_or_nul(path)
     {
         return false;
@@ -125,12 +148,14 @@ fn is_well_formed_path(path: &str) -> bool {
 }
 
 impl SiteManifest {
-    /// Parse a JSON site manifest and enforce byte-size and route-count ceilings.
+    /// Parse a JSON site manifest and enforce byte-size, route-count, path, and
+    /// public-`ContentRef` invariants.
     ///
     /// # Errors
     ///
     /// Returns a human-readable error if the bytes exceed `MAX_MANIFEST_BYTES`,
-    /// are not valid JSON, or declare more than `MAX_MANIFEST_ROUTES` routes.
+    /// are not valid JSON, declare more than `MAX_MANIFEST_ROUTES` routes, or
+    /// carry a malformed path or non-public/invalid `ContentRef`.
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() > MAX_MANIFEST_BYTES {
             return Err(format!(
@@ -146,6 +171,27 @@ impl SiteManifest {
                 MAX_MANIFEST_ROUTES
             ));
         }
+        if manifest.index == "/"
+            || manifest.index.ends_with('/')
+            || !is_well_formed_path(&manifest.index)
+        {
+            return Err(format!(
+                "manifest index {:?} is not a well-formed route path",
+                manifest.index
+            ));
+        }
+        for (route_path, route) in &manifest.routes {
+            if route_path == "/" || route_path.ends_with('/') || !is_well_formed_path(route_path) {
+                return Err(format!(
+                    "manifest route path {route_path:?} is not well-formed"
+                ));
+            }
+            if !is_valid_public_route_content(&route.content) {
+                return Err(format!(
+                    "manifest route {route_path:?} carries non-public or invalid ContentRef"
+                ));
+            }
+        }
         Ok(manifest)
     }
 
@@ -156,7 +202,8 @@ impl SiteManifest {
     ///
     /// # Errors
     ///
-    /// [`RouteError::Malformed`] for a path `is_well_formed_path` refuses,
+    /// [`RouteError::Malformed`] for a path `is_well_formed_path` refuses or a
+    /// non-public/invalid route `ContentRef`,
     /// [`RouteError::MissingIndex`] when the index route is absent,
     /// [`RouteError::NotFound`] for a path the manifest does not carry, and
     /// [`RouteError::DisallowedMime`] for a route whose type is not allowed.
@@ -165,6 +212,9 @@ impl SiteManifest {
             return Err(RouteError::Malformed);
         }
         let lookup = if path == "/" {
+            if self.index == "/" || self.index.ends_with('/') || !is_well_formed_path(&self.index) {
+                return Err(RouteError::Malformed);
+            }
             self.index.as_str()
         } else {
             path.strip_suffix('/').unwrap_or(path)
@@ -174,6 +224,9 @@ impl SiteManifest {
         } else {
             RouteError::NotFound
         })?;
+        if !is_valid_public_route_content(&route.content) {
+            return Err(RouteError::Malformed);
+        }
         if !ALLOWED_MIME_TYPES.contains(&route.mime.as_str()) {
             return Err(RouteError::DisallowedMime);
         }
@@ -335,6 +388,66 @@ mod tests {
                 site.resolve(bad),
                 Err(RouteError::Malformed),
                 "encoded traversal {bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_rejects_sealed_routes_malformed_index_and_query_or_control_paths() {
+        let sealed_route = Route {
+            content: ContentRef {
+                content_id: ContentId {
+                    kind: ContentIdKind::Sealed,
+                    digest: [0x11; 32],
+                    len: 16,
+                },
+                object_commitment: [0x22; 32],
+                nft_id: None,
+            },
+            mime: "text/html".to_string(),
+        };
+        let mut sealed_routes = BTreeMap::new();
+        sealed_routes.insert("/index.html".to_string(), sealed_route);
+        let sealed_site = SiteManifest {
+            index: "/index.html".to_string(),
+            routes: sealed_routes,
+            csp: None,
+        };
+        assert_eq!(
+            sealed_site.resolve("/index.html"),
+            Err(RouteError::Malformed),
+            "sealed ContentRef must never resolve through a public site manifest"
+        );
+        let sealed_json = serde_json::to_vec(&sealed_site).expect("serialize");
+        assert!(
+            SiteManifest::from_json_bytes(&sealed_json).is_err(),
+            "from_json_bytes must reject sealed route ContentRef"
+        );
+
+        let mut bad_index_routes = BTreeMap::new();
+        bad_index_routes.insert("/../secret".to_string(), route(0x01, "text/html"));
+        let bad_index_site = SiteManifest {
+            index: "/../secret".to_string(),
+            routes: bad_index_routes,
+            csp: None,
+        };
+        assert_eq!(
+            bad_index_site.resolve("/"),
+            Err(RouteError::Malformed),
+            "malformed manifest.index must not bypass path validation on `/`"
+        );
+
+        let clean = site();
+        for bad_path in [
+            "/index.html?x=1",
+            "/index.html#frag",
+            "/index.html\r\nx",
+            "/%252e%252e/secret",
+        ] {
+            assert_eq!(
+                clean.resolve(bad_path),
+                Err(RouteError::Malformed),
+                "query, fragment, control, or double-encoded path {bad_path:?} must be refused"
             );
         }
     }

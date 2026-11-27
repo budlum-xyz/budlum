@@ -351,16 +351,18 @@ pub fn cache_key(content: &ContentRef) -> [u8; 32] {
     content.object_commitment
 }
 
-/// A verified-answer cache, keyed by object commitment.
+/// A verified-answer cache, keyed by `(ContentId, object_commitment)`.
 ///
 /// Bounded by total bytes, not by entry count, because one entry can be a
 /// 10 MB page and a thousand entries can be a thousand favicons. Every byte is
 /// checked against the `ContentId` digest before it is stored, and again when
 /// it is served, so a cache that was written by a buggy or hostile source can
-/// still not serve a body that does not hash to the id the manifest named.
+/// still not serve a body that does not hash to the id the manifest named, nor
+/// can a hostile manifest evict another site's cached object by colliding on
+/// `object_commitment` alone.
 #[derive(Debug, Default)]
 pub struct ContentCache {
-    entries: BTreeMap<[u8; 32], Vec<u8>>,
+    entries: BTreeMap<(crate::storage::bud3::content_id::ContentId, [u8; 32]), Vec<u8>>,
     max_bytes: usize,
     held_bytes: usize,
 }
@@ -390,17 +392,21 @@ impl ContentCache {
     ///
     /// # Errors
     ///
-    /// [`CacheMiss::DigestMismatch`] when the bytes do not hash to the id, and
-    /// [`CacheMiss::TooLarge`] when the object alone exceeds the budget.
+    /// [`CacheMiss::DigestMismatch`] when the bytes do not hash to a valid
+    /// public `ContentRef`, and [`CacheMiss::TooLarge`] when the object alone
+    /// exceeds the budget.
     pub fn insert(&mut self, content: &ContentRef, bytes: Vec<u8>) -> Result<(), CacheMiss> {
+        let Some(verified_ref) = public_only(*content) else {
+            return Err(CacheMiss::DigestMismatch);
+        };
         let public = crate::storage::bud3::content_id::ContentId::public(&bytes);
-        if public != content.content_id {
+        if public != verified_ref.content_id {
             return Err(CacheMiss::DigestMismatch);
         }
         if bytes.len() > self.max_bytes {
             return Err(CacheMiss::TooLarge);
         }
-        let key = content.object_commitment;
+        let key = (verified_ref.content_id, verified_ref.object_commitment);
         if let Some(old) = self.entries.remove(&key) {
             self.held_bytes = self.held_bytes.saturating_sub(old.len());
         }
@@ -422,9 +428,10 @@ impl ContentCache {
     /// A poisoned entry answers `None` and is dropped, so a bad write cannot
     /// become a bad page.
     pub fn get(&mut self, content: &ContentRef) -> Option<&[u8]> {
-        let key = content.object_commitment;
+        let verified_ref = public_only(*content)?;
+        let key = (verified_ref.content_id, verified_ref.object_commitment);
         let valid = self.entries.get(&key).is_some_and(|bytes| {
-            crate::storage::bud3::content_id::ContentId::public(bytes) == content.content_id
+            crate::storage::bud3::content_id::ContentId::public(bytes) == verified_ref.content_id
         });
         if !valid {
             if let Some(dropped) = self.entries.remove(&key) {
@@ -973,6 +980,47 @@ mod tests {
         assert!(
             matches!(err, GatewayError::ProofFailed(ref msg) if msg.contains("does not match")),
             "expected ProofFailed name mismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn cache_isolates_forged_commitment_collisions_and_refuses_sealed_refs() {
+        let mut cache = ContentCache::new(1024);
+        let victim_bytes = b"legit victim bundle".to_vec();
+        let victim_ref = ContentRef::new(ContentId::public(&victim_bytes), [0x44; 32], None)
+            .expect("victim ref");
+        cache
+            .insert(&victim_ref, victim_bytes.clone())
+            .expect("insert victim");
+
+        // Hostile site copies victim's `object_commitment` `[0x44; 32]` with its own ContentId.
+        let attacker_bytes = b"attacker payload".to_vec();
+        let forged_collision_ref =
+            ContentRef::new(ContentId::public(&attacker_bytes), [0x44; 32], None)
+                .expect("forged ref");
+
+        assert!(
+            cache.get(&forged_collision_ref).is_none(),
+            "forged commitment must miss victim's ContentId"
+        );
+        cache
+            .insert(&forged_collision_ref, attacker_bytes)
+            .expect("insert attacker under distinct ContentId");
+        assert_eq!(
+            cache.get(&victim_ref),
+            Some(victim_bytes.as_slice()),
+            "attacker reusing victim object_commitment must not evict or overwrite victim cache entry"
+        );
+
+        let zero_commitment_ref = ContentRef {
+            content_id: ContentId::public(b"bad"),
+            object_commitment: [0u8; 32],
+            nft_id: None,
+        };
+        assert_eq!(
+            cache.insert(&zero_commitment_ref, b"bad".to_vec()),
+            Err(CacheMiss::DigestMismatch),
+            "cache must reject invalid zero-commitment ContentRef"
         );
     }
 }
