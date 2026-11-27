@@ -41,6 +41,7 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
 
     mapping(bytes32 => Binding) internal bindings;
     mapping(bytes32 => mapping(bytes32 => bool)) internal boundKeys;
+    mapping(address => mapping(bytes32 => bytes32)) internal activeValidatorForKey;
     mapping(address => bytes32) public validatorOf;
     mapping(address => uint64) public lastReportedBlock;
     uint256 private _reentrancyLock;
@@ -150,25 +151,58 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         if (!allocationManager.isMemberOfOperatorSet(msg.sender, set)) {
             revert NotInOperatorSet(msg.sender);
         }
-        _retireMovedRow(msg.sender, budlumValidator, compressedKey);
-        bytes32 row = bindingKey(budlumValidator, msg.sender);
-        boundKeys[row][keccak256(uncompressedKey)] = true;
-        bindings[row] = Binding({operator: msg.sender, compressedKey: compressedKey, uncompressedKey: uncompressedKey});
-        validatorOf[msg.sender] = budlumValidator;
+        _recordBinding(msg.sender, budlumValidator, compressedKey, uncompressedKey);
         emit Bound(msg.sender, budlumValidator, compressedKey);
     }
 
+    function _recordBinding(
+        address operator,
+        bytes32 budlumValidator,
+        bytes memory compressedKey,
+        bytes memory uncompressedKey
+    ) internal {
+        _retireMovedRow(operator, budlumValidator, compressedKey);
+        bytes32 row = bindingKey(budlumValidator, operator);
+        bytes32 keyHash = keccak256(compressedKey);
+        if (bindings[row].operator != address(0)) {
+            bytes32 replacedKeyHash = keccak256(bindings[row].compressedKey);
+            if (replacedKeyHash != keyHash && activeValidatorForKey[operator][replacedKeyHash] == budlumValidator) {
+                delete activeValidatorForKey[operator][replacedKeyHash];
+            }
+        }
+        boundKeys[row][keccak256(uncompressedKey)] = true;
+        bindings[row] = Binding({operator: operator, compressedKey: compressedKey, uncompressedKey: uncompressedKey});
+        activeValidatorForKey[operator][keyHash] = budlumValidator;
+        validatorOf[operator] = budlumValidator;
+    }
+
     function _retireMovedRow(address operator, bytes32 budlumValidator, bytes memory compressedKey) internal {
+        bytes32 keyHash = keccak256(compressedKey);
+        bytes32 tracked = activeValidatorForKey[operator][keyHash];
+        if (tracked != bytes32(0) && tracked != budlumValidator) {
+            bytes32 trackedRow = bindingKey(tracked, operator);
+            if (
+                bindings[trackedRow].operator != address(0)
+                    && keccak256(bindings[trackedRow].compressedKey) == keyHash
+            ) {
+                delete bindings[trackedRow];
+                delete activeValidatorForKey[operator][keyHash];
+                emit Unbound(operator, tracked);
+            }
+        }
         bytes32 previous = validatorOf[operator];
-        if (previous == bytes32(0) || previous == budlumValidator) {
+        if (previous == bytes32(0) || previous == budlumValidator || previous == tracked) {
             return;
         }
         bytes32 previousRow = bindingKey(previous, operator);
         if (
             bindings[previousRow].operator != address(0)
-                && keccak256(bindings[previousRow].compressedKey) == keccak256(compressedKey)
+                && keccak256(bindings[previousRow].compressedKey) == keyHash
         ) {
             delete bindings[previousRow];
+            if (activeValidatorForKey[operator][keyHash] == previous) {
+                delete activeValidatorForKey[operator][keyHash];
+            }
             emit Unbound(operator, previous);
         }
     }
