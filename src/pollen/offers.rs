@@ -2185,14 +2185,21 @@ mod tests {
     }
 
     #[test]
-    fn offer_counter_saturates_and_encryption_policy_cap_holds() {
+    fn offer_counter_exhaustion_refuses_u64_max_and_encryption_policy_cap_holds() {
         let mut reg = MarketplaceRegistry::new();
         let seller = addr(1);
         let cid = ContentId([0xEE; 32]);
-        reg.next_offer_id = u64::MAX;
+        reg.next_offer_id = u64::MAX - 1;
         let id = reg.create_offer(seller, cid, 50, 7).unwrap();
-        assert_eq!(id, u64::MAX);
+        assert_eq!(id, u64::MAX - 1);
         assert_eq!(reg.next_offer_id, u64::MAX);
+        // Once the counter hits u64::MAX, minting must refuse rather than saturating
+        // and reusing slot u64::MAX after closure/eviction.
+        assert!(reg.create_offer(seller, cid, 50, 7).is_err());
+        if let Some(offer) = reg.offers.get_mut(&id) {
+            offer.active = false;
+        }
+        reg.offers.clear();
         assert!(reg.create_offer(seller, cid, 50, 7).is_err());
 
         for v in 1..=(MAX_ENCRYPTION_POLICIES as u32) {
