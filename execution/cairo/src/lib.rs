@@ -142,8 +142,24 @@ pub fn decode_sierra_class(raw: &[u8]) -> Result<SierraContractClass, EeRefusal>
     let body = raw.get(4..).unwrap_or_default();
     let cls: SierraContractClass = serde_json::from_slice(body)
         .map_err(|e| ee_bad_code(format!("malformed Sierra class: {e}")))?;
-    if cls.entrypoints.is_empty() {
-        return Err(ee_bad_code("Sierra class has no entrypoints".into()));
+    if cls.sierra_version.is_empty() || cls.entrypoints.is_empty() || cls.entrypoints.len() > 512 {
+        return Err(ee_bad_code(
+            "Sierra class version or entrypoints invalid".into(),
+        ));
+    }
+    for (idx, ep) in cls.entrypoints.iter().enumerate() {
+        if ep.name.is_empty() || ep.ops.len() > 16_384 {
+            return Err(ee_bad_code("invalid Cairo entrypoint definition".into()));
+        }
+        let sel = sn_keccak_selector(&ep.name);
+        if cls.entrypoints[(idx + 1)..]
+            .iter()
+            .any(|other| other.name == ep.name || sn_keccak_selector(&other.name) == sel)
+        {
+            return Err(ee_bad_code(
+                "duplicate Cairo entrypoint name or selector".into(),
+            ));
+        }
     }
     Ok(cls)
 }
@@ -1393,5 +1409,40 @@ mod tests {
         };
         assert_eq!(decl_ok.status, OutcomeStatus::Success);
         assert!(decl_ok.gas_used > CAIRO_AA_BASE_BGU + 50_000);
+    }
+
+    #[test]
+    fn sierra_class_rejects_empty_version_and_duplicate_entrypoint_selectors() {
+        let empty_ver = encode_sierra_class(&SierraContractClass {
+            sierra_version: String::new(),
+            entrypoints: vec![CairoEntrypoint {
+                name: "run".into(),
+                ops: Vec::new(),
+            }],
+        })
+        .unwrap();
+        assert!(
+            decode_sierra_class(&empty_ver).is_err(),
+            "empty Sierra version must be refused"
+        );
+
+        let dup_ep = encode_sierra_class(&SierraContractClass {
+            sierra_version: "1.5.0".into(),
+            entrypoints: vec![
+                CairoEntrypoint {
+                    name: "run".into(),
+                    ops: Vec::new(),
+                },
+                CairoEntrypoint {
+                    name: "run".into(),
+                    ops: Vec::new(),
+                },
+            ],
+        })
+        .unwrap();
+        assert!(
+            decode_sierra_class(&dup_ep).is_err(),
+            "duplicate Cairo entrypoint names/selectors must be refused"
+        );
     }
 }

@@ -129,10 +129,29 @@ pub fn decode_tvm_blob(bytes: &[u8]) -> Result<TvmContract, EeRefusal> {
             message: String::from("TVM blob missing TVM\\0 header"),
         });
     };
-    serde_json::from_slice(rest).map_err(|e| EeRefusal {
+    let contract: TvmContract = serde_json::from_slice(rest).map_err(|e| EeRefusal {
         code: RefusalCode::InvalidCode,
         message: format!("invalid TVM cell package: {e}"),
-    })
+    })?;
+    if contract.init.len() > 16_384 || contract.handlers.len() > 512 {
+        return Err(EeRefusal {
+            code: RefusalCode::TooLarge,
+            message: String::from("TVM contract exceeds handler/instruction bounds"),
+        });
+    }
+    for (idx, h) in contract.handlers.iter().enumerate() {
+        if h.body.len() > 16_384
+            || contract.handlers[(idx + 1)..]
+                .iter()
+                .any(|other| other.op == h.op)
+        {
+            return Err(EeRefusal {
+                code: RefusalCode::InvalidCode,
+                message: String::from("duplicate or oversized TVM op handler"),
+            });
+        }
+    }
+    Ok(contract)
 }
 
 fn code_key(addr32: &[u8; 32]) -> Vec<u8> {
@@ -1093,6 +1112,28 @@ mod tests {
             dep_res.status,
             OutcomeStatus::Revert,
             "TVM Deploy must fail closed on code: host.read error"
+        );
+    }
+
+    #[test]
+    fn tvm_blob_rejects_duplicate_op_handlers() {
+        let dup = encode_tvm_blob(&TvmContract {
+            init: Vec::new(),
+            handlers: vec![
+                TvmMethod {
+                    op: 0x10,
+                    body: vec![TvmInsn::PushInt(1)],
+                },
+                TvmMethod {
+                    op: 0x10,
+                    body: vec![TvmInsn::PushInt(2)],
+                },
+            ],
+        })
+        .unwrap();
+        assert!(
+            decode_tvm_blob(&dup).is_err(),
+            "duplicate TVM 32-bit op handlers must be refused"
         );
     }
 }

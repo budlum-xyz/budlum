@@ -120,38 +120,39 @@ pub fn encode_plutus_blob(prog: &PlutusValidatorProgram) -> Result<Vec<u8>, EeRe
 /// # Errors
 ///
 /// Returns [`EeRefusal`] on header, size, or AST encoding violation.
-fn check_uplc_depth(term: &UplcTerm, depth: usize) -> Result<(), EeRefusal> {
+fn validate_uplc_term(term: &UplcTerm, depth: usize, nodes: &mut usize) -> bool {
     if depth > MAX_UPLC_DEPTH {
-        return Err(EeRefusal {
-            code: RefusalCode::InvalidCode,
-            message: String::from("UPLC validator exceeds maximum AST nesting depth"),
-        });
+        return false;
     }
-    let next = depth + 1;
+    *nodes = nodes.saturating_add(1);
+    if *nodes > MAX_UPLC_STEPS {
+        return false;
+    }
     match term {
-        UplcTerm::Add(a, b) | UplcTerm::EqualsInt(a, b) | UplcTerm::EqualsBytes(a, b) => {
-            check_uplc_depth(a, next)?;
-            check_uplc_depth(b, next)
-        }
-        UplcTerm::Sha256(inner) | UplcTerm::TraceUnit(inner) => check_uplc_depth(inner, next),
-        UplcTerm::IfThenElse {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            check_uplc_depth(cond, next)?;
-            check_uplc_depth(then_branch, next)?;
-            check_uplc_depth(else_branch, next)
-        }
         UplcTerm::ConstInt(_)
-        | UplcTerm::ConstBytes(_)
         | UplcTerm::DatumInt
         | UplcTerm::RedeemerInt
         | UplcTerm::RedeemerBytes
         | UplcTerm::CtxHeight
         | UplcTerm::Signatory
         | UplcTerm::Owner
-        | UplcTerm::Error => Ok(()),
+        | UplcTerm::Error => true,
+        UplcTerm::ConstBytes(b) => b.len() <= MAX_PLUTUS_SCRIPT_BYTES,
+        UplcTerm::Sha256(inner) | UplcTerm::TraceUnit(inner) => {
+            validate_uplc_term(inner, depth + 1, nodes)
+        }
+        UplcTerm::Add(a, b) | UplcTerm::EqualsInt(a, b) | UplcTerm::EqualsBytes(a, b) => {
+            validate_uplc_term(a, depth + 1, nodes) && validate_uplc_term(b, depth + 1, nodes)
+        }
+        UplcTerm::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            validate_uplc_term(cond, depth + 1, nodes)
+                && validate_uplc_term(then_branch, depth + 1, nodes)
+                && validate_uplc_term(else_branch, depth + 1, nodes)
+        }
     }
 }
 
@@ -172,14 +173,17 @@ pub fn decode_plutus_blob(bytes: &[u8]) -> Result<PlutusValidatorProgram, EeRefu
         code: RefusalCode::InvalidCode,
         message: format!("invalid UPLC validator: {e}"),
     })?;
-    if prog.uplc_version.is_empty() || prog.uplc_version.len() > 32 || !prog.uplc_version.is_ascii()
+    let mut nodes = 0usize;
+    if prog.uplc_version.is_empty()
+        || prog.uplc_version.len() > 32
+        || !prog.uplc_version.is_ascii()
+        || !validate_uplc_term(&prog.validator, 0, &mut nodes)
     {
         return Err(EeRefusal {
             code: RefusalCode::InvalidCode,
-            message: String::from("UPLC validator requires a valid ASCII uplc_version"),
+            message: String::from("invalid UPLC version or AST depth/size"),
         });
     }
-    check_uplc_depth(&prog.validator, 0)?;
     Ok(prog)
 }
 
@@ -1286,5 +1290,34 @@ mod tests {
         };
         assert_eq!(ok.status, OutcomeStatus::Success);
         assert_eq!(ok.gas_used, expected_gas);
+    }
+
+    #[test]
+    fn plutus_blob_rejects_empty_version_and_excessive_ast_depth() {
+        let empty_ver = encode_plutus_blob(&PlutusValidatorProgram {
+            uplc_version: String::new(),
+            initial_datum_int: 0,
+            validator: UplcTerm::ConstInt(1),
+        })
+        .unwrap();
+        assert!(
+            decode_plutus_blob(&empty_ver).is_err(),
+            "empty uplc_version must be refused"
+        );
+
+        let mut deep = UplcTerm::ConstBytes(vec![1]);
+        for _ in 0..80 {
+            deep = UplcTerm::Sha256(Box::new(deep));
+        }
+        let deep_blob = encode_plutus_blob(&PlutusValidatorProgram {
+            uplc_version: "1.1.0".into(),
+            initial_datum_int: 0,
+            validator: deep,
+        })
+        .unwrap();
+        assert!(
+            decode_plutus_blob(&deep_blob).is_err(),
+            "UPLC AST deeper than MAX_UPLC_DEPTH must be refused"
+        );
     }
 }

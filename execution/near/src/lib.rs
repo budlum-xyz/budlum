@@ -141,11 +141,24 @@ pub fn decode_near_blob(code: &[u8]) -> Result<Option<NearContractProgram>, EeRe
             code: RefusalCode::InvalidCode,
             message: format!("invalid NEAR blob: {e}"),
         })?;
-        if prog.abi_version.is_empty() {
+        if prog.abi_version.is_empty() || prog.init_ops.len() > 16_384 || prog.methods.len() > 512 {
             return Err(EeRefusal {
                 code: RefusalCode::InvalidCode,
-                message: String::from("NEAR abi_version must be non-empty"),
+                message: String::from("NEAR abi_version or method table invalid"),
             });
+        }
+        for (idx, m) in prog.methods.iter().enumerate() {
+            if m.name.is_empty()
+                || m.ops.len() > 16_384
+                || prog.methods[(idx + 1)..]
+                    .iter()
+                    .any(|other| other.name == m.name)
+            {
+                return Err(EeRefusal {
+                    code: RefusalCode::InvalidCode,
+                    message: String::from("empty, oversized, or duplicate NEAR method"),
+                });
+            }
         }
         return Ok(Some(prog));
     }
@@ -1244,5 +1257,30 @@ mod tests {
             panic!("low put");
         };
         assert_eq!(low_put.status, OutcomeStatus::OutOfGas);
+    }
+
+    #[test]
+    fn near_blob_rejects_empty_or_duplicate_method_names() {
+        let dup = encode_near_blob(&NearContractProgram {
+            abi_version: "1.0".into(),
+            init_ops: Vec::new(),
+            methods: vec![
+                NearMethod {
+                    name: "set".into(),
+                    is_view: false,
+                    ops: Vec::new(),
+                },
+                NearMethod {
+                    name: "set".into(),
+                    is_view: true,
+                    ops: Vec::new(),
+                },
+            ],
+        })
+        .unwrap();
+        assert!(
+            decode_near_blob(&dup).is_err(),
+            "duplicate NEAR method names must be refused"
+        );
     }
 }
