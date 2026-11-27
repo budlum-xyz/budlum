@@ -39,6 +39,8 @@ pub const MAX_POLKAVM_BLOB_BYTES: usize = 1024 * 1024;
 
 /// RV32EM register count (`a0..a5`, `s0..s1`, `t0..t2`, `ra`, `sp`).
 const REG_COUNT: usize = 16;
+const MAX_DISPATCHES: usize = 256;
+const MAX_INSNS_PER_ENTRY: usize = 16_384;
 
 /// Deterministic RV32EM + `seal_*` (`ink!` / `pallet-revive`) instruction set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,7 +131,21 @@ pub fn decode_polkavm_blob(raw: &[u8]) -> Result<PolkaVmProgram, EeRefusal> {
     }
     let prog: PolkaVmProgram = serde_json::from_slice(raw.get(4..).unwrap_or_default())
         .map_err(|e| ee_bad_code(format!("corrupt PolkaVM blob: {e}")))?;
-    for d in &prog.dispatches {
+    if prog.constructor.len() > MAX_INSNS_PER_ENTRY || prog.dispatches.len() > MAX_DISPATCHES {
+        return Err(ee_bad_code("PolkaVM program exceeds entry bounds".into()));
+    }
+    for (idx, d) in prog.dispatches.iter().enumerate() {
+        if d.insns.len() > MAX_INSNS_PER_ENTRY {
+            return Err(ee_bad_code(
+                "PolkaVM dispatch exceeds instruction bound".into(),
+            ));
+        }
+        if prog.dispatches[(idx + 1)..]
+            .iter()
+            .any(|other| other.selector == d.selector)
+        {
+            return Err(ee_bad_code("duplicate PolkaVM 4-byte selector".into()));
+        }
         for ins in &d.insns {
             if !regs_in_range(ins) {
                 return Err(ee_bad_code("PolkaVM register >= 16".into()));
@@ -449,7 +465,8 @@ impl ExecutionEnvironment for PolkaVmWorker {
                 .is_err()
                 || host.write(&ns, &owner_key(&addr), Some(&caller32)).is_err()
             {
-                let _ = host.checkpoint_rollback(cp);
+                host.checkpoint_rollback(cp)
+                    .map_err(|_| ee_wire_fault("checkpoint rollback failed"))?;
                 return Ok(ee_reverted(b"code write err".to_vec(), gas_used));
             }
             let scope = PvmScope {
@@ -461,23 +478,29 @@ impl ExecutionEnvironment for PolkaVmWorker {
             match run_rv32em(&scope, &prog.constructor, &[], &mut gas_used, host) {
                 Ok(_) => {
                     if host.checkpoint_commit(cp).is_err() {
-                        let _ = host.checkpoint_rollback(cp);
+                        host.checkpoint_rollback(cp)
+                            .map_err(|_| ee_wire_fault("checkpoint rollback failed"))?;
                         return Ok(ee_reverted(b"checkpoint commit err".to_vec(), gas_used));
                     }
                     Ok(ee_success(addr.to_vec(), gas_used))
                 }
                 Err(b"OUT_OF_GAS") => {
-                    let _ = host.checkpoint_rollback(cp);
+                    host.checkpoint_rollback(cp)
+                        .map_err(|_| ee_wire_fault("checkpoint rollback failed"))?;
                     Ok(ee_out_of_gas(call.gas_limit))
                 }
                 Err(r) => {
-                    let _ = host.checkpoint_rollback(cp);
+                    host.checkpoint_rollback(cp)
+                        .map_err(|_| ee_wire_fault("checkpoint rollback failed"))?;
                     Ok(ee_reverted(r.to_vec(), gas_used))
                 }
             }
         } else {
             let Ok(target32) = <[u8; 32]>::try_from(call.target.id.as_slice()) else {
-                return Ok(ee_reverted(b"PolkaVM target must be 32 bytes".to_vec(), 0));
+                return Ok(ee_reverted(
+                    b"PolkaVM target must be 32 bytes".to_vec(),
+                    gas_used,
+                ));
             };
             let Ok(Some(blob)) = host.read(&ns, &code_key(&target32)) else {
                 return Ok(ee_reverted(b"PolkaVM contract missing".to_vec(), gas_used));
@@ -506,17 +529,20 @@ impl ExecutionEnvironment for PolkaVmWorker {
             match run_rv32em(&scope, &disp.insns, args_tail, &mut gas_used, host) {
                 Ok(out) => {
                     if host.checkpoint_commit(cp).is_err() {
-                        let _ = host.checkpoint_rollback(cp);
+                        host.checkpoint_rollback(cp)
+                            .map_err(|_| ee_wire_fault("checkpoint rollback failed"))?;
                         return Ok(ee_reverted(b"checkpoint commit err".to_vec(), gas_used));
                     }
                     Ok(ee_success(out, gas_used))
                 }
                 Err(b"OUT_OF_GAS") => {
-                    let _ = host.checkpoint_rollback(cp);
+                    host.checkpoint_rollback(cp)
+                        .map_err(|_| ee_wire_fault("checkpoint rollback failed"))?;
                     Ok(ee_out_of_gas(call.gas_limit))
                 }
                 Err(r) => {
-                    let _ = host.checkpoint_rollback(cp);
+                    host.checkpoint_rollback(cp)
+                        .map_err(|_| ee_wire_fault("checkpoint rollback failed"))?;
                     Ok(ee_reverted(r.to_vec(), gas_used))
                 }
             }
@@ -1107,5 +1133,53 @@ mod tests {
         };
         assert_eq!(ok.status, OutcomeStatus::Success);
         assert!(ok.gas_used >= expected_base);
+    }
+
+    #[test]
+    fn polkavm_rejects_duplicate_selectors_and_reports_charged_base_gas_on_bad_target() {
+        let dup_prog = PolkaVmProgram {
+            constructor: Vec::new(),
+            dispatches: vec![
+                PolkaVmDispatch {
+                    selector: [1, 2, 3, 4],
+                    insns: vec![PolkaVmInsn::LoadImm { rd: 0, imm: 1 }],
+                },
+                PolkaVmDispatch {
+                    selector: [1, 2, 3, 4],
+                    insns: vec![PolkaVmInsn::LoadImm { rd: 0, imm: 2 }],
+                },
+            ],
+        };
+        let blob = encode_polkavm_blob(&dup_prog).unwrap();
+        assert!(
+            decode_polkavm_blob(&blob).is_err(),
+            "duplicate 4-byte ink! selectors must be refused"
+        );
+
+        let mut worker = PolkaVmWorker::with_activation_height(Some(0));
+        let mut host = MemoryHost::new(500_000);
+        let caller = EeIdentity::new(EeId::POLKAVM, vec![0xAA; 32]).unwrap();
+        let short_target = EeIdentity::new(EeId::POLKAVM, vec![0xBB; 20]).unwrap();
+        let out = worker
+            .execute(
+                &ctx_open(),
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller,
+                    target: short_target,
+                    value: BudAmount(0),
+                    input: vec![1, 2, 3, 4],
+                    gas_limit: 50_000,
+                    depth: 0,
+                    tx_hash: [0xD1; 32],
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(out.status, OutcomeStatus::Revert);
+        assert_eq!(
+            out.gas_used, host.gas_charged,
+            "reverted call after base charge must report exact gas charged on host"
+        );
     }
 }

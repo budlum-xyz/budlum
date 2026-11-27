@@ -197,6 +197,16 @@ impl ExecutionEnvironment for BudZeroWorker {
                 gas_used: 0,
             });
         };
+        if call.caller.id.is_empty()
+            || call.target.id.is_empty()
+            || call.target.id.starts_with(b"owner:")
+        {
+            return Ok(EeOutcome {
+                status: OutcomeStatus::Revert,
+                output: b"invalid BudZero caller or reserved target prefix".to_vec(),
+                gas_used: 0,
+            });
+        }
 
         match call.kind {
             EeCallKind::Deploy => {
@@ -225,7 +235,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
                         output: b"program already deployed".to_vec(),
-                        gas_used: 0,
+                        gas_used: deploy_gas,
                     });
                 }
                 let Ok(cp) = host.checkpoint_begin() else {
@@ -247,7 +257,13 @@ impl ExecutionEnvironment for BudZeroWorker {
                         .is_err()
                     || host.checkpoint_commit(cp).is_err()
                 {
-                    let _ = host.checkpoint_rollback(cp);
+                    host.checkpoint_rollback(cp).map_err(|_| EeFault {
+                        ee: EeId::BUDZERO,
+                        panic_digest: budlum_uel_abi::panic_digest(
+                            EeId::BUDZERO,
+                            "checkpoint rollback failed",
+                        ),
+                    })?;
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
                         output: Vec::new(),
@@ -1405,5 +1421,93 @@ mod tests {
         };
         assert_eq!(ok.status, OutcomeStatus::Success);
         assert_eq!(ok.gas_used, expected_gas);
+    }
+
+    #[test]
+    fn budzero_worker_prevents_owner_key_prefix_collision_and_accounts_duplicate_deploy_gas() {
+        let mut worker = BudZeroWorker;
+        let mut host = budlum_uel_abi::mock::MemoryHost::new(5_000_000);
+        let ctx = BlockContext {
+            chain_id: 45_262,
+            height: 1,
+            timestamp_ms: 1_700_000_000_000,
+        };
+        let halt_code = Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode()
+        .to_le_bytes()
+        .to_vec();
+
+        // Deploying to reserved "owner:..." target id must be refused so no contract
+        // can collide with `owner:<victim>` metadata keys in NS_BUDZERO_PROGRAM.
+        let caller = EeIdentity::new(EeId::BUDZERO, vec![0x11; 32]).unwrap();
+        let reserved_target = EeIdentity::new(EeId::BUDZERO, b"owner:victim".to_vec()).unwrap();
+        let refused = worker
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Deploy,
+                    caller: caller.clone(),
+                    target: reserved_target,
+                    value: BudAmount(0),
+                    input: halt_code.clone(),
+                    gas_limit: 100_000,
+                    depth: 0,
+                    tx_hash: [0xA1; 32],
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(
+            refused.status,
+            OutcomeStatus::Revert,
+            "deploying to reserved owner: prefix target id must be refused"
+        );
+
+        // Duplicate deploy after charging deploy_gas must report deploy_gas, not 0.
+        let honest_target = EeIdentity::new(EeId::BUDZERO, vec![0x22; 32]).unwrap();
+        let first = worker
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Deploy,
+                    caller: caller.clone(),
+                    target: honest_target.clone(),
+                    value: BudAmount(0),
+                    input: halt_code.clone(),
+                    gas_limit: 100_000,
+                    depth: 0,
+                    tx_hash: [0xA2; 32],
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(first.status, OutcomeStatus::Success);
+        let dup = worker
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Deploy,
+                    caller,
+                    target: honest_target,
+                    value: BudAmount(0),
+                    input: halt_code,
+                    gas_limit: 100_000,
+                    depth: 0,
+                    tx_hash: [0xA3; 32],
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(dup.status, OutcomeStatus::Revert);
+        assert!(
+            dup.gas_used > 0,
+            "duplicate deploy must report charged deploy_gas"
+        );
     }
 }
