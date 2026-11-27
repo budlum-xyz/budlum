@@ -492,3 +492,74 @@ where
     }
     BundleStatus::Open
 }
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    fn owner() -> Address {
+        Address::from([0xA1; 32])
+    }
+
+    fn leg(tag: u8) -> UserIntent {
+        UserIntent::new(
+            owner(),
+            u32::from(tag),
+            u32::from(tag) + 1,
+            crate::relayer::policy::RelayerActionKind::DwebResolve {
+                name: format!("leg-{tag}"),
+            },
+            100,
+            1_000,
+            u64::from(tag),
+            [0x11; 32],
+            Address::from([0xB2; 32]),
+        )
+    }
+
+    /// Expiry beats settlement: two settled legs and one expired leg refunds,
+    /// it does not pay out the two. This is the incentive the bundle exists to
+    /// create - a solver cannot fill the easy legs and let the hard one lapse.
+    #[test]
+    fn expiry_wins_over_partial_settlement() {
+        let (a, b, c) = (leg(1), leg(2), leg(3));
+        let bundle = IntentBundle::new(owner(), vec![a.clone(), b.clone(), c.clone()], 500, 400);
+
+        let settled = |id: &[u8; 32]| *id == a.intent_id || *id == b.intent_id;
+        let expired = |id: &[u8; 32]| *id == c.intent_id;
+
+        assert_eq!(
+            bundle_status(&bundle, settled, expired),
+            BundleStatus::Refund,
+            "a partially settled bundle with an expired leg paid out"
+        );
+    }
+
+    /// A bundle completes only when every leg settled; nothing less counts.
+    #[test]
+    fn a_bundle_completes_only_when_every_leg_settled() {
+        let (a, b) = (leg(1), leg(2));
+        let bundle = IntentBundle::new(owner(), vec![a.clone(), b.clone()], 500, 400);
+
+        let none = |_: &[u8; 32]| false;
+        assert_eq!(
+            bundle_status(&bundle, none, none),
+            BundleStatus::Open,
+            "an untouched bundle was not open"
+        );
+
+        let only_a = |id: &[u8; 32]| *id == a.intent_id;
+        assert_eq!(
+            bundle_status(&bundle, only_a, none),
+            BundleStatus::Open,
+            "one settled leg completed the bundle"
+        );
+
+        let both = |_: &[u8; 32]| true;
+        assert_eq!(
+            bundle_status(&bundle, both, none),
+            BundleStatus::Complete,
+            "all legs settled did not complete the bundle"
+        );
+    }
+}
