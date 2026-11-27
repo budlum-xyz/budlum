@@ -194,6 +194,9 @@ fn handle_uol_precompile_call(
 
     match decoded {
         DecodedUolCall::BalanceOf { class_id, holder } => {
+            if holder.len() > budlum_uel_abi::types::MAX_IDENTITY_BYTES {
+                return uol_revert(b"UOL holder identity too long", gas, mem_offset);
+            }
             let bal = match uol_read_balance(
                 context.journaled_state.db().host,
                 &ns,
@@ -262,8 +265,12 @@ fn handle_uol_precompile_call(
             if inputs.is_static {
                 return uol_revert(b"UOL transfer inside static call", gas, mem_offset);
             }
-            if to.is_empty() {
-                return uol_revert(b"UOL empty recipient", gas, mem_offset);
+            if to.len() != crate::abi::UOL_TAKER_LEN || to.iter().all(|&b| b == 0) {
+                return uol_revert(
+                    b"UOL recipient must be non-zero 20-byte EVM address",
+                    gas,
+                    mem_offset,
+                );
             }
             if asset_id == [0u8; 32] && amount == 0 {
                 return uol_revert(
@@ -314,6 +321,17 @@ fn handle_uol_precompile_call(
                         return uol_revert(msg, gas, mem_offset);
                     }
                 };
+                if to_bal == 0 {
+                    let slot_bytes = (8u64 + 32u64 + (to.len() as u64) + 16u64)
+                        .saturating_mul(crate::abi::UOL_STATE_GROWTH_GAS_PER_BYTE);
+                    if !gas.record_regular_cost(slot_bytes) {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Some(CallOutcome::new(
+                            InterpreterResult::new(InstructionResult::OutOfGas, Bytes::new(), gas),
+                            mem_offset,
+                        ));
+                    }
+                }
                 let Some(next_to) = to_bal.checked_add(amount) else {
                     let _ = host.checkpoint_rollback(cp);
                     return uol_revert(b"UOL balance overflow", gas, mem_offset);
@@ -1223,6 +1241,151 @@ mod tests {
             ok_out.gas_used >= 27_000,
             "UOL offer must charge per-byte state growth gas, got {}",
             ok_out.gas_used
+        );
+    }
+
+    #[test]
+    fn uol_transfer_rejects_oversized_or_zero_recipient_and_charges_new_slot_state_growth_gas() {
+        use crate::abi::{uol_selector, NS_UEL_ASSETS, UOL_PRECOMPILE};
+        use crate::{EvmWorker, BUDLUM_EVM_CHAIN_ID};
+        use budlum_uel_abi::mock::MemoryHost;
+        use budlum_uel_abi::{
+            BlockContext, BudAmount, EeCall, EeCallKind, EeId, EeIdentity, ExecutionEnvironment,
+            HostApi, HostRead, Namespace, OutcomeStatus,
+        };
+
+        let mut host = MemoryHost::new(10_000_000);
+        let Ok(ns_assets) = Namespace::new(NS_UEL_ASSETS) else {
+            panic!("ns");
+        };
+        let class_id = [0x77u8; 32];
+        let asset_id = [0x88u8; 32];
+        let sender = [0x11u8; 20];
+        let hk = super::uol_holder_key(&asset_id);
+        host.write(&ns_assets, &hk, Some(&sender)).expect("holder");
+        host.write(
+            &ns_assets,
+            &super::uol_bal_key(&class_id, &sender),
+            Some(&1_000u128.to_le_bytes()),
+        )
+        .expect("sender bal");
+
+        let build_xfer_cd = |a_id: [u8; 32], to: &[u8], amount: u128| -> Vec<u8> {
+            let mut cd = Vec::from(uol_selector("transfer(bytes32,bytes32,bytes,uint128)"));
+            cd.extend_from_slice(&class_id);
+            cd.extend_from_slice(&a_id);
+            let mut off = [0u8; 32];
+            off[31] = 128;
+            cd.extend_from_slice(&off);
+            let mut amt_w = [0u8; 32];
+            amt_w[16..32].copy_from_slice(&amount.to_be_bytes());
+            cd.extend_from_slice(&amt_w);
+            let mut tlen = [0u8; 32];
+            tlen[24..32].copy_from_slice(&(to.len() as u64).to_be_bytes());
+            cd.extend_from_slice(&tlen);
+            let padded = to.len().div_ceil(32) * 32;
+            let mut tbuf = vec![0u8; padded];
+            tbuf[..to.len()].copy_from_slice(to);
+            cd.extend_from_slice(&tbuf);
+            cd
+        };
+
+        let mut worker = EvmWorker;
+        let sender_id = EeIdentity::new(EeId::EVM, sender.to_vec()).expect("sender");
+        let uol_id = EeIdentity::new(EeId::EVM, UOL_PRECOMPILE.as_slice().to_vec()).expect("uol");
+        let ctx = BlockContext {
+            chain_id: BUDLUM_EVM_CHAIN_ID,
+            height: 12,
+            timestamp_ms: 1_793_923_200_000,
+        };
+
+        // 1. Oversized 512-byte recipient must revert without locking the asset.
+        let over_out = worker
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: sender_id.clone(),
+                    target: uol_id.clone(),
+                    value: BudAmount(0),
+                    input: build_xfer_cd(asset_id, &[0xAA; 512], 0),
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [0xF1; 32],
+                },
+                &mut host,
+            )
+            .expect("over_out");
+        assert_eq!(over_out.status, OutcomeStatus::Revert);
+        assert_eq!(
+            host.read(&ns_assets, &hk).unwrap(),
+            Some(sender.to_vec()),
+            "oversized recipient stole asset holder slot"
+        );
+
+        // 2. Zero 20-byte recipient must revert rather than burning into 0x00..00.
+        let zero_out = worker
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: sender_id.clone(),
+                    target: uol_id.clone(),
+                    value: BudAmount(0),
+                    input: build_xfer_cd(asset_id, &[0u8; 20], 0),
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [0xF2; 32],
+                },
+                &mut host,
+            )
+            .expect("zero_out");
+        assert_eq!(zero_out.status, OutcomeStatus::Revert);
+
+        // 3. Fungible transfer creating a new recipient slot must charge state-growth gas (76 * 16 = 1216 BGU)
+        //    on top of intrinsic + entry gas (> 25_000 BGU total).
+        let fresh_to = [0x33u8; 20];
+        let fresh_out = worker
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: sender_id.clone(),
+                    target: uol_id.clone(),
+                    value: BudAmount(0),
+                    input: build_xfer_cd([0u8; 32], &fresh_to, 10),
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [0xF3; 32],
+                },
+                &mut host,
+            )
+            .expect("fresh_out");
+        assert_eq!(fresh_out.status, OutcomeStatus::Success);
+
+        // Second transfer to the already-populated slot charges no new-slot growth gas.
+        let warm_out = worker
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: sender_id,
+                    target: uol_id,
+                    value: BudAmount(0),
+                    input: build_xfer_cd([0u8; 32], &fresh_to, 10),
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [0xF4; 32],
+                },
+                &mut host,
+            )
+            .expect("warm_out");
+        assert_eq!(warm_out.status, OutcomeStatus::Success);
+        assert!(
+            fresh_out.gas_used >= warm_out.gas_used + 1_200,
+            "fresh recipient balance slot must charge state-growth gas: fresh={} warm={}",
+            fresh_out.gas_used,
+            warm_out.gas_used
         );
     }
 }

@@ -1341,6 +1341,9 @@ fn invoke_contract_entry(
     for sub in &resp.messages {
         let rem_fuel = fuel_budget.saturating_sub(total_fuel);
         let sub_limit = sub.gas_limit.map_or(rem_fuel, |g| g.min(rem_fuel));
+        let sub_cp = host
+            .checkpoint_begin()
+            .map_err(|e| (OutcomeStatus::Revert, e.to_string(), total_fuel))?;
         let sub_exec = dispatch_submsg(
             ctx,
             host,
@@ -1350,25 +1353,39 @@ fn invoke_contract_entry(
             submsg_depth.saturating_add(1),
         );
         let (sub_result, sub_used) = match sub_exec {
-            Ok((sub_data, used)) => (
-                CwSubMsgResult::Ok(CwSubMsgResponse {
-                    events: Vec::new(),
-                    data: if sub_data.is_empty() {
-                        None
-                    } else {
-                        Some(b64_encode(&sub_data))
-                    },
-                }),
-                used,
-            ),
+            Ok((sub_data, used)) => {
+                if let Err(e) = host.checkpoint_commit(sub_cp) {
+                    let _ = host.checkpoint_rollback(sub_cp);
+                    return Err((
+                        OutcomeStatus::Revert,
+                        e.to_string(),
+                        total_fuel.saturating_add(used),
+                    ));
+                }
+                (
+                    CwSubMsgResult::Ok(CwSubMsgResponse {
+                        events: Vec::new(),
+                        data: if sub_data.is_empty() {
+                            None
+                        } else {
+                            Some(b64_encode(&sub_data))
+                        },
+                    }),
+                    used,
+                )
+            }
             Err((OutcomeStatus::OutOfGas, msg, used)) => {
+                let _ = host.checkpoint_rollback(sub_cp);
                 return Err((
                     OutcomeStatus::OutOfGas,
                     msg,
                     total_fuel.saturating_add(used),
                 ));
             }
-            Err((_, err_msg, used)) => (CwSubMsgResult::Error(err_msg), used),
+            Err((_, err_msg, used)) => {
+                let _ = host.checkpoint_rollback(sub_cp);
+                (CwSubMsgResult::Error(err_msg), used)
+            }
         };
         total_fuel = total_fuel.saturating_add(sub_used);
 
@@ -1463,6 +1480,15 @@ fn dispatch_submsg(
                     0,
                 ));
             }
+            let canonical_to =
+                bud_addr_canonicalize(to_address).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
+            if canonical_to.iter().all(|&b| b == 0) {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("BankMsg::Send refuses all-zero recipient"),
+                    0,
+                ));
+            }
             let ubud = parse_ubud_coins(amount).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
             let attos = ubud
                 .checked_mul(ATTOS_PER_UBUD)
@@ -1493,6 +1519,15 @@ fn dispatch_submsg(
             is_static,
         }) => {
             let target_bytes = b64_decode(target).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
+            if target_bytes.is_empty() {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("UniversalCall target cannot be empty"),
+                    0,
+                ));
+            }
+            let target_id = EeIdentity::new(EeId(*target_ee), target_bytes)
+                .map_err(|e| (OutcomeStatus::Revert, e.to_string(), 0))?;
             let input_bytes = b64_decode(input).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
             let val_u128 = value_attos
                 .parse::<u128>()
@@ -1881,26 +1916,43 @@ impl WasmWorker {
                 gas_used: 0,
             };
         };
+        let Ok(top_cp) = host.checkpoint_begin() else {
+            return EeOutcome {
+                status: OutcomeStatus::Revert,
+                output: b"wasm checkpoint begin failed".to_vec(),
+                gas_used: 0,
+            };
+        };
 
         // `EeCallKind::Deploy` uploads raw `.wasm` bytecode and returns the 8-byte BE `code_id`.
         if call.kind == EeCallKind::Deploy {
             return match store_wasm_code(host, &sender, &call.input) {
                 Ok((out, gas)) => {
-                    let g = gas.min(call.gas_limit);
-                    if host.charge(g).is_err() {
+                    if gas > call.gas_limit || host.charge(gas).is_err() {
+                        let _ = host.checkpoint_rollback(top_cp);
+                        let _ = host.charge(call.gas_limit);
                         return EeOutcome {
                             status: OutcomeStatus::OutOfGas,
                             output: Vec::new(),
                             gas_used: call.gas_limit,
                         };
                     }
+                    if host.checkpoint_commit(top_cp).is_err() {
+                        let _ = host.checkpoint_rollback(top_cp);
+                        return EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"wasm checkpoint commit failed".to_vec(),
+                            gas_used: gas,
+                        };
+                    }
                     EeOutcome {
                         status: OutcomeStatus::Success,
                         output: out,
-                        gas_used: g,
+                        gas_used: gas,
                     }
                 }
                 Err((status, msg, gas)) => {
+                    let _ = host.checkpoint_rollback(top_cp);
                     let g = gas.min(call.gas_limit);
                     let _ = host.charge(g);
                     EeOutcome {
@@ -2031,13 +2083,38 @@ impl WasmWorker {
                     to_address,
                     amount_ubud,
                 } => {
+                    let canonical_to = match bud_addr_canonicalize(&to_address) {
+                        Ok(c) => c,
+                        Err(m) => {
+                            return {
+                                let _ = host.checkpoint_rollback(top_cp);
+                                EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: m.into_bytes(),
+                                    gas_used: 0,
+                                }
+                            }
+                        }
+                    };
+                    if canonical_to.iter().all(|&b| b == 0) {
+                        let _ = host.checkpoint_rollback(top_cp);
+                        return EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"BankSend refuses all-zero recipient".to_vec(),
+                            gas_used: 0,
+                        };
+                    }
                     let from_id = EeIdentity {
                         ee: EeId::WASM,
                         id: sender.into_bytes(),
                     };
-                    let to_id = EeIdentity {
-                        ee: EeId::WASM,
-                        id: to_address.into_bytes(),
+                    let Ok(to_id) = EeIdentity::new(EeId::WASM, to_address.into_bytes()) else {
+                        let _ = host.checkpoint_rollback(top_cp);
+                        return EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"invalid WASM recipient identity".to_vec(),
+                            gas_used: 0,
+                        };
                     };
                     match host.bud_transfer(
                         &from_id,
@@ -2082,21 +2159,31 @@ impl WasmWorker {
 
         match res {
             Ok((out, used)) => {
-                let g = used.min(call.gas_limit);
-                if host.charge(g).is_err() {
+                if used > call.gas_limit || host.charge(used).is_err() {
+                    let _ = host.checkpoint_rollback(top_cp);
+                    let _ = host.charge(call.gas_limit);
                     return EeOutcome {
                         status: OutcomeStatus::OutOfGas,
                         output: Vec::new(),
                         gas_used: call.gas_limit,
                     };
                 }
+                if host.checkpoint_commit(top_cp).is_err() {
+                    let _ = host.checkpoint_rollback(top_cp);
+                    return EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"wasm checkpoint commit failed".to_vec(),
+                        gas_used: used,
+                    };
+                }
                 EeOutcome {
                     status: OutcomeStatus::Success,
                     output: out,
-                    gas_used: g,
+                    gas_used: used,
                 }
             }
             Err((OutcomeStatus::OutOfGas, _, _)) => {
+                let _ = host.checkpoint_rollback(top_cp);
                 let _ = host.charge(call.gas_limit);
                 EeOutcome {
                     status: OutcomeStatus::OutOfGas,
@@ -2105,6 +2192,7 @@ impl WasmWorker {
                 }
             }
             Err((status, msg, used)) => {
+                let _ = host.checkpoint_rollback(top_cp);
                 let g = used.min(call.gas_limit);
                 let _ = host.charge(g);
                 EeOutcome {
@@ -2758,6 +2846,129 @@ mod tests {
         assert!(
             res.is_err(),
             "memory64 modules must be refused deterministically"
+        );
+    }
+
+    #[test]
+    fn reverted_or_oog_calls_rollback_state_and_bank_send_validates_bech32_recipient() {
+        let Ok(code_bytes) = counter_cw_wasm() else {
+            panic!("counter_cw_wasm failed");
+        };
+        let mut worker = WasmWorker;
+        let mut host = MemoryHost::new(50_000_000);
+        let ctx = sample_ctx();
+        let Ok(sender_bech32) = bud_addr_humanize(&[0x55u8; 32]) else {
+            panic!("sender humanize");
+        };
+        let Ok(ghost_contract_bech32) = bud_addr_humanize(&[0x66u8; 32]) else {
+            panic!("ghost humanize");
+        };
+        let caller = EeIdentity {
+            ee: EeId::WASM,
+            id: sender_bech32.into_bytes(),
+        };
+        host.balances
+            .insert(caller.clone(), 1_000 * crate::ATTOS_PER_UBUD);
+
+        // 1. OOG deploy must not persist uploaded code or bump code_id counter.
+        let Ok(oog_dep) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: EeIdentity {
+                    ee: EeId::WASM,
+                    id: Vec::new(),
+                },
+                value: BudAmount(0),
+                input: code_bytes,
+                gas_limit: 100,
+                depth: 0,
+                tx_hash: [0xA1; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("oog deploy faulted");
+        };
+        assert_eq!(oog_dep.status, OutcomeStatus::OutOfGas);
+        assert!(
+            host.state.is_empty(),
+            "OutOfGas deploy leaked partial state writes: {:?}",
+            host.state.keys().collect::<Vec<_>>()
+        );
+
+        // 2. Reverted Execute carrying funds_ubud must roll back the pre-call BUD transfer.
+        let Ok(bad_exec_bytes) = serde_json::to_vec(&WasmTxAction::Execute {
+            contract: ghost_contract_bech32,
+            msg_b64: b64_encode(b"{}"),
+            funds_ubud: 400,
+        }) else {
+            panic!("exec serialize");
+        };
+        let Ok(rev_exec) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: EeIdentity {
+                    ee: EeId::WASM,
+                    id: Vec::new(),
+                },
+                value: BudAmount(0),
+                input: bad_exec_bytes,
+                gas_limit: 5_000_000,
+                depth: 0,
+                tx_hash: [0xA2; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("rev_exec faulted");
+        };
+        assert!(
+            matches!(
+                rev_exec.status,
+                OutcomeStatus::Revert | OutcomeStatus::InvalidCode
+            ),
+            "unexpected status {:?}",
+            rev_exec.status
+        );
+        assert_eq!(
+            host.balances.get(&caller).copied(),
+            Some(1_000 * crate::ATTOS_PER_UBUD),
+            "reverted Execute leaked 400 ubud out of caller"
+        );
+
+        // 3. BankSend to malformed non-Bech32 or all-zero recipient must revert without burning BUD.
+        let Ok(bad_send_bytes) = serde_json::to_vec(&WasmTxAction::BankSend {
+            to_address: String::from("not-a-valid-bech32-address"),
+            amount_ubud: 250,
+        }) else {
+            panic!("send serialize");
+        };
+        let Ok(bad_send) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: EeIdentity {
+                    ee: EeId::WASM,
+                    id: Vec::new(),
+                },
+                value: BudAmount(0),
+                input: bad_send_bytes,
+                gas_limit: 5_000_000,
+                depth: 0,
+                tx_hash: [0xA3; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("bad_send faulted");
+        };
+        assert_eq!(bad_send.status, OutcomeStatus::Revert);
+        assert_eq!(
+            host.balances.get(&caller).copied(),
+            Some(1_000 * crate::ATTOS_PER_UBUD),
+            "invalid Bech32 BankSend burned caller funds"
         );
     }
 }
