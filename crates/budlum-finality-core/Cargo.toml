@@ -1,0 +1,22 @@
+[package]
+name = "budlum-finality-core"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Common finality-proof model + fail-closed cross-domain security verifier for Budlum (the consensus of consensuses)."
+repository = "https://github.com/budlum-xyz/budlum"
+
+# Decoupled, standalone crate: it does NOT join the budlum-core workspace graph
+# (which is 900+ crates and cannot be compiled in every sandbox). It is built and
+# tested on its own. The recommended wiring into `src/cross_domain/external/
+# intake.rs` is documented in the workspace audit (denetim/bulgular/B-0283-*).
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Intentionally zero dependencies: deterministic, no admin key, trivial to
+# reproduce bit-for-bit, and independently auditable.
+
+[dev-dependencies]
