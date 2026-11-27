@@ -642,10 +642,14 @@ impl BnsRegistry {
         // first. The index answers the same question - which name's grace
         // window closed earliest - in the time it takes to look at the head.
         if self.names.len() >= self.max_names && !self.names.contains_key(&name) {
+            // The expiry index is sorted ascending by grace end, so checking the
+            // head entry is O(1) and uses the same `grace_end <= current_epoch`
+            // boundary as `reclaim_expired` and `prune_expired`.
             let Some((_, expired_key)) = self
                 .expired_by_grace_end
                 .iter()
-                .find(|(grace_end, _)| *grace_end < current_epoch)
+                .next()
+                .filter(|(grace_end, _)| *grace_end <= current_epoch)
             else {
                 return Err(BnsError::NameTaken);
             };
@@ -680,26 +684,26 @@ impl BnsRegistry {
         if !Self::is_valid_duration(duration) {
             return Err(BnsError::InvalidDuration);
         }
+        let (old_grace_end, new_expires_at) = {
+            let record = self.names.get(name).ok_or(BnsError::InvalidName)?;
+            if &record.owner != caller {
+                return Err(BnsError::NotOwner);
+            }
+            let grace_expires_at = record.expires_at.saturating_add(Self::GRACE_PERIOD);
+            if current_epoch >= grace_expires_at {
+                return Err(BnsError::Expired);
+            }
+            let base_epoch = record.expires_at.max(current_epoch);
+            let new_expires_at = base_epoch
+                .checked_add(duration)
+                .ok_or(BnsError::InvalidDuration)?;
+            if new_expires_at.saturating_sub(current_epoch) > MAX_DURATION {
+                return Err(BnsError::InvalidDuration);
+            }
+            (grace_end_of(record), new_expires_at)
+        };
         let record = Self::slot_mut(&mut self.names, &mut self.name_tree, name)
             .ok_or(BnsError::InvalidName)?;
-        if &record.owner != caller {
-            return Err(BnsError::NotOwner);
-        }
-        let grace_expires_at = record.expires_at.saturating_add(Self::GRACE_PERIOD);
-        if current_epoch >= grace_expires_at {
-            return Err(BnsError::Expired);
-        }
-        let base_epoch = record.expires_at.max(current_epoch);
-        let new_expires_at = base_epoch
-            .checked_add(duration)
-            .ok_or(BnsError::InvalidDuration)?;
-        if new_expires_at.saturating_sub(current_epoch) > MAX_DURATION {
-            return Err(BnsError::InvalidDuration);
-        }
-        // B13: the index carries the grace end, so a renewal must move both the
-        // record and its row. Writing `record.expires_at` here directly was how
-        // a renewed name kept an index entry pointing at the old epoch.
-        let old_grace_end = grace_end_of(record);
         record.expires_at = new_expires_at;
         let new_grace_end = grace_end_of(record);
         if old_grace_end != new_grace_end {
@@ -820,20 +824,23 @@ impl BnsRegistry {
         if owner == Address::zero() || !Self::is_valid_sub_label(&sub_label) {
             return Err(BnsError::InvalidName);
         }
+        {
+            let parent = self.names.get(parent_name).ok_or(BnsError::InvalidName)?;
+            if &parent.owner != caller {
+                return Err(BnsError::NotOwner);
+            }
+            if parent.expires_at <= current_epoch {
+                return Err(BnsError::Expired);
+            }
+            if parent.subdomains.contains_key(&sub_label) {
+                return Err(BnsError::NameTaken);
+            }
+            if parent.subdomains.len() >= Self::MAX_SUBDOMAINS_PER_NAME {
+                return Err(BnsError::InvalidName);
+            }
+        }
         let parent = Self::slot_mut(&mut self.names, &mut self.name_tree, parent_name)
             .ok_or(BnsError::InvalidName)?;
-        if &parent.owner != caller {
-            return Err(BnsError::NotOwner);
-        }
-        if parent.expires_at <= current_epoch {
-            return Err(BnsError::Expired);
-        }
-        if parent.subdomains.contains_key(&sub_label) {
-            return Err(BnsError::NameTaken);
-        }
-        if parent.subdomains.len() >= Self::MAX_SUBDOMAINS_PER_NAME {
-            return Err(BnsError::InvalidName);
-        }
         parent
             .subdomains
             .insert(sub_label, SubdomainRecord::owned_by(owner));
@@ -864,22 +871,33 @@ impl BnsRegistry {
         if !Self::is_valid_sub_label(sub_label) {
             return Err(BnsBud3Error::Bns(BnsError::InvalidName));
         }
+        {
+            let parent = self
+                .names
+                .get(parent_name)
+                .ok_or(BnsBud3Error::Bns(BnsError::InvalidName))?;
+            if parent.expires_at <= current_epoch {
+                return Err(BnsBud3Error::Bns(BnsError::Expired));
+            }
+            let record = parent
+                .subdomains
+                .get(sub_label)
+                .ok_or(BnsBud3Error::Bns(BnsError::InvalidName))?;
+            if &record.owner != caller {
+                return Err(BnsBud3Error::Bns(BnsError::NotOwner));
+            }
+        }
+        let validated = match content {
+            None => None,
+            Some(cref) => Some(crate::bns::bud3::checked_content_ref(bud3, cref)?),
+        };
         let parent = Self::slot_mut(&mut self.names, &mut self.name_tree, parent_name)
             .ok_or(BnsBud3Error::Bns(BnsError::InvalidName))?;
-        if parent.expires_at <= current_epoch {
-            return Err(BnsBud3Error::Bns(BnsError::Expired));
-        }
         let record = parent
             .subdomains
             .get_mut(sub_label)
             .ok_or(BnsBud3Error::Bns(BnsError::InvalidName))?;
-        if &record.owner != caller {
-            return Err(BnsBud3Error::Bns(BnsError::NotOwner));
-        }
-        record.content = match content {
-            None => None,
-            Some(cref) => Some(crate::bns::bud3::checked_content_ref(bud3, cref)?),
-        };
+        record.content = validated;
         Ok(())
     }
 
@@ -1336,14 +1354,17 @@ impl BnsRegistry {
         storage_domain_id: u32,
         current_epoch: u64,
     ) -> Result<(), BnsError> {
+        {
+            let rec = self.names.get(name).ok_or(BnsError::InvalidName)?;
+            if rec.owner != caller {
+                return Err(BnsError::NotOwner);
+            }
+            if rec.expires_at <= current_epoch {
+                return Err(BnsError::Expired);
+            }
+        }
         let rec = Self::slot_mut(&mut self.names, &mut self.name_tree, name)
             .ok_or(BnsError::InvalidName)?;
-        if rec.owner != caller {
-            return Err(BnsError::NotOwner);
-        }
-        if rec.expires_at <= current_epoch {
-            return Err(BnsError::Expired);
-        }
         rec.storage_root = Some(storage_root);
         rec.storage_domain_id = Some(storage_domain_id);
         rec.storage_root_height = Some(current_epoch);
@@ -1661,9 +1682,9 @@ impl BnsRegistry {
             // the pre-image behind it is the one the header root commits to.
             // A branch that discloses its extras is checked here, so every
             // field it shows is bound to the root. A branch that withholds them
-            // still proves the fields outside the digest; callers that need a
-            // disclosed field must read it from `branch.extras`, never from the
-            // top-level copy, which is where the prover chooses freely.
+            // still proves the fields outside the digest, and must also leave
+            // the top-level `address` empty so an unauthenticated address can
+            // never be smuggled past verification.
             if let Some(extras) = &branch.extras {
                 if Self::extras_digest(extras) != branch.extras_digest {
                     return Err("branch extras do not match the extras digest".into());
@@ -1671,6 +1692,10 @@ impl BnsRegistry {
                 if extras.address != branch.address {
                     return Err("branch top-level address contradicts the extras digest".into());
                 }
+            } else if branch.address.is_some() {
+                return Err(
+                    "branch top-level address cannot be verified without extras pre-image".into(),
+                );
             }
             let recomputed_leaf = Self::compute_leaf_digest(
                 &branch.name,
