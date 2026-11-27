@@ -288,6 +288,26 @@ fn validate_evidence_fields(ev: &SymbioticVaultEvidence) -> Result<(), AdapterEr
     }
     validate_distinct_keys(&ev.classical_signer_keys, "classical")?;
     validate_distinct_keys(&ev.pq_signer_keys, "pq")?;
+    let classical_set = u128::try_from(ev.classical_signer_keys.len()).unwrap_or(u128::MAX);
+    if u128::from(ev.classical_threshold).saturating_mul(3) <= classical_set.saturating_mul(2) {
+        return Err(AdapterError::ConsensusRule {
+            rule: format!(
+                "Symbiotic classical_threshold {}/{} does not exceed 2/3 supermajority",
+                ev.classical_threshold,
+                ev.classical_signer_keys.len()
+            ),
+        });
+    }
+    let pq_set = u128::try_from(ev.pq_signer_keys.len()).unwrap_or(u128::MAX);
+    if u128::from(ev.pq_threshold).saturating_mul(3) <= pq_set.saturating_mul(2) {
+        return Err(AdapterError::ConsensusRule {
+            rule: format!(
+                "Symbiotic pq_threshold {}/{} does not exceed 2/3 supermajority",
+                ev.pq_threshold,
+                ev.pq_signer_keys.len()
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -534,11 +554,22 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
         }
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned_committee_roots.is_some()
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, AdapterError> {
+        let desc = self.descriptor();
+        if evidence.adapter != desc.id {
+            return Err(AdapterError::WrongAdapter {
+                expected: desc.name,
+                found: hex::encode(evidence.adapter.as_bytes()),
+            });
+        }
         if evidence.evidence_version != EVIDENCE_VERSION {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -569,6 +600,11 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
                 reason: e.to_string(),
             })?;
         let free_collateral = self.verify_collateral(&ev)?;
+        if free_collateral == 0 {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Symbiotic free_collateral must be non-zero for economic finality".into(),
+            });
+        }
 
         if policy.min_depth > 1 {
             return Err(AdapterError::InsufficientDepth {
@@ -577,8 +613,14 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
             });
         }
 
-        if policy.max_age > 0 && policy.now > ev.epoch {
-            let age = policy.now.saturating_sub(ev.epoch);
+        if policy.max_age > 0 {
+            if ev.epoch > policy.now {
+                return Err(AdapterError::Stale {
+                    age: ev.epoch - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - ev.epoch;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
                     age,
@@ -991,5 +1033,88 @@ mod tests {
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
         );
+    }
+
+    #[test]
+    fn minority_threshold_zero_weight_wrong_adapter_and_future_epoch_fail_closed() {
+        let (mut minority_ev, committee) = sample_evidence_with_committee("mainnet");
+        let pinned_adapter = SymbioticVaultAdapter::new("mainnet")
+            .with_pinned_committee_keys(&committee.classical_pubkeys(), &committee.pq_pubkeys());
+        assert!(
+            pinned_adapter.has_pinned_trust_anchor(),
+            "pinned Symbiotic adapter must advertise has_pinned_trust_anchor=true"
+        );
+        assert!(
+            !SymbioticVaultAdapter::new("mainnet").has_pinned_trust_anchor(),
+            "unpinned Symbiotic adapter must advertise has_pinned_trust_anchor=false"
+        );
+
+        // 1-of-2 minority threshold (50% <= 2/3) signed by a single compromised signer
+        // must never satisfy HonestMajority vault finality.
+        minority_ev.classical_threshold = 1;
+        minority_ev.pq_threshold = 1;
+        committee.sign("mainnet", &mut minority_ev, 1);
+        let minority_err = pinned_adapter
+            .verify_collateral(&minority_ev)
+            .expect_err("1-of-2 minority threshold must fail >2/3 supermajority");
+        assert!(matches!(minority_err, AdapterError::ConsensusRule { .. }));
+
+        // Zero free collateral must be refused at the finality verify door.
+        let (mut zero_ev, zero_committee) = sample_evidence_with_committee("mainnet");
+        zero_ev.gross_collateral = 0;
+        zero_ev.encumbered_collateral = 0;
+        zero_committee.sign("mainnet", &mut zero_ev, 2);
+        let zero_adapter = SymbioticVaultAdapter::new("mainnet").with_pinned_committee_keys(
+            &zero_committee.classical_pubkeys(),
+            &zero_committee.pq_pubkeys(),
+        );
+        let zero_raw = RawConsensusEvidence {
+            adapter: zero_adapter.descriptor().id,
+            evidence_version: EVIDENCE_VERSION,
+            network: "mainnet".to_string(),
+            payload: encode_symbiotic_evidence(&zero_ev),
+            declared_height: zero_ev.epoch,
+            declared_root: zero_ev.collateral_root,
+            submitter: crate::core::address::Address([0; 32]),
+        };
+        assert!(matches!(
+            zero_adapter.verify(&zero_raw, &default_policy()),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // WrongAdapter and future epoch > policy.now when max_age > 0 must fail closed.
+        let (valid_ev, valid_committee) = sample_evidence_with_committee("mainnet");
+        let valid_adapter = SymbioticVaultAdapter::new("mainnet").with_pinned_committee_keys(
+            &valid_committee.classical_pubkeys(),
+            &valid_committee.pq_pubkeys(),
+        );
+        let wrong_adapter_raw = RawConsensusEvidence {
+            adapter: AdapterId::from_name("foreign-adapter-v1"),
+            evidence_version: EVIDENCE_VERSION,
+            network: "mainnet".to_string(),
+            payload: encode_symbiotic_evidence(&valid_ev),
+            declared_height: valid_ev.epoch,
+            declared_root: valid_ev.collateral_root,
+            submitter: crate::core::address::Address([0; 32]),
+        };
+        assert!(matches!(
+            valid_adapter.verify(&wrong_adapter_raw, &default_policy()),
+            Err(AdapterError::WrongAdapter { .. })
+        ));
+
+        let valid_raw = RawConsensusEvidence {
+            adapter: valid_adapter.descriptor().id,
+            ..wrong_adapter_raw
+        };
+        let mut future_policy = default_policy();
+        future_policy.max_age = 10;
+        future_policy.now = valid_ev.epoch - 3;
+        assert!(matches!(
+            valid_adapter.verify(&valid_raw, &future_policy),
+            Err(AdapterError::Stale {
+                age: 3,
+                max_age: 10
+            })
+        ));
     }
 }
