@@ -1319,11 +1319,18 @@ fn invoke_contract_entry(
             "attributes": resp.attributes,
             "events": resp.events,
         });
-        let _ = host.emit_log(EeLog {
+        if let Err(err) = host.emit_log(EeLog {
             emitter: contract_id.clone(),
             topics: vec![b"wasm".to_vec()],
             data: serde_json::to_vec(&log_json).unwrap_or_default(),
-        });
+        }) {
+            let status = if matches!(err, budlum_uel_abi::HostError::OutOfGas) {
+                OutcomeStatus::OutOfGas
+            } else {
+                OutcomeStatus::Revert
+            };
+            return Err((status, err.to_string(), total_fuel));
+        }
     }
 
     let mut final_data = match &resp.data {
@@ -1448,16 +1455,28 @@ fn dispatch_submsg(
     };
     match msg {
         CwCosmosMsg::Bank(CwBankMsg::Send { to_address, amount }) => {
+            if to_address.is_empty() || to_address.len() > budlum_uel_abi::types::MAX_IDENTITY_BYTES
+            {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("BankMsg::Send to_address must be 1..=64 bytes"),
+                    0,
+                ));
+            }
             let ubud = parse_ubud_coins(amount).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
             let attos = ubud
                 .checked_mul(ATTOS_PER_UBUD)
                 .ok_or_else(|| (OutcomeStatus::Revert, String::from("attoBUD overflow"), 0))?;
-            let to_id = EeIdentity {
-                ee: EeId::WASM,
-                id: to_address.as_bytes().to_vec(),
-            };
-            host.bud_transfer(&from_id, &to_id, attos)
+            let to_id = EeIdentity::new(EeId::WASM, to_address.as_bytes().to_vec())
                 .map_err(|e| (OutcomeStatus::Revert, e.to_string(), 0))?;
+            host.bud_transfer(&from_id, &to_id, attos).map_err(|e| {
+                let st = if matches!(e, budlum_uel_abi::HostError::OutOfGas) {
+                    OutcomeStatus::OutOfGas
+                } else {
+                    OutcomeStatus::Revert
+                };
+                (st, e.to_string(), 0)
+            })?;
             Ok((Vec::new(), 1_000))
         }
         CwCosmosMsg::Bank(CwBankMsg::Burn { .. }) => Err((
@@ -1485,13 +1504,12 @@ fn dispatch_submsg(
                     0,
                 ));
             }
+            let target_id = EeIdentity::new(EeId(*target_ee), target_bytes)
+                .map_err(|e| (OutcomeStatus::Revert, e.to_string(), 0))?;
             let ucall = UniversalCall {
                 from: from_id,
                 to_ee: EeId(*target_ee),
-                target: EeIdentity {
-                    ee: EeId(*target_ee),
-                    id: target_bytes,
-                },
+                target: target_id,
                 value: BudAmount(val_u128),
                 input: input_bytes,
                 gas_limit: (*gas_limit_bgu).min(fuel_budget),
@@ -1504,6 +1522,9 @@ fn dispatch_submsg(
                     String::from("UniversalCall reverted"),
                     res.gas_used,
                 )),
+                Err(budlum_uel_abi::HostError::OutOfGas) => {
+                    Err((OutcomeStatus::OutOfGas, String::from("out of gas"), 0))
+                }
                 Err(e) => Err((OutcomeStatus::Revert, e.to_string(), 0)),
             }
         }

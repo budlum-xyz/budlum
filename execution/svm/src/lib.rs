@@ -220,9 +220,28 @@ fn execute_sbpf_bytecode(code: &[u8], input: &[u8], cu_limit: u64) -> SbpfExecRe
     }
 }
 
+fn map_svm_host_err(err: HostError) -> (OutcomeStatus, String) {
+    match err {
+        HostError::OutOfGas => (OutcomeStatus::OutOfGas, String::from("out of gas")),
+        other => (OutcomeStatus::Revert, other.to_string()),
+    }
+}
+
+fn charge_svm_cu(
+    host: &mut dyn HostApi,
+    cu: u64,
+    gas_limit: u64,
+) -> Result<(), (OutcomeStatus, String)> {
+    if cu > gas_limit || host.charge(cu).is_err() {
+        return Err((OutcomeStatus::OutOfGas, String::from("out of gas")));
+    }
+    Ok(())
+}
+
 fn handle_system_program(
     caller: &[u8; 32],
     ix: &SvmInstructionEnvelope,
+    gas_limit: u64,
     host: &mut dyn HostApi,
 ) -> Result<(Vec<u8>, u64), (OutcomeStatus, String)> {
     if ix.data.len() < 4 {
@@ -246,12 +265,15 @@ fn handle_system_program(
                     .and_then(|s| s.try_into().ok())
                     .unwrap_or([0; 8]),
             );
-            let space = u64::from_le_bytes(
+            let space_u64 = u64::from_le_bytes(
                 ix.data
                     .get(12..20)
                     .and_then(|s| s.try_into().ok())
                     .unwrap_or([0; 8]),
-            ) as usize;
+            );
+            let Ok(space) = usize::try_from(space_u64) else {
+                return Err((OutcomeStatus::Revert, String::from("space > 1 MiB")));
+            };
             let owner: [u8; 32] = ix
                 .data
                 .get(20..52)
@@ -289,10 +311,10 @@ fn handle_system_program(
                     String::from("CreateAccount target is not an authenticated signer"),
                 ));
             }
+            let cu = 150u64.saturating_add(space_u64.saturating_mul(25));
+            charge_svm_cu(host, cu, gas_limit)?;
             let to_pk = new_account.pubkey;
-            if svm_account_exists(host, &to_pk)
-                .map_err(|e| (OutcomeStatus::Revert, e.to_string()))?
-            {
+            if svm_account_exists(host, &to_pk).map_err(map_svm_host_err)? {
                 return Err((
                     OutcomeStatus::Revert,
                     String::from("CreateAccount target already exists"),
@@ -311,7 +333,7 @@ fn handle_system_program(
                     },
                     attos,
                 )
-                .map_err(|e| (OutcomeStatus::Revert, e.to_string()))?;
+                .map_err(map_svm_host_err)?;
             }
             let rec = SvmAccountRecord {
                 owner,
@@ -319,22 +341,47 @@ fn handle_system_program(
                 rent_epoch: u64::MAX,
                 data: vec![0u8; space],
             };
-            write_svm_account(host, &to_pk, &rec)
-                .map_err(|e| (OutcomeStatus::Revert, e.to_string()))?;
-            Ok((Vec::new(), 150))
+            write_svm_account(host, &to_pk, &rec).map_err(map_svm_host_err)?;
+            Ok((Vec::new(), cu))
         }
         // 2 = Transfer { lamports: u64 }
         2 => {
             if ix.data.len() < 12 || ix.accounts.len() < 2 {
                 return Err((OutcomeStatus::Revert, String::from("bad Transfer")));
             }
+            let from = ix.accounts.first().ok_or_else(|| {
+                (
+                    OutcomeStatus::Revert,
+                    String::from("missing Transfer source"),
+                )
+            })?;
+            let to = ix.accounts.get(1).ok_or_else(|| {
+                (
+                    OutcomeStatus::Revert,
+                    String::from("missing Transfer destination"),
+                )
+            })?;
+            if from.pubkey != *caller || !from.is_signer || !from.is_writable {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("Transfer source must be the authenticated writable signer"),
+                ));
+            }
+            if !to.is_writable || to.pubkey == [0u8; 32] {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("Transfer destination must be writable and non-zero"),
+                ));
+            }
+            let cu = 150u64;
+            charge_svm_cu(host, cu, gas_limit)?;
             let lamports = u64::from_le_bytes(
                 ix.data
                     .get(4..12)
                     .and_then(|s| s.try_into().ok())
                     .unwrap_or([0; 8]),
             );
-            let to_pk = ix.accounts.get(1).map(|m| m.pubkey).unwrap_or([0u8; 32]);
+            let to_pk = to.pubkey;
             if lamports > 0 {
                 let attos = u128::from(lamports).saturating_mul(ATTOS_PER_LAMPORT);
                 host.bud_transfer(
@@ -348,9 +395,9 @@ fn handle_system_program(
                     },
                     attos,
                 )
-                .map_err(|e| (OutcomeStatus::Revert, e.to_string()))?;
+                .map_err(map_svm_host_err)?;
             }
-            Ok((Vec::new(), 150))
+            Ok((Vec::new(), cu))
         }
         _ => Err((
             OutcomeStatus::Revert,
@@ -363,11 +410,18 @@ fn handle_spl_token(
     program_id: &[u8; 32],
     caller: &[u8; 32],
     ix: &SvmInstructionEnvelope,
+    gas_limit: u64,
     host: &mut dyn HostApi,
 ) -> Result<(Vec<u8>, u64), (OutcomeStatus, String)> {
     let Some(&op) = ix.data.first() else {
         return Err((OutcomeStatus::Revert, String::from("empty SPL Token ix")));
     };
+    let required_cu = match op {
+        0 | 1 => 1_500u64,
+        3 | 7 => 2_500u64,
+        _ => return Err((OutcomeStatus::Revert, format!("unsupported SPL op {op}"))),
+    };
+    charge_svm_cu(host, required_cu, gas_limit)?;
     match op {
         // 0 = InitializeMint { decimals: u8, mint_authority: [u8; 32] } (accounts: [mint_seed]).
         // The seed is not the address: the mint lives at `derive_spl_mint_address(caller,
@@ -813,21 +867,17 @@ impl SvmWorker {
                     gas_used: 0,
                 };
             };
-            return match handle_system_program(&caller_pk, &ix, host) {
-                Ok((out, cu)) => {
-                    if host.charge(cu).is_err() {
-                        return EeOutcome {
-                            status: OutcomeStatus::OutOfGas,
-                            output: Vec::new(),
-                            gas_used: call.gas_limit,
-                        };
-                    }
-                    EeOutcome {
-                        status: OutcomeStatus::Success,
-                        output: out,
-                        gas_used: cu,
-                    }
-                }
+            return match handle_system_program(&caller_pk, &ix, call.gas_limit, host) {
+                Ok((out, cu)) => EeOutcome {
+                    status: OutcomeStatus::Success,
+                    output: out,
+                    gas_used: cu,
+                },
+                Err((OutcomeStatus::OutOfGas, _)) => EeOutcome {
+                    status: OutcomeStatus::OutOfGas,
+                    output: Vec::new(),
+                    gas_used: call.gas_limit,
+                },
                 Err((st, msg)) => EeOutcome {
                     status: st,
                     output: msg.into_bytes(),
@@ -844,21 +894,17 @@ impl SvmWorker {
                     gas_used: 0,
                 };
             };
-            return match handle_spl_token(&target_pk, &caller_pk, &ix, host) {
-                Ok((out, cu)) => {
-                    if host.charge(cu).is_err() {
-                        return EeOutcome {
-                            status: OutcomeStatus::OutOfGas,
-                            output: Vec::new(),
-                            gas_used: call.gas_limit,
-                        };
-                    }
-                    EeOutcome {
-                        status: OutcomeStatus::Success,
-                        output: out,
-                        gas_used: cu,
-                    }
-                }
+            return match handle_spl_token(&target_pk, &caller_pk, &ix, call.gas_limit, host) {
+                Ok((out, cu)) => EeOutcome {
+                    status: OutcomeStatus::Success,
+                    output: out,
+                    gas_used: cu,
+                },
+                Err((OutcomeStatus::OutOfGas, _)) => EeOutcome {
+                    status: OutcomeStatus::OutOfGas,
+                    output: Vec::new(),
+                    gas_used: call.gas_limit,
+                },
                 Err((st, msg)) => EeOutcome {
                     status: st,
                     output: msg.into_bytes(),
@@ -1208,7 +1254,7 @@ mod tests {
             ],
             data,
         };
-        assert!(handle_system_program(&caller, &ix, &mut host).is_err());
+        assert!(handle_system_program(&caller, &ix, u64::MAX, &mut host).is_err());
         assert_eq!(read_svm_account(&host, &victim), existing);
     }
 
@@ -1383,7 +1429,14 @@ mod tests {
             ],
             data: mint_to,
         };
-        assert!(handle_spl_token(&SPL_TOKEN_PROGRAM_ID, &caller, &mint_ix, &mut host).is_err());
+        assert!(handle_spl_token(
+            &SPL_TOKEN_PROGRAM_ID,
+            &caller,
+            &mint_ix,
+            u64::MAX,
+            &mut host
+        )
+        .is_err());
         assert_eq!(
             host.state, before,
             "mint mismatch must not alter supply or account"
@@ -1418,7 +1471,14 @@ mod tests {
             ],
             data: transfer,
         };
-        assert!(handle_spl_token(&SPL_TOKEN_PROGRAM_ID, &caller, &transfer_ix, &mut host).is_ok());
+        assert!(handle_spl_token(
+            &SPL_TOKEN_PROGRAM_ID,
+            &caller,
+            &transfer_ix,
+            u64::MAX,
+            &mut host
+        )
+        .is_ok());
         assert_eq!(host.state, before, "self-transfer cannot mint tokens");
     }
 
@@ -1563,6 +1623,7 @@ mod tests {
             &SPL_TOKEN_PROGRAM_ID,
             &mallory,
             &initialize_mint_ix(seed, 6, mallory),
+            u64::MAX,
             &mut host,
         ) else {
             panic!("mallory initializes her own mint");
@@ -1572,6 +1633,7 @@ mod tests {
             &SPL_TOKEN_PROGRAM_ID,
             &alice,
             &initialize_mint_ix(seed, 6, alice),
+            u64::MAX,
             &mut host,
         ) else {
             panic!("alice is not blocked by mallory");
@@ -1593,6 +1655,7 @@ mod tests {
             &SPL_TOKEN_PROGRAM_ID,
             &mallory,
             &initialize_mint_ix([0x23; 32], 6, alice),
+            u64::MAX,
             &mut host,
         );
         assert!(matches!(refused, Err((OutcomeStatus::Revert, _))));
@@ -1602,6 +1665,7 @@ mod tests {
             &SPL_TOKEN_PROGRAM_ID,
             &alice,
             &initialize_mint_ix(seed, 6, alice),
+            u64::MAX,
             &mut host,
         );
         assert!(matches!(again, Err((OutcomeStatus::Revert, _))));
@@ -1620,6 +1684,7 @@ mod tests {
             &SPL_TOKEN_PROGRAM_ID,
             &alice,
             &initialize_mint_ix([0x01; 32], 6, alice),
+            u64::MAX,
             &mut host,
         ) else {
             panic!("mint");
@@ -1635,6 +1700,7 @@ mod tests {
                 &SPL_TOKEN_PROGRAM_ID,
                 &mallory,
                 &initialize_account_ix(bob_ata, mint, owner),
+                u64::MAX,
                 &mut host,
             );
             assert!(
@@ -1650,6 +1716,7 @@ mod tests {
             &SPL_TOKEN_PROGRAM_ID,
             &bob,
             &initialize_account_ix([0x99; 32], mint, bob),
+            u64::MAX,
             &mut host,
         );
         assert!(matches!(refused, Err((OutcomeStatus::Revert, _))));
@@ -1659,6 +1726,7 @@ mod tests {
             &SPL_TOKEN_PROGRAM_ID,
             &bob,
             &initialize_account_ix(bob_ata, mint, bob),
+            u64::MAX,
             &mut host,
         );
         assert!(own.is_ok());
