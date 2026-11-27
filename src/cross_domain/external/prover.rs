@@ -295,17 +295,33 @@ impl DomainEconomics {
         value_atoms.min(bond_atoms)
     }
 
+    /// What a lying prover actually loses on a contradicted attestation
+    /// carrying `value_atoms`: the penalty, net of the challenger's share.
+    ///
+    /// The challenger's share is paid to whoever presents the contradiction,
+    /// and nothing binds that address to a stranger - a prover with two
+    /// addresses presents its own and takes the share back. So the gross
+    /// penalty overstates the deterrent by exactly that share, and a domain
+    /// paying the whole slash to the challenger deters nothing. A share
+    /// larger than the penalty (a floor above the bond) leaves zero, never a
+    /// negative loss: the slash pays out no more than it took.
+    #[must_use]
+    fn net_loss_for(&self, value_atoms: u128) -> u128 {
+        let penalty = self.penalty_for(value_atoms, self.required_bond_atoms());
+        penalty.saturating_sub(self.challenge.for_slash(penalty))
+    }
+
     /// Carrier reward for serving an attestation carrying `value_atoms` after
     /// `idle_heights` heights of inactivity. Escalates monotonically while a
-    /// domain goes unserved, yet stays strictly below the prover's slashing
-    /// loss whenever `penalty > 0` so idle escalation never makes lying
-    /// profitable.
+    /// domain goes unserved, yet stays strictly below the prover's net
+    /// slashing loss whenever that loss is positive, so idle escalation never
+    /// makes lying profitable - not even for a prover that challenges itself.
     #[must_use]
     pub fn carrier_reward_for_idle(&self, value_atoms: u128, idle_heights: u64) -> u128 {
         let escalated = self
             .fee
             .for_value_with_idle_escalation(value_atoms, idle_heights);
-        let loss = self.penalty_for(value_atoms, self.required_bond_atoms());
+        let loss = self.net_loss_for(value_atoms);
         if loss > 0 {
             escalated.min(loss.saturating_sub(1))
         } else {
@@ -326,7 +342,11 @@ impl DomainEconomics {
 #[must_use]
 pub fn honesty_is_cheaper(economics: &DomainEconomics, value_atoms: u128) -> bool {
     let gain = economics.fee.for_value(value_atoms);
-    let loss = economics.penalty_for(value_atoms, economics.required_bond_atoms());
+    // The loss a liar can count on is the penalty net of the challenger's
+    // share it can route back to itself (`DomainEconomics::net_loss_for`);
+    // measured against the gross penalty, a 100% challenger share read as a
+    // deterrent while leaving none.
+    let loss = economics.net_loss_for(value_atoms);
     gain < loss
 }
 
@@ -385,5 +405,118 @@ mod tests {
         assert_eq!(tight_loss, 1_000);
         assert_eq!(tight_reward, 999);
         assert!(tight_reward < tight_loss);
+    }
+
+    /// The challenger's share of a slash is paid to whoever presents the
+    /// contradiction, and nothing stops a lying prover from presenting it
+    /// from a second address. The loss that deters lying is therefore the
+    /// penalty net of the largest rebate the prover can route back to
+    /// itself, not the gross penalty.
+    #[test]
+    fn the_deterrent_is_the_penalty_net_of_the_challenger_rebate() {
+        let econ = DomainEconomics {
+            routing_ceiling_atoms: 1_000_000,
+            fee: ProverFee {
+                base_atoms: 1_000,
+                value_bps: 10,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 2_500,
+                floor_atoms: 500,
+            },
+            unbonding_heights: 100,
+        };
+        let ceiling = econ.routing_ceiling_atoms;
+        // Gross penalty 100_000 (the bond), rebate 25_000, net 75_000.
+        assert_eq!(
+            econ.penalty_for(ceiling, econ.required_bond_atoms()),
+            100_000
+        );
+        assert_eq!(econ.net_loss_for(ceiling), 75_000);
+        // A floor above the penalty cannot turn the rebate into a profit: the
+        // rebate is capped at what the slash took, so the net loss is zero,
+        // never negative.
+        let floor_heavy = DomainEconomics {
+            challenge: ChallengeReward {
+                bps_of_slash: 0,
+                floor_atoms: u128::MAX,
+            },
+            ..econ
+        };
+        assert_eq!(floor_heavy.net_loss_for(ceiling), 0);
+    }
+
+    /// A domain that pays the challenger the whole slash makes a false
+    /// attestation free for a prover with two addresses: the fee is earned,
+    /// the penalty comes back as the challenger's reward. Such economics do
+    /// not make honesty cheaper and must read as dishonest.
+    #[test]
+    fn a_full_challenger_rebate_makes_lying_free_and_is_not_honest() {
+        let econ = DomainEconomics {
+            routing_ceiling_atoms: 1_000_000,
+            fee: ProverFee {
+                base_atoms: 1_000,
+                value_bps: 10,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 10_000,
+                floor_atoms: 0,
+            },
+            unbonding_heights: 100,
+        };
+        let ceiling = econ.routing_ceiling_atoms;
+        assert_eq!(econ.net_loss_for(ceiling), 0);
+        assert!(
+            !honesty_is_cheaper(&econ, ceiling),
+            "a 100% challenger rebate leaves no deterrent"
+        );
+        // The same fee under a 25% rebate still loses 75_000 against a 2_000
+        // gain, so the rule refuses exactly the economics that leak.
+        let quarter = DomainEconomics {
+            challenge: ChallengeReward {
+                bps_of_slash: 2_500,
+                floor_atoms: 0,
+            },
+            ..econ
+        };
+        assert!(honesty_is_cheaper(&quarter, ceiling));
+        // And a rebate that leaves less than the fee behind is dishonest even
+        // though the gross penalty dwarfs the fee: 99.9% rebate -> net 100 < 2_000.
+        let leaky = DomainEconomics {
+            challenge: ChallengeReward {
+                bps_of_slash: 9_990,
+                floor_atoms: 0,
+            },
+            ..econ
+        };
+        assert_eq!(
+            leaky.penalty_for(ceiling, leaky.required_bond_atoms()),
+            100_000
+        );
+        assert!(!honesty_is_cheaper(&leaky, ceiling));
+    }
+
+    /// Idle escalation is capped below what lying costs; that cost is the net
+    /// loss, so a generous rebate tightens the cap rather than loosening it.
+    #[test]
+    fn idle_escalation_stays_below_the_net_loss_not_the_gross_penalty() {
+        let econ = DomainEconomics {
+            routing_ceiling_atoms: 10_000, // bond 1_000 = gross penalty
+            fee: ProverFee {
+                base_atoms: 400,
+                value_bps: 0,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 8_000, // rebate 800 -> net loss 200
+                floor_atoms: 0,
+            },
+            unbonding_heights: 10,
+        };
+        assert_eq!(econ.net_loss_for(10_000), 200);
+        let escalated = econ.carrier_reward_for_idle(10_000, 10_000);
+        assert!(
+            escalated < 200,
+            "idle escalation {escalated} must stay below the net loss 200"
+        );
     }
 }

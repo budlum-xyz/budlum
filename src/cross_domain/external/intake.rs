@@ -3645,6 +3645,60 @@ mod tests {
         assert_eq!(err, IntakeError::DishonestEconomics);
     }
 
+    /// The same door, the other leak: a modest fee under a bond that dwarfs
+    /// it, and a challenger share of the whole slash. The gross penalty says
+    /// honesty is cheaper; the prover that challenges itself from a second
+    /// address says otherwise, and the door reads it that way.
+    #[test]
+    fn economics_that_rebate_the_whole_slash_to_the_challenger_are_refused_at_the_door() {
+        let mut state = IntakeState::new();
+        let spec = eth_spec();
+        if let AdapterSpec::EthereumSync {
+            network,
+            committee: Some(committee),
+        } = &spec
+        {
+            state.pin_ethereum_committee(network.clone(), committee.clone());
+        }
+        let golden = golden_for(&spec);
+        let versions = versions_for(&spec);
+        let economics = DomainEconomics {
+            routing_ceiling_atoms: 1_000_000,
+            fee: ProverFee {
+                base_atoms: 1,
+                value_bps: 10,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 10_000,
+                floor_atoms: 0,
+            },
+            unbonding_heights: 10,
+        };
+        assert!(
+            economics.fee.for_value(economics.routing_ceiling_atoms)
+                < economics.penalty_for(
+                    economics.routing_ceiling_atoms,
+                    economics.required_bond_atoms()
+                ),
+            "the gross penalty alone would have admitted these economics"
+        );
+        let err = state
+            .register_domain(
+                RegistrationRequest {
+                    spec,
+                    policy: VerificationPolicy::strict(1_000),
+                    bond_atoms: economics.required_bond_atoms(),
+                    economics,
+                    versions,
+                    poster: addr(9),
+                    golden,
+                },
+                Some(Box::new(StrictTestBls)),
+            )
+            .unwrap_err();
+        assert_eq!(err, IntakeError::DishonestEconomics);
+    }
+
     #[test]
     fn evidence_for_an_unregistered_domain_is_refused_by_name() {
         let mut state = IntakeState::new();
