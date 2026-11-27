@@ -4682,6 +4682,16 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
                 }
             }
         }
+        SettlementTx::SchemeTransition(scheme_tx) => {
+            // Tag 23. Moving a scheme is a change to what the chain accepts as
+            // a signature, so the whole action and its claimed authority are
+            // signed.
+            use crate::settlement::domains::SchemeTransitionTx;
+            put_u8(out, 23);
+            let bytes = postcard::to_allocvec(scheme_tx.as_ref())
+                .unwrap_or_else(|_| b"budlum/scheme-transition/fields-failed".to_vec());
+            put_bytes(out, &bytes);
+        }
         SettlementTx::Master(master_tx) => {
             // Tag 22. Releasing a master is the removal of a content address
             // from the chain, so the action and its id are signed.

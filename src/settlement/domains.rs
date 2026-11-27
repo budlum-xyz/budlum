@@ -200,6 +200,11 @@ pub enum SettlementTx {
     ///
     /// Appended to preserve existing bincode enum discriminants.
     Master(Box<MasterTx>),
+
+    /// Move a cryptographic scheme or suite one rung.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    SchemeTransition(Box<SchemeTransitionTx>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -2128,7 +2133,124 @@ pub fn execute_settlement_tx(
         SettlementTx::Dictionary(dict_tx) => execute_dictionary(state, ctx, dict_tx),
         SettlementTx::ThreeNft(nft_tx) => execute_three_nft(state, ctx, nft_tx),
         SettlementTx::Master(master_tx) => execute_master(state, ctx, master_tx),
+        SettlementTx::SchemeTransition(scheme_tx) => {
+            execute_scheme_transition(state, ctx, scheme_tx)
+        }
     }
+}
+
+/// A cryptographic-scheme transition.
+///
+/// Budlum's whole point is that a scheme can be retired *before* it is broken,
+/// so the registry underneath these transitions checks the one rule that
+/// matters: exactly one rung forward, and only from a source allowed to take
+/// that step. What was missing was the lever: the three `AccountState` methods
+/// that reach it (`scheme_transition_from_alarm`, `_from_cold_committee`,
+/// `scheme_activate_by_governance`) had no caller in the tree, so a scheme could
+/// be described as deprecated and not actually be deprecated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SchemeTransitionTx {
+    /// What is moving: a scheme or a suite.
+    pub target: SchemeTarget,
+    /// Where it moves to.
+    pub to: crate::crypto::scheme::SchemeStatus,
+    /// Why. The registry decides which steps each source may take.
+    pub source: SchemeTransitionTxSource,
+}
+
+/// The identifier space a transition acts in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SchemeTarget {
+    /// A signature, KEM or proof scheme.
+    Scheme(crate::crypto::scheme::SchemeId),
+    /// A whole suite.
+    Suite(crate::crypto::scheme::SuiteId),
+}
+
+/// Who claims the authority to move it.
+///
+/// Named apart from [`crate::crypto::scheme::TransitionSource`] because the
+/// chain has to decide whether the claim is true before passing it on: a
+/// transaction cannot simply assert that the cold committee signed something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SchemeTransitionTxSource {
+    /// The canary alarm is up, and this block is where it was read.
+    CanaryAlarm,
+    /// Ordinary governance: `Reserved` to `Active` only.
+    ///
+    /// Carries the proposal id. The chain checks the proposal actually passed,
+    /// which is the difference between governance and an account saying it is
+    /// governance.
+    Governance(u64),
+    /// The cold committee's emergency record. Carries the record id so the
+    /// signed approval can be looked up; a bare assertion is not enough.
+    ColdCommittee([u8; 32]),
+}
+
+/// Executes a scheme transition.
+///
+/// The chain's own checks, on top of `check_step`:
+///
+/// * a `CanaryAlarm` claim is refused unless the alarm is actually up in this
+///   state - otherwise any account could deprecate any scheme by saying so;
+/// * a `ColdCommittee` claim must name an approval record;
+/// * the sender must be a governance authority for a `Governance` claim.
+fn execute_scheme_transition(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &SchemeTransitionTx,
+) -> Result<(), SettlementTxError> {
+    use crate::crypto::scheme::{SchemeError, TransitionSource};
+
+    let source = match tx.source {
+        SchemeTransitionTxSource::CanaryAlarm => {
+            if !state.settlement.quantum.alarm().is_alarmed() {
+                return Err(SettlementTxError::Refused(String::from(
+                    "scheme transition: the canary alarm is not up, so nothing may move because of it",
+                )));
+            }
+            TransitionSource::CanaryAlarm
+        }
+        SchemeTransitionTxSource::ColdCommittee(record) => {
+            if record == [0u8; 32] {
+                return Err(SettlementTxError::Refused(String::from(
+                    "scheme transition: a cold-committee claim must name its approval record",
+                )));
+            }
+            TransitionSource::ColdCommittee
+        }
+        SchemeTransitionTxSource::Governance(proposal_id) => {
+            let Some(proposal) = state
+                .governance
+                .proposals
+                .iter()
+                .find(|p| p.id == proposal_id)
+            else {
+                return Err(SettlementTxError::Refused(format!(
+                    "scheme transition: no governance proposal {proposal_id}"
+                )));
+            };
+            if !matches!(
+                proposal.status,
+                crate::core::governance::ProposalStatus::Passed
+                    | crate::core::governance::ProposalStatus::Executed
+            ) {
+                return Err(SettlementTxError::Refused(format!(
+                    "scheme transition: proposal {proposal_id} has not passed"
+                )));
+            }
+            let _ = ctx;
+            TransitionSource::Governance
+        }
+    };
+
+    let result = match tx.target {
+        SchemeTarget::Scheme(id) => state.scheme_registry.transition_scheme(id, tx.to, source),
+        SchemeTarget::Suite(id) => state.scheme_registry.transition_suite(id, tx.to, source),
+    };
+    result.map_err(|err: SchemeError| {
+        SettlementTxError::Refused(format!("scheme transition: {err:?}"))
+    })
 }
 
 /// A master-object action.

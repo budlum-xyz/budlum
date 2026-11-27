@@ -17,7 +17,9 @@
 use std::collections::BTreeMap;
 
 /// A signature, key-exchange or proof scheme identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct SchemeId(pub u16);
 
 impl SchemeId {
@@ -122,7 +124,9 @@ pub enum SchemeFamily {
 }
 
 /// The lifecycle state of a scheme or suite.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum SchemeStatus {
     /// Defined, not usable.
     Reserved,
@@ -364,7 +368,9 @@ pub const SCHEMES: &[SchemeInfo] = &[
 ];
 
 /// A composite signature suite identifier (section 6.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct SuiteId(pub u16);
 
 impl SuiteId {
