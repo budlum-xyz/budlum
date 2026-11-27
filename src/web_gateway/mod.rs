@@ -3,13 +3,14 @@
 //! reads the RPC answers into the proof type, and hands each decision to the
 //! function in this module that has a test.
 //!
-//! Still absent, and named so they are not mistaken for done: the B.U.D. 3.0
-//! content source (the binary uses a directory source today and refuses to
-//! start without one), the light client that would fill `PinnedHeaderRoots`
-//! with verified roots and epochs, the sealed-content symbol-bundle path, TLS
-//! termination and `ops/gateway/`. A gateway whose pinned header set is empty
-//! answers 502 to every request, which is the honest state until the light
-//! client is wired.
+//! Shipped in `src/bin/budlum-gateway.rs`: the `[bud3]` RPC content source
+//! (cross-endpoint metadata agreement plus `ContentId` verification), the
+//! directory rehearsal source, and operator-pinned / watched checkpoint roots
+//! (`PinnedHeaderRoots`). Still absent, and named so they are not mistaken for
+//! done: an embedded light-client header sync loop inside the gateway process,
+//! direct custody-network symbol assembly without RPC nodes, and the
+//! sealed-content symbol-bundle path. A gateway whose verified header set is
+//! empty answers 502 to every request.
 //!
 //! The `budlum.xyz` network gateway (B14).
 //!

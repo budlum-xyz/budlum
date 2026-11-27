@@ -145,6 +145,12 @@ fn is_valid_narrowing_directive(name: &str, values: &[String]) -> bool {
     }
 }
 
+fn sanitize_header_value(raw: &str) -> String {
+    raw.chars()
+        .filter(|&c| c == '\t' || (' '..='~').contains(&c))
+        .collect()
+}
+
 /// The headers a successful content response carries.
 ///
 /// `cache_control` differs by what is being answered: an object addressed by
@@ -155,8 +161,11 @@ fn is_valid_narrowing_directive(name: &str, values: &[String]) -> bool {
 #[must_use]
 fn content_headers(mime: &str, cache_control: &str) -> Vec<(String, String)> {
     vec![
-        ("content-type".to_string(), mime.to_string()),
-        ("cache-control".to_string(), cache_control.to_string()),
+        ("content-type".to_string(), sanitize_header_value(mime)),
+        (
+            "cache-control".to_string(),
+            sanitize_header_value(cache_control),
+        ),
         (
             "content-security-policy".to_string(),
             DEFAULT_CSP.to_string(),
@@ -328,7 +337,7 @@ impl BlockList {
     /// Whether `name` is blocked.
     #[must_use]
     pub fn is_blocked(&self, name: &str) -> bool {
-        self.names.contains(&name.to_ascii_lowercase())
+        self.names.contains(&name.trim().to_ascii_lowercase())
     }
 
     /// How many names are blocked.
@@ -602,6 +611,23 @@ mod tests {
             assert!(
                 !csp_is_at_least_as_strict(bad, DEFAULT_CSP),
                 "loosening directive value must be refused: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn block_list_trims_lookup_whitespace_and_headers_strip_crlf() {
+        let list = BlockList::from_names(["blocked.bud".to_string()]);
+        assert!(
+            list.is_blocked("  BLOCKED.bud \t"),
+            "is_blocked must match trimmed case-folded names symmetrically with from_names"
+        );
+        let headers = content_headers_with_csp("text/html\r\nx-injected: 1", IMMUTABLE_CACHE, None);
+        for (name, value) in &headers {
+            assert!(
+                !name.bytes().any(|b| b < 0x20 || b == 0x7f)
+                    && !value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0),
+                "emitted header must never contain CR/LF/NUL bytes: {name}: {value:?}"
             );
         }
     }
