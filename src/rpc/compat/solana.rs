@@ -173,6 +173,45 @@ pub struct SolanaCompatGateway {
     lane_pool: crate::mempool::lanes::MultiLaneMempool,
 }
 
+fn decode_variable_base58(text: &str, max_bytes: usize) -> Result<Vec<u8>, &'static str> {
+    const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    if text.is_empty() {
+        return Err("empty base58 transaction");
+    }
+    if text.len() > max_bytes.saturating_mul(2).saturating_add(2) {
+        return Err("base58 transaction exceeds packet-size encoding bound");
+    }
+    let input = text.as_bytes();
+    let zeros = input.iter().take_while(|byte| **byte == b'1').count();
+    if zeros > max_bytes {
+        return Err("base58 transaction exceeds maximum byte length");
+    }
+    let mut digits = Vec::<u8>::new();
+    for &byte in input.get(zeros..).unwrap_or(&[]) {
+        let digit = ALPHABET
+            .iter()
+            .position(|candidate| *candidate == byte)
+            .ok_or("character outside the Solana base58 alphabet")? as u32;
+        let mut carry = digit;
+        for value in &mut digits {
+            carry += u32::from(*value) * 58;
+            *value = (carry & 0xff) as u8;
+            carry >>= 8;
+        }
+        while carry != 0 {
+            digits.push((carry & 0xff) as u8);
+            carry >>= 8;
+        }
+        if zeros.saturating_add(digits.len()) > max_bytes {
+            return Err("base58 transaction exceeds maximum byte length");
+        }
+    }
+    let mut out = Vec::with_capacity(zeros.saturating_add(digits.len()));
+    out.resize(zeros, 0u8);
+    out.extend(digits.iter().rev().copied());
+    Ok(out)
+}
+
 impl SolanaCompatGateway {
     #[must_use]
     pub fn new(config: SolanaCompatConfig, slot: u64, latest_blockhash: [u8; 32]) -> Self {
@@ -194,6 +233,13 @@ impl SolanaCompatGateway {
         _state: &AccountState,
     ) -> JsonRpcResponse {
         let id = req.id.clone();
+        if req.jsonrpc != "2.0" {
+            return JsonRpcResponse::err(
+                id,
+                -32600,
+                format!("Solana RPC requires jsonrpc \"2.0\", got {:?}", req.jsonrpc),
+            );
+        }
         if !SOLANA_METHOD_CLASSES.iter().any(|m| m.name == req.method) {
             return JsonRpcResponse::err(id, JSONRPC_METHOD_NOT_FOUND, "Method not found");
         }
@@ -233,32 +279,56 @@ impl SolanaCompatGateway {
                         ),
                     );
                 }
-                let Some(raw_str) = req
-                    .params
-                    .as_array()
-                    .and_then(|arr| arr.first())
-                    .and_then(serde_json::Value::as_str)
-                else {
+                let Some(params) = req.params.as_array() else {
+                    return JsonRpcResponse::err(
+                        id,
+                        JSONRPC_INVALID_PARAMS,
+                        "sendTransaction params must be an array",
+                    );
+                };
+                if params.is_empty() || params.len() > 2 {
+                    return JsonRpcResponse::err(
+                        id,
+                        JSONRPC_INVALID_PARAMS,
+                        "sendTransaction expects 1 or 2 parameters",
+                    );
+                }
+                let Some(raw_str) = params.first().and_then(serde_json::Value::as_str) else {
                     return JsonRpcResponse::err(
                         id,
                         JSONRPC_INVALID_PARAMS,
                         "sendTransaction requires a base58 or base64 wire transaction string",
                     );
                 };
-                let use_base64 = req
-                    .params
-                    .as_array()
-                    .and_then(|arr| arr.get(1))
-                    .and_then(|cfg| cfg.get("encoding"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some("base64");
+                let use_base64 = match params.get(1) {
+                    None | Some(serde_json::Value::Null) => false,
+                    Some(serde_json::Value::Object(cfg)) => match cfg.get("encoding") {
+                        None | Some(serde_json::Value::Null) => false,
+                        Some(serde_json::Value::String(enc)) if enc == "base58" => false,
+                        Some(serde_json::Value::String(enc)) if enc == "base64" => true,
+                        Some(_) => {
+                            return JsonRpcResponse::err(
+                                id,
+                                JSONRPC_INVALID_PARAMS,
+                                "sendTransaction encoding must be \"base58\" or \"base64\"",
+                            );
+                        }
+                    },
+                    Some(_) => {
+                        return JsonRpcResponse::err(
+                            id,
+                            JSONRPC_INVALID_PARAMS,
+                            "sendTransaction config parameter must be an object",
+                        );
+                    }
+                };
                 let wire_res = if use_base64 {
                     crate::execution::coordinator::foreign::solana::decode_solana_base64(raw_str)
                 } else {
-                    crate::execution::coordinator::foreign::solana::decode_solana_base58::<164>(
+                    decode_variable_base58(
                         raw_str,
+                        crate::execution::coordinator::foreign::solana::MAX_SOLANA_TRANSACTION_BYTES,
                     )
-                    .map(|arr| arr.to_vec())
                 };
                 let Ok(wire) = wire_res else {
                     return JsonRpcResponse::err(
@@ -278,6 +348,17 @@ impl SolanaCompatGateway {
                             crate::execution::coordinator::foreign::solana::encode_solana_base58(
                                 &decoded.fee_payer_signature,
                             );
+                        if crate::execution::coordinator::foreign::solana::decode_solana_base58::<64>(
+                            &sig,
+                        )
+                        .is_err()
+                        {
+                            return JsonRpcResponse::err(
+                                id,
+                                JSONRPC_TX_REJECTED,
+                                "Solana signature encoding self-check failed",
+                            );
+                        }
                         JsonRpcResponse::ok(id, serde_json::json!(sig))
                     }
                     Err(err) => JsonRpcResponse::err(
@@ -336,4 +417,108 @@ pub fn handle_solana_jsonrpc(state: &AccountState, raw_json: &str) -> String {
     let mut gw = SolanaCompatGateway::new(SolanaCompatConfig::default(), 0, [0u8; 32]);
     let resp = gw.handle_request(&req, state);
     serde_json::to_string(&resp).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    fn signed_solana_tx_bytes(blockhash: [u8; 32]) -> Vec<u8> {
+        let ix = crate::execution::coordinator::foreign::solana::SolanaCompiledInstruction {
+            program_id_index: 1,
+            accounts: vec![0],
+            data: vec![1, 2, 3, 4],
+        };
+        crate::execution::coordinator::foreign::solana::sign_solana_tx(
+            &[0x42; 32],
+            false,
+            blockhash,
+            &[[0x11; 32]],
+            &[ix],
+        )
+    }
+
+    #[test]
+    fn send_transaction_rejects_unknown_encoding_instead_of_base58_fallback() {
+        let state = AccountState::new();
+        let mut gw = SolanaCompatGateway::new(
+            SolanaCompatConfig {
+                enabled: true,
+                ..SolanaCompatConfig::default()
+            },
+            10,
+            [0xAA; 32],
+        );
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: serde_json::json!(1),
+            method: "sendTransaction".to_string(),
+            params: serde_json::json!(["1111", { "encoding": "base64+zstd" }]),
+        };
+        let resp = gw.handle_request(&req, &state);
+        assert!(resp.result.is_none() && !resp.error.is_none());
+        let err = resp.error.expect("unsupported encoding must fail");
+        assert_eq!(err.code, JSONRPC_INVALID_PARAMS);
+        assert!(
+            err.message.contains("encoding"),
+            "expected encoding error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn send_transaction_accepts_variable_length_base58_wire_tx() {
+        let state = AccountState::new();
+        let bh = [0xAA; 32];
+        let mut gw = SolanaCompatGateway::new(
+            SolanaCompatConfig {
+                enabled: true,
+                ..SolanaCompatConfig::default()
+            },
+            10,
+            bh,
+        );
+        let wire = signed_solana_tx_bytes(bh);
+        assert_ne!(
+            wire.len(),
+            164,
+            "wire length must test variable-length base58"
+        );
+        let b58 = crate::execution::coordinator::foreign::solana::encode_solana_base58(&wire);
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: serde_json::json!(2),
+            method: "sendTransaction".to_string(),
+            params: serde_json::json!([b58]),
+        };
+        let resp = gw.handle_request(&req, &state);
+        assert!(
+            resp.error.is_none() && resp.result.is_some(),
+            "variable-length base58 Solana tx ({} bytes) must succeed, got {:?}",
+            wire.len(),
+            resp.error
+        );
+    }
+
+    #[test]
+    fn solana_gateway_rejects_non_2_0_jsonrpc_version() {
+        let state = AccountState::new();
+        let mut gw = SolanaCompatGateway::new(SolanaCompatConfig::default(), 10, [0xAA; 32]);
+        let req = JsonRpcRequest {
+            jsonrpc: "1.0".to_string(),
+            id: serde_json::json!(3),
+            method: "getHealth".to_string(),
+            params: serde_json::json!([]),
+        };
+        let resp = gw.handle_request(&req, &state);
+        assert!(resp.result.is_none() && !resp.error.is_none());
+        let err = resp.error.expect("jsonrpc 1.0 must be rejected");
+        assert_eq!(err.code, -32600);
+
+        let raw_resp = handle_solana_jsonrpc(
+            &state,
+            r#"{"jsonrpc":"1.0","id":4,"method":"getHealth","params":[]}"#,
+        );
+        assert!(raw_resp.contains("-32600"), "raw_resp: {raw_resp}");
+    }
 }
