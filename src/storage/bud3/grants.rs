@@ -25,7 +25,8 @@ pub const GRANT_TAG_DOMAIN: &[u8] = b"BDLM_BUD3_GRANT_V1";
 /// Domain tag for the one-time revocation / burn-shredding message digest.
 pub const GRANT_REVOKE_DOMAIN: &[u8] = b"BDLM_BUD3_GRANT_REVOKE_V1";
 
-/// Hard upper bound on a sealed HPKE key package stored in a grant row (4 KiB).
+/// Hard wire-ceiling bound (`4 KiB`) above the exact 1,206-byte HPKE X-Wing (`0x647a`)
+/// grant key-package envelope.
 pub const MAX_SEALED_KEY_PACKAGE_BYTES: usize = 4096;
 
 /// Compute the unlinkable 32-byte grant tag from `(nft_id, grant_nonce)`.
@@ -95,9 +96,10 @@ pub enum GrantBud3Error {
     UnknownGrant,
     /// `one_time_pk` is not a valid ML-DSA-65 public key.
     InvalidOneTimeKey,
-    /// `sealed_key_package` is empty, exceeds [`MAX_SEALED_KEY_PACKAGE_BYTES`], or is not HPKE `0x647a`.
+    /// `sealed_key_package` length is not the exact 1,206-byte B.U.D. 3.0 grant envelope
+    /// (compile-time bounded by [`MAX_SEALED_KEY_PACKAGE_BYTES`]) or fails HPKE `0x647a` decoding.
     InvalidKeyPackage,
-    /// `grant_tag` does not match `H(BDLM_BUD3_GRANT_V1 || nft_id || grant_nonce)`.
+    /// `grant_tag` is all-zero or does not match `H(BDLM_BUD3_GRANT_V1 || nft_id || grant_nonce)`.
     InvalidGrantTag,
     /// One-time ML-DSA-65 revocation signature failed verification.
     InvalidRevokeSignature,
@@ -109,21 +111,28 @@ pub enum GrantBud3Error {
 const EXACT_SEALED_KEY_PACKAGE_BYTES: usize =
     6 + crate::crypto::hpke::HPKE_ENCAPPED_KEY_LEN + super::keys::KEYPKG_PLAINTEXT_LEN + 16;
 
+const _: () = assert!(EXACT_SEALED_KEY_PACKAGE_BYTES <= MAX_SEALED_KEY_PACKAGE_BYTES);
+
 impl GrantRow {
     /// Validate all structural and cryptographic invariants of a newly submitted
     /// `GrantRow` at `current_epoch` before state mutation.
     ///
     /// # Errors
     ///
-    /// Returns [`GrantBud3Error`] if expiry, ML-DSA-65 key, or exact-size HPKE `0x647a`
-    /// key-package envelope checks fail.
+    /// Returns [`GrantBud3Error`] if `grant_tag` is degenerate all-zero, expiry has passed,
+    /// `one_time_pk` is not a valid ML-DSA-65 key, or `sealed_key_package` is not an
+    /// exact-size 1,206-byte HPKE `0x647a` envelope.
     pub fn validate_for_issue(&self, current_epoch: u64) -> Result<(), GrantBud3Error> {
+        if bool::from(subtle::ConstantTimeEq::ct_eq(
+            self.grant_tag.as_slice(),
+            [0u8; 32].as_slice(),
+        )) {
+            return Err(GrantBud3Error::InvalidGrantTag);
+        }
         if self.expires_at_epoch <= current_epoch {
             return Err(GrantBud3Error::ExpiredGrant);
         }
-        if self.sealed_key_package.len() != EXACT_SEALED_KEY_PACKAGE_BYTES
-            || self.sealed_key_package.len() > MAX_SEALED_KEY_PACKAGE_BYTES
-        {
+        if self.sealed_key_package.len() != EXACT_SEALED_KEY_PACKAGE_BYTES {
             return Err(GrantBud3Error::InvalidKeyPackage);
         }
         validate_public_key(SchemeId::ML_DSA_65, &self.one_time_pk)
@@ -137,8 +146,15 @@ impl GrantRow {
     ///
     /// # Errors
     ///
-    /// Returns [`GrantBud3Error::InvalidRevokeSignature`] if verification fails.
+    /// Returns [`GrantBud3Error::InvalidGrantTag`] if `grant_tag` is all-zero, or
+    /// [`GrantBud3Error::InvalidRevokeSignature`] if ML-DSA-65 verification fails.
     pub fn verify_revocation(&self, one_time_signature: &[u8]) -> Result<(), GrantBud3Error> {
+        if bool::from(subtle::ConstantTimeEq::ct_eq(
+            self.grant_tag.as_slice(),
+            [0u8; 32].as_slice(),
+        )) {
+            return Err(GrantBud3Error::InvalidGrantTag);
+        }
         let msg = grant_revoke_digest(&self.grant_tag);
         verify(
             SchemeId::ML_DSA_65,
@@ -232,11 +248,57 @@ mod tests {
             padded_row.validate_for_issue(10),
             Err(GrantBud3Error::InvalidKeyPackage)
         );
-        let mut short_row = row;
+        let mut short_row = row.clone();
         short_row.sealed_key_package.pop();
         assert_eq!(
             short_row.validate_for_issue(10),
             Err(GrantBud3Error::InvalidKeyPackage)
+        );
+
+        // Empty, 4096-byte, 4097-byte (> MAX_SEALED_KEY_PACKAGE_BYTES), and non-0x647a exact-length
+        // envelopes must all fail with `InvalidKeyPackage`.
+        let mut empty_pkg_row = row.clone();
+        empty_pkg_row.sealed_key_package.clear();
+        assert_eq!(
+            empty_pkg_row.validate_for_issue(10),
+            Err(GrantBud3Error::InvalidKeyPackage)
+        );
+        let mut cap_4096_row = row.clone();
+        cap_4096_row
+            .sealed_key_package
+            .resize(MAX_SEALED_KEY_PACKAGE_BYTES, 0xaa);
+        assert_eq!(
+            cap_4096_row.validate_for_issue(10),
+            Err(GrantBud3Error::InvalidKeyPackage)
+        );
+        let mut over_cap_row = row.clone();
+        over_cap_row
+            .sealed_key_package
+            .resize(MAX_SEALED_KEY_PACKAGE_BYTES + 1, 0xaa);
+        assert_eq!(
+            over_cap_row.validate_for_issue(10),
+            Err(GrantBud3Error::InvalidKeyPackage)
+        );
+        let mut bad_suite_row = row.clone();
+        bad_suite_row.sealed_key_package[0] ^= 0xff;
+        assert_eq!(
+            bad_suite_row.validate_for_issue(10),
+            Err(GrantBud3Error::InvalidKeyPackage)
+        );
+
+        // Degenerate all-zero `grant_tag` must be refused by both `validate_for_issue`
+        // and `verify_revocation` even if a caller constructs `GrantRow` directly.
+        let mut zero_tag_row = row.clone();
+        zero_tag_row.grant_tag = [0u8; 32];
+        assert_eq!(
+            zero_tag_row.validate_for_issue(10),
+            Err(GrantBud3Error::InvalidGrantTag)
+        );
+        let zero_tag_sig =
+            sign_with_grant_one_time_key(&otk_seed_1, &grant_revoke_digest(&[0u8; 32])).unwrap();
+        assert_eq!(
+            zero_tag_row.verify_revocation(&zero_tag_sig),
+            Err(GrantBud3Error::InvalidGrantTag)
         );
     }
 }
