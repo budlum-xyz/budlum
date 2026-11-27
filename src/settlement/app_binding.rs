@@ -1232,13 +1232,15 @@ pub fn execute_app_binding_tx(
             domain_key,
             executor,
         } => {
-            let operator = state
+            let domain = state
                 .settlement
                 .domains
                 .get(*domain_key)
-                .ok_or_else(|| refused("AppBinding executor names an unregistered domain"))?
-                .operator;
-            if operator != Some(ctx.sender) {
+                .ok_or_else(|| refused("AppBinding executor names an unregistered domain"))?;
+            if !domain.is_active() {
+                return Err(refused("AppBinding executor names an inactive domain"));
+            }
+            if domain.operator != Some(ctx.sender) {
                 return Err(refused(
                     "only the domain operator may name its AppBinding executor",
                 ));
@@ -1271,11 +1273,6 @@ pub fn execute_app_binding_tx(
             origin_beneficiary,
             deadline_block,
         } => {
-            // Retire what is already past its deadline before measuring the
-            // caps: an expired row is not work in progress, and counting it let
-            // any funded account fill the registry with rows nobody will ever
-            // fulfil (the escrow is refundable, so the only cost was the fee).
-            sweep_expired_intents(state, block)?;
             let app = state
                 .settlement
                 .app_binding
@@ -1330,20 +1327,23 @@ pub fn execute_app_binding_tx(
             {
                 return Err(refused("AppBinding intent deadline is out of range"));
             }
+            // Measure live (`deadline_block >= block`) intents and sender funding
+            // BEFORE sweeping expired rows so a refused OpenIntent never mutates state.
             let registry = &state.settlement.app_binding;
-            let sender_rows = registry
+            let live_sender_rows = registry
                 .intents
                 .values()
-                .filter(|intent| intent.owner == ctx.sender)
+                .filter(|intent| block <= intent.deadline_block && intent.owner == ctx.sender)
                 .count();
-            if sender_rows >= MAX_BINDING_INTENTS_PER_SENDER {
+            if live_sender_rows >= MAX_BINDING_INTENTS_PER_SENDER {
                 return Err(refused("too many open intents for this account"));
             }
-            // Every surviving row is live: the sweep above retired the expired
-            // ones, so the registry cap and the per-account cap count the same
-            // population and neither can be filled with rows that will never be
-            // fulfilled.
-            if registry.intents.len() >= MAX_APP_BINDING_OPEN_INTENTS {
+            let live_total_rows = registry
+                .intents
+                .values()
+                .filter(|intent| block <= intent.deadline_block)
+                .count();
+            if live_total_rows >= MAX_APP_BINDING_OPEN_INTENTS {
                 return Err(refused("AppBinding intent registry is full"));
             }
             let next_count = registry
@@ -1360,6 +1360,24 @@ pub fn execute_app_binding_tx(
             if registry.intents.contains_key(&intent_id) {
                 return Err(refused("app-binding intent identifier is already in use"));
             }
+            let needed = max_payment
+                .checked_add(ctx.fee)
+                .ok_or_else(|| refused("AppBinding amount overflows"))?;
+            let expired_sender_refund = registry
+                .intents
+                .values()
+                .filter(|intent| block > intent.deadline_block && intent.owner == ctx.sender)
+                .fold(0u64, |acc, intent| acc.saturating_add(intent.max_payment));
+            let projected_balance = state
+                .spendable_balance(&ctx.sender)
+                .saturating_add(expired_sender_refund);
+            if projected_balance < needed {
+                return Err(SettlementTxError::BondUnfunded {
+                    needed,
+                    balance: projected_balance,
+                });
+            }
+            sweep_expired_intents(state, block)?;
             debit(state, ctx, *max_payment)?;
             let registry = &mut state.settlement.app_binding;
             registry.intent_count = next_count;
@@ -1482,10 +1500,23 @@ pub fn execute_app_binding_tx(
                 .get(&intent.app_binding_id)
                 .cloned()
                 .ok_or_else(|| refused("AppBinding application not found"))?;
-            // The escrow-release arm applies the same origin gate as
-            // `Register`, `Claim` and `OpenIntent`: an app binding whose domain
-            // cannot serve as a trust anchor, or that has stopped anchoring,
-            // must not settle, even for an intent opened while it could.
+            // The escrow-release arm applies the same origin, certificate
+            // refutation, and Sentry circuit-breaker gates as `Claim`: an app
+            // binding whose domain is refuted or halted by Sentry must never
+            // release escrowed BUD.
+            crate::settlement::finality_gate::enforce_domain_not_refuted(
+                &state.settlement,
+                block,
+                crate::settlement::finality_gate::ValueGate::RelayerIntentSettle,
+                app.domain_key,
+            )
+            .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+            crate::settlement::finality_gate::enforce_sentry_circuit_clear(
+                &state.bridge_state.consensus_sentry,
+                crate::settlement::finality_gate::ValueGate::RelayerIntentSettle,
+                app.domain_key,
+            )
+            .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
             ensure_serving_origin(state, app.domain_key)?;
             // The intent's own snapshot decides which emitter may prove this
             // call, so a rotation after the award cannot invalidate work the
@@ -1601,6 +1632,19 @@ fn settle_expired_intent(
                     .domains
                     .get(app.domain_key)
                     .is_some_and(crate::domain::types::ConsensusDomain::is_active)
+                    && crate::settlement::finality_gate::enforce_domain_not_refuted(
+                        &state.settlement,
+                        state.current_block_height,
+                        crate::settlement::finality_gate::ValueGate::RelayerIntentSettle,
+                        app.domain_key,
+                    )
+                    .is_ok()
+                    && crate::settlement::finality_gate::enforce_sentry_circuit_clear(
+                        &state.bridge_state.consensus_sentry,
+                        crate::settlement::finality_gate::ValueGate::RelayerIntentSettle,
+                        app.domain_key,
+                    )
+                    .is_ok()
                     && (!intent.executor.is_empty()
                         || state
                             .settlement
@@ -3748,5 +3792,243 @@ mod tests {
         apply_claim(&mut state, &app_after, &id, payout).unwrap();
         assert_eq!(state.get_balance(&payout), 500);
         assert_eq!(state.get_balance(&mirror_addr), 0);
+    }
+
+    #[test]
+    fn refused_open_intent_never_mutates_expired_rows_and_sentry_blocks_fulfill_without_slashing_solver(
+    ) {
+        let operator = Address::from([0x11; 32]);
+        let owner = Address::from([0x12; 32]);
+        let solver = Address::from([0x13; 32]);
+        let unfunded_caller = Address::from([0x14; 32]);
+        let mut state = state_with_domain(operator);
+
+        let origin_app = vec![0xAA; 20];
+        let executor = vec![0xBB; 20];
+        let reg_fee = state.registry.params().app_binding_registration_fee;
+        state.add_balance(&operator, reg_fee + FEE * 4);
+        run_binding_tx(
+            &mut state,
+            &ctx(operator),
+            &BindingTx::SetExecutor {
+                domain_key: DOMAIN,
+                executor: executor.clone(),
+            },
+        )
+        .expect("set executor");
+        run_binding_tx(
+            &mut state,
+            &ctx(operator),
+            &BindingTx::Register {
+                domain_key: DOMAIN,
+                origin_app: origin_app.clone(),
+                manifest_hash: [0x55; 32],
+            },
+        )
+        .expect("register app");
+        let app_id = calc_binding_id(DOMAIN, &origin_app);
+
+        // Register solver as active RELAYER so it can bid and be awarded.
+        let relayer_min = state.registry.params().min_stake;
+        state.add_balance(&solver, relayer_min + FEE * 4);
+        state
+            .registry
+            .register(
+                solver,
+                crate::registry::role::roles::RELAYER,
+                relayer_min,
+                0,
+            )
+            .expect("register relayer");
+
+        // Open an intent at block 10 with deadline 700, bid and award it.
+        state.current_block_height = 10;
+        state.add_balance(&owner, 10_000 + FEE * 4);
+        run_binding_tx(
+            &mut state,
+            &ctx(owner),
+            &BindingTx::OpenIntent {
+                app_binding_id: app_id,
+                call_hash: [0x77; 32],
+                value: 100,
+                max_payment: 1_000,
+                solver_fee_cap: 200,
+                service_price: 100,
+                origin_beneficiary: vec![0xCC; 20],
+                deadline_block: 700,
+            },
+        )
+        .expect("open intent");
+        let intent_id = *state
+            .settlement
+            .app_binding
+            .intents
+            .keys()
+            .next()
+            .expect("intent key");
+        run_binding_tx(
+            &mut state,
+            &ctx(solver),
+            &BindingTx::Bid {
+                intent_id,
+                cost: 300,
+                fee: 150,
+            },
+        )
+        .expect("bid");
+        run_binding_tx(
+            &mut state,
+            &ctx(owner),
+            &BindingTx::Award { intent_id, solver },
+        )
+        .expect("award");
+
+        // 1. Advance past deadline (block 705) and submit an INVALID OpenIntent (unknown app):
+        //    a refused OpenIntent MUST NOT sweep/mutate existing expired intents or slash anyone!
+        let mut snapshot_past_deadline = state.clone();
+        snapshot_past_deadline.current_block_height = 705;
+        let root_before_refusal = snapshot_past_deadline.settlement.app_binding.root();
+        let owner_bal_before = snapshot_past_deadline.get_balance(&owner);
+        let refused_open = run_binding_tx(
+            &mut snapshot_past_deadline,
+            &ctx(unfunded_caller),
+            &BindingTx::OpenIntent {
+                app_binding_id: [0xFE; 32],
+                call_hash: [0x88; 32],
+                value: 1,
+                max_payment: 500,
+                solver_fee_cap: 50,
+                service_price: 50,
+                origin_beneficiary: vec![0xDD; 20],
+                deadline_block: 900,
+            },
+        );
+        assert!(refused_open.is_err());
+        assert_eq!(
+            snapshot_past_deadline.settlement.app_binding.root(),
+            root_before_refusal,
+            "refused OpenIntent must not mutate app_binding state via premature sweep"
+        );
+        assert_eq!(snapshot_past_deadline.get_balance(&owner), owner_bal_before);
+
+        // 2a. Unbound domain height in finality certificate blocks Fulfill fail-closed.
+        state.current_block_height = 100;
+        if let Some(dom) = state.settlement.domains.get_mut(DOMAIN) {
+            dom.last_committed_height = 5;
+            dom.last_committed_hash = [0x99; 32];
+        }
+        let intent_row = state.settlement.app_binding.intents[&intent_id].clone();
+        let fulfill_msg = CrossDomainMessage::new_correlated(
+            CrossDomainMessageParams {
+                source_domain: DOMAIN,
+                target_domain: 1,
+                source_height: 5,
+                event_index: 0,
+                nonce: 1,
+                sender: origin_emitter(&executor),
+                recipient: solver,
+                payload_hash: fulfilled_payload_hash(&intent_row, &origin_app, solver),
+                kind: MessageKind::Custom(FULFILLED_KIND.to_vec()),
+                expiry_height: 0,
+            },
+            intent_id,
+        );
+        let ev = anchored(&mut state, fulfill_msg);
+        let cert_err = run_binding_tx(
+            &mut state,
+            &ctx(solver),
+            &BindingTx::Fulfill {
+                intent_id,
+                evidence: ev.clone(),
+            },
+        )
+        .expect_err("pending/unbound finality certificate must refuse AppBinding Fulfill");
+        assert!(
+            cert_err.to_string().contains("finality certificate"),
+            "{cert_err}"
+        );
+        if let Some(dom) = state.settlement.domains.get_mut(DOMAIN) {
+            dom.last_committed_height = 0;
+            dom.last_committed_hash = [0u8; 32];
+        }
+
+        // 2b. Escalate ConsensusSentry for DOMAIN into Halted via stalled finality:
+        //     Fulfill MUST be refused fail-closed, AND subsequent expiry Refund MUST NOT slash
+        //     the honest solver whose delivery was blocked by Sentry!
+        let sentry_key =
+            crate::cross_domain::external::sentry::ConsensusSentry::domain_key_for_id(DOMAIN);
+        state
+            .bridge_state
+            .consensus_sentry
+            .register_domain(
+                sentry_key.clone(),
+                crate::cross_domain::external::sentry::SentryDomainPolicy {
+                    consensus_family: "poa".into(),
+                    quantum_posture:
+                        crate::cross_domain::external::sentry::DomainQuantumPosture::ClassicalOnly,
+                    max_finality_stall_secs: 60,
+                    min_trusting_window_secs: 600,
+                    max_reorg_blocks: 6,
+                    max_consecutive_proof_failures: 3,
+                    max_restake_share_ppm:
+                        crate::cross_domain::external::sentry::DEFAULT_MAX_RESTAKE_SHARE_PPM,
+                    recovery_cooldown_secs: 3_600,
+                },
+            )
+            .expect("register sentry domain");
+        state
+            .bridge_state
+            .consensus_sentry
+            .observe(&crate::cross_domain::external::sentry::SentryObservation {
+                domain_id: sentry_key.clone(),
+                height: 1,
+                state_root: [0xA1; 32],
+                observed_at_secs: 1_000,
+                remaining_trust_window_secs: None,
+                restake_share_ppm: 0,
+            })
+            .expect("initial sentry observation");
+        state
+            .bridge_state
+            .consensus_sentry
+            .observe(&crate::cross_domain::external::sentry::SentryObservation {
+                domain_id: sentry_key,
+                height: 1,
+                state_root: [0xA1; 32],
+                observed_at_secs: 5_000,
+                remaining_trust_window_secs: None,
+                restake_share_ppm: 0,
+            })
+            .expect("stalled sentry observation");
+
+        let fulfill_err = run_binding_tx(
+            &mut state,
+            &ctx(solver),
+            &BindingTx::Fulfill {
+                intent_id,
+                evidence: ev,
+            },
+        )
+        .expect_err("Sentry-halted domain must refuse AppBinding Fulfill");
+        assert!(fulfill_err.to_string().contains("sentry"), "{fulfill_err}");
+
+        // Advance past deadline while Sentry remains halted -> Refund refunds owner WITHOUT slashing solver!
+        state.current_block_height = 705;
+        let solver_stake_before = state
+            .registry
+            .get(&solver, crate::registry::role::roles::RELAYER)
+            .expect("solver reg")
+            .stake;
+        run_binding_tx(&mut state, &ctx(owner), &BindingTx::Refund { intent_id })
+            .expect("refund expired intent");
+        let solver_stake_after = state
+            .registry
+            .get(&solver, crate::registry::role::roles::RELAYER)
+            .expect("solver reg")
+            .stake;
+        assert_eq!(
+            solver_stake_after, solver_stake_before,
+            "honest solver blocked by Sentry circuit halt must not be slashed on Refund"
+        );
     }
 }
