@@ -166,6 +166,9 @@ impl PresenceSignal {
     where
         F: FnOnce(&[u8], &[u8; 32], &[u8]) -> bool,
     {
+        if chain_id == 0 || self.validator == Address::zero() || self.sig_bls.is_empty() {
+            return false;
+        }
         let message = presence_message(chain_id, self.window, self.class);
         verify(self.validator.as_bytes(), &message, &self.sig_bls)
     }
@@ -318,5 +321,36 @@ mod tests {
         assert!(signal.is_double_sign_with(&other));
         let next = PresenceSignal::sign(owner, 45_261, 12, ValidatorClass::Full, hint, sign);
         assert!(!signal.is_double_sign_with(&next));
+    }
+
+    #[test]
+    fn presence_verify_refuses_zero_validator_zero_chain_and_empty_signature() {
+        let owner = Address([9u8; 32]);
+        let hint = [0u8; 32];
+        let valid = PresenceSignal::sign(owner, 45_261, 11, ValidatorClass::Mobile, hint, |m| {
+            m.to_vec()
+        });
+        assert!(
+            !valid.verify_with(0, |_, _, _| true),
+            "chain_id 0 must be refused"
+        );
+
+        let zero_val = PresenceSignal {
+            validator: Address::zero(),
+            ..valid.clone()
+        };
+        assert!(
+            !zero_val.verify_with(45_261, |_, _, _| true),
+            "zero validator address must be refused"
+        );
+
+        let empty_sig = PresenceSignal {
+            sig_bls: Vec::new(),
+            ..valid
+        };
+        assert!(
+            !empty_sig.verify_with(45_261, |_, _, _| true),
+            "empty BLS signature must be refused"
+        );
     }
 }
