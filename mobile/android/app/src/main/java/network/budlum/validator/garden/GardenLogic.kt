@@ -1,5 +1,7 @@
 package network.budlum.validator.garden
 
+import org.json.JSONObject
+
 /**
  * Pure state, parsing and navigation rules for Budlum Garden.
  *
@@ -46,17 +48,48 @@ object GardenLogic {
         return if (isBudlumLink || isSignedRecord || isHttpGardenQr) text else null
     }
 
-    /** True when the phone stepped out once and can still return without re-inviting. */
-    fun canReturnToGarden(statusJson: String): Boolean =
-        statusJson.contains("\"can_return\":true") || statusJson.contains("\"status\":\"Away\"")
+    /**
+     * True when the phone stepped out once and can still return without re-inviting.
+     *
+     * Parses JSON fail-closed so nested fields (such as `budlum.status`) or an
+     * ended-chain summary never forge a live seat.
+     */
+    fun canReturnToGarden(statusJson: String): Boolean {
+        val root = parseObject(statusJson) ?: return false
+        if (root.optBoolean("can_return", false)) return true
+        val garden = root.optJSONObject("garden") ?: return false
+        return garden.optBoolean("can_return", false) ||
+            garden.optString("status") == "Away"
+    }
 
-    /** True when the Garden status JSON names an active (non-Away) chain seat. */
-    fun isGardenSeated(statusJson: String): Boolean =
-        statusJson.contains("\"chain_id\"") && !canReturnToGarden(statusJson)
+    /**
+     * True when the `garden` object itself names an active (non-Away) chain seat.
+     *
+     * An ended response (`{"garden":null,"ended":{"chain_id":...}}`) fails closed.
+     */
+    fun isGardenSeated(statusJson: String): Boolean {
+        val root = parseObject(statusJson) ?: return false
+        val garden = root.optJSONObject("garden") ?: return false
+        val chainId = garden.optString("chain_id").trim()
+        if (chainId.isEmpty()) return false
+        return !canReturnToGarden(statusJson)
+    }
 
-    /** True when the user holds a seat (either currently seated or stepped out). */
-    fun hasGardenSeat(statusJson: String): Boolean =
-        statusJson.contains("\"chain_id\"") || canReturnToGarden(statusJson)
+    /** True when the phone holds a live or stepped-out seat in the `garden` object. */
+    fun hasGardenSeat(statusJson: String): Boolean {
+        val root = parseObject(statusJson) ?: return false
+        if (root.optBoolean("can_return", false)) return true
+        val garden = root.optJSONObject("garden") ?: return false
+        return garden.optString("chain_id").trim().isNotEmpty() ||
+            garden.optBoolean("can_return", false) ||
+            garden.optString("status") == "Away"
+    }
+
+    private fun parseObject(raw: String): JSONObject? {
+        val trimmed = raw.trim()
+        if (!trimmed.startsWith("{")) return null
+        return runCatching { JSONObject(trimmed) }.getOrNull()
+    }
 
     /**
      * Choose the landing step once initial readiness, wallet and seat checks settle.

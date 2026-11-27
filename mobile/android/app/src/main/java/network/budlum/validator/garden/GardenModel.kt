@@ -154,7 +154,7 @@ class GardenModel(
         }
         if (!selfTestPassed()) return
         background(onSuccess = onSuccess) {
-            val answer = phone.create(clean, name)
+            val answer = phone.create(clean, name, null)
             state = state.copy(
                 status = answer.json,
                 canReturn = false,
@@ -615,9 +615,12 @@ class GardenModel(
         )
     }
 
-    /** Section 5.12: a scanned QR invite joins immediately when valid. */
-    fun scanned(record: String, onSuccess: () -> Unit = {}) {
-        join(record, onSuccess)
+    /**
+     * Fail-closed QR confirmation: preview the scanned invite in Join so the
+     * owner sees host and expiry and explicitly confirms with one tap.
+     */
+    fun scanned(record: String) {
+        receiveInviteLink(record)
     }
 
     private fun selfTestPassed(): Boolean {

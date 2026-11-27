@@ -43,13 +43,19 @@ class GardenLogicTest {
     @Test
     fun gardenSeatAndReturnFlagsParseReliably() {
         val seated = """{"garden":{"chain_id":"0xabc","status":"Active","title":"My Garden"}}"""
+        val nestedAway = """{"garden":{"chain_id":"0xabc","status":"Running","budlum":{"status":"Away"}}}"""
         val steppedOutAway = """{"garden":{"chain_id":"0xabc","status":"Away"}}"""
         val steppedOutLeave = """{"can_return":true,"status":"Away"}"""
+        val endedFalsePositive = """{"garden":null,"ended":{"chain_id":"0xdeadbeef","title":"Old"}}"""
         val retired = """{"garden":null,"can_return":false}"""
 
         assertTrue(GardenLogic.isGardenSeated(seated))
         assertFalse(GardenLogic.canReturnToGarden(seated))
         assertTrue(GardenLogic.hasGardenSeat(seated))
+
+        assertTrue(GardenLogic.isGardenSeated(nestedAway))
+        assertFalse(GardenLogic.canReturnToGarden(nestedAway))
+        assertTrue(GardenLogic.hasGardenSeat(nestedAway))
 
         assertFalse(GardenLogic.isGardenSeated(steppedOutAway))
         assertTrue(GardenLogic.canReturnToGarden(steppedOutAway))
@@ -59,12 +65,17 @@ class GardenLogicTest {
         assertTrue(GardenLogic.canReturnToGarden(steppedOutLeave))
         assertTrue(GardenLogic.hasGardenSeat(steppedOutLeave))
 
+        assertFalse(GardenLogic.isGardenSeated(endedFalsePositive))
+        assertFalse(GardenLogic.canReturnToGarden(endedFalsePositive))
+        assertFalse(GardenLogic.hasGardenSeat(endedFalsePositive))
+
         assertFalse(GardenLogic.isGardenSeated(retired))
         assertFalse(GardenLogic.canReturnToGarden(retired))
         assertFalse(GardenLogic.hasGardenSeat(retired))
 
         assertFalse(GardenLogic.isGardenSeated(""))
         assertFalse(GardenLogic.canReturnToGarden("not-json"))
+        assertFalse(GardenLogic.hasGardenSeat("not-json"))
     }
 
     @Test

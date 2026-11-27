@@ -33,11 +33,11 @@ object GardenHolder {
      * chain either way.
      */
     fun hasGarden(context: Context): Boolean =
-        runCatching { phone(context).status().json.contains("\"chain_id\"") }
+        runCatching { GardenLogic.hasGardenSeat(phone(context).status().json) }
             .getOrDefault(false)
 
     /** Whether the validator is stepped out and could return right now. */
     fun isAway(context: Context): Boolean =
-        runCatching { phone(context).status().json.contains("\"status\":\"Away\"") }
+        runCatching { GardenLogic.canReturnToGarden(phone(context).status().json) }
             .getOrDefault(false)
 }
