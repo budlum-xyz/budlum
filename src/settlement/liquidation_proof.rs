@@ -1,9 +1,11 @@
 //! `ProofCarryingLiquidation`: oracle-free AMM/TWAP state-root-proven
 //! cross-domain liquidation engine.
 //!
-//! WIRING: unwired - oracle-free AMM/TWAP cross-domain liquidation proof
-//! verifier awaits its dedicated settlement transaction door and RPC submission
-//! endpoint in a subsequent integration step.
+//! WIRING: wired - `SettlementTx::Liquidate` reaches
+//! [`execute_proven_cross_domain_liquidation`] through
+//! `domains::execute_liquidation_request`, which intersects the sender's
+//! claimed roots with the chain's `external_roots` before the engine sees them.
+//! The RPC submission endpoint is still out of tree; the chain door is not.
 //!
 //! This module implements a liquidation mechanism that does not depend on
 //! any external price oracle. Instead, it uses a Time-Weighted Average Price
@@ -941,5 +943,45 @@ mod tests {
         let obs = make_observations(&[(1, 100, 200), (2, 100, 200), (3, 100, 200)]);
         let outcomes = execute_liquidation(&obs, &[]).expect("ok");
         assert!(outcomes.is_empty());
+    }
+}
+
+/// A liquidation as it arrives on chain: everything the engine needs, in one
+/// object, so the door does not have to invent a wire format.
+///
+/// The fields are the engine's five inputs verbatim. Nothing is derived here:
+/// a request that lies about a root, a reserve or a leg is caught by
+/// `execute_proven_cross_domain_liquidation`, and the door's only extra work is
+/// to drop claimed roots this chain never accepted (see
+/// `domains::execute_liquidation_request`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiquidationRequest {
+    /// The position being liquidated.
+    pub position: LiquidationPosition,
+    /// Roots the sender claims are final, keyed by `(domain, epoch)`.
+    ///
+    /// The sender supplies these because only it knows which epochs its
+    /// observations cite; the chain then intersects them with what it has
+    /// accepted, which is why an invented root here is harmless rather than
+    /// exploitable.
+    pub certified_roots: std::collections::BTreeMap<(u32, u64), Hash32>,
+    /// Reserve observations, each carrying its own inclusion proof.
+    pub observations: Vec<ProvenReserveObservation>,
+    /// The collateral legs the position claims, one per source domain.
+    pub collateral_legs: Vec<CollateralLegSpec>,
+    /// Caps and the delivery anchor.
+    pub params: CrossDomainLiquidationParams,
+}
+
+impl LiquidationRequest {
+    /// Whether the request carries any evidence at all.
+    ///
+    /// A request with no observations cannot prove health, so it is refused
+    /// before the engine's heavier checks run - and, more importantly, before
+    /// any caller could mistake "the engine returned nothing" for "nothing was
+    /// wrong".
+    #[must_use]
+    pub fn has_evidence(&self) -> bool {
+        !self.certified_roots.is_empty() && !self.observations.is_empty()
     }
 }

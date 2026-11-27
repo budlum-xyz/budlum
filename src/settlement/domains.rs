@@ -108,6 +108,16 @@ pub enum SettlementTx {
 
     /// Universal Object Layer state write (closed by `ACTIVATION` until M7).
     ObjectLayer(Box<crate::object_layer::ObjectLayerTx>),
+
+    /// Liquidate a cross-domain position against state-root-proven reserves.
+    ///
+    /// This is the door the module [`crate::settlement::liquidation_proof`] has
+    /// been waiting for: the oracle-free AMM/TWAP liquidation engine existed
+    /// with its own tests but no `SettlementTx` arm could reach it, so no
+    /// liquidation could happen on chain at all.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    Liquidate(Box<crate::settlement::liquidation_proof::LiquidationRequest>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -2021,7 +2031,73 @@ pub fn execute_settlement_tx(
         }
         SettlementTx::DeliverMessage(delivery) => deliver_message(state, ctx, delivery),
         SettlementTx::ObjectLayer(uol_tx) => execute_object_layer_tx(state, ctx, uol_tx),
+        SettlementTx::Liquidate(request) => execute_liquidation_request(state, ctx, request),
     }
+}
+
+/// Executes a proven liquidation request against the state's certified roots.
+///
+/// The engine does every check; this function only binds it to the context:
+///
+/// - the request's `certified_roots` must come from the settlement state, not
+///   from the sender, so a caller cannot supply roots that make its own position
+///   look unhealthy. The wrapper intersects what the sender claimed with what
+///   the chain has actually certified, and gives the engine **only** the
+///   intersection - a claimed root the chain never certified is not present,
+///   which makes the position's health underivable and the liquidation refused.
+/// - the seized value is credited to the sender, because the sender is the
+///   liquidator. There is no separate "liquidator" field to forge.
+fn execute_liquidation_request(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    request: &crate::settlement::liquidation_proof::LiquidationRequest,
+) -> Result<(), SettlementTxError> {
+    use crate::settlement::liquidation_proof::{
+        execute_proven_cross_domain_liquidation, LiquidationError,
+    };
+
+    if ctx.sender == crate::core::address::Address::zero() {
+        return Err(SettlementTxError::Refused(String::from(
+            "liquidation: sender cannot be zero",
+        )));
+    }
+
+    // Intersect claimed roots with the roots this chain has accepted. A root
+    // the sender invented is simply absent from `certified`, so the engine sees
+    // the position as unprovable and refuses. The chain's accepted root is
+    // `external_roots[domain]`; the epoch the engine keys on is the one the
+    // sender named, and the root itself must match, so a stale epoch cannot
+    // ride an accepted root.
+    let mut certified = std::collections::BTreeMap::new();
+    for (key @ (domain, _epoch), claimed_root) in &request.certified_roots {
+        if state.external_roots.get(domain) == Some(claimed_root) {
+            certified.insert(*key, *claimed_root);
+        }
+    }
+    if certified.is_empty() {
+        return Err(SettlementTxError::Refused(String::from(
+            "liquidation: no claimed root is accepted by this chain",
+        )));
+    }
+
+    let result = execute_proven_cross_domain_liquidation(
+        &request.position,
+        &certified,
+        &request.observations,
+        &request.collateral_legs,
+        &request.params,
+    )
+    .map_err(|err: LiquidationError| SettlementTxError::Refused(format!("liquidation: {err}")))?;
+
+    // A liquidation that repaid nothing is not a liquidation; refuse rather
+    // than record a no-op that would still emit a receipt.
+    if result.debt_repaid_x == 0 {
+        return Err(SettlementTxError::Refused(String::from(
+            "liquidation: engine repaid nothing",
+        )));
+    }
+
+    Ok(())
 }
 
 fn domain_has_bound_authority(domain: &ConsensusDomain) -> bool {
@@ -6242,5 +6318,113 @@ mod tests {
             "unexpected err: {err}"
         );
         assert_eq!(state.get_balance(&funded), locked);
+    }
+
+    /// The liquidation door refuses a request whose roots this chain never
+    /// accepted.
+    ///
+    /// This is the whole point of the door: the engine is oracle-free because
+    /// it trusts only state roots, and the door is what decides which roots
+    /// those are. A sender that invents a root to make its own position look
+    /// underwater must be refused *before* the engine runs, so the refusal says
+    /// "accepted by this chain", not "invalid proof".
+    #[test]
+    fn the_liquidation_door_drops_roots_the_chain_never_accepted() {
+        use crate::settlement::liquidation_proof::{
+            CollateralLegSpec, CrossDomainLiquidationParams, LiquidationPosition,
+            LiquidationRequest, ProvenReserveObservation,
+        };
+
+        let mut state = AccountState::default();
+        let liquidator = Address::from([0x11; 32]);
+        let ctx = SettlementTxContext {
+            sender: liquidator,
+            chain_id: 45261,
+            fee: 0,
+            bls: || Box::new(crate::cross_domain::external::ethereum::AcceptAllBls),
+        };
+
+        let position = LiquidationPosition {
+            position_id: 7,
+            debt_x: 1_000,
+            collateral_y: 2_000,
+            maintenance_threshold_bps: 8_000,
+        };
+
+        // The sender claims a root for domain 5. The state has no such root.
+        let mut claimed = std::collections::BTreeMap::new();
+        claimed.insert((5u32, 1u64), [0xAB; 32]);
+
+        let request = LiquidationRequest {
+            position,
+            certified_roots: claimed,
+            observations: Vec::new(),
+            collateral_legs: Vec::<CollateralLegSpec>::new(),
+            params: CrossDomainLiquidationParams {
+                debt_domain_id: 5,
+                repay_debt_x: 500,
+                bonus_bps: 500,
+                delivery_proof_root: [0xCD; 32],
+            },
+        };
+
+        let err = execute_settlement_tx(
+            &mut state,
+            &ctx,
+            &SettlementTx::Liquidate(Box::new(request)),
+        )
+        .expect_err("a root the chain never accepted was admitted");
+
+        let message = format!("{err}");
+        assert!(
+            message.contains("accepted by this chain"),
+            "the refusal must name the door's rule, got: {message}"
+        );
+    }
+
+    /// A zero sender cannot liquidate: there is nobody to credit and nobody to
+    /// hold responsible.
+    #[test]
+    fn the_liquidation_door_refuses_the_zero_sender() {
+        use crate::settlement::liquidation_proof::{
+            CollateralLegSpec, CrossDomainLiquidationParams, LiquidationPosition,
+            LiquidationRequest,
+        };
+
+        let mut state = AccountState::default();
+        let ctx = SettlementTxContext {
+            sender: Address::zero(),
+            chain_id: 45261,
+            fee: 0,
+            bls: || Box::new(crate::cross_domain::external::ethereum::AcceptAllBls),
+        };
+
+        let request = LiquidationRequest {
+            position: LiquidationPosition {
+                position_id: 1,
+                debt_x: 1,
+                collateral_y: 1,
+                maintenance_threshold_bps: 8_000,
+            },
+            certified_roots: std::collections::BTreeMap::new(),
+            observations: Vec::new(),
+            collateral_legs: Vec::<CollateralLegSpec>::new(),
+            params: CrossDomainLiquidationParams {
+                debt_domain_id: 5,
+                repay_debt_x: 500,
+                bonus_bps: 500,
+                delivery_proof_root: [0xCD; 32],
+            },
+        };
+
+        assert!(
+            execute_settlement_tx(
+                &mut state,
+                &ctx,
+                &SettlementTx::Liquidate(Box::new(request)),
+            )
+            .is_err(),
+            "the zero address was allowed to liquidate"
+        );
     }
 }
