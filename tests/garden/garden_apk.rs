@@ -712,20 +712,49 @@ fn garden_apk_cleanup() -> Result<(), String> {
         before.iter().any(|path| path == "seat.json"),
         "the join left no seat to clean up: {before:?}"
     );
-    // The check that names a regression has to be able to see it. A phone
-    // that only joined holds no content, so "nothing survived the leave" is
-    // true before the leave runs and stays true when `leave` removes nothing.
-    // So the phone publishes first, follows the publish to a final block, and
-    // only then leaves: the absence afterwards means the leave did the work.
+    // A phone that only joined holds no content, so "nothing survived the
+    // leave" would be true before the leave runs and would stay true if the
+    // leave removed nothing. The publish below is what makes the assertion
+    // below it mean something: the bytes have to reach the disk first.
+    //
+    // The check is made here, right after `send`, and not after the trace.
+    // Every verb is its own process, and `GardenService::new` removes a
+    // content tree it did not put there, because a validator key never
+    // survives a restart and content is fetched again from the Garden. So a
+    // process that starts after the publish clears the tree before doing
+    // anything, and asserting over it later would be asserting over a fresh
+    // directory. What this test proves is that a publish writes content; that
+    // a leave wipes a tree that is still there is proven where the publish
+    // and the leave happen in one process, in the core's own
+    // `garden_service_keeps_caller_text_out_of_file_paths`.
     let (ok, sent) = phone_verb(dir.path(), "send", &["cleanup content", "cleanup"])?;
     assert!(ok, "the publish before the leave was refused: {sent}");
+    assert!(
+        sent.contains("accepted into the mempool, not yet in a block"),
+        "the send did not say what its answer is: {sent}"
+    );
     let answered: Value = serde_json::from_str(
         sent.lines()
             .find(|line| line.trim_start().starts_with('{'))
             .ok_or_else(|| format!("the send printed no JSON: {sent}"))?,
     )
     .map_err(|e| format!("the send answered with unreadable JSON: {e}"))?;
+    assert_eq!(
+        answered["published"],
+        json!(false),
+        "the send answered that it published: {answered}"
+    );
     let tx_id = text(&answered, "/tx_id")?;
+    let with_content = files_under(dir.path());
+    assert!(
+        with_content.iter().any(|path| path.starts_with("garden/")),
+        "the publish wrote nothing under garden/, so it never stored the bytes it \
+         answered about: {with_content:?}"
+    );
+
+    // The handle the send answered with is the way to the verdict, and the
+    // verdict has to arrive: a mempool acceptance that never becomes a block
+    // is the failure this whole check exists for.
     wait_for("the publish to reach a final block", || {
         let (ok, out) = phone_verb(dir.path(), "trace", &[&tx_id])?;
         if !ok {
@@ -743,15 +772,7 @@ fn garden_apk_cleanup() -> Result<(), String> {
             None
         })
     })
-    .map_err(|e| {
-        format!("the content never reached a block, so the leave has nothing to prove: {e}")
-    })?;
-    let with_content = files_under(dir.path());
-    assert!(
-        with_content.iter().any(|path| path.starts_with("garden/")),
-        "the publish left no Garden content behind, so an empty tree after the leave would \
-         prove nothing: {with_content:?}"
-    );
+    .map_err(|e| format!("the publish never reached a block: {e}"))?;
 
     let (ok, left) = phone_verb(dir.path(), "leave", &[])?;
     assert!(ok, "the leave failed: {left}");
