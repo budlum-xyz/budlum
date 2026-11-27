@@ -360,6 +360,126 @@ pub fn best_superchain_score(
     best
 }
 
+/// Which of two proofs a verifier keeps when offered a competing chain.
+///
+/// A proof that does not verify never wins; a proof on another anchor does
+/// not compete. Of two verifying proofs on one anchor, the challenger wins
+/// only with strictly more work after the last common ancestor, so a tie
+/// keeps what the verifier already holds. Work is `best_superchain_score`
+/// per level: headers at level mu or above weigh 2^mu each, level > min_level
+/// counts only once it carries at least m headers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NipopowPreferred {
+    /// The proof the verifier already holds.
+    Incumbent,
+    /// The proof that was offered against it.
+    Challenger,
+    /// Neither proof verifies.
+    Neither,
+}
+
+/// Choose between two `NipopowEvidence` bundles by KMZ work after their LCA.
+///
+/// Returns `Neither` when neither verifies, `Incumbent`/`Challenger` when
+/// only one verifies, `Incumbent` when anchors differ, otherwise the side
+/// with strictly greater `best_superchain_score` on the suffix above the LCA.
+///
+/// Convenience: exposed for competing `NIPoPoW` fork comparison.
+#[must_use]
+pub fn nipopow_prefer(
+    incumbent: &NipopowEvidence,
+    challenger: &NipopowEvidence,
+    pinned: &PinnedNipopowGenesis,
+) -> NipopowPreferred {
+    let incumbent_ok = nipopow_bundle_verifies(incumbent, pinned);
+    let challenger_ok = nipopow_bundle_verifies(challenger, pinned);
+    match (incumbent_ok, challenger_ok) {
+        (false, false) => return NipopowPreferred::Neither,
+        (true, false) => return NipopowPreferred::Incumbent,
+        (false, true) => return NipopowPreferred::Challenger,
+        (true, true) => {}
+    }
+    if incumbent.prefix.first().map(|h| h.block_id) != challenger.prefix.first().map(|h| h.block_id) {
+        return NipopowPreferred::Incumbent;
+    }
+    let fork = nipopow_fork_height(incumbent, challenger);
+    let held = nipopow_work_after(incumbent, fork, pinned);
+    let offered = nipopow_work_after(challenger, fork, pinned);
+    if offered > held {
+        NipopowPreferred::Challenger
+    } else {
+        NipopowPreferred::Incumbent
+    }
+}
+
+fn nipopow_headers(bundle: &NipopowEvidence) -> impl Iterator<Item = &NipopowHeader> {
+    bundle.prefix.iter().chain(bundle.suffix.iter())
+}
+
+fn nipopow_fork_height(a: &NipopowEvidence, b: &NipopowEvidence) -> Option<u64> {
+    let in_a: BTreeSet<[u8; 32]> = nipopow_headers(a).map(|h| h.block_id).collect();
+    nipopow_headers(b)
+        .filter(|h| in_a.contains(&h.block_id))
+        .map(|h| h.height)
+        .max()
+}
+
+fn nipopow_work_after(
+    bundle: &NipopowEvidence,
+    fork: Option<u64>,
+    pinned: &PinnedNipopowGenesis,
+) -> u128 {
+    let above: Vec<u8> = nipopow_headers(bundle)
+        .filter(|h| fork.is_none_or(|f| h.height > f))
+        .filter_map(|h| superblock_level(&h.block_id, &pinned.pow_target))
+        .collect();
+    best_superchain_score(&above, pinned.min_superblocks_m, pinned.min_superblock_level)
+        .map(|(_, score)| score)
+        .unwrap_or(0)
+}
+
+fn nipopow_bundle_verifies(bundle: &NipopowEvidence, pinned: &PinnedNipopowGenesis) -> bool {
+    if bundle.prefix.is_empty() || bundle.suffix.is_empty() {
+        return false;
+    }
+    if bundle.prefix_hops.len() + 1 != bundle.prefix.len() {
+        return false;
+    }
+    let genesis = match bundle.prefix.first() {
+        Some(g) => g,
+        None => return false,
+    };
+    if genesis.block_id != pinned.genesis_id || genesis.height != pinned.genesis_height {
+        return false;
+    }
+    let mut prev = genesis;
+    let mut prev_level = MAX_SUPERBLOCK_LEVEL;
+    for (next, hop) in bundle.prefix.iter().skip(1).zip(bundle.prefix_hops.iter()) {
+        if next.height <= prev.height {
+            return false;
+        }
+        let level = match superblock_level(&next.block_id, &pinned.pow_target) {
+            Some(l) => l,
+            None => return false,
+        };
+        if prev_level < hop.level {
+            return false;
+        }
+        if !verify_interlink_inclusion(hop.level, &prev.block_id, &hop.merkle_path, &next.interlink_root) {
+            return false;
+        }
+        prev = next;
+        prev_level = level;
+    }
+    let levels: Vec<u8> = bundle
+        .prefix
+        .iter()
+        .skip(1)
+        .filter_map(|h| superblock_level(&h.block_id, &pinned.pow_target))
+        .collect();
+    best_superchain_score(&levels, pinned.min_superblocks_m, pinned.min_superblock_level).is_some()
+}
+
 /// External finality adapter verifying KMZ `NIPoPoW` superblock + suffix proofs.
 pub struct NipopowAdapter {
     network: String,
