@@ -597,6 +597,15 @@ private fun WorkScreen(
                     skin = skin,
                 )
                 Rule(skin = skin)
+                // The number that says whether the coding bought anything.
+                // Source symbols are the object cut up; only these let it
+                // come back with pieces missing.
+                Fact(
+                    name = stringResource(R.string.g_repair),
+                    value = (bud3?.optLong("symbols_repair") ?: 0L).toString(),
+                    skin = skin,
+                )
+                Rule(skin = skin)
                 Fact(
                     name = stringResource(R.string.g_validators),
                     value = (garden?.optInt("active_validators") ?: 0).toString(),

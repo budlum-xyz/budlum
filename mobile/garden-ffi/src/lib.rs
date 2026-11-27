@@ -396,7 +396,8 @@ impl GardenPhone {
     /// It tries the four things the phone has to be able to do, and it
     /// tries them for real: a file is written and read back, a key is made
     /// and used to sign, a socket is bound, and an object goes down the
-    /// B.U.D. 3.0 path and comes back. None of it touches the network.
+    /// B.U.D. 3.0 path and comes back after an eighth of its symbols have
+    /// been thrown away. None of it touches the network.
     pub fn self_test(&self) -> SelfTestReport {
         let started = std::time::Instant::now();
         let steps = vec![
@@ -577,7 +578,7 @@ fn check_network_listen() -> SelfTestStep {
 }
 
 fn check_object_round_trip() -> SelfTestStep {
-    let name = "code and rebuild a small object";
+    let name = "rebuild an object with symbols missing";
     match budlum_core::garden::self_test_object_round_trip() {
         Ok(()) => step(name, true, String::new()),
         Err(e) => step(name, false, e),

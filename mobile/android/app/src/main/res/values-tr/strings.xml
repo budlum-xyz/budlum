@@ -106,6 +106,7 @@
     <string name="g_stored">saklanan</string>
     <string name="g_coded">kodlanan nesne</string>
     <string name="g_symbols">üretilen sembol</string>
+    <string name="g_repair">onarım simgesi</string>
     <string name="g_validators">doğrulayıcı</string>
     <string name="g_leave">ayrıl</string>
     <!-- Telefonun kendi cüzdanı. Bir telefonda bir cüzdan bulunur. -->

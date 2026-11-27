@@ -4150,6 +4150,7 @@ impl Node {
                     "objects_coded": bud3.objects_coded,
                     "segments_coded": bud3.segments_coded,
                     "symbols_made": bud3.symbols_made,
+                    "symbols_repair": bud3.symbols_repair,
                     "symbol_roots": bud3.symbol_roots,
                     "objects_viewed": bud3.objects_viewed,
                     "symbols_used": bud3.symbols_used,

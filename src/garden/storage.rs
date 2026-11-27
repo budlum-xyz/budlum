@@ -71,6 +71,12 @@ pub struct Bud3PartCounts {
     pub segments_coded: u64,
     /// RFC 6330 symbols produced (`fountain`).
     pub symbols_made: u64,
+    /// How many of those were repair symbols rather than source symbols.
+    ///
+    /// This is the number that says whether the coding is doing anything.
+    /// Source symbols are the object cut up; only repair symbols let a
+    /// reader rebuild it with pieces missing.
+    pub symbols_repair: u64,
     /// Per-segment symbol roots built (`custody`).
     pub symbol_roots: u64,
     /// Objects read back through the view path (`pipeline::view_public`).
@@ -86,6 +92,12 @@ pub struct Bud3PartCounts {
 /// cache. The budget is deliberately small: the plain bytes are the durable
 /// copy, so forgetting symbols costs a node nothing but the shortcut.
 const CODED_SYMBOL_BUDGET: u64 = 8 * 1024 * 1024;
+
+/// The fewest repair symbols a segment gets, however small it is.
+///
+/// A small object has few source symbols, so a proportional share would
+/// round down to nothing and leave it with no redundancy at all.
+const MIN_REPAIR_SYMBOLS: u32 = 8;
 
 /// What B.U.D. 3.0 made of one object.
 #[derive(Debug)]
@@ -460,9 +472,18 @@ impl GardenContentStore {
             .map(|segment| count_of(segment.len()))
             .fold(0u64, u64::saturating_add);
         let roots = count_of(coded.record.symbol_roots.len());
+        // Source symbols are the object cut into `symbol_size` pieces; every
+        // symbol past that is repair. Counting them apart is the only way to
+        // see from the outside whether the coding bought any redundancy.
+        let source = coded
+            .record
+            .object_len
+            .div_ceil(u64::from(Profile::P0.symbol_size));
+        let repair = symbols.saturating_sub(source);
         self.parts.objects_coded = self.parts.objects_coded.saturating_add(1);
         self.parts.segments_coded = self.parts.segments_coded.saturating_add(segments);
         self.parts.symbols_made = self.parts.symbols_made.saturating_add(symbols);
+        self.parts.symbols_repair = self.parts.symbols_repair.saturating_add(repair);
         self.parts.symbol_roots = self.parts.symbol_roots.saturating_add(roots);
         self.coded_bytes = self.coded_bytes.saturating_add(coded.footprint);
         self.coded.insert(content_id, coded);
@@ -497,6 +518,30 @@ impl GardenContentStore {
     /// segment's worth of symbols, because a Garden object is small by
     /// construction: the ceiling is `max_object_bytes`, far under the
     /// segment capacity, so the usual result is a single segment.
+    /// How many symbols a segment of `k` source symbols is given.
+    ///
+    /// The pipeline accepts anything from `k + 2` upwards, and `k + 2` is
+    /// what this used to ask for. Two spare symbols out of a thousand is
+    /// not erasure coding - it is a rounding error with a fountain code
+    /// standing behind it, and an object that loses a third symbol is
+    /// gone. A quarter again in repair, and never fewer than eight, is
+    /// what makes losing pieces survivable, which is the entire reason
+    /// the object is coded at all.
+    const fn with_repair(k: u32) -> u32 {
+        let quarter = k / 4;
+        let repair = if quarter > MIN_REPAIR_SYMBOLS {
+            quarter
+        } else {
+            MIN_REPAIR_SYMBOLS
+        };
+        let want = k.saturating_add(repair);
+        if want > MAX_SYMBOLS_PER_SEGMENT {
+            MAX_SYMBOLS_PER_SEGMENT
+        } else {
+            want
+        }
+    }
+
     fn code_object(bytes: &[u8]) -> Result<CodedObject, String> {
         let profile = Profile::P0;
         let limits = Bud3Limits::TESTNET_DEFAULT;
@@ -504,18 +549,20 @@ impl GardenContentStore {
         // from it: a codec may shrink the bytes and a header grows them, so
         // the source-symbol count `k` is only known inside. Guess from the
         // content, and when the guess is short the error carries the real
-        // `k`; the second call is then exact. The pipeline wants at least
-        // `k + 2` so every segment also carries repair symbols.
-        let guess = u32::try_from(bytes.len().div_ceil(usize::from(profile.symbol_size)))
+        // `k`; the second call is then exact.
+        //
+        // The guess is capped at the profile's `k_max` because the count is
+        // per segment, not per object. Guessing from the whole object asked
+        // a two segment object for twice the symbols it needed in every
+        // segment, which grew with the file.
+        let per_segment = u32::try_from(bytes.len().div_ceil(usize::from(profile.symbol_size)))
             .unwrap_or(profile.k_max)
-            .saturating_add(2);
+            .min(profile.k_max);
+        let guess = Self::with_repair(per_segment);
         let prepared = match prepare_public_upload(bytes, &profile, &limits, guess) {
-            Err(PipelineError::TooFewSymbols { k, .. }) => prepare_public_upload(
-                bytes,
-                &profile,
-                &limits,
-                k.saturating_add(2).min(MAX_SYMBOLS_PER_SEGMENT),
-            ),
+            Err(PipelineError::TooFewSymbols { k, .. }) => {
+                prepare_public_upload(bytes, &profile, &limits, Self::with_repair(k))
+            }
             first => first,
         }
         .map_err(|e| format!("garden object cannot be coded by B.U.D. 3.0: {e:?}"))?;
@@ -776,6 +823,60 @@ mod tests {
         )
         .unwrap();
         assert!(store.get(&id).is_none());
+    }
+
+    /// The point of coding an object is surviving the loss of pieces of
+    /// it. A segment used to be given `k + 2` symbols, so an object that
+    /// lost a third symbol was gone and the fountain code was decoration.
+    #[test]
+    fn an_object_survives_losing_an_eighth_of_its_symbols() {
+        let mut store = GardenContentStore::open(None, 1024 * 1024).unwrap();
+        let payload: Vec<u8> = (0..40_000u32)
+            .map(|i| u8::try_from(i % 251).unwrap_or_default())
+            .collect();
+        let id = store.put(&payload).unwrap();
+
+        let counts = store.part_counts();
+        assert!(
+            counts.symbols_repair > 0,
+            "a coding with no repair symbols is not a coding"
+        );
+        assert!(
+            counts.symbols_repair * 8 >= counts.symbols_made,
+            "repair symbols must be a real share of the symbols made: {} of {}",
+            counts.symbols_repair,
+            counts.symbols_made
+        );
+
+        let (record, symbols) = store.coded_parts(&id).expect("the object has a coding");
+        let made = symbols.len();
+        let kept: Vec<Symbol> = symbols
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| index % 8 != 0)
+            .map(|(_, symbol)| symbol)
+            .collect();
+        assert!(kept.len() < made, "the test must actually lose symbols");
+
+        let rebuilt = store
+            .rebuild_coded(&id, &record, kept)
+            .expect("the object rebuilds from what is left");
+        assert_eq!(rebuilt, payload);
+    }
+
+    /// The symbol count is per segment, not per object. Guessing it from
+    /// the whole object asked every segment of a multi-segment object for
+    /// as many symbols as the object had in total.
+    #[test]
+    fn the_symbol_count_a_segment_gets_does_not_grow_with_the_object() {
+        let small = GardenContentStore::with_repair(4);
+        let large = GardenContentStore::with_repair(4096);
+        assert_eq!(small, 12, "a small segment still gets the floor of eight");
+        assert_eq!(large, 5120, "a full segment gets a quarter again");
+        assert!(
+            large <= MAX_SYMBOLS_PER_SEGMENT,
+            "the ask must stay inside what the pipeline accepts"
+        );
     }
 
     /// The object is the recipe. Nothing under the store root may be the

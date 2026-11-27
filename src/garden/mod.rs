@@ -67,6 +67,10 @@ pub(crate) use types::is_garden_domain_id;
 /// # Errors
 ///
 /// Returns what failed, in words a person can read on a phone screen.
+///
+/// The object is coded, then an eighth of its symbols are thrown away and
+/// it is rebuilt from the rest. That is the claim B.U.D. 3.0 makes, and it
+/// is the only part of it worth testing.
 /// WIRING: wired - the caller is `mobile/garden-ffi`, the phone's UniFFI
 /// library, which runs this as the B.U.D. 3.0 step of the section 4 self
 /// test before a Garden is created or joined. That crate builds against
@@ -85,9 +89,28 @@ pub fn self_test_object_round_trip() -> Result<(), String> {
     let content_id = store
         .put(&object)
         .map_err(|e| format!("the object was not stored: {e}"))?;
+    let (record, symbols) = store
+        .coded_parts(&content_id)
+        .ok_or_else(|| "the object was stored without a B.U.D. 3.0 coding".to_string())?;
+    let made = symbols.len();
+    // Throw pieces away before asking for it back. Rebuilding an object
+    // from a complete set of symbols proves only that the coder can be
+    // run backwards; it is the missing pieces that the whole scheme is
+    // for, and a phone that cannot do this is not holding anything
+    // safely. Every eighth symbol goes, source symbols included.
+    let kept: Vec<_> = symbols
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| index % 8 != 0)
+        .map(|(_, symbol)| symbol)
+        .collect();
+    let lost = made.saturating_sub(kept.len());
+    if lost == 0 {
+        return Err("the coding produced too few symbols to lose any".into());
+    }
     let rebuilt = store
-        .get_coded(&content_id)
-        .ok_or_else(|| "the object did not come back from its coded symbols".to_string())?;
+        .rebuild_coded(&content_id, &record, kept)
+        .map_err(|e| format!("the object did not survive losing {lost} of {made} symbols: {e}"))?;
     if rebuilt != object {
         return Err(format!(
             "the object came back changed: {} bytes in, {} bytes out",
