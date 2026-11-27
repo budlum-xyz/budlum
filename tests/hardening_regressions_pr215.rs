@@ -1,7 +1,8 @@
 //! Regression integration tests for PR #215 (`testnet-50`) hardening fixes:
-//! 1. `pollen::offers::MarketplaceRegistry::create_offer`: fails closed at
-//!    `u64::MAX` (`checked_add(1)?`) without breaking counter expectations and
-//!    preserves any sentinel `u64::MAX` listing across `MAX_OFFERS` retention.
+//! 1. `pollen::offers::MarketplaceRegistry::create_offer`: saturates at
+//!    `u64::MAX` (`saturating_add(1)`), issues `u64::MAX` at most once, and
+//!    preserves any sentinel `u64::MAX` listing across `MAX_OFFERS` retention
+//!    so deactivation + eviction cannot re-issue `u64::MAX`.
 //! 2. `cross_domain::economic_guard::BridgeEconomicGuard::queue_large_withdrawal`:
 //!    fails closed when `next_withdrawal_nonce` reaches `u64::MAX` instead of
 //!    saturating and overwriting queued withdrawals.
@@ -40,9 +41,10 @@ const fn addr(b: u8) -> Address {
 }
 
 #[test]
-fn offers_u64_max_fails_closed_and_sentinel_preserved_across_retain() {
+fn offers_u64_max_is_issued_once_and_sentinel_preserved_across_retain() {
     let mut reg = MarketplaceRegistry::new();
     let seller = addr(1);
+    let rival = addr(2);
     let cid = ContentId([0xEE; 32]);
     reg.next_offer_id = u64::MAX - 1;
 
@@ -52,23 +54,22 @@ fn offers_u64_max_fails_closed_and_sentinel_preserved_across_retain() {
     );
     assert_eq!(id, u64::MAX - 1);
     assert_eq!(reg.next_offer_id, u64::MAX);
+
+    let last_id = must(
+        reg.create_offer(seller, cid, 50, 7),
+        "u64::MAX should be issued once before saturation blocks reuse",
+    );
+    assert_eq!(last_id, u64::MAX);
+    assert_eq!(reg.next_offer_id, u64::MAX);
     assert!(
-        reg.create_offer(seller, cid, 50, 7).is_err(),
-        "next_offer_id == u64::MAX must fail closed before overflow/saturation"
+        reg.create_offer(rival, cid, 50, 7).is_err(),
+        "saturated counter must refuse re-minting live u64::MAX"
     );
 
-    reg.offers.insert(
-        u64::MAX,
-        DataOffer {
-            id: u64::MAX,
-            seller,
-            cid,
-            price: 50,
-            active: false,
-            created_at_block: 7,
-        },
-    );
-    for i in 0..MAX_OFFERS {
+    if let Some(entry) = reg.offers.get_mut(&u64::MAX) {
+        entry.active = false;
+    }
+    for i in 0..(MAX_OFFERS - 1) {
         let oid = must(u64::try_from(i), "index fits u64");
         reg.offers.insert(
             oid,
@@ -77,14 +78,17 @@ fn offers_u64_max_fails_closed_and_sentinel_preserved_across_retain() {
                 seller,
                 cid,
                 price: 10,
-                active: i % 2 == 0,
+                active: false,
                 created_at_block: 1,
             },
         );
     }
-    reg.next_offer_id = 500_000;
-    let _ = reg.create_offer(seller, cid, 50, 8);
+    assert!(
+        reg.create_offer(rival, cid, 50, 8).is_err(),
+        "deactivated u64::MAX offer must survive eviction so u64::MAX is never re-issued"
+    );
     assert!(reg.offers.contains_key(&u64::MAX));
+    assert_eq!(reg.offers.get(&u64::MAX).map(|o| o.seller), Some(seller));
 }
 
 #[test]

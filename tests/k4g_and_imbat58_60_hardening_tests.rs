@@ -1,6 +1,6 @@
 use budlum_core::bns::registry::BnsRegistry;
 use budlum_core::core::address::Address;
-use budlum_core::pollen::offers::MarketplaceRegistry;
+use budlum_core::pollen::offers::{DataOffer, MarketplaceRegistry, MAX_OFFERS};
 use budlum_core::relayer::policy::{
     IntentSettlement, IntentSettlementStatus, RelayerPolicyRegistry,
     DEFAULT_SOLVER_CONCENTRATION_WARN_BPS,
@@ -166,14 +166,43 @@ fn imbat58_59_checked_counters_refuse_u64_max_overwrite_and_grace_overflow() {
         Err(SocialFiBud3Error::FolderLimitExceeded)
     );
 
-    // 2. Pollen MarketplaceRegistry refuses u64::MAX next_offer_id instead of saturating.
+    // 2. Pollen MarketplaceRegistry issues u64::MAX once, then refuses reuse even after eviction.
     let mut market = MarketplaceRegistry::new();
     market.next_offer_id = u64::MAX;
     let cid = ContentId([0x44; 32]);
-    let offer_err = market.create_offer(addr(0x22), cid, 1_000, 10);
+    let first_seller = addr(0x22);
+    let second_seller = addr(0x44);
+    assert_eq!(
+        market.create_offer(first_seller, cid, 1_000, 10),
+        Ok(u64::MAX)
+    );
     assert!(
-        offer_err.is_err(),
-        "u64::MAX next_offer_id must fail closed"
+        market.create_offer(second_seller, cid, 1_000, 10).is_err(),
+        "live u64::MAX offer must never be overwritten"
+    );
+    if let Some(last) = market.offers.get_mut(&u64::MAX) {
+        last.active = false;
+    }
+    for dummy_id in 0..((MAX_OFFERS - 1) as u64) {
+        market.offers.insert(
+            dummy_id,
+            DataOffer {
+                id: dummy_id,
+                seller: addr(0x55),
+                cid,
+                price: 100,
+                active: false,
+                created_at_block: 1,
+            },
+        );
+    }
+    assert!(
+        market.create_offer(second_seller, cid, 1_000, 10).is_err(),
+        "deactivated u64::MAX sentinel must survive eviction so u64::MAX cannot be re-minted"
+    );
+    assert_eq!(
+        market.offers.get(&u64::MAX).map(|o| o.seller),
+        Some(first_seller)
     );
 
     // 3. BNS renew refuses expires_at + GRACE_PERIOD overflow near u64::MAX.
