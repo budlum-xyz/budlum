@@ -2292,6 +2292,89 @@ impl IntakeState {
         Ok(hash_fields_bytes(&[b"BDLM_EXTERNAL_INTAKE_V1", &bytes]))
     }
 
+    /// The one object that stands for "everything this chain currently
+    /// believes about every domain it serves".
+    ///
+    /// `state_digest` answers a different question: it hashes the whole intake
+    /// (registrations, bonds, quorum rounds, admission reports) so two nodes
+    /// can tell whether they applied the same events. This answers the
+    /// *narrow* question a consumer actually asks - what is finalized, where,
+    /// and under which proof kind - and deliberately leaves out the
+    /// bookkeeping. One is a consistency check; this is a claim about the
+    /// world.
+    ///
+    /// # What it is not
+    ///
+    /// It is not a proof aggregator. A leaf's truth is still shown by that
+    /// domain's own finality proof; this root only says what the leaves are.
+    /// Calling it an aggregation layer would be wrong and would invite a trust
+    /// claim this function does not make.
+    ///
+    /// # Shape
+    ///
+    /// One leaf per **serving** domain, ordered by the `BTreeMap` key so two
+    /// nodes that applied the same events fold the same bytes:
+    ///
+    /// `H(domain_id ‖ adapter_version ‖ committed_height ‖ proof_kind ‖ last_backing)`
+    ///
+    /// plus the settlement's own anchor root as the final leaf, so the object
+    /// spans both what this chain anchors and what it reads from outside.
+    /// `proof_kind` travels *inside* the leaf on purpose: a PoW SPV leaf and a
+    /// BFT leaf sit in the same tree without pretending to be the same thing.
+    ///
+    /// # A domain that never accepted anything
+    ///
+    /// It contributes a leaf at height 0 with an empty backing rather than
+    /// being skipped. A domain that disappears from the root when it stalls
+    /// would let a consumer mistake "not serving yet" for "not registered";
+    /// presence is part of the claim.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the tree cannot be built (a zero digest or the
+    /// aggregator's own refusal), rather than substituting a constant.
+    pub fn unified_finality_root(
+        &self,
+        settlement_anchor_root: [u8; 32],
+    ) -> Result<[u8; 32], String> {
+        use crate::settlement::aggregate_finality_roots;
+
+        let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(self.entries.len() + 1);
+        for (key, entry) in &self.entries {
+            let Some(reg) = self.registry.domain(key) else {
+                // Registered in the intake but absent from the registry is a
+                // broken state, not an empty one; refuse rather than paper
+                // over it.
+                return Err(format!("intake entry {key:?} has no registry record"));
+            };
+            if !reg.record.state.serves() {
+                continue;
+            }
+            let record = &reg.record;
+            // The proof kind travels inside the leaf. `consensus_kind` is the
+            // adapter's own words for what it is reading and `finality_kind`
+            // is the finality it offers; together they keep a PoW SPV leaf and
+            // a BFT leaf distinguishable inside one tree.
+            let finality_kind = format!("{:?}", record.descriptor.finality_kind);
+            leaves.push(hash_fields_bytes(&[
+                b"BDLM_UFR_LEAF_V1",
+                key.0.as_slice(),
+                record.descriptor.id.as_bytes(),
+                record.descriptor.consensus_kind.as_bytes(),
+                finality_kind.as_bytes(),
+                &record.last_accepted_height.unwrap_or(0).to_be_bytes(),
+                &record.descriptor.adapter_version.to_be_bytes(),
+            ]));
+        }
+
+        // The settlement anchor is a leaf, not a prefix: a consumer verifying a
+        // path to this root learns the same way whether a fact came from an
+        // external domain or from this chain's own anchoring.
+        leaves.push(settlement_anchor_root);
+
+        aggregate_finality_roots(&leaves).map_err(|e| format!("unified finality root: {e}"))
+    }
+
     /// Constructs the node's production BLS verifier. One function, so the
     /// call sites (chain actor, RPC) cannot end up with two different pairing
     /// configurations for the same chain.
@@ -4878,6 +4961,39 @@ mod tests {
 
     /// A refusal that only counts its failures cannot be diagnosed from a
     /// log line; the error must name the probes that did not pass.
+    /// The unified root is deterministic and the anchor really enters it.
+    ///
+    /// Two claims, and they are the whole contract at the empty-intake end:
+    /// two nodes with the same intake and the same anchor fold the same root,
+    /// and a different anchor folds a different root - which is what makes the
+    /// settlement anchor a leaf rather than decoration.
+    #[test]
+    fn the_unified_finality_root_is_deterministic_and_binds_the_anchor() {
+        let intake = IntakeState::new();
+        let anchor_a = [0x11u8; 32];
+        let anchor_b = [0x22u8; 32];
+
+        let first = intake
+            .unified_finality_root(anchor_a)
+            .expect("empty intake still folds its anchor");
+        let again = intake
+            .unified_finality_root(anchor_a)
+            .expect("deterministic");
+        assert_eq!(first, again, "the same intake and anchor folded two roots");
+
+        let other = intake
+            .unified_finality_root(anchor_b)
+            .expect("a different anchor still folds");
+        assert_ne!(first, other, "the settlement anchor did not enter the root");
+
+        // A zero anchor is refused by the aggregator rather than folded into a
+        // root that pretends to speak for nothing.
+        assert!(
+            intake.unified_finality_root([0u8; 32]).is_err(),
+            "a zero settlement anchor was accepted"
+        );
+    }
+
     #[test]
     fn a_refused_admission_names_its_failing_probes() {
         use crate::cross_domain::external::selftest::{AdmissionReport, ProbeOutcome, RefusalKind};
