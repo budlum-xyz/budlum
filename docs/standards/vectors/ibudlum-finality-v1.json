@@ -1,0 +1,209 @@
+{
+  "domain_tag": "bud-attestation-v1",
+  "encoding": {
+    "attestation_digest": "keccak256(abi.encode(tag:string, height:uint64, stateRoot:bytes32, epoch:uint64, chainId:uint64, 5 x keccak256(bytes):bytes32, mlDsaEthVariant:bool))",
+    "note": "abi.encode widens every static argument to a 32-byte word and puts a dynamic string's data in the tail at its head offset; standard 3 packs integers at their own width. The two standards are NOT interchangeable.",
+    "signing_root": "keccak256(bytes.concat(\"bud-finality-signing-root-v1\", bytes32(block.chainid), bytes8(height), stateRoot, bytes8(epoch), bytes8(chainId)))"
+  },
+  "negative": [
+    {
+      "a": "bd217653928d5c96e5b4e0d155aae525481e4b02fce42ee1adea95e7552a814c",
+      "b": "2906fe8076360766ece8525dbe5f5c245ac4d99c111cfed68316fd561c71df93",
+      "basis": "signing_root",
+      "mutate": {
+        "host_chain_id": 1
+      },
+      "name": "host_chainid_changes_signing_root_only",
+      "same_attestation_digest": "7a9c6134ca0b6df115501563c05449c7e9580d8ec6cec166b28471cf14580ae3",
+      "why_rejected": "signingRoot binds block.chainid (the host), attestationDigest binds only Budlum's chainId: the same attestation may be recorded in two verifiers, its signature may not be replayed on two hosts"
+    },
+    {
+      "a": "7a9c6134ca0b6df115501563c05449c7e9580d8ec6cec166b28471cf14580ae3",
+      "b": "e0118c33c0df432175b2c9927afca2bfe4e75df0a1eb14090497e7941d5321b6",
+      "basis": "attestation_digest",
+      "mutate": {
+        "chainId": 45262
+      },
+      "name": "budlum_chainid_change_changes_both",
+      "why_rejected": "a wrong budlumChainId must be distinguishable, not silently reused"
+    },
+    {
+      "a": "7a9c6134ca0b6df115501563c05449c7e9580d8ec6cec166b28471cf14580ae3",
+      "b": "e3fe654da7dc354eed913244c127c7b37b2da95faebc499f74673b3a4e380b13",
+      "basis": "attestation_digest",
+      "mutate": {
+        "mlDsaEthVariant": true
+      },
+      "name": "variant_flag_changes_digest",
+      "why_rejected": "ML-DSA context binding is a security parameter; two variants sharing a digest would let one signature be claimed for both"
+    }
+  ],
+  "positive": [
+    {
+      "expected": {
+        "digest": "7a9c6134ca0b6df115501563c05449c7e9580d8ec6cec166b28471cf14580ae3",
+        "preimage": "000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000000110000000000000000000000000000000000000000000000000000000000000009000000000000000000000000000000000000000000000000000000000000b0cd5068f71b4deceba704fcbf1ffa71509083006005d64f4487febe41a511002d3c852debb548fb40c5335e799cc715f1a7e9f7d3b116a2ae3b7997dd259df3077a0898bb80d067582e5b768536fa77e57e2a0905b05002c76db2c112c71d05564b10ad851181da968ccafe0c0b57271ea7072e0e058bd4a066095b9046bc7ac932d3fca89cbcb40746409ed4384a8e6cae2c8614e777a11939d754682916ce9d41000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000126275642d6174746573746174696f6e2d76310000000000000000000000000000"
+      },
+      "input": {
+        "chainId": 45261,
+        "epoch": 9,
+        "g1NegSignature": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+        "g2AggregatePubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "g2Generator": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+        "height": 1234,
+        "mlDsaEthVariant": false,
+        "mlDsaPubkey": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+        "mlDsaSignature": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+        "stateRoot": "0000000000000000000000000000000000000000000000000000000000000011"
+      },
+      "name": "attestation_digest"
+    },
+    {
+      "expected": {
+        "digest": "e3fe654da7dc354eed913244c127c7b37b2da95faebc499f74673b3a4e380b13",
+        "preimage": "000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000004d200000000000000000000000000000000000000000000000000000000000000110000000000000000000000000000000000000000000000000000000000000009000000000000000000000000000000000000000000000000000000000000b0cd5068f71b4deceba704fcbf1ffa71509083006005d64f4487febe41a511002d3c852debb548fb40c5335e799cc715f1a7e9f7d3b116a2ae3b7997dd259df3077a0898bb80d067582e5b768536fa77e57e2a0905b05002c76db2c112c71d05564b10ad851181da968ccafe0c0b57271ea7072e0e058bd4a066095b9046bc7ac932d3fca89cbcb40746409ed4384a8e6cae2c8614e777a11939d754682916ce9d41000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000126275642d6174746573746174696f6e2d76310000000000000000000000000000"
+      },
+      "input": {
+        "chainId": 45261,
+        "epoch": 9,
+        "g1NegSignature": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+        "g2AggregatePubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "g2Generator": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+        "height": 1234,
+        "mlDsaEthVariant": true,
+        "mlDsaPubkey": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+        "mlDsaSignature": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+        "stateRoot": "0000000000000000000000000000000000000000000000000000000000000011"
+      },
+      "name": "attestation_digest_pq_variant_on"
+    },
+    {
+      "expected": {
+        "digest": "fea0f820ddb6ff40b2c9dedb5746ee038977544d389491f5281033a3a7a98801",
+        "preimage": "000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000004d20000000000000000000000000000000000000000000000000000000000000011000000000000000000000000000000000000000000000000000000000000001a6275642d6174746573746174696f6e2d70656e64696e672d7631000000000000"
+      },
+      "input": {
+        "height": 1234,
+        "stateRoot": "0000000000000000000000000000000000000000000000000000000000000011"
+      },
+      "name": "pending_identity"
+    },
+    {
+      "expected": {
+        "digest": "bd217653928d5c96e5b4e0d155aae525481e4b02fce42ee1adea95e7552a814c",
+        "preimage": "6275642d66696e616c6974792d7369676e696e672d726f6f742d76310000000000000000000000000000000000000000000000000000000000aa36a700000000000004d200000000000000000000000000000000000000000000000000000000000000110000000000000009000000000000b0cd"
+      },
+      "input": {
+        "att": {
+          "chainId": 45261,
+          "epoch": 9,
+          "g1NegSignature": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+          "g2AggregatePubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "g2Generator": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+          "height": 1234,
+          "mlDsaEthVariant": false,
+          "mlDsaPubkey": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+          "mlDsaSignature": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+          "stateRoot": "0000000000000000000000000000000000000000000000000000000000000011"
+        },
+        "host_chain_id": 11155111
+      },
+      "name": "signing_root"
+    }
+  ],
+  "solidity": {
+    "declarations": [
+      {
+        "canonical_signature": "rootAtHeight(uint64)",
+        "declaration": "function rootAtHeight(uint64 height) external view returns (bytes32);",
+        "file": "contracts/external-domain/BudlumFinalityVerifier.sol",
+        "line": 16,
+        "selector": "0xe695796c"
+      },
+      {
+        "canonical_signature": "heightFinal(uint64)",
+        "declaration": "function heightFinal(uint64 height) external view returns (bool);",
+        "file": "contracts/external-domain/BudlumFinalityVerifier.sol",
+        "line": 17,
+        "selector": "0xbafa9edb"
+      },
+      {
+        "canonical_signature": "latestFinalHeight()",
+        "declaration": "function latestFinalHeight() external view returns (uint64);",
+        "file": "contracts/external-domain/BudlumFinalityVerifier.sol",
+        "line": 18,
+        "selector": "0x8931c55e"
+      },
+      {
+        "canonical_signature": "finalityModeAtHeight(uint64)",
+        "declaration": "function finalityModeAtHeight(uint64 height) external view returns (FinalityMode);",
+        "file": "contracts/external-domain/BudlumFinalityVerifier.sol",
+        "line": 19,
+        "selector": "0xef30003e"
+      },
+      {
+        "canonical_signature": "pendingIdentity(uint64,bytes32)",
+        "declaration": "function pendingIdentity(uint64 height, bytes32 stateRoot) public pure returns (bytes32) {",
+        "file": "contracts/external-domain/BudlumFinalityVerifier.sol",
+        "line": 205,
+        "selector": "0x7bf6f9bb"
+      },
+      {
+        "canonical_signature": "attestationDigest(tuple(uint64,bytes32,uint64,uint64,bytes,bytes,bytes,bytes,bytes,bool))",
+        "declaration": "function attestationDigest(Attestation calldata a) public pure returns (bytes32) {",
+        "file": "contracts/external-domain/BudlumFinalityVerifier.sol",
+        "line": 209,
+        "selector": "0xc360fe9d"
+      },
+      {
+        "canonical_signature": "signingRoot(tuple(uint64,bytes32,uint64,uint64,bytes,bytes,bytes,bytes,bytes,bool))",
+        "declaration": "function signingRoot(Attestation calldata a) public view returns (bytes32) {",
+        "file": "contracts/external-domain/BudlumFinalityVerifier.sol",
+        "line": 227,
+        "selector": "0x183da6d6"
+      },
+      {
+        "canonical_signature": "finalityModeAtHeight(uint64)",
+        "declaration": "function finalityModeAtHeight(uint64 height) external view returns (FinalityMode);",
+        "file": "contracts/object-layer/BudlumFinalityVerifier.sol",
+        "line": 23,
+        "selector": "0xef30003e"
+      },
+      {
+        "canonical_signature": "heightFinal(uint64)",
+        "declaration": "function heightFinal(uint64 height) external view returns (bool);",
+        "file": "contracts/object-layer/BudlumFinalityVerifier.sol",
+        "line": 27,
+        "selector": "0xbafa9edb"
+      },
+      {
+        "canonical_signature": "heightFinal(uint64)",
+        "declaration": "function heightFinal(uint64 height)",
+        "file": "contracts/object-layer/BudlumFinalityVerifier.sol",
+        "line": 84,
+        "selector": "0xbafa9edb"
+      },
+      {
+        "canonical_signature": "finalityModeAtHeight(uint64)",
+        "declaration": "function finalityModeAtHeight(uint64 height) external view override returns (FinalityMode) {",
+        "file": "contracts/object-layer/BudlumFinalityVerifier.sol",
+        "line": 93,
+        "selector": "0xef30003e"
+      }
+    ],
+    "declared_selector": {
+      "attestationDigest": "0xc360fe9d",
+      "finalityModeAtHeight": "0xef30003e",
+      "heightFinal": "0xbafa9edb",
+      "latestFinalHeight": "0x8931c55e",
+      "pendingIdentity": "0x7bf6f9bb",
+      "rootAtHeight": "0xe695796c",
+      "signingRoot": "0x183da6d6"
+    },
+    "note": "selectors are derived from these declarations, not transcribed; a struct parameter appears in canonical form as the tuple of its member types, so reordering `Attestation`'s fields changes `attestationDigest`'s selector and every caller's ABI",
+    "source_files": [
+      "contracts/external-domain/BudlumFinalityVerifier.sol",
+      "contracts/object-layer/BudlumFinalityVerifier.sol"
+    ]
+  }
+}
