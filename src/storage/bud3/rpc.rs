@@ -27,6 +27,7 @@ use super::upload::UploadSessionManager;
 use super::view::{
     fallback_decode_public, NetworkSymbolSource, PaidViewReceipt, RevealSessionManager,
 };
+use crate::storage::bud3::upload::UploadError;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -127,6 +128,62 @@ impl Default for Bud3RpcService {
 }
 
 impl Bud3RpcService {
+    /// Open an upload session without a placement context.
+    ///
+    /// `handle` takes a placement row, a candidate set and a symbol source
+    /// because `bud_storageUploadFinish` needs all three. Opening a session
+    /// needs none of them: it admits a declared length against the gateway,
+    /// account, per-IP and daily limits and returns an id. Exposing that
+    /// separately is what lets a running node serve the method at all - the
+    /// generic dispatcher is reachable only from `Blockchain`, which the RPC
+    /// layer cannot borrow across an await point.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`UploadSessionManager::open_session`] refuses.
+    pub fn open_upload(
+        &mut self,
+        account: Address,
+        ip_bucket: [u8; 16],
+        declared_len: u64,
+        raw_flags: u8,
+        lifetime_epochs: u64,
+        pre_sealed: bool,
+        now_sec: u64,
+    ) -> Result<u64, UploadError> {
+        self.uploads.open_session(
+            (account, ip_bucket),
+            declared_len,
+            raw_flags,
+            lifetime_epochs,
+            pre_sealed,
+            now_sec,
+        )
+    }
+
+    /// Append a chunk to an open session.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`UploadSessionManager::append_chunk`] refuses.
+    pub fn append_upload(
+        &mut self,
+        session_id: u64,
+        chunk: &[u8],
+        now_sec: u64,
+    ) -> Result<u64, UploadError> {
+        self.uploads.append_chunk(session_id, chunk, now_sec)
+    }
+
+    /// The per-client upload bucket `handle` derives for an account.
+    ///
+    /// # Errors
+    ///
+    /// If the account is malformed or the params carry a bad `ip_key`.
+    pub fn upload_bucket(params: &Value, account: &Address) -> Result<[u8; 16], String> {
+        upload_client_bucket(params, account)
+    }
+
     /// Dispatch a Section 6.22.2 `bud_storage*` JSON-RPC request.
     ///
     /// # Errors

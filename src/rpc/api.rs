@@ -1475,6 +1475,27 @@ pub trait BudlumApi {
     /// B.U.D. 3.0 object record by commitment (hex). Reads the chain actor's
     /// state-rooted registry; returns null only when that live registry has no
     /// object. An unavailable actor is an explicit RPC error.
+    /// Open a B.U.D. 3.0 streaming upload session.
+    ///
+    /// The three upload methods were named in `BUD3_RPC_METHODS`, implemented
+    /// in `Bud3RpcService::handle`, and constructed by nothing but tests. A
+    /// node could serve back every byte it already held and could not accept
+    /// a new one. Open and Append need no placement context, so they are
+    /// reachable now; Finish needs the placement row a block supplies and
+    /// stays with the block that supplies it.
+    #[method(name = "bud_storageUploadOpen")]
+    async fn storage_upload_open(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Append one chunk of hex bytes to an open upload session.
+    #[method(name = "bud_storageUploadAppend")]
+    async fn storage_upload_append(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     #[method(name = "bud_storageGetObject")]
     async fn storage_get_object(
         &self,

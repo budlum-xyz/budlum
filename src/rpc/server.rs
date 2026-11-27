@@ -713,6 +713,16 @@ pub struct RpcServer {
     /// The Garden of this node. Both listeners share one service, and every
     /// `bud_garden*` method is answered on the operator listener only.
     garden: Arc<crate::garden::GardenService>,
+    /// The B.U.D. 3.0 storage endpoint: upload sessions, reveal sessions and
+    /// the per-peer symbol limiter.
+    ///
+    /// This existed, fully written, and only tests ever constructed it. The
+    /// three methods that put bytes into the network -
+    /// `bud_storageUploadOpen`, `bud_storageUploadAppend`,
+    /// `bud_storageUploadFinish` - were therefore served by no running node,
+    /// while the eight that read, grant and reveal were: the storage layer
+    /// could give back what it already had and could not take anything new.
+    bud3_rpc: Arc<tokio::sync::Mutex<crate::storage::bud3::rpc::Bud3RpcService>>,
 }
 
 const MAX_CONSUMED_PAID_VIEWS: usize = 65_536;
@@ -1002,6 +1012,9 @@ impl RpcServer {
     pub fn new(chain: ChainHandle, node: NodeClient) -> Self {
         Self {
             garden: Arc::new(crate::garden::GardenService::new(Some(chain.clone()), None)),
+            bud3_rpc: Arc::new(tokio::sync::Mutex::new(
+                crate::storage::bud3::rpc::Bud3RpcService::default(),
+            )),
             chain,
             node,
             security: RpcSecurityConfig::default(),
@@ -1025,6 +1038,9 @@ impl RpcServer {
     ) -> Self {
         Self {
             garden: Arc::new(crate::garden::GardenService::new(Some(chain.clone()), None)),
+            bud3_rpc: Arc::new(tokio::sync::Mutex::new(
+                crate::storage::bud3::rpc::Bud3RpcService::default(),
+            )),
             chain,
             node,
             security,
@@ -1049,6 +1065,9 @@ impl RpcServer {
     ) -> Self {
         Self {
             garden: Arc::new(crate::garden::GardenService::new(Some(chain.clone()), None)),
+            bud3_rpc: Arc::new(tokio::sync::Mutex::new(
+                crate::storage::bud3::rpc::Bud3RpcService::default(),
+            )),
             chain,
             node,
             security,
@@ -9456,6 +9475,86 @@ impl BudlumApiServer for RpcServer {
             .validator_directory(crate::validators::DirectoryQuery::One(owner))
             .await
             .map_err(|_| validator_directory_unavailable())
+    }
+
+    async fn storage_upload_open(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::storage::bud3::rpc::Bud3RpcService;
+
+        let account = parse_hex32_field(
+            params
+                .get("account")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ErrorObjectOwned::owned(-32602, "missing `account`", None::<()>))?,
+            "account",
+        )?;
+        let declared_len = params
+            .get("declared_len")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| ErrorObjectOwned::owned(-32602, "missing `declared_len`", None::<()>))?;
+        let raw_flags = u8::try_from(
+            params
+                .get("flags")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        )
+        .map_err(|_| ErrorObjectOwned::owned(-32602, "invalid `flags`", None::<()>))?;
+        let lifetime_epochs = params
+            .get("lifetime_epochs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(100);
+        let pre_sealed = params
+            .get("pre_sealed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let bucket = Bud3RpcService::upload_bucket(&params, &account)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+
+        let mut service = self.bud3_rpc.lock().await;
+        let session_id = service
+            .open_upload(
+                account,
+                bucket,
+                declared_len,
+                raw_flags,
+                lifetime_epochs,
+                pre_sealed,
+                now,
+            )
+            .map_err(|e| ErrorObjectOwned::owned(-32000, format!("{e:?}"), None::<()>))?;
+        Ok(serde_json::json!({ "session_id": session_id }))
+    }
+
+    async fn storage_upload_append(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let session_id = params
+            .get("session_id")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| ErrorObjectOwned::owned(-32602, "missing `session_id`", None::<()>))?;
+        let chunk_hex = params
+            .get("chunk_hex")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ErrorObjectOwned::owned(-32602, "missing `chunk_hex`", None::<()>))?;
+        let chunk =
+            hex::decode(chunk_hex.strip_prefix("0x").unwrap_or(chunk_hex)).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("invalid `chunk_hex`: {e}"), None::<()>)
+            })?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+
+        let mut service = self.bud3_rpc.lock().await;
+        let received = service
+            .append_upload(session_id, &chunk, now)
+            .map_err(|e| ErrorObjectOwned::owned(-32000, format!("{e:?}"), None::<()>))?;
+        Ok(serde_json::json!({ "session_id": session_id, "received_len": received }))
     }
 
     async fn storage_get_object(

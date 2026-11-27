@@ -279,6 +279,11 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_getStatus", Public, Read),
     row("bud_getValidatorSet", Public, Read),
     row("bud_getValidator", Public, Read),
+    // Uploads write node-local session state, not chain state, but they admit
+    // bytes into the network and spend the node's disk, so they sit with the
+    // other node-local storage endpoints rather than in the public reads.
+    row("bud_storageUploadOpen", Public, LocalAdmin),
+    row("bud_storageUploadAppend", Public, LocalAdmin),
     row("bud_storageGetObject", Public, Read),
     row("bud_storageGetCustody", Public, Read),
     row("bud_storageGetContent", Public, LocalAdmin),
