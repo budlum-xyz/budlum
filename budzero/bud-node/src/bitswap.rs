@@ -343,30 +343,32 @@ impl BudBitswap {
 
 /// Encode a Bitswap request to bytes.
 pub fn encode_request(req: &BitswapRequest) -> Result<Vec<u8>, CodecError> {
+    if req.want_cid == ContentId([0u8; 32]) {
+        return Err(CodecError::Serialize(String::from(
+            "all-zero want_cid is invalid",
+        )));
+    }
     let bytes = bincode::serialize(req).map_err(|e| CodecError::Serialize(e.to_string()))?;
-    if bytes.len() > MAX_MESSAGE_SIZE {
+    if bytes.len() > MAX_REQUEST_BYTES {
         return Err(CodecError::TooLarge {
             size: bytes.len(),
-            max: MAX_MESSAGE_SIZE,
+            max: MAX_REQUEST_BYTES,
         });
     }
     Ok(bytes)
 }
 
-/// The bincode reader for peer input: the byte cap alone is not enough,
-/// because the default deserializer trusts a collection length prefix and
-/// reserves that much before reading a single element. With the limit the
-/// reservation is bounded by the bytes that can actually follow.
-fn bounded_bincode() -> impl bincode::Options {
+/// The bincode reader for peer input: bounds collection pre-allocation to the
+/// actual wire slice length (`<= MAX_MESSAGE_SIZE`) and refuses trailing bytes.
+fn bounded_bincode(wire_len: usize) -> impl bincode::Options {
     use bincode::Options;
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
-        .allow_trailing_bytes()
-        .with_limit(MAX_MESSAGE_SIZE as u64)
+        .reject_trailing_bytes()
+        .with_limit(wire_len.min(MAX_MESSAGE_SIZE) as u64)
 }
 
-/// Decode a Bitswap request from bytes. Trailing bytes are refused: a request
-/// has exactly one encoding.
+/// Decode a Bitswap request from bytes. Trailing bytes and zero CIDs are refused.
 pub fn decode_request(bytes: &[u8]) -> Result<BitswapRequest, CodecError> {
     use bincode::Options;
     if bytes.len() > MAX_REQUEST_BYTES {
@@ -375,16 +377,27 @@ pub fn decode_request(bytes: &[u8]) -> Result<BitswapRequest, CodecError> {
             max: MAX_REQUEST_BYTES,
         });
     }
-    bincode::DefaultOptions::new()
+    let req: BitswapRequest = bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .reject_trailing_bytes()
-        .with_limit(MAX_REQUEST_BYTES as u64)
+        .with_limit(bytes.len() as u64)
         .deserialize(bytes)
-        .map_err(|e| CodecError::Deserialize(e.to_string()))
+        .map_err(|e| CodecError::Deserialize(e.to_string()))?;
+    if req.want_cid == ContentId([0u8; 32]) {
+        return Err(CodecError::Deserialize(String::from(
+            "all-zero want_cid is invalid",
+        )));
+    }
+    Ok(req)
 }
 
 /// Encode a Bitswap response to bytes.
 pub fn encode_response(resp: &BitswapResponse) -> Result<Vec<u8>, CodecError> {
+    if resp.not_found && !resp.data.is_empty() {
+        return Err(CodecError::Serialize(String::from(
+            "not_found response cannot carry payload bytes",
+        )));
+    }
     let bytes = bincode::serialize(resp).map_err(|e| CodecError::Serialize(e.to_string()))?;
     if bytes.len() > MAX_MESSAGE_SIZE {
         return Err(CodecError::TooLarge {
@@ -404,9 +417,15 @@ pub fn decode_response(bytes: &[u8]) -> Result<BitswapResponse, CodecError> {
             max: MAX_MESSAGE_SIZE,
         });
     }
-    bounded_bincode()
+    let resp: BitswapResponse = bounded_bincode(bytes.len())
         .deserialize(bytes)
-        .map_err(|e| CodecError::Deserialize(e.to_string()))
+        .map_err(|e| CodecError::Deserialize(e.to_string()))?;
+    if resp.not_found && !resp.data.is_empty() {
+        return Err(CodecError::Deserialize(String::from(
+            "not_found response cannot carry payload bytes",
+        )));
+    }
+    Ok(resp)
 }
 
 #[cfg(test)]
@@ -617,5 +636,30 @@ mod tests {
         .unwrap();
         assert_eq!(decoded.cid, cid);
         assert_eq!(counter.load(Ordering::Acquire), 0);
+
+        // Trailing bytes on BitswapResponse, non-empty data with not_found=true, and zero want_cid must fail.
+        let mut trailing = wire.clone();
+        trailing.push(0xFF);
+        assert!(
+            decode_response(&trailing).is_err(),
+            "BitswapResponse with trailing bytes must be refused"
+        );
+        let bad_not_found = bincode::serialize(&BitswapResponse {
+            cid,
+            data: vec![0x11; 64],
+            not_found: true,
+        })
+        .unwrap();
+        assert!(
+            decode_response(&bad_not_found).is_err(),
+            "not_found=true carrying payload bytes must be refused"
+        );
+        assert!(
+            encode_request(&BitswapRequest {
+                want_cid: ContentId([0u8; 32]),
+            })
+            .is_err(),
+            "all-zero want_cid BitswapRequest must be refused"
+        );
     }
 }

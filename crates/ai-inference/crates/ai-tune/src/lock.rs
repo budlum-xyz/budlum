@@ -28,6 +28,9 @@ pub fn lock_output(manifest: &LoRaManifest) -> OutputLock {
 ///
 /// If the digest or the model_id does not match.
 pub fn verify_lock(lock: &OutputLock, manifest: &LoRaManifest) -> Result<(), String> {
+    if lock.model_id == ModelId([0u8; 32]) || lock.manifest_digest == [0u8; 32] {
+        return Err("output lock carries a zero model_id or manifest_digest".to_string());
+    }
     if lock.manifest_digest != manifest.digest() {
         return Err("the output lock does not match the manifest digest".to_string());
     }
@@ -73,5 +76,12 @@ mod tests {
         let mut other_dtype = m.clone();
         other_dtype.dtype = ai_core::manifest::AdapterDtype::Fp16;
         assert!(verify_lock(&lock, &other_dtype).is_err());
+
+        let zero_manifest = LoRaManifest::new(ModelId([0u8; 32]), 16, 32);
+        let zero_lock = lock_output(&zero_manifest);
+        assert!(
+            verify_lock(&zero_lock, &zero_manifest).is_err(),
+            "zero base_model OutputLock must be refused"
+        );
     }
 }

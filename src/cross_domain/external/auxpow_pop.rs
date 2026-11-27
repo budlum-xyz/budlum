@@ -1378,7 +1378,11 @@ impl ExternalFinalityAdapter for AuxPowPopAdapter {
 
     fn has_pinned_trust_anchor(&self) -> bool {
         self.pinned.as_ref().is_some_and(|p| {
-            p.aux_chain_id >= 1 && p.trusted_parent_hash != [0u8; 32] && p.min_confirmations >= 1
+            p.aux_chain_id >= 1
+                && !bool::from(p.trusted_parent_hash.ct_eq(&[0u8; 32]))
+                && p.min_confirmations >= 1
+                && expand_compact_bits(p.max_target_bits).is_ok()
+                && (p.pop_signers.is_empty() || index_pop_signers(&p.pop_signers).is_ok())
         })
     }
 
@@ -1404,6 +1408,7 @@ impl ExternalFinalityAdapter for AuxPowPopAdapter {
     }
 
     fn fault_probes(&self) -> Vec<FaultProbe> {
+        const PARENT0_MERKLE_ROOT_OFFSET: usize = 208;
         let sig_tail = self
             .golden
             .as_ref()
@@ -1413,11 +1418,39 @@ impl ExternalFinalityAdapter for AuxPowPopAdapter {
             .as_ref()
             .and_then(|g| g.payload.get(8).copied())
             .map_or(0xFE, |b| b ^ 0xFF);
-        let flipped_sig = self
-            .golden
+        let tail_probe = if self
+            .pinned
             .as_ref()
-            .and_then(|g| g.payload.get(sig_tail).copied())
-            .map_or(0xCA, |b| b ^ 0xFF);
+            .is_some_and(|p| p.pop_signers.is_empty())
+        {
+            let flipped_mr = self
+                .golden
+                .as_ref()
+                .and_then(|g| g.payload.get(PARENT0_MERKLE_ROOT_OFFSET).copied())
+                .map_or(0xCA, |b| b ^ 0xFF);
+            FaultProbe {
+                name: "refuses corrupted parent coinbase merkle_root".into(),
+                patch: BytePatch::InPayload {
+                    offset: PARENT0_MERKLE_ROOT_OFFSET,
+                    bytes: vec![flipped_mr],
+                },
+                expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
+            }
+        } else {
+            let flipped_sig = self
+                .golden
+                .as_ref()
+                .and_then(|g| g.payload.get(sig_tail).copied())
+                .map_or(0xCA, |b| b ^ 0xFF);
+            FaultProbe {
+                name: "refuses corrupted PoP anchor signature".into(),
+                patch: BytePatch::InPayload {
+                    offset: sig_tail,
+                    bytes: vec![flipped_sig],
+                },
+                expect: ExpectedRefusal::Kind(RefusalKind::Crypto),
+            }
+        };
         vec![
             FaultProbe {
                 name: "refuses unsupported auxpow-pop evidence version".into(),
@@ -1457,14 +1490,7 @@ impl ExternalFinalityAdapter for AuxPowPopAdapter {
                 },
                 expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
             },
-            FaultProbe {
-                name: "refuses corrupted PoP anchor signature".into(),
-                patch: BytePatch::InPayload {
-                    offset: sig_tail,
-                    bytes: vec![flipped_sig],
-                },
-                expect: ExpectedRefusal::Kind(RefusalKind::Crypto),
-            },
+            tail_probe,
             FaultProbe {
                 name: "refuses truncated auxpow-pop payload".into(),
                 patch: BytePatch::TruncatePayload { keep: 4 },

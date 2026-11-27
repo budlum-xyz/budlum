@@ -102,6 +102,9 @@ impl SessionTracker {
 
     /// Updates the session state from an incoming message.
     pub fn observe(&mut self, item: &serde_json::Value) {
+        if self.state == ConnState::Failed {
+            return;
+        }
         let kind = item.get("T").and_then(serde_json::Value::as_str);
         if kind == Some("error") {
             self.state = ConnState::Failed;
@@ -181,5 +184,19 @@ mod tests {
         let mut tracker = SessionTracker::new();
         tracker.observe(&serde_json::json!({"T": "success", "msg": "connected"}));
         assert_eq!(tracker.state(), ConnState::Connected);
+    }
+
+    #[test]
+    fn failed_session_is_terminal_until_fresh_tracker() {
+        let mut tracker = SessionTracker::new();
+        tracker.observe(&serde_json::json!({"T": "error", "msg": "auth failed"}));
+        assert_eq!(tracker.state(), ConnState::Failed);
+        tracker.observe(&serde_json::json!({"T": "success", "msg": "connected"}));
+        tracker.observe(&serde_json::json!({"T": "success", "msg": "authenticated"}));
+        assert_eq!(
+            tracker.state(),
+            ConnState::Failed,
+            "Failed session must not resurrect on the same socket without a reconnect"
+        );
     }
 }

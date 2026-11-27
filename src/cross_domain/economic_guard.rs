@@ -1920,7 +1920,9 @@ impl BridgeEconomicGuard {
                     }
                 });
         let nonce = self.next_withdrawal_nonce;
-        self.next_withdrawal_nonce = self.next_withdrawal_nonce.saturating_add(1);
+        let next_withdrawal_nonce = nonce.checked_add(1).ok_or_else(|| {
+            EconomicGuardError::InvalidPolicy("withdrawal nonce counter exhausted".into())
+        })?;
         let withdrawal_id = hash_fields_bytes(&[
             b"BDLM_ECON_GUARD_TIMELOCK_WD_V1",
             &domain_id.to_le_bytes(),
@@ -1929,6 +1931,10 @@ impl BridgeEconomicGuard {
             &current_height.to_le_bytes(),
             &nonce.to_le_bytes(),
         ]);
+        if self.queued_withdrawals.contains_key(&withdrawal_id) {
+            return Err(EconomicGuardError::DuplicateEvidence(withdrawal_id));
+        }
+        self.next_withdrawal_nonce = next_withdrawal_nonce;
         let queued = QueuedBridgeWithdrawal {
             withdrawal_id,
             domain_id,

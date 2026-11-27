@@ -39,11 +39,21 @@ fn strip_hex_prefix(address_hex: &str) -> &str {
         .unwrap_or(address_hex)
 }
 
-/// A JSON-RPC 2.0 request body. `params` is a JSON array, written as text.
+/// A JSON-RPC 2.0 request body. `params` must be a valid JSON array; malformed
+/// or non-array text is normalized to `[]` so injected properties can never
+/// escape into the outer JSON-RPC envelope.
 #[must_use]
 pub fn request(method: &str, params: &str, id: u64) -> String {
     let safe_method = json_escape_str(method);
-    format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"{safe_method}\",\"params\":{params}}}")
+    let safe_params = match serde_json::from_str::<serde_json::Value>(params) {
+        Ok(val) if val.is_array() => {
+            serde_json::to_string(&val).unwrap_or_else(|_| String::from("[]"))
+        }
+        _ => String::from("[]"),
+    };
+    format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"{safe_method}\",\"params\":{safe_params}}}"
+    )
 }
 
 /// `bud_chainId`.
@@ -518,5 +528,12 @@ mod tests {
         let ctrl_body = get_balance("0xab\u{0000}cd");
         assert!(ctrl_body.contains("\\u0000"));
         assert!(serde_json::from_str::<serde_json::Value>(&ctrl_body).is_ok());
+
+        // 10. rpc::request must never allow raw `params` text to inject sibling JSON-RPC fields.
+        let injected_req = request("bud_getBalance", "[],\"method\":\"bud_evil\"", 7);
+        let parsed_req: serde_json::Value =
+            serde_json::from_str(&injected_req).expect("request must always emit valid JSON");
+        assert_eq!(parsed_req["method"], "bud_getBalance");
+        assert!(!injected_req.contains("\"method\":\"bud_evil\""));
     }
 }

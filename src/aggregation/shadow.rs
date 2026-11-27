@@ -4,9 +4,10 @@
 //! verification and aggregation claim derivation without altering block
 //! validity, publishing frames, or changing consensus rules.
 //!
-//! WIRING: Node shadow-mode block hooks invoke `ShadowAuditor::audit_block`
-//! when `AggParams::mode == AggMode::Shadow` to verify zero divergence across
-//! live blocks before flipping a network to `AggMode::On`.
+//! WIRING: `Blockchain::aggregation_after_commit` invokes
+//! `ShadowAuditor::audit_block_in` when `AggParams::mode == AggMode::Shadow`
+//! to verify zero divergence across committed blocks before flipping a
+//! network to `AggMode::On`.
 
 use super::chain::{account_claim, claim_domain, claim_signature};
 use super::object::derive_claim;
@@ -59,7 +60,8 @@ impl ShadowAuditor {
         &self.report
     }
 
-    /// Audits one block without affecting consensus.
+    /// Audits one block against the registry snapshot captured at construction
+    /// without affecting consensus.
     ///
     /// Returns `Ok(true)` if every transaction in `block` matched between
     /// native signature verification (including `tx.chain_id == block.chain_id`)
@@ -71,7 +73,33 @@ impl ShadowAuditor {
     ///
     /// Returns an error if `block.chain_id` does not fit a `DomainId`.
     pub fn audit_block(&mut self, block: &Block) -> Result<bool, String> {
-        if self.params.mode != AggMode::Shadow {
+        Self::audit_block_with(&mut self.report, &self.params, block, &self.registry)
+    }
+
+    /// Audits one block against the caller's live `SchemeStatusRegistry`
+    /// without affecting consensus.
+    ///
+    /// Preferred over [`Self::audit_block`] on long-lived node instances whose
+    /// scheme status ladder advances across blocks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `block.chain_id` does not fit a `DomainId`.
+    pub fn audit_block_in(
+        &mut self,
+        block: &Block,
+        registry: &SchemeStatusRegistry,
+    ) -> Result<bool, String> {
+        Self::audit_block_with(&mut self.report, &self.params, block, registry)
+    }
+
+    fn audit_block_with(
+        report: &mut ShadowReport,
+        params: &AggParams,
+        block: &Block,
+        registry: &SchemeStatusRegistry,
+    ) -> Result<bool, String> {
+        if params.mode != AggMode::Shadow {
             return Ok(true);
         }
         let domain = claim_domain(block.chain_id)
@@ -86,21 +114,26 @@ impl ShadowAuditor {
             if !is_inline_v5 {
                 continue;
             }
-            self.report.txs_checked = self.report.txs_checked.saturating_add(1);
-            let matched = self.audit_tx(tx, block.chain_id, domain);
+            report.txs_checked = report.txs_checked.saturating_add(1);
+            let matched = Self::audit_tx_in(tx, block.chain_id, domain, registry);
             if matched {
-                self.report.matches = self.report.matches.saturating_add(1);
+                report.matches = report.matches.saturating_add(1);
             } else {
-                self.report.mismatches = self.report.mismatches.saturating_add(1);
+                report.mismatches = report.mismatches.saturating_add(1);
                 all_matched = false;
             }
         }
-        self.report.blocks_audited = self.report.blocks_audited.saturating_add(1);
+        report.blocks_audited = report.blocks_audited.saturating_add(1);
         Ok(all_matched)
     }
 
-    fn audit_tx(&self, tx: &Transaction, block_chain_id: u64, domain: DomainId) -> bool {
-        let native_ok = tx.chain_id == block_chain_id && tx.verify_in(&self.registry);
+    fn audit_tx_in(
+        tx: &Transaction,
+        block_chain_id: u64,
+        domain: DomainId,
+        registry: &SchemeStatusRegistry,
+    ) -> bool {
+        let native_ok = tx.chain_id == block_chain_id && tx.verify_in(registry);
         let agg_ok = claim_signature(tx).is_some_and(|(claimed, env)| {
             if env.domain != domain || !claimed.claimed_shape_is_canonical() {
                 return false;
@@ -112,7 +145,7 @@ impl ShadowAuditor {
             if claimed.auth_claim != Some(expected_digest) {
                 return false;
             }
-            derive_claim(&self.registry, &env).is_ok_and(|derived| {
+            derive_claim(registry, &env).is_ok_and(|derived| {
                 derived == expected && derived.digest(domain) == expected_digest
             })
         });

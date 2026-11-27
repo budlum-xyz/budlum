@@ -52,6 +52,8 @@ pub enum StripeError {
     WeightOverflow,
     /// Two entries name the same device.
     DuplicateDevice,
+    /// An uninitialized all-zero content-addressed device id was supplied.
+    ZeroDeviceId,
 }
 
 impl std::fmt::Display for StripeError {
@@ -62,6 +64,7 @@ impl std::fmt::Display for StripeError {
             Self::NoUsableDevice => write!(f, "staging: no device measured usable bandwidth"),
             Self::WeightOverflow => write!(f, "staging: measured weights overflow"),
             Self::DuplicateDevice => write!(f, "staging: a device is listed more than once"),
+            Self::ZeroDeviceId => write!(f, "staging: all-zero device id is invalid"),
         }
     }
 }
@@ -102,6 +105,9 @@ pub fn stripe_plan(len: u64, devices: &[StorageDevice]) -> Result<Vec<StripeChun
         return Err(StripeError::NoDevice);
     }
 
+    if devices.iter().any(|dev| dev.id == [0u8; 32]) {
+        return Err(StripeError::ZeroDeviceId);
+    }
     let mut seen = std::collections::BTreeSet::new();
     if !devices.iter().all(|dev| seen.insert(dev.id)) {
         return Err(StripeError::DuplicateDevice);
@@ -179,8 +185,8 @@ pub struct DeviceProbe {
 impl DeviceProbe {
     /// A device whose probe came back empty is not a usable staging device.
     #[must_use]
-    pub const fn is_usable(&self) -> bool {
-        self.measured_kib_s > 0
+    pub fn is_usable(&self) -> bool {
+        self.measured_kib_s > 0 && self.device.id != [0u8; 32]
     }
 
     /// The weight a stripe plan should use for this device: the measured
@@ -346,5 +352,21 @@ mod staging_tests {
         assert!(good.is_usable());
         assert!(!bad.is_usable());
         assert_eq!(good.weight_kib_s(), 6400);
+    }
+
+    #[test]
+    fn all_zero_device_id_is_refused_in_stripe_plan_and_probe() {
+        assert!(
+            stripe_plan(1024, &[dev(0, 100), dev(1, 100)]).is_err(),
+            "all-zero StorageDevice id must be refused"
+        );
+        let zero_probe = DeviceProbe {
+            device: dev(0, 100),
+            measured_kib_s: 6400,
+        };
+        assert!(
+            !zero_probe.is_usable(),
+            "probe for all-zero device id must not be usable"
+        );
     }
 }
