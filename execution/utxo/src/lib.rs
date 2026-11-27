@@ -204,6 +204,13 @@ fn eval_script(
     gas_limit: u64,
     host: &mut dyn HostApi,
 ) -> Result<(), Vec<u8>> {
+    // BIP-62 SCRIPT_VERIFY_SIGPUSHONLY: spend witnesses may push data only.
+    if !unlock_ops
+        .iter()
+        .all(|op| matches!(op, ScriptOp::PushBytes(_) | ScriptOp::PushNum(_)))
+    {
+        return Err(b"UTXO unlock_ops must be push-only".to_vec());
+    }
     let mut stack: Vec<Vec<u8>> = Vec::new();
     for op in unlock_ops.iter().chain(lock_ops.iter()) {
         let Some(next) = gas_used.checked_add(250) else {
@@ -299,6 +306,18 @@ fn eval_script(
                 {
                     return Err(b"invalid multisig threshold".to_vec());
                 }
+                // Charge ECDSA verification gas proportional to the pubkey set
+                // before parsing or verifying secp256k1 points.
+                let sig_gas = u64::try_from(pubkeys.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(3_000);
+                let Some(next_sig_gas) = gas_used.checked_add(sig_gas) else {
+                    return Err(b"OUT_OF_GAS".to_vec());
+                };
+                if next_sig_gas > gas_limit || host.charge(sig_gas).is_err() {
+                    return Err(b"OUT_OF_GAS".to_vec());
+                }
+                *gas_used = next_sig_gas;
                 // Parse every key and deduplicate on canonical 33-byte compressed SEC1
                 // form so one private key cannot be listed twice in compressed and
                 // uncompressed encodings to bypass an M-of-N threshold.
@@ -358,6 +377,10 @@ fn eval_script(
     };
     if !is_truthy(&top) {
         return Err(b"UTXO script top-of-stack false".to_vec());
+    }
+    // BIP-141 SCRIPT_VERIFY_CLEANSTACK: exactly one truthy item may remain.
+    if !stack.is_empty() {
+        return Err(b"UTXO script must leave a clean stack".to_vec());
     }
     Ok(())
 }
@@ -558,6 +581,13 @@ impl ExecutionEnvironment for UtxoScriptWorker {
                 gas_used,
             });
         };
+        if witness.recipient == [0u8; 32] {
+            return Ok(EeOutcome {
+                status: OutcomeStatus::Revert,
+                output: b"UTXO recipient cannot be zero".to_vec(),
+                gas_used,
+            });
+        }
 
         let sighash =
             utxo_multisig_sighash(&call.tx_hash, &utxo_id, &call.caller.id, &witness.recipient);
