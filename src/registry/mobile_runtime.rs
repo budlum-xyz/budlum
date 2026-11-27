@@ -63,6 +63,9 @@ pub const MOBILE_ONBOARDING_MIN_STAKE_ATOMS: u64 = 10_000_000;
 /// Domain tag committing an operator-key rotation (`RotateOperatorKey`, `R-16`).
 pub const DOMAIN_ROTATE_OPERATOR_KEY: &[u8] = b"BDLM_MOBILE_ROTATE_OPERATOR_V1";
 
+/// Maximum distinct objects held by one Mobile validator controller.
+const MAX_MOBILE_HELD_OBJECTS: usize = 65_536;
+
 /// Mobile validator execution class across Android and iOS (Section 7.9 & Section 7.10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MobileValidatorClass {
@@ -129,6 +132,10 @@ pub enum MobileRuntimeError {
     BackgroundConstraintViolation(&'static str),
     /// Two APK builds differed in byte length or SHA-256 digest.
     NonReproducibleApk,
+    /// Policy parameter violated valid bounds (for example `min_battery_percent > 100`).
+    InvalidPolicy(&'static str),
+    /// Share assignment violated lifecycle phase, uniqueness, or size invariants.
+    InvalidShareAssignment(&'static str),
 }
 
 impl std::fmt::Display for MobileRuntimeError {
@@ -151,6 +158,8 @@ impl std::fmt::Display for MobileRuntimeError {
             Self::NonReproducibleApk => {
                 f.write_str("independent Android APK builds are not byte-for-byte identical")
             }
+            Self::InvalidPolicy(msg) => write!(f, "invalid mobile policy: {msg}"),
+            Self::InvalidShareAssignment(msg) => write!(f, "invalid share assignment: {msg}"),
         }
     }
 }
@@ -216,6 +225,11 @@ impl MobileValidatorPolicy {
         }
         if !self.wifi_only && self.daily_cellular_cap_mib == 0 {
             return Err(MobileRuntimeError::MeteredCapRequired);
+        }
+        if self.min_battery_percent > 100 {
+            return Err(MobileRuntimeError::InvalidPolicy(
+                "min_battery_percent cannot exceed 100",
+            ));
         }
         let max = self.class.max_quota_bytes();
         if self.quota_bytes < MOBILE_MIN_QUOTA_BYTES || self.quota_bytes > max {
@@ -351,9 +365,19 @@ impl MobileKeystoreState {
         new_operator_pk: &[u8],
         epoch: u64,
     ) -> Result<[u8; 32], MobileRuntimeError> {
-        if new_operator_pk.is_empty() {
+        if self.owner_address == Address::zero() {
             return Err(MobileRuntimeError::InsecureKeyWrapping(
-                "new operator public key cannot be empty",
+                "owner_address cannot be zero",
+            ));
+        }
+        if epoch <= self.rotation_epoch {
+            return Err(MobileRuntimeError::InsecureKeyWrapping(
+                "rotation_epoch must strictly advance",
+            ));
+        }
+        if new_operator_pk.is_empty() || new_operator_pk.iter().all(|&b| b == 0) {
+            return Err(MobileRuntimeError::InsecureKeyWrapping(
+                "new operator public key cannot be empty or all-zero",
             ));
         }
         let next_digest = hash_fields_bytes(&[
@@ -401,6 +425,25 @@ pub struct MobileValidatorController {
     pub disclosure_accepted: bool,
 }
 
+fn is_safe_no_backup_storage_dir(class: MobileValidatorClass, path: &str) -> bool {
+    if !path.starts_with('/') || path.contains('\0') || path.contains('\\') {
+        return false;
+    }
+    if path
+        .split('/')
+        .skip(1)
+        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
+        return false;
+    }
+    match class {
+        MobileValidatorClass::AndroidMobile => path.ends_with("/noBackupFilesDir/bud3"),
+        MobileValidatorClass::MobileOpportunistic => {
+            path.ends_with("/ApplicationSupport/bud3-nobackup")
+        }
+    }
+}
+
 impl MobileValidatorController {
     /// Complete onboarding -> registration flow (Section 7.9.9 items 1, 2, 5).
     /// exposed for Android/iOS onboarding controller and emulator tests.
@@ -423,11 +466,9 @@ impl MobileValidatorController {
                 "user must accept storage share & encrypted sealed-content disclosure",
             ));
         }
-        if !storage_dir_no_backup.ends_with("noBackupFilesDir/bud3")
-            && !storage_dir_no_backup.ends_with("ApplicationSupport/bud3-nobackup")
-        {
+        if !is_safe_no_backup_storage_dir(policy.class, &storage_dir_no_backup) {
             return Err(MobileRuntimeError::IncompleteOnboarding(
-                "share directory must reside under cloud-excluded noBackupFilesDir/bud3",
+                "share directory must be a canonical absolute cloud-excluded noBackup path matching validator class",
             ));
         }
         if staked_atoms < MOBILE_ONBOARDING_MIN_STAKE_ATOMS {
@@ -453,14 +494,54 @@ impl MobileValidatorController {
     ///
     /// # Errors
     ///
-    /// Returns [`MobileRuntimeError::QuotaOutOfBounds`] if accepting `bytes` exceeds quota.
+    /// Returns [`MobileRuntimeError::InvalidShareAssignment`] or
+    /// [`MobileRuntimeError::QuotaOutOfBounds`] if lifecycle, key/size,
+    /// uniqueness, capacity, or quota checks fail.
     pub fn accept_share(
         &mut self,
         object: ObjectKey,
         bytes: u64,
     ) -> Result<(), MobileRuntimeError> {
-        let used: u64 = self.held_objects.iter().map(|(_, b)| *b).sum();
-        let next = used.saturating_add(bytes);
+        if self.phase != MobileLifecyclePhase::Registered {
+            return Err(MobileRuntimeError::InvalidShareAssignment(
+                "mobile validator must be in Registered phase to accept shares",
+            ));
+        }
+        if object == [0u8; 32] {
+            return Err(MobileRuntimeError::InvalidShareAssignment(
+                "object key cannot be zero",
+            ));
+        }
+        if bytes == 0 {
+            return Err(MobileRuntimeError::InvalidShareAssignment(
+                "share size must be non-zero",
+            ));
+        }
+        if self.held_objects.len() >= MAX_MOBILE_HELD_OBJECTS {
+            return Err(MobileRuntimeError::InvalidShareAssignment(
+                "held_objects capacity ceiling reached",
+            ));
+        }
+        if self
+            .held_objects
+            .iter()
+            .any(|(existing, _)| *existing == object)
+        {
+            return Err(MobileRuntimeError::InvalidShareAssignment(
+                "duplicate object share assignment",
+            ));
+        }
+        let used: u64 = self
+            .held_objects
+            .iter()
+            .fold(0u64, |acc, (_, b)| acc.saturating_add(*b));
+        let next = used
+            .checked_add(bytes)
+            .ok_or(MobileRuntimeError::QuotaOutOfBounds {
+                got: u64::MAX,
+                min: MOBILE_MIN_QUOTA_BYTES,
+                max: self.policy.quota_bytes,
+            })?;
         if next > self.policy.quota_bytes {
             return Err(MobileRuntimeError::QuotaOutOfBounds {
                 got: next,
@@ -821,6 +902,106 @@ mod tests {
         assert_eq!(
             verify_reproducible_apk_builds(apk_a, b"PK\x03\x04different"),
             Err(MobileRuntimeError::NonReproducibleApk)
+        );
+    }
+
+    #[test]
+    fn wave4_mobile_keystore_rejects_non_monotonic_rotation_epoch_zero_owner_and_zero_key() {
+        let mut ks = valid_keystore();
+        ks.rotate_operator_key(&[0x99; 64], 7).unwrap();
+        assert!(
+            ks.rotate_operator_key(&[0xAA; 64], 7).is_err(),
+            "same rotation_epoch replay must be rejected"
+        );
+        assert!(
+            ks.rotate_operator_key(&[0xBB; 64], 3).is_err(),
+            "rollback rotation_epoch must be rejected"
+        );
+        assert!(
+            ks.rotate_operator_key(&[0u8; 64], 8).is_err(),
+            "all-zero operator public key must be rejected"
+        );
+        let mut zero_owner = valid_keystore();
+        zero_owner.owner_address = Address::zero();
+        assert!(
+            zero_owner.rotate_operator_key(&[0xCC; 64], 1).is_err(),
+            "zero owner_address rotation must be rejected"
+        );
+    }
+
+    #[test]
+    fn wave4_mobile_controller_rejects_post_leave_zero_byte_duplicate_and_zero_key_shares() {
+        let mut ctrl = MobileValidatorController::complete_onboarding_and_register(
+            MobileValidatorPolicy::android_default(),
+            valid_keystore(),
+            String::from("/data/user/0/xyz.budlum.validator/noBackupFilesDir/bud3"),
+            100_000_000,
+            true,
+        )
+        .unwrap();
+
+        assert!(
+            ctrl.accept_share([0u8; 32], 1024).is_err(),
+            "zero ObjectKey must be rejected"
+        );
+        assert!(
+            ctrl.accept_share([1u8; 32], 0).is_err(),
+            "zero-byte share must be rejected to block unbounded held_objects spam"
+        );
+        ctrl.accept_share([1u8; 32], 1024).unwrap();
+        assert!(
+            ctrl.accept_share([1u8; 32], 1024).is_err(),
+            "duplicate ObjectKey share must be rejected"
+        );
+
+        let _ = ctrl.leave_and_unbond();
+        assert!(
+            ctrl.accept_share([2u8; 32], 1024).is_err(),
+            "accept_share after leave_and_unbond must be rejected"
+        );
+    }
+
+    #[test]
+    fn wave4_mobile_onboarding_rejects_path_traversal_relative_path_and_invalid_battery_policy() {
+        assert!(
+            MobileValidatorController::complete_onboarding_and_register(
+                MobileValidatorPolicy::android_default(),
+                valid_keystore(),
+                String::from("/data/../../sdcard/noBackupFilesDir/bud3"),
+                100_000_000,
+                true,
+            )
+            .is_err(),
+            "path traversal in storage_dir_no_backup must be rejected"
+        );
+        assert!(
+            MobileValidatorController::complete_onboarding_and_register(
+                MobileValidatorPolicy::android_default(),
+                valid_keystore(),
+                String::from("noBackupFilesDir/bud3"),
+                100_000_000,
+                true,
+            )
+            .is_err(),
+            "relative storage_dir_no_backup path must be rejected"
+        );
+        assert!(
+            MobileValidatorController::complete_onboarding_and_register(
+                MobileValidatorPolicy::android_default(),
+                valid_keystore(),
+                String::from("/var/mobile/Containers/Data/ApplicationSupport/bud3-nobackup"),
+                100_000_000,
+                true,
+            )
+            .is_err(),
+            "Android class with iOS storage path must be rejected"
+        );
+
+        let mut bad_policy = MobileValidatorPolicy::android_default();
+        bad_policy.min_battery_percent = 101;
+        assert!(
+            bad_policy.validate().is_err(),
+            "min_battery_percent > 100 must be rejected"
         );
     }
 }

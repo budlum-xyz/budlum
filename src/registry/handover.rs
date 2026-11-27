@@ -45,6 +45,9 @@ pub const FINALITY_STALL_RECOVERY_BLOCKS: u64 = 40;
 /// Maximum per-validator seat share cap (`floor(S / 4)`, 25%).
 pub const MAX_VALIDATOR_SEAT_FRACTION_DENOM: usize = 4;
 
+/// Maximum queued omitted presence aggregates retained before evicting oldest.
+const MAX_PENDING_PRESENCE_AGGREGATES: usize = 1_024;
+
 /// Every duty governed by Section 7.6 Instant Task Handover (AGD).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum HandoverDutyKind {
@@ -126,7 +129,8 @@ impl HandoverCoordinator {
         if proposers.is_empty() {
             return None;
         }
-        let idx = usize::try_from(height.saturating_add(round) % (proposers.len() as u64)).ok()?;
+        let len = u128::try_from(proposers.len()).ok()?;
+        let idx = usize::try_from((u128::from(height) + u128::from(round)) % len).ok()?;
         proposers.get(idx).copied()
     }
 
@@ -151,11 +155,11 @@ impl HandoverCoordinator {
             let misses = self.consecutive_seat_misses.entry(*slot).or_insert(0);
             *misses = misses.saturating_add(1);
             if *misses >= SEAT_ABSENCE_HANDOVER_CHECKPOINTS {
-                if let Some(replacement) = standby_queue
-                    .iter()
-                    .copied()
-                    .find(|cand| !active_snapshot.contains(cand) && !used_standbys.contains(cand))
-                {
+                if let Some(replacement) = standby_queue.iter().copied().find(|cand| {
+                    *cand != Address::zero()
+                        && !active_snapshot.contains(cand)
+                        && !used_standbys.contains(cand)
+                }) {
                     let departed = *slot;
                     *slot = replacement;
                     self.consecutive_seat_misses.remove(&departed);
@@ -194,7 +198,9 @@ impl HandoverCoordinator {
             .iter()
             .filter(|sh| {
                 let addr = Address::from(sh.validator);
-                presence.state_of(&addr).is_some_and(|st| st.suspended)
+                presence
+                    .state_of(&addr)
+                    .is_some_and(|st| st.suspended || st.slashed_double_sign)
             })
             .copied()
             .collect()
@@ -260,7 +266,23 @@ impl HandoverCoordinator {
         aggregate: PresenceAggregate,
         proposer_included: bool,
     ) -> Vec<PresenceAggregate> {
-        self.pending_presence_aggregates.push(aggregate);
+        if let Some(existing) = self
+            .pending_presence_aggregates
+            .iter_mut()
+            .find(|a| a.window == aggregate.window && a.class == aggregate.class)
+        {
+            *existing = aggregate;
+        } else {
+            if self.pending_presence_aggregates.len() >= MAX_PENDING_PRESENCE_AGGREGATES {
+                let excess = self
+                    .pending_presence_aggregates
+                    .len()
+                    .saturating_sub(MAX_PENDING_PRESENCE_AGGREGATES)
+                    .saturating_add(1);
+                self.pending_presence_aggregates.drain(..excess);
+            }
+            self.pending_presence_aggregates.push(aggregate);
+        }
         if proposer_included {
             std::mem::take(&mut self.pending_presence_aggregates)
         } else {
@@ -296,16 +318,21 @@ impl HandoverCoordinator {
         new_finalized_height: Option<u64>,
         checkpoint_interval: u64,
     ) {
+        if height < self.latest_height || epoch < self.current_epoch {
+            return;
+        }
         self.latest_height = height;
         self.current_epoch = epoch;
         let stall_blocks = 8u64.saturating_mul(checkpoint_interval.max(1));
         if let Some(fin) = new_finalized_height {
-            if fin > self.finalized_height {
-                self.finalized_height = fin;
-            }
-            if height.saturating_sub(self.finalized_height) < stall_blocks {
-                self.recovery_mode = RecoveryMode::Normal;
-                return;
+            if fin <= height {
+                if fin > self.finalized_height {
+                    self.finalized_height = fin;
+                }
+                if height.saturating_sub(self.finalized_height) < stall_blocks {
+                    self.recovery_mode = RecoveryMode::Normal;
+                    return;
+                }
             }
         }
         if matches!(self.recovery_mode, RecoveryMode::Normal)
@@ -345,15 +372,20 @@ impl HandoverCoordinator {
         if !self.can_recompute_recovery_committee(next_epoch) {
             return None;
         }
+        let mut seen = BTreeSet::new();
         let eligible: Vec<Address> = candidates
             .iter()
             .copied()
             .filter(|addr| {
-                presence.state_of(addr).is_some_and(|st| {
-                    st.class == PresenceClass::Full
-                        && !st.suspended
-                        && next_epoch.saturating_sub(st.last_seen_epoch) <= recent_horizon_epochs
-                })
+                *addr != Address::zero()
+                    && seen.insert(*addr)
+                    && presence.state_of(addr).is_some_and(|st| {
+                        st.class == PresenceClass::Full
+                            && !st.suspended
+                            && !st.slashed_double_sign
+                            && next_epoch.saturating_sub(st.last_seen_epoch)
+                                <= recent_horizon_epochs
+                    })
             })
             .collect();
         if eligible.is_empty() {
@@ -770,5 +802,146 @@ mod tests {
         let recovered = sim.run_blocks(25);
         assert!(recovered.checkpoints_finalized > 0);
         assert_eq!(sim.coordinator.budlum_finality_stalled(), 0);
+    }
+
+    #[test]
+    fn wave4_handover_rejects_slashed_duplicate_and_zero_validators_in_recovery_committee() {
+        let mut presence = PresenceTracker::new(3, 10);
+        let v1 = Address::from([0x11; 32]);
+        let v2 = Address::from([0x22; 32]);
+        presence.register_validator(v1, PresenceClass::Full, 100_000, 0);
+        presence.register_validator(v2, PresenceClass::Full, 100_000, 0);
+        // Construct a PresenceTracker where v2 is flagged slashed_double_sign = true
+        // (even with suspended = false) via serde round-trip, keeping the test
+        // independent of private fields.
+        let mut raw = serde_json::to_value(&presence).unwrap();
+        if let Some(map) = raw.get_mut("validators").and_then(|v| v.as_object_mut()) {
+            let v2_key = serde_json::to_string(&v2).unwrap();
+            let trimmed = v2_key.trim_matches('"');
+            if let Some(entry) = map.get_mut(trimmed).and_then(|v| v.as_object_mut()) {
+                entry.insert(
+                    String::from("slashed_double_sign"),
+                    serde_json::Value::Bool(true),
+                );
+                entry.insert(String::from("suspended"), serde_json::Value::Bool(false));
+            }
+        }
+        let presence: PresenceTracker = serde_json::from_value(raw).unwrap();
+        assert!(presence.state_of(&v2).unwrap().slashed_double_sign);
+        assert!(!presence.state_of(&v2).unwrap().suspended);
+
+        let mut coord = HandoverCoordinator::new();
+        coord.observe_block_at_interval(40, 0, None, 5);
+        assert!(matches!(coord.recovery_mode, RecoveryMode::Recovery { .. }));
+
+        let poisoned_candidates = [Address::zero(), v1, v1, v1, v2];
+        assert_eq!(
+            coord.compute_recovery_committee(1, &poisoned_candidates, &presence, 2),
+            Some(vec![v1]),
+            "recovery committee must deduplicate and exclude slashed and zero-address candidates"
+        );
+        assert!(
+            coord
+                .compute_recovery_committee(1, &[Address::zero(), v2], &presence, 2)
+                .is_none(),
+            "recovery committee must return None when only slashed or zero candidates exist"
+        );
+
+        let shares = [Share {
+            validator: [0x22; 32],
+            class: Class::Full,
+            first_esi: 0,
+            symbols: 4,
+        }];
+        let needing = HandoverCoordinator::shares_needing_durability_handover(&shares, &presence);
+        assert_eq!(
+            needing.len(),
+            1,
+            "slashed validator shares must be flagged for durability handover"
+        );
+    }
+
+    #[test]
+    fn wave4_handover_rejects_future_finalized_height_and_u64_max_proposer_stall() {
+        let mut coord = HandoverCoordinator::new();
+        coord.observe_block_at_interval(40, 1, None, 5);
+        assert_eq!(coord.budlum_finality_stalled(), 1);
+
+        // An impossible future finalized height (> block height) must NOT exit recovery
+        // or poison finalized_height to u64::MAX.
+        coord.observe_block_at_interval(41, 1, Some(u64::MAX), 5);
+        assert!(
+            coord.finalized_height <= 41,
+            "future finalized height poisoned finalized_height={}",
+            coord.finalized_height
+        );
+        assert_eq!(
+            coord.budlum_finality_stalled(),
+            1,
+            "future finalized height prematurely exited recovery mode"
+        );
+
+        // Stale height/epoch observations must not roll back coordinator cursors.
+        coord.observe_block_at_interval(10, 0, None, 5);
+        assert_eq!(coord.latest_height, 41);
+        assert_eq!(coord.current_epoch, 1);
+
+        // Round-robin proposer handover must still rotate at height = u64::MAX.
+        let proposers = [
+            Address::from([1u8; 32]),
+            Address::from([2u8; 32]),
+            Address::from([3u8; 32]),
+        ];
+        let r0 = HandoverCoordinator::proposer_for_round(&proposers, u64::MAX, 0).unwrap();
+        let r1 = HandoverCoordinator::proposer_for_round(&proposers, u64::MAX, 1).unwrap();
+        assert_ne!(r0, r1, "proposer_for_round stalled at height=u64::MAX");
+
+        // Zero standby address must never take over an active finality seat.
+        let mut active = [Address::from([1u8; 32]), Address::from([2u8; 32])];
+        let participated: BTreeSet<Address> = [Address::from([1u8; 32])].into_iter().collect();
+        let standby = [Address::zero(), Address::from([9u8; 32])];
+        let _ = coord.record_checkpoint_participation(&mut active, &participated, &standby);
+        let _ = coord.record_checkpoint_participation(&mut active, &participated, &standby);
+        assert!(
+            !active.contains(&Address::zero()),
+            "zero standby address took over an active finality seat"
+        );
+        assert_eq!(active[1], Address::from([9u8; 32]));
+    }
+
+    #[test]
+    fn wave4_handover_bounds_pending_presence_aggregates_and_deduplicates_windows() {
+        let mut coord = HandoverCoordinator::new();
+        for w in 0..1_100u64 {
+            let agg = PresenceAggregate {
+                window: w,
+                class: PresenceClass::Mobile,
+                bitmap: vec![0x01],
+                aggregate_sig: vec![0x11; 48],
+            };
+            let _ = coord.on_presence_window_ready(agg, false);
+        }
+        // Duplicate an existing recent window.
+        let dup = PresenceAggregate {
+            window: 1_099,
+            class: PresenceClass::Mobile,
+            bitmap: vec![0x03],
+            aggregate_sig: vec![0x22; 48],
+        };
+        let _ = coord.on_presence_window_ready(dup, false);
+
+        let flushed = coord.flush_pending_presence_aggregates();
+        assert!(
+            flushed.len() <= 1_024,
+            "pending_presence_aggregates grew unboundedly to {}",
+            flushed.len()
+        );
+        let unique: BTreeSet<(u64, PresenceClass)> =
+            flushed.iter().map(|a| (a.window, a.class)).collect();
+        assert_eq!(
+            unique.len(),
+            flushed.len(),
+            "duplicate (window, class) aggregates were queued"
+        );
     }
 }

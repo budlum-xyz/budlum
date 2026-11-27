@@ -23,6 +23,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// Default deduplication window size (number of recent message hashes to keep).
 pub const DEFAULT_DEDUP_WINDOW: usize = 10_000;
 
+/// Hard upper bound on `window_size` to prevent OOM pre-allocation.
+const MAX_DEDUP_WINDOW: usize = 1_000_000;
+
 /// Maximum number of peers whose scores are retained.
 ///
 /// # Why the score table needs a ceiling
@@ -118,12 +121,18 @@ impl PeerScore {
     fn recover_duplicates(&mut self, now: std::time::Instant) {
         if let Some(last) = self.last_duplicate_at {
             let secs = now.saturating_duration_since(last).as_secs_f64();
-            let back = (secs * DUPLICATE_RECOVERY_PER_SEC).min(self.duplicate_penalty);
-            self.score += back;
-            self.duplicate_penalty -= back;
-            self.duplicate_count = self.duplicate_count.saturating_sub(secs as u64);
+            if secs.is_finite() && secs >= 0.0 {
+                let back = (secs * DUPLICATE_RECOVERY_PER_SEC).min(self.duplicate_penalty);
+                self.score = (self.score + back).clamp(-100.0, MAX_PEER_SCORE);
+                self.duplicate_penalty = (self.duplicate_penalty - back).max(0.0);
+                self.duplicate_count = self.duplicate_count.saturating_sub(secs as u64);
+            }
         }
         self.last_duplicate_at = Some(now);
+    }
+
+    fn is_auto_banned(&self) -> bool {
+        self.duplicate_count >= MAX_DUPLICATE_COUNT || self.score <= MIN_PEER_SCORE
     }
 
     #[must_use]
@@ -175,11 +184,12 @@ impl GossipDedup {
     #[must_use]
     pub fn new(window_size: usize) -> Self {
         // A zero window would never evict: the set would grow without bound and the
-        // utilization ratio would divide by zero.
-        let window_size = window_size.max(1);
+        // utilization ratio would divide by zero. Cap upper bound to prevent OOM.
+        let window_size = window_size.clamp(1, MAX_DEDUP_WINDOW);
+        let init_cap = window_size.min(DEFAULT_DEDUP_WINDOW);
         Self {
-            seen_set: HashSet::with_capacity(window_size),
-            seen_order: VecDeque::with_capacity(window_size),
+            seen_set: HashSet::with_capacity(init_cap),
+            seen_order: VecDeque::with_capacity(init_cap),
             window_size,
             peer_scores: HashMap::new(),
             disconnected_order: VecDeque::new(),
@@ -196,14 +206,19 @@ impl GossipDedup {
         let hash = hash_message(message_bytes);
 
         if self.seen_set.contains(&hash) {
-            // Duplicate - record on peer score
-            self.total_duplicates += 1;
+            // Duplicate - record on peer score. Only charge `duplicate_penalty`
+            // for the actual clamped delta applied to `score`, so flooding
+            // duplicates at the -100.0 floor can never accumulate phantom
+            // recovery credit that launders invalid-message penalties or farms
+            // positive reputation.
+            self.total_duplicates = self.total_duplicates.saturating_add(1);
             let score = self.peer_scores.entry(*peer).or_default();
             score.recover_duplicates(std::time::Instant::now());
-            score.score += SCORE_DUPLICATE;
-            score.duplicate_penalty -= SCORE_DUPLICATE;
-            score.duplicate_count += 1;
-            score.score = score.score.clamp(-100.0, MAX_PEER_SCORE);
+            let before = score.score;
+            score.score = (score.score + SCORE_DUPLICATE).clamp(-100.0, MAX_PEER_SCORE);
+            let actual_penalty = (before - score.score).max(0.0);
+            score.duplicate_penalty += actual_penalty;
+            score.duplicate_count = score.duplicate_count.saturating_add(1);
             self.enforce_score_ceiling();
             return DedupResult::Duplicate;
         }
@@ -216,7 +231,7 @@ impl GossipDedup {
         }
         self.seen_set.insert(hash);
         self.seen_order.push_back(hash);
-        self.total_processed += 1;
+        self.total_processed = self.total_processed.saturating_add(1);
 
         DedupResult::New
     }
@@ -237,17 +252,17 @@ impl GossipDedup {
     pub fn record_valid(&mut self, peer: &libp2p::PeerId, timestamp_ms: u64) {
         let score = self.peer_scores.entry(*peer).or_default();
         score.score += SCORE_VALID_MESSAGE;
-        score.valid_count += 1;
+        score.valid_count = score.valid_count.saturating_add(1);
 
-        // Timely bonus
-        if score.last_message_at > 0 {
-            let gap = timestamp_ms.saturating_sub(score.last_message_at);
+        // Timely bonus requires a monotonic timestamp within the propagation window.
+        if score.last_message_at > 0 && timestamp_ms >= score.last_message_at {
+            let gap = timestamp_ms - score.last_message_at;
             if gap <= PROPAGATION_WINDOW_MS as u64 {
                 score.score += SCORE_TIMELY;
-                score.timely_count += 1;
+                score.timely_count = score.timely_count.saturating_add(1);
             }
         }
-        score.last_message_at = timestamp_ms;
+        score.last_message_at = score.last_message_at.max(timestamp_ms);
         score.score = score.score.clamp(-100.0, MAX_PEER_SCORE);
         self.enforce_score_ceiling();
     }
@@ -256,7 +271,7 @@ impl GossipDedup {
     pub fn record_invalid(&mut self, peer: &libp2p::PeerId) {
         let score = self.peer_scores.entry(*peer).or_default();
         score.score += SCORE_INVALID;
-        score.invalid_count += 1;
+        score.invalid_count = score.invalid_count.saturating_add(1);
         score.score = score.score.clamp(-100.0, MAX_PEER_SCORE);
         self.enforce_score_ceiling();
     }
@@ -380,9 +395,16 @@ impl GossipDedup {
     /// the record worth keeping is the one that would ban somebody.
     fn enforce_score_ceiling(&mut self) {
         while self.peer_scores.len() > MAX_SCORED_PEERS {
-            if let Some(peer) = self.disconnected_order.pop_front() {
-                self.peer_scores.remove(&peer);
-                continue;
+            let evict_idx = self
+                .disconnected_order
+                .iter()
+                .position(|p| self.peer_scores.get(p).is_none_or(|s| !s.is_auto_banned()))
+                .or_else(|| (!self.disconnected_order.is_empty()).then_some(0));
+            if let Some(idx) = evict_idx {
+                if let Some(peer) = self.disconnected_order.remove(idx) {
+                    self.peer_scores.remove(&peer);
+                    continue;
+                }
             }
             let Some(victim) = self
                 .peer_scores
@@ -836,5 +858,106 @@ mod tests {
         assert_eq!(dedup.check_and_record(b"a", &p), DedupResult::Duplicate);
         // "b" was evicted by the "a" re-insert above -> New again.
         assert_eq!(dedup.check_and_record(b"b", &p), DedupResult::New);
+    }
+
+    #[test]
+    fn wave4_gossip_dedup_rejects_ban_laundering_and_score_farming_via_clamped_duplicate_flood() {
+        let mut dedup = GossipDedup::new(100);
+        let attacker = peer(10);
+        let spammer = peer(11);
+        assert_eq!(dedup.check_and_record(b"seed", &attacker), DedupResult::New);
+
+        // Push attacker to the -100.0 floor purely via invalid messages.
+        for _ in 0..20 {
+            dedup.record_invalid(&attacker);
+        }
+        assert!(dedup.peer_should_be_banned(&attacker));
+
+        // Flood duplicates while already floored at -100.0; this must NOT inflate
+        // recoverable duplicate_penalty beyond actual score deductions.
+        for _ in 0..400 {
+            assert_eq!(
+                dedup.check_and_record(b"seed", &attacker),
+                DedupResult::Duplicate
+            );
+        }
+        if let Some(s) = dedup.peer_scores.get_mut(&attacker) {
+            s.last_duplicate_at =
+                std::time::Instant::now().checked_sub(std::time::Duration::from_secs(10_000));
+        }
+        let _ = dedup.check_and_record(b"seed", &attacker);
+        assert!(
+            !(dedup.peer_score(&attacker) > MIN_PEER_SCORE),
+            "clamped duplicate flood laundered invalid-message ban to score {}",
+            dedup.peer_score(&attacker)
+        );
+        assert!(dedup.peer_should_be_banned(&attacker));
+
+        // Even a peer with ZERO valid messages must never farm positive reputation
+        // by flooding duplicates past the floor and waiting for decay.
+        for _ in 0..400 {
+            assert_eq!(
+                dedup.check_and_record(b"seed", &spammer),
+                DedupResult::Duplicate
+            );
+        }
+        if let Some(s) = dedup.peer_scores.get_mut(&spammer) {
+            s.last_duplicate_at =
+                std::time::Instant::now().checked_sub(std::time::Duration::from_secs(10_000));
+        }
+        let _ = dedup.check_and_record(b"seed", &spammer);
+        assert!(
+            !(dedup.peer_score(&spammer) > 0.0),
+            "duplicate-only spammer farmed positive score {}",
+            dedup.peer_score(&spammer)
+        );
+    }
+
+    #[test]
+    fn wave4_gossip_dedup_rejects_backward_timestamp_timely_bonus_forgery() {
+        let mut dedup = GossipDedup::new(100);
+        let p = peer(12);
+        dedup.record_valid(&p, 10_000);
+        // Stale/backward timestamps must not earn SCORE_TIMELY or roll back last_message_at.
+        dedup.record_valid(&p, 1_000);
+        dedup.record_valid(&p, 0);
+
+        let s = dedup.get_peer_score(&p).unwrap();
+        assert!(
+            !(s.timely_count > 0),
+            "backward timestamp earned timely bonus"
+        );
+        assert_eq!(
+            s.last_message_at, 10_000,
+            "stale timestamp rolled back last_message_at"
+        );
+    }
+
+    #[test]
+    fn wave4_gossip_dedup_preserves_disconnected_banned_peer_under_benign_sybil_churn() {
+        let mut dedup = GossipDedup::new(64);
+        let banned = peer(13);
+        for _ in 0..10 {
+            dedup.record_invalid(&banned);
+        }
+        assert!(dedup.peer_should_be_banned(&banned));
+        dedup.note_peer_disconnected(&banned);
+
+        // Flood table with benign disconnected peers: benign entries must evict
+        // before an actively banned disconnected offender.
+        for _ in 0..(MAX_SCORED_PEERS + 50) {
+            let sybil = libp2p::PeerId::random();
+            dedup.record_valid(&sybil, 1_000);
+            dedup.note_peer_disconnected(&sybil);
+        }
+        assert!(
+            dedup.scored_peer_count() <= MAX_SCORED_PEERS,
+            "score table must still honor ceiling"
+        );
+        assert!(
+            dedup.get_peer_score(&banned).is_some(),
+            "benign Sybil churn evicted a disconnected banned peer"
+        );
+        assert!(dedup.peer_should_be_banned(&banned));
     }
 }
