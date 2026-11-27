@@ -1,9 +1,12 @@
 //! Phase 4 domain state-transition claims and [`ClaimedDomainFinalityAdapter`].
 //!
-//! WIRING: unwired - Phase 4 domain-transition prover and adapter surface;
-//! external rollup provers produce `ObjectKind::StarkProof` envelopes for
-//! `agg/object`, and settlement nodes wire `ClaimedDomainFinalityAdapter` into
-//! their domain registry once a block's `MasterProof` passes `StarkBackend::verify`.
+//! WIRING: the adapter is reachable from the settlement door. A ZK domain that
+//! submits an `AggregatedProg` proof is routed to
+//! [`ClaimedDomainFinalityAdapter`] by `settlement::domains`, which builds it
+//! for the chain's claim domain and runs the verdict through the same
+//! attestation and shape checks every other proof shape passes. What remains
+//! unwired is the *prover* side: external rollup provers still produce
+//! `ObjectKind::StarkProof` envelopes out of band.
 //!
 //! Each domain's state-transition STARK proof enters the aggregation layer as
 //! an `ObjectKind::StarkProof` envelope and collapses into:
