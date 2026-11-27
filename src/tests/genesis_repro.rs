@@ -115,6 +115,10 @@ mod tests {
         let mut observations = Vec::new();
         for &chain_id in &chain_ids {
             let run_a = probe_chain(chain_id);
+            // A FRESH observation vector, not a copy: comparing `run_a` with a
+            // clone of itself would assert nothing. `probe_chain` rebuilds the
+            // entire config, state and chain on every call, so any leak of
+            // HashMap order, wall-clock time or address entropy lands here.
             let run_b = probe_chain(chain_id);
             assert_eq!(
                 run_a, run_b,
@@ -122,6 +126,24 @@ mod tests {
             );
             observations.extend(run_a);
         }
+
+        // Vacuity locks, stated as measured properties, not as a length:
+        //  1. the digest moves when one observation moves (a digest that
+        //     ignores its input is the classic vacuous pass),
+        //  2. the digest does not depend on how the lines were cut.
+        let baseline = digest_of(&observations);
+        let mut perturbed = observations.clone();
+        perturbed[0].push('x');
+        assert_ne!(
+            digest_of(&perturbed),
+            baseline,
+            "digest ignores the observations it hashes - the probe is vacuous"
+        );
+        assert_eq!(
+            digest_of(&observations),
+            baseline,
+            "digest is not stable across two hashes of the same vector"
+        );
 
         let digest = digest_of(&observations);
         println!("GENESIS_HASH={digest}");
