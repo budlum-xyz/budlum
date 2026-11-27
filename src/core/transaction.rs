@@ -4682,6 +4682,22 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
                 }
             }
         }
+        SettlementTx::Denominate(denomination) => {
+            // Tag 13. The members and the anchor are the whole claim; the label
+            // is display only and is deliberately absent, matching the id rule
+            // that a spelling cannot split an asset.
+            put_u8(out, 13);
+            put_fixed(out, denomination.issuer.as_bytes());
+            put_u64(out, denomination.anchored_at_block);
+            put_fixed(out, &denomination.anchor_root);
+            put_u64(out, denomination.anchor_height);
+            put_fixed(out, &denomination.denomination_id);
+            put_u64(out, denomination.members.len() as u64);
+            for member in &denomination.members {
+                put_u32(out, member.domain);
+                put_fixed(out, &member.native_id);
+            }
+        }
     }
 }
 

@@ -609,6 +609,9 @@ mod tests {
             issuer(),
             vec![eth(1), AssetMember::new(99, [5u8; 32])],
             "X",
+            1,
+            [0xE1; 32],
+            1,
         );
         let has_claim = |domain: u32| domain != 99;
         assert_eq!(

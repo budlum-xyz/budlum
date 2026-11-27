@@ -128,6 +128,16 @@ pub enum SettlementTx {
     ///
     /// Appended to preserve existing bincode enum discriminants.
     Bundle(Box<BundleTx>),
+
+    /// Declare that chain-native assets on several domains are one asset.
+    ///
+    /// Without this door a [`crate::settlement::universal_asset::Denomination`]
+    /// could only exist in memory: the unified balance reads the settlement
+    /// registry, and nothing wrote it. This is the write side of the "one
+    /// asset, many chains" claim.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    Denominate(Box<crate::settlement::universal_asset::Denomination>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -2044,7 +2054,57 @@ pub fn execute_settlement_tx(
         SettlementTx::ObjectLayer(uol_tx) => execute_object_layer_tx(state, ctx, uol_tx),
         SettlementTx::Liquidate(request) => execute_liquidation_request(state, ctx, request),
         SettlementTx::Bundle(bundle_tx) => execute_bundle_tx(state, ctx, bundle_tx),
+        SettlementTx::Denominate(denomination) => {
+            execute_denomination(state, ctx, denomination)
+        }
     }
+}
+
+/// Admits a denomination into the settlement registry.
+///
+/// Two chain-level rules on top of
+/// [`crate::settlement::universal_asset::Denomination::validate_shape`]:
+///
+/// - every member's domain must be a domain this chain actually carries, which
+///   is the same "can this be proven here" test the shape check applies, but
+///   answered from consensus state rather than from a caller-supplied closure.
+/// - the issuer must be the sender. A denomination anybody can declare *for*
+///   somebody else is a signature forgeable by relay; the declaration is
+///   attributable or it is nothing.
+fn execute_denomination(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    denomination: &crate::settlement::universal_asset::Denomination,
+) -> Result<(), SettlementTxError> {
+    use crate::settlement::universal_asset::AssetError;
+
+    if denomination.issuer != ctx.sender {
+        return Err(SettlementTxError::Refused(String::from(
+            "denomination: only the issuing account may declare it",
+        )));
+    }
+
+    // The claim domain test: a member on a domain this chain cannot carry has
+    // a balance that could never be proven, so admitting it would be a
+    // permanent hole in every sum the asset enters.
+    let has_claim_domain = |domain: u32| {
+        crate::aggregation::chain::claim_domain(ctx.chain_id)
+            .is_some()
+            && state
+                .settlement
+                .domains
+                .domains()
+                .iter()
+                .any(|d| d.id == domain)
+    };
+
+    state
+        .settlement
+        .denominations
+        .admit(denomination.clone(), has_claim_domain)
+        .map_err(|err: AssetError| {
+            SettlementTxError::Refused(format!("denomination: {err}"))
+        })
 }
 
 /// What a bundle transaction asks for.

@@ -49,6 +49,10 @@ pub enum BalanceError {
         /// The domain whose asset had no denomination.
         domain: u32,
     },
+    /// The asset id names no admitted denomination, so nothing can be said about
+    /// it at all - not even which domain it came from.
+    #[error("asset is not denominated; no chain can contribute to it")]
+    Unattributed,
     /// The term's finality is not cryptographic.
     ///
     /// Admission rule of the whole system: a chain whose state is not proven
@@ -275,6 +279,102 @@ pub fn proven_term(
 }
 
 #[cfg(test)]
+
+/// Builds the unified balance the chain can report right now.
+///
+/// This is the read side that makes the module more than an arithmetic helper:
+/// it takes the denominations a chain has admitted and the per-domain roots it
+/// has accepted, and produces one total per universal asset - each term carrying
+/// the height it is true as of.
+///
+/// # What it refuses
+///
+/// A caller supplies `amount_on(domain, asset)` because only it knows how to
+/// read an amount from a domain's state: this chain does not parse foreign
+/// state. What it does *not* supply is whether the asset counts, or whether the
+/// term is final - those are read from consensus state, so a caller cannot make
+/// an undenominated asset sum by passing it, and cannot claim a finality the
+/// chain has not accepted.
+///
+/// A domain with no accepted root contributes nothing and is *reported* as
+/// excluded rather than silently skipped; the caller sees the hole.
+///
+/// # Errors
+///
+/// The arithmetic errors of [`totals_by_asset`]. Nothing here can fail because a
+/// domain is missing; a missing domain is data, not a bug.
+pub fn unified_balance<F>(
+    denominations: &DenominationIndex,
+    accepted_roots: &std::collections::BTreeMap<u32, (Hash32, u64)>,
+    assets: &[Hash32],
+    amount_on: F,
+) -> Result<Vec<AssetTotal>, BalanceError>
+where
+    F: Fn(u32, &Hash32) -> Option<u64>,
+{
+    let mut terms: Vec<BalanceTerm> = Vec::new();
+    let mut excluded: Vec<(Hash32, u32, BalanceError)> = Vec::new();
+
+    for asset in assets {
+        let Some(denomination) = denominations.get(asset) else {
+            // The asset is not denominated: it cannot be attributed, and the
+            // caller is told which one it was.
+            excluded.push((*asset, u32::MAX, BalanceError::Unattributed));
+            continue;
+        };
+        for member in &denomination.members {
+            let Some((root, height)) = accepted_roots.get(&member.domain) else {
+                // No accepted root for this chain: its contribution cannot be
+                // proven, so it is excluded by name rather than assumed zero.
+                excluded.push((
+                    *asset,
+                    member.domain,
+                    BalanceError::NotCryptographicallyFinal {
+                        domain: member.domain,
+                    },
+                ));
+                continue;
+            };
+            let Some(amount) = amount_on(member.domain, asset) else {
+                continue;
+            };
+            if amount == 0 {
+                // A zero balance is a real answer and adds nothing; recording it
+                // as a term would inflate the domain count without moving the
+                // total.
+                continue;
+            }
+            terms.push(proven_term(*asset, member.domain, amount, *root, *height));
+        }
+    }
+
+    let (mut totals, unattributed) = totals_by_asset(&terms, denominations)?;
+
+    // Fold the per-domain exclusions into the asset they belong to, so a caller
+    // reading a total also sees exactly which chains it is missing.
+    for (asset, domain, error) in excluded {
+        if let Some(total) = totals.iter_mut().find(|t| t.universal_asset == asset) {
+            total.excluded.push((domain, error));
+        } else if unattributed
+            .iter()
+            .any(|e| matches!(e, BalanceError::Unattributed))
+        {
+            // An asset whose every term was excluded still deserves an entry,
+            // so the caller sees "this asset, nothing, and here is why".
+            totals.push(AssetTotal {
+                universal_asset: asset,
+                total: 0,
+                domains: 0,
+                true_as_of_root: [0u8; 32],
+                true_as_of_height: 0,
+                excluded: vec![(domain, error)],
+            });
+        }
+    }
+
+    Ok(totals)
+}
+
 mod tests {
     use super::*;
     use crate::core::address::Address;
@@ -417,5 +517,50 @@ mod tests {
             proven_term(usdc, 9, 1, root(2), 2),
         ];
         assert_eq!(totals_by_asset(&terms, &index), Err(BalanceError::Overflow));
+    }
+
+    /// The read side: a chain with an accepted root for one of an asset's two
+    /// domains reports one total, and names the missing domain rather than
+    /// pretending the asset is worth less.
+    #[test]
+    fn a_missing_domain_is_reported_not_assumed_zero() {
+        let (index, usdc) = usdc_index();
+        let mut roots = std::collections::BTreeMap::new();
+        roots.insert(1u32, (root(0xA1), 100u64));
+
+        let totals = unified_balance(&index, &roots, &[usdc], |domain, _asset| match domain {
+            1 => Some(700),
+            9 => Some(300),
+            _ => None,
+        })
+        .expect("arithmetic");
+
+        assert_eq!(totals.len(), 1);
+        assert_eq!(
+            totals[0].total, 700,
+            "a domain with no accepted root was summed"
+        );
+        assert!(
+            !totals[0].is_complete(),
+            "the missing domain was not reported"
+        );
+        assert_eq!(
+            totals[0].excluded,
+            vec![(9, BalanceError::NotCryptographicallyFinal { domain: 9 })]
+        );
+    }
+
+    /// An asset nobody denominated comes back as an entry with zero and a
+    /// reason, so a caller can show "this chain's asset is not in the sum".
+    #[test]
+    fn an_undenominated_asset_gets_a_zero_entry_with_a_reason() {
+        let (index, _usdc) = usdc_index();
+        let roots = std::collections::BTreeMap::new();
+        let stray = [0xFFu8; 32];
+        let totals = unified_balance(&index, &roots, &[stray], |_, _| Some(5)).expect("arithmetic");
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].universal_asset, stray);
+        assert_eq!(totals[0].total, 0);
+        assert_eq!(totals[0].excluded[0].1, BalanceError::Unattributed);
     }
 }
