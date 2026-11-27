@@ -1809,7 +1809,7 @@ impl IntakeState {
     /// # Errors
     ///
     /// The named zero field.
-    pub fn install_nipopow_genesis(
+    pub(crate) fn install_nipopow_genesis(
         &mut self,
         network: impl Into<String>,
         genesis: crate::cross_domain::external::nipopow::PinnedNipopowGenesis,
@@ -1842,7 +1842,7 @@ impl IntakeState {
     /// # Errors
     ///
     /// The named zero field.
-    pub fn install_ghostdag_anchor(
+    pub(crate) fn install_ghostdag_anchor(
         &mut self,
         network: impl Into<String>,
         anchor: crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor,
@@ -1882,7 +1882,7 @@ impl IntakeState {
     /// # Errors
     ///
     /// The named defect.
-    pub fn install_spore_operator(
+    pub(crate) fn install_spore_operator(
         &mut self,
         network: impl Into<String>,
         operator: crate::cross_domain::external::arweave_spora::PinnedSpore,
@@ -1954,7 +1954,7 @@ impl IntakeState {
     /// # Errors
     ///
     /// The named defect.
-    pub fn install_ouroboros_epoch(
+    pub(crate) fn install_ouroboros_epoch(
         &mut self,
         network: impl Into<String>,
         stake: crate::cross_domain::external::ouroboros_mithril::EpochStake,
@@ -1991,7 +1991,7 @@ impl IntakeState {
     /// # Errors
     ///
     /// The named zero or inconsistent field.
-    pub fn install_near_epoch(
+    pub(crate) fn install_near_epoch(
         &mut self,
         network: impl Into<String>,
         epoch: crate::cross_domain::external::near_doomslug::PinnedNearEpoch,
@@ -2007,7 +2007,7 @@ impl IntakeState {
     /// # Errors
     ///
     /// The committee's own verdict, naming the offending field.
-    pub fn install_honeybadger_committee(
+    pub(crate) fn install_honeybadger_committee(
         &mut self,
         network: impl Into<String>,
         committee: crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee,

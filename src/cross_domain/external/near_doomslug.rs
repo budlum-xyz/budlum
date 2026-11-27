@@ -668,6 +668,22 @@ pub enum NearSlashKind {
     SurroundApproval,
 }
 
+/// Verified outcome of [`verify_near_approval_slash`].
+///
+/// A struct rather than a tuple so the guard, which needs all three facts and
+/// a domain-separated evidence digest, cannot quietly drop one of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedNearSlash {
+    /// Account id of the proven equivocating block producer.
+    pub offender_account: String,
+    /// That producer's pinned stake, the weight a slash applies to.
+    pub slashed_stake_weight: u128,
+    /// Which Doomslug rule the pair of approvals broke.
+    pub kind: NearSlashKind,
+    /// Canonical digest of the proven violation, for replay bookkeeping.
+    pub evidence_digest: Hash32,
+}
+
 /// Cryptographic proof of a slashable NEAR Doomslug approval violation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NearApprovalSlashProof {
@@ -686,7 +702,7 @@ pub struct NearApprovalSlashProof {
 }
 
 /// Verify a [`NearApprovalSlashProof`] against `pinned`, returning the guilty
-/// producer's account ID, staked weight, and violation kind.
+/// producer's account ID, staked weight, violation kind and evidence digest.
 ///
 /// # Errors
 ///
@@ -696,7 +712,7 @@ pub fn verify_near_approval_slash(
     network: &str,
     pinned: &PinnedNearEpoch,
     proof: &NearApprovalSlashProof,
-) -> Result<(String, u128, NearSlashKind), AdapterError> {
+) -> Result<VerifiedNearSlash, AdapterError> {
     let (bp_map, _) = validate_bp_table(&pinned.block_producers)?;
     if !bool::from(
         proof
@@ -761,7 +777,54 @@ pub fn verify_near_approval_slash(
         }
     }
 
-    Ok((bp.account_id.clone(), bp.stake, kind))
+    // The digest binds both signed approvals, so the same fault cannot be
+    // replayed under a different framing and two distinct faults by the same
+    // producer cannot collapse onto one offence.
+    let kind_byte = match kind {
+        NearSlashKind::DoubleApproval => 1u8,
+        NearSlashKind::SurroundApproval => 2u8,
+    };
+    let digest = crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_NEAR_SLASH_EVIDENCE_V1",
+        network.as_bytes(),
+        &pinned.epoch_id,
+        &kind_byte.to_le_bytes(),
+        bp.account_id.as_bytes(),
+        &proof.target_a.to_le_bytes(),
+        &proof.target_b.to_le_bytes(),
+        &proof.sig_a.ed25519_sig,
+        &proof.sig_b.ed25519_sig,
+    ]);
+    Ok(VerifiedNearSlash {
+        offender_account: bp.account_id.clone(),
+        slashed_stake_weight: bp.stake,
+        kind,
+        evidence_digest: digest,
+    })
+}
+
+/// Canonical pin digest for a NEAR epoch pin.
+///
+/// Convenience: exposed for `BridgeEconomicGuard` pin binding.
+#[must_use]
+pub fn near_pin_digest(pin: &PinnedNearEpoch) -> Hash32 {
+    let mut producer_digests: Vec<Hash32> = Vec::with_capacity(pin.block_producers.len());
+    for bp in &pin.block_producers {
+        producer_digests.push(crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_NEAR_PRODUCER_V1",
+            bp.account_id.as_bytes(),
+            &bp.ed25519_pubkey,
+            &bp.stake.to_le_bytes(),
+            &bp.pq_pubkey,
+        ]));
+    }
+    let refs: Vec<&[u8]> = std::iter::once(b"BDLM_NEAR_PIN_DIGEST_V1".as_slice())
+        .chain(std::iter::once(pin.epoch_id.as_slice()))
+        .chain(std::iter::once(pin.next_epoch_id.as_slice()))
+        .chain(std::iter::once(pin.next_bp_hash.as_slice()))
+        .chain(producer_digests.iter().map(|d| d.as_slice()))
+        .collect();
+    crate::core::hash::hash_fields_bytes(&refs)
 }
 
 /// External finality adapter for NEAR `Nightshade` + `Doomslug` BFT consensus.
@@ -1380,11 +1443,19 @@ pub(crate) mod tests {
                 target,
             ),
         };
-        let (acct, stake, kind) =
+        let slash =
             verify_near_approval_slash(NET, &fx.pinned, &double_proof).expect("double approval");
-        assert_eq!(acct, "bp0.poolv1.near");
-        assert_eq!(stake, 300);
-        assert_eq!(kind, NearSlashKind::DoubleApproval);
+        assert_eq!(slash.offender_account, "bp0.poolv1.near");
+        assert_eq!(slash.slashed_stake_weight, 300);
+        assert_eq!(slash.kind, NearSlashKind::DoubleApproval);
+        // The evidence digest is a function of the proven pair: a different
+        // pair by the same producer is a different offence, not a replay.
+        let mut reordered = double_proof.clone();
+        core::mem::swap(&mut reordered.sig_a, &mut reordered.sig_b);
+        let other = verify_near_approval_slash(NET, &fx.pinned, &reordered)
+            .expect("the same fault, framed the other way round");
+        assert_eq!(other.evidence_digest, slash.evidence_digest);
+        assert_ne!(slash.evidence_digest, [0u8; 32]);
 
         // 4. Surround-approval slash: Skip(100 -> 110) surrounds Endorsement(103 -> 104)!
         let outer = NearApprovalInner::Skip { source_height: 100 };
@@ -1412,11 +1483,11 @@ pub(crate) mod tests {
                 104,
             ),
         };
-        let (acct2, stake2, kind2) =
+        let slash2 =
             verify_near_approval_slash(NET, &fx.pinned, &surround_proof).expect("surround slash");
-        assert_eq!(acct2, "bp2.poolv1.near");
-        assert_eq!(stake2, 250);
-        assert_eq!(kind2, NearSlashKind::SurroundApproval);
+        assert_eq!(slash2.offender_account, "bp2.poolv1.near");
+        assert_eq!(slash2.slashed_stake_weight, 250);
+        assert_eq!(slash2.kind, NearSlashKind::SurroundApproval);
 
         let unbonded_policy = VerificationPolicy {
             require_slashable: false,

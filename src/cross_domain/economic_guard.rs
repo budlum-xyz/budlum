@@ -47,8 +47,16 @@ use crate::cross_domain::external::based_preconf::{
     verify_based_preconf_equivocation, BasedPreconfAdapter, BasedPreconfEquivocationProof,
     PinnedBasedPreconfCommittee,
 };
+use crate::cross_domain::external::honeybadger_bft::{
+    verify_rbc_equivocation, HoneyBadgerBftAdapter, PinnedHoneyBadgerCommittee,
+    RbcEquivocationProof,
+};
 use crate::cross_domain::external::mina_recursive::{
     PinnedSuccinctGenesis, SuccinctRecursiveAdapter,
+};
+use crate::cross_domain::external::near_doomslug::{
+    near_pin_digest, verify_near_approval_slash, NearApprovalSlashProof, NearDoomslugAdapter,
+    PinnedNearEpoch,
 };
 use crate::cross_domain::external::prover::{ProverBond, Slashing, BPS_DEN};
 use crate::cross_domain::external::restaking_avs::{
@@ -287,6 +295,20 @@ pub enum GuardedExternalAdapter {
         /// Governance-pinned succinct genesis and ML-DSA-65 aggregator anchor.
         pinned: Box<PinnedSuccinctGenesis>,
     },
+    /// Leaderless asynchronous BFT Bracha RBC equivocation (HoneyBadgerBFT).
+    HoneyBadgerBft {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned epoch committee.
+        pinned: Box<PinnedHoneyBadgerCommittee>,
+    },
+    /// Epoch-based Doomslug approval equivocation (NEAR).
+    NearDoomslug {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned epoch validator table.
+        pinned: Box<PinnedNearEpoch>,
+    },
 }
 
 impl GuardedExternalAdapter {
@@ -302,6 +324,8 @@ impl GuardedExternalAdapter {
             Self::TonCatchain { .. } => 6,
             Self::StellarScp { .. } => 7,
             Self::MinaRecursive { .. } => 8,
+            Self::HoneyBadgerBft { .. } => 9,
+            Self::NearDoomslug { .. } => 10,
         }
     }
 
@@ -316,7 +340,9 @@ impl GuardedExternalAdapter {
             | Self::BasedPreconf { network, .. }
             | Self::TonCatchain { network, .. }
             | Self::StellarScp { network, .. }
-            | Self::MinaRecursive { network, .. } => network,
+            | Self::MinaRecursive { network, .. }
+            | Self::HoneyBadgerBft { network, .. }
+            | Self::NearDoomslug { network, .. } => network,
         }
     }
 
@@ -336,6 +362,8 @@ impl GuardedExternalAdapter {
             Self::TonCatchain { pinned, .. } => pinned.canonical_pin_digest(),
             Self::StellarScp { pinned, .. } => pinned.canonical_pin_digest(),
             Self::MinaRecursive { pinned, .. } => pinned.canonical_pin_digest(),
+            Self::HoneyBadgerBft { pinned, .. } => pinned.canonical_pin_digest(),
+            Self::NearDoomslug { pinned, .. } => near_pin_digest(pinned),
         };
         hash_fields_bytes(&[
             b"BDLM_ECON_GUARD_PIN_V1",
@@ -432,6 +460,24 @@ pub enum ContradictionEvidence {
         pinned: PinnedScpTier,
         /// Cryptographic SCP ballot equivocation proof.
         proof: Box<StellarBallotEquivocationProof>,
+    },
+    /// Verified HoneyBadgerBFT Bracha RBC double-erasure-root equivocation.
+    HoneyBadgerFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned epoch committee.
+        pinned: Box<PinnedHoneyBadgerCommittee>,
+        /// Cryptographic RBC equivocation proof.
+        proof: Box<RbcEquivocationProof>,
+    },
+    /// Verified NEAR Doomslug double- or surround-approval equivocation.
+    NearDoomslugFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned epoch validator table.
+        pinned: Box<PinnedNearEpoch>,
+        /// Cryptographic approval equivocation proof.
+        proof: Box<NearApprovalSlashProof>,
     },
 }
 
@@ -1098,6 +1144,14 @@ impl BridgeEconomicGuard {
                 SuccinctRecursiveAdapter::new(network.clone(), Some((**pinned).clone()))
                     .verify(evidence, verification_policy)
             }
+            GuardedExternalAdapter::HoneyBadgerBft { network, pinned } => {
+                HoneyBadgerBftAdapter::new(network, Some((**pinned).clone()))
+                    .verify(evidence, verification_policy)
+            }
+            GuardedExternalAdapter::NearDoomslug { network, pinned } => {
+                NearDoomslugAdapter::new(network.clone(), Some((**pinned).clone()))
+                    .verify(evidence, verification_policy)
+            }
         }
         .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
 
@@ -1748,6 +1802,104 @@ impl BridgeEconomicGuard {
                     &res.offenders,
                     digest,
                     |pk| pinned.node_member_info(pk),
+                )?;
+                (digest, incremental, keys)
+            }
+            ContradictionEvidence::HoneyBadgerFault {
+                network,
+                pinned,
+                proof,
+            } => {
+                let supplied = GuardedExternalAdapter::HoneyBadgerBft {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                let (offender_id, weight) = verify_rbc_equivocation(pinned, proof)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[9u8],
+                    &domain_id.to_le_bytes(),
+                    &proof.committee_epoch.to_le_bytes(),
+                    &proof.acs_epoch.to_le_bytes(),
+                    &proof.proposer_index.to_le_bytes(),
+                    &proof.first_root,
+                    &proof.second_root,
+                    &offender_id,
+                ]);
+                // One offender per RBC proof: the pinned proposer slot is the
+                // only entity that can equivocate on the erasure root, and its
+                // index is what the locus binds, so the same slot cannot be
+                // slashed twice for the same epoch pair.
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &[9u8],
+                    &proof.committee_epoch.to_le_bytes(),
+                    &proof.acs_epoch.to_le_bytes(),
+                    &proof.proposer_index.to_le_bytes(),
+                ]);
+                let (incremental, keys) = compute_incremental_slash(
+                    &self.slashed_offenders,
+                    domain_id,
+                    9,
+                    &locus,
+                    &[offender_id],
+                    digest,
+                    |_| Some((u128::from(weight), true)),
+                )?;
+                (digest, incremental, keys)
+            }
+            ContradictionEvidence::NearDoomslugFault {
+                network,
+                pinned,
+                proof,
+            } => {
+                let supplied = GuardedExternalAdapter::NearDoomslug {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                let verified = verify_near_approval_slash(network, pinned, proof)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[10u8],
+                    &domain_id.to_le_bytes(),
+                    &verified.evidence_digest,
+                ]);
+                // A NEAR producer is identified by its account id, but the
+                // replay key needs a fixed-width identity: the account id's
+                // canonical hash is one, and it is what the pinned table
+                // already commits to.
+                let offender = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_NEAR_OFFENDER_V1",
+                    verified.offender_account.as_bytes(),
+                    &pinned.epoch_id,
+                ]);
+                let weight = verified.slashed_stake_weight;
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &[10u8],
+                    &pinned.epoch_id,
+                    &offender,
+                ]);
+                let (incremental, keys) = compute_incremental_slash(
+                    &self.slashed_offenders,
+                    domain_id,
+                    10,
+                    &locus,
+                    &[offender],
+                    digest,
+                    |_| Some((weight, true)),
                 )?;
                 (digest, incremental, keys)
             }
