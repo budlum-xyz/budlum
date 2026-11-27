@@ -109,7 +109,7 @@ contract BudlumSettlementEndpoint {
     /// by the 20-byte *home* contract address. Read-only: this grants no
     /// ownership or permission to release anything.
     function assetClassId(uint32 homeDomain, uint8 kind, address token) public pure returns (bytes32) {
-        if (kind > UNIQUE || token == address(0)) revert InvalidAssetClass();
+        if (homeDomain == 0 || kind > UNIQUE || token == address(0)) revert InvalidAssetClass();
         bytes memory classRef = bytes.concat(bytes1(kind), bytes20(token));
         bytes[] memory fields = new bytes[](HASH_QUAD_FIELDS);
         fields[0] = "BDLM_OBJECT_LAYER_CLASS_V1";

@@ -65,15 +65,18 @@ contract BudlumObjectLayerFinality is IBudlumObjectLayerFinality, IBudlumFinalit
     /// the other input of `AccountState::root_from_opening`; merely supplying
     /// an accepted attestation digest does not bind it to any header hash.
     function record(uint64 height, bytes32 headerHash, bytes32 stateRootBody) external {
-        if (headerHash == bytes32(0)) revert NotAccepted();
+        if (height == 0 || headerHash == bytes32(0) || stateRootBody == bytes32(0)) {
+            revert NotAccepted();
+        }
+        bytes32 stateRoot = _computeStateRoot(headerHash, stateRootBody);
         bytes32 known = headerAt[height];
         if (known != bytes32(0)) {
-            if (known != headerHash) revert Conflict();
+            if (known != headerHash || rootAtHeight[height] != stateRoot) revert Conflict();
             return;
         }
         FinalityMode mode = _requireFinalizedHeader(height, headerHash, stateRootBody);
         headerAt[height] = headerHash;
-        rootAtHeight[height] = _computeStateRoot(headerHash, stateRootBody);
+        rootAtHeight[height] = stateRoot;
         finalityModeAt[height] = mode;
         if (height > latestFinalHeight) {
             latestFinalHeight = height;
