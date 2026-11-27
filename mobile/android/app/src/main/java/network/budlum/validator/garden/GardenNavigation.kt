@@ -27,6 +27,18 @@ enum class Step {
 
     /** Taking an invite, reached straight from the choice. */
     Join,
+
+    /**
+     * Making this phone's wallet, or putting back one it already had.
+     *
+     * It sits after the validator checks because that is the order the
+     * app asks for things: be a validator first, then hold a key. A
+     * phone that cannot do the duties has no use for the key.
+     */
+    Wallet,
+
+    /** The twenty-four words, shown once, before anything else happens. */
+    Seed,
 }
 
 /**
@@ -46,6 +58,7 @@ fun ChooseScreen(
     onStartOwn: () -> Unit,
     onHaveInvite: () -> Unit,
     onTestnet: () -> Unit,
+    onWallet: () -> Unit,
     onBack: () -> Unit,
 ) {
     val state = model.state
@@ -71,6 +84,7 @@ fun ChooseScreen(
                 MenuLine(stringResource(R.string.g_start_own), onStartOwn)
                 MenuLine(stringResource(R.string.g_was_invited), onHaveInvite)
             }
+            MenuLine(stringResource(R.string.w_wallet), onWallet)
             MenuLine(stringResource(R.string.g_testnet), onTestnet)
             MenuLine(stringResource(R.string.g_back), onBack)
 

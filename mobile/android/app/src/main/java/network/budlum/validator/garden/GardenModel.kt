@@ -102,6 +102,18 @@ data class GardenState(
     val waitingForHost: Boolean = false,
     /** True when this phone started the network. */
     val iAmHost: Boolean = false,
+    /** True once this phone holds a wallet. One phone holds one. */
+    val walletExists: Boolean = false,
+    /** The address of that wallet, readable without the password. */
+    val walletAddress: String = "",
+    /**
+     * The twenty-four words, held only between making a wallet and the
+     * person saying they have written them down. Never read back off
+     * disk: the sealed file does not hold them in the clear.
+     */
+    val mnemonic: List<String> = emptyList(),
+    /** True once the password has been shown to open the wallet. */
+    val walletUnlocked: Boolean = false,
     /** The record behind the preview, kept so one tap can act on it. */
     val previewRecord: String = "",
     /** What the group has sent, as the core reports it. */
@@ -357,6 +369,63 @@ class GardenModel(
     }
 
     /** Open six digits that stand for this Garden's invite for an hour. */
+    /**
+     * What this phone knows about its own wallet without being told a
+     * password: whether there is one, and which address it is.
+     */
+    fun readWallet() = background(quiet = true) {
+        val here = phone.walletExists()
+        val address = if (here) runCatching { phone.walletAddress() }.getOrNull() ?: "" else ""
+        state = state.copy(walletExists = here, walletAddress = address)
+    }
+
+    /**
+     * Make this phone's wallet.
+     *
+     * The words come back once and are held in state only until the
+     * person says they have written them down, because the sealed file
+     * keeps no clear copy to show them again.
+     */
+    fun createWallet(password: String) = background {
+        val seed = phone.walletCreate(password)
+        state = state.copy(
+            walletExists = true,
+            walletAddress = seed.address,
+            mnemonic = seed.mnemonic.trim().split(" ").filter { it.isNotEmpty() },
+            walletUnlocked = true,
+        )
+    }
+
+    /** Put back a wallet from words the person already had. */
+    fun restoreWallet(words: String, password: String) = background {
+        val address = phone.walletRestore(words.trim().lowercase(), password)
+        state = state.copy(
+            walletExists = true,
+            walletAddress = address,
+            mnemonic = emptyList(),
+            walletUnlocked = true,
+        )
+    }
+
+    /** Show that the password opens this phone's wallet. */
+    fun unlockWallet(password: String) = background {
+        val address = phone.walletOpen(password)
+        state = state.copy(walletUnlocked = true, walletAddress = address)
+    }
+
+    /**
+     * Drop the words from memory once they have been written down.
+     *
+     * Called by the screen that showed them, so they are not sitting in
+     * state behind every later screen.
+     */
+    fun forgetMnemonic() {
+        state = state.copy(mnemonic = emptyList())
+    }
+
+    /** How many words a phrase has, asked of the core rather than assumed. */
+    fun wordCount(): Int = phone.walletWordCount().toInt()
+
     fun openCode() = background {
         val opened = phone.openCode()
         state = state.copy(code = opened.code, codeSecondsLeft = opened.secondsLeft.toLong())

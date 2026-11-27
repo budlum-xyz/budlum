@@ -6,10 +6,10 @@
     <string name="notif_boot_resume_title">Budlum Do&#x011F;rulay&#x0131;c&#x0131; G&#x00F6;revleri Kullan&#x0131;lam&#x0131;y&#x006F;r</string>
     <string name="notif_boot_resume_body">Do&#x011F;rulay&#x0131;c&#x0131; g&#x00F6;revleri hen&#x00FC;z ba&#x011F;l&#x0131; de&#x011F;il. Denetimler &#x00E7;al&#x0131;&#x015F;m&#x0131;y&#x006F;r. Durumu g&#x00F6;rmek i&#x00E7;in uygulamay&#x0131; a&#x00E7;&#x0131;n.</string>
     <string name="onboarding_disclosure">Bu s&#x00FC;r&#x00FC;m a&#x011F; i&#x00E7;eri&#x011F;i saklamaz veya denetlemez. Gelecekteki do&#x011F;rulay&#x0131;c&#x0131;lar silme kodlamal&#x0131; paylar&#x0131; saklayabilir; m&#x00FC;h&#x00FC;rl&#x00FC; i&#x00E7;erikler u&#x00E7;tan uca &#x015F;ifreli kalmal&#x0131;d&#x0131;r. Musluk isteklerinde blok madencili&#x011F;i de&#x011F;il, s&#x0131;n&#x0131;rland&#x0131;r&#x0131;lm&#x0131;&#x015F; bot kar&#x015F;&#x0131;t&#x0131; i&#x015F; kan&#x0131;t&#x0131; yap&#x0131;labilir.</string>
-    <string name="security_tradeoff_note">Sahip harcaması, stake, anahtar döndürme ve çıkış bu sürümde kapalıdır. ML-DSA-87 cüzdan imzacısı ve Keystore destekli biyometrik/PIN yetkisi bağlanmamıştır. Görev anahtarlarının saklanması çalışan doğrulayıcı anlamına gelmez.</string>
+    <string name="security_tradeoff_note">Sahip harcaması, stake, anahtar döndürme ve çıkış bu sürümde kapalıdır. Bu telefon bir cüzdan tutar ve onunla imzalayabilir, ancak bu imzayı henüz Keystore destekli biyometrik veya PIN yetkisi korumaz. Görev anahtarlarının saklanması çalışan doğrulayıcı anlamına gelmez.</string>
     <string name="action_faucet_request">Musluk isteği gönder (100 BUD)</string>
     <string name="validator_unavailable">Bu sürümde doğrulayıcı kaydı, imzalama ve saklama zincire bağlı değildir. Musluk isteği yerel bakiye veya stake oluşturmaz.</string>
-    <string name="faucet_explanation">Testnet musluğunuzun HTTPS adresini ve kontrol ettiğiniz bir cüzdanın 0x ile başlayan 32 baytlık adresini girin. Bu uygulama henüz cüzdan oluşturamaz veya doğrulayamaz. Kurtarma kelimelerinizi asla girmeyin. Gönderilen aktarım onaylanmış bakiye değildir. Adres ve IP başına istek sınırı uygulanabilir.</string>
+    <string name="faucet_explanation">Testnet musluğunuzun HTTPS adresini ve kontrol ettiğiniz bir cüzdanın 0x ile başlayan 32 baytlık adresini girin. Bu telefon kendi cüzdanını oluşturur, dolayısıyla yukarıdaki adres kendi adresi olabilir. Yirmi dört kelimenizi ne burada ne başka bir yerde bir musluğa yazmayın. Gönderilen aktarım onaylanmış bakiye değildir. Adres ve IP başına istek sınırı uygulanabilir.</string>
     <string name="faucet_endpoint">Musluk HTTPS adresi (https://faucet.alan-adiniz)</string>
     <string name="faucet_wallet_address">Cüzdan adresiniz (0x…)</string>
     <string name="faucet_pending">Musluk görevi çözülüyor ve istek gönderiliyor…</string>
@@ -108,4 +108,26 @@
     <string name="g_symbols">üretilen sembol</string>
     <string name="g_validators">doğrulayıcı</string>
     <string name="g_leave">ayrıl</string>
+    <!-- Telefonun kendi cüzdanı. Bir telefonda bir cüzdan bulunur. -->
+    <string name="w_wallet">cüzdan</string>
+    <string name="w_what_a_wallet_is">Cüzdanınız yirmi dört kelimedir. Telefon bu kelimeleri bir parolayla mühürler ve başka bir şey saklamaz; geri dönmenin tek yolu kelimelerdir, kimse size onları yeniden veremez.</string>
+    <string name="w_password">parola</string>
+    <string name="w_password_hint">yalnızca sizin bildiğiniz bir parola</string>
+    <string name="w_password_floor">En az sekiz karakter. Cüzdanı bu telefonda mühürler; hiçbir yere gönderilmez.</string>
+    <string name="w_make">Cüzdanımı oluştur</string>
+    <string name="w_restore_instead">Kelimelerim zaten var</string>
+    <string name="w_restore">Cüzdanımı geri getir</string>
+    <string name="w_make_instead">Bunun yerine yeni bir tane oluştur</string>
+    <string name="w_your_words">kelimeleriniz</string>
+    <string name="w_words_hint">yirmi dört kelime, sırasıyla, aralarında boşluk</string>
+    <string name="w_seed_phrase">yirmi dört kelimeniz</string>
+    <string name="w_seed_warning">Bunları kâğıda yazın ve bu telefondan uzakta saklayın. Kelimeleri elinde tutan cüzdanı elinde tutar. Bir kez gösterilir, bir daha gösterilemez.</string>
+    <string name="w_written_down">Kâğıda yazdım</string>
+    <string name="w_written_down_yes">yazıldı</string>
+    <string name="w_done">Sürdür</string>
+    <string name="w_chain">zincir</string>
+    <string name="w_locked_or_not">durum</string>
+    <string name="w_locked">kilitli</string>
+    <string name="w_unlocked">açık</string>
+    <string name="w_unlock">Kilidi aç</string>
 </resources>

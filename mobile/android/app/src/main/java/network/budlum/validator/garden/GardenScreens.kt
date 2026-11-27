@@ -51,19 +51,65 @@ import org.json.JSONObject
 @Composable
 fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
     var step by remember { mutableStateOf(Step.Setup) }
+    // Whether this phone holds a wallet, and which address it is, asked
+    // once when the app opens rather than on every draw.
+    LaunchedEffect(Unit) { model.readWallet() }
     var tab by remember { mutableStateOf(0) }
 
     BackHandler(enabled = step != Step.Setup) {
-        step = if (step == Step.Choose) Step.Setup else Step.Choose
+        step = when (step) {
+            Step.Choose, Step.Wallet -> Step.Setup
+            // The words are shown once. Going back out of them without
+            // saying they are written down would be a way to lose a
+            // wallet by pressing a system button, so that door stays
+            // shut and the screen's own button is the only way on.
+            Step.Seed -> Step.Seed
+            else -> Step.Choose
+        }
     }
 
     when (step) {
-        Step.Setup -> SetupScreen(model) { step = Step.Choose }
+        // The validator checks pass first, then the key. A phone that
+        // cannot do the duties has no use for a wallet, and a phone that
+        // already holds one is not asked twice.
+        Step.Setup -> SetupScreen(model) {
+            step = if (model.state.walletExists) Step.Choose else Step.Wallet
+        }
+        Step.Wallet -> {
+            // The same door serves both states, told apart by what was
+            // true when it opened rather than by what is true now: a
+            // phone that already had a wallet is shown it, and a phone
+            // that did not is asked to make one and then moved on. If
+            // the two were told apart by the live value instead, making
+            // a wallet would turn this into the other screen mid-visit.
+            // There is no list in either case, because there is never
+            // more than one wallet.
+            val hadOneAlready = remember { model.state.walletExists }
+            if (hadOneAlready) {
+                WalletScreen(model)
+            } else {
+                WalletStartScreen(model)
+                // Words arriving is what means a wallet was just made,
+                // so moving to the screen that shows them is an effect
+                // of that rather than a decision taken while drawing.
+                val madeNow = model.state.mnemonic.isNotEmpty()
+                val restoredNow = model.state.walletExists && !madeNow
+                LaunchedEffect(madeNow, restoredNow) {
+                    if (madeNow) {
+                        step = Step.Seed
+                    } else if (restoredNow) {
+                        step = Step.Choose
+                    }
+                }
+            }
+        }
+        Step.Seed -> SeedPhraseScreen(model) { step = Step.Choose }
         Step.Choose -> ChooseScreen(
             model = model,
             onStartOwn = { step = Step.Garden; tab = 0 },
             onHaveInvite = { step = Step.Join },
             onTestnet = onTestnet,
+            onWallet = { step = Step.Wallet },
             onBack = { step = Step.Setup },
         )
         Step.Join -> CubeFloor(model.skin) {

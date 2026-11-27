@@ -41,12 +41,33 @@ object MobileConstants {
  * or RPC-reported balance does not satisfy any of these requirements.
  */
 object ValidatorOnboardingGate {
-    fun readyForDuties(): Boolean = false
+    /**
+     * What a phone still has to gain before it can do validator duties,
+     * named one piece at a time.
+     *
+     * This used to be a bare `false` with the reasons written into the
+     * message beside it, which is how the message came to claim the
+     * owner wallet was missing after the phone had grown one. A list
+     * that the gate is computed from cannot drift away from the gate.
+     *
+     * The wallet is no longer on it: `GardenPhone` makes and seals one
+     * from `budlum_core::wallet`, and it signs. Registration and the
+     * duty transport are still not connected to a chain, so the gate
+     * still fails closed.
+     */
+    fun missingPieces(): List<String> = listOf(
+        "on-chain validator registration",
+        "duty transport",
+    )
+
+    fun readyForDuties(): Boolean = missingPieces().isEmpty()
 
     fun requireConnected() {
-        if (!readyForDuties()) {
+        val missing = missingPieces()
+        if (missing.isNotEmpty()) {
             throw IllegalStateException(
-                "mobile_validator_unconnected: owner wallet, final registration and duty transport are unavailable"
+                "mobile_validator_unconnected: " +
+                    missing.joinToString(" and ") + " are unavailable"
             )
         }
     }

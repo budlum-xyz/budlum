@@ -25,12 +25,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.LaunchedEffect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import network.budlum.validator.garden.GardenHolder
 import network.budlum.validator.R
 import network.budlum.validator.core.AccountBalanceResult
 import network.budlum.validator.core.FaucetResult
@@ -72,6 +75,25 @@ fun ValidatorDashboardScreen(
     var endpoint by rememberSaveable { mutableStateOf("") }
     var rpcEndpoint by rememberSaveable { mutableStateOf("") }
     var address by rememberSaveable { mutableStateOf("") }
+    // The faucet needs somewhere to send to, and this phone now has a
+    // wallet of its own, so the field starts filled in with its address
+    // rather than asking a person to copy thirty-two bytes by hand. It
+    // stays editable: sending to a wallet held elsewhere is a thing
+    // people legitimately do.
+    val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        if (address.isEmpty()) {
+            val mine = withContext(Dispatchers.IO) {
+                runCatching {
+                    val phone = GardenHolder.phone(context)
+                    if (phone.walletExists()) phone.walletAddress() else ""
+                }.getOrDefault("")
+            }
+            if (mine.isNotEmpty()) {
+                address = mine
+            }
+        }
+    }
     var pending by remember { mutableStateOf(false) }
     var balancePending by remember { mutableStateOf(false) }
     var outcome by remember { mutableStateOf<FaucetResult?>(null) }

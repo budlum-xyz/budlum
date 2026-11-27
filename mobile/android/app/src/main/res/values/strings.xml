@@ -6,10 +6,10 @@
     <string name="notif_boot_resume_title">Budlum Validator Duties Unavailable</string>
     <string name="notif_boot_resume_body">Validator duties are not connected yet. Audits are not running. Reopen the app to view its status.</string>
     <string name="onboarding_disclosure">This build does not store or audit network content. Future validators may store erasure-coded shares, and sealed content must remain end-to-end encrypted. Faucet requests may perform bounded anti-bot proof of work, not block mining.</string>
-    <string name="security_tradeoff_note">Owner spend, staking, rotation and unbonding are unavailable. No wallet signer or Keystore-backed biometric/PIN authorization is connected. Operator and BLS key wrapping alone does not make validator duties operational.</string>
+    <string name="security_tradeoff_note">Owner spend, staking, rotation and unbonding are unavailable. This phone holds a wallet and can sign with it, but no Keystore-backed biometric or PIN authorization guards that signature yet. Operator and BLS key wrapping alone does not make validator duties operational.</string>
     <string name="action_faucet_request">Submit faucet request (100 BUD)</string>
     <string name="validator_unavailable">Validator registration, signing and custody are not connected to the chain in this build. A faucet request does not create a local balance or stake.</string>
-    <string name="faucet_explanation">Enter the HTTPS origin of your testnet faucet and the 0x-prefixed 32-byte address of a wallet you control. This app cannot create or verify a wallet yet. Never enter your seed phrase. A submitted transfer is not a confirmed balance. The faucet may limit requests by address and IP.</string>
+    <string name="faucet_explanation">Enter the HTTPS origin of your testnet faucet and the 0x-prefixed 32-byte address of a wallet you control. This phone makes its own wallet, so the address above can be its own. Never type your twenty-four words into a faucet, here or anywhere else. A submitted transfer is not a confirmed balance. The faucet may limit requests by address and IP.</string>
     <string name="faucet_endpoint">Faucet HTTPS origin (https://faucet.your-domain)</string>
     <string name="faucet_wallet_address">Your wallet address (0x…)</string>
     <string name="faucet_pending">Solving the faucet challenge and submitting request…</string>
@@ -108,4 +108,26 @@
     <string name="g_symbols">symbols made</string>
     <string name="g_validators">validators</string>
     <string name="g_leave">leave</string>
+    <!-- The phone's own wallet. One phone holds one. -->
+    <string name="w_wallet">wallet</string>
+    <string name="w_what_a_wallet_is">Your wallet is twenty-four words. The phone seals them under a password and keeps nothing else; the words are the only way back in, and nobody can give them to you again.</string>
+    <string name="w_password">password</string>
+    <string name="w_password_hint">a password only you know</string>
+    <string name="w_password_floor">At least eight characters. It seals the wallet on this phone; it is not sent anywhere.</string>
+    <string name="w_make">Make my wallet</string>
+    <string name="w_restore_instead">I already have words</string>
+    <string name="w_restore">Put my wallet back</string>
+    <string name="w_make_instead">Make a new one instead</string>
+    <string name="w_your_words">your words</string>
+    <string name="w_words_hint">the twenty-four words, in order, separated by spaces</string>
+    <string name="w_seed_phrase">your twenty-four words</string>
+    <string name="w_seed_warning">Write these down on paper and keep them away from this phone. Anyone holding them holds the wallet. They are shown once and cannot be shown again.</string>
+    <string name="w_written_down">I have written them down</string>
+    <string name="w_written_down_yes">written down</string>
+    <string name="w_done">Continue</string>
+    <string name="w_chain">chain</string>
+    <string name="w_locked_or_not">state</string>
+    <string name="w_locked">locked</string>
+    <string name="w_unlocked">unlocked</string>
+    <string name="w_unlock">Unlock</string>
 </resources>
