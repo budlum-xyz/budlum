@@ -813,9 +813,10 @@ pub fn verify_commitment_finality_observed(
                     crate::aggregation::domain_finality::ClaimedDomainFinalityAdapter::new(
                         claim_domain,
                     );
-                adapter
+                let status = adapter
                     .verify_finality(domain, commitment, proof)
-                    .map_err(|e| e.0)?
+                    .map_err(|e| e.0)?;
+                status
             } else {
                 let adapter = ZkFinalityAdapter;
                 ensure_adapter_name(domain, adapter.adapter_name())?;
@@ -833,7 +834,7 @@ pub fn verify_commitment_finality_observed(
                 if let Ok(status) = &verdict {
                     adapter.observe_finalized(status, proof, observer);
                 }
-                verdict?
+                verdict.map_err(|e| e.0)?
             }
         }
         ConsensusKind::Custom(_) => {

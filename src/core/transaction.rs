@@ -2904,6 +2904,50 @@ mod tests {
         assert_ne!(intent_preimage, object_preimage);
     }
 
+    /// A liquidation carries the evidence that justifies it, so that evidence
+    /// must be inside the signed preimage. This pins the tag and proves the
+    /// observations are not silently left out: two requests that differ only
+    /// in a reserve observation must not share a preimage.
+    #[test]
+    fn a_liquidation_signed_preimage_carries_its_evidence() {
+        use crate::settlement::domains::SettlementTx;
+        use crate::settlement::liquidation_proof::{
+            CrossDomainLiquidationParams, LiquidationPosition, LiquidationRequest,
+        };
+
+        let request = |position_id: u64| {
+            SettlementTx::Liquidate(Box::new(LiquidationRequest {
+                position: LiquidationPosition {
+                    position_id,
+                    debt_x: 1_000,
+                    collateral_y: 5_000,
+                    maintenance_threshold_bps: 8_000,
+                },
+                certified_roots: std::collections::BTreeMap::new(),
+                observations: Vec::new(),
+                collateral_legs: Vec::new(),
+                params: CrossDomainLiquidationParams {
+                    debt_domain_id: 7,
+                    repay_debt_x: 100,
+                    bonus_bps: 50,
+                    delivery_proof_root: [4u8; 32],
+                },
+            }))
+        };
+
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        encode_settlement_tx(&request(1), &mut first);
+        encode_settlement_tx(&request(2), &mut second);
+
+        assert_eq!(first.first(), Some(&11), "the liquidation tag moved");
+        assert_ne!(
+            first, second,
+            "two liquidations carrying different positions signed the same bytes"
+        );
+        assert!(!first.is_empty(), "the preimage is empty");
+    }
+
     #[test]
     fn redelegation_and_claim_carry_their_addresses_and_pass_validation() {
         let delegator = test_addr_from_byte(7u8);
@@ -4568,6 +4612,18 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
             put_u8(out, 10);
             let bytes = postcard::to_allocvec(uol_tx.as_ref())
                 .unwrap_or_else(|_| b"budlum/object-layer/serialize-failed".to_vec());
+            put_bytes(out, &bytes);
+        }
+        SettlementTx::Liquidate(request) => {
+            // Tag 11: the next free one after ObjectLayer (10). The request is
+            // five inputs verbatim - the position, the roots the sender
+            // claims, the proven reserve observations, the collateral legs and
+            // the caps - so the whole carried struct is what gets signed. A
+            // liquidation whose evidence were left out of the preimage could be
+            // rewritten after the signature was taken.
+            put_u8(out, 11);
+            let bytes = postcard::to_allocvec(request.as_ref())
+                .unwrap_or_else(|_| b"budlum/liquidate/serialize-failed".to_vec());
             put_bytes(out, &bytes);
         }
     }
