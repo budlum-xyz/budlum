@@ -311,6 +311,13 @@ impl Vm {
         u64::from_le_bytes(bytes)
     }
 
+    fn checked_jump_target(cur_pc: usize, imm: i32) -> Option<usize> {
+        isize::try_from(cur_pc)
+            .ok()?
+            .checked_add(imm as isize)
+            .and_then(|target| usize::try_from(target).ok())
+    }
+
     /// Walk the path window at `path_addr`, or `None` when the window does not fit
     /// in memory. The window is `[key, leaf[4], 64 x sibling[4], root[4]]`.
     ///
@@ -543,13 +550,22 @@ impl Vm {
                 (0, cur_pc + 1)
             }
             Opcode::Jmp => {
-                let target = (cur_pc as i64 + inst.imm as i64) as usize;
+                let Some(target) = Self::checked_jump_target(cur_pc, inst.imm) else {
+                    self.halted = true;
+                    self.error = Some(VmError::InvalidPc);
+                    return Err(VmError::InvalidPc);
+                };
                 self.pc = target;
                 (0, target)
             }
             Opcode::Jnz => {
                 let target = if src1_val != 0 {
-                    (cur_pc as i64 + inst.imm as i64) as usize
+                    let Some(target) = Self::checked_jump_target(cur_pc, inst.imm) else {
+                        self.halted = true;
+                        self.error = Some(VmError::InvalidPc);
+                        return Err(VmError::InvalidPc);
+                    };
+                    target
                 } else {
                     cur_pc + 1
                 };
@@ -562,7 +578,11 @@ impl Vm {
                     self.error = Some(VmError::StackOverflow);
                     return Err(VmError::StackOverflow);
                 }
-                let target = (cur_pc as i64 + inst.imm as i64) as usize;
+                let Some(target) = Self::checked_jump_target(cur_pc, inst.imm) else {
+                    self.halted = true;
+                    self.error = Some(VmError::InvalidPc);
+                    return Err(VmError::InvalidPc);
+                };
                 self.stack.push((cur_pc + 1) as u64);
                 self.pc = target;
                 ((cur_pc + 1) as u64, target)
@@ -654,10 +674,14 @@ impl Vm {
                     constant_storage_slot(inst.imm)
                 };
                 if slot >= GOLDILOCKS_P {
+                    self.halted = true;
+                    self.error = Some(VmError::InvalidMemoryAccess);
                     return Err(VmError::InvalidMemoryAccess);
                 }
                 let val = *self.storage.get(&slot).unwrap_or(&0);
                 if val >= GOLDILOCKS_P {
+                    self.halted = true;
+                    self.error = Some(VmError::InvalidMemoryAccess);
                     return Err(VmError::InvalidMemoryAccess);
                 }
                 self.registers[dst_idx as usize] = val;
@@ -671,6 +695,8 @@ impl Vm {
                     constant_storage_slot(inst.imm)
                 };
                 if slot >= GOLDILOCKS_P || src1_val >= GOLDILOCKS_P {
+                    self.halted = true;
+                    self.error = Some(VmError::InvalidMemoryAccess);
                     return Err(VmError::InvalidMemoryAccess);
                 }
                 self.storage.insert(slot, src1_val);
@@ -2322,6 +2348,54 @@ mod poseidon_parameter_tests {
         assert_eq!(
             vm4.registers[4], 5,
             "Syscall 6 must compute (block_height + rs1) mod GOLDILOCKS_P == 5"
+        );
+    }
+
+    #[test]
+    fn sread_swrite_and_negative_jump_halt_and_record_error_state() {
+        let halt = Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode();
+        let bad_swrite = Instruction {
+            opcode: Opcode::SWrite,
+            rd: 0,
+            rs1: 1,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode();
+        let mut vm = Vm::new(64);
+        vm.registers[1] = GOLDILOCKS_P;
+        let err = vm.step(&[bad_swrite, halt]).unwrap_err();
+        assert_eq!(err, VmError::InvalidMemoryAccess);
+        assert!(
+            vm.halted,
+            "SWrite out-of-field failure must set vm.halted = true"
+        );
+        assert_eq!(vm.error, Some(VmError::InvalidMemoryAccess));
+
+        // Negative jump target (pc = 0, imm = -1) must fail closed on the jump step
+        // instead of wrapping next_pc to usize::MAX in trace.
+        let neg_jmp = Instruction {
+            opcode: Opcode::Jmp,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: -1,
+        }
+        .encode();
+        let mut vm_jmp = Vm::new(64);
+        let j_err = vm_jmp.step(&[neg_jmp, halt]).unwrap_err();
+        assert_eq!(j_err, VmError::InvalidPc);
+        assert!(vm_jmp.halted);
+        assert!(
+            vm_jmp.trace.is_empty(),
+            "failing negative Jmp must not record next_pc=usize::MAX"
         );
     }
 }

@@ -313,7 +313,8 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
     // Only an explicit `--activation full` on a non-production chain opens
     // the Merkle path; the VM and proof verifier share that activation state.
     let mainnet_mode = config.activation == bud_isa::MainnetActivation::default();
-    let mut vm = Vm::with_mainnet_mode(bud_compiler::MIN_VM_MEMORY_BYTES, 1_000_000, mainnet_mode);
+    let mut vm = Vm::with_mainnet_mode(bud_compiler::MIN_VM_MEMORY_BYTES, 1_000_000, mainnet_mode)
+        .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
     if let Some(s) = config.sender {
         vm.context.sender = s;
         // Security review (MEDIUM): creating an automatically funded account for
@@ -324,6 +325,17 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         let acc = state.get_account(s).ok_or_else(|| {
             format!("sender account {s} does not exist in {state_file}; refusing to fund a new account implicitly")
         })?;
+        if config.commit_state {
+            if let Some(n) = config.nonce {
+                if n != acc.nonce {
+                    return Err(format!(
+                        "committed transaction nonce {n} does not match persisted account nonce {}",
+                        acc.nonce
+                    )
+                    .into());
+                }
+            }
+        }
         vm.context.nonce = acc.nonce;
     }
     if let Some(n) = config.nonce {
@@ -343,6 +355,13 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         .into());
     }
     for (i, val) in config.args.iter().enumerate() {
+        if *val >= bud_vm::GOLDILOCKS_P {
+            return Err(format!(
+                "input argument {val} at index {i} exceeds canonical Goldilocks modulus {}",
+                bud_vm::GOLDILOCKS_P
+            )
+            .into());
+        }
         vm.registers[i + 1] = *val;
     }
 
@@ -1527,5 +1546,72 @@ mod tests {
             error.contains("does not exist"),
             "refused but for another reason: {error}"
         );
+    }
+
+    #[test]
+    fn pipeline_rejects_committed_nonce_rollback_and_non_canonical_goldilocks_args() {
+        use bud_state::StateBackend;
+
+        let path = std::env::temp_dir().join(format!(
+            "budcli-nonce-guard-{}-{}.json",
+            std::process::id(),
+            line!()
+        ));
+        let mut seeded = bud_state::State::load(path.to_str().unwrap()).unwrap();
+        seeded.set_account(
+            77,
+            bud_state::Account {
+                balance: 1_000,
+                nonce: 10,
+                code_hash: [0u8; 32],
+                storage_root: [0u8; 32],
+            },
+        );
+        seeded.save().unwrap();
+
+        let halt_prog = vec![bud_isa::Instruction {
+            opcode: bud_isa::Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode()];
+
+        // 1) Committed run attempting to rewind sender nonce from 10 back to 0 must be refused.
+        let rollback_cfg = ExecutionConfig {
+            bytecode: halt_prog.clone(),
+            sender: Some(77),
+            nonce: Some(0),
+            block_height: Some(1),
+            args: Vec::new(),
+            chain_id: 45_262,
+            state_in_file: Some(path.to_string_lossy().into_owned()),
+            commit_state: true,
+            activation: bud_isa::MainnetActivation::default(),
+        };
+        assert!(
+            run_pipeline(rollback_cfg).is_err(),
+            "committed run with stale/rewound --nonce must be refused"
+        );
+
+        // 2) Input register argument >= GOLDILOCKS_P must be refused before VM execution.
+        let non_canonical_arg_cfg = ExecutionConfig {
+            bytecode: halt_prog,
+            sender: None,
+            nonce: None,
+            block_height: Some(1),
+            args: vec![bud_vm::GOLDILOCKS_P],
+            chain_id: 45_262,
+            state_in_file: Some(path.to_string_lossy().into_owned()),
+            commit_state: false,
+            activation: bud_isa::MainnetActivation::default(),
+        };
+        assert!(
+            run_pipeline(non_canonical_arg_cfg).is_err(),
+            "input argument >= GOLDILOCKS_P must be refused"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }

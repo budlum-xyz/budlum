@@ -21,12 +21,17 @@
 //! work, and the refusal is lifted with the binding.
 //! WIRING: unwired - the AIR-shape helpers here are the proof-side surface a later caller wires up; no production module calls them yet (the prover paths consume the concrete columns directly until that wiring lands).
 
-use crate::keccak_chip::{prove_keccak_f, verify_keccak_f, KeccakChipError};
+use crate::keccak_chip::{prove_keccak_f, verify_keccak_f, KeccakChipError, MAX_PERMUTATIONS};
 use bud_proof::plonky3_prover::ChipProof;
 
 /// The Keccak-256 rate in bytes.
 /// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub const RATE_BYTES: usize = 136;
+
+const STAMP_BATCH_DOMAIN: &[u8; 19] = b"BDLM_STAMP_BATCH_V1";
+const ENCODED_STATEMENT_BYTES: usize = 3 * 8 + 32 + 32 + 2;
+const MAX_BATCH_STATEMENTS: usize =
+    (MAX_PERMUTATIONS * RATE_BYTES - (STAMP_BATCH_DOMAIN.len() + 8 + 1)) / ENCODED_STATEMENT_BYTES;
 
 /// One proven transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +43,10 @@ pub struct PulStatement {
 }
 
 impl PulStatement {
+    fn is_non_zero(&self) -> bool {
+        self.txid != [0u8; 32] && self.from_address != [0u8; 32]
+    }
+
     /// The canonical encoding: each field preceded by its little-endian u64
     /// length.
     #[must_use]
@@ -55,15 +64,34 @@ impl PulStatement {
     }
 }
 
-/// The encoded batch: the statement count, then every statement.
+/// The encoded batch: domain separator, statement count, then every statement.
 #[must_use]
 /// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub fn encode_batch(statements: &[PulStatement]) -> Vec<u8> {
-    let mut out = (statements.len() as u64).to_le_bytes().to_vec();
+    let mut out = Vec::with_capacity(
+        STAMP_BATCH_DOMAIN.len() + 8 + statements.len().saturating_mul(ENCODED_STATEMENT_BYTES),
+    );
+    out.extend_from_slice(STAMP_BATCH_DOMAIN);
+    out.extend_from_slice(&(statements.len() as u64).to_le_bytes());
     for statement in statements {
         out.extend_from_slice(&statement.encode());
     }
     out
+}
+
+fn check_batch_bounds(len: usize, all_non_zero: bool) -> Result<(), KeccakChipError> {
+    if len == 0 {
+        return Err(KeccakChipError::Empty);
+    }
+    if len > MAX_BATCH_STATEMENTS {
+        return Err(KeccakChipError::TooMany(len));
+    }
+    if !all_non_zero {
+        return Err(KeccakChipError::Rejected(
+            "stamp statement txid and sender address must be non-zero".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// The Keccak-f input state of every absorption of the sponge over `bytes`.
@@ -166,9 +194,7 @@ pub struct PulBatchProof {
 /// An empty batch or a chip refusal.
 /// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub fn prove_batch(statements: Vec<PulStatement>) -> Result<PulBatchProof, KeccakChipError> {
-    if statements.is_empty() {
-        return Err(KeccakChipError::Empty);
-    }
+    check_batch_bounds(statements.len(), statements.iter().all(|s| s.is_non_zero()))?;
     let inputs = absorb_states(&encode_batch(&statements));
     let keccak = prove_keccak_f(&inputs)?;
     Ok(PulBatchProof { statements, keccak })
@@ -193,9 +219,10 @@ pub fn prove_batch(statements: Vec<PulStatement>) -> Result<PulBatchProof, Kecca
 /// until the AIR binds the sponge inputs of the batch.
 /// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub fn verify_batch(proof: &PulBatchProof) -> Result<(), KeccakChipError> {
-    if proof.statements.is_empty() {
-        return Err(KeccakChipError::Empty);
-    }
+    check_batch_bounds(
+        proof.statements.len(),
+        proof.statements.iter().all(|s| s.is_non_zero()),
+    )?;
     verify_keccak_f(&proof.keccak)?;
     Err(KeccakChipError::UnboundProof)
 }
@@ -258,6 +285,35 @@ mod tests {
             verify_batch(&honest_again),
             Err(KeccakChipError::UnboundProof),
             "the honest batch is refused too: the refusal is not a statement check"
+        );
+    }
+
+    #[test]
+    fn stamp_batch_rejects_zero_statements_oversized_batches_and_domain_binds_encoding() {
+        let mut zero_txid = statement(1);
+        zero_txid.txid = [0u8; 32];
+        assert!(
+            matches!(
+                prove_batch(vec![zero_txid]),
+                Err(KeccakChipError::Rejected(_))
+            ),
+            "all-zero txid statement must be rejected before proving"
+        );
+
+        let mut zero_addr = statement(1);
+        zero_addr.from_address = [0u8; 32];
+        assert!(
+            matches!(
+                prove_batch(vec![zero_addr]),
+                Err(KeccakChipError::Rejected(_))
+            ),
+            "all-zero sender statement must be rejected before proving"
+        );
+
+        let encoded = encode_batch(&[statement(1)]);
+        assert!(
+            encoded.starts_with(b"BDLM_STAMP_BATCH_V1"),
+            "batch sponge input must begin with canonical domain separator"
         );
     }
 }
