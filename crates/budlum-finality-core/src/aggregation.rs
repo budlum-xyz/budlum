@@ -4,7 +4,7 @@
 //! final `GlobalBlockHeader`. This mirrors the composition in
 //! `src/settlement/universal_finality.rs` (`end_to_end_slashable`): a cross-domain
 //! value route is only as safe as its weakest link, so the global header is
-//! fail-closed — empty or partial sets are NOT a consensus of consensuses.
+//! fail-closed - empty or partial sets are NOT a consensus of consensuses.
 
 use crate::{is_economic_backing, SecurityBacking};
 

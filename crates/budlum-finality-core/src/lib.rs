@@ -10,7 +10,7 @@
 //! # Why this crate exists
 //!
 //! `src/cross_domain/external/intake.rs` (the central settlement intake) only
-//! mentions `slashable` in comments — it never enforces the `require_slashable`
+//! mentions `slashable` in comments - it never enforces the `require_slashable`
 //! policy field. Enforcement is scattered across individual adapters
 //! (`ethereum.rs:719`, `tendermint.rs:1066`, `domain_bridge.rs:163`). That is
 //! fragile: a new adapter that forgets the check silently lets an *unsashable*
@@ -179,7 +179,7 @@ pub fn verify_finality_backing(
             if u128::from(*signers) > *total_weight {
                 return Err(BackingError::SignersExceedTotal);
             }
-            // Economic-security gate — the core of the "consensus of consensuses".
+            // Economic-security gate - the core of the "consensus of consensuses".
             if policy.require_slashable && !*slashable {
                 return Err(BackingError::UnslashableBacking);
             }
@@ -220,12 +220,12 @@ pub fn is_economic_backing(backing: &SecurityBacking) -> bool {
 /// maps onto one of these proof kinds before being folded into the
 /// `GlobalBlockHeader`:
 ///
-/// * `SpvHeaderChain`  — Chaum/hashcash → Nakamoto (Bitcoin SPV / NIPoPoW).
-/// * `LightClientAttestation` — Ethereum VM → Altair sync committee.
-/// * `BftQuorum` — Casper/Tendermint/HotStuff BFT finality.
-/// * `DagCausalOrder` — DAG / parallel structural time.
-/// * `ValidityProof` — rollup / ZK / restaking validity.
-/// * `CapacityProof` — PoSpace / PoH capacity proofs.
+/// * `SpvHeaderChain`  - Chaum/hashcash → Nakamoto (Bitcoin SPV / NIPoPoW).
+/// * `LightClientAttestation` - Ethereum VM → Altair sync committee.
+/// * `BftQuorum` - Casper/Tendermint/HotStuff BFT finality.
+/// * `DagCausalOrder` - DAG / parallel structural time.
+/// * `ValidityProof` - rollup / ZK / restaking validity.
+/// * `CapacityProof` - PoSpace / PoH capacity proofs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinalityProof {
     /// Bitcoin-style SPV / NIPoPoW header chain.

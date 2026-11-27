@@ -1,7 +1,7 @@
 # budlum-finality-core
 
 Common finality-proof model + **fail-closed** cross-domain security verifier
-for Budlum — the *consensus of consensuses*.
+for Budlum - the *consensus of consensuses*.
 
 Every external domain (PoW, PoS, PoA, BFT, ZK, DAG, capacity-proof, …) keeps its
 own finality engine. Budlum verifies each domain's finality proof and folds it
@@ -12,7 +12,7 @@ into a single `GlobalBlockHeader`. This crate is the **shared proof model**
 
 ## Why
 
-`intake.rs` only mentions `slashable` in comments — it never enforces the
+`intake.rs` only mentions `slashable` in comments - it never enforces the
 `require_slashable` policy field. Enforcement is scattered across adapters
 (`ethereum.rs:719`, `tendermint.rs:1066`, `domain_bridge.rs:163`). A new
 adapter that forgets the check silently lets an *unsashable* backing reach the
@@ -21,10 +21,10 @@ risk. **Fail-closed**: any condition not provably safe is a rejection.
 
 ## Properties (verified by the tests)
 
-* **Fail-closed** — `require_slashable` + a non-slashable backing ⇒ reject.
-* **No admin key** — verification is pure, deterministic, key-free.
-* **Deterministic** — identical inputs ⇒ identical output.
-* **Quorum sanity** — malformed quorums are rejected, never trusted.
+* **Fail-closed** - `require_slashable` + a non-slashable backing ⇒ reject.
+* **No admin key** - verification is pure, deterministic, key-free.
+* **Deterministic** - identical inputs ⇒ identical output.
+* **Quorum sanity** - malformed quorums are rejected, never trusted.
 
 ## Build & test (standalone)
 
