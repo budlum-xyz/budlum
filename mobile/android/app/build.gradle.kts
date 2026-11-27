@@ -94,10 +94,23 @@ val checkNativeValidatorRelease by tasks.registering {
                     "and native libraries: ${missing.joinToString()}"
             )
         }
+        // The gate was the literal `= false` and this looked for that
+        // spelling. It is now computed from a list of what is still
+        // missing, so what is looked for is a list with nothing left on
+        // it - the condition, not the characters.
         val gate = file("src/main/java/network/budlum/validator/core/MobileCoreBridge.kt").readText()
-        if ("readyForDuties(): Boolean = false" in gate) {
+        val stillMissing = Regex("""fun missingPieces\(\): List<String> = listOf\(([^)]*)\)""")
+            .find(gate)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+            ?.trimEnd(',')
+            ?: throw org.gradle.api.GradleException(
+                "Cannot find the onboarding gate's list of what is missing"
+            )
+        if (stillMissing.isNotEmpty()) {
             throw org.gradle.api.GradleException(
-                "Refusing validator release while owner registration and duty transport are unconnected"
+                "Refusing validator release while these are unconnected: $stillMissing"
             )
         }
     }

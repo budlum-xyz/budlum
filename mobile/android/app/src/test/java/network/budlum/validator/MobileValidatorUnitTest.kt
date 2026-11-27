@@ -319,7 +319,12 @@ object MobileValidatorUnitTest {
         check(gradle.contains("budlum_mobile_ffi.kt"), "release requires generated UniFFI Kotlin")
         check(gradle.contains("NativeValidatorGateway.kt"), "release requires real host gateway")
         check(gradle.contains("libbudlum_mobile_ffi.so"), "release requires built native library")
-        check(gradle.contains("readyForDuties(): Boolean = false"), "release must refuse while gate is closed")
+        // The gate used to be the literal `= false`, and this asserted
+        // that literal. It is now computed from the list of what is
+        // still missing, so the thing worth asserting is that the list
+        // is not empty - the behaviour, not the spelling.
+        check(gradle.contains("missingPieces()"), "release must refuse while the gate is closed")
+        check(ValidatorOnboardingGate.missingPieces().isNotEmpty(), "gate must name what is missing")
         check(!ValidatorOnboardingGate.readyForDuties(), "no wallet proof may enable validator today")
     }
 

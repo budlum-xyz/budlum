@@ -111,17 +111,44 @@ fun SetupScreen(model: GardenModel, onReady: () -> Unit) {
             Rule()
             Fact(stringResource(R.string.g_camera), stringResource(R.string.g_only_for_qr))
 
+            // This button used to be shut unless the self test passed
+            // and notifications were granted, which made the first
+            // screen of the app a wall: deny the Android prompt twice
+            // and it never appears again, so the only button left was
+            // dark and there was no way further in. A person in that
+            // state cannot become a validator at all, which is the one
+            // thing this app exists to ask of them.
+            //
+            // Notifications are what keeps the duty service alive in
+            // the background; without them this phone validates while
+            // the screen is on and stops when it is not. That is worse,
+            // not impossible, so it is said plainly above and the door
+            // stays open.
             RuleButton(
                 text = when {
                     !checksDone -> stringResource(R.string.g_checking)
-                    !checksPassed -> stringResource(R.string.g_cannot_validate)
-                    !ready.notifications -> stringResource(R.string.g_notifications_needed)
-                    else -> stringResource(R.string.g_done)
+                    !checksPassed -> stringResource(R.string.g_become_anyway)
+                    !ready.notifications -> stringResource(R.string.g_become_anyway)
+                    else -> stringResource(R.string.g_become_validator)
                 },
                 onTap = onReady,
-                enabled = checksPassed && ready.canValidate,
+                enabled = checksDone,
                 modifier = Modifier.padding(top = 20.dp),
             )
+
+            // What taking that button means while something is still
+            // unmet, said once, under it.
+            if (checksDone && (!checksPassed || !ready.notifications)) {
+                Label(
+                    if (!checksPassed) {
+                        stringResource(R.string.g_self_test_failed_why)
+                    } else {
+                        stringResource(R.string.g_without_notifications)
+                    },
+                    color = Flow,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
 
             if (state.message.isNotEmpty()) {
                 Label(state.message, color = Flow, modifier = Modifier.padding(top = 12.dp))

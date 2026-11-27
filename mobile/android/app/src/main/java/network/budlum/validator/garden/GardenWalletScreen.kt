@@ -1,10 +1,13 @@
 package network.budlum.validator.garden
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -17,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
@@ -26,32 +30,76 @@ import network.budlum.validator.R
 import network.budlum.validator.core.MobileConstants
 
 /**
- * The phone's own wallet.
+ * The wallet sheets, laid out the way the design file lays them out.
  *
- * One phone holds one wallet, so there is no account list here and
- * nothing to add to it. A key is not a profile: either this phone has
- * one or it does not, and the three screens below are the three states
- * that follow from that.
+ * The file puts a wordmark at the top of the floor, a faint search bar
+ * under it, a lowercase menu in the bottom left corner, and one panel
+ * carrying everything the screen is actually about. These screens are
+ * that, with the phone's width standing in for the file's right-hand
+ * dock. The words on the buttons are lifted from the file rather than
+ * invented here, which is why they live in the Turkish resources and
+ * are reached only through stringResource.
  *
- * None of this screen knows how a key is made. Every call goes to the
- * core's own wallet module through the model, so the wallet a person
- * writes down here is the same wallet the desktop tools would derive
- * from the same twenty-four words.
+ * One phone holds one wallet, so there is no account list anywhere in
+ * this file and nothing that adds a second.
  */
 
-/** The shortest password the core will seal under, repeated here so the
- *  button can be dark before the call is made rather than after it. */
+/** The shortest password the core will seal under. */
 private const val MIN_PASSWORD = 8
 
-/** How many of the twenty-four are asked back before the wallet is let go. */
+/** How many of the words are asked back before the wallet is let go. */
 private const val CHECKED_WORDS = 3
+
+/**
+ * The floor every wallet sheet stands on: tiled background, wordmark,
+ * search bar, corner menu, and the panel in the middle of it.
+ */
+@Composable
+private fun WalletFloor(
+    model: GardenModel,
+    panel: @Composable () -> Unit,
+) {
+    val skin = model.skin
+    CubeFloor(skin) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                stringResource(R.string.g_what_this_is),
+                style = MaterialTheme.typography.headlineSmall,
+                color = Sage,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            SearchBar(stringResource(R.string.w_search_hint), skin)
+            Spacer(modifier = Modifier.height(22.dp))
+
+            panel()
+
+            Spacer(modifier = Modifier.height(30.dp))
+            Box(modifier = Modifier.fillMaxWidth()) {
+                CornerMenu(
+                    listOf(
+                        stringResource(R.string.w_menu_ao),
+                        stringResource(R.string.w_menu_market),
+                        stringResource(R.string.w_menu_ecosystem),
+                        stringResource(R.string.w_menu_participation),
+                    ),
+                    skin,
+                    modifier = Modifier.align(Alignment.CenterStart),
+                )
+            }
+        }
+    }
+}
 
 /**
  * No wallet yet: make one, or put back one the person already has.
  *
- * The two paths are one screen because they are one decision, and a
- * person who has words already should not have to find a second place
- * to type them.
+ * Both paths are one panel because to the person they are one decision.
  */
 @Composable
 fun WalletStartScreen(model: GardenModel) {
@@ -59,290 +107,33 @@ fun WalletStartScreen(model: GardenModel) {
     var words by remember { mutableStateOf("") }
     var restoring by remember { mutableStateOf(false) }
     val state = model.state
+    val skin = model.skin
 
-    CubeFloor(model.skin) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Label(stringResource(R.string.w_wallet))
-            Text(
-                stringResource(R.string.w_what_a_wallet_is),
-                style = MaterialTheme.typography.bodySmall,
-                color = Ink,
-                modifier = Modifier.padding(bottom = 10.dp),
-            )
-
-            if (restoring) {
-                Label(stringResource(R.string.w_your_words))
-                OutlinedTextField(
-                    value = words,
-                    onValueChange = { fresh -> words = fresh },
-                    placeholder = { Label(stringResource(R.string.w_words_hint)) },
-                    singleLine = false,
-                    modifier = Modifier.fillMaxWidth(),
+    WalletFloor(model) {
+        Sheet(skin) {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                SheetHead(
+                    name = stringResource(R.string.w_wallet),
+                    address = stringResource(R.string.w_no_wallet_yet),
+                    under = "",
+                    skin = skin,
                 )
-            }
-
-            Label(stringResource(R.string.w_password))
-            OutlinedTextField(
-                value = password,
-                onValueChange = { fresh -> password = fresh },
-                placeholder = { Label(stringResource(R.string.w_password_hint)) },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Label(stringResource(R.string.w_password_floor))
-
-            Rule()
-
-            if (restoring) {
-                RuleButton(
-                    text = stringResource(R.string.w_restore),
-                    onTap = { model.restoreWallet(words, password) },
-                    enabled = !state.busy &&
-                        password.length >= MIN_PASSWORD &&
-                        words.trim().split(" ").filter { it.isNotEmpty() }.size ==
-                        model.wordCount(),
+                Text(
+                    stringResource(R.string.w_what_a_wallet_is),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = skin.ink,
                 )
-                RuleButton(
-                    text = stringResource(R.string.w_make_instead),
-                    onTap = { restoring = false },
-                    enabled = !state.busy,
-                )
-            } else {
-                RuleButton(
-                    text = stringResource(R.string.w_make),
-                    onTap = { model.createWallet(password) },
-                    enabled = !state.busy && password.length >= MIN_PASSWORD,
-                )
-                RuleButton(
-                    text = stringResource(R.string.w_restore_instead),
-                    onTap = { restoring = true },
-                    enabled = !state.busy,
-                )
-            }
 
-            if (state.message.isNotEmpty()) {
-                Label(state.message, color = Flow)
-            }
-        }
-    }
-}
-
-/**
- * The twenty-four words, shown once.
- *
- * They are not read back off disk afterwards, because the sealed file
- * holds no clear copy of them. That is the point of the screen and the
- * reason it will not move on until it has been told they are written
- * down.
- */
-@Composable
-fun SeedPhraseScreen(model: GardenModel, onWritten: () -> Unit) {
-    var confirmed by remember { mutableStateOf(false) }
-    val state = model.state
-    val words = state.mnemonic
-
-    CubeFloor(model.skin) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Label(stringResource(R.string.w_seed_phrase))
-            Text(
-                stringResource(R.string.w_seed_warning),
-                style = MaterialTheme.typography.bodySmall,
-                color = Ink,
-                modifier = Modifier.padding(bottom = 10.dp),
-            )
-
-            // Two columns, the way the design file lays them out: the
-            // left column counts one upward and the right column carries
-            // on from it, so a person reads down and then down again
-            // rather than zig-zagging across the page.
-            val half = (words.size + 1) / 2
-            Slab(modifier = Modifier.fillMaxWidth()) {
-                Column {
-                    for (row in 0 until half) {
-                        if (row > 0) {
-                            Rule()
-                        }
-                        Row(modifier = Modifier.fillMaxWidth()) {
-                            SeedWord(row + 1, words.getOrNull(row), Modifier.weight(1f))
-                            SeedWord(
-                                row + 1 + half,
-                                words.getOrNull(row + half),
-                                Modifier.weight(1f),
-                            )
-                        }
-                    }
-                }
-            }
-
-            Rule()
-
-            RuleButton(
-                text = if (confirmed) {
-                    stringResource(R.string.w_written_down_yes)
-                } else {
-                    stringResource(R.string.w_written_down)
-                },
-                onTap = { confirmed = true },
-                enabled = !confirmed,
-            )
-            RuleButton(
-                text = stringResource(R.string.w_done),
-                onTap = onWritten,
-                enabled = confirmed,
-            )
-        }
-    }
-}
-
-/**
- * Three of the words, asked back.
- *
- * A person who taps past the phrase screen without writing anything
- * down has a wallet they will lose, and they will not find that out
- * until the day it matters. Asking for three positions at random is
- * the cheapest way to make the claim true at the moment it is made.
- *
- * The positions are drawn once and remembered, so they do not shuffle
- * underneath somebody who is part way through typing.
- */
-@Composable
-fun SeedVerifyScreen(model: GardenModel, onVerified: () -> Unit) {
-    val words = model.state.mnemonic
-    val asked = remember(words.size) {
-        if (words.size < CHECKED_WORDS) {
-            words.indices.toList()
-        } else {
-            words.indices.shuffled().take(CHECKED_WORDS).sorted()
-        }
-    }
-    var typed by remember { mutableStateOf(List(asked.size) { "" }) }
-    val right = asked.indices.all { slot ->
-        typed[slot].trim().equals(words.getOrNull(asked[slot]) ?: "", ignoreCase = true)
-    }
-
-    CubeFloor(model.skin) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Label(stringResource(R.string.w_verify))
-            Text(
-                stringResource(R.string.w_verify_why),
-                style = MaterialTheme.typography.bodySmall,
-                color = Ink,
-                modifier = Modifier.padding(bottom = 10.dp),
-            )
-
-            asked.forEachIndexed { slot, position ->
-                OutlinedTextField(
-                    value = typed[slot],
-                    onValueChange = { fresh ->
-                        typed = typed.toMutableList().also { it[slot] = fresh }
-                    },
-                    label = { Label(stringResource(R.string.w_word_number, position + 1)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-
-            Rule()
-
-            RuleButton(
-                text = stringResource(R.string.w_done),
-                onTap = {
-                    model.forgetMnemonic()
-                    onVerified()
-                },
-                enabled = right,
-            )
-            if (!right && typed.any { it.isNotEmpty() }) {
-                Label(stringResource(R.string.w_not_those_words), color = Flow)
-            }
-        }
-    }
-}
-
-/** One numbered word of the phrase. */
-@Composable
-private fun SeedWord(number: Int, word: String?, modifier: Modifier = Modifier) {
-    Row(
-        modifier = modifier.padding(horizontal = 14.dp, vertical = 7.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Label(number.toString(), color = Mute)
-        Text(
-            word ?: "",
-            style = MaterialTheme.typography.bodySmall,
-            color = Ink,
-        )
-    }
-}
-
-/**
- * The wallet this phone holds.
- *
- * The address is read without the password, because the sealed file
- * keeps it in the clear for exactly this: a person should be able to
- * see which wallet their phone is carrying without unlocking it.
- */
-@Composable
-fun WalletScreen(model: GardenModel) {
-    var password by remember { mutableStateOf("") }
-    val state = model.state
-
-    CubeFloor(model.skin) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Label(stringResource(R.string.w_wallet))
-
-            Slab(modifier = Modifier.fillMaxWidth()) {
-                Column {
-                    Fact(stringResource(R.string.faucet_wallet_address), state.walletAddress)
-                    Rule()
-                    // The chain this wallet belongs to, read from the
-                    // one constant the rest of the app reads it from
-                    // rather than typed into a string file twice.
-                    Fact(
-                        stringResource(R.string.w_chain),
-                        MobileConstants.TESTNET_CHAIN_ID.toString(),
-                    )
-                    Rule()
-                    Fact(
-                        stringResource(R.string.w_locked_or_not),
-                        if (state.walletUnlocked) {
-                            stringResource(R.string.w_unlocked)
-                        } else {
-                            stringResource(R.string.w_locked)
-                        },
+                if (restoring) {
+                    OutlinedTextField(
+                        value = words,
+                        onValueChange = { fresh -> words = fresh },
+                        placeholder = { Label(stringResource(R.string.w_words_hint)) },
+                        singleLine = false,
+                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
-            }
 
-            if (!state.walletUnlocked) {
-                Rule()
-                Label(stringResource(R.string.w_password))
                 OutlinedTextField(
                     value = password,
                     onValueChange = { fresh -> password = fresh },
@@ -352,16 +143,262 @@ fun WalletScreen(model: GardenModel) {
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                RuleButton(
-                    text = stringResource(R.string.w_unlock),
-                    onTap = { model.unlockWallet(password) },
-                    enabled = !state.busy && password.isNotEmpty(),
+                Text(
+                    stringResource(R.string.w_password_floor),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Mute,
                 )
-            }
 
-            if (state.message.isNotEmpty()) {
-                Label(state.message, color = Flow)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (restoring) {
+                        PillButton(
+                            text = stringResource(R.string.w_restore),
+                            onTap = { model.restoreWallet(words, password) },
+                            enabled = !state.busy &&
+                                password.length >= MIN_PASSWORD &&
+                                words.trim().split(" ").filter { it.isNotEmpty() }.size ==
+                                model.wordCount(),
+                        )
+                        PillButton(
+                            text = stringResource(R.string.w_make_instead),
+                            onTap = { restoring = false },
+                            enabled = !state.busy,
+                        )
+                    } else {
+                        PillButton(
+                            text = stringResource(R.string.w_make),
+                            onTap = { model.createWallet(password) },
+                            enabled = !state.busy && password.length >= MIN_PASSWORD,
+                        )
+                        PillButton(
+                            text = stringResource(R.string.w_restore_instead),
+                            onTap = { restoring = true },
+                            enabled = !state.busy,
+                        )
+                    }
+                }
+
+                if (state.message.isNotEmpty()) {
+                    Text(
+                        state.message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Flow,
+                    )
+                }
             }
         }
     }
+}
+
+/**
+ * The words, shown once, in the file's two-column grid of numbered
+ * boxes. The button under them carries the file's own wording.
+ */
+@Composable
+fun SeedPhraseScreen(model: GardenModel, onWritten: () -> Unit) {
+    val skin = model.skin
+    val words = model.state.mnemonic
+
+    WalletFloor(model) {
+        Sheet(skin) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    stringResource(R.string.w_seed_warning),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = skin.ink,
+                )
+
+                // Two columns, counting across the way the file counts:
+                // 1 and 2 on the first line, 3 and 4 on the second.
+                val lines = (words.size + 1) / 2
+                for (line in 0 until lines) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        val left = line * 2
+                        WordCell(
+                            left + 1,
+                            words.getOrNull(left) ?: "",
+                            skin,
+                            Modifier.weight(1f),
+                        )
+                        if (left + 1 < words.size) {
+                            WordCell(
+                                left + 2,
+                                words[left + 1],
+                                skin,
+                                Modifier.weight(1f),
+                            )
+                        } else {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    PillButton(
+                        text = stringResource(R.string.w_noted_go_on),
+                        onTap = onWritten,
+                        modifier = Modifier.align(Alignment.Center),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Three of the words, asked back, in the same grid with the boxes
+ * empty, under the file's own wording for the button.
+ *
+ * The positions are drawn once and remembered, so they do not shuffle
+ * underneath somebody part way through typing.
+ */
+@Composable
+fun SeedVerifyScreen(model: GardenModel, onVerified: () -> Unit) {
+    val skin = model.skin
+    val words = model.state.mnemonic
+    val asked = remember(words.size) {
+        if (words.size <= CHECKED_WORDS) {
+            words.indices.toList()
+        } else {
+            words.indices.shuffled().take(CHECKED_WORDS).sorted()
+        }
+    }
+    var typed by remember { mutableStateOf(List(asked.size) { "" }) }
+    val right = asked.isNotEmpty() && asked.indices.all { slot ->
+        typed[slot].trim().equals(words.getOrNull(asked[slot]) ?: "", ignoreCase = true)
+    }
+
+    WalletFloor(model) {
+        Sheet(skin) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    stringResource(R.string.w_verify_why),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = skin.ink,
+                )
+
+                asked.forEachIndexed { slot, position ->
+                    WordField(
+                        number = position + 1,
+                        value = typed[slot],
+                        onValue = { fresh ->
+                            typed = typed.toMutableList().also { it[slot] = fresh }
+                        },
+                        skin = skin,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+
+                if (!right && typed.any { it.isNotEmpty() }) {
+                    Text(
+                        stringResource(R.string.w_not_those_words),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Flow,
+                    )
+                }
+
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    PillButton(
+                        text = stringResource(R.string.w_thats_it),
+                        onTap = {
+                            model.forgetMnemonic()
+                            onVerified()
+                        },
+                        enabled = right,
+                        modifier = Modifier.align(Alignment.Center),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The wallet this phone holds, in the file's own panel: portrait, who
+ * this is, the address, then the counts and the balance.
+ *
+ * The address is read without the password, because the sealed file
+ * keeps it in the clear for exactly this.
+ */
+@Composable
+fun WalletScreen(model: GardenModel) {
+    var password by remember { mutableStateOf("") }
+    val state = model.state
+    val skin = model.skin
+
+    WalletFloor(model) {
+        Sheet(skin) {
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                SheetHead(
+                    name = stringResource(R.string.w_you),
+                    address = shortAddress(state.walletAddress),
+                    under = stringResource(R.string.w_chain) + " " +
+                        MobileConstants.TESTNET_CHAIN_ID.toString(),
+                    skin = skin,
+                )
+
+                SheetRow(
+                    first = stringResource(R.string.w_tokens_none),
+                    second = stringResource(R.string.w_nft_none),
+                    skin = skin,
+                    markFill = skin.rule,
+                )
+
+                SheetRow(
+                    first = stringResource(R.string.w_bud_zero),
+                    second = "",
+                    skin = skin,
+                )
+
+                if (!state.walletUnlocked) {
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { fresh -> password = fresh },
+                        placeholder = { Label(stringResource(R.string.w_password_hint)) },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    PillButton(
+                        text = if (state.walletUnlocked) {
+                            stringResource(R.string.w_open_transfers)
+                        } else {
+                            stringResource(R.string.w_sign_in)
+                        },
+                        onTap = {
+                            if (!state.walletUnlocked) {
+                                model.unlockWallet(password)
+                            }
+                        },
+                        enabled = state.walletUnlocked ||
+                            (!state.busy && password.isNotEmpty()),
+                        modifier = Modifier.align(Alignment.Center),
+                    )
+                }
+
+                if (state.message.isNotEmpty()) {
+                    Text(
+                        state.message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Flow,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * An address the way the file shows one: the head, an ellipsis, the
+ * tail. Thirty-two bytes of hex does not fit a panel and nobody reads
+ * the middle of it anyway.
+ */
+private fun shortAddress(address: String): String = when {
+    address.isEmpty() -> ""
+    address.length <= 18 -> address
+    else -> address.take(10) + "…" + address.takeLast(6)
 }

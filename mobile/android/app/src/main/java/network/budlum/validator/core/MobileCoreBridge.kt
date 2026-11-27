@@ -29,7 +29,11 @@ object MobileConstants {
     const val QUOTA_DEFAULT_BYTES: Long = 4L * GIB_BYTES
     const val QUOTA_MAX_BYTES: Long = 64L * GIB_BYTES
     const val FREE_SPACE_FLOOR_BYTES: Long = 2L * GIB_BYTES
-    const val MOBILE_MIN_STAKE_BUD: Long = 10L
+    // The core puts the Mobile class floor at MOBILE_VALIDATOR_MIN_STAKE_ATOMS
+    // = 100_000_000 atoms, which is 100 BUD. This said 10, and so did the
+    // button in the app, so the app was quoting a price the chain would
+    // have refused.
+    const val MOBILE_MIN_STAKE_BUD: Long = 100L
     const val WORKMANAGER_PERIOD_MINUTES: Long = 15L
     const val THERMAL_STATUS_MODERATE: Int = 2
 }
