@@ -171,7 +171,9 @@ pub fn member_set_is_valid(members: &[HandoffMember]) -> bool {
     let mut seen = BTreeSet::new();
     for member in members {
         if member.address.is_empty()
+            || member.address.iter().all(|&b| b == 0)
             || member.pq_public_key.is_empty()
+            || member.pq_public_key.iter().all(|&b| b == 0)
             || member.stake == 0
             || !seen.insert(member.address.as_slice())
         {
@@ -317,10 +319,19 @@ impl HandoffCertificate {
     where
         F: FnMut(&[u8], &[u8], &[u8]) -> Result<(), String>,
     {
+        if self.chain_id == 0 {
+            return Err(HandoffError::Chain {
+                expected: 1,
+                got: 0,
+            });
+        }
         if !member_set_is_valid(outgoing)
             || set_digest(self.chain_id, self.epoch, outgoing) != self.outgoing_set
         {
             return Err(HandoffError::OutgoingSet);
+        }
+        if self.incoming_set == [0u8; 32] {
+            return Err(HandoffError::IncomingSet);
         }
         if self.randomness != epoch_randomness {
             return Err(HandoffError::Randomness);
@@ -400,6 +411,12 @@ pub fn follow_handoffs_with<'a, F>(
 where
     F: FnMut(&[u8], &[u8], &[u8]) -> Result<(), String>,
 {
+    if chain_id == 0 {
+        return Err(HandoffError::Chain {
+            expected: 1,
+            got: 0,
+        });
+    }
     if !member_set_is_valid(trusted) {
         return Err(HandoffError::OutgoingSet);
     }
@@ -504,5 +521,57 @@ mod tests {
         );
         let c2 = HandoffCertificate::unsigned(45_261, 1, &[m1], &[m2], [8; 32]);
         assert_ne!(c1.signing_message(), c2.signing_message());
+    }
+
+    #[test]
+    fn handoff_rejects_zero_address_zero_chain_id_and_zero_incoming_set() {
+        let zero_addr_member = HandoffMember {
+            address: vec![0u8; 32],
+            bls_public_key: vec![2; 48],
+            pop_signature: vec![3; 96],
+            pq_public_key: vec![4; 32],
+            stake: 100,
+        };
+        assert!(
+            !member_set_is_valid(&[zero_addr_member]),
+            "all-zero validator address must be rejected by member_set_is_valid"
+        );
+
+        let valid = HandoffMember {
+            address: vec![1; 32],
+            bls_public_key: vec![2; 48],
+            pop_signature: vec![3; 96],
+            pq_public_key: vec![4; 32],
+            stake: 100,
+        };
+        let mut cert_zero_chain = HandoffCertificate::unsigned(
+            0,
+            1,
+            std::slice::from_ref(&valid),
+            std::slice::from_ref(&valid),
+            [9; 32],
+        );
+        cert_zero_chain.insert_signature(0, vec![0xAA; 64]);
+        assert!(
+            cert_zero_chain
+                .verify_with(std::slice::from_ref(&valid), [9; 32], |_, _, _| Ok(()))
+                .is_err(),
+            "handoff certificate with chain_id == 0 must be refused"
+        );
+
+        let mut cert_zero_incoming = HandoffCertificate::unsigned(
+            45_261,
+            1,
+            std::slice::from_ref(&valid),
+            std::slice::from_ref(&valid),
+            [9; 32],
+        );
+        cert_zero_incoming.incoming_set = [0u8; 32];
+        cert_zero_incoming.insert_signature(0, vec![0xAA; 64]);
+        assert_eq!(
+            cert_zero_incoming.verify_with(std::slice::from_ref(&valid), [9; 32], |_, _, _| Ok(())),
+            Err(HandoffError::IncomingSet),
+            "handoff certificate with all-zero incoming_set digest must be refused"
+        );
     }
 }

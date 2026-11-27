@@ -166,6 +166,12 @@ impl PresenceSignal {
     where
         F: FnOnce(&[u8], &[u8; 32], &[u8]) -> bool,
     {
+        if chain_id == 0
+            || self.validator.as_bytes().iter().all(|&b| b == 0)
+            || self.sig_bls.is_empty()
+        {
+            return false;
+        }
         let message = presence_message(chain_id, self.window, self.class);
         verify(self.validator.as_bytes(), &message, &self.sig_bls)
     }
@@ -174,7 +180,10 @@ impl PresenceSignal {
     /// are a double sign (section 7.8 item 8).
     #[must_use]
     pub fn is_double_sign_with(&self, other: &Self) -> bool {
-        self.validator == other.validator
+        !self.validator.as_bytes().iter().all(|&b| b == 0)
+            && !self.sig_bls.is_empty()
+            && !other.sig_bls.is_empty()
+            && self.validator == other.validator
             && self.window == other.window
             && self.class != other.class
     }
@@ -318,5 +327,55 @@ mod tests {
         assert!(signal.is_double_sign_with(&other));
         let next = PresenceSignal::sign(owner, 45_261, 12, ValidatorClass::Full, hint, sign);
         assert!(!signal.is_double_sign_with(&next));
+    }
+
+    #[test]
+    fn presence_signal_rejects_zero_chain_zero_validator_and_empty_signature() {
+        let zero_owner = Address([0u8; 32]);
+        let honest_owner = Address([9u8; 32]);
+        let zero_sig = PresenceSignal {
+            validator: honest_owner,
+            window: 11,
+            class: ValidatorClass::Mobile,
+            network_hint: [0u8; 32],
+            sig_bls: Vec::new(),
+        };
+        assert!(
+            !zero_sig.verify_with(45_261, |_, _, _| true),
+            "empty BLS signature must fail closed before verifier callback"
+        );
+
+        let zero_val = PresenceSignal {
+            validator: zero_owner,
+            window: 11,
+            class: ValidatorClass::Mobile,
+            network_hint: [0u8; 32],
+            sig_bls: vec![1u8; 48],
+        };
+        assert!(
+            !zero_val.verify_with(45_261, |_, _, _| true),
+            "all-zero validator address must fail closed"
+        );
+        assert!(
+            !signal_for(honest_owner, ValidatorClass::Mobile).verify_with(0, |_, _, _| true),
+            "chain_id == 0 must fail closed"
+        );
+        assert!(
+            !zero_sig.is_double_sign_with(&PresenceSignal {
+                class: ValidatorClass::Full,
+                ..zero_sig.clone()
+            }),
+            "unsigned empty-signature pair must not qualify as double-sign"
+        );
+    }
+
+    fn signal_for(validator: Address, class: ValidatorClass) -> PresenceSignal {
+        PresenceSignal {
+            validator,
+            window: 11,
+            class,
+            network_hint: [0u8; 32],
+            sig_bls: vec![7u8; 48],
+        }
     }
 }
