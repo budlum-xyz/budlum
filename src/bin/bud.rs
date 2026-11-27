@@ -221,6 +221,31 @@ enum Command {
         #[command(subcommand)]
         action: DomainAction,
     },
+    /// Declare that chain-native assets on several domains are one asset.
+    ///
+    /// This is the write side of "one asset, many chains": until a
+    /// denomination is admitted, a unified balance cannot sum the asset at all
+    /// and reports it as excluded rather than guessing.
+    Denominate {
+        #[command(flatten)]
+        signer: V5Signer,
+        /// A human label, for display only. Deliberately not part of the
+        /// denomination id: a spelling must not split one asset in two.
+        #[arg(long, required = true)]
+        label: String,
+        /// A member, as `domain:native-id-hex`. Repeat once per chain.
+        #[arg(long = "member", required = true)]
+        members: Vec<String>,
+        /// The finality root the declaration was anchored against, hex.
+        #[arg(long, required = true)]
+        anchor_root: String,
+        /// The height of that root.
+        #[arg(long, required = true)]
+        anchor_height: u64,
+        /// The block the declaration was anchored at.
+        #[arg(long, required = true)]
+        anchored_at_block: u64,
+    },
     /// Universal finality certificates and cross-domain route guarantees.
     Finality {
         #[command(subcommand)]
@@ -2014,6 +2039,52 @@ fn run_validator_commission(
 
 /// `bud delegate`, `bud undelegate` (with an amount) and
 /// `bud withdraw-delegation` (without one).
+/// Declares a denomination and sends it as a signed settlement transaction.
+///
+/// The anchor root is not a formality: `execute_denomination` refuses a
+/// declaration whose root is not the root this chain accepted for that domain,
+/// so a mistyped root is a refused transaction rather than a created asset.
+#[allow(clippy::too_many_arguments)]
+fn run_denominate(
+    rpc_url: &str,
+    signer: &V5Signer,
+    label: &str,
+    members: &[String],
+    anchor_root: &str,
+    anchor_height: u64,
+    anchored_at_block: u64,
+) -> Result<(), String> {
+    use budlum_core::settlement::universal_asset::{AssetMember, Denomination};
+
+    let key = open_wallet(signer)?;
+    let owner = key.address();
+    let mut parsed = Vec::with_capacity(members.len());
+    for member in members {
+        let (domain, native) = member
+            .split_once(':')
+            .ok_or_else(|| format!("--member must be domain:native-id, got {member:?}"))?;
+        let domain: u32 = domain
+            .parse()
+            .map_err(|_| format!("--member domain {domain:?} is not a u32"))?;
+        parsed.push(AssetMember::new(
+            domain,
+            hex32(native, "--member native id")?,
+        ));
+    }
+    let denomination = Denomination::declare_anchored(
+        owner,
+        parsed,
+        label,
+        anchored_at_block,
+        hex32(anchor_root, "--anchor-root")?,
+        anchor_height,
+    );
+    let tx_type = TransactionType::Settlement(
+        budlum_core::settlement::domains::SettlementTx::Denominate(Box::new(denomination)),
+    );
+    send_v5(rpc_url, &key, v5_template(tx_type, 0, signer.fee), None)
+}
+
 fn run_delegation(
     rpc_url: &str,
     signer: &V5Signer,
@@ -4495,6 +4566,23 @@ fn main() {
         Command::ClaimRewards { signer, validator } => {
             run_claim_rewards(&cli.rpc_url, signer, validator)
         }
+
+        Command::Denominate {
+            signer,
+            label,
+            members,
+            anchor_root,
+            anchor_height,
+            anchored_at_block,
+        } => run_denominate(
+            &cli.rpc_url,
+            signer,
+            label,
+            members,
+            anchor_root,
+            *anchor_height,
+            *anchored_at_block,
+        ),
         Command::Domain { action } => match action {
             DomainAction::RegisterPow {
                 signer,
