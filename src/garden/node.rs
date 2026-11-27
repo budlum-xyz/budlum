@@ -1993,7 +1993,9 @@ impl Node {
                 self.respond(channel, GardenResponse::AdmissionStatus(verdict))
                     .await;
             }
-            GardenRequest::GetObject { .. } | GardenRequest::PutObject { .. }
+            GardenRequest::GetObject { .. }
+            | GardenRequest::PutObject { .. }
+            | GardenRequest::PutCodedObject { .. }
                 if !self.is_seated(&peer) =>
             {
                 self.respond(
@@ -2072,106 +2074,15 @@ impl Node {
                 }
             }
             GardenRequest::PutObject { bytes } => {
-                let Some(sender) = self.peers.get(&peer).copied() else {
-                    self.respond(
-                        channel,
-                        GardenResponse::Refused("show the invite first".into()),
-                    )
-                    .await;
-                    return;
-                };
-                let now = Instant::now();
-                let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                let max_bytes = u64::from(self.limits().max_object_bytes)
-                    .saturating_mul(2)
-                    .max(4 * 1024 * 1024);
-                let budget = self.put_object_budget.entry(peer).or_insert((now, 0, 0));
-                if now.duration_since(budget.0) >= Duration::from_secs(1) {
-                    *budget = (now, 0, 0);
-                }
-                if budget.1 >= MAX_PUT_OBJECT_REQS_PER_PEER_PER_SEC
-                    || budget.2.saturating_add(len) > max_bytes
-                {
-                    self.respond(
-                        channel,
-                        GardenResponse::Refused("deposit rate limit exceeded".into()),
-                    )
-                    .await;
-                    return;
-                }
-                let peer_in_flight = self.deposits_in_flight.get(&peer).copied().unwrap_or(0);
-                if self.total_deposits_in_flight >= MAX_IN_FLIGHT_DEPOSITS
-                    || peer_in_flight >= MAX_IN_FLIGHT_DEPOSITS_PER_PEER
-                {
-                    self.respond(
-                        channel,
-                        GardenResponse::Refused("deposit write queue is busy".into()),
-                    )
-                    .await;
-                    return;
-                }
-                budget.1 = budget.1.saturating_add(1);
-                budget.2 = budget.2.saturating_add(len);
-                if bytes.is_empty() || bytes.len() > self.limits().max_object_bytes as usize {
-                    self.respond(
-                        channel,
-                        GardenResponse::Refused(format!(
-                            "object size {} is outside 1..={} bytes",
-                            bytes.len(),
-                            self.limits().max_object_bytes
-                        )),
-                    )
-                    .await;
-                    return;
-                }
-                let content_id = crate::storage::content_id::ContentId::of(&bytes).0;
-                // Refuse unsolicited copies of already-finalized publications
-                // on validators outside that object's placement holder set, so
-                // a peer cannot stuff past objects onto non-holders outside the
-                // unreferenced deposit quotas.
-                let published = self.ledger.state.accounts_for(&content_id, len);
-                let is_holder = published && self.holders(&content_id).contains(&self.me);
-                if published && !is_holder {
-                    self.respond(
-                        channel,
-                        GardenResponse::Refused(
-                            "this validator is not a holder of that publication".into(),
-                        ),
-                    )
-                    .await;
-                    return;
-                }
-                match self.store.reserve_background_write(content_id, &bytes) {
-                    Ok(Some((path, charged_len))) => {
-                        self.total_deposits_in_flight =
-                            self.total_deposits_in_flight.saturating_add(1);
-                        *self.deposits_in_flight.entry(peer).or_insert(0) += 1;
-                        let tx = self.deposit_tx.clone();
-                        tokio::spawn(async move {
-                            let outcome = tokio::task::spawn_blocking(move || {
-                                let res =
-                                    GardenContentStore::write_object_file_blocking(path, bytes);
-                                drop(frame_budget);
-                                res
-                            })
-                            .await
-                            .unwrap_or_else(|e| Err(format!("garden object write panicked: {e}")));
-                            let _ = tx
-                                .send(DepositDone {
-                                    peer,
-                                    sender,
-                                    content_id,
-                                    charged_len,
-                                    already_published_for_me: is_holder,
-                                    outcome,
-                                    channel,
-                                })
-                                .await;
-                        });
-                    }
-                    Ok(None) => {
-                        let response = self.finish_deposit(sender, content_id, is_holder);
-                        self.respond(channel, response).await;
+                self.take_deposit(peer, bytes, channel, frame_budget).await;
+            }
+            GardenRequest::PutCodedObject { record, symbols } => {
+                // The decode is the admission test. Parts that do not
+                // rebuild, or rebuild into something else, never reach the
+                // disk and never touch a quota.
+                match self.store.rebuild_coded(&record, symbols) {
+                    Ok(bytes) => {
+                        self.take_deposit(peer, bytes, channel, frame_budget).await;
                     }
                     Err(err) => {
                         self.respond(channel, GardenResponse::Refused(err)).await;
@@ -2181,6 +2092,122 @@ impl Node {
         }
     }
 
+    /// Take an object a peer deposited: rate limits, quotas, then the
+    /// write. Reached by a raw deposit and by one that arrived as
+    /// B.U.D. 3.0 parts, so both are charged and bounded the same way.
+    async fn take_deposit(
+        &mut self,
+        peer: PeerId,
+        bytes: Vec<u8>,
+        channel: ResponseChannel<BudgetedFrame>,
+        frame_budget: FramePermits,
+    ) {
+        let Some(sender) = self.peers.get(&peer).copied() else {
+            self.respond(
+                channel,
+                GardenResponse::Refused("show the invite first".into()),
+            )
+            .await;
+            return;
+        };
+        let now = Instant::now();
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let max_bytes = u64::from(self.limits().max_object_bytes)
+            .saturating_mul(2)
+            .max(4 * 1024 * 1024);
+        let budget = self.put_object_budget.entry(peer).or_insert((now, 0, 0));
+        if now.duration_since(budget.0) >= Duration::from_secs(1) {
+            *budget = (now, 0, 0);
+        }
+        if budget.1 >= MAX_PUT_OBJECT_REQS_PER_PEER_PER_SEC
+            || budget.2.saturating_add(len) > max_bytes
+        {
+            self.respond(
+                channel,
+                GardenResponse::Refused("deposit rate limit exceeded".into()),
+            )
+            .await;
+            return;
+        }
+        let peer_in_flight = self.deposits_in_flight.get(&peer).copied().unwrap_or(0);
+        if self.total_deposits_in_flight >= MAX_IN_FLIGHT_DEPOSITS
+            || peer_in_flight >= MAX_IN_FLIGHT_DEPOSITS_PER_PEER
+        {
+            self.respond(
+                channel,
+                GardenResponse::Refused("deposit write queue is busy".into()),
+            )
+            .await;
+            return;
+        }
+        budget.1 = budget.1.saturating_add(1);
+        budget.2 = budget.2.saturating_add(len);
+        if bytes.is_empty() || bytes.len() > self.limits().max_object_bytes as usize {
+            self.respond(
+                channel,
+                GardenResponse::Refused(format!(
+                    "object size {} is outside 1..={} bytes",
+                    bytes.len(),
+                    self.limits().max_object_bytes
+                )),
+            )
+            .await;
+            return;
+        }
+        let content_id = crate::storage::content_id::ContentId::of(&bytes).0;
+        // Refuse unsolicited copies of already-finalized publications
+        // on validators outside that object's placement holder set, so
+        // a peer cannot stuff past objects onto non-holders outside the
+        // unreferenced deposit quotas.
+        let published = self.ledger.state.accounts_for(&content_id, len);
+        let is_holder = published && self.holders(&content_id).contains(&self.me);
+        if published && !is_holder {
+            self.respond(
+                channel,
+                GardenResponse::Refused(
+                    "this validator is not a holder of that publication".into(),
+                ),
+            )
+            .await;
+            return;
+        }
+        match self.store.reserve_background_write(content_id, &bytes) {
+            Ok(Some((path, charged_len))) => {
+                self.total_deposits_in_flight =
+                    self.total_deposits_in_flight.saturating_add(1);
+                *self.deposits_in_flight.entry(peer).or_insert(0) += 1;
+                let tx = self.deposit_tx.clone();
+                tokio::spawn(async move {
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        let res =
+                            GardenContentStore::write_object_file_blocking(path, bytes);
+                        drop(frame_budget);
+                        res
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(format!("garden object write panicked: {e}")));
+                    let _ = tx
+                        .send(DepositDone {
+                            peer,
+                            sender,
+                            content_id,
+                            charged_len,
+                            already_published_for_me: is_holder,
+                            outcome,
+                            channel,
+                        })
+                        .await;
+                });
+            }
+            Ok(None) => {
+                let response = self.finish_deposit(sender, content_id, is_holder);
+                self.respond(channel, response).await;
+            }
+            Err(err) => {
+                self.respond(channel, GardenResponse::Refused(err)).await;
+            }
+        }
+    }
     fn fresh_tag(&mut self) -> u64 {
         self.next_tag = self.next_tag.wrapping_add(1).max(TAG_FIRST_FETCH);
         self.next_tag
@@ -3908,19 +3935,27 @@ impl Node {
             .filter(|(_, key)| holders.contains(key))
             .map(|(peer, _)| *peer)
             .collect();
+        // `put` above coded the object. Hand the holders what the coder
+        // made rather than the bytes it started from: everything this
+        // node publishes travels as B.U.D. 3.0 parts. A node that somehow
+        // holds the object without a coding falls back to raw bytes, which
+        // is the old behaviour and no worse than it was.
+        let coded = self.store.coded_parts(&content_id);
         for peer in targets {
-            // Pushing the bytes to a holder is serving them too: the
-            // other node ends up with content it did not have, which is
-            // the whole point of the counter.
+            // Pushing an object to a holder is serving it too: the other
+            // node ends up with content it did not have, which is the
+            // whole point of the counter.
             self.parts_served = self.parts_served.saturating_add(1);
-            self.send(
-                peer,
-                GardenRequest::PutObject {
+            let request = match coded.clone() {
+                Some((record, symbols)) => GardenRequest::PutCodedObject {
+                    record: Box::new(record),
+                    symbols,
+                },
+                None => GardenRequest::PutObject {
                     bytes: bytes.clone(),
                 },
-                TAG_IGNORE,
-            )
-            .await;
+            };
+            self.send(peer, request, TAG_IGNORE).await;
         }
         let tx_id = self.submit(tx_kind).await?;
         Ok(json!({

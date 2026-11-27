@@ -489,6 +489,54 @@ impl GardenContentStore {
         Some(bytes)
     }
 
+    /// The B.U.D. 3.0 record and symbols of a held object, ready to send.
+    ///
+    /// A validator that wants another validator to hold an object hands
+    /// over what the coder made, not the bytes it started from. The
+    /// receiver rebuilds the object from these and keeps it only if the
+    /// result hashes to the id it was promised.
+    #[must_use]
+    pub fn coded_parts(&self, content_id: &Hash32) -> Option<(ObjectRecord, Vec<Symbol>)> {
+        let coded = self.coded.get(content_id)?;
+        Some((
+            coded.record.clone(),
+            coded.segments.iter().flatten().cloned().collect(),
+        ))
+    }
+
+    /// Rebuild an object from B.U.D. 3.0 parts a peer sent, without
+    /// storing it.
+    ///
+    /// The decode is the check. Parts that do not rebuild, or rebuild into
+    /// something with another content id, are refused before anything is
+    /// written, so a peer cannot deposit rubbish under a name it chose.
+    pub fn rebuild_coded(
+        &mut self,
+        record: &ObjectRecord,
+        symbols: Vec<Symbol>,
+    ) -> Result<Vec<u8>, String> {
+        let expected = record.content_id.0;
+        let used = count_of(symbols.len());
+        let bytes = view_public(record, symbols)
+            .map_err(|e| format!("these B.U.D. 3.0 parts do not rebuild an object: {e:?}"))?;
+        if ContentId::of(&bytes).0 != expected {
+            return Err("rebuilt object does not match the content id it was sent under".into());
+        }
+        self.parts.objects_viewed = self.parts.objects_viewed.saturating_add(1);
+        self.parts.symbols_used = self.parts.symbols_used.saturating_add(used);
+        Ok(bytes)
+    }
+
+    /// Take an object as B.U.D. 3.0 parts and keep it if it rebuilds.
+    pub fn put_coded(
+        &mut self,
+        record: &ObjectRecord,
+        symbols: Vec<Symbol>,
+    ) -> Result<Hash32, String> {
+        let bytes = self.rebuild_coded(record, symbols)?;
+        self.put(&bytes)
+    }
+
     /// The B.U.D. 3.0 record of a held object, if this node coded it.
     #[must_use]
     pub fn record_of(&self, content_id: &Hash32) -> Option<&ObjectRecord> {
