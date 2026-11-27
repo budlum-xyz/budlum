@@ -10,8 +10,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::json;
 
@@ -54,7 +55,7 @@ fn collect_lockfiles(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<
             if !matches!(name.as_str(), ".git" | "target" | "node_modules") {
                 collect_lockfiles(root, &entry.path(), out)?;
             }
-        } else if name == "Cargo.lock" {
+        } else if ty.is_file() && name == "Cargo.lock" {
             let rel = entry
                 .path()
                 .strip_prefix(root)
@@ -269,6 +270,38 @@ fn build_snapshot_json(
     out
 }
 
+fn validate_github_repo(repo: &str) -> Result<(), String> {
+    let valid_part = |s: &str| {
+        !s.is_empty()
+            && s != "."
+            && s != ".."
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    let mut parts = repo.split('/');
+    let Some(owner) = parts.next() else {
+        return Err("invalid GITHUB_REPOSITORY slug".to_string());
+    };
+    let Some(name) = parts.next() else {
+        return Err("invalid GITHUB_REPOSITORY slug".to_string());
+    };
+    if parts.next().is_some() || !valid_part(owner) || !valid_part(name) {
+        return Err(format!("invalid GITHUB_REPOSITORY slug {repo:?}"));
+    }
+    Ok(())
+}
+
+fn validate_github_token(token: &str) -> Result<(), String> {
+    if token.is_empty()
+        || token
+            .bytes()
+            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control() || b == b'"' || b == b'\\')
+    {
+        return Err("invalid GITHUB_TOKEN value".to_string());
+    }
+    Ok(())
+}
+
 fn github_snapshot_url(repo: &str) -> String {
     format!("https://api.github.com/repos/{repo}/dependency-graph/snapshots")
 }
@@ -281,9 +314,11 @@ fn submit_to_github(snapshot_path: &Path) -> Result<String, String> {
     if repo.is_empty() || token.is_empty() {
         return Err("GITHUB_REPOSITORY and GITHUB_TOKEN must be non-empty".to_string());
     }
+    validate_github_repo(&repo)?;
+    validate_github_token(&token)?;
     let url = github_snapshot_url(&repo);
     let data_arg = format!("@{}", snapshot_path.display());
-    let out = Command::new("curl")
+    let mut child = Command::new("curl")
         .args([
             "--fail-with-body",
             "-sS",
@@ -293,14 +328,25 @@ fn submit_to_github(snapshot_path: &Path) -> Result<String, String> {
             "Accept: application/vnd.github+json",
             "-H",
             "X-GitHub-Api-Version: 2022-11-28",
-            "-H",
-            &format!("Authorization: Bearer {token}"),
+            "--config",
+            "-",
             &url,
             "--data-binary",
             &data_arg,
         ])
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("failed to execute curl: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(format!("header = \"Authorization: Bearer {token}\"\n").as_bytes())
+            .map_err(|e| format!("failed to pass Authorization header to curl: {e}"))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("failed waiting for curl: {e}"))?;
     if !out.status.success() {
         return Err(format!(
             "dependency snapshot upload failed ({}): {}{}",
@@ -327,6 +373,8 @@ pub fn run(root: &Path, args: &[&str]) -> Result<String, String> {
     for &arg in args {
         if arg == "--submit" {
             submit = true;
+        } else if arg.starts_with('-') {
+            return Err(format!("unknown flag `{arg}`"));
         } else if out_arg.is_none() {
             out_arg = Some(arg);
         } else {
@@ -464,5 +512,57 @@ mod tests {
     #[test]
     fn snapshot_canary_passes() {
         self_test().unwrap();
+    }
+
+    #[test]
+    fn snapshot_rejects_symlink_lockfile_and_unknown_flags() {
+        let outside = crate::support::make_temp_dir("dep-snap-outside").expect("outside dir");
+        let target = outside.join("fake.lock");
+        std::fs::write(
+            &target,
+            "version = 3\n[[package]]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write fake lock");
+
+        let root = crate::support::make_temp_dir("dep-snap-root").expect("root dir");
+        std::os::unix::fs::symlink(&target, root.join("Cargo.lock")).expect("symlink Cargo.lock");
+
+        let res_symlink = run(&root, &["out.json"]);
+        assert!(
+            res_symlink.is_err(),
+            "symlinked Cargo.lock must not be followed"
+        );
+
+        std::fs::remove_file(root.join("Cargo.lock")).expect("remove symlink");
+        std::fs::write(
+            root.join("Cargo.lock"),
+            "version = 3\n[[package]]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write real lock");
+
+        let res_flag = run(&root, &["--bogus-flag"]);
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            res_flag.is_err(),
+            "unknown CLI flag must not be treated as output path"
+        );
+        assert!(validate_github_repo("budlum-xyz/budlum").is_ok());
+        for bad_repo in [
+            "",
+            "budlum-xyz",
+            "budlum-xyz/../../evil",
+            "evil.com#x/y",
+            "a/b/c",
+            "./budlum",
+            "budlum-xyz/..",
+        ] {
+            assert!(
+                validate_github_repo(bad_repo).is_err(),
+                "must reject repo slug: {bad_repo}"
+            );
+        }
+        assert!(validate_github_token("ghs_validToken123").is_ok());
+        assert!(validate_github_token("tok\r\nX-Injected: 1").is_err());
     }
 }

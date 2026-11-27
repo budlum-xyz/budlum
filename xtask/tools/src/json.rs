@@ -246,20 +246,25 @@ impl Reader<'_> {
     }
 
     fn unicode_escape(&mut self) -> Result<char, String> {
+        let esc_pos = self.pos.saturating_sub(2);
         let first = self.hex4()?;
         if (0xD800..0xDC00).contains(&first) {
-            // A high surrogate has to be followed by a low one.
-            if self.bytes[self.pos..].starts_with(b"\\u") {
-                self.pos += 2;
-                let second = self.hex4()?;
-                if (0xDC00..0xE000).contains(&second) {
-                    let code = 0x1_0000 + ((first - 0xD800) << 10) + (second - 0xDC00);
-                    return Ok(char::from_u32(code).unwrap_or('\u{FFFD}'));
-                }
+            if !self.bytes[self.pos..].starts_with(b"\\u") {
+                return Err(format!("unpaired UTF-16 high surrogate at byte {esc_pos}"));
             }
-            return Ok('\u{FFFD}');
+            self.pos += 2;
+            let second = self.hex4()?;
+            if !(0xDC00..0xE000).contains(&second) {
+                return Err(format!("unpaired UTF-16 high surrogate at byte {esc_pos}"));
+            }
+            let code = 0x1_0000 + ((first - 0xD800) << 10) + (second - 0xDC00);
+            return char::from_u32(code)
+                .ok_or_else(|| format!("invalid Unicode scalar at byte {esc_pos}"));
         }
-        Ok(char::from_u32(first).unwrap_or('\u{FFFD}'))
+        if (0xDC00..0xE000).contains(&first) {
+            return Err(format!("unpaired UTF-16 low surrogate at byte {esc_pos}"));
+        }
+        char::from_u32(first).ok_or_else(|| format!("invalid Unicode scalar at byte {esc_pos}"))
     }
 
     fn string(&mut self) -> Result<String, String> {
@@ -372,5 +377,22 @@ mod tests {
     fn rejects_runaway_nesting() {
         let deep = "[".repeat(MAX_DEPTH + 10);
         assert!(parse(&deep).is_err());
+    }
+
+    #[test]
+    fn rejects_unpaired_utf16_surrogates() {
+        for bad in [
+            r#""\ud800""#,
+            r#""\udbff""#,
+            r#""\udc00""#,
+            r#""\udfff""#,
+            r#""\ud800\u0041""#,
+            r#""\ud800x""#,
+        ] {
+            assert!(
+                parse(bad).is_err(),
+                "unpaired UTF-16 surrogate must be rejected: {bad}"
+            );
+        }
     }
 }

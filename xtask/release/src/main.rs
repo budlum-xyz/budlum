@@ -81,6 +81,12 @@ fn signing_key(seed: &[u8]) -> Result<SigningKey<Shake256s>, String> {
     }
     let (sk_seed, rest) = seed.split_at(32);
     let (sk_prf, pk_seed) = rest.split_at(32);
+    if sk_seed.iter().all(|&b| b == 0)
+        || sk_prf.iter().all(|&b| b == 0)
+        || pk_seed.iter().all(|&b| b == 0)
+    {
+        return Err("seed contains an all-zero key component".into());
+    }
     Ok(SigningKey::<Shake256s>::slh_keygen_internal(
         sk_seed, sk_prf, pk_seed,
     ))
@@ -93,8 +99,17 @@ fn public_key_of(key: &SigningKey<Shake256s>) -> Vec<u8> {
 
 /// A manifest path is relative, has no `..`, and fits on one line.
 fn check_path(path: &str) -> Result<(), String> {
-    if path.is_empty() || path.contains('\n') || path.contains('\r') {
+    if path.is_empty()
+        || path.trim() != path
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+    {
         return Err(format!("unusable manifest path {path:?}"));
+    }
+    if path == MANIFEST_NAME || path == SIGNATURE_NAME {
+        return Err(format!(
+            "manifest path {path:?} cannot reference release metadata"
+        ));
     }
     let parsed = Path::new(path);
     if parsed.is_absolute()
@@ -107,6 +122,46 @@ fn check_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn read_confined_regular_file(base: &Path, rel_path: &str) -> Result<Vec<u8>, String> {
+    check_path(rel_path)?;
+    let canon_base =
+        fs::canonicalize(base).map_err(|e| format!("cannot canonicalize release base: {e}"))?;
+    let mut cursor = base.to_path_buf();
+    for component in Path::new(rel_path).components() {
+        cursor.push(component);
+        let meta =
+            fs::symlink_metadata(&cursor).map_err(|e| format!("cannot inspect {rel_path}: {e}"))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!("refusing symlink in release path {rel_path:?}"));
+        }
+    }
+    let final_meta =
+        fs::symlink_metadata(&cursor).map_err(|e| format!("cannot inspect {rel_path}: {e}"))?;
+    if !final_meta.file_type().is_file() {
+        return Err(format!("release entry {rel_path:?} is not a regular file"));
+    }
+    let canon_target =
+        fs::canonicalize(&cursor).map_err(|e| format!("cannot canonicalize {rel_path}: {e}"))?;
+    if !canon_target.starts_with(&canon_base) {
+        return Err(format!(
+            "release entry {rel_path:?} escapes the release base"
+        ));
+    }
+    fs::read(&cursor).map_err(|e| format!("cannot read {rel_path}: {e}"))
+}
+
+fn reject_symlink_destination(path: &Path) -> Result<(), String> {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "refusing to overwrite symlink destination {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn sha3_hex(bytes: &[u8]) -> String {
     hex_encode(&Sha3_256::digest(bytes))
 }
@@ -115,8 +170,7 @@ fn sha3_hex(bytes: &[u8]) -> String {
 fn build_manifest(base: &Path, files: &[String]) -> Result<String, String> {
     let mut entries = Vec::new();
     for file in files {
-        check_path(file)?;
-        let bytes = fs::read(base.join(file)).map_err(|e| format!("cannot read {file}: {e}"))?;
+        let bytes = read_confined_regular_file(base, file)?;
         entries.push((file.clone(), sha3_hex(&bytes)));
     }
     entries.sort();
@@ -219,10 +273,14 @@ fn keygen(seed_file: &Path, public_key_file: &Path) -> Result<(), String> {
     let seed = random_bytes(SEED_LEN)?;
     let key = signing_key(&seed)?;
     write_new_key_file(seed_file, &format!("{}\n", hex_encode(&seed)))?;
-    write_new_key_file(
+    if let Err(err) = write_new_key_file(
         public_key_file,
         &format!("{}\n", hex_encode(&public_key_of(&key))),
-    )
+    ) {
+        let _ = fs::remove_file(seed_file);
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn sign_release(
@@ -240,13 +298,13 @@ fn sign_release(
     // Verify what was just made before it leaves the machine.
     verify_manifest(&public_key_of(&key), &manifest, &signature)?;
     fs::create_dir_all(out_dir).map_err(|e| format!("cannot create the output: {e}"))?;
-    fs::write(out_dir.join(MANIFEST_NAME), &manifest)
-        .map_err(|e| format!("cannot write the manifest: {e}"))?;
-    fs::write(
-        out_dir.join(SIGNATURE_NAME),
-        format!("{}\n", hex_encode(&signature)),
-    )
-    .map_err(|e| format!("cannot write the signature: {e}"))
+    let manifest_out = out_dir.join(MANIFEST_NAME);
+    let signature_out = out_dir.join(SIGNATURE_NAME);
+    reject_symlink_destination(&manifest_out)?;
+    reject_symlink_destination(&signature_out)?;
+    fs::write(&manifest_out, &manifest).map_err(|e| format!("cannot write the manifest: {e}"))?;
+    fs::write(&signature_out, format!("{}\n", hex_encode(&signature)))
+        .map_err(|e| format!("cannot write the signature: {e}"))
 }
 
 fn verify_release(
@@ -268,9 +326,10 @@ fn verify_release(
     let entries = parse_manifest(&manifest)?;
     let base: PathBuf = manifest_file
         .parent()
+        .filter(|p| !p.as_os_str().is_empty())
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     for (hash, path) in &entries {
-        let bytes = fs::read(base.join(path)).map_err(|e| format!("cannot read {path}: {e}"))?;
+        let bytes = read_confined_regular_file(&base, path)?;
         if sha3_hex(&bytes) != *hash {
             return Err(format!("{path} does not match the signed manifest"));
         }
@@ -382,11 +441,20 @@ fn self_test_in(dir: &Path) -> Result<(), String> {
 }
 
 fn run(args: &[String]) -> Result<(), String> {
+    let usage = || -> String {
+        "usage: keygen <seed> <pub> | sign-release <seed> <base> <out> <file>... | verify-release <pub> <manifest> <sig> | --self-test"
+            .into()
+    };
     let argument = |i: usize| -> Result<&String, String> {
         args.get(i).ok_or_else(|| "missing argument".to_string())
     };
     match args.first().map(String::as_str) {
-        Some("keygen") => keygen(Path::new(argument(1)?), Path::new(argument(2)?)),
+        Some("keygen") => {
+            if args.len() != 3 {
+                return Err(usage());
+            }
+            keygen(Path::new(argument(1)?), Path::new(argument(2)?))
+        }
         Some("sign-release") => sign_release(
             Path::new(argument(1)?),
             Path::new(argument(2)?),
@@ -394,6 +462,9 @@ fn run(args: &[String]) -> Result<(), String> {
             args.get(4..).unwrap_or_default(),
         ),
         Some("verify-release") => {
+            if args.len() != 4 {
+                return Err(usage());
+            }
             let count = verify_release(
                 Path::new(argument(1)?),
                 Path::new(argument(2)?),
@@ -403,14 +474,14 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("--self-test") => {
+            if args.len() != 1 {
+                return Err(usage());
+            }
             self_test()?;
             println!("self-test passed");
             Ok(())
         }
-        _ => Err(
-            "usage: keygen <seed> <pub> | sign-release <seed> <base> <out> <file>... | verify-release <pub> <manifest> <sig> | --self-test"
-                .into(),
-        ),
+        _ => Err(usage()),
     }
 }
 
@@ -503,5 +574,58 @@ mod tests {
         symlink(&missing, &dangling).expect("create dangling symlink");
         assert!(write_new_key_file(&dangling, "seed material").is_err());
         assert!(!missing.exists());
+    }
+
+    #[test]
+    fn manifest_and_signing_reject_symlink_escape_zero_seed_reserved_paths_and_extra_args() {
+        let outside = Directory::new();
+        let secret = outside.0.join("outside.txt");
+        fs::write(&secret, b"outside release root").expect("write outside");
+
+        let rel = Directory::new();
+        let link = rel.0.join("escaped.bin");
+        symlink(&secret, &link).expect("create symlink inside release dir");
+        let real_inside = rel.0.join("real.bin");
+        fs::write(&real_inside, b"inside release root").expect("write inside");
+        let intra_link = rel.0.join("alias.bin");
+        symlink(&real_inside, &intra_link).expect("create intra-release symlink");
+
+        let sub = rel.0.join("sub");
+        fs::create_dir(&sub).expect("create subdir");
+        fs::write(sub.join("nested.bin"), b"nested inside").expect("write nested");
+        symlink(&sub, rel.0.join("linked_sub")).expect("create intermediate dir symlink");
+
+        assert!(
+            super::build_manifest(&rel.0, &["escaped.bin".to_string()]).is_err(),
+            "build_manifest must reject symlinked release files escaping base"
+        );
+        assert!(
+            super::build_manifest(&rel.0, &["alias.bin".to_string()]).is_err(),
+            "build_manifest must reject intra-directory symlinks"
+        );
+        assert!(
+            super::build_manifest(&rel.0, &["linked_sub/nested.bin".to_string()]).is_err(),
+            "build_manifest must reject intermediate directory symlinks"
+        );
+        assert!(
+            super::check_path(super::MANIFEST_NAME).is_err(),
+            "manifest must not reference itself"
+        );
+        assert!(
+            super::check_path(super::SIGNATURE_NAME).is_err(),
+            "manifest must not reference its signature file"
+        );
+        assert!(
+            super::check_path(" leading-space.bin").is_err(),
+            "manifest path must reject leading or trailing whitespace"
+        );
+        assert!(
+            super::signing_key(&[0u8; super::SEED_LEN]).is_err(),
+            "all-zero seed must be rejected"
+        );
+        assert!(
+            super::run(&["--self-test".to_string(), "unexpected".to_string()]).is_err(),
+            "extra CLI arguments must be rejected"
+        );
     }
 }

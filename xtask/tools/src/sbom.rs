@@ -46,10 +46,14 @@ pub fn verify(doc: &Value) -> Result<usize, String> {
             return Err(format!("bomFormat is not 'CycloneDX': {other:?}"));
         }
     }
-    let count = doc
+    let items = doc
         .get("components")
         .and_then(Value::as_array)
-        .map_or(0, <[Value]>::len);
+        .ok_or_else(|| "components is missing or not a JSON array".to_string())?;
+    if !items.iter().all(|item| matches!(item, Value::Object(_))) {
+        return Err("every CycloneDX component entry must be a JSON object".to_string());
+    }
+    let count = items.len();
     if count < MIN_COMPONENTS {
         return Err(format!(
             "only {count} components; production is incomplete (at least {MIN_COMPONENTS} expected)"
@@ -274,5 +278,18 @@ mod tests {
         assert!(CYCLONEDX_VERSION
             .split('.')
             .all(|p| p.parse::<u32>().is_ok()));
+    }
+
+    #[test]
+    fn rejects_non_object_component_entries() {
+        let nulls = vec!["null"; MIN_COMPONENTS].join(",");
+        let doc = json::parse(&format!(
+            r#"{{"bomFormat":"CycloneDX","components":[{nulls}]}}"#
+        ))
+        .expect("json");
+        assert!(
+            verify(&doc).is_err(),
+            "non-object component entries must not satisfy CycloneDX verification"
+        );
     }
 }
