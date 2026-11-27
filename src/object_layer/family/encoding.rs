@@ -401,8 +401,11 @@ pub fn bech32_decode(text: &str) -> Result<(String, Vec<u8>), WireError> {
     let (hrp, rest) = text
         .rsplit_once('1')
         .ok_or(WireError("no bech32 separator"))?;
-    if hrp.is_empty() || rest.len() < 6 || text.len() > 90 {
+    if hrp.is_empty() || hrp.len() > 83 || rest.len() < 6 || text.len() > 90 {
         return Err(WireError("bad bech32 length"));
+    }
+    if !hrp.bytes().all(|b| (33..=126).contains(&b)) {
+        return Err(WireError("invalid bech32 hrp character"));
     }
     let mut values = Vec::with_capacity(rest.len());
     for c in rest.bytes() {
@@ -462,6 +465,14 @@ mod tests {
         let last = broken.pop().unwrap();
         broken.push(if last == 'q' { 'p' } else { 'q' });
         assert!(bech32_decode(&broken).is_err());
+
+        // BIP-173 HRP bounds: control bytes, spaces, non-ASCII bytes, and HRPs > 83 chars must fail.
+        let control_hrp = bech32_encode("\x00wasm", &data);
+        assert!(bech32_decode(&control_hrp).is_err());
+        let space_hrp = bech32_encode("wa sm", &data);
+        assert!(bech32_decode(&space_hrp).is_err());
+        let long_hrp = bech32_encode(&"a".repeat(84), &data);
+        assert!(bech32_decode(&long_hrp).is_err());
     }
 
     #[test]

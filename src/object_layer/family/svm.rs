@@ -118,6 +118,11 @@ impl FamilyProfile for SvmFamily {
         _ctx: &FamilyContext<'_>,
         raw: &RawEndpointEvent,
     ) -> Result<EndpointEvent, FamilyError> {
+        if raw.emitter.len() != 32 || !raw.topics.is_empty() || !raw.attributes.is_empty() {
+            return Err(FamilyError::Malformed(
+                "SVM endpoint event requires 32-byte emitter and empty topics/attributes",
+            ));
+        }
         let mut r = Reader::new(&raw.data);
         let disc: [u8; 8] = r
             .take(8)
@@ -382,5 +387,25 @@ mod tests {
             s,
             "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1/token:11111111111111111111111111111111"
         );
+    }
+
+    #[test]
+    fn svm_refuses_smuggled_topics_or_attributes_in_endpoint_envelope() {
+        use crate::object_layer::family::EventFixture;
+
+        let ctx = FamilyContext {
+            chain_reference: "localnet",
+            address_prefix: "",
+        };
+        let ep = [2u8; 32];
+        let mut with_topic = fixture::SvmFixture.released(&ep, &DepartureId([5u8; 32]));
+        with_topic.topics.push(vec![0xaa; 32]);
+        assert!(SvmFamily.translate_event(&ctx, &with_topic).is_err());
+
+        let mut with_attr = fixture::SvmFixture.released(&ep, &DepartureId([5u8; 32]));
+        with_attr
+            .attributes
+            .push(("spoof".to_string(), "x".to_string()));
+        assert!(SvmFamily.translate_event(&ctx, &with_attr).is_err());
     }
 }
