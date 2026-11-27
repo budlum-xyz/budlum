@@ -361,6 +361,26 @@ impl ExternalDomainRegistry {
         let Some(reg) = self.domains.get_mut(domain) else {
             return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
         };
+        if matches!(
+            reg.record.state,
+            DomainState::QuantumIsolated | DomainState::Retired
+        ) {
+            return Err(RegistryError::NotServing {
+                state: reg.record.state.as_str().to_string(),
+            });
+        }
+        if reason.trim().is_empty() {
+            return Err(RegistryError::Adapter(AdapterError::ConsensusRule {
+                rule: "readmission reason cannot be empty or whitespace".to_string(),
+            }));
+        }
+        let required = reg.economics.required_bond_atoms();
+        if required == 0 {
+            return Err(RegistryError::InsufficientBond {
+                posted: 0,
+                required: 1,
+            });
+        }
         if !admission.admitted
             || !admission.golden_verified
             || admission.total() == 0
@@ -417,17 +437,22 @@ impl ExternalDomainRegistry {
         Ok(())
     }
 
-    /// Isolate every domain whose observed schemes are classical: the
-    /// quantum alarm reached Zemheri. A domain with no observation is left
-    /// alone (nothing is known about it), one already outside the serving
-    /// states keeps its state. Returns how many moved.
+    /// Isolate every domain that has not demonstrated post-quantum schemes:
+    /// the quantum alarm reached Zemheri. A domain whose observed schemes are
+    /// classical or unattested fails closed into [`DomainState::QuantumIsolated`],
+    /// while post-quantum (`Lattice` / `Hash`) domains remain untouched.
     pub fn isolate_classical_domains(&mut self) -> usize {
         let height = self.height;
         let mut moved = 0;
         for reg in self.domains.values_mut() {
-            let classical = reg.record.crypto_facts.quantum_class()
-                == Some(crate::crypto::facts::QuantumClass::Classical);
-            if !classical
+            let post_quantum = matches!(
+                reg.record.crypto_facts.quantum_class(),
+                Some(
+                    crate::crypto::facts::QuantumClass::Lattice
+                        | crate::crypto::facts::QuantumClass::Hash
+                )
+            );
+            if post_quantum
                 || !matches!(
                     reg.record.state,
                     DomainState::Registered | DomainState::Admitted | DomainState::Active
@@ -441,7 +466,7 @@ impl ExternalDomainRegistry {
                 at_height: height,
                 from,
                 to: DomainState::QuantumIsolated,
-                reason: "quantum alarm Isolate: the domain's observed schemes are classical"
+                reason: "quantum alarm Isolate: the domain lacks post-quantum attestation"
                     .to_string(),
             });
             moved += 1;
@@ -1473,6 +1498,64 @@ mod tests {
         assert!(
             reg.record.state.serves(),
             "after readmit the domain serves again"
+        );
+
+        // (1) Whitespace-only readmission reason must be refused even when Faulted.
+        registry
+            .mark_faulted(&key, "blank reason check")
+            .expect("faults");
+        assert!(
+            registry.readmit(&key, &admission, "   \t\n").is_err(),
+            "whitespace-only readmission reason must be refused"
+        );
+
+        // (2) Slashing prover collateral below required_bond_atoms() prevents any
+        // submission after readmit until fresh full collateral is bonded.
+        registry
+            .slash(
+                &key,
+                Address::from([7u8; 32]),
+                _att.evidence_digest,
+                100,
+                Address::from([9u8; 32]),
+            )
+            .expect("slash drains live collateral below floor");
+        registry
+            .readmit(&key, &admission, "reopen awaiting replacement bond")
+            .expect("faulted domain reopens");
+        let mut next_ev = Fix.golden_evidence().expect("golden");
+        next_ev.declared_height = 2;
+        let underbonded_submit = registry.submit(&Fix, &next_ev, &VerificationPolicy::strict(10));
+        assert!(
+            matches!(underbonded_submit, Err(RegistryError::ProverUnderbonded { .. })),
+            "slashed prover must remain blocked from submitting after readmit, got: {underbonded_submit:?}"
+        );
+
+        // (3) Frost Alarm classical isolation must quarantine domains lacking post-quantum
+        // crypto_facts (including freshly registered classical domains before first submit),
+        // and readmit must never reopen a QuantumIsolated or Retired domain.
+        assert_eq!(
+            registry.isolate_classical_domains(),
+            1,
+            "domain without post-quantum crypto_facts must be isolated under Frost Alarm"
+        );
+        assert_eq!(
+            registry.domain(&key).expect("domain").record.state,
+            DomainState::QuantumIsolated
+        );
+        let iso_err = registry.readmit(&key, &admission, "bypass CRQC quarantine");
+        assert!(
+            matches!(iso_err, Err(RegistryError::NotServing { .. })),
+            "QuantumIsolated domain must refuse readmit, got: {iso_err:?}"
+        );
+
+        if let Some(reg_mut) = registry.domain_mut(&key) {
+            reg_mut.record.state = DomainState::Retired;
+        }
+        let ret_err = registry.readmit(&key, &admission, "bypass retirement");
+        assert!(
+            matches!(ret_err, Err(RegistryError::NotServing { .. })),
+            "Retired domain must refuse readmit, got: {ret_err:?}"
         );
     }
 
