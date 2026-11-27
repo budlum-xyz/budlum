@@ -1035,14 +1035,13 @@ fn rule(reason: impl Into<String>) -> AdapterError {
 }
 
 #[cfg(test)]
-#[allow(clippy::redundant_pub_crate)]
 pub(crate) mod tests {
     use super::*;
     use crate::cross_domain::external::selftest::{admit, ProbeOutcome};
 
-    pub(crate) const CHAIN_ID: u64 = 7_645_382;
+    pub const CHAIN_ID: u64 = 7_645_382;
     const NETWORK: &str = "cardano-mainnet";
-    pub(crate) const EPOCH: u64 = 512;
+    pub const EPOCH: u64 = 512;
     const HEIGHT: u64 = 11_204_889;
     const STATE_ROOT: [u8; 32] = [0x51; 32];
 
@@ -1056,7 +1055,7 @@ pub(crate) mod tests {
 
     /// Six signers holding equal stake: no single one is anywhere near the
     /// two-thirds threshold, which is the shape a whale attack needs.
-    pub(crate) fn stake_distribution(epoch: u64) -> EpochStake {
+    pub fn stake_distribution(epoch: u64) -> EpochStake {
         EpochStake {
             epoch,
             signers: (1u8..=6)
@@ -1077,7 +1076,7 @@ pub(crate) mod tests {
 
     /// A certificate signed by four of six equal signers: two thirds of the
     /// stake, 4e18 of 6e18.
-    pub(crate) fn golden_evidence() -> RawConsensusEvidence {
+    pub fn golden_evidence() -> RawConsensusEvidence {
         let message = mithril_certificate_message(EPOCH, HEIGHT, &STATE_ROOT);
         let signatures = (1u8..=4)
             .map(|seed| sign_certificate(seed, &message))

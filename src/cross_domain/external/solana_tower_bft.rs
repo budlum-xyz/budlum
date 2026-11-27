@@ -706,7 +706,6 @@ impl ExternalFinalityAdapter for SolanaTowerBftAdapter {
 }
 
 #[cfg(test)]
-#[allow(clippy::redundant_pub_crate)]
 pub(crate) mod tests {
     use super::*;
     use crate::core::address::Address;
@@ -721,7 +720,7 @@ pub(crate) mod tests {
     const LAST_SLOT: u64 = 333_232_639;
     const SLOT: u64 = 333_000_000;
 
-    pub(crate) struct StakeNode {
+    pub struct StakeNode {
         ed: KeyPair,
         pq: PqKeyPair,
         vote_account: [u8; 32],
@@ -782,7 +781,7 @@ pub(crate) mod tests {
     /// Public within the crate because the intake tests register a Solana
     /// domain end to end and need the same known-good sample admission will
     /// verify against; the intermediate evidence type stays private.
-    pub(crate) fn tower_fixture(slash_escrow: bool) -> (PinnedSolEpoch, RawConsensusEvidence) {
+    pub fn tower_fixture(slash_escrow: bool) -> (PinnedSolEpoch, RawConsensusEvidence) {
         let (pinned, _nodes, _evidence, golden) = build_tower_fixture(slash_escrow);
         (pinned, golden)
     }

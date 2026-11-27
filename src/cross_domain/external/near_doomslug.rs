@@ -1066,11 +1066,6 @@ impl ExternalFinalityAdapter for NearDoomslugAdapter {
 }
 
 #[cfg(test)]
-// The fixture helpers here are shared with the intake tests, so they must be
-// visible outside this module: inside a private module `pub(crate)` is the
-// honest statement, and clippy's "redundant" reading is wrong for this one
-// module.
-#[allow(clippy::redundant_pub_crate)]
 pub(crate) mod tests {
     use super::*;
     use crate::core::address::Address;
@@ -1079,7 +1074,7 @@ pub(crate) mod tests {
 
     const NET: &str = "near-mainnet";
 
-    pub(crate) struct NearFixture {
+    pub struct NearFixture {
         pub(crate) pinned: PinnedNearEpoch,
         pub(crate) ed_keys: Vec<KeyPair>,
         pub(crate) pq_keys: Vec<PqKeyPair>,
@@ -1135,7 +1130,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn build_near_fixture() -> NearFixture {
+    pub fn build_near_fixture() -> NearFixture {
         let ed_keys: Vec<KeyPair> = (0..4).map(|_| KeyPair::generate().unwrap()).collect();
         let pq_keys: Vec<PqKeyPair> = (0..4).map(|_| PqKeyPair::generate()).collect();
         let stakes = [300u128, 250, 250, 200]; // total = 1000; first 3 = 800 > 666

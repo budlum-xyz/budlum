@@ -1809,10 +1809,10 @@ impl IntakeState {
     /// # Errors
     ///
     /// The named zero field.
-    // Called by the genesis and governance bootstrap paths in this module's
-    // tests and by `install_pinned_anchor`'s doc contract; the crate-private
-    // door exists so a checked install is impossible to bypass by accident.
-    #[allow(dead_code)]
+    // The checked door is exercised from this module's tests; production
+    // reaches the same map through `install_pinned_anchor`, so this wrapper
+    // is test-only by construction rather than dead.
+    #[cfg(test)]
     pub(crate) fn install_nipopow_genesis(
         &mut self,
         network: impl Into<String>,
@@ -1846,10 +1846,10 @@ impl IntakeState {
     /// # Errors
     ///
     /// The named zero field.
-    // Called by the genesis and governance bootstrap paths in this module's
-    // tests and by `install_pinned_anchor`'s doc contract; the crate-private
-    // door exists so a checked install is impossible to bypass by accident.
-    #[allow(dead_code)]
+    // The checked door is exercised from this module's tests; production
+    // reaches the same map through `install_pinned_anchor`, so this wrapper
+    // is test-only by construction rather than dead.
+    #[cfg(test)]
     pub(crate) fn install_ghostdag_anchor(
         &mut self,
         network: impl Into<String>,
@@ -1890,10 +1890,10 @@ impl IntakeState {
     /// # Errors
     ///
     /// The named defect.
-    // Called by the genesis and governance bootstrap paths in this module's
-    // tests and by `install_pinned_anchor`'s doc contract; the crate-private
-    // door exists so a checked install is impossible to bypass by accident.
-    #[allow(dead_code)]
+    // The checked door is exercised from this module's tests; production
+    // reaches the same map through `install_pinned_anchor`, so this wrapper
+    // is test-only by construction rather than dead.
+    #[cfg(test)]
     pub(crate) fn install_spore_operator(
         &mut self,
         network: impl Into<String>,
@@ -1966,10 +1966,10 @@ impl IntakeState {
     /// # Errors
     ///
     /// The named defect.
-    // Called by the genesis and governance bootstrap paths in this module's
-    // tests and by `install_pinned_anchor`'s doc contract; the crate-private
-    // door exists so a checked install is impossible to bypass by accident.
-    #[allow(dead_code)]
+    // The checked door is exercised from this module's tests; production
+    // reaches the same map through `install_pinned_anchor`, so this wrapper
+    // is test-only by construction rather than dead.
+    #[cfg(test)]
     pub(crate) fn install_ouroboros_epoch(
         &mut self,
         network: impl Into<String>,
@@ -2007,10 +2007,10 @@ impl IntakeState {
     /// # Errors
     ///
     /// The named zero or inconsistent field.
-    // Called by the genesis and governance bootstrap paths in this module's
-    // tests and by `install_pinned_anchor`'s doc contract; the crate-private
-    // door exists so a checked install is impossible to bypass by accident.
-    #[allow(dead_code)]
+    // The checked door is exercised from this module's tests; production
+    // reaches the same map through `install_pinned_anchor`, so this wrapper
+    // is test-only by construction rather than dead.
+    #[cfg(test)]
     pub(crate) fn install_near_epoch(
         &mut self,
         network: impl Into<String>,
@@ -2027,10 +2027,10 @@ impl IntakeState {
     /// # Errors
     ///
     /// The committee's own verdict, naming the offending field.
-    // Called by the genesis and governance bootstrap paths in this module's
-    // tests and by `install_pinned_anchor`'s doc contract; the crate-private
-    // door exists so a checked install is impossible to bypass by accident.
-    #[allow(dead_code)]
+    // The checked door is exercised from this module's tests; production
+    // reaches the same map through `install_pinned_anchor`, so this wrapper
+    // is test-only by construction rather than dead.
+    #[cfg(test)]
     pub(crate) fn install_honeybadger_committee(
         &mut self,
         network: impl Into<String>,

@@ -51,6 +51,24 @@ struct Budget {
 /// The measured inventory. Counted, not typed.
 const BUDGETS: &[Budget] = &[
     Budget {
+        file: "src/settlement/universal_finality.rs",
+        lint: "clippy::too_many_lines",
+        count: 1,
+        reason: "`for_proof` is one arm per adapter family, and an arm is only auditable against the pin shape it validates: the guarantee a family earns (reversibility class, quantum posture, attestation bit, slashable backing) is decided by the same fields the arm reads, so extracting arms into helpers would separate each guarantee from the proof that earns it - the exact drift this table exists to prevent",
+    },
+    Budget {
+        file: "src/cross_domain/external/intake.rs",
+        lint: "clippy::too_many_lines",
+        count: 1,
+        reason: "the five admission-door tests share one function on purpose: each door's assertion block only means something next to the doorway it has to refuse relative to its neighbours, and five separate functions would make that comparison the file is about unreadable without cross-referencing; the test body itself has no branches beyond the assertions",
+    },
+    Budget {
+        file: "src/cross_domain/economic_guard.rs",
+        lint: "clippy::too_many_lines",
+        count: 1,
+        reason: "`submit_contradiction` is one match arm per adapter family, and the verifier, the evidence digest and the offender replay key of a family have to be read together - a digest that does not commit what the verifier proved is the defect this function exists to prevent, so an extracted arm would separate a statement from its proof",
+    },
+    Budget {
         file: "src/chain/blockchain.rs",
         lint: "clippy::expect_used",
         count: 1,
