@@ -128,8 +128,12 @@ impl RootSecret {
     ///
     /// [`KdfError::EntropyLength`] unless the entropy is 32 bytes.
     pub fn derive(entropy: &[u8], password: &str) -> Result<Self, KdfError> {
+        const MAX_KDF_PASSWORD_BYTES: usize = 1_024;
         if entropy.len() != ENTROPY_LEN {
             return Err(KdfError::EntropyLength(entropy.len()));
+        }
+        if password.len() > MAX_KDF_PASSWORD_BYTES || password.contains('\0') {
+            return Err(KdfError::EntropyLength(password.len()));
         }
         let normalized: Zeroizing<String> = Zeroizing::new(password.nfkd().collect());
         Ok(Self(shake::<ROOT_LEN>(&[
@@ -188,8 +192,27 @@ impl RootSecret {
     /// # Errors
     ///
     /// [`KdfError`] when a component cannot be derived.
-    pub fn user_account(&self, account: u32, index: u32) -> Result<UserAccount, KdfError> {
-        let suite = SuiteId::USER;
+    /// Derive a user account under an explicit `suite`, refusing suites that
+    /// carry no recovery scheme (`SuiteId::VALIDATOR`).
+    ///
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    ///
+    /// # Errors
+    ///
+    /// [`KdfError::Suite`] when `suite` is not a user suite with recovery, or a
+    /// component derivation error.
+    pub fn user_account_for_suite(
+        &self,
+        suite: SuiteId,
+        account: u32,
+        index: u32,
+    ) -> Result<UserAccount, KdfError> {
+        let Some(info) = suite.info() else {
+            return Err(KdfError::Suite(suite));
+        };
+        if info.recovery.is_none() {
+            return Err(KdfError::Suite(suite));
+        }
         let signing = CompositeKeypair::from_seeds(
             suite,
             self.xi_mldsa87(account, index).as_slice(),
@@ -209,6 +232,16 @@ impl RootSecret {
             recovery_public_key,
             address,
         })
+    }
+
+    /// The signing key pair, the recovery seed and the address of `(account,
+    /// index)` under the user suite.
+    ///
+    /// # Errors
+    ///
+    /// [`KdfError`] when a component cannot be derived.
+    pub fn user_account(&self, account: u32, index: u32) -> Result<UserAccount, KdfError> {
+        self.user_account_for_suite(SuiteId::USER, account, index)
     }
 }
 
