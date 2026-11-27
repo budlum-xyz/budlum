@@ -1,4 +1,5 @@
 pub mod budzero_ee;
+pub mod certified_output;
 pub mod coordinator;
 pub mod ee;
 pub mod executor;
