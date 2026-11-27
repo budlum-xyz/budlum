@@ -752,6 +752,27 @@ impl BabylonEotsAdapter {
             .map(|(_, key)| key.as_slice())
     }
 
+    fn has_duplicate_epoch_entries<T>(entries: &[(u64, T)]) -> bool {
+        let mut seen = std::collections::BTreeSet::new();
+        for (epoch, _) in entries {
+            if !seen.insert(*epoch) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn has_valid_anchor(&self) -> bool {
+        !self.network.trim().is_empty()
+            && self.chain_id != 0
+            && !self.epoch_keys.is_empty()
+            && !Self::has_duplicate_epoch_entries(&self.epoch_keys)
+            && !Self::has_duplicate_epoch_entries(&self.epoch_pq_keys)
+            && self.anchor.is_some_and(|anchor| {
+                anchor.tip_block_hash != [0u8; 32] && anchor.required_confirmations > 0
+            })
+    }
+
     /// Whether the caller's policy requires a post-quantum half.
     ///
     /// `require_slashable` is the only policy field that speaks to backing, and
@@ -782,6 +803,9 @@ impl BabylonEotsAdapter {
                 found: hex::encode(evidence.adapter.as_bytes()),
             });
         }
+        if self.network.trim().is_empty() {
+            return Err(rule("Babylon EOTS network identifier must not be empty"));
+        }
         if evidence.network != self.network {
             return Err(AdapterError::WrongAdapter {
                 expected: self.network.clone(),
@@ -804,10 +828,22 @@ impl BabylonEotsAdapter {
                 required: policy.min_depth,
             });
         }
+        if Self::has_duplicate_epoch_entries(&self.epoch_keys)
+            || Self::has_duplicate_epoch_entries(&self.epoch_pq_keys)
+        {
+            return Err(rule(
+                "pinned Babylon epoch key table contains duplicate epoch announcements",
+            ));
+        }
 
         let anchor = self.anchor.as_ref().ok_or_else(|| {
             rule("no Bitcoin weak-subjectivity anchor is pinned for this Babylon domain")
         })?;
+        if anchor.tip_block_hash == [0u8; 32] {
+            return Err(rule(
+                "pinned Bitcoin weak-subjectivity anchor carries an all-zero tip_block_hash",
+            ));
+        }
         if anchor.required_confirmations == 0 {
             return Err(rule(
                 "pinned Bitcoin weak-subjectivity anchor must require at least 1 confirmation",
@@ -1006,6 +1042,10 @@ impl ExternalFinalityAdapter for BabylonEotsAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.has_valid_anchor()
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,
@@ -1015,6 +1055,28 @@ impl ExternalFinalityAdapter for BabylonEotsAdapter {
         if conflict.is_some() {
             return Err(rule(
                 "evidence carries two conflicting epoch votes (equivocation) and cannot attest finality",
+            ));
+        }
+        Ok(attestation)
+    }
+
+    fn verify_observed(
+        &self,
+        evidence: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+        observer: &mut dyn crate::crypto::facts::CryptoObserver,
+    ) -> Result<FinalityAttestation, AdapterError> {
+        let attestation = self.verify(evidence, policy)?;
+        observer.observe(ObservedScheme::Secp256k1);
+        if matches!(
+            attestation.security,
+            SecurityBacking::SignatureSet {
+                slashable: true,
+                ..
+            }
+        ) {
+            observer.observe(ObservedScheme::Scheme(
+                crate::crypto::scheme::SchemeId::ML_DSA_65,
             ));
         }
         Ok(attestation)
@@ -1769,5 +1831,49 @@ mod tests {
         assert_eq!(address, provider_address(&eots_public_key().x_only));
         let other = EotsPublicKey { x_only: [0x22; 32] };
         assert_ne!(address, provider_address(&other.x_only));
+    }
+
+    #[test]
+    fn babylon_reports_pinned_anchor_observes_pq_and_refuses_zero_anchor_or_duplicate_epoch_keys() {
+        use crate::crypto::facts::CryptoFacts;
+        use crate::crypto::scheme::SchemeId;
+
+        let valid = adapter();
+        assert!(
+            valid.has_pinned_trust_anchor(),
+            "anchored BabylonEotsAdapter with epoch keys must report has_pinned_trust_anchor=true"
+        );
+        assert!(!BabylonEotsAdapter::new(NETWORK, CHAIN_ID).has_pinned_trust_anchor());
+
+        let evidence = envelope(vec![golden_vote()]);
+        let mut facts = CryptoFacts::default();
+        valid
+            .verify_observed(&evidence, &policy(), &mut facts)
+            .expect("hybrid golden vote verifies");
+        assert!(
+            facts.count(ObservedScheme::Scheme(SchemeId::ML_DSA_65)) >= 1,
+            "verify_observed must record ML_DSA_65 when the vote's post-quantum half verified"
+        );
+
+        let zero_hash_anchor = valid.clone().with_anchor(BtcWeakSubjectivityAnchor {
+            tip_block_hash: [0u8; 32],
+            tip_height: 870_010,
+            required_confirmations: DEFAULT_REQUIRED_BTC_CONFIRMATIONS,
+        });
+        assert!(!zero_hash_anchor.has_pinned_trust_anchor());
+        assert!(matches!(
+            zero_hash_anchor.verify(&evidence, &policy()),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        let stranger = k256::schnorr::SigningKey::from_slice(&[0x77; 32]).expect("scalar");
+        let conflicting_epoch_table = valid.with_epoch_key(EPOCH, x_only_of(&stranger));
+        assert!(
+            matches!(
+                conflicting_epoch_table.verify(&evidence, &policy()),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "duplicate epoch EOTS key announcements must fail closed"
+        );
     }
 }
