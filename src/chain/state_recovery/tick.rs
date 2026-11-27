@@ -81,9 +81,17 @@ pub struct CheckpointView {
 
 impl CheckpointView {
     fn at(&self, stage: Stage, height: u64) -> Option<&Checkpoint> {
-        self.checkpoints
+        let mut matches = self
+            .checkpoints
             .iter()
-            .find(|c| c.stage == stage && c.height == height)
+            .filter(|c| c.stage == stage && c.height == height);
+        let first = matches.next()?;
+        // Fail closed when multiple entries exist for the same `(stage, height)`
+        // with differing contents rather than letting vector order decide.
+        if matches.any(|other| other != first) {
+            return None;
+        }
+        Some(first)
     }
 
     /// The canonical commitment, only when a post-quantum seal of this stage
@@ -198,12 +206,24 @@ impl StateRecoveryTick {
         let canonical = |stage: Stage, height: u64| view.canonical(stage, height);
         let stage_height = |stage: Stage| view.stage_height(stage);
 
+        let mut live_missing = false;
         if self.ledger.stage == Stage::Medusa {
             // The adult stage follows the live checkpoint. A missing block
-            // holds no commitment, so it cannot match the certificate.
+            // holds no commitment, so it cannot match the certificate even if
+            // the canonical commitment happens to be all-zero.
             let live = view.at(Stage::Medusa, view.live).and_then(|c| c.local);
             self.ledger.height = view.live;
-            self.ledger.commitment = live.unwrap_or_default();
+            if let Some(commitment) = live {
+                self.ledger.commitment = commitment;
+            } else {
+                live_missing = true;
+                let expected = view.canonical(Stage::Medusa, view.live);
+                self.ledger.commitment = if expected == Some([0u8; 32]) {
+                    [0xFF; 32]
+                } else {
+                    [0u8; 32]
+                };
+            }
         } else if let Some(next) = self.ledger.stage.later() {
             // A reverted stage grows back one stage at a time, and only when
             // the node's own block at that checkpoint is canonical.
@@ -226,10 +246,19 @@ impl StateRecoveryTick {
         }
 
         let repair_cost = self.ledger.height;
-        let regrowth_cost = self
+        // Price re-growth against the actual post-quantum sealed target stage
+        // rather than raw `view.previous`/`view.polyp` heights, so an unsealed
+        // or revoked anchor cannot underprice a deep Polyp reversion.
+        let regrowth_anchor = self
             .ledger
             .height
-            .saturating_sub(view.previous.or(view.polyp).unwrap_or(0));
+            .checked_sub(1)
+            .and_then(|damaged_below| self.ledger.cheapest_target(damaged_below, &stage_height))
+            .and_then(&stage_height)
+            .or_else(|| view.stage_height(Stage::Ephyra))
+            .or_else(|| view.stage_height(Stage::Polyp))
+            .unwrap_or(0);
+        let regrowth_cost = self.ledger.height.saturating_sub(regrowth_anchor);
         let verdict = assess(
             &self.ledger,
             &self.policy,
@@ -254,11 +283,13 @@ impl StateRecoveryTick {
             _ => true,
         };
         match verdict {
-            HealthVerdict::Healthy if reverted && live_diverged => TickOutcome::Repair {
-                stress: Stress::Divergence,
-                repair_cost,
-                regrowth_cost,
-            },
+            HealthVerdict::Healthy if live_missing || (reverted && live_diverged) => {
+                TickOutcome::Repair {
+                    stress: Stress::Divergence,
+                    repair_cost,
+                    regrowth_cost,
+                }
+            }
             HealthVerdict::Healthy => TickOutcome::Healthy,
             HealthVerdict::RepairRecommended {
                 stress,
