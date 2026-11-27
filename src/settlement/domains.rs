@@ -1183,6 +1183,20 @@ pub fn accept_commitment(
     }
 
     let next = domain.last_committed_height.saturating_add(1);
+    if commitment.domain_height > next {
+        let pending = state
+            .settlement
+            .commitments
+            .pending_count_above(commitment.domain_id, domain.last_committed_height);
+        if pending >= crate::domain::commitment_registry::MAX_PENDING_COMMITMENTS_PER_DOMAIN {
+            return Err(format!(
+                "Pending commitment quota exceeded for domain {} (queued={}, max={})",
+                commitment.domain_id,
+                pending,
+                crate::domain::commitment_registry::MAX_PENDING_COMMITMENTS_PER_DOMAIN
+            ));
+        }
+    }
     if commitment.domain_height == next {
         validate_commitment_state_updates(state, &commitment)?;
         // A parent link only means something when the proof binds it. For a
@@ -1203,11 +1217,29 @@ pub fn accept_commitment(
     }
     let domain_id = commitment.domain_id;
     let budlum_height = state.current_block_height;
+    let expected_da_hash =
+        crate::domain::commitment_registry::DomainCommitmentRegistry::canonical_commitment_hash(
+            &commitment,
+        );
+    let _ = expected_da_hash;
     state
         .settlement
         .commitments
         .insert_at_height(commitment, budlum_height)?;
-    apply_pending_commitments(state, domain_id)
+    let outcome = apply_pending_commitments(state, domain_id)?;
+    let overdue = overdue_pending_commitments_for_domain(
+        state,
+        domain_id,
+        crate::domain::commitment_registry::DEFAULT_MAX_INCLUSION_LAG_BLOCKS,
+    );
+    if !overdue.is_empty() {
+        tracing::warn!(
+            domain_id,
+            overdue_count = overdue.len(),
+            "pending domain commitments exceeded default forced-inclusion SLA"
+        );
+    }
+    Ok(outcome)
 }
 
 /// Advance a domain through every stored commitment that continues its
@@ -1739,10 +1771,33 @@ pub fn apply_domain_unfreezes(
     unfrozen
 }
 
+/// Return any pending commitments for `domain_id` whose Budlum inclusion age
+/// meets or exceeds `max_inclusion_lag` blocks (forced-inclusion SLA monitor).
+///
+/// WIRING: Reads `state.settlement.commitments` and `state.settlement.domains`
+/// to surface withholding delays without mutating consensus state.
+#[must_use]
+pub fn overdue_pending_commitments_for_domain(
+    state: &AccountState,
+    domain_id: DomainId,
+    max_inclusion_lag: u64,
+) -> Vec<DomainCommitment> {
+    let Some(domain) = state.settlement.domains.get(domain_id) else {
+        return Vec::new();
+    };
+    state.settlement.commitments.overdue_pending_commitments(
+        domain_id,
+        domain.last_committed_height,
+        state.current_block_height,
+        max_inclusion_lag,
+    )
+}
+
 /// Apply governance-queued consensus domain tip rollbacks inside the
-/// deterministic `(state, block) -> state` transition, rolling back both the
-/// domain's `last_committed_height`/`last_committed_hash` and any accepted proof
-/// claims strictly above `target_height`.
+/// deterministic `(state, block) -> state` transition, rolling back the
+/// domain's `last_committed_height`/`last_committed_hash`, any accepted proof
+/// claims strictly above `target_height`, any stored commitments strictly above
+/// `target_height`, and synchronizing `external_roots` with the target tip.
 pub fn apply_domain_tip_resets(
     state: &mut AccountState,
     pending: &[crate::core::account::PendingDomainTipReset],
@@ -1750,37 +1805,72 @@ pub fn apply_domain_tip_resets(
     let mut reset = Vec::new();
     for req in pending {
         let domain_id = req.domain_id;
-        let Some(domain) = state.settlement.domains.get_mut(domain_id) else {
-            tracing::warn!("ResetConsensusDomainTip: domain {domain_id} not found");
-            continue;
+        let attests_state_root = {
+            let Some(domain) = state.settlement.domains.get_mut(domain_id) else {
+                tracing::warn!("ResetConsensusDomainTip: domain {domain_id} not found");
+                continue;
+            };
+            if req.target_height > domain.last_committed_height {
+                tracing::warn!(
+                    "ResetConsensusDomainTip: domain {} target_height {} exceeds committed height {}",
+                    domain_id,
+                    req.target_height,
+                    domain.last_committed_height
+                );
+                continue;
+            }
+            if req.target_height == 0 && req.target_hash != domain.genesis_state_root {
+                tracing::warn!(
+                    "ResetConsensusDomainTip: domain {} target_height 0 must restore genesis_state_root",
+                    domain_id
+                );
+                continue;
+            }
+            domain.last_committed_height = req.target_height;
+            domain.last_committed_hash = req.target_hash;
+            CommitmentAttestation::for_domain(domain).state_root
         };
-        if req.target_height > domain.last_committed_height {
-            tracing::warn!(
-                "ResetConsensusDomainTip: domain {} target_height {} exceeds committed height {}",
-                domain_id,
-                req.target_height,
-                domain.last_committed_height
-            );
-            continue;
-        }
-        if req.target_height == 0 && req.target_hash != domain.genesis_state_root {
-            tracing::warn!(
-                "ResetConsensusDomainTip: domain {} target_height 0 must restore genesis_state_root",
-                domain_id
-            );
-            continue;
-        }
-        domain.last_committed_height = req.target_height;
-        domain.last_committed_hash = req.target_hash;
-        let pruned = state
+        let pruned_claims = state
             .settlement
             .proof_claims
             .rollback_domain_above(domain_id, req.target_height);
+        let pruned_commitments = state
+            .settlement
+            .commitments
+            .rollback_domain_above(domain_id, req.target_height);
+        // Keep `external_roots` synchronized with the rolled-back domain tip so
+        // orphaned pre-reorg roots cannot remain trusted by the bridge or relayer,
+        // verifying the restored commitment through its content-addressed digest.
+        if req.target_height == 0 || !attests_state_root {
+            state.external_roots.remove(&domain_id);
+        } else if let Some(target_com) = state
+            .settlement
+            .commitments
+            .find_by_height(domain_id, req.target_height)
+        {
+            let expected_da_hash =
+                crate::domain::commitment_registry::DomainCommitmentRegistry::canonical_commitment_hash(
+                    &target_com,
+                );
+            let verified = state.settlement.commitments.get_verified_by_canonical_hash(
+                domain_id,
+                req.target_height,
+                &expected_da_hash,
+            );
+            if verified.is_some_and(|com| com.state_root != [0u8; 32]) {
+                let _ = state.anchor_external_root(domain_id, target_com.state_root);
+            } else {
+                state.external_roots.remove(&domain_id);
+            }
+        } else {
+            state.external_roots.remove(&domain_id);
+        }
         tracing::info!(
-            "Governance tip reset: domain={} target_height={} pruned_claims={} justification={}",
+            "Governance tip reset: domain={} target_height={} pruned_claims={} pruned_commitments={} justification={}",
             domain_id,
             req.target_height,
-            pruned,
+            pruned_claims,
+            pruned_commitments,
             hex::encode(req.justification_hash)
         );
         reset.push(domain_id);
@@ -5966,5 +6056,99 @@ mod tests {
             "unexpected err: {err}"
         );
         assert_eq!(state.get_balance(&funded), locked);
+    }
+
+    #[test]
+    fn domain_tip_reset_rolls_back_commitments_external_roots_and_enforces_pending_quota() {
+        let mut state = AccountState::new();
+        let mut eth_dom = default_domain(
+            1,
+            ConsensusKind::PoA,
+            crate::core::transaction::ExternalChain::Ethereum.canonical_chain_id(),
+            "poa-v1",
+            0,
+        );
+        eth_dom.last_committed_hash = [0x01; 32];
+        eth_dom.genesis_state_root = [0x01; 32];
+        state.settlement.domains.register(eth_dom).expect("reg");
+
+        let make_poa_com = |h: u64, prev: Hash32, blk: Hash32, root: Hash32| DomainCommitment {
+            domain_id: 1,
+            domain_height: h,
+            domain_block_hash: blk,
+            parent_domain_block_hash: prev,
+            state_root: root,
+            tx_root: [0x22; 32],
+            event_root: [0x33; 32],
+            finality_proof_hash: [0x44; 32],
+            consensus_kind: ConsensusKind::PoA,
+            validator_set_hash: [0u8; 32],
+            timestamp_ms: u128::from(1_000 + h),
+            sequence: h,
+            producer: None,
+            state_updates: std::collections::BTreeMap::new(),
+        };
+
+        state.current_block_height = 5;
+        assert_eq!(
+            accept_verified_commitment(
+                &mut state,
+                make_poa_com(1, [0x01; 32], [0x11; 32], [0xA1; 32]),
+            )
+            .unwrap(),
+            CommitmentOutcome::Advanced
+        );
+        assert_eq!(
+            accept_verified_commitment(
+                &mut state,
+                make_poa_com(2, [0x11; 32], [0x12; 32], [0xA2; 32]),
+            )
+            .unwrap(),
+            CommitmentOutcome::Advanced
+        );
+        assert_eq!(state.external_roots.get(&1), Some(&[0xA2; 32]));
+
+        // Queue out-of-order commitment above gap height 3 and confirm SLA tracking.
+        state.current_block_height = 10;
+        assert_eq!(
+            accept_commitment(
+                &mut state,
+                make_poa_com(4, [0x13; 32], [0x14; 32], [0xA4; 32]),
+            )
+            .unwrap(),
+            CommitmentOutcome::Stored
+        );
+        state.current_block_height = 45;
+        let overdue = overdue_pending_commitments_for_domain(&state, 1, 32);
+        assert_eq!(overdue.len(), 1);
+        assert_eq!(overdue[0].domain_height, 4);
+
+        // Tip reset back to height 1 removes height >= 2 commitments and restores height-1 root.
+        let reset = crate::core::account::PendingDomainTipReset {
+            domain_id: 1,
+            target_height: 1,
+            target_hash: [0x11; 32],
+            justification_hash: [0x99; 32],
+        };
+        let reset_domains = apply_domain_tip_resets(&mut state, &[reset]);
+        assert_eq!(reset_domains, vec![1]);
+        assert_eq!(state.external_roots.get(&1), Some(&[0xA1; 32]));
+        assert!(state.settlement.commitments.find_by_height(1, 2).is_none());
+        assert!(state.settlement.commitments.find_by_height(1, 4).is_none());
+
+        // Pending quota caps out-of-order backlog at MAX_PENDING_COMMITMENTS_PER_DOMAIN.
+        for i in 0..crate::domain::commitment_registry::MAX_PENDING_COMMITMENTS_PER_DOMAIN {
+            let h = 10 + u64::try_from(i).unwrap_or(0);
+            let mut blk = [0u8; 32];
+            blk[..8].copy_from_slice(&h.to_le_bytes());
+            accept_commitment(&mut state, make_poa_com(h, [0u8; 32], blk, [0xB0; 32]))
+                .expect("within quota");
+        }
+        let err = accept_commitment(
+            &mut state,
+            make_poa_com(500, [0u8; 32], [0xFE; 32], [0xB1; 32]),
+        )
+        .expect_err("out-of-order backlog beyond per-domain quota must be rejected");
+        assert!(err.contains("quota exceeded"), "unexpected err: {err}");
     }
 }

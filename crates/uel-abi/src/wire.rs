@@ -194,6 +194,11 @@ impl From<&EeRefusal> for pb::Refusal {
 impl TryFrom<pb::Refusal> for EeRefusal {
     type Error = WireError;
     fn try_from(value: pb::Refusal) -> Result<Self, WireError> {
+        if value.message.len() > 1024 {
+            return Err(WireError::TooLong {
+                field: "refusal.message",
+            });
+        }
         let code = match pb::RefusalCode::try_from(value.code) {
             Ok(pb::RefusalCode::InvalidCode) => RefusalCode::InvalidCode,
             Ok(pb::RefusalCode::Unsupported) => RefusalCode::Unsupported,
@@ -224,6 +229,16 @@ impl From<&CodeInfo> for pb::CodeInfo {
 impl TryFrom<pb::CodeInfo> for CodeInfo {
     type Error = WireError;
     fn try_from(value: pb::CodeInfo) -> Result<Self, WireError> {
+        if value.abi_tag.is_empty() || value.abi_tag.bytes().any(|b| !(0x21..=0x7E).contains(&b)) {
+            return Err(WireError::BadLength {
+                field: "code_info.abi_tag",
+            });
+        }
+        if value.abi_tag.len() > 64 {
+            return Err(WireError::TooLong {
+                field: "code_info.abi_tag",
+            });
+        }
         Ok(Self {
             code_hash: fixed32(&value.code_hash, "code_info.code_hash")?,
             abi_tag: value.abi_tag,

@@ -213,6 +213,41 @@ pub fn signed_transfer_v7_json(
     ))
 }
 
+/// Verify a pre-sign simulation snapshot against live wallet state, authorize
+/// optional agent session limits, and sign `transfer` only if every check passes.
+///
+/// # Errors
+/// WIRING: Client wallet pre-sign wrapper combining [`crate::tx_safety`] simulation
+/// freshness and autonomous agent cap checks with [`signed_transfer_json`].
+///
+/// # Errors
+///
+/// Returns [`crate::tx_safety::TxSafetyError`] when simulation state drifted,
+/// an approval trap is present, or agent spending guardrails refuse the spend.
+pub fn signed_transfer_after_simulation(
+    wallet: &Wallet,
+    transfer: &UnsignedTransfer,
+    sim: &crate::tx_safety::SimulationSnapshot,
+    live: &crate::tx_safety::LiveSignContext,
+    agent_guard: Option<(
+        &mut crate::tx_safety::AgentSpendGuard,
+        &crate::tx_safety::AgentExecutionPolicy,
+        bool,
+    )>,
+) -> Result<String, crate::tx_safety::TxSafetyError> {
+    crate::tx_safety::verify_simulation_freshness(sim, live)?;
+    if let Some((guard, policy, human_countersigned)) = agent_guard {
+        guard.authorize_spend(
+            policy,
+            live.current_height,
+            &transfer.to,
+            u128::from(transfer.amount),
+            human_countersigned,
+        )?;
+    }
+    Ok(signed_transfer_json(wallet, transfer))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +448,82 @@ mod tests {
         named.from = wallet.address();
         assert!(json.contains(&hex::encode(named.signing_hash())));
         assert!(json.contains("\"signature_version\":5"));
+    }
+
+    #[test]
+    fn signed_transfer_after_simulation_gates_stale_state_and_agent_caps() {
+        use crate::tx_safety::{
+            AgentExecutionPolicy, AgentSpendGuard, LiveSignContext, SimulationSnapshot,
+            TxSafetyError,
+        };
+
+        let wallet = Wallet::from_entropy(&[9u8; 32]).expect("256-bit entropy");
+        let recipient = [0x44; 32];
+        let transfer = UnsignedTransfer {
+            from: [0u8; 32],
+            to: recipient,
+            amount: 50,
+            fee: 1,
+            max_fee: 1,
+            priority_fee: 0,
+            nonce: 3,
+            timestamp_ms: 1,
+            chain_id: 45_261,
+        };
+        let sim = SimulationSnapshot {
+            chain_id: 45_261,
+            sender_nonce: 3,
+            block_height: 100,
+            state_epoch: 2,
+            quoted_min_out_atoms: 100,
+            expected_delegate: None,
+            approval_grant: None,
+        };
+        let mut live = LiveSignContext {
+            chain_id: 45_261,
+            current_nonce: 3,
+            current_height: 101,
+            current_epoch: 2,
+            tx_min_out_atoms: 100,
+            active_delegate: None,
+            max_simulation_age_blocks: 5,
+        };
+        let policy = AgentExecutionPolicy {
+            expires_at_height: 200,
+            per_tx_cap_atoms: 60,
+            epoch_cap_atoms: 80,
+            human_veto_above_atoms: 100,
+            allowed_targets: vec![recipient],
+        };
+        let mut guard = AgentSpendGuard::new(2);
+
+        let signed = signed_transfer_after_simulation(
+            &wallet,
+            &transfer,
+            &sim,
+            &live,
+            Some((&mut guard, &policy, false)),
+        )
+        .expect("fresh simulation within agent policy must sign");
+        assert!(signed.contains("\"signature_version\":5"));
+        assert_eq!(guard.epoch_spent_atoms(), 50);
+
+        // Second spend (50 + 50 = 100 > epoch_cap 80) must be refused before signing.
+        let err = signed_transfer_after_simulation(
+            &wallet,
+            &transfer,
+            &sim,
+            &live,
+            Some((&mut guard, &policy, false)),
+        )
+        .expect_err("epoch cap breach must refuse signing");
+        assert!(matches!(err, TxSafetyError::EpochCapExceeded { .. }));
+
+        // Stale nonce must be refused even without agent policy.
+        live.current_nonce = 4;
+        assert!(matches!(
+            signed_transfer_after_simulation(&wallet, &transfer, &sim, &live, None),
+            Err(TxSafetyError::StaleNonce { .. })
+        ));
     }
 }

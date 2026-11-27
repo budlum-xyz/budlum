@@ -25,6 +25,16 @@ pub enum ProofClass {
     Hiding,
 }
 
+/// Verification policy separating envelope binding from strict PCS zero-knowledge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZkVerificationPolicy {
+    /// Verifies STARK soundness plus witness commitment and lookup-terminal seal.
+    WitnessEnvelopeOnly,
+    /// Requires a PCS with `Pcs::ZK == true` and randomized LogUp lookup terminals.
+    /// Fails closed while the active backend uses non-ZK `TwoAdicFriPcs`.
+    StrictZeroKnowledgePcs,
+}
+
 /// Blinding commitment tying a STARK envelope to hidden witness scalars.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HidingBinding {
@@ -34,6 +44,13 @@ pub struct HidingBinding {
     pub witness_commitment: u64,
     /// Secondary challenge tag binding envelope public_inputs_hash and salt_commit.
     pub transcript_seal: [u8; 32],
+    /// Domain-separated commitment binding the LogUp auxiliary trace commitment and salt.
+    #[serde(default)]
+    pub lookup_terminal_commitment: [u8; 32],
+    /// True only when the underlying PCS actually implements zero-knowledge and
+    /// LogUp lookup terminal randomization (`false` for current `TwoAdicFriPcs`).
+    #[serde(default)]
+    pub pcs_zk_supported: bool,
 }
 
 /// Self-contained hiding STARK envelope.
@@ -58,6 +75,22 @@ fn compute_transcript_seal(
     let mut k = Keccak::v256();
     k.update(b"BDLM_HIDING_TRANSCRIPT_SEAL_V1");
     k.update(public_inputs_hash);
+    k.update(salt_commit);
+    k.update(&witness_commitment.to_le_bytes());
+    let mut out = [0u8; 32];
+    k.finalize(&mut out);
+    out
+}
+
+fn compute_lookup_terminal_commitment(
+    proof_bytes: &[u8],
+    salt_commit: &[u8; 32],
+    witness_commitment: u64,
+) -> [u8; 32] {
+    let mut k = Keccak::v256();
+    k.update(b"BDLM_LOOKUP_TERMINAL_SEAL_V1");
+    k.update(&(proof_bytes.len() as u64).to_le_bytes());
+    k.update(proof_bytes);
     k.update(salt_commit);
     k.update(&witness_commitment.to_le_bytes());
     let mut out = [0u8; 32];
@@ -104,6 +137,8 @@ pub fn prove_hiding(
         &salt_commit,
         witness_commitment,
     );
+    let lookup_terminal_commitment =
+        compute_lookup_terminal_commitment(&envelope.proof_bytes, &salt_commit, witness_commitment);
     Ok(HidingProofPackage {
         class: ProofClass::Hiding,
         envelope,
@@ -111,6 +146,8 @@ pub fn prove_hiding(
             salt_commit,
             witness_commitment,
             transcript_seal,
+            lookup_terminal_commitment,
+            pcs_zk_supported: false,
         }),
     })
 }
@@ -129,10 +166,47 @@ pub fn verify_with_class(
     program: &[u64],
     required_class: ProofClass,
 ) -> Result<(), VerifyError> {
+    verify_with_policy(
+        package,
+        expected_inputs,
+        program,
+        required_class,
+        ZkVerificationPolicy::WitnessEnvelopeOnly,
+    )
+}
+
+/// Verify a `HidingProofPackage` enforcing both `required_class` and an explicit
+/// zero-knowledge capability [`ZkVerificationPolicy`].
+///
+/// When `policy == ZkVerificationPolicy::StrictZeroKnowledgePcs`, proofs produced
+/// on the non-ZK `TwoAdicFriPcs` backend (`Pcs::ZK == false`, unblinded FRI /
+/// LogUp lookup terminals) are rejected fail-closed.
+///
+/// # Errors
+///
+/// Returns [`VerifyError`] when class, ZK capability policy, binding seal, or
+/// STARK verification fails.
+pub fn verify_with_policy(
+    package: &HidingProofPackage,
+    expected_inputs: &ExecutionPublicInputs,
+    program: &[u64],
+    required_class: ProofClass,
+    policy: ZkVerificationPolicy,
+) -> Result<(), VerifyError> {
     if required_class == ProofClass::Hiding && package.class != ProofClass::Hiding {
         return Err(VerifyError::InvalidEnvelope(
             "expected ProofClass::Hiding proof package".to_string(),
         ));
+    }
+    if policy == ZkVerificationPolicy::StrictZeroKnowledgePcs {
+        let pcs_ok = package.binding.as_ref().is_some_and(|b| b.pcs_zk_supported)
+            && package.envelope.backend != "Plonky3-Keccak-Goldilocks";
+        if !pcs_ok {
+            return Err(VerifyError::InvalidEnvelope(
+                "TwoAdicFriPcs (Pcs::ZK == false) does not satisfy strict zero-knowledge or blinded LogUp lookup terminals"
+                    .to_string(),
+            ));
+        }
     }
     if package.class == ProofClass::Hiding {
         let Some(ref binding) = package.binding else {
@@ -164,6 +238,16 @@ pub fn verify_with_class(
         if binding.transcript_seal != expected_seal {
             return Err(VerifyError::InvalidEnvelope(
                 "hiding transcript seal mismatch".to_string(),
+            ));
+        }
+        let expected_lookup_seal = compute_lookup_terminal_commitment(
+            &package.envelope.proof_bytes,
+            &binding.salt_commit,
+            binding.witness_commitment,
+        );
+        if binding.lookup_terminal_commitment != expected_lookup_seal {
+            return Err(VerifyError::InvalidEnvelope(
+                "hiding lookup terminal commitment mismatch".to_string(),
             ));
         }
     }
@@ -230,8 +314,26 @@ mod tests {
         downgraded.class = ProofClass::Open;
         assert!(verify_with_class(&downgraded, &pi, &program, ProofClass::Hiding).is_err());
 
-        let mut forged = pkg;
+        let mut forged = pkg.clone();
         forged.binding.as_mut().expect("binding").salt_commit[0] ^= 1;
         assert!(verify_with_class(&forged, &pi, &program, ProofClass::Hiding).is_err());
+
+        // StrictZeroKnowledgePcs must refuse non-ZK TwoAdicFriPcs envelopes
+        // whose FRI openings and LogUp lookup terminals remain unblinded.
+        assert!(verify_with_policy(
+            &pkg,
+            &pi,
+            &program,
+            ProofClass::Hiding,
+            ZkVerificationPolicy::StrictZeroKnowledgePcs,
+        )
+        .is_err());
+        let mut forged_lookup = pkg;
+        forged_lookup
+            .binding
+            .as_mut()
+            .expect("binding")
+            .lookup_terminal_commitment[0] ^= 1;
+        assert!(verify_with_class(&forged_lookup, &pi, &program, ProofClass::Hiding).is_err());
     }
 }

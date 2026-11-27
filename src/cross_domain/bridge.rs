@@ -957,7 +957,12 @@ impl BridgeState {
                 .map_err(|e| BridgeError(e.to_string()))?;
         } else {
             self.economic_guard
-                .check_and_record_flow(source_domain, unlock_flow_atoms, settled_height)
+                .check_and_record_directional_flow(
+                    source_domain,
+                    super::economic_guard::BridgeFlowDirection::Withdraw,
+                    unlock_flow_atoms,
+                    settled_height,
+                )
                 .map_err(|e| BridgeError(e.to_string()))?;
         }
         let transfer = self

@@ -168,6 +168,7 @@ mod gates {
     pub mod pq_ctx_is_bound;
     pub mod pq_scan;
     pub mod proof_deps_are_exactly_pinned;
+    pub mod proof_hash_width;
     pub mod qr_is_derivative_only;
     pub mod quantum_account;
     pub mod readme_claims_are_wired;
@@ -378,6 +379,14 @@ const GATES: &[Gate] = &[
         run: gates::proof_deps_are_exactly_pinned::run,
         run_args: None,
         self_test: gates::proof_deps_are_exactly_pinned::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "proof-hash-width",
+        replaces: None,
+        run: gates::proof_hash_width::run,
+        run_args: None,
+        self_test: gates::proof_hash_width::self_test,
         run_log: None,
     },
     Gate {

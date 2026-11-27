@@ -32,6 +32,19 @@
 //! comment. It also refuses the reverse: a field that is both marked excluded
 //! and named in the derivation.
 //!
+//! # Whole-row digests
+//!
+//! The same shape appears without an id field: a struct whose impl defines
+//! `digest(&self)`, `row_digest(&self)` or `leaf_digest(&self)` returning a
+//! 32-byte hash commits to itself through that digest, and a bond, a
+//! signature or a stored commitment binds exactly the fields the digest
+//! reads. `DomainFinalityEntry::row_digest` is the certificate row under
+//! `finality_certificate_root`; `AnchorKeyLedger::digest` is what a
+//! ceremony grant pins. Those impls are measured like an id: every `pub`
+//! field is in the derivation or carries `IDENTITY: excluded - <reason>`.
+//! A getter returning a reference (`-> &[u8; 32]`) is a stored value, not a
+//! derivation, and is not matched.
+//!
 //! # Known limits
 //!
 //! Coverage is measured by name: a derivation that mentions `self.foo` counts
@@ -43,6 +56,19 @@ use std::path::{Path, PathBuf};
 
 /// Roots holding shipped library code.
 const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates"];
+
+/// Whole-row digest names. An impl defining one of these as
+/// `fn <name>(&self) -> [u8; 32]` or `-> Hash32` is measured like an id.
+const ROW_DIGESTS: &[&str] = &["digest", "row_digest", "leaf_digest"];
+
+/// The whole-row digest an impl body defines, if any.
+fn row_digest_of(impl_body: &str) -> Option<&'static str> {
+    ROW_DIGESTS.iter().copied().find(|name| {
+        let head = format!("fn {name}(&self) -> ");
+        impl_body.contains(&format!("{head}[u8; 32]"))
+            || impl_body.contains(&format!("{head}Hash32"))
+    })
+}
 
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
@@ -405,7 +431,7 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 
     if out.structs == 0 {
         return Err(String::from(
-            "gate found no struct with a verify_id to measure - wrong root?",
+            "gate found no struct with a verify_id or a whole-row digest to measure - wrong root?",
         ));
     }
     Ok(out)
@@ -418,7 +444,7 @@ fn measure_one(path: &Path, root: &Path, out: &mut Outcome) {
         .unwrap_or_default();
     let src = String::from_utf8_lossy(&raw).into_owned();
     let src = strip_test_mods(&src);
-    if !src.contains("fn verify_id") {
+    if !src.contains("fn verify_id") && row_digest_of(&src).is_none() {
         return;
     }
 
@@ -440,6 +466,7 @@ fn measure_one(path: &Path, root: &Path, out: &mut Outcome) {
     }
 
     let helpers = fn_bodies(&src);
+    let rel_path = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
 
     let mut impl_cursor = 0usize;
     while let Some(rel) = src[impl_cursor..].find("impl ") {
@@ -456,10 +483,14 @@ fn measure_one(path: &Path, root: &Path, out: &mut Outcome) {
             continue;
         }
         let impl_body = balanced(&src, pos);
-        if !impl_body.contains("fn verify_id") {
+        let derivation_fn = if impl_body.contains("fn verify_id") {
+            "verify_id"
+        } else if let Some(row) = row_digest_of(&impl_body) {
+            row
+        } else {
             impl_cursor = pos + 1;
             continue;
-        }
+        };
         let Some(fields) = structs.get(&name) else {
             impl_cursor = pos + 1;
             continue;
@@ -468,34 +499,41 @@ fn measure_one(path: &Path, root: &Path, out: &mut Outcome) {
             impl_cursor = pos + 1;
             continue;
         }
-        check_impl(&impl_body, &name, fields, &helpers, path, root, out);
+        check_impl(
+            &impl_body,
+            &name,
+            fields,
+            &helpers,
+            derivation_fn,
+            &rel_path,
+            out,
+        );
         impl_cursor = pos + 1;
     }
 }
 
-/// Check one impl's `verify_id` against its struct's fields.
+/// Check one impl's derivation (`verify_id`, or a whole-row digest) against
+/// its struct's fields. `rel` is the file's path relative to the repo root.
 fn check_impl(
     impl_body: &str,
     name: &str,
     fields: &[(String, String)],
     helpers: &BTreeMap<String, String>,
-    path: &Path,
-    root: &Path,
+    derivation_fn: &str,
+    rel: &str,
     out: &mut Outcome,
 ) {
     let methods = fn_bodies(impl_body);
-    let mut derivation = methods.get("verify_id").cloned().unwrap_or_else(|| {
-        let rest = &impl_body[impl_body.find("fn verify_id").unwrap_or(0)..];
-        match rest.find('{') {
-            Some(open) => balanced(
-                impl_body,
-                impl_body.find("fn verify_id").unwrap_or(0) + open,
-            ),
+    let head = format!("fn {derivation_fn}");
+    let mut derivation = methods.get(derivation_fn).cloned().unwrap_or_else(|| {
+        let at = impl_body.find(&head).unwrap_or(0);
+        match impl_body[at..].find('{') {
+            Some(open) => balanced(impl_body, at + open),
             None => String::new(),
         }
     });
     let mut frontier = vec![derivation.clone()];
-    let mut seen: BTreeSet<String> = ["verify_id".to_string()].into_iter().collect();
+    let mut seen: BTreeSet<String> = [derivation_fn.to_string()].into_iter().collect();
     while let Some(text) = frontier.pop() {
         for called in called_names(&text) {
             if seen.contains(&called) {
@@ -514,9 +552,18 @@ fn check_impl(
     }
 
     let first = fields[0].0.clone();
-    let id_field = id_field_of(&derivation, &first);
+    // A whole-row digest has no id field: every field is measured.
+    let id_field = if derivation_fn == "verify_id" {
+        id_field_of(&derivation, &first)
+    } else {
+        String::new()
+    };
+    let commits_to = if derivation_fn == "verify_id" {
+        format!("the id that {name}.{id_field} commits to")
+    } else {
+        format!("the digest {name}.{derivation_fn}() commits to")
+    };
     out.structs += 1;
-    let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
 
     // A mention in a comment or a string does not bind a field.
     let code = crate::gates::rust_literals::scrub(&derivation);
@@ -529,11 +576,11 @@ fn check_impl(
         let declared = identity_excluded(doc);
         if !bound && declared.is_none() {
             out.problems.push(format!(
-                "{rel}: {name}.{field} is outside the id that {name}.{id_field} \
-                 commits to, and the field does not say so. Two values of this \
-                 struct can disagree about it under one id, and whichever is \
-                 stored first defines the entry. Hash it in the derivation, or \
-                 write `IDENTITY: excluded - <reason>` in the field's doc."
+                "{rel}: {name}.{field} is outside {commits_to}, and the field \
+                 does not say so. Two values of this struct can disagree about \
+                 it under one commitment, and whichever is stored first defines \
+                 the entry. Hash it in the derivation, or write \
+                 `IDENTITY: excluded - <reason>` in the field's doc."
             ));
         } else if bound {
             if let Some(reason) = declared {
@@ -563,8 +610,9 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(out.problems.join("\n"));
     }
     Ok(format!(
-        "self-derived id gate OK: {} structs with a verify_id, {} non-id fields \
-         each hashed into the id or declaring that they are not",
+        "self-derived id gate OK: {} structs with a verify_id or a whole-row \
+         digest, {} non-id fields each hashed into the commitment or declaring \
+         that they are not",
         out.structs, out.fields
     ))
 }
@@ -618,6 +666,31 @@ const CANARIES: &[Canary] = &[
         name: "no_verify",
         body: "pub struct Plain {\n    pub a: u64,\n    pub b: u64,\n}\npub struct Req {\n    pub id: [u8; 32],\n    pub amount: u64,\n}\nimpl Req {\n    pub fn calculate_id(&self) -> [u8; 32] {\n        [self.amount as u8; 32]\n    }\n    pub fn verify_id(&self) -> bool {\n        self.id == self.calculate_id()\n    }\n}",
         expect: Expect::Pass,
+    },
+    Canary {
+        name: "digest_covered",
+        body: "pub struct Row {\n    pub a: u64,\n    pub b: u16,\n}\nimpl Row {\n    pub fn digest(&self) -> [u8; 32] {\n        let mut h = Vec::new();\n        h.extend_from_slice(&self.a.to_le_bytes());\n        h.extend_from_slice(&self.b.to_le_bytes());\n        [h.len() as u8; 32]\n    }\n}",
+        expect: Expect::Pass,
+    },
+    Canary {
+        name: "digest_silent",
+        body: "pub struct Row {\n    pub a: u64,\n    pub b: u16,\n}\nimpl Row {\n    pub fn digest(&self) -> [u8; 32] {\n        let mut h = Vec::new();\n        h.extend_from_slice(&self.a.to_le_bytes());\n        [h.len() as u8; 32]\n    }\n}",
+        expect: Expect::Finding,
+    },
+    Canary {
+        name: "digest_declared",
+        body: "pub struct Row {\n    pub a: u64,\n    /// IDENTITY: excluded - the signature over this digest.\n    pub signature: Vec<u8>,\n}\nimpl Row {\n    pub fn digest(&self) -> [u8; 32] {\n        [self.a as u8; 32]\n    }\n}",
+        expect: Expect::Pass,
+    },
+    Canary {
+        name: "row_digest_hash32_silent",
+        body: "pub type Hash32 = [u8; 32];\npub struct Row {\n    pub a: u64,\n    pub b: u16,\n}\nimpl Row {\n    pub fn row_digest(&self) -> Hash32 {\n        [self.a as u8; 32]\n    }\n}",
+        expect: Expect::Finding,
+    },
+    Canary {
+        name: "digest_getter",
+        body: "pub struct Cell {\n    pub digest: [u8; 32],\n    pub extra: u8,\n}\nimpl Cell {\n    pub fn digest(&self) -> &[u8; 32] {\n        &self.digest\n    }\n}",
+        expect: Expect::MeasuredNothing,
     },
     Canary {
         name: "empty",
@@ -714,8 +787,11 @@ pub fn self_test() -> Result<String, String> {
         "self-derived id gate self-test OK: every field hashed passes, a field \
          silently outside is refused, a declared exclusion passes, a stale \
          exclusion on a bound field is refused, delegation is followed, test \
-         fixtures are not bindings, a struct without verify_id is skipped, and \
-         a tree with nothing to measure reports so.",
+         fixtures are not bindings, a struct without verify_id is skipped, a \
+         whole-row digest is measured like an id (a silent field is refused, a \
+         declared exclusion passes, `row_digest -> Hash32` counts), a digest \
+         getter is not a derivation, and a tree with nothing to measure \
+         reports so.",
     ))
 }
 
