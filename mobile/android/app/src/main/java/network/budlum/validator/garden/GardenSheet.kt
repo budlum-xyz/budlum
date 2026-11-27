@@ -374,8 +374,15 @@ fun SpotlightBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(38.dp)
+                // On the dark skin the sheet draws this strip at #0E100C
+                // against a #060705 floor with no visible edge: it is felt
+                // rather than seen. A full-strength rule here boxed it in.
                 .background(skin.surface.copy(alpha = 0.92f), RoundedCornerShape(CONTROL_RADIUS))
-                .border(1.dp, skin.surfaceRule, RoundedCornerShape(CONTROL_RADIUS))
+                .border(
+                    1.dp,
+                    skin.surfaceRule.copy(alpha = if (skin.isDark) 0.45f else 1f),
+                    RoundedCornerShape(CONTROL_RADIUS),
+                )
                 .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),

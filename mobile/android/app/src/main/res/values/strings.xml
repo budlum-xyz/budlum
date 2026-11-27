@@ -222,4 +222,12 @@
     <string name="b_wallet">wallet</string>
     <string name="b_garden">garden</string>
     <string name="b_drag_hint">tap a block to open, hold to move</string>
+    <string name="g_keys_room">chat message room</string>
+    <string name="g_keys_people">people invite code qr</string>
+    <string name="g_keys_status">status validator bud3 parts</string>
+    <string name="g_keys_wallet">wallet address seed key</string>
+    <string name="g_keys_join">join code link</string>
+    <string name="g_keys_scan">qr camera scan</string>
+    <string name="g_keys_setup">setup permissions battery notifications</string>
+    <string name="g_keys_testnet">testnet faucet rpc balance</string>
 </resources>

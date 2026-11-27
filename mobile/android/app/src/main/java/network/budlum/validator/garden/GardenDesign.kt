@@ -133,8 +133,15 @@ enum class Skin(
     }
 }
 
-/** The design's tile, and so its unit of space. */
-val TILE = 60.dp
+/**
+ * The design's tile, and so its unit of space.
+ *
+ * The tile is 60 px in the file and was laid down here at 60 dp. A phone
+ * runs at three times density, so the 60 px cell is 20 dp and the sheet
+ * is 1080 px across to the phone's 360. At 60 dp the floor came out as a
+ * handful of enormous squares where the file draws a fine mesh.
+ */
+val TILE = 20.dp
 
 /** The cube tile, repeated across the viewport with smooth skin transitions. */
 @Composable

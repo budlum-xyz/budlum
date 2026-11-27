@@ -106,7 +106,7 @@ fun GardenApp(
         SpotlightEntry(
             title = stringResource(R.string.g_search_jump_room),
             detail = stringResource(R.string.g_room),
-            keywords = "chat message room thread",
+            keywords = stringResource(R.string.g_keys_room),
             onSelect = {
                 if (state.seated) {
                     tab = 0
@@ -122,7 +122,7 @@ fun GardenApp(
         SpotlightEntry(
             title = stringResource(R.string.g_search_jump_people),
             detail = stringResource(R.string.g_people),
-            keywords = "people invite code qr members",
+            keywords = stringResource(R.string.g_keys_people),
             onSelect = {
                 if (state.seated) {
                     tab = 1
@@ -135,7 +135,7 @@ fun GardenApp(
         SpotlightEntry(
             title = stringResource(R.string.g_search_jump_status),
             detail = stringResource(R.string.g_status),
-            keywords = "status validator bud3 parts node",
+            keywords = stringResource(R.string.g_keys_status),
             onSelect = {
                 if (state.seated) {
                     tab = 2
@@ -148,7 +148,7 @@ fun GardenApp(
         SpotlightEntry(
             title = stringResource(R.string.g_search_jump_wallet),
             detail = stringResource(R.string.w_wallet),
-            keywords = "wallet address seed key funds",
+            keywords = stringResource(R.string.g_keys_wallet),
             onSelect = {
                 walletReturnStep = if (step == Step.Setup) Step.Setup else Step.Choose
                 step = Step.Wallet
@@ -157,13 +157,13 @@ fun GardenApp(
         SpotlightEntry(
             title = stringResource(R.string.g_search_jump_join),
             detail = stringResource(R.string.g_code_label),
-            keywords = "join code link invite",
+            keywords = stringResource(R.string.g_keys_join),
             onSelect = { step = Step.Join },
         ),
         SpotlightEntry(
             title = stringResource(R.string.g_search_jump_scan),
             detail = "QR",
-            keywords = "qr camera scan invite",
+            keywords = stringResource(R.string.g_keys_scan),
             onSelect = {
                 step = Step.Join
                 model.scan()
@@ -172,13 +172,13 @@ fun GardenApp(
         SpotlightEntry(
             title = stringResource(R.string.g_search_jump_setup),
             detail = stringResource(R.string.g_self_test),
-            keywords = "setup permissions battery notifications check",
+            keywords = stringResource(R.string.g_keys_setup),
             onSelect = { step = Step.Setup },
         ),
         SpotlightEntry(
             title = stringResource(R.string.g_search_jump_testnet),
             detail = stringResource(R.string.g_testnet),
-            keywords = "testnet faucet rpc balance",
+            keywords = stringResource(R.string.g_keys_testnet),
             onSelect = onTestnet,
         ),
     )
