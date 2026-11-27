@@ -184,6 +184,17 @@ struct TvmScope<'a> {
     gas_limit: u64,
 }
 
+/// Maximum TVM evaluation stack depth per call.
+const MAX_TVM_STACK_ITEMS: usize = 1_000;
+
+fn push_tvm_stack(stack: &mut Vec<i128>, val: i128) -> Result<(), Vec<u8>> {
+    if stack.len() >= MAX_TVM_STACK_ITEMS {
+        return Err(b"TVM stack overflow".to_vec());
+    }
+    stack.push(val);
+    Ok(())
+}
+
 fn run_tvm_body(
     scope: &TvmScope<'_>,
     insns: &[TvmInsn],
@@ -201,12 +212,12 @@ fn run_tvm_body(
         }
         *gas_used = next;
         match insn {
-            TvmInsn::PushInt(v) => stack.push(*v),
+            TvmInsn::PushInt(v) => push_tvm_stack(&mut stack, *v)?,
             TvmInsn::PushMsgWord(idx) => {
                 let Some(v) = args.get(*idx) else {
                     return Err(b"TVM msg underflow".to_vec());
                 };
-                stack.push(*v);
+                push_tvm_stack(&mut stack, *v)?;
             }
             TvmInsn::Add => {
                 let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
@@ -250,7 +261,11 @@ fn run_tvm_body(
                 }
             }
             TvmInsn::ThrowUnlessOwner(code) => {
-                let owner = host.read(scope.ns, &owner_key(scope.addr32)).ok().flatten();
+                let owner = match host.read(scope.ns, &owner_key(scope.addr32)) {
+                    Ok(v) => v,
+                    Err(budlum_uel_abi::HostError::OutOfGas) => return Err(b"OUT_OF_GAS".to_vec()),
+                    Err(_) => return Err(b"TVM owner read failed".to_vec()),
+                };
                 if owner.as_deref() != Some(scope.caller) {
                     return Err(format!("TVM_EXIT_{code}").into_bytes());
                 }
@@ -272,7 +287,7 @@ fn run_tvm_body(
                     Err(budlum_uel_abi::HostError::OutOfGas) => return Err(b"OUT_OF_GAS".to_vec()),
                     Err(_) => return Err(b"TVM c4 read failed".to_vec()),
                 };
-                stack.push(raw);
+                push_tvm_stack(&mut stack, raw)?;
             }
             TvmInsn::StoreC4Word { key } => {
                 let Some(val) = stack.pop() else {
@@ -301,7 +316,7 @@ fn run_tvm_body(
                 if let Some(src) = d.get(..16) {
                     head.copy_from_slice(src);
                 }
-                stack.push(i128::from_le_bytes(head));
+                push_tvm_stack(&mut stack, i128::from_le_bytes(head))?;
             }
             TvmInsn::EmitExtOut { topic } => {
                 let top = stack.last().copied().unwrap_or(0);
