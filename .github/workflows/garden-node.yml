@@ -58,6 +58,18 @@ jobs:
           ls -la target/release/budlum-core
           ./target/release/budlum-core --help | head -40
 
+      # The Garden's own tests, run where a compiler exists. Nothing else
+      # in this repository's workflows runs them for this branch, so every
+      # claim the storage seam makes about B.U.D. 3.0 - that an object
+      # survives losing symbols, that what lands on disk is the recipe and
+      # not the content, that the counts survive a restart - was being
+      # asserted and never executed. A test that never runs is a comment.
+      - name: Run the Garden's tests
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          cargo test --locked --lib garden:: -- --nocapture
+
       - name: Check it answers for itself
         run: |
           BIN=target/release/budlum-core

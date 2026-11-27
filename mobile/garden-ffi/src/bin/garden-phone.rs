@@ -174,7 +174,18 @@ fn main() -> ExitCode {
                 }
             }
         }
-        "status" => say(phone.status().map_err(|e| e.to_string())),
+        // A phone that closed its process has stepped out of its Garden
+        // with its seat kept, so asking for status without returning first
+        // answered "Away" and nothing else - no objects, no B.U.D. 3.0
+        // counts, nothing the node actually holds. The Status screen in
+        // the app returns on the way up; this does the same. A phone that
+        // has no seat still gets the plain answer.
+        "status" => {
+            if phone.rejoin().is_err() {
+                eprintln!("no Garden to return to; reporting what there is");
+            }
+            say(phone.status().map_err(|e| e.to_string()))
+        }
         // The Data screen's three taps. A Garden is a group that sends
         // data over its own chain and reads it back verified, so the phone
         // has to be able to do all three from the command line the app's
