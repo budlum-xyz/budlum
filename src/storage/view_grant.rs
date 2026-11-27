@@ -436,6 +436,13 @@ pub enum ViewGrantError {
     UnknownContent,
     /// The signed authorisation is not the owner's word over this mutation.
     Authorization(GrantAuthError),
+    /// Zero issuer, zero grantee, or all-zero key handle.
+    InvalidParameters(&'static str),
+    /// Global or per-content view-grant capacity ceiling reached.
+    CapacityReached {
+        scope: &'static str,
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for ViewGrantError {
@@ -472,6 +479,10 @@ impl std::fmt::Display for ViewGrantError {
                     f,
                     "a live grant already exists for this content/grantee/key"
                 )
+            }
+            Self::InvalidParameters(reason) => write!(f, "invalid view grant parameter: {reason}"),
+            Self::CapacityReached { scope, max } => {
+                write!(f, "view grant {scope} capacity ceiling reached (max {max})")
             }
         }
     }
@@ -559,6 +570,24 @@ impl ViewGrantRegistry {
         policy: ViewPolicy,
         opened_epoch: u64,
     ) -> Result<u64, ViewGrantError> {
+        const MAX_VIEW_GRANTS: usize = 100_000;
+        const MAX_VIEW_GRANTS_PER_CONTENT: usize = 256;
+
+        if issuer == Address::zero() {
+            return Err(ViewGrantError::InvalidParameters(
+                "issuer address cannot be zero",
+            ));
+        }
+        if key_id == [0u8; 32] {
+            return Err(ViewGrantError::InvalidParameters(
+                "key_id cannot be all-zero",
+            ));
+        }
+        if grantee == Some(Address::zero()) {
+            return Err(ViewGrantError::InvalidParameters(
+                "grantee address cannot be zero",
+            ));
+        }
         match policy {
             ViewPolicy::NamedGrantee if grantee.is_none() => {
                 return Err(ViewGrantError::NamedPolicyNeedsGrantee);
@@ -571,8 +600,21 @@ impl ViewGrantRegistry {
             }
             _ => {}
         }
+        if self.grants.len() >= MAX_VIEW_GRANTS {
+            return Err(ViewGrantError::CapacityReached {
+                scope: "global",
+                max: MAX_VIEW_GRANTS,
+            });
+        }
+        if self.by_content.get(&content_id).map_or(0, Vec::len) >= MAX_VIEW_GRANTS_PER_CONTENT {
+            return Err(ViewGrantError::CapacityReached {
+                scope: "per-content",
+                max: MAX_VIEW_GRANTS_PER_CONTENT,
+            });
+        }
         let dup = self.grants.values().any(|g| {
             g.is_live()
+                && g.issuer == issuer
                 && g.content_id == content_id
                 && g.key_id == key_id
                 && g.grantee == grantee

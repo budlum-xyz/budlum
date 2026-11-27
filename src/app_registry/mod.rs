@@ -41,6 +41,8 @@ pub enum AppRegistryError {
     SealedBundleForbidden,
     InvalidContentRef(ContentRefError),
     FeeBelowMinimum,
+    InvalidDeveloper,
+    CapacityReached,
 }
 
 fn is_valid_canonical_app_name(canonical: &str) -> bool {
@@ -52,6 +54,14 @@ fn is_valid_canonical_app_name(canonical: &str) -> bool {
         || !bytes.last().is_some_and(u8::is_ascii_alphanumeric)
     {
         return false;
+    }
+    if canonical.contains("..") {
+        return false;
+    }
+    for segment in canonical.split(['.', ' ']) {
+        if segment.as_bytes().get(2..4) == Some(b"--") {
+            return false;
+        }
     }
     let mut prev_space = false;
     for &b in bytes {
@@ -107,6 +117,12 @@ impl AppRegistry {
         bundle: (ContentId, ObjectKey),
         fee_paid_atoms: u64,
     ) -> Result<RegisteredApp, AppRegistryError> {
+        const MAX_REGISTERED_APPS: usize = 65_536;
+        const MAX_APPS_PER_DEVELOPER: usize = 64;
+
+        if developer == Address::zero() {
+            return Err(AppRegistryError::InvalidDeveloper);
+        }
         if fee_paid_atoms < APP_REGISTRY_MIN_FEE {
             return Err(AppRegistryError::FeeBelowMinimum);
         }
@@ -116,6 +132,17 @@ impl AppRegistry {
         }
         if self.apps.contains_key(&canonical) {
             return Err(AppRegistryError::AlreadyRegistered);
+        }
+        if self.apps.len() >= MAX_REGISTERED_APPS {
+            return Err(AppRegistryError::CapacityReached);
+        }
+        let dev_count = self
+            .apps
+            .values()
+            .filter(|existing| existing.developer == developer)
+            .count();
+        if dev_count >= MAX_APPS_PER_DEVELOPER {
+            return Err(AppRegistryError::CapacityReached);
         }
         let (cid, obj_key) = bundle;
         if cid.kind != ContentIdKind::Public {
