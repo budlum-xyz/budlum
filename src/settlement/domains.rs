@@ -617,10 +617,38 @@ pub fn verify_commitment_finality(
     proof: &FinalityProof,
     bls: fn() -> Box<dyn BlsVerifier>,
 ) -> Result<(), String> {
+    verify_commitment_finality_on_chain(
+        state,
+        commitment,
+        proof,
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        bls,
+    )
+}
+
+/// [`verify_commitment_finality`] on a named chain.
+///
+/// The chain id matters for one shape: an `AggregatedProg` proof is scoped to
+/// the aggregation claim domain of *this* chain, so a caller that knows which
+/// chain it is validating on must say so. Callers that do not (the test
+/// harness, and code that only ever runs on the default chain) keep the
+/// four-argument form, which is this function with `DEFAULT_CHAIN_ID`.
+///
+/// # Errors
+///
+/// The adapter's refusal, a pending depth, or a metadata mismatch.
+pub fn verify_commitment_finality_on_chain(
+    state: &AccountState,
+    commitment: &DomainCommitment,
+    proof: &FinalityProof,
+    chain_id: u64,
+    bls: fn() -> Box<dyn BlsVerifier>,
+) -> Result<(), String> {
     verify_commitment_finality_observed(
         state,
         commitment,
         proof,
+        chain_id,
         bls,
         &mut crate::crypto::facts::NullObserver,
     )
@@ -636,6 +664,7 @@ pub fn verify_commitment_finality_observed(
     state: &AccountState,
     commitment: &DomainCommitment,
     proof: &FinalityProof,
+    chain_id: u64,
     bls: fn() -> Box<dyn BlsVerifier>,
     observer: &mut dyn crate::crypto::facts::CryptoObserver,
 ) -> Result<(), String> {
@@ -749,25 +778,53 @@ pub fn verify_commitment_finality_observed(
             )
         }
         ConsensusKind::Zk => {
-            // The claim-bound verifier: a ZK domain finalizes only against
-            // the root an accepted proof claim recorded.
-            let adapter = ZkFinalityAdapter;
-            ensure_adapter_name(domain, adapter.adapter_name())?;
-            let claim_key = ProofClaimKey {
-                domain_id: commitment.domain_id,
-                target_height: commitment.domain_height,
-            };
-            let accepted_root = state
-                .settlement
-                .proof_claims
-                .get(&claim_key)
-                .map(|c| c.final_state_root);
-            let verdict =
-                adapter.verify_finality_with_claim(domain, commitment, proof, accepted_root);
-            if let Ok(status) = &verdict {
-                adapter.observe_finalized(status, proof, observer);
+            // Two proof shapes reach a ZK domain, and they are decided by
+            // different machinery on purpose:
+            //
+            // - `AggregatedProg`: the domain's state transition was proven
+            //   inside a block `ClaimFrame` and collapsed to a `Claim::Prog`.
+            //   The chain already holds the answer and does not re-verify the
+            //   transition proof - that is the point of carrying a domain by
+            //   aggregation instead of by its own witness.
+            //   `ClaimedDomainFinalityAdapter` owns the predecessor-tip and
+            //   allowlist rules that make it safe.
+            // - `Zk`: the domain's own proof was accepted and recorded a
+            //   claim; finality is read from that claim's root.
+            //
+            // Before this branch existed, an `AggregatedProg` proof sent to a
+            // ZK domain had no route and could never finalize, even though the
+            // adapter that judges it was written and tested.
+            if matches!(proof, crate::domain::FinalityProof::AggregatedProg { .. }) {
+                let claim_domain =
+                    crate::aggregation::chain::claim_domain(chain_id).ok_or_else(|| {
+                        format!("chain id {chain_id} does not fit an aggregation claim domain")
+                    })?;
+                let adapter =
+                    crate::aggregation::domain_finality::ClaimedDomainFinalityAdapter::new(
+                        claim_domain,
+                    );
+                adapter
+                    .verify_finality(domain, commitment, proof)
+                    .map_err(|e| e.0)?
+            } else {
+                let adapter = ZkFinalityAdapter;
+                ensure_adapter_name(domain, adapter.adapter_name())?;
+                let claim_key = ProofClaimKey {
+                    domain_id: commitment.domain_id,
+                    target_height: commitment.domain_height,
+                };
+                let accepted_root = state
+                    .settlement
+                    .proof_claims
+                    .get(&claim_key)
+                    .map(|c| c.final_state_root);
+                let verdict =
+                    adapter.verify_finality_with_claim(domain, commitment, proof, accepted_root);
+                if let Ok(status) = &verdict {
+                    adapter.observe_finalized(status, proof, observer);
+                }
+                verdict?
             }
-            verdict
         }
         ConsensusKind::Custom(_) => {
             if domain.finality_adapter
@@ -1898,6 +1955,7 @@ pub fn execute_settlement_tx(
                 state,
                 &payload.commitment,
                 &payload.proof,
+                ctx.chain_id,
                 ctx.bls,
                 &mut observed,
             )

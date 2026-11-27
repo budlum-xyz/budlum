@@ -1984,10 +1984,11 @@ impl Blockchain {
         commitment: &DomainCommitment,
         proof: &FinalityProof,
     ) -> Result<(), String> {
-        crate::settlement::domains::verify_commitment_finality(
+        crate::settlement::domains::verify_commitment_finality_on_chain(
             &self.state,
             commitment,
             proof,
+            self.chain_id,
             crate::cross_domain::external::IntakeState::production_bls,
         )
     }
