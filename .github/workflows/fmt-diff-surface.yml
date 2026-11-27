@@ -20,7 +20,7 @@ on:
 # commits nobody reads any more, and five of them held a quarter of the runner pool.
 concurrency:
   group: diff-surface-${{ github.ref }}
-  cancel-in-progress: ${{ github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
+  cancel-in-progress: ${{ github.base_ref != 'testnet-50' }}
 
 permissions:
   contents: read

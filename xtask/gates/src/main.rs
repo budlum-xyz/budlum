@@ -76,6 +76,7 @@ mod gates {
     pub mod capability_modules_are_wired;
     pub mod cargo_vet;
     pub mod chain_id_is_not_hardcoded;
+    pub mod ci_concurrency_scope;
     pub mod ci_fanout_budget;
     pub mod ci_jobs_end_on_cancel;
     pub mod ci_trigger_coverage;
@@ -543,6 +544,14 @@ const GATES: &[Gate] = &[
         run: gates::ci_fanout_budget::run,
         run_args: Some(gates::ci_fanout_budget::run_args),
         self_test: gates::ci_fanout_budget::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "ci-concurrency-scope",
+        replaces: None,
+        run: gates::ci_concurrency_scope::run,
+        run_args: None,
+        self_test: gates::ci_concurrency_scope::self_test,
         run_log: None,
     },
     Gate {

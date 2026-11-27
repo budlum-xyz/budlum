@@ -30,7 +30,7 @@ permissions:
 
 concurrency:
   group: provenance-${{ github.ref }}
-  cancel-in-progress: ${{ github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
+  cancel-in-progress: ${{ github.base_ref != 'testnet-50' }}
 
 jobs:
   sbom-attestation:

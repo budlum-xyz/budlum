@@ -34,7 +34,7 @@ on:
 
 concurrency:
   group: testnet-rehearsal-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.base_ref != 'testnet-50' }}
 
 permissions:
   contents: read

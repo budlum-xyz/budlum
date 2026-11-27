@@ -42,7 +42,7 @@ permissions:
 
 concurrency:
   group: extra-tooling-${{ github.ref }}
-  cancel-in-progress: ${{ github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
+  cancel-in-progress: ${{ github.base_ref != 'testnet-50' }}
 
 jobs:
   # ── 1. cargo-auditable + cargo-audit ────────────────────────────────────────

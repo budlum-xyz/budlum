@@ -1,0 +1,13 @@
+# The branches a pull request is delivered into, one per line.
+#
+# These are the branches whose pull requests must keep a complete CI verdict:
+# a push to the head of such a pull request arrives faster than the suite runs,
+# so the run in progress is allowed to finish instead of being cancelled by the
+# next one. Every workflow's `concurrency.cancel-in-progress` expression must
+# name every branch listed here (ci-concurrency-scope gate).
+#
+# A retired branch is removed from this file in the same change that retires
+# it. Keeping a name that no longer heads a delivery pull request is how the
+# guards in 36 workflow files stopped firing on 2026-11-22 while still reading
+# like an exemption.
+testnet-50
