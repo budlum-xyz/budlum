@@ -110,12 +110,17 @@ impl Namespace {
     /// [`WireError::BadNamespace`] when the name is empty, too long, or holds a
     /// character outside the allowed set.
     pub fn new(name: &str) -> Result<Self, WireError> {
-        let ok = !name.is_empty()
+        let chars_ok = !name.is_empty()
             && name.len() <= MAX_NAMESPACE_BYTES
             && name
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-./".contains(&b));
-        if ok {
+        let segments_ok = chars_ok
+            && !name.contains("..")
+            && name
+                .split('/')
+                .all(|seg| !seg.is_empty() && !seg.starts_with('.') && !seg.ends_with('.'));
+        if segments_ok {
             Ok(Self(name.to_string()))
         } else {
             Err(WireError::BadNamespace)

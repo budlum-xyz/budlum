@@ -139,13 +139,44 @@ impl ValidatorSetSnapshot {
         hex::encode(hasher.finalize())
     }
 
-    /// Recomputes `set_hash` and `total_stake` from `validators` so an untrusted
-    /// wire snapshot cannot forge a lower quorum denominator.
+    /// Recomputes `set_hash` and `total_stake` from `validators` and enforces
+    /// structural validator-set invariants (non-empty set, non-zero unique
+    /// addresses, positive stakes, and unique non-empty PQ public keys) so an
+    /// untrusted wire snapshot cannot forge a lower quorum denominator or
+    /// amplify votes via duplicate entries or shared keys.
     ///
     /// # Errors
     ///
-    /// Returns a descriptive mismatch error if either field disagrees.
+    /// Returns a descriptive mismatch or structural error if any invariant fails.
     pub fn validate_metadata(&self) -> Result<(), String> {
+        if self.validators.is_empty() {
+            return Err("ValidatorSetSnapshot cannot be empty".into());
+        }
+        let mut seen_addresses = BTreeSet::new();
+        let mut seen_pq_keys = BTreeSet::new();
+        for v in &self.validators {
+            if v.address == Address::zero() {
+                return Err("ValidatorSetSnapshot contains a zero validator address".into());
+            }
+            if v.stake == 0 {
+                return Err(format!(
+                    "ValidatorSetSnapshot validator {} has zero stake",
+                    v.address
+                ));
+            }
+            if !seen_addresses.insert(v.address) {
+                return Err(format!(
+                    "ValidatorSetSnapshot contains duplicate validator address {}",
+                    v.address
+                ));
+            }
+            if !v.pq_public_key.is_empty() && !seen_pq_keys.insert(v.pq_public_key.as_slice()) {
+                return Err(format!(
+                    "ValidatorSetSnapshot contains duplicate PQ public key at validator {}",
+                    v.address
+                ));
+            }
+        }
         let computed_hash = Self::compute_hash(&self.validators);
         if self.set_hash != computed_hash {
             return Err(format!(

@@ -162,18 +162,22 @@ pub fn set_digest(chain_id: u64, epoch: u64, members: &[HandoffMember]) -> [u8; 
 }
 
 /// Whether a validator set satisfies the structural handoff rules: non-empty,
-/// positive stake, non-empty address and PQ key, and no duplicate addresses.
+/// positive stake, non-empty non-zero address, non-empty unique PQ key, and
+/// no duplicate addresses.
 #[must_use]
 pub fn member_set_is_valid(members: &[HandoffMember]) -> bool {
     if members.is_empty() {
         return false;
     }
-    let mut seen = BTreeSet::new();
+    let mut seen_addr = BTreeSet::new();
+    let mut seen_pq = BTreeSet::new();
     for member in members {
         if member.address.is_empty()
+            || member.address.iter().all(|&b| b == 0)
             || member.pq_public_key.is_empty()
             || member.stake == 0
-            || !seen.insert(member.address.as_slice())
+            || !seen_addr.insert(member.address.as_slice())
+            || !seen_pq.insert(member.pq_public_key.as_slice())
         {
             return false;
         }
