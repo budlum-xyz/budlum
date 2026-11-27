@@ -37,6 +37,12 @@
 //! WIRING: implements `ExternalFinalityAdapter` for `ExternalDomainRegistry`
 //! admission/submission/slashing; `AdapterSpec` tag append joins `intake.rs`
 //! after concurrent intake hardening merges.
+//!
+//! INTAKE: economic-guard-only - based preconfirmations are verified here and priced by
+//! `cross_domain/economic_guard.rs`; `intake.rs` does not name this adapter. A
+//! preconfirmation is a promise rather than a finality, so recording it in a global
+//! header is a design question and not only a registration one; the class is written
+//! down so the question is visible.
 
 use crate::crypto::facts::{CryptoObserver, ObservedScheme};
 use crate::crypto::scheme::SchemeId;

@@ -98,6 +98,7 @@ mod gates {
     pub mod domain_tags;
     pub mod economy_invariants;
     pub mod ee_workers_build_with_unwind;
+    pub mod every_adapter_has_an_intake_class;
     pub mod every_fuzz_target_is_run;
     pub mod every_opcode_forgery;
     pub mod evidence_provenance;
@@ -641,6 +642,14 @@ const GATES: &[Gate] = &[
         run: gates::ci_full_battery_parity::run,
         run_args: None,
         self_test: gates::ci_full_battery_parity::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "every-adapter-has-an-intake-class",
+        replaces: None,
+        run: gates::every_adapter_has_an_intake_class::run,
+        run_args: None,
+        self_test: gates::every_adapter_has_an_intake_class::self_test,
         run_log: None,
     },
     Gate {

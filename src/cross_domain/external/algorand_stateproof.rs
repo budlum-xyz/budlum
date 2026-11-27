@@ -44,6 +44,11 @@
 
 //!
 //! WIRING: implements `ExternalFinalityAdapter` for `ExternalDomainRegistry`; `AdapterSpec` joins `intake.rs` in the follow-up merge.
+//!
+//! INTAKE: economic-guard-only - Algorand compact state proofs are verified here and priced by
+//! `cross_domain/economic_guard.rs`; `intake.rs` does not name this adapter, so an
+//! Algorand state proof cannot yet be folded into a global header. The missing piece is
+//! one `AdapterSpec` registration, not a second verifier.
 
 use crate::crypto::facts::{CryptoObserver, ObservedScheme};
 use crate::crypto::scheme::SchemeId;

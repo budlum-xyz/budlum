@@ -40,6 +40,11 @@
 //! WIRING: implements [`ExternalFinalityAdapter`] and is invoked in production
 //! by [`crate::cross_domain::economic_guard`] for external attestation ceiling
 //! derivation and contradiction-driven bond slashing.
+//!
+//! INTAKE: economic-guard-only - restaking AVS quorums and their dual slashing are verified here and priced
+//! by `cross_domain/economic_guard.rs`; `intake.rs` does not name this adapter, so AVS
+//! finality cannot yet be folded into a global header. The missing piece is one
+//! `AdapterSpec` registration.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::crypto::facts::{CryptoObserver, ObservedScheme};

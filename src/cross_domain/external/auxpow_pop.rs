@@ -38,6 +38,11 @@
 //! WIRING: implements [`ExternalFinalityAdapter`] and is invoked in production
 //! by [`crate::cross_domain::economic_guard`] for `AuxPoW`/`PoP` ceiling checks and
 //! double-anchor contradiction slashing.
+//!
+//! INTAKE: economic-guard-only - merged-mining AuxPoW and proof-of-proof evidence is verified here and priced
+//! by `cross_domain/economic_guard.rs`; `intake.rs` does not name this adapter, so this
+//! family's finality cannot yet be folded into a global header. The missing piece is one
+//! `AdapterSpec` registration.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::cross_domain::external::bitcoin_spv::sha256d;

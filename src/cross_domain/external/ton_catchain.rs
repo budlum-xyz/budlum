@@ -38,6 +38,11 @@
 //! WIRING: implements `ExternalFinalityAdapter` for `ExternalDomainRegistry`
 //! (pairing with `execution/tvm`); `AdapterSpec` tag append joins `intake.rs`
 //! after concurrent intake hardening merges.
+//!
+//! INTAKE: economic-guard-only - TON Catchain key blocks and shard merges are verified here and priced by
+//! `cross_domain/economic_guard.rs`; `intake.rs` does not name this adapter, so Catchain
+//! finality cannot yet be folded into a global header. The missing piece is one
+//! `AdapterSpec` registration.
 
 use crate::crypto::facts::{CryptoObserver, ObservedScheme};
 use crate::crypto::scheme::SchemeId;

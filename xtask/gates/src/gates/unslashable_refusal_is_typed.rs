@@ -80,9 +80,13 @@ pub struct Guard {
     pub refuses: bool,
 }
 
-/// Where `#[cfg(test)]` starts in this source, if it does.
-fn test_module_start(src: &str) -> usize {
-    src.find("#[cfg(test)]").unwrap_or(src.len())
+/// Production code: every `#[cfg(test)]` item removed, braces balanced.
+///
+/// Truncating at the first `#[cfg(test)]` was measured to be wrong on this
+/// tree: several adapter sources carry a test-only item partway down, and a
+/// reader that stops there never sees the guards below it.
+fn production(src: &str) -> String {
+    super::capability_modules_are_wired::strip_test_mods(src)
 }
 
 /// The balanced `{ ... }` block that starts at the `{` in `src[open..]`.
@@ -109,7 +113,7 @@ fn balanced_block(src: &str, open: usize) -> &str {
 /// Read the production guards of one adapter source.
 #[must_use]
 pub fn guards(file: &str, src: &str) -> Vec<Guard> {
-    let prod = &src[..test_module_start(src)];
+    let prod = &production(src);
     let mut out: Vec<Guard> = Vec::new();
     let mut from = 0usize;
     while let Some(rel) = prod[from..].find(GUARD) {

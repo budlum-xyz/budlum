@@ -108,9 +108,13 @@ pub struct Site {
     pub declared: bool,
 }
 
-/// Everything before the first `#[cfg(test)]`.
-fn production(src: &str) -> &str {
-    src.find("#[cfg(test)]").map_or(src, |i| &src[..i])
+/// Production code: every `#[cfg(test)]` item removed, braces balanced.
+///
+/// Truncating at the first `#[cfg(test)]` was measured to be wrong on this
+/// tree: several sources carry a test-only item partway down, and a reader
+/// that stops there never sees the code below it.
+fn production(src: &str) -> String {
+    super::capability_modules_are_wired::strip_test_mods(src)
 }
 
 /// Does this text carry the declaration as a real line comment?
@@ -186,7 +190,7 @@ fn arm_literal(arm: &str) -> Option<bool> {
 /// are why it compares the two arms instead of trusting proximity.
 #[must_use]
 pub fn sites(file: &str, src: &str) -> Vec<Site> {
-    let prod = production(src);
+    let prod = &production(src);
     let mut out: Vec<Site> = Vec::new();
     let mut from = 0usize;
     while let Some(rel) = prod[from..].find("if ") {
@@ -274,7 +278,7 @@ pub fn findings(sources: &[(String, String)]) -> Vec<Finding> {
         }
         // A declaration with no site is a list that stopped describing the tree.
         let prod = production(src);
-        let notes = declaration_lines(prod);
+        let notes = declaration_lines(&prod);
         let here = sites(file, src).iter().filter(|s| s.declared).count();
         if notes > here {
             out.push(Finding {
