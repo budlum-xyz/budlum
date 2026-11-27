@@ -201,7 +201,7 @@ impl GardenContentStore {
                 self.max_object_bytes
             ));
         }
-        let content_id = ContentId::of(bytes).digest;
+        let content_id = ContentId::of(bytes).0;
         // Code the object with B.U.D. 3.0 before a single byte is written.
         // The Garden keeps the plain bytes as its cache, but the object it
         // claims to hold is the coded one: if BOF-1 cannot represent it,
@@ -379,7 +379,7 @@ impl GardenContentStore {
                 self.max_object_bytes
             ));
         }
-        if ContentId::of(bytes).digest != *expected {
+        if ContentId::of(bytes).0 != *expected {
             return Err("received bytes do not hash to the requested content id".into());
         }
         self.put(bytes).map(|_| ())
@@ -481,7 +481,7 @@ impl GardenContentStore {
         let symbols: Vec<Symbol> = coded.segments.iter().flatten().cloned().collect();
         let used = count_of(symbols.len());
         let bytes = view_public(&coded.record, symbols).ok()?;
-        if ContentId::of(&bytes).digest != *content_id {
+        if ContentId::of(&bytes).0 != *content_id {
             return None;
         }
         self.parts.objects_viewed = self.parts.objects_viewed.saturating_add(1);
@@ -507,7 +507,7 @@ impl GardenContentStore {
             Some(path) => fs::read(path).ok()?,
             None => self.memory.get(content_id)?.clone(),
         };
-        (ContentId::of(&bytes).digest == *content_id).then_some(bytes)
+        (ContentId::of(&bytes).0 == *content_id).then_some(bytes)
     }
 
     pub fn contains(&self, content_id: &Hash32) -> bool {
@@ -633,7 +633,7 @@ mod tests {
         let root = dir.path().join("garden");
         let mut store = GardenContentStore::open(Some(&root), 1024).unwrap();
         let id = store.put(b"hello garden").unwrap();
-        assert_eq!(id, ContentId::of(b"hello garden").digest);
+        assert_eq!(id, ContentId::of(b"hello garden").0);
         assert_eq!(store.get(&id).unwrap(), b"hello garden");
         assert!(store.contains(&id));
         assert_eq!(store.stored_len(&id), Some(12));
@@ -645,7 +645,7 @@ mod tests {
     #[test]
     fn garden_store_refuses_bytes_that_do_not_match_the_content_id() {
         let mut store = GardenContentStore::open(None, 1024).unwrap();
-        let id = ContentId::of(b"real").digest;
+        let id = ContentId::of(b"real").0;
         assert!(store.put_verified(&id, b"fake").is_err());
         assert!(!store.contains(&id));
         store.put_verified(&id, b"real").unwrap();
@@ -695,7 +695,7 @@ mod tests {
     fn garden_store_put_verified_checks_size_before_hashing() {
         let mut store = GardenContentStore::open(None, 8).unwrap();
         let oversized = vec![7u8; 16];
-        let id = ContentId::of(&oversized).digest;
+        let id = ContentId::of(&oversized).0;
         let err = store.put_verified(&id, &oversized).unwrap_err();
         assert!(err.contains("outside 1..=8"), "{err}");
         assert!(!store.contains(&id));
@@ -719,7 +719,7 @@ mod tests {
         assert_eq!(store.total_bytes(), floor);
         // Atomic `write_object_file_blocking` claims `Ok(true)` once and `Ok(false)` on duplicate,
         // and stale `<64hex>.tmp.*` files are purged on reopen without inflating quota.
-        let dup_id = ContentId::of(&[9u8; 12]).digest;
+        let dup_id = ContentId::of(&[9u8; 12]).0;
         let dup_path = root.join(hex::encode(dup_id));
         assert!(
             GardenContentStore::write_object_file_blocking(dup_path.clone(), vec![9u8; 12])
