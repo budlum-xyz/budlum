@@ -103,8 +103,8 @@ pub enum CertifiedOutputError {
 ///
 /// Build one with [`CertifiedExecutionOutput::new`], which refuses an
 /// inconsistent pair before the object exists. An object that arrived over the
-/// wire never went through that constructor, so [`Self::verify`] repeats every
-/// check and is the only thing that may be believed.
+/// wire never went through that constructor, so [`Self::verify_structure`]
+/// repeats every check and is the only thing that may be believed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CertifiedExecutionOutput {
     /// What ran, as the network recorded it.
@@ -208,7 +208,7 @@ impl CertifiedExecutionOutput {
     /// # Errors
     ///
     /// [`CertifiedOutputError::WrongProgram`] when the proof is about a
-    /// different program, plus everything [`Self::verify`] refuses.
+    /// different program, plus everything [`Self::verify_structure`] refuses.
     /// Convenience: exposed for external conformance verifiers and BudZero
     /// worker hosts; the in-block path reaches [`Self::verify_structure`] and
     /// the adapter's own check.
