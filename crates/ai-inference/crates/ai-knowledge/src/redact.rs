@@ -42,6 +42,9 @@ const BENIGN_KEYS: &[&str] = &["author", "authors", "max_tokens", "tokenizer", "
 
 /// Does a key name carry one of the secret keywords?
 fn is_secret_key(key: &str) -> bool {
+    if key.contains("<SECRET") {
+        return false;
+    }
     let key_norm = key.to_lowercase().replace('-', "_");
     let bare =
         key_norm.trim_matches(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '\\');
@@ -269,7 +272,7 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
         let head = &line[start..pos];
         // The key is the identifier immediately before the separator.
         let key_seg = head
-            .rfind([',', ';', '{', '['])
+            .rfind([',', ';', '{', '[', '?', '&'])
             .map_or(head, |i| &head[i + 1..])
             .trim();
         let key = if key_seg.ends_with('"') || key_seg.ends_with('\'') {
@@ -307,12 +310,35 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
             continue;
         }
 
+        // HTTP authorization scheme prefix (`Authorization: Bearer <token>`,
+        // `Basic <cred>`, `Token <tok>`, `ApiKey <key>`): preserve the scheme
+        // keyword and mask the credential token that follows it.
+        if quote.is_none() {
+            if let Some((scheme_part, rest_tok)) = split_http_auth_scheme(body) {
+                let tok_end = rest_tok
+                    .char_indices()
+                    .find(|(_, c)| matches!(c, ',' | ';' | ')' | '}' | ']' | '&' | ' ' | '\t'))
+                    .map_or(rest_tok.len(), |(i, _)| i);
+                let cred = &rest_tok[..tok_end];
+                out.push_str(lead_ws);
+                out.push_str(scheme_part);
+                if cred.is_empty() || cred.starts_with(REDACTION_TOKEN) {
+                    out.push_str(cred);
+                } else {
+                    report.add("key_value");
+                    out.push_str(REDACTION_TOKEN);
+                }
+                start += lead_ws.len() + scheme_part.len() + tok_end;
+                continue;
+            }
+        }
+
         // Otherwise the value runs until the next unquoted field delimiter
-        // (comma, semicolon, closing bracket, or whitespace), and scanning
-        // continues across the rest of the line.
+        // (comma, semicolon, closing bracket, query `&`, or whitespace), and
+        // scanning continues across the rest of the line.
         let value_end = body
             .char_indices()
-            .find(|(_, c)| matches!(c, ',' | ';' | ')' | '}' | ']' | ' ' | '\t'))
+            .find(|(_, c)| matches!(c, ',' | ';' | ')' | '}' | ']' | '&' | ' ' | '\t'))
             .map_or(body.len(), |(i, _)| i);
         let value = &body[..value_end];
         out.push_str(lead_ws);
@@ -327,6 +353,61 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
         start += lead_ws.len() + q.len() + value_end;
     }
     out.push_str(&line[start..]);
+    out
+}
+
+/// Split an HTTP auth scheme prefix (`Bearer `, `Basic `, `Token `, `Digest `, `ApiKey `)
+/// from its credential value when followed by a non-whitespace token.
+fn split_http_auth_scheme(body: &str) -> Option<(&str, &str)> {
+    for scheme in ["bearer", "basic", "token", "digest", "apikey"] {
+        if body.len() > scheme.len()
+            && body
+                .get(..scheme.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(scheme))
+        {
+            let after = &body[scheme.len()..];
+            let trimmed = after.trim_start_matches([' ', '\t']);
+            let ws_len = after.len() - trimmed.len();
+            if ws_len > 0 && !trimmed.is_empty() {
+                let prefix_len = scheme.len() + ws_len;
+                return Some((&body[..prefix_len], trimmed));
+            }
+        }
+    }
+    None
+}
+
+/// Mask `scheme://user:password@host` URI credentials while preserving user and host.
+fn redact_uri_userinfo(line: &str, report: &mut RedactionReport) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut cursor = 0usize;
+    while let Some(rel) = line[cursor..].find("://") {
+        let auth_start = cursor + rel + 3;
+        let rest = &line[auth_start..];
+        let auth_len = rest
+            .find(['/', '?', '#', ' ', '\t', '"', '\''])
+            .unwrap_or(rest.len());
+        let authority = &rest[..auth_len];
+        if let Some(at_pos) = authority.rfind('@') {
+            let userinfo = &authority[..at_pos];
+            if let Some(colon_pos) = userinfo.find(':') {
+                let pass = &userinfo[colon_pos + 1..];
+                out.push_str(&line[cursor..auth_start + colon_pos + 1]);
+                if pass.is_empty() || pass == REDACTION_TOKEN {
+                    out.push_str(pass);
+                } else {
+                    report.add("uri_userinfo");
+                    out.push_str(REDACTION_TOKEN);
+                }
+                out.push_str(&authority[at_pos..]);
+                cursor = auth_start + auth_len;
+                continue;
+            }
+        }
+        out.push_str(&line[cursor..auth_start + auth_len]);
+        cursor = auth_start + auth_len;
+    }
+    out.push_str(&line[cursor..]);
     out
 }
 
@@ -464,7 +545,8 @@ pub fn redact_text(text: &str) -> RedactionResult {
         // A line that does not nest under the block ends it; the next state
         // comes from this line alone.
         block = block_scalar_indent(line);
-        let l = redact_key_value(line, &mut report);
+        let u = redact_uri_userinfo(line, &mut report);
+        let l = redact_key_value(&u, &mut report);
         lines.push(redact_known_values(&l, &mut report));
     }
     RedactionResult {
@@ -897,5 +979,33 @@ mod tests {
         let r3 = redact_text("export TOKEN=delta_secret SECRET=echo_secret");
         assert!(!r3.text().contains("delta_secret"), "{}", r3.text());
         assert!(!r3.text().contains("echo_secret"), "{}", r3.text());
+    }
+
+    #[test]
+    fn authorization_bearer_headers_url_query_params_and_uri_userinfo_are_masked() {
+        let r_hdr = redact_text("Authorization: Bearer opaque_secret_token_999999");
+        assert!(
+            !r_hdr.text().contains("opaque_secret_token_999999"),
+            "Bearer token leaked in HTTP header: {}",
+            r_hdr.text()
+        );
+        let r_basic = redact_text("Authorization: Basic dXNlcjpzdXBlcnNlY3JldA==");
+        assert!(
+            !r_basic.text().contains("dXNlcjpzdXBlcnNlY3JldA=="),
+            "Basic credential leaked in HTTP header: {}",
+            r_basic.text()
+        );
+        let r_q = redact_text("GET https://api.example.com/v1?api_key=query_secret_77&page=2");
+        assert!(
+            !r_q.text().contains("query_secret_77") && r_q.text().contains("page=2"),
+            "URL query api_key leaked or ate sibling param: {}",
+            r_q.text()
+        );
+        let r_uri = redact_text("postgres://admin:UriPassSecret42@db.internal:5432/prod");
+        assert!(
+            !r_uri.text().contains("UriPassSecret42") && r_uri.text().contains("@db.internal"),
+            "URI userinfo password leaked: {}",
+            r_uri.text()
+        );
     }
 }
