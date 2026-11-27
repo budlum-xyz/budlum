@@ -43,6 +43,10 @@ pub const TILE_DIM: usize = 64;
 pub const TILE_CELLS: usize = TILE_DIM * TILE_DIM;
 /// Hard ceiling on interactive bisection rounds (`2^32` steps).
 pub const MAX_BISECTION_ROUNDS: u32 = 32;
+/// Maximum legal fixed-point right shift in a [`DeterministicInferenceProfile`].
+pub const MAX_FIXED_SCALE_SHIFT: u8 = 30;
+/// Hard ceiling on pending un-discharged [`InferenceAssumption`] entries.
+pub const MAX_PENDING_INFERENCE_ASSUMPTIONS: usize = 4_096;
 
 /// Domain tag for `ModelRecordV2` weights root.
 pub const MODEL_WEIGHTS_ROOT_TAG: &[u8] = b"BDLM_AI_MODEL_WEIGHTS_ROOT_V2";
@@ -119,6 +123,33 @@ impl DeterministicInferenceProfile {
         h.update(self.runtime_digest);
         h.finalize().into()
     }
+
+    /// Validate that all deterministic numerical and runtime-binding fields
+    /// are well-formed and non-zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VerificationLayerError::InvalidModelOrInput`] when
+    /// `quantization_bits`, `fixed_scale_shift`, `tokenizer_digest`, or
+    /// `runtime_digest` is out of canonical bounds.
+    pub fn validate(&self) -> Result<(), VerificationLayerError> {
+        if self.quantization_bits == 0 || self.quantization_bits > 31 {
+            return Err(VerificationLayerError::InvalidModelOrInput(
+                "quantization_bits must be in 1..=31".to_owned(),
+            ));
+        }
+        if self.fixed_scale_shift > MAX_FIXED_SCALE_SHIFT {
+            return Err(VerificationLayerError::InvalidModelOrInput(
+                "fixed_scale_shift must be <= 30".to_owned(),
+            ));
+        }
+        if self.tokenizer_digest == [0u8; 32] || self.runtime_digest == [0u8; 32] {
+            return Err(VerificationLayerError::InvalidModelOrInput(
+                "DIP tokenizer_digest and runtime_digest must be non-zero".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Model registration V2 binding `weights_root`, `dip_digest`, and guest
@@ -142,14 +173,15 @@ impl ModelRecordV2 {
     ///
     /// # Errors
     ///
-    /// Returns [`VerificationLayerError::InvalidModelOrInput`] if `spec` fails
-    /// validation.
+    /// Returns [`VerificationLayerError::InvalidModelOrInput`] if `spec` or `dip`
+    /// fails validation.
     /// Convenience: exposed for AI model specification loader.
     pub fn from_mlp_spec(
         model_id: AiModelId,
         spec: &FixedPointMlpSpec,
         dip: &DeterministicInferenceProfile,
     ) -> Result<Self, VerificationLayerError> {
+        dip.validate()?;
         let program_hash =
             matmul_program_hash(spec).map_err(VerificationLayerError::InvalidModelOrInput)?;
         Ok(Self {
@@ -236,11 +268,7 @@ pub fn eval_dip_inference(
     spec: &FixedPointMlpSpec,
     prompt_tokens: &[i32],
 ) -> Result<(Vec<i32>, [u8; 32]), VerificationLayerError> {
-    if dip.quantization_bits == 0 || dip.quantization_bits > 31 {
-        return Err(VerificationLayerError::InvalidModelOrInput(
-            "quantization_bits must be in 1..=31".to_owned(),
-        ));
-    }
+    dip.validate()?;
     spec.validate()
         .map_err(VerificationLayerError::InvalidModelOrInput)?;
     let in_dim = usize::from(spec.dims.first().copied().unwrap_or(0));
@@ -281,7 +309,7 @@ pub fn eval_dip_inference(
                 let x = i64::from(current.get(i).copied().unwrap_or(0));
                 acc = acc.saturating_add(w.saturating_mul(x));
             }
-            let shifted = acc >> u32::from(dip.fixed_scale_shift.min(30));
+            let shifted = acc >> u32::from(dip.fixed_scale_shift);
             let mut q = quantize(shifted);
             if layer_idx + 1 < num_layers && q < 0 {
                 q = 0;
@@ -355,6 +383,11 @@ pub fn draw_committee_for_request(
             "committee_size must be >= 1".to_owned(),
         ));
     }
+    if *epoch_randomness == [0u8; 32] {
+        return Err(VerificationLayerError::InvalidModelOrInput(
+            "epoch_randomness must be non-zero".to_owned(),
+        ));
+    }
     if randomness_epoch <= request_epoch {
         return Err(VerificationLayerError::FutureEpochRandomnessRequired {
             request_epoch,
@@ -363,6 +396,11 @@ pub fn draw_committee_for_request(
     }
     let mut canonical: BTreeMap<Address, u64> = BTreeMap::new();
     for &(addr, stake) in staked_candidates {
+        if addr == Address::zero() {
+            return Err(VerificationLayerError::InvalidModelOrInput(
+                "committee candidate address must be non-zero".to_owned(),
+            ));
+        }
         if let Some(&prev) = canonical.get(&addr) {
             if prev != stake {
                 return Err(VerificationLayerError::InvalidModelOrInput(
@@ -454,6 +492,8 @@ pub struct CommitRevealSession {
     pub request_id: AiRequestId,
     pub committee: BTreeSet<Address>,
     pub quorum_threshold: usize,
+    start_block: u64,
+    config_valid: bool,
     pub commit_deadline_block: u64,
     pub reveal_deadline_block: u64,
     pub challenge_deadline_block: u64,
@@ -476,14 +516,27 @@ impl CommitRevealSession {
         reveal_blocks: u64,
         challenge_window_blocks: u64,
     ) -> Self {
-        let commit_deadline_block = start_block.saturating_add(commit_blocks);
-        let reveal_deadline_block = commit_deadline_block.saturating_add(reveal_blocks);
-        let challenge_deadline_block =
-            reveal_deadline_block.saturating_add(challenge_window_blocks);
+        let committee_set: BTreeSet<Address> = committee.into_iter().collect();
+        let commit_opt = start_block.checked_add(commit_blocks);
+        let reveal_opt = commit_opt.and_then(|c| c.checked_add(reveal_blocks));
+        let challenge_opt = reveal_opt.and_then(|r| r.checked_add(challenge_window_blocks));
+        let config_valid = !committee_set.is_empty()
+            && !committee_set.contains(&Address::zero())
+            && quorum_threshold >= 1
+            && quorum_threshold <= committee_set.len()
+            && commit_blocks >= 1
+            && reveal_blocks >= 1
+            && challenge_window_blocks >= 1
+            && challenge_opt.is_some();
+        let commit_deadline_block = commit_opt.unwrap_or(u64::MAX);
+        let reveal_deadline_block = reveal_opt.unwrap_or(u64::MAX);
+        let challenge_deadline_block = challenge_opt.unwrap_or(u64::MAX);
         Self {
             request_id,
-            committee: committee.into_iter().collect(),
-            quorum_threshold: quorum_threshold.max(1),
+            committee: committee_set,
+            quorum_threshold,
+            start_block,
+            config_valid,
             commit_deadline_block,
             reveal_deadline_block,
             challenge_deadline_block,
@@ -493,6 +546,17 @@ impl CommitRevealSession {
             level: LevelRecord::new(),
             agreed_digest: None,
         }
+    }
+
+    fn has_valid_schedule(&self) -> bool {
+        self.config_valid
+            && !self.committee.is_empty()
+            && !self.committee.contains(&Address::zero())
+            && self.quorum_threshold >= 1
+            && self.quorum_threshold <= self.committee.len()
+            && self.start_block < self.commit_deadline_block
+            && self.commit_deadline_block < self.reveal_deadline_block
+            && self.reveal_deadline_block < self.challenge_deadline_block
     }
 
     fn is_slashed(&self, member: &Address) -> bool {
@@ -518,8 +582,9 @@ impl CommitRevealSession {
     ///
     /// # Errors
     ///
-    /// Refuses non-committee members, late commits, slashed members, or commit
-    /// replacement attempts.
+    /// Refuses malformed schedules, non-committee members, pre-start or late
+    /// commits, zero commitments, slashed members, or commit replacement
+    /// attempts.
     /// Convenience: exposed for AI verifier commit submission door.
     pub fn submit_commit(
         &mut self,
@@ -527,10 +592,15 @@ impl CommitRevealSession {
         commitment: [u8; 32],
         block_height: u64,
     ) -> Result<(), VerificationLayerError> {
+        if !self.has_valid_schedule() {
+            return Err(VerificationLayerError::PhaseClosed);
+        }
         if !self.committee.contains(&member) {
             return Err(VerificationLayerError::NotCommitteeMember(member));
         }
-        if block_height > self.commit_deadline_block
+        if block_height < self.start_block
+            || block_height > self.commit_deadline_block
+            || commitment == [0u8; 32]
             || self.is_slashed(&member)
             || self.commits.contains_key(&member)
         {
@@ -554,7 +624,8 @@ impl CommitRevealSession {
     ///
     /// Slashes and returns [`VerificationLayerError::RevealHashMismatch`] if the
     /// member tries to reveal a copied digest that does not match its own bound
-    /// commitment; refuses slashed members and duplicate reveals.
+    /// commitment; refuses malformed schedules, slashed members, and duplicate
+    /// reveals.
     /// Convenience: exposed for AI verifier reveal submission door.
     pub fn submit_reveal(
         &mut self,
@@ -563,6 +634,9 @@ impl CommitRevealSession {
         salt: [u8; 32],
         block_height: u64,
     ) -> Result<(), VerificationLayerError> {
+        if !self.has_valid_schedule() {
+            return Err(VerificationLayerError::PhaseClosed);
+        }
         if !self.committee.contains(&member) {
             return Err(VerificationLayerError::NotCommitteeMember(member));
         }
@@ -592,14 +666,17 @@ impl CommitRevealSession {
     ///
     /// # Errors
     ///
-    /// Refuses calls before `reveal_deadline_block` has passed or after phase
-    /// settlement.
+    /// Refuses malformed schedules, calls before `reveal_deadline_block` has
+    /// passed, or calls after phase settlement.
     /// Convenience: exposed for AI commit-reveal phase finalizer.
     pub fn finalize_reveal_phase(
         &mut self,
         block_height: u64,
     ) -> Result<Option<[u8; 32]>, VerificationLayerError> {
-        if block_height <= self.reveal_deadline_block || self.level.is_refuted() {
+        if !self.has_valid_schedule()
+            || block_height <= self.reveal_deadline_block
+            || self.level.is_refuted()
+        {
             return Err(VerificationLayerError::PhaseClosed);
         }
         if self.agreed_digest.is_some() {
@@ -658,11 +735,12 @@ impl CommitRevealSession {
     ///
     /// # Errors
     ///
-    /// Refuses calls outside the open challenge window or when no `VL-1` digest
-    /// is pending challenge.
+    /// Refuses malformed schedules, calls outside the open challenge window, or
+    /// calls when no `VL-1` digest is pending challenge.
     /// Convenience: exposed for AI dispute-refutation settlement driver.
     pub fn uphold_challenge(&mut self, block_height: u64) -> Result<(), VerificationLayerError> {
-        if block_height <= self.reveal_deadline_block
+        if !self.has_valid_schedule()
+            || block_height <= self.reveal_deadline_block
             || block_height > self.challenge_deadline_block
         {
             return Err(VerificationLayerError::PhaseClosed);
@@ -687,7 +765,8 @@ impl CommitRevealSession {
     ///
     /// # Errors
     ///
-    /// Refuses promotion before the challenge window closes or when refuted.
+    /// Refuses malformed schedules, promotion before the challenge window
+    /// closes, or calls when refuted.
     /// Convenience: exposed for AI challenge window settlement driver.
     pub fn close_challenge_window(
         &mut self,
@@ -698,7 +777,10 @@ impl CommitRevealSession {
                 .raise(VerificationLevel::ChallengeWindowClosed)
                 .map_err(VerificationLayerError::LevelTransition)?;
         }
-        if block_height <= self.challenge_deadline_block || self.agreed_digest.is_none() {
+        if !self.has_valid_schedule()
+            || block_height <= self.challenge_deadline_block
+            || self.agreed_digest.is_none()
+        {
             return Err(VerificationLayerError::PhaseClosed);
         }
         self.level
@@ -720,7 +802,7 @@ pub fn should_sample_for_second_committee(
     if sampling_rate_bps == 0 {
         return false;
     }
-    if sampling_rate_bps >= 10_000 {
+    if *epoch_randomness == [0u8; 32] || sampling_rate_bps >= 10_000 {
         return true;
     }
     let roll = sample_uniform_u128(10_000, |attempt| {
@@ -772,13 +854,14 @@ impl DisputeBisectionGame {
     /// `left_step -> right_step` (`right_step == left_step + 1`).
     #[must_use]
     pub const fn is_converged(&self) -> bool {
-        self.right_step.saturating_sub(self.left_step) <= 1
+        self.left_step < self.right_step && self.right_step - self.left_step == 1
     }
 
     /// Midpoint queried in the next bisection round.
     #[must_use]
     pub const fn midpoint(&self) -> u64 {
-        self.left_step + (self.right_step - self.left_step) / 2
+        self.left_step
+            .saturating_add(self.right_step.saturating_sub(self.left_step) / 2)
     }
 
     /// Advance one bisection step by comparing defender's midpoint checkpoint
@@ -786,13 +869,24 @@ impl DisputeBisectionGame {
     ///
     /// # Errors
     ///
-    /// Refuses calls after convergence or beyond [`MAX_BISECTION_ROUNDS`].
+    /// Refuses malformed intervals, calls after convergence, or calls beyond
+    /// [`MAX_BISECTION_ROUNDS`].
     /// Convenience: exposed for AI dispute bisection driver.
     pub fn advance_bisection(
         &mut self,
         defender_mid: &[u8; 32],
         challenger_mid: &[u8; 32],
     ) -> Result<(), VerificationLayerError> {
+        if self.left_step >= self.right_step {
+            return Err(VerificationLayerError::InvalidBisectionState(
+                "invalid bisection interval",
+            ));
+        }
+        if self.right_step - self.left_step > (1u64 << MAX_BISECTION_ROUNDS) {
+            return Err(VerificationLayerError::InvalidBisectionState(
+                "bisection interval exceeds MAX_BISECTION_ROUNDS",
+            ));
+        }
         if self.is_converged() {
             return Err(VerificationLayerError::InvalidBisectionState(
                 "bisection already converged",
@@ -966,6 +1060,15 @@ pub fn prove_small_model_bound(
     spec: &FixedPointMlpSpec,
     input: &[i32],
 ) -> Result<SmallModelBoundProof, VerificationLayerError> {
+    if model.version != 2
+        || model.dip_digest == [0u8; 32]
+        || model.weights_root == [0u8; 32]
+        || model.program_hash == [0u8; 32]
+    {
+        return Err(VerificationLayerError::InvalidModelOrInput(
+            "ModelRecordV2 must be version 2 with non-zero commitments".to_owned(),
+        ));
+    }
     let actual_weights_root = compute_weights_root(spec);
     if actual_weights_root != model.weights_root {
         return Err(VerificationLayerError::InvalidModelOrInput(
@@ -1025,6 +1128,13 @@ pub fn is_valid_small_model_bound_proof(
     spec: &FixedPointMlpSpec,
     input: &[i32],
 ) -> bool {
+    if model.version != 2
+        || model.dip_digest == [0u8; 32]
+        || model.weights_root == [0u8; 32]
+        || model.program_hash == [0u8; 32]
+    {
+        return false;
+    }
     if &proof.request_id != expected_request_id || proof.model_id != model.model_id {
         return false;
     }
@@ -1087,10 +1197,40 @@ pub struct InferenceAssumptionPool {
 }
 
 impl InferenceAssumptionPool {
+    /// Record an assumption emitted by a guest execution, refusing zero
+    /// commitments or inserts beyond [`MAX_PENDING_INFERENCE_ASSUMPTIONS`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VerificationLayerError::InvalidModelOrInput`] if any
+    /// commitment is zero or the pending pool is full.
+    pub fn try_record_assumption(
+        &mut self,
+        assumption: InferenceAssumption,
+    ) -> Result<(), VerificationLayerError> {
+        if assumption.weights_root == [0u8; 32]
+            || assumption.input_commit == [0u8; 32]
+            || assumption.output_commit == [0u8; 32]
+        {
+            return Err(VerificationLayerError::InvalidModelOrInput(
+                "inference assumption commitments must be non-zero".to_owned(),
+            ));
+        }
+        if !self.pending.contains(&assumption)
+            && self.pending.len() >= MAX_PENDING_INFERENCE_ASSUMPTIONS
+        {
+            return Err(VerificationLayerError::InvalidModelOrInput(
+                "inference assumption pool capacity exceeded".to_owned(),
+            ));
+        }
+        self.pending.insert(assumption);
+        Ok(())
+    }
+
     /// Record an assumption emitted by a guest execution.
     /// Convenience: exposed for AI optimistic assumption recorder.
     pub fn record_assumption(&mut self, assumption: InferenceAssumption) {
-        self.pending.insert(assumption);
+        let _ = self.try_record_assumption(assumption);
     }
 
     /// Discharge a matching assumption using a verified [`SmallModelBoundProof`].
@@ -1491,5 +1631,154 @@ mod tests {
         assert!(sess.close_challenge_window(25).is_err());
         assert!(sess.slashed.contains(&(a, SlashOffense::InvalidReveal)));
         assert!(sess.slashed.contains(&(b, SlashOffense::InvalidReveal)));
+    }
+
+    #[test]
+    fn commit_reveal_rejects_zero_challenge_window_zero_committee_bad_quorum_and_zero_commit() {
+        let req = AiRequestId([0x44; 32]);
+        let a = Address::from([1u8; 32]);
+        let b = Address::from([2u8; 32]);
+        let d1 = [0x11; 32];
+        let s = [0x22; 32];
+
+        // Zero challenge window must never allow VL-2 promotion without a challenge window.
+        let mut zero_cw = CommitRevealSession::new(req, vec![a, b], 2, 10, 5, 5, 0);
+        assert!(zero_cw
+            .submit_commit(a, compute_vote_commitment(&req, &a, &d1, &s), 11)
+            .is_err());
+        assert!(zero_cw.close_challenge_window(100).is_err());
+
+        // Zero address in committee or invalid quorum (0 or > len) fails closed.
+        let mut zero_member =
+            CommitRevealSession::new(req, vec![Address::zero(), a], 1, 10, 5, 5, 10);
+        assert!(zero_member
+            .submit_commit(a, compute_vote_commitment(&req, &a, &d1, &s), 11)
+            .is_err());
+
+        let mut zero_quorum = CommitRevealSession::new(req, vec![a, b], 0, 10, 5, 5, 10);
+        assert!(zero_quorum
+            .submit_commit(a, compute_vote_commitment(&req, &a, &d1, &s), 11)
+            .is_err());
+
+        let mut impossible_quorum = CommitRevealSession::new(req, vec![a, b], 3, 10, 5, 5, 10);
+        assert!(impossible_quorum
+            .submit_commit(a, compute_vote_commitment(&req, &a, &d1, &s), 11)
+            .is_err());
+
+        // Overflowing deadline saturation must fail closed.
+        let mut saturated = CommitRevealSession::new(req, vec![a, b], 2, u64::MAX - 2, 5, 5, 10);
+        assert!(saturated
+            .submit_commit(a, compute_vote_commitment(&req, &a, &d1, &s), u64::MAX - 1)
+            .is_err());
+
+        // Pre-start_block commit and all-zero commitment must fail closed.
+        let mut valid = CommitRevealSession::new(req, vec![a, b], 2, 100, 10, 10, 20);
+        assert!(valid
+            .submit_commit(a, compute_vote_commitment(&req, &a, &d1, &s), 99)
+            .is_err());
+        assert!(valid.submit_commit(a, [0u8; 32], 105).is_err());
+    }
+
+    #[test]
+    fn committee_draw_and_audit_sampling_reject_zero_address_and_zero_randomness() {
+        let req = AiRequestId([0x55; 32]);
+        let a = Address::from([1u8; 32]);
+        let b = Address::from([2u8; 32]);
+
+        assert!(
+            draw_committee_for_request(&req, 5, 6, &[0u8; 32], &[(a, 100), (b, 100)], 1).is_err()
+        );
+        assert!(draw_committee_for_request(
+            &req,
+            5,
+            6,
+            &[0x77; 32],
+            &[(Address::zero(), 500), (a, 100)],
+            1
+        )
+        .is_err());
+        // Missing/zero randomness with non-zero sampling rate fails closed to mandatory audit.
+        assert!(should_sample_for_second_committee(&req, &[0u8; 32], 1));
+    }
+
+    #[test]
+    fn dip_and_model_v2_reject_unbounded_scale_shift_and_zero_digests() {
+        let spec = sample_mlp();
+        let prompt = [1, 2, 3, 4];
+        let model_id = AiModelId::of(&Address([1u8; 32]), &[2u8; 32], 2);
+
+        let mut bad_shift = sample_dip();
+        bad_shift.fixed_scale_shift = 31;
+        assert!(eval_dip_inference(&bad_shift, &spec, &prompt).is_err());
+        assert!(ModelRecordV2::from_mlp_spec(model_id, &spec, &bad_shift).is_err());
+
+        let mut zero_tok = sample_dip();
+        zero_tok.tokenizer_digest = [0u8; 32];
+        assert!(eval_dip_inference(&zero_tok, &spec, &prompt).is_err());
+        assert!(ModelRecordV2::from_mlp_spec(model_id, &spec, &zero_tok).is_err());
+
+        let mut zero_rt = sample_dip();
+        zero_rt.runtime_digest = [0u8; 32];
+        assert!(eval_dip_inference(&zero_rt, &spec, &prompt).is_err());
+        assert!(ModelRecordV2::from_mlp_spec(model_id, &spec, &zero_rt).is_err());
+    }
+
+    #[test]
+    fn bisection_small_model_and_assumption_pool_reject_invalid_bounds_and_zero_entries() {
+        let mut inverted = DisputeBisectionGame {
+            left_step: 50,
+            right_step: 10,
+            rounds_used: 0,
+        };
+        assert!(!inverted.is_converged());
+        assert_eq!(inverted.midpoint(), 50);
+        assert!(inverted.advance_bisection(&[1u8; 32], &[2u8; 32]).is_err());
+
+        let dip = sample_dip();
+        let spec = sample_mlp();
+        let model_id = AiModelId::of(&Address([3u8; 32]), &[4u8; 32], 2);
+        let model = ModelRecordV2::from_mlp_spec(model_id, &spec, &dip).unwrap();
+        let req = AiRequestId([0x66; 32]);
+        let input = [1, -1, 2, 0];
+        let proof = prove_small_model_bound(req, &model, &spec, &input).unwrap();
+
+        let mut bad_ver = model.clone();
+        bad_ver.version = 1;
+        assert!(prove_small_model_bound(req, &bad_ver, &spec, &input).is_err());
+        assert!(!is_valid_small_model_bound_proof(
+            &proof, &req, &bad_ver, &spec, &input
+        ));
+
+        let mut zero_dip = model;
+        zero_dip.dip_digest = [0u8; 32];
+        assert!(prove_small_model_bound(req, &zero_dip, &spec, &input).is_err());
+        assert!(!is_valid_small_model_bound_proof(
+            &proof, &req, &zero_dip, &spec, &input
+        ));
+
+        // Zero-commitment assumptions must be rejected and pool size strictly bounded.
+        let mut pool = InferenceAssumptionPool::default();
+        pool.record_assumption(InferenceAssumption {
+            request_id: req,
+            model_id,
+            weights_root: [0u8; 32],
+            input_commit: [1u8; 32],
+            output_commit: [2u8; 32],
+        });
+        assert!(pool.is_fully_discharged());
+        for i in 0u64..4_150 {
+            let mut rid = [0u8; 32];
+            if let Some(prefix) = rid.get_mut(..8) {
+                prefix.copy_from_slice(&i.to_le_bytes());
+            }
+            pool.record_assumption(InferenceAssumption {
+                request_id: AiRequestId(rid),
+                model_id,
+                weights_root: [1u8; 32],
+                input_commit: [2u8; 32],
+                output_commit: [3u8; 32],
+            });
+        }
+        assert!(pool.pending.len() <= 4_096);
     }
 }

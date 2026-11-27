@@ -171,6 +171,52 @@ pub struct AppIsolationPolicy {
     pub max_frame_bytes: u32,
 }
 
+fn is_valid_policy_origin(origin: &str) -> bool {
+    if origin == "self" {
+        return true;
+    }
+    if let Some(rest) = origin.strip_prefix("http://localhost") {
+        if rest.is_empty() {
+            return true;
+        }
+        return rest.strip_prefix(':').is_some_and(|port| {
+            !port.is_empty()
+                && port.bytes().all(|b| b.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|p| p > 0)
+        });
+    }
+    let Some(authority) = origin.strip_prefix("https://") else {
+        return false;
+    };
+    if authority.is_empty() {
+        return false;
+    }
+    let (host, port_opt) = match authority.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (authority, None),
+    };
+    if host.is_empty()
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.starts_with('-')
+        || host.ends_with('-')
+        || host.contains("..")
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
+    {
+        return false;
+    }
+    match port_opt {
+        None => true,
+        Some(port) => {
+            !port.is_empty()
+                && port.bytes().all(|b| b.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|p| p > 0)
+        }
+    }
+}
+
 impl AppIsolationPolicy {
     /// The commitment the bundle carries for this policy.
     #[must_use]
@@ -181,16 +227,23 @@ impl AppIsolationPolicy {
         ];
         let quota = self.storage_quota_bytes.to_le_bytes();
         let frame = u64::from(self.max_frame_bytes).to_le_bytes();
-        let origins = self.allowed_origins.join("\u{1f}");
-        let methods = self.rpc_methods.join("\u{1f}");
-        hash_fields_bytes(&[
-            POLICY_TAG,
-            &flags,
-            &quota,
-            &frame,
-            origins.as_bytes(),
-            methods.as_bytes(),
-        ])
+        let origin_count = (self.allowed_origins.len() as u64).to_le_bytes();
+        let method_count = (self.rpc_methods.len() as u64).to_le_bytes();
+        let mut fields: Vec<&[u8]> =
+            Vec::with_capacity(6 + self.allowed_origins.len() + self.rpc_methods.len());
+        fields.push(POLICY_TAG);
+        fields.push(&flags);
+        fields.push(&quota);
+        fields.push(&frame);
+        fields.push(&origin_count);
+        for origin in &self.allowed_origins {
+            fields.push(origin.as_bytes());
+        }
+        fields.push(&method_count);
+        for method in &self.rpc_methods {
+            fields.push(method.as_bytes());
+        }
+        hash_fields_bytes(&fields)
     }
 
     /// Check the policy a bundle carries.
@@ -206,16 +259,18 @@ impl AppIsolationPolicy {
         if self.allowed_origins.iter().any(|o| {
             o.len() > MAX_ORIGIN_LEN
                 || o.is_empty()
-                || o.chars().any(|c| c.is_whitespace())
+                || o.chars().any(|c| c.is_whitespace() || c.is_control())
                 || o.chars().any(|c| c.is_uppercase())
         }) {
             return Err(BundleError::Policy(
                 "origin is not lowercase without spaces",
             ));
         }
-        if self.allowed_origins.iter().any(|o| {
-            o.as_str() != "self" && !o.starts_with("https://") && !o.starts_with("http://localhost")
-        }) {
+        if self
+            .allowed_origins
+            .iter()
+            .any(|o| !is_valid_policy_origin(o))
+        {
             return Err(BundleError::Policy(
                 "origin is not self, https, or localhost",
             ));
@@ -234,8 +289,19 @@ impl AppIsolationPolicy {
                 "the RPC allowlist is empty or too long",
             ));
         }
-        if self.rpc_methods.iter().any(|m| !m.starts_with("bud_")) {
+        if self.rpc_methods.iter().any(|m| {
+            m.len() <= "bud_".len()
+                || m.len() > MAX_ORIGIN_LEN
+                || !m.starts_with("bud_")
+                || !m.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        }) {
             return Err(BundleError::Policy("an allowed method is not a bud_* name"));
+        }
+        let mut sorted_methods = self.rpc_methods.clone();
+        sorted_methods.sort();
+        sorted_methods.dedup();
+        if sorted_methods != self.rpc_methods {
+            return Err(BundleError::Policy("RPC methods are not sorted and unique"));
         }
         if self.max_frame_bytes == 0 || u64::from(self.max_frame_bytes) > self.storage_quota_bytes {
             return Err(BundleError::Policy("the frame cap is out of range"));
@@ -434,6 +500,8 @@ impl AppBundle {
         let policy = self.policy.digest();
         let proof = self.name_proof.digest();
         let version = self.version.to_le_bytes();
+        let manifest_version = self.manifest.version.to_le_bytes();
+        let manifest_visibility = [self.manifest.visibility as u8];
         let issued = self.issued_epoch.to_le_bytes();
         let expires = self.expires_epoch.to_le_bytes();
         hash_fields_bytes(&[
@@ -448,6 +516,8 @@ impl AppBundle {
             &self.object_commitment,
             &nft_flag,
             &nft_bytes,
+            &manifest_version,
+            &manifest_visibility,
             &self.manifest.ciphertext_root,
             &self.manifest.plaintext_root,
             &self.manifest.key_commitment,
@@ -470,11 +540,19 @@ impl AppBundle {
         if self.version != APP_BUNDLE_VERSION {
             return Err(BundleError::WrongVersion(self.version));
         }
+        if self.manifest.version != APP_BUNDLE_VERSION {
+            return Err(BundleError::WrongVersion(self.manifest.version));
+        }
         if self.hash_suite != self.manifest.hash_suite {
             return Err(BundleError::HashSuiteMismatch);
         }
         if self.name.is_empty()
             || self.name.len() > MAX_NAME_LEN
+            || self.name.starts_with('-')
+            || self.name.ends_with('-')
+            || self.name.starts_with('.')
+            || self.name.ends_with('.')
+            || self.name.contains("..")
             || !self
                 .name
                 .chars()
@@ -489,6 +567,9 @@ impl AppBundle {
             return Err(BundleError::ManifestObjectMismatch);
         }
         let binding = self.binding()?;
+        if self.owner == Address::zero() {
+            return Err(BundleError::Policy("owner address is unset"));
+        }
         self.policy.validate()?;
         if self.bns_state_root == [0u8; 32] {
             return Err(BundleError::UnsetStateRoot);
@@ -507,7 +588,14 @@ impl AppBundle {
         {
             return Err(BundleError::NameNotInState);
         }
-        if self.issued_epoch > self.expires_epoch {
+        let visibility_matches = match self.content_id.kind {
+            ContentIdKind::Public => self.manifest.visibility.is_public(),
+            ContentIdKind::Sealed => !self.manifest.visibility.is_public(),
+        };
+        if !visibility_matches {
+            return Err(BundleError::ManifestObjectMismatch);
+        }
+        if self.issued_epoch > self.expires_epoch || at_epoch < self.issued_epoch {
             return Err(BundleError::EpochOrder);
         }
         if self.expires_epoch - self.issued_epoch > MAX_LIFETIME_EPOCHS {
@@ -610,9 +698,11 @@ impl StorageMirrorAttestation {
         let segment = self.challenge.segment.to_le_bytes();
         let position = self.challenge.position.to_le_bytes();
         let sub_block = self.challenge.sub_block.to_le_bytes();
-        let esi = [self.proof.esi as u8];
+        let esi = self.proof.esi.to_le_bytes();
         let attested = self.attested_epoch.to_le_bytes();
         let expires = self.expires_epoch.to_le_bytes();
+        let symbol_path_len = (self.proof.symbol_path.len() as u64).to_le_bytes();
+        let root_path_len = (self.proof.root_path.len() as u64).to_le_bytes();
         let mut owned: Vec<Vec<u8>> = vec![
             MIRROR_TAG.to_vec(),
             version.to_vec(),
@@ -630,15 +720,18 @@ impl StorageMirrorAttestation {
             self.proof.bytes.to_vec(),
             attested.to_vec(),
             expires.to_vec(),
+            symbol_path_len.to_vec(),
         ];
-        for step in self
-            .proof
-            .symbol_path
-            .iter()
-            .chain(self.proof.root_path.iter())
-        {
+        for step in &self.proof.symbol_path {
             // A step with no sibling is marked, so a short path cannot be
             // confused with a longer one.
+            owned.push(match step {
+                Some(sibling) => sibling.to_vec(),
+                None => vec![0u8],
+            });
+        }
+        owned.push(root_path_len.to_vec());
+        for step in &self.proof.root_path {
             owned.push(match step {
                 Some(sibling) => sibling.to_vec(),
                 None => vec![0u8],
@@ -655,7 +748,8 @@ impl StorageMirrorAttestation {
     /// [`BundleError::WrongVersion`], [`BundleError::BadLocator`],
     /// [`BundleError::BadChallenge`], [`BundleError::WrongNonce`],
     /// [`BundleError::ProofMismatch`], [`BundleError::ProofPath`],
-    /// [`BundleError::EpochOrder`] or [`BundleError::Expired`].
+    /// [`BundleError::EpochOrder`], [`BundleError::LifetimeTooLong`] or
+    /// [`BundleError::Expired`].
     pub fn verify(&self, expected_nonce: &[u8; 32], at_epoch: u64) -> Result<(), BundleError> {
         if self.version != APP_BUNDLE_VERSION {
             return Err(BundleError::WrongVersion(self.version));
@@ -671,14 +765,18 @@ impl StorageMirrorAttestation {
         {
             return Err(BundleError::BadChallenge);
         }
-        if self.challenge.position >= self.symbol_count
+        if *expected_nonce == [0u8; 32]
+            || self.challenge.position >= self.symbol_count
             || self.challenge.sub_block >= self.sub_blocks
             || self.challenge.nonce != *expected_nonce
         {
             return Err(BundleError::WrongNonce);
         }
-        if self.attested_epoch > self.expires_epoch {
+        if self.attested_epoch > self.expires_epoch || at_epoch < self.attested_epoch {
             return Err(BundleError::EpochOrder);
+        }
+        if self.expires_epoch - self.attested_epoch > MAX_LIFETIME_EPOCHS {
+            return Err(BundleError::LifetimeTooLong);
         }
         if at_epoch >= self.expires_epoch {
             return Err(BundleError::Expired {
@@ -1051,5 +1149,116 @@ mod tests {
             attestation.verify(&[0x2b; 32], 20),
             Err(BundleError::BadChallenge)
         );
+    }
+
+    #[test]
+    fn mirror_digest_separates_high_esi_and_path_boundaries() {
+        let (mut a, _) = mirror_fixture();
+        let mut b = a.clone();
+        a.proof.esi = 1;
+        b.proof.esi = 257;
+        assert_ne!(
+            a.digest(),
+            b.digest(),
+            "u32 esi must not be truncated to u8 in mirror digest"
+        );
+
+        let (mut left, _) = mirror_fixture();
+        let mut right = left.clone();
+        left.proof.symbol_path = vec![Some([0x11; 32]), Some([0x22; 32])];
+        left.proof.root_path = vec![Some([0x33; 32])];
+        right.proof.symbol_path = vec![Some([0x11; 32])];
+        right.proof.root_path = vec![Some([0x22; 32]), Some([0x33; 32])];
+        assert_ne!(
+            left.digest(),
+            right.digest(),
+            "symbol_path and root_path boundaries must be domain-separated"
+        );
+    }
+
+    #[test]
+    fn mirror_verify_rejects_zero_nonce_future_epoch_and_excess_lifetime() {
+        let (mut zero_nonce, _) = mirror_fixture();
+        zero_nonce.challenge.nonce = [0u8; 32];
+        assert!(zero_nonce.verify(&[0u8; 32], 20).is_err());
+
+        let (future, _) = mirror_fixture();
+        assert!(future.verify(&[0x2b; 32], 9).is_err());
+
+        let (mut long_lived, _) = mirror_fixture();
+        long_lived.expires_epoch = long_lived.attested_epoch + MAX_LIFETIME_EPOCHS + 1;
+        assert!(long_lived.verify(&[0x2b; 32], 20).is_err());
+    }
+
+    #[test]
+    fn policy_rejects_delimiter_collision_wildcard_rpc_and_spoofed_localhost() {
+        let mut split = policy();
+        split.allowed_origins = vec!["https://a.bud".to_string(), "https://b.bud".to_string()];
+        let mut injected = policy();
+        injected.allowed_origins = vec!["https://a.bud\u{1f}https://b.bud".to_string()];
+        assert_ne!(
+            split.digest(),
+            injected.digest(),
+            "control delimiter in allowed_origins must not collide policy digests"
+        );
+        assert!(injected.validate().is_err());
+
+        let mut wildcard = policy();
+        wildcard.rpc_methods = vec!["bud_".to_string()];
+        assert!(wildcard.validate().is_err());
+
+        let mut unsorted_rpc = policy();
+        unsorted_rpc.rpc_methods = vec!["bud_z".to_string(), "bud_a".to_string()];
+        assert!(unsorted_rpc.validate().is_err());
+
+        let mut dup_rpc = policy();
+        dup_rpc.rpc_methods = vec!["bud_storage".to_string(), "bud_storage".to_string()];
+        assert!(dup_rpc.validate().is_err());
+
+        let mut bare_https = policy();
+        bare_https.allowed_origins = vec!["https://".to_string()];
+        assert!(bare_https.validate().is_err());
+
+        let mut spoofed_local = policy();
+        spoofed_local.allowed_origins = vec!["http://localhost.evil.com".to_string()];
+        assert!(spoofed_local.validate().is_err());
+    }
+
+    #[test]
+    fn bundle_digest_and_verify_reject_manifest_mismatch_zero_owner_future_epoch_and_bad_name() {
+        let (base, _) = fixture();
+        let mut other_vis = base.clone();
+        other_vis.manifest.visibility = SealedObjectVisibilityBytes::Sealed;
+        assert_ne!(base.digest(), other_vis.digest());
+
+        let mut other_ver = base.clone();
+        other_ver.manifest.version = 2;
+        assert_ne!(base.digest(), other_ver.digest());
+        assert!(other_ver.verify(50).is_err());
+        assert!(other_vis.verify(50).is_err());
+
+        assert!(base.verify(9).is_err());
+
+        let mut bad_name = base.clone();
+        bad_name.name = "-alice".to_string();
+        assert!(bad_name.verify(50).is_err());
+        bad_name.name = "a..b".to_string();
+        assert!(bad_name.verify(50).is_err());
+
+        let mut zero_owner = base;
+        zero_owner.owner = Address::zero();
+        let cid = zero_owner.content_id;
+        let obj = zero_owner.object_commitment;
+        let binding = Bud3NameBinding {
+            name: zero_owner.name.clone(),
+            owner: Address::zero(),
+            content_ref: ContentRef::new(cid, obj, None).expect("content ref"),
+        };
+        let mut tree = smt::Tree::default();
+        tree.insert(smt::key_of(&zero_owner.name), binding.digest());
+        zero_owner.bns_state_root = tree.root();
+        zero_owner.name_proof =
+            NameInclusionProof::from_path(&tree.prove(&smt::key_of(&zero_owner.name)));
+        assert!(zero_owner.verify(50).is_err());
     }
 }

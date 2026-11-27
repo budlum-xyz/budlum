@@ -42,6 +42,22 @@ pub const APB_LEVEL_ATTESTATION_TAG: &[u8] = b"BDLM_AI_APB_LEVEL_ATTESTATION_V1"
 pub const APB_FENCE_OPEN: &str = "```apb\n";
 /// Closing fence for the `apb` block.
 pub const APB_FENCE_CLOSE: &str = "\n```";
+/// Maximum sentences permitted in a single [`AnswerProofBundle`].
+pub const MAX_APB_SENTENCES: usize = 1_024;
+/// Maximum UTF-8 byte length permitted for a single sentence in an [`AnswerProofBundle`].
+pub const MAX_APB_SENTENCE_BYTES: usize = 16_384;
+/// Maximum UTF-8 byte length permitted for a Markdown APB document.
+pub const MAX_APB_MARKDOWN_BYTES: usize = 1_048_576;
+/// Maximum Merkle leaf capacity accepted in a [`SourceCitationProof`].
+pub const MAX_APB_TREE_LEAVES: u32 = 1 << 24;
+
+fn is_valid_sentence_text(text: &str) -> bool {
+    !text.trim().is_empty()
+        && text.len() <= MAX_APB_SENTENCE_BYTES
+        && !text.contains(['\n', '\r', '\0'])
+        && !text.contains("```")
+        && !text.contains("[unverified commentary]")
+}
 
 /// Errors produced when building, auditing, or parsing an [`AnswerProofBundle`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,8 +242,15 @@ impl SourceCitationProof {
     /// slots, and exact consent/disclosure agreement.
     #[must_use]
     pub fn is_authentic(&self) -> bool {
+        if self.document_root == [0u8; 32] || self.leaf_digest == [0u8; 32] {
+            return false;
+        }
         let cap = self.tree_leaf_count as usize;
-        if cap == 0 || !cap.is_power_of_two() || (self.chunk_index as usize) >= cap {
+        if cap == 0
+            || self.tree_leaf_count > MAX_APB_TREE_LEAVES
+            || !cap.is_power_of_two()
+            || (self.chunk_index as usize) >= cap
+        {
             return false;
         }
         let expected_depth = cap.trailing_zeros() as usize;
@@ -529,9 +552,14 @@ impl AnswerProofBundle {
         if candidates.is_empty() {
             return Err(ApbError::EmptySentence { index: 0 });
         }
+        if candidates.len() > MAX_APB_SENTENCES {
+            return Err(ApbError::MalformedMarkdown(
+                "too many sentences in APB bundle",
+            ));
+        }
         let mut sentences = Vec::with_capacity(candidates.len());
         for (index, item) in candidates.into_iter().enumerate() {
-            if item.text.trim().is_empty() || item.text.contains("```apb") {
+            if !is_valid_sentence_text(&item.text) {
                 return Err(ApbError::EmptySentence { index });
             }
             let Some(kind) = item.claim_kind else {
@@ -577,15 +605,14 @@ impl AnswerProofBundle {
     /// [`Self::prose_body`].
     #[must_use]
     pub fn is_authentic(&self) -> bool {
-        if self.sentences.is_empty() {
+        if self.sentences.is_empty() || self.sentences.len() > MAX_APB_SENTENCES {
             return false;
         }
         if compute_prose_digest(&self.prose_body()) != self.prose_digest {
             return false;
         }
         self.sentences.iter().all(|s| {
-            !s.text.trim().is_empty()
-                && !s.text.contains("```apb")
+            is_valid_sentence_text(&s.text)
                 && match &s.claim_kind {
                     SentenceClaimKind::SourceBacked(src) => src.is_authentic(),
                     SentenceClaimKind::ComputationBacked(calc) => calc.is_authentic(),
@@ -606,9 +633,11 @@ impl AnswerProofBundle {
     ///
     /// # Errors
     ///
-    /// Returns [`ApbError::LevelTransition`] on any attempt to lower the level.
+    /// Returns [`ApbError::LevelUnbound`] if the bundle fails internal
+    /// authenticity audit or `attestation` does not match `prose_digest`, and
+    /// [`ApbError::LevelTransition`] on any attempt to lower the level.
     pub fn upgrade_level(&mut self, attestation: &LevelAttestation) -> Result<(), ApbError> {
-        if attestation.prose_digest != self.prose_digest {
+        if !self.is_authentic() || attestation.prose_digest != self.prose_digest {
             return Err(ApbError::LevelUnbound);
         }
         self.verification_level
@@ -642,10 +671,15 @@ impl AnswerProofBundle {
     ///
     /// # Errors
     ///
-    /// Refuses missing/multiple `apb` blocks, tampered prose outside the block,
-    /// or invalid sentence proofs inside the block.
+    /// Refuses missing/multiple `apb` blocks, oversized inputs, tampered prose
+    /// outside the block, or invalid sentence proofs inside the block.
     /// Convenience: exposed for SDK/CLI proof-bundle markdown parser.
     pub fn from_markdown_document(markdown: &str) -> Result<Self, ApbError> {
+        if markdown.len() > MAX_APB_MARKDOWN_BYTES {
+            return Err(ApbError::MalformedMarkdown(
+                "markdown exceeds APB size limit",
+            ));
+        }
         let Some(fence_pos) = markdown.find(APB_FENCE_OPEN) else {
             return Err(ApbError::MalformedMarkdown("missing ```apb block"));
         };
@@ -942,5 +976,119 @@ mod tests {
         let mut md = bundle.to_markdown_document().unwrap();
         md.push_str("\nUnverified trailing paragraph.");
         assert!(AnswerProofBundle::from_markdown_document(&md).is_err());
+    }
+
+    #[test]
+    fn apb_rejects_newline_commentary_spoofing_and_fence_smuggling() {
+        let doc = sample_doc();
+        let cite = doc.open_chunk(0, true).unwrap();
+
+        // Multi-line text in one SourceBacked sentence can smuggle unverified lines
+        // and collide prose_digest with an UnverifiedCommentary bundle.
+        assert!(AnswerProofBundle::build(vec![CandidateSentence {
+            text: "Epoch length is 50 slots.\nForged claim. [unverified commentary]".to_owned(),
+            claim_kind: Some(SentenceClaimKind::SourceBacked(cite.clone())),
+        }])
+        .is_err());
+
+        assert!(AnswerProofBundle::build(vec![CandidateSentence {
+            text: "Claim with spoofed tag [unverified commentary]".to_owned(),
+            claim_kind: Some(SentenceClaimKind::SourceBacked(cite.clone())),
+        }])
+        .is_err());
+
+        assert!(AnswerProofBundle::build(vec![CandidateSentence {
+            text: "Claim with fence ``` inside".to_owned(),
+            claim_kind: Some(SentenceClaimKind::SourceBacked(cite.clone())),
+        }])
+        .is_err());
+
+        // Even if constructed or deserialized directly, is_authentic() must reject smuggling.
+        let smuggled_sentence = VerifiedSentence {
+            text: "Line 1.\nLine 2. [unverified commentary]".to_owned(),
+            claim_kind: SentenceClaimKind::SourceBacked(cite),
+        };
+        let prose = format_prose(std::slice::from_ref(&smuggled_sentence));
+        let forged = AnswerProofBundle {
+            sentences: vec![smuggled_sentence],
+            prose_digest: compute_prose_digest(&prose),
+            verification_level: LevelRecord::new(),
+        };
+        assert!(!forged.is_authentic());
+    }
+
+    #[test]
+    fn source_citation_rejects_zero_root_and_zero_leaf_forgery() {
+        let forged_zero = SourceCitationProof {
+            document_root: [0u8; 32],
+            chunk_index: 0,
+            tree_leaf_count: 1,
+            merkle_siblings: Vec::new(),
+            consent_granted: false,
+            disclosed_excerpt: None,
+            leaf_digest: [0u8; 32],
+        };
+        assert!(!forged_zero.is_authentic());
+        assert!(AnswerProofBundle::build(vec![CandidateSentence {
+            text: "Forged zero-root citation.".to_owned(),
+            claim_kind: Some(SentenceClaimKind::SourceBacked(forged_zero)),
+        }])
+        .is_err());
+    }
+
+    #[test]
+    fn upgrade_level_rejects_tampered_inauthentic_bundle() {
+        let doc = sample_doc();
+        let cite = doc.open_chunk(0, true).unwrap();
+        let mut bundle = AnswerProofBundle::build(vec![CandidateSentence {
+            text: "Original verified prose.".to_owned(),
+            claim_kind: Some(SentenceClaimKind::SourceBacked(cite)),
+        }])
+        .unwrap();
+        let verifier_kp = PqKeyPair::generate();
+        let verifier_pk = verifier_kp.public_key_bytes().to_vec();
+        let msg =
+            LevelAttestation::signing_digest(VerificationLevel::FullProof, bundle.prose_digest);
+        let sig = verifier_kp
+            .sign(crate::crypto::ctx::APB_LEVEL_V1, &msg)
+            .expect("pq sign");
+        let attest = LevelAttestation::verified(
+            VerificationLevel::FullProof,
+            bundle.prose_digest,
+            &verifier_pk,
+            &sig,
+        )
+        .unwrap();
+
+        // Tamper sentence prose without updating prose_digest: upgrade_level must fail closed.
+        if let Some(first) = bundle.sentences.first_mut() {
+            first.text = "Tampered prose.".to_owned();
+        }
+        assert!(bundle.upgrade_level(&attest).is_err());
+        assert_eq!(
+            bundle.verification_level.level(),
+            VerificationLevel::Receipt
+        );
+    }
+
+    #[test]
+    fn apb_rejects_oversized_sentence_list_sentence_text_and_markdown_document() {
+        let many: Vec<CandidateSentence> = (0..1_025)
+            .map(|i| CandidateSentence {
+                text: format!("Commentary {i}."),
+                claim_kind: Some(SentenceClaimKind::UnverifiedCommentary),
+            })
+            .collect();
+        assert!(AnswerProofBundle::build(many).is_err());
+
+        let huge_sentence = "a".repeat(16_385);
+        assert!(AnswerProofBundle::build(vec![CandidateSentence {
+            text: huge_sentence,
+            claim_kind: Some(SentenceClaimKind::UnverifiedCommentary),
+        }])
+        .is_err());
+
+        let huge_md = format!("{}\n\n```apb\n{{}}\n```", "x".repeat(1_048_577));
+        assert!(AnswerProofBundle::from_markdown_document(&huge_md).is_err());
     }
 }
