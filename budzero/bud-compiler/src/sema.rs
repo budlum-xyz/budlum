@@ -267,6 +267,12 @@ impl SemanticAnalyzer {
                     )));
                 }
                 if let Ok(ty) = parsed {
+                    if matches!(ty, Type::Map(..)) {
+                        errors.push(CompileError::SemanticError(format!(
+                            "field '{}.{}': storage mapping type Map<K,V> is only valid in storage",
+                            s.name, f.name
+                        )));
+                    }
                     self.check_struct_type(
                         &ty,
                         &format!("field '{}.{}'", s.name, f.name),
@@ -307,6 +313,12 @@ impl SemanticAnalyzer {
                         Type::Unknown
                     }
                 };
+                if matches!(ty, Type::Map(..)) {
+                    errors.push(CompileError::SemanticError(format!(
+                        "parameter '{}' of function '{}': storage mapping type Map<K,V> is only valid in storage",
+                        p.name, f.name
+                    )));
+                }
                 self.check_struct_type(
                     &ty,
                     &format!("parameter '{}' of function '{}'", p.name, f.name),
@@ -325,6 +337,12 @@ impl SemanticAnalyzer {
                         Type::Unknown
                     }
                 };
+                if matches!(ty, Type::Map(..)) {
+                    errors.push(CompileError::SemanticError(format!(
+                        "return type of function '{}': storage mapping type Map<K,V> is only valid in storage",
+                        f.name
+                    )));
+                }
                 self.check_struct_type(
                     &ty,
                     &format!("return type of function '{}'", f.name),
@@ -480,7 +498,10 @@ impl SemanticAnalyzer {
     /// Is not a value; both are near-certain bugs, rejected at compile
     /// Time. (match has its own stricter scrutinee check.)
     fn check_condition_type(&self, ty: &Type, ctx: &str, errors: &mut Vec<CompileError>) {
-        if matches!(ty, Type::Struct(_) | Type::Void) {
+        if matches!(
+            ty,
+            Type::Struct(_) | Type::Void | Type::Address | Type::Hash32 | Type::Map(..)
+        ) {
             errors.push(CompileError::SemanticError(format!(
                 "{} condition must be a scalar (u64/bool/field), got {:?}",
                 ctx, ty
@@ -536,6 +557,12 @@ impl SemanticAnalyzer {
         match stmt {
             Stmt::Let(name, expr) => {
                 let ty = self.analyze_expr(expr, env, errors);
+                if ty == Type::Void {
+                    errors.push(CompileError::SemanticError(format!(
+                        "cannot bind void expression to variable '{}'",
+                        name
+                    )));
+                }
                 env.insert(name.clone(), ty);
             }
             Stmt::Constrain(expr) => {
@@ -625,8 +652,20 @@ impl SemanticAnalyzer {
                 end,
                 body,
             } => {
-                self.analyze_expr(start, env, errors);
-                self.analyze_expr(end, env, errors);
+                let start_ty = self.analyze_expr(start, env, errors);
+                if start_ty != Type::U64 && start_ty != Type::Unknown {
+                    errors.push(CompileError::SemanticError(format!(
+                        "for-loop start bound must be u64, got {}",
+                        start_ty.name()
+                    )));
+                }
+                let end_ty = self.analyze_expr(end, env, errors);
+                if end_ty != Type::U64 && end_ty != Type::Unknown {
+                    errors.push(CompileError::SemanticError(format!(
+                        "for-loop end bound must be u64, got {}",
+                        end_ty.name()
+                    )));
+                }
                 let mut inner_env = env.clone();
                 inner_env.insert(var.clone(), Type::U64);
                 for s in body {
@@ -943,5 +982,144 @@ impl SemanticAnalyzer {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bud_isa::IsaProfile;
+
+    #[test]
+    fn budc01_sema_refuses_non_u64_for_bounds_opaque_conditions_void_let_and_non_storage_map() {
+        // 1. `for` loop bounds must be u64, never struct/void/Address/Hash32/bool.
+        let bad_for_struct = r"
+            contract C {
+                struct S { x: u64 }
+                pub fn main() {
+                    let s = S { x: 1 };
+                    for i in s..5 {
+                        emit E(i);
+                    }
+                }
+            }
+        ";
+        assert!(
+            crate::compile(bad_for_struct, IsaProfile::Production).is_err(),
+            "struct as for-loop start bound must be refused"
+        );
+
+        let bad_for_void = r"
+            contract C {
+                fn nothing() { }
+                pub fn main() {
+                    for i in 0..nothing() {
+                        emit E(i);
+                    }
+                }
+            }
+        ";
+        assert!(
+            crate::compile(bad_for_void, IsaProfile::Production).is_err(),
+            "void expression as for-loop end bound must be refused"
+        );
+
+        // 2. Opaque 32-byte types (Address/Hash32) must not be used as scalar conditions.
+        let bad_addr_cond = r"
+            contract C {
+                fn check(a: Address) {
+                    if (a) {
+                        emit E(1);
+                    }
+                }
+                pub fn main() { }
+            }
+        ";
+        assert!(
+            crate::compile(bad_addr_cond, IsaProfile::Production).is_err(),
+            "Address in if-condition must be refused"
+        );
+
+        let bad_hash_constrain = r"
+            contract C {
+                fn check(h: Hash32) {
+                    constrain(h);
+                }
+                pub fn main() { }
+            }
+        ";
+        assert!(
+            crate::compile(bad_hash_constrain, IsaProfile::Production).is_err(),
+            "Hash32 in constrain must be refused"
+        );
+
+        // 3. `let` must refuse binding a void expression.
+        let bad_void_let = r"
+            contract C {
+                fn nothing() { }
+                pub fn main() {
+                    let x = nothing();
+                }
+            }
+        ";
+        assert!(
+            crate::compile(bad_void_let, IsaProfile::Production).is_err(),
+            "binding a void expression in let must be refused"
+        );
+
+        // 4. Programmatic AST with Map<K,V> on a struct field or function parameter must fail sema.
+        let bad_map_contract = Contract {
+            name: "BadMap".into(),
+            storage: vec![],
+            structs: vec![Struct {
+                name: "Holder".into(),
+                fields: vec![StorageField {
+                    name: "m".into(),
+                    ty: "Map<u64,u64>".into(),
+                }],
+            }],
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                return_type: None,
+                body: vec![],
+                is_pub: true,
+            }],
+        };
+        let mut sema = SemanticAnalyzer::new();
+        assert!(
+            sema.analyze(&bad_map_contract).is_err(),
+            "Map<K,V> in struct field must be refused"
+        );
+
+        let bad_map_param = Contract {
+            name: "BadMapParam".into(),
+            storage: vec![],
+            structs: vec![],
+            functions: vec![
+                Function {
+                    name: "helper".into(),
+                    params: vec![Param {
+                        name: "m".into(),
+                        ty: "Map<u64,u64>".into(),
+                    }],
+                    return_type: None,
+                    body: vec![],
+                    is_pub: false,
+                },
+                Function {
+                    name: "main".into(),
+                    params: vec![],
+                    return_type: None,
+                    body: vec![],
+                    is_pub: true,
+                },
+            ],
+        };
+        let mut sema2 = SemanticAnalyzer::new();
+        assert!(
+            sema2.analyze(&bad_map_param).is_err(),
+            "Map<K,V> as function parameter must be refused"
+        );
     }
 }

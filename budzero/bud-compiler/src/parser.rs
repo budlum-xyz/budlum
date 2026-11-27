@@ -61,13 +61,31 @@ const MAX_EXPR_TREE_HEIGHT: u32 = 128;
 /// front end, and the message says so.
 pub const MAX_NESTING_DEPTH: u32 = 32;
 
+/// Maximum source size accepted by the front end (2 MiB).
+const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum token count accepted by the front end.
+const MAX_TOKENS: usize = 500_000;
+
 impl<'a> Parser<'a> {
     pub fn new(source: &'a str) -> Result<Self, CompileError> {
+        if source.len() > MAX_SOURCE_BYTES {
+            return Err(CompileError::ParserError(format!(
+                "source size {} bytes exceeds the {MAX_SOURCE_BYTES} byte front-end limit",
+                source.len()
+            )));
+        }
         let mut lexer = Token::lexer(source);
         let mut tokens = Vec::new();
         while let Some(res) = lexer.next() {
             match res {
-                Ok(tok) => tokens.push(tok),
+                Ok(tok) => {
+                    if tokens.len() >= MAX_TOKENS {
+                        return Err(CompileError::ParserError(format!(
+                            "token count exceeds the {MAX_TOKENS} token front-end limit"
+                        )));
+                    }
+                    tokens.push(tok);
+                }
                 Err(()) => {
                     let span = lexer.span();
                     let line = source[..span.start].lines().count().saturating_add(1);
@@ -940,5 +958,22 @@ mod tests {
         let source = format!("contract T {{ pub fn main() {{ let x = {sum}; }} }}");
         let res = crate::compile(&source, bud_isa::IsaProfile::Production);
         assert!(res.is_ok(), "{:?}", res.err());
+    }
+
+    #[test]
+    fn budc05_parser_refuses_oversized_source_and_token_bomb() {
+        // 1. Source exceeding 2 MiB must be refused before allocating token vectors.
+        let oversized = " ".repeat(2 * 1024 * 1024 + 64);
+        assert!(
+            matches!(Parser::new(&oversized), Err(CompileError::ParserError(_))),
+            "oversized source (> 2 MiB) must be refused"
+        );
+
+        // 2. Dense token bomb (> 500,000 single-byte tokens inside <= 2 MiB) must be refused.
+        let token_bomb = ";".repeat(500_005);
+        assert!(
+            matches!(Parser::new(&token_bomb), Err(CompileError::ParserError(_))),
+            "token bomb (> 500k tokens) must be refused"
+        );
     }
 }

@@ -138,17 +138,25 @@ impl std::error::Error for VerifyError {}
 
 // ─── Public entry points ──────────────────────────────────────────────────
 
+/// Goldilocks prime field modulus (`2^64 - 2^32 + 1`).
+const GOLDILOCKS_P: u64 = 18_446_744_069_414_584_321;
+
 /// Verifies the whole program. Returns the first error found.
 pub fn verify_program(program: &IrProgram) -> Result<(), VerifyError> {
-    let valid_fids: HashSet<FunctionId> = program.functions.iter().map(|f| f.id).collect();
-    let signatures: HashMap<FunctionId, (Vec<IrType>, IrType)> = program
-        .functions
-        .iter()
-        .map(|f| {
-            let param_tys = f.params.iter().map(|(_, ty)| ty.clone()).collect();
-            (f.id, (param_tys, f.ret_ty.clone()))
-        })
-        .collect();
+    let mut valid_fids = HashSet::with_capacity(program.functions.len());
+    let mut signatures: HashMap<FunctionId, (Vec<IrType>, IrType)> =
+        HashMap::with_capacity(program.functions.len());
+
+    for f in &program.functions {
+        if !valid_fids.insert(f.id) {
+            return Err(VerifyError::UndefinedFunction {
+                function: f.id,
+                in_caller: format!("duplicate function id in '{}'", f.name),
+            });
+        }
+        let param_tys = f.params.iter().map(|(_, ty)| ty.clone()).collect();
+        signatures.insert(f.id, (param_tys, f.ret_ty.clone()));
+    }
 
     for func in &program.functions {
         verify_function(func, &valid_fids)?;
@@ -227,7 +235,21 @@ pub fn verify_function(
 ) -> Result<(), VerifyError> {
     let fname = &func.name;
     let local_count = func.locals.len();
-    let valid_blocks: HashSet<BlockId> = func.blocks.iter().map(|b| b.id).collect();
+    if func.blocks.is_empty() {
+        return Err(VerifyError::MissingTerminator {
+            block: BlockId(0),
+            in_function: fname.clone(),
+        });
+    }
+    let mut valid_blocks: HashSet<BlockId> = HashSet::with_capacity(func.blocks.len());
+    for b in &func.blocks {
+        if !valid_blocks.insert(b.id) {
+            return Err(VerifyError::UndefinedBlock {
+                block: b.id,
+                in_function: format!("duplicate block in {fname}"),
+            });
+        }
+    }
 
     // ── 1. Collect defined ValueIds: params first ────────────────
     let mut defined: HashMap<ValueId, IrType> = HashMap::new();
@@ -296,6 +318,14 @@ fn verify_block(
                 got: None,
                 in_function: fname.to_string(),
             });
+        }
+        if let Some(res_vid) = node.result {
+            if instr_uses_value(&node.instr, res_vid) {
+                return Err(VerifyError::UndefinedValue {
+                    value: res_vid,
+                    in_function: fname.to_string(),
+                });
+            }
         }
         verify_instr(
             &node.instr,
@@ -390,7 +420,18 @@ fn verify_instr(
     local_count: usize,
 ) -> Result<(), VerifyError> {
     match instr {
-        Instruction::Const { .. } => {}
+        Instruction::Const { ty, value } => {
+            if !matches!(ty, IrType::U64 | IrType::Bool | IrType::Field)
+                || *value >= GOLDILOCKS_P
+                || (*ty == IrType::Bool && *value > 1)
+            {
+                return Err(VerifyError::OperandTypeMismatch {
+                    lhs_ty: ty.clone(),
+                    rhs_ty: IrType::U64,
+                    in_function: fname.to_string(),
+                });
+            }
+        }
 
         Instruction::Add { lhs, rhs, ty }
         | Instruction::Sub { lhs, rhs, ty }
@@ -509,6 +550,33 @@ fn verify_instr(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
+
+fn instr_uses_value(instr: &Instruction, target: ValueId) -> bool {
+    match instr {
+        Instruction::Const { .. }
+        | Instruction::StateRead { .. }
+        | Instruction::ReadLocal { .. }
+        | Instruction::ContextRead { .. } => false,
+        Instruction::Add { lhs, rhs, .. }
+        | Instruction::Sub { lhs, rhs, .. }
+        | Instruction::Mul { lhs, rhs, .. }
+        | Instruction::Div { lhs, rhs, .. }
+        | Instruction::IrEq { lhs, rhs, .. }
+        | Instruction::IrNe { lhs, rhs, .. }
+        | Instruction::Lt { lhs, rhs, .. }
+        | Instruction::Le { lhs, rhs, .. }
+        | Instruction::Gt { lhs, rhs, .. }
+        | Instruction::Ge { lhs, rhs, .. }
+        | Instruction::Poseidon { lhs, rhs } => *lhs == target || *rhs == target,
+        Instruction::Load { base, .. } => *base == target,
+        Instruction::Store { base, value, .. } => *base == target || *value == target,
+        Instruction::StateWrite { value, .. } | Instruction::WriteLocal { value, .. } => {
+            *value == target
+        }
+        Instruction::Call { args, .. } | Instruction::Emit { args, .. } => args.contains(&target),
+        Instruction::Assert { condition } => *condition == target,
+    }
+}
 
 fn check_value_ref(
     vid: ValueId,
@@ -995,5 +1063,158 @@ mod tests {
             verify_program(&prog_call),
             Err(VerifyError::OperandTypeMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn budc03_verifier_refuses_dup_fids_empty_fn_dup_blocks_self_cycle_and_bad_const() {
+        // 1. Duplicate FunctionId in program must fail closed.
+        let f0 = IrFunction {
+            id: FunctionId(0),
+            name: "f0".into(),
+            params: vec![],
+            ret_ty: IrType::Void,
+            blocks: vec![BasicBlock {
+                id: BlockId::new(0),
+                instrs: vec![],
+                terminator: Some(Terminator::Return(None)),
+            }],
+            locals: vec![],
+        };
+        let f0_dup = IrFunction {
+            id: FunctionId(0),
+            name: "f0_dup".into(),
+            params: vec![],
+            ret_ty: IrType::Void,
+            blocks: vec![BasicBlock {
+                id: BlockId::new(0),
+                instrs: vec![],
+                terminator: Some(Terminator::Return(None)),
+            }],
+            locals: vec![],
+        };
+        let dup_fid_prog = IrProgram {
+            functions: vec![f0, f0_dup],
+            function_names: Default::default(),
+        };
+        assert!(
+            verify_program(&dup_fid_prog).is_err(),
+            "duplicate FunctionId must be refused"
+        );
+
+        // 2. Function with zero basic blocks must fail closed.
+        let empty_fn = IrFunction {
+            id: FunctionId(0),
+            name: "empty".into(),
+            params: vec![],
+            ret_ty: IrType::U64,
+            blocks: vec![],
+            locals: vec![],
+        };
+        assert!(
+            verify_program(&IrProgram {
+                functions: vec![empty_fn],
+                function_names: Default::default(),
+            })
+            .is_err(),
+            "function with zero blocks must be refused"
+        );
+
+        // 3. Duplicate BlockId within a function must fail closed.
+        let dup_block_fn = IrFunction {
+            id: FunctionId(0),
+            name: "dup_block".into(),
+            params: vec![],
+            ret_ty: IrType::Void,
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId::new(0),
+                    instrs: vec![],
+                    terminator: Some(Terminator::Return(None)),
+                },
+                BasicBlock {
+                    id: BlockId::new(0),
+                    instrs: vec![],
+                    terminator: Some(Terminator::Return(None)),
+                },
+            ],
+            locals: vec![],
+        };
+        assert!(
+            verify_program(&IrProgram {
+                functions: vec![dup_block_fn],
+                function_names: Default::default(),
+            })
+            .is_err(),
+            "duplicate BlockId must be refused"
+        );
+
+        // 4. Direct self-referential SSA cycle (`%0 = Add %0, %0`) must fail closed.
+        let self_cycle_fn = IrFunction {
+            id: FunctionId(0),
+            name: "self_cycle".into(),
+            params: vec![],
+            ret_ty: IrType::U64,
+            blocks: vec![BasicBlock {
+                id: BlockId::new(0),
+                instrs: vec![InstrNode {
+                    result: Some(ValueId::new(0)),
+                    instr: Instruction::Add {
+                        ty: IrType::U64,
+                        lhs: ValueId::new(0),
+                        rhs: ValueId::new(0),
+                    },
+                }],
+                terminator: Some(Terminator::Return(Some(ValueId::new(0)))),
+            }],
+            locals: vec![],
+        };
+        assert!(
+            verify_program(&IrProgram {
+                functions: vec![self_cycle_fn],
+                function_names: Default::default(),
+            })
+            .is_err(),
+            "self-referential SSA value cycle must be refused"
+        );
+
+        // 5. Non-scalar or out-of-Goldilocks-field Const must fail closed.
+        for bad_const in [
+            Instruction::Const {
+                ty: IrType::Struct("S".into()),
+                value: 1,
+            },
+            Instruction::Const {
+                ty: IrType::Bool,
+                value: 2,
+            },
+            Instruction::Const {
+                ty: IrType::U64,
+                value: 18446744069414584321,
+            },
+        ] {
+            let bad_const_fn = IrFunction {
+                id: FunctionId(0),
+                name: "bad_const".into(),
+                params: vec![],
+                ret_ty: IrType::Void,
+                blocks: vec![BasicBlock {
+                    id: BlockId::new(0),
+                    instrs: vec![InstrNode {
+                        result: Some(ValueId::new(0)),
+                        instr: bad_const,
+                    }],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+                locals: vec![],
+            };
+            assert!(
+                verify_program(&IrProgram {
+                    functions: vec![bad_const_fn],
+                    function_names: Default::default(),
+                })
+                .is_err(),
+                "invalid Const instruction must be refused"
+            );
+        }
     }
 }

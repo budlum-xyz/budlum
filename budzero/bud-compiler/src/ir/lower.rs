@@ -111,6 +111,9 @@ fn parse_ir_type(s: &str) -> Result<IrType, LoweringError> {
 
 // ─── Public entry point ───────────────────────────────────────────────────
 
+/// Goldilocks prime field modulus (`2^64 - 2^32 + 1`).
+const GOLDILOCKS_P: u64 = 18_446_744_069_414_584_321;
+
 /// Converts a contract into an [`IrProgram`].
 ///
 /// The existing production codegen (`codegen.rs`) is left untouched; this
@@ -119,7 +122,7 @@ pub fn lower_contract(
     contract: &Contract,
     sema: &SemanticAnalyzer,
 ) -> Result<IrProgram, LoweringError> {
-    let mut lowerer = Lowerer::new(contract, sema);
+    let mut lowerer = Lowerer::new(contract, sema)?;
     lowerer.lower(contract)
 }
 
@@ -136,38 +139,53 @@ struct Lowerer<'a> {
 }
 
 impl<'a> Lowerer<'a> {
-    fn new(contract: &Contract, sema: &'a SemanticAnalyzer) -> Self {
-        let storage_slots = contract
-            .storage
-            .iter()
-            .enumerate()
-            .map(|(i, f)| (f.name.clone(), i as i32))
-            .collect();
+    fn new(contract: &Contract, sema: &'a SemanticAnalyzer) -> Result<Self, LoweringError> {
+        let mut storage_slots = HashMap::with_capacity(contract.storage.len());
+        for (i, f) in contract.storage.iter().enumerate() {
+            let slot = i32::try_from(i).map_err(|_| {
+                LoweringError::InternalError(format!("storage slot index {i} exceeds i32"))
+            })?;
+            if storage_slots.insert(f.name.clone(), slot).is_some() {
+                return Err(LoweringError::UnsupportedNode(format!(
+                    "duplicate storage field '{}'",
+                    f.name
+                )));
+            }
+        }
 
-        let struct_field_order = contract
-            .structs
-            .iter()
-            .map(|s| {
-                let fields = s.fields.iter().map(|f| f.name.clone()).collect();
-                (s.name.clone(), fields)
-            })
-            .collect();
+        let mut struct_field_order = HashMap::with_capacity(contract.structs.len());
+        for s in &contract.structs {
+            let fields = s.fields.iter().map(|f| f.name.clone()).collect();
+            if struct_field_order.insert(s.name.clone(), fields).is_some() {
+                return Err(LoweringError::UnsupportedNode(format!(
+                    "duplicate struct '{}'",
+                    s.name
+                )));
+            }
+        }
 
-        Lowerer {
+        Ok(Lowerer {
             sema,
             storage_slots,
             struct_field_order,
             function_ids: HashMap::new(),
-        }
+        })
     }
 
     fn lower(&mut self, contract: &Contract) -> Result<IrProgram, LoweringError> {
         let mut program = IrProgram::default();
 
-        // 1st pass: assign every function a FunctionId.
+        // 1st pass: assign every function a unique FunctionId.
         for (i, func) in contract.functions.iter().enumerate() {
-            let fid = FunctionId(i as u32);
-            self.function_ids.insert(func.name.clone(), fid);
+            let fid = FunctionId(u32::try_from(i).map_err(|_| {
+                LoweringError::InternalError(format!("function index {i} exceeds u32"))
+            })?);
+            if self.function_ids.insert(func.name.clone(), fid).is_some() {
+                return Err(LoweringError::UnsupportedNode(format!(
+                    "duplicate function '{}'",
+                    func.name
+                )));
+            }
             program.function_names.insert(func.name.clone(), fid);
         }
 
@@ -245,10 +263,16 @@ impl<'a> Lowerer<'a> {
             }
 
             Stmt::Assign(name, expr) => {
-                let (val, _) = self.lower_expr_value(expr, ctx)?;
-                let (local, _) = ctx
+                let (val, val_ty) = self.lower_expr_value(expr, ctx)?;
+                let (local, local_ty) = ctx
                     .lookup_local(name)
                     .ok_or_else(|| LoweringError::UndefinedVariable(name.clone()))?;
+                if val_ty != local_ty {
+                    return Err(LoweringError::TypeMismatch {
+                        expected: local_ty,
+                        got: val_ty,
+                    });
+                }
                 ctx.push_instr(Instruction::WriteLocal { local, value: val });
             }
 
@@ -341,8 +365,20 @@ impl<'a> Lowerer<'a> {
                 end,
                 body,
             } => {
-                let (start_val, _) = self.lower_expr_value(start, ctx)?;
-                let (end_val, _) = self.lower_expr_value(end, ctx)?;
+                let (start_val, start_ty) = self.lower_expr_value(start, ctx)?;
+                if start_ty != IrType::U64 {
+                    return Err(LoweringError::TypeMismatch {
+                        expected: IrType::U64,
+                        got: start_ty,
+                    });
+                }
+                let (end_val, end_ty) = self.lower_expr_value(end, ctx)?;
+                if end_ty != IrType::U64 {
+                    return Err(LoweringError::TypeMismatch {
+                        expected: IrType::U64,
+                        got: end_ty,
+                    });
+                }
 
                 // Local slot for the loop variable.
                 let loop_local = ctx.fresh_local(IrType::U64);
@@ -473,6 +509,13 @@ impl<'a> Lowerer<'a> {
     ) -> Result<Option<(ValueId, IrType)>, LoweringError> {
         match expr {
             Expr::Int(v) => {
+                if *v >= GOLDILOCKS_P {
+                    return Err(LoweringError::UnsupportedNode(format!(
+                        "integer literal {} exceeds Goldilocks field modulus (max {})",
+                        v,
+                        GOLDILOCKS_P - 1
+                    )));
+                }
                 let val = ctx.push_value_instr(Instruction::Const {
                     ty: IrType::U64,
                     value: *v,
@@ -653,34 +696,31 @@ impl<'a> Lowerer<'a> {
         ctx: &mut FnCtx,
     ) -> Result<Option<(ValueId, IrType)>, LoweringError> {
         // Context built-ins
-        if name == "msg::sender" {
-            let val = ctx.push_value_instr(Instruction::ContextRead {
-                kind: ContextKind::Sender,
-            })?;
-            return Ok(Some((val, IrType::U64)));
-        }
-        if name == "msg::nonce" {
-            let val = ctx.push_value_instr(Instruction::ContextRead {
-                kind: ContextKind::Nonce,
-            })?;
-            return Ok(Some((val, IrType::U64)));
-        }
-        if name == "block::number" {
-            let val = ctx.push_value_instr(Instruction::ContextRead {
-                kind: ContextKind::BlockHeight,
-            })?;
+        if name == "msg::sender" || name == "msg::nonce" || name == "block::number" {
+            if !args.is_empty() {
+                return Err(LoweringError::UnsupportedNode(format!(
+                    "{name}() takes 0 arguments, got {}",
+                    args.len()
+                )));
+            }
+            let kind = match name {
+                "msg::sender" => ContextKind::Sender,
+                "msg::nonce" => ContextKind::Nonce,
+                _ => ContextKind::BlockHeight,
+            };
+            let val = ctx.push_value_instr(Instruction::ContextRead { kind })?;
             return Ok(Some((val, IrType::U64)));
         }
 
         // Poseidon built-in
         if name == "poseidon" {
-            if args.len() != 2 {
+            let [arg0, arg1] = args else {
                 return Err(LoweringError::UnsupportedNode(
                     "poseidon() exactly 2 arguments required".into(),
                 ));
-            }
-            let (lhs, _) = self.lower_expr_value(&args[0], ctx)?;
-            let (rhs, _) = self.lower_expr_value(&args[1], ctx)?;
+            };
+            let (lhs, _) = self.lower_expr_value(arg0, ctx)?;
+            let (rhs, _) = self.lower_expr_value(arg1, ctx)?;
             let val = ctx.push_value_instr(Instruction::Poseidon { lhs, rhs })?;
             return Ok(Some((val, IrType::U64)));
         }
@@ -699,14 +739,32 @@ impl<'a> Lowerer<'a> {
             .copied()
             .ok_or_else(|| LoweringError::UndefinedFunction(name.to_string()))?;
 
-        let mut arg_vals = Vec::new();
+        let mut arg_vals = Vec::with_capacity(args.len());
+        let mut arg_tys = Vec::with_capacity(args.len());
         for arg in args {
-            let (v, _) = self.lower_expr_value(arg, ctx)?;
+            let (v, ty) = self.lower_expr_value(arg, ctx)?;
             arg_vals.push(v);
+            arg_tys.push(ty);
         }
 
-        // Take the return type from sema.
-        let ret_ty = if let Some((_, ret)) = self.sema.functions.get(name) {
+        // Validate parameter count/types and return type against sema when known.
+        let ret_ty = if let Some((params, ret)) = self.sema.functions.get(name) {
+            if arg_tys.len() != params.len() {
+                return Err(LoweringError::UnsupportedNode(format!(
+                    "function '{name}' expects {} arguments, got {}",
+                    params.len(),
+                    arg_tys.len()
+                )));
+            }
+            for (got_ty, expected_sema) in arg_tys.iter().zip(params.iter()) {
+                let expected_ty = from_sema_type(expected_sema)?;
+                if *got_ty != expected_ty {
+                    return Err(LoweringError::TypeMismatch {
+                        expected: expected_ty,
+                        got: got_ty.clone(),
+                    });
+                }
+            }
             from_sema_type(ret)?
         } else {
             IrType::Void
@@ -1088,5 +1146,201 @@ mod tests {
             .flat_map(|b| &b.instrs)
             .any(|n| matches!(&n.instr, Instruction::Poseidon { .. }));
         assert!(has_poseidon, "Poseidon instruction missing");
+    }
+
+    #[test]
+    fn budc04_lower_refuses_field_overflow_dup_names_bad_builtin_args_and_assign_mismatch() {
+        use crate::ast::{Function, StorageField};
+
+        // 1. Out-of-Goldilocks-field integer literal must be refused during lowering.
+        let over_field = Contract {
+            name: "Over".into(),
+            storage: vec![],
+            structs: vec![],
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                return_type: Some("u64".into()),
+                body: vec![Stmt::Return(Some(Expr::Int(18446744069414584321)))],
+                is_pub: true,
+            }],
+        };
+        let sema = SemanticAnalyzer::new();
+        assert!(
+            lower_contract(&over_field, &sema).is_err(),
+            "integer literal >= GOLDILOCKS_P must be refused in lowering"
+        );
+
+        // 2. Duplicate function names must fail closed instead of silently overwriting.
+        let dup_fn = Contract {
+            name: "Dup".into(),
+            storage: vec![],
+            structs: vec![],
+            functions: vec![
+                Function {
+                    name: "main".into(),
+                    params: vec![],
+                    return_type: None,
+                    body: vec![],
+                    is_pub: true,
+                },
+                Function {
+                    name: "main".into(),
+                    params: vec![],
+                    return_type: None,
+                    body: vec![],
+                    is_pub: true,
+                },
+            ],
+        };
+        assert!(
+            lower_contract(&dup_fn, &sema).is_err(),
+            "duplicate function names must be refused in lowering"
+        );
+
+        // 3. Duplicate storage names must fail closed.
+        let dup_st = Contract {
+            name: "DupSt".into(),
+            storage: vec![
+                StorageField {
+                    name: "s".into(),
+                    ty: "u64".into(),
+                },
+                StorageField {
+                    name: "s".into(),
+                    ty: "u64".into(),
+                },
+            ],
+            structs: vec![],
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                return_type: None,
+                body: vec![],
+                is_pub: true,
+            }],
+        };
+        assert!(
+            lower_contract(&dup_st, &sema).is_err(),
+            "duplicate storage fields must be refused in lowering"
+        );
+
+        // 4. Context built-in with spurious arguments must fail closed.
+        let bad_ctx = Contract {
+            name: "BadCtx".into(),
+            storage: vec![],
+            structs: vec![],
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                return_type: Some("u64".into()),
+                body: vec![Stmt::Return(Some(Expr::Call(
+                    "msg::sender".into(),
+                    vec![Expr::Int(1)],
+                )))],
+                is_pub: true,
+            }],
+        };
+        assert!(
+            lower_contract(&bad_ctx, &sema).is_err(),
+            "msg::sender with arguments must be refused in lowering"
+        );
+
+        // 5. Assign with mismatched type (Bool into U64 slot) must fail closed in lowering.
+        let bad_assign = Contract {
+            name: "BadAssign".into(),
+            storage: vec![],
+            structs: vec![],
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                return_type: None,
+                body: vec![
+                    Stmt::Let("x".into(), Expr::Int(1)),
+                    Stmt::Assign(
+                        "x".into(),
+                        Expr::Binary(Box::new(Expr::Int(1)), BinOp::Eq, Box::new(Expr::Int(2))),
+                    ),
+                ],
+                is_pub: true,
+            }],
+        };
+        assert!(
+            lower_contract(&bad_assign, &sema).is_err(),
+            "assigning Bool to U64 local must be refused in lowering"
+        );
+
+        // 6. User-defined call with wrong arity or arg type against sema must fail closed.
+        let mut typed_sema = SemanticAnalyzer::new();
+        typed_sema.functions.insert(
+            "helper".into(),
+            (vec![crate::sema::Type::U64], crate::sema::Type::U64),
+        );
+        let bad_call_arity = Contract {
+            name: "BadCallArity".into(),
+            storage: vec![],
+            structs: vec![],
+            functions: vec![
+                Function {
+                    name: "helper".into(),
+                    params: vec![crate::ast::Param {
+                        name: "x".into(),
+                        ty: "u64".into(),
+                    }],
+                    return_type: Some("u64".into()),
+                    body: vec![Stmt::Return(Some(Expr::Ident("x".into())))],
+                    is_pub: false,
+                },
+                Function {
+                    name: "main".into(),
+                    params: vec![],
+                    return_type: Some("u64".into()),
+                    body: vec![Stmt::Return(Some(Expr::Call(
+                        "helper".into(),
+                        vec![Expr::Int(1), Expr::Int(2)],
+                    )))],
+                    is_pub: true,
+                },
+            ],
+        };
+        assert!(
+            lower_contract(&bad_call_arity, &typed_sema).is_err(),
+            "wrong user-function call arity must be refused in lowering"
+        );
+        let bad_call_type = Contract {
+            name: "BadCallType".into(),
+            storage: vec![],
+            structs: vec![],
+            functions: vec![
+                Function {
+                    name: "helper".into(),
+                    params: vec![crate::ast::Param {
+                        name: "x".into(),
+                        ty: "u64".into(),
+                    }],
+                    return_type: Some("u64".into()),
+                    body: vec![Stmt::Return(Some(Expr::Ident("x".into())))],
+                    is_pub: false,
+                },
+                Function {
+                    name: "main".into(),
+                    params: vec![],
+                    return_type: Some("u64".into()),
+                    body: vec![Stmt::Return(Some(Expr::Call(
+                        "helper".into(),
+                        vec![Expr::Binary(
+                            Box::new(Expr::Int(1)),
+                            BinOp::Eq,
+                            Box::new(Expr::Int(1)),
+                        )],
+                    )))],
+                    is_pub: true,
+                },
+            ],
+        };
+        assert!(
+            lower_contract(&bad_call_type, &typed_sema).is_err(),
+            "wrong user-function call arg type must be refused in lowering"
+        );
     }
 }

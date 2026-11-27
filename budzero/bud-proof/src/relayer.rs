@@ -149,6 +149,22 @@ fn hex16(bytes: &[u8; 32]) -> String {
     hex32(bytes)[..16].to_string()
 }
 
+fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn sanitize_nul(s: &str) -> String {
+    s.replace('\0', "?")
+}
+
+fn has_nul(s: &str) -> bool {
+    s.as_bytes().contains(&0)
+}
+
 impl CanonicalRelayReport {
     /// The canonical byte payload the signature covers.
     ///
@@ -203,9 +219,39 @@ impl CanonicalRelayReport {
         p
     }
 
-    /// Recompute the signature and check it against `report_sig`.
+    /// Recompute the signature and check it against `report_sig`, failing
+    /// closed on schema mismatch, embedded NUL field smuggling, u32 length
+    /// truncation, or contradictory status/alarm/canonical invariants.
     pub fn verify_report_sig(&self) -> bool {
-        keccak256(&self.canonical_payload()) == self.report_sig
+        if self.schema_version != RELAY_SCHEMA_VERSION {
+            return false;
+        }
+        if u32::try_from(self.proof.proof_bytes_len).is_err() {
+            return false;
+        }
+        if has_nul(&self.proof.backend)
+            || has_nul(&self.proof.p3_version)
+            || has_nul(&self.proof.fri_params_id)
+            || self.alarm.as_ref().is_some_and(|a| has_nul(&a.detail))
+        {
+            return false;
+        }
+        match self.status {
+            RelayStatus::Ok => {
+                if !self.is_canonical
+                    || self.alarm.is_some()
+                    || self.canonical_set_digest == [0u8; 32]
+                {
+                    return false;
+                }
+            }
+            RelayStatus::Alarm => {
+                if self.alarm.is_none() {
+                    return false;
+                }
+            }
+        }
+        ct_eq_32(&keccak256(&self.canonical_payload()), &self.report_sig)
     }
 
     /// Pretty JSON serialization (deterministic field order).
@@ -288,8 +334,10 @@ fn alarm_from_verify_error(e: &VerifyError) -> AlarmDetail {
             AlarmCode::PublicInputsMismatch,
             String::from("public inputs mismatch"),
         ),
-        VerifyError::InvalidEnvelope(msg) => (AlarmCode::InvalidEnvelope, msg.clone()),
-        VerifyError::DeserializationError(msg) => (AlarmCode::DeserializationError, msg.clone()),
+        VerifyError::InvalidEnvelope(msg) => (AlarmCode::InvalidEnvelope, sanitize_nul(msg)),
+        VerifyError::DeserializationError(msg) => {
+            (AlarmCode::DeserializationError, sanitize_nul(msg))
+        }
     };
     AlarmDetail { code, detail }
 }
@@ -297,9 +345,9 @@ fn alarm_from_verify_error(e: &VerifyError) -> AlarmDetail {
 fn fingerprint_of(envelope: &ProofEnvelope) -> ProofFingerprint {
     ProofFingerprint {
         proof_format_version: envelope.proof_format_version,
-        backend: envelope.backend.clone(),
-        p3_version: envelope.p3_version.clone(),
-        fri_params_id: envelope.fri_params_id.clone(),
+        backend: sanitize_nul(&envelope.backend),
+        p3_version: sanitize_nul(&envelope.p3_version),
+        fri_params_id: sanitize_nul(&envelope.fri_params_id),
         degree_bits: envelope.degree_bits,
         public_inputs_hash: envelope.public_inputs_hash,
         proof_bytes_len: envelope.proof_bytes.len(),
@@ -1067,5 +1115,135 @@ mod tests {
             report.alarm
         );
         assert!(report.verify_report_sig());
+    }
+
+    #[test]
+    fn budprf03_relayer_refuses_nul_smuggling_len_truncation_and_inconsistent_reports() {
+        let make_signed = |mut r: CanonicalRelayReport| {
+            r.report_sig = keccak256(&r.canonical_payload());
+            r
+        };
+        let valid_digest = canonical_set::canonical_set_digest().expect("digest");
+        let base = CanonicalRelayReport {
+            schema_version: RELAY_SCHEMA_VERSION,
+            status: RelayStatus::Ok,
+            verified_at_unix: 1_700_000_000,
+            program_hash: [0x11u8; 32],
+            is_canonical: true,
+            canonical_set_digest: valid_digest,
+            proof: ProofFingerprint {
+                proof_format_version: 1,
+                backend: "Plonky3-Keccak-Goldilocks".into(),
+                p3_version: "0.5.2".into(),
+                fri_params_id: "prod".into(),
+                degree_bits: 4,
+                public_inputs_hash: [0x22u8; 32],
+                proof_bytes_len: 128,
+            },
+            alarm: None,
+            report_sig: [0u8; 32],
+        };
+        assert!(make_signed(base.clone()).verify_report_sig());
+
+        // 1. NUL-byte field boundary smuggling in backend/p3_version/fri_params_id/alarm.detail.
+        let mut smuggled = base.clone();
+        smuggled.proof.backend = "Plonky3\x000.5.2".into();
+        smuggled.proof.p3_version = "prod".into();
+        assert!(
+            !make_signed(smuggled).verify_report_sig(),
+            "embedded NUL in backend must be refused by verify_report_sig"
+        );
+
+        let mut smuggled_detail = base.clone();
+        smuggled_detail.status = RelayStatus::Alarm;
+        smuggled_detail.alarm = Some(AlarmDetail {
+            code: AlarmCode::InvalidProof,
+            detail: "bad\0injected".into(),
+        });
+        assert!(
+            !make_signed(smuggled_detail).verify_report_sig(),
+            "embedded NUL in alarm.detail must be refused by verify_report_sig"
+        );
+
+        // 2. proof_bytes_len > u32::MAX (silent truncation collision with proof_bytes_len % 2^32).
+        if usize::BITS > 32 {
+            let mut truncated = base.clone();
+            truncated.proof.proof_bytes_len = (1usize << 32) + 128;
+            assert!(
+                !make_signed(truncated).verify_report_sig(),
+                "proof_bytes_len exceeding u32::MAX must be refused"
+            );
+        }
+
+        // 3. Semantic contradictions must fail closed even with recomputed report_sig.
+        let mut ok_noncanonical = base.clone();
+        ok_noncanonical.is_canonical = false;
+        assert!(
+            !make_signed(ok_noncanonical).verify_report_sig(),
+            "Ok report with is_canonical=false must be refused"
+        );
+
+        let mut ok_with_alarm = base.clone();
+        ok_with_alarm.alarm = Some(AlarmDetail {
+            code: AlarmCode::InvalidProof,
+            detail: "contradiction".into(),
+        });
+        assert!(
+            !make_signed(ok_with_alarm).verify_report_sig(),
+            "Ok report carrying an alarm must be refused"
+        );
+
+        let mut alarm_without_detail = base.clone();
+        alarm_without_detail.status = RelayStatus::Alarm;
+        alarm_without_detail.alarm = None;
+        assert!(
+            !make_signed(alarm_without_detail).verify_report_sig(),
+            "Alarm report with alarm=None must be refused"
+        );
+
+        let mut bad_schema = base;
+        bad_schema.schema_version = RELAY_SCHEMA_VERSION + 99;
+        assert!(
+            !make_signed(bad_schema).verify_report_sig(),
+            "unknown schema_version must be refused"
+        );
+
+        // 4. Adversarial envelope carrying embedded NULs must sanitize cleanly so the resulting
+        // Alarm report remains self-verifying.
+        let evil_env = ProofEnvelope {
+            proof_format_version: crate::adapter::PROOF_FORMAT_VERSION,
+            backend: "evil\0backend".into(),
+            p3_version: "0.5\0.2".into(),
+            fri_params_id: "fri\0x".into(),
+            public_inputs_hash: [0u8; 32],
+            proof_bytes: vec![0u8; 4],
+            degree_bits: 4,
+        };
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash: [0xAA; 32],
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: 10,
+            gas_used: 1,
+            exit_code: 0,
+            trace_len: 1,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+        let alarm_rep = CanonicalRelayReport::from_outcome(
+            &evil_env,
+            &pi,
+            Err(VerifyError::InvalidEnvelope("bad\0env".into())),
+            1_700_000_000,
+        );
+        assert_eq!(alarm_rep.status, RelayStatus::Alarm);
+        assert!(
+            alarm_rep.verify_report_sig(),
+            "sanitized alarm report from adversarial envelope must verify"
+        );
     }
 }

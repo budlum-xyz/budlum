@@ -38,6 +38,9 @@ pub struct Codegen {
         std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     /// The declared return type of every function, so `f().x` resolves.
     function_returns: std::collections::HashMap<String, String>,
+    /// The declared parameter count of every function, so direct codegen
+    /// callers cannot emit mismatched-arity calls that corrupt the VM stack.
+    function_arities: std::collections::HashMap<String, usize>,
 }
 
 impl Default for Codegen {
@@ -58,6 +61,7 @@ impl Codegen {
             struct_layouts: std::collections::HashMap::new(),
             struct_field_types: std::collections::HashMap::new(),
             function_returns: std::collections::HashMap::new(),
+            function_arities: std::collections::HashMap::new(),
         }
     }
 
@@ -74,22 +78,82 @@ impl Codegen {
             struct_layouts: std::collections::HashMap::new(),
             struct_field_types: std::collections::HashMap::new(),
             function_returns: std::collections::HashMap::new(),
+            function_arities: std::collections::HashMap::new(),
+        }
+    }
+
+    fn checked_jump_offset(&mut self, target: usize, origin: usize) -> i32 {
+        let diff = target as i128 - origin as i128;
+        match i32::try_from(diff) {
+            Ok(v) => v,
+            Err(_) => {
+                if self.error.is_none() {
+                    self.error = Some(CompileError::CodegenError(format!(
+                        "jump offset {diff} exceeds i32 range"
+                    )));
+                }
+                0
+            }
+        }
+    }
+
+    fn checked_byte_offset(&mut self, words: usize, ctx: &str) -> i32 {
+        match words.checked_mul(8).and_then(|b| i32::try_from(b).ok()) {
+            Some(v) => v,
+            None => {
+                if self.error.is_none() {
+                    self.error = Some(CompileError::CodegenError(format!(
+                        "{ctx} byte offset overflows i32 ({words} words)"
+                    )));
+                }
+                0
+            }
         }
     }
 
     pub fn generate(&mut self, contract: &Contract) -> Result<Vec<u64>, CompileError> {
-        // Populate struct layouts
+        // Populate struct layouts, refusing duplicate struct or field names.
         for s in &contract.structs {
             let mut fields = Vec::new();
             let mut types = std::collections::HashMap::new();
             for f in &s.fields {
                 fields.push(f.name.clone());
-                types.insert(f.name.clone(), f.ty.clone());
+                if types.insert(f.name.clone(), f.ty.clone()).is_some() {
+                    return Err(CompileError::CodegenError(format!(
+                        "duplicate field '{}' in struct '{}'",
+                        f.name, s.name
+                    )));
+                }
             }
-            self.struct_layouts.insert(s.name.clone(), fields);
+            if self.struct_layouts.insert(s.name.clone(), fields).is_some() {
+                return Err(CompileError::CodegenError(format!(
+                    "duplicate struct definition '{}'",
+                    s.name
+                )));
+            }
             self.struct_field_types.insert(s.name.clone(), types);
         }
+        // Validate unique storage field names up front.
+        let mut seen_storage = std::collections::HashSet::new();
+        for field in &contract.storage {
+            if !seen_storage.insert(field.name.as_str()) {
+                return Err(CompileError::CodegenError(format!(
+                    "duplicate storage field '{}'",
+                    field.name
+                )));
+            }
+        }
         for f in &contract.functions {
+            if self
+                .function_arities
+                .insert(f.name.clone(), f.params.len())
+                .is_some()
+            {
+                return Err(CompileError::CodegenError(format!(
+                    "duplicate function definition '{}'",
+                    f.name
+                )));
+            }
             if let Some(ret) = &f.return_type {
                 self.function_returns.insert(f.name.clone(), ret.clone());
             }
@@ -109,10 +173,8 @@ impl Codegen {
 
         // Patch main call
         if let Some(main_idx) = func_offsets.get("main") {
-            self.patch_jump(
-                jump_to_main_idx,
-                (*main_idx as i32) - (jump_to_main_idx as i32),
-            );
+            let off = self.checked_jump_offset(*main_idx, jump_to_main_idx);
+            self.patch_jump(jump_to_main_idx, off);
         } else {
             self.error = Some(CompileError::CodegenError(
                 "main function not found".to_string(),
@@ -122,7 +184,8 @@ impl Codegen {
         let unpatched = std::mem::take(&mut self.unpatched_calls);
         for (call_idx, func_name) in unpatched {
             if let Some(target_idx) = func_offsets.get(&func_name) {
-                self.patch_jump(call_idx, (*target_idx as i32) - (call_idx as i32));
+                let off = self.checked_jump_offset(*target_idx, call_idx);
+                self.patch_jump(call_idx, off);
             } else {
                 self.error = Some(CompileError::CodegenError(format!(
                     "Undefined function {}",
@@ -327,11 +390,10 @@ impl Codegen {
                 let end_idx = self.instructions.len();
                 self.next_reg = saved_reg;
 
-                self.patch_jump(
-                    jump_to_then_idx,
-                    (then_start_idx as i32) - (jump_to_then_idx as i32),
-                );
-                self.patch_jump(jump_to_end_idx, (end_idx as i32) - (jump_to_end_idx as i32));
+                let off_then = self.checked_jump_offset(then_start_idx, jump_to_then_idx);
+                let off_end = self.checked_jump_offset(end_idx, jump_to_end_idx);
+                self.patch_jump(jump_to_then_idx, off_then);
+                self.patch_jump(jump_to_end_idx, off_end);
             }
             Stmt::While(cond, body) => {
                 let start_idx = self.instructions.len();
@@ -351,22 +413,16 @@ impl Codegen {
                 }
 
                 let current_idx = self.instructions.len();
-                self.emit(
-                    Opcode::Jmp,
-                    0,
-                    0,
-                    0,
-                    (start_idx as i32) - (current_idx as i32),
-                );
+                let back_off = self.checked_jump_offset(start_idx, current_idx);
+                self.emit(Opcode::Jmp, 0, 0, 0, back_off);
 
                 let end_idx = self.instructions.len();
                 // The body's `let`s end with the body.
                 self.next_reg = saved_reg;
-                self.patch_jump(
-                    jump_to_body_idx,
-                    (body_start_idx as i32) - (jump_to_body_idx as i32),
-                );
-                self.patch_jump(jump_to_end_idx, (end_idx as i32) - (jump_to_end_idx as i32));
+                let off_body = self.checked_jump_offset(body_start_idx, jump_to_body_idx);
+                let off_end = self.checked_jump_offset(end_idx, jump_to_end_idx);
+                self.patch_jump(jump_to_body_idx, off_body);
+                self.patch_jump(jump_to_end_idx, off_end);
             }
             Stmt::Match { scrutinee, arms } => {
                 // Pattern matching codegen. ZK-circuit-friendly
@@ -416,7 +472,8 @@ impl Codegen {
                     let test_start = self.instructions.len();
                     // The previous arm's failure jump goes to this arm's test.
                     if let Some(prev) = pending_skip.take() {
-                        self.patch_jump(prev, (test_start as i32) - (prev as i32));
+                        let off = self.checked_jump_offset(test_start, prev);
+                        self.patch_jump(prev, off);
                     }
                     match &arm.pattern {
                         MatchPattern::IntLit(val) => {
@@ -463,7 +520,8 @@ impl Codegen {
                 // Register if the match ever grows a value.
                 let end_idx = self.instructions.len();
                 for idx in end_jump_indices {
-                    self.patch_jump(idx, (end_idx as i32) - (idx as i32));
+                    let off = self.checked_jump_offset(end_idx, idx);
+                    self.patch_jump(idx, off);
                 }
                 self.next_reg = saved_reg;
             }
@@ -520,20 +578,14 @@ impl Codegen {
                 self.next_reg = inner_saved;
 
                 let current_idx = self.instructions.len();
-                self.emit(
-                    Opcode::Jmp,
-                    0,
-                    0,
-                    0,
-                    (start_idx as i32) - (current_idx as i32),
-                );
+                let back_off = self.checked_jump_offset(start_idx, current_idx);
+                self.emit(Opcode::Jmp, 0, 0, 0, back_off);
 
                 let end_idx = self.instructions.len();
-                self.patch_jump(
-                    jump_to_body_idx,
-                    (body_start_idx as i32) - (jump_to_body_idx as i32),
-                );
-                self.patch_jump(jump_to_end_idx, (end_idx as i32) - (jump_to_end_idx as i32));
+                let off_body = self.checked_jump_offset(body_start_idx, jump_to_body_idx);
+                let off_end = self.checked_jump_offset(end_idx, jump_to_end_idx);
+                self.patch_jump(jump_to_body_idx, off_body);
+                self.patch_jump(jump_to_end_idx, off_end);
 
                 self.next_reg = saved_reg;
             }
@@ -572,7 +624,12 @@ impl Codegen {
         if self.error.is_some() {
             return;
         }
-        let inst_raw = self.instructions[idx];
+        let Some(&inst_raw) = self.instructions.get(idx) else {
+            self.error = Some(CompileError::CodegenError(format!(
+                "patch_jump: instruction index {idx} out of bounds"
+            )));
+            return;
+        };
         let mut inst = match Instruction::decode_any(inst_raw) {
             Ok(i) => i,
             Err(_) => {
@@ -585,7 +642,20 @@ impl Codegen {
             }
         };
         inst.imm = offset;
-        self.instructions[idx] = inst.encode();
+        match inst.try_encode() {
+            Ok(encoded) => {
+                if let Some(slot) = self.instructions.get_mut(idx) {
+                    *slot = encoded;
+                }
+            }
+            Err(e) => {
+                if self.error.is_none() {
+                    self.error = Some(CompileError::CodegenError(format!(
+                        "patch_jump: failed to encode instruction: {e}"
+                    )));
+                }
+            }
+        }
     }
 
     /// Best-effort static resolution of the struct type an expression
@@ -771,19 +841,20 @@ impl Codegen {
                 // Falls back to the literal count when the layout is
                 // Unknown.
                 let size_words = layout.as_ref().map_or(fields.len(), |fs| fs.len());
+                let size_bytes = self.checked_byte_offset(size_words, "struct allocation");
                 let size_reg = self.alloc_reg();
-                self.emit(Opcode::Load, size_reg, 0, 0, (size_words * 8) as i32);
+                self.emit(Opcode::Load, size_reg, 0, 0, size_bytes);
                 self.emit(Opcode::Add, 31, 31, size_reg, 0); // bump heap pointer
                 self.next_reg = ptr_reg + 1;
 
-                let mut field_vals: Vec<(usize, u8)> = Vec::new();
+                let mut field_vals: Vec<(i32, u8)> = Vec::new();
                 for (fname, val) in fields {
                     let val_reg = self.generate_expr(val, scope, storage);
                     let offset = match layout
                         .as_ref()
                         .and_then(|fs| fs.iter().position(|f| f == fname))
                     {
-                        Some(idx) => idx * 8,
+                        Some(idx) => self.checked_byte_offset(idx, "struct field"),
                         None => {
                             // Sema rejects literals naming a field the
                             // Struct does not declare; defense in depth.
@@ -795,14 +866,14 @@ impl Codegen {
                                     fname, name
                                 )));
                             }
-                            field_vals.len() * 8
+                            self.checked_byte_offset(field_vals.len(), "struct field")
                         }
                     };
                     field_vals.push((offset, val_reg));
                 }
 
                 for (offset, val_reg) in field_vals {
-                    self.emit(Opcode::Store, 0, ptr_reg, val_reg, offset as i32);
+                    self.emit(Opcode::Store, 0, ptr_reg, val_reg, offset);
                 }
 
                 self.next_reg = saved_next_reg;
@@ -828,7 +899,7 @@ impl Codegen {
                     // Every layout and took the first hit, which is both
                     // Wrong and (hash-map iteration order) non-deterministic.
                     Some(fields) => match fields.iter().position(|f| f == field) {
-                        Some(idx) => idx * 8,
+                        Some(idx) => self.checked_byte_offset(idx, "field access"),
                         None => {
                             // The semantic analyzer rejects field access
                             // On a struct that lacks the field, so this
@@ -868,7 +939,7 @@ impl Codegen {
                     }
                 };
 
-                self.emit(Opcode::Load, res_reg, base_reg, 0, offset as i32);
+                self.emit(Opcode::Load, res_reg, base_reg, 0, offset);
                 res_reg
             }
             Expr::Binary(left, op, right) => {
@@ -904,10 +975,19 @@ impl Codegen {
             }
             Expr::Call(name, args) => {
                 if name == "poseidon" {
+                    let [arg0, arg1] = args.as_slice() else {
+                        if self.error.is_none() {
+                            self.error = Some(CompileError::CodegenError(format!(
+                                "poseidon expects exactly 2 arguments, got {}",
+                                args.len()
+                            )));
+                        }
+                        return 0;
+                    };
                     let saved1 = self.next_reg;
-                    let r1 = self.generate_expr(&args[0], scope, storage);
+                    let r1 = self.generate_expr(arg0, scope, storage);
                     let saved2 = self.next_reg;
-                    let r2 = self.generate_expr(&args[1], scope, storage);
+                    let r2 = self.generate_expr(arg1, scope, storage);
 
                     let res = if r1 >= saved1 {
                         r1
@@ -920,19 +1000,34 @@ impl Codegen {
                     self.emit(Opcode::Poseidon, res, r1, r2, 0);
                     self.next_reg = std::cmp::max(res + 1, saved1);
                     res
-                } else if name == "msg::sender" {
+                } else if name == "msg::sender" || name == "msg::nonce" || name == "block::number" {
+                    if !args.is_empty() {
+                        if self.error.is_none() {
+                            self.error = Some(CompileError::CodegenError(format!(
+                                "{name} expects 0 arguments, got {}",
+                                args.len()
+                            )));
+                        }
+                        return 0;
+                    }
+                    let syscall_id = match name.as_str() {
+                        "msg::sender" => 1,
+                        "block::number" => 2,
+                        _ => 3,
+                    };
                     let res = self.alloc_reg();
-                    self.emit(Opcode::Syscall, res, 0, 0, 1);
-                    res
-                } else if name == "msg::nonce" {
-                    let res = self.alloc_reg();
-                    self.emit(Opcode::Syscall, res, 0, 0, 3);
-                    res
-                } else if name == "block::number" {
-                    let res = self.alloc_reg();
-                    self.emit(Opcode::Syscall, res, 0, 0, 2);
+                    self.emit(Opcode::Syscall, res, 0, 0, syscall_id);
                     res
                 } else if name == "verify_merkle_proof" {
+                    let [arg0] = args.as_slice() else {
+                        if self.error.is_none() {
+                            self.error = Some(CompileError::CodegenError(format!(
+                                "verify_merkle_proof expects exactly 1 argument, got {}",
+                                args.len()
+                            )));
+                        }
+                        return 0;
+                    };
                     // The VM's VerifyMerkle opcode takes only the address of the
                     // path window, as an immediate (`imm`); `rs1` and `rs2` are not
                     // read.
@@ -942,7 +1037,7 @@ impl Codegen {
                     // Reject dynamic expressions and out-of-range literals
                     // Explicitly instead of silently truncating a register
                     // Number (the old `r_path as i32` bug).
-                    let path_addr = match &args[0] {
+                    let path_addr = match arg0 {
                         Expr::Int(v) => *v,
                         _ => {
                             if self.error.is_none() {
@@ -972,6 +1067,19 @@ impl Codegen {
                     self.emit(Opcode::VerifyMerkle, res, 0, 0, path_addr as i32);
                     res
                 } else {
+                    if let Some(&expected_arity) = self.function_arities.get(name) {
+                        if args.len() != expected_arity {
+                            if self.error.is_none() {
+                                self.error = Some(CompileError::CodegenError(format!(
+                                    "function '{}' expects {} arguments, got {}",
+                                    name,
+                                    expected_arity,
+                                    args.len()
+                                )));
+                            }
+                            return 0;
+                        }
+                    }
                     let saved_next_reg = self.next_reg;
                     for r in 1..saved_next_reg {
                         self.emit(Opcode::Push, 0, r, 0, 0);
@@ -1047,6 +1155,154 @@ impl Codegen {
             rs2,
             imm,
         };
-        self.instructions.push(inst.encode());
+        match inst.try_encode() {
+            Ok(encoded) => self.instructions.push(encoded),
+            Err(_) => {
+                if self.error.is_none() {
+                    self.error = Some(CompileError::RegisterExhausted);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_contract(body: Vec<Stmt>) -> Contract {
+        Contract {
+            name: "T".into(),
+            storage: vec![],
+            structs: vec![],
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                return_type: None,
+                body,
+                is_pub: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn budc02_codegen_refuses_bad_builtin_arity_duplicates_user_arity_and_bad_registers() {
+        // 1. poseidon() with 0, 1, or 3 args must return Err rather than panicking or dropping args.
+        for args in [
+            vec![],
+            vec![Expr::Int(1)],
+            vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)],
+        ] {
+            let c = minimal_contract(vec![Stmt::Expr(Expr::Call("poseidon".into(), args))]);
+            assert!(
+                Codegen::new().generate(&c).is_err(),
+                "poseidon with wrong arity must return Err"
+            );
+        }
+
+        // 2. verify_merkle_proof() with 0 or 2 args must return Err rather than panicking.
+        for args in [vec![], vec![Expr::Int(0), Expr::Int(1)]] {
+            let c = minimal_contract(vec![Stmt::Expr(Expr::Call(
+                "verify_merkle_proof".into(),
+                args,
+            ))]);
+            assert!(
+                Codegen::new().generate(&c).is_err(),
+                "verify_merkle_proof with wrong arity must return Err"
+            );
+        }
+
+        // 3. Context syscalls with spurious arguments must fail closed.
+        for builtin in ["msg::sender", "msg::nonce", "block::number"] {
+            let c = minimal_contract(vec![Stmt::Expr(Expr::Call(
+                builtin.into(),
+                vec![Expr::Int(1)],
+            ))]);
+            assert!(
+                Codegen::new().generate(&c).is_err(),
+                "{builtin} with extra arg must return Err"
+            );
+        }
+
+        // 4. Duplicate function names must not silently overwrite func_offsets.
+        let dup_fn = Contract {
+            name: "DupFn".into(),
+            storage: vec![],
+            structs: vec![],
+            functions: vec![
+                Function {
+                    name: "main".into(),
+                    params: vec![],
+                    return_type: None,
+                    body: vec![],
+                    is_pub: true,
+                },
+                Function {
+                    name: "main".into(),
+                    params: vec![],
+                    return_type: None,
+                    body: vec![],
+                    is_pub: true,
+                },
+            ],
+        };
+        assert!(Codegen::new().generate(&dup_fn).is_err());
+
+        // 5. Duplicate storage names must not silently overwrite slots.
+        let dup_storage = Contract {
+            name: "DupSt".into(),
+            storage: vec![
+                StorageField {
+                    name: "x".into(),
+                    ty: "u64".into(),
+                },
+                StorageField {
+                    name: "x".into(),
+                    ty: "u64".into(),
+                },
+            ],
+            structs: vec![],
+            functions: vec![Function {
+                name: "main".into(),
+                params: vec![],
+                return_type: None,
+                body: vec![],
+                is_pub: true,
+            }],
+        };
+        assert!(Codegen::new().generate(&dup_storage).is_err());
+
+        // 6. User function call with wrong argument count must fail closed in codegen.
+        let bad_arity = Contract {
+            name: "BadArity".into(),
+            storage: vec![],
+            structs: vec![],
+            functions: vec![
+                Function {
+                    name: "helper".into(),
+                    params: vec![Param {
+                        name: "a".into(),
+                        ty: "u64".into(),
+                    }],
+                    return_type: Some("u64".into()),
+                    body: vec![Stmt::Return(Some(Expr::Ident("a".into())))],
+                    is_pub: false,
+                },
+                Function {
+                    name: "main".into(),
+                    params: vec![],
+                    return_type: None,
+                    body: vec![Stmt::Expr(Expr::Call("helper".into(), vec![]))],
+                    is_pub: true,
+                },
+            ],
+        };
+        assert!(Codegen::new().generate(&bad_arity).is_err());
+
+        // 7. Emitting an out-of-range register (> 31) must record an error, never emit u64::MAX.
+        let mut cg = Codegen::new();
+        cg.emit(Opcode::Add, 32, 0, 0, 0);
+        assert!(cg.error.is_some());
+        assert!(cg.instructions.is_empty());
     }
 }
