@@ -73,6 +73,10 @@ jobs:
             echo "AR_x86_64_linux_android=$TC/llvm-ar"
           } >> "$GITHUB_ENV"
 
+      # Run FFI unit tests (Rust -> GardenPhone) before cross-compiling for Android.
+      - name: Run Garden FFI unit tests
+        run: cargo test --locked --manifest-path mobile/garden-ffi/Cargo.toml
+
       # The core itself, for both ABIs of section 3.1. This is the same
       # library the Linux validators run; nothing Garden specific is built
       # for the phone (section 9.1).
@@ -106,6 +110,10 @@ jobs:
             cp "mobile/garden-ffi/target/${TRIPLE}/${PROFILE_DIR}/libbudlum_garden_ffi.so" "$DEST/"
             ls -la "$DEST"
           done
+
+      - name: Run Android JVM unit tests
+        working-directory: mobile/android
+        run: gradle testDebugUnitTest --no-daemon
 
       - name: Assemble the APK
         working-directory: mobile/android

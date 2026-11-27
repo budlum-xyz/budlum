@@ -1,12 +1,15 @@
 package network.budlum.validator.garden
 
+import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -26,12 +29,14 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -40,26 +45,50 @@ import com.google.zxing.qrcode.QRCodeWriter
 import org.json.JSONObject
 
 /**
- * The three screens of section 2.4: Invite, Join and Status. Nothing else
- * is here on purpose. Section 2.8 keeps message, post and trace queries out
- * of the app, so there is no screen for them.
+ * The Garden screens: Data, Invite, Join, and Status.
  */
 @Composable
 fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
+    val state = model.state
     var step by remember { mutableStateOf(Step.Setup) }
-    var tab by remember { mutableStateOf(0) }
+    var autoRoutedSeat by remember { mutableStateOf(false) }
+
+    // If a persisted seat restores cleanly and the phone is already allowed to
+    // validate, jump straight into the Garden once without blocking Back.
+    LaunchedEffect(state.readyForGarden, state.hasSeat) {
+        if (!autoRoutedSeat && state.readyForGarden && state.hasSeat) {
+            autoRoutedSeat = true
+            step = Step.Garden
+        }
+    }
+
+    // If an incoming deep link or QR scan staged an invite and setup is ready,
+    // route directly to Join so one tap finishes joining.
+    LaunchedEffect(state.readyForGarden, state.pendingJoinRecord) {
+        if (state.readyForGarden && state.pendingJoinRecord.isNotEmpty()) {
+            step = Step.Join
+        }
+    }
 
     // Every step can be left the way it was entered.
     BackHandler(enabled = step != Step.Setup) {
-        step = if (step == Step.Setup) Step.Setup else
-            if (step == Step.Choose) Step.Setup else Step.Choose
+        step = when (step) {
+            Step.Setup -> Step.Setup
+            Step.Choose -> Step.Setup
+            Step.Join, Step.Garden -> Step.Choose
+        }
     }
 
     when (step) {
-        Step.Setup -> SetupScreen(model) { step = Step.Choose }
+        Step.Setup -> SetupScreen(model) {
+            step = if (state.pendingJoinRecord.isNotEmpty()) Step.Join else Step.Choose
+        }
         Step.Choose -> ChooseScreen(
             model = model,
-            onStartOwn = { step = Step.Garden; tab = 0 },
+            onStartOwn = {
+                model.selectTab(0)
+                step = Step.Garden
+            },
             onHaveInvite = { step = Step.Join },
             onTestnet = onTestnet,
             onBack = { step = Step.Setup },
@@ -70,24 +99,21 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
         }
         Step.Garden -> Column(modifier = Modifier.fillMaxSize()) {
             TopBar("My network") { step = Step.Choose }
-            // Sending data is the first tab because it is the reason the
-            // network exists; the invite and the state of the group come
-            // after it.
             val titles = listOf("Data", "Invite", "Status")
-            TabRow(selectedTabIndex = tab) {
+            TabRow(selectedTabIndex = state.selectedTab) {
                 titles.forEachIndexed { index, title ->
                     Tab(
-                        selected = tab == index,
-                        onClick = { tab = index },
+                        selected = state.selectedTab == index,
+                        onClick = { model.selectTab(index) },
                         text = { Text(title) },
                     )
                 }
             }
-            when (tab) {
-                0 -> if (model.state.status.contains("\"chain_id\"")) {
-                    DataScreen(model)
-                } else {
-                    InviteScreen(model) { step = Step.Join }
+            when (state.selectedTab) {
+                0 -> when {
+                    state.inGarden -> DataScreen(model)
+                    state.canReturn -> StatusScreen(model)
+                    else -> InviteScreen(model) { step = Step.Join }
                 }
                 1 -> InviteScreen(model) { step = Step.Join }
                 else -> StatusScreen(model)
@@ -110,13 +136,46 @@ private fun TopBar(title: String, onBack: () -> Unit) {
     }
 }
 
+/** Shared labeled card container for structured sub-screens such as [DataScreen]. */
+@Composable
+internal fun GardenCard(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(title.uppercase(), style = MaterialTheme.typography.labelSmall)
+            content()
+        }
+    }
+}
+
 /**
  * Section 2.5: the link, the QR and a way to share them.
+ *
+ * Keeps the screen awake while showing a QR code and starts local-HTTP / mDNS
+ * sharing only while this screen is visible (section 5.6).
  */
 @Composable
 private fun InviteScreen(model: GardenModel, onJoinInstead: () -> Unit) {
     val context = LocalContext.current
+    val activity = context as? Activity
     val state = model.state
+
+    DisposableEffect(activity, state.inGarden) {
+        if (state.inGarden) {
+            activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            model.setInviteVisible(true)
+        }
+        onDispose {
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            model.setInviteVisible(false)
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -125,11 +184,6 @@ private fun InviteScreen(model: GardenModel, onJoinInstead: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         if (state.record.isEmpty()) {
-            // The old version of this screen opened on an empty box
-            // labelled "Name of the Garden" and nothing else. There was no
-            // way to know that the name is simply what you decide to call
-            // a group you are starting, or that somebody who was invited
-            // should not be here at all.
             Text("This phone is in no network yet.", style = MaterialTheme.typography.bodyLarge)
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(
@@ -179,7 +233,7 @@ private fun InviteScreen(model: GardenModel, onJoinInstead: () -> Unit) {
             ) { Text(if (state.busy) "Starting..." else "Start my network") }
         } else {
             Text("Anyone who has this can join.", style = MaterialTheme.typography.bodyLarge)
-            qrBitmap(state.recordQr)?.let { bitmap ->
+            qrBitmap(state.recordQr.ifBlank { state.record })?.let { bitmap ->
                 Image(
                     bitmap = bitmap.asImageBitmap(),
                     contentDescription = "Invite QR code",
@@ -193,10 +247,21 @@ private fun InviteScreen(model: GardenModel, onJoinInstead: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-            Text(
-                "Good until ${state.expiry}. Seats left on this invite: ${state.uses}.",
-                style = MaterialTheme.typography.bodySmall,
-            )
+            if (state.localShareUrl.isNotEmpty()) {
+                Text(
+                    "Local Wi-Fi APK + invite share active at ${state.localShareUrl}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (state.expiry.isNotEmpty() || state.uses > 0) {
+                Text(
+                    buildString {
+                        if (state.expiry.isNotEmpty()) append("Good until ${state.expiry}. ")
+                        if (state.uses > 0) append("Seats left on this invite: ${state.uses}.")
+                    }.trim(),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
@@ -222,12 +287,11 @@ private fun InviteScreen(model: GardenModel, onJoinInstead: () -> Unit) {
 }
 
 /**
- * Section 2.6: scan a QR, paste an invite, confirm.
+ * Section 2.6: scan a QR, pick a nearby/copied invite or paste one, preview, confirm.
  */
 @Composable
 private fun JoinScreen(model: GardenModel) {
     val state = model.state
-    var pasted by remember { mutableStateOf("") }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -240,29 +304,46 @@ private fun JoinScreen(model: GardenModel) {
             enabled = !state.busy,
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Scan a QR code") }
+
+        state.clipboardSuggestion?.let { clipInvite ->
+            OutlinedButton(
+                onClick = { model.acceptSuggestedInvite(clipInvite) },
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Use copied invite") }
+        }
+
+        if (state.nearbyInvites.isNotEmpty()) {
+            Text("NEARBY ON WI-FI", style = MaterialTheme.typography.labelSmall)
+            state.nearbyInvites.forEach { (label, rec) ->
+                OutlinedButton(
+                    onClick = { model.acceptSuggestedInvite(rec) },
+                    enabled = !state.busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Load invite from $label") }
+            }
+        }
+
         OutlinedTextField(
-            value = pasted,
-            onValueChange = {
-                pasted = it
-                model.preview(it)
-            },
+            value = state.pendingJoinRecord,
+            onValueChange = { model.updatePendingInvite(it) },
             label = { Text("Or paste an invite") },
             modifier = Modifier.fillMaxWidth(),
         )
-        if (state.preview.isNotEmpty()) {
+        if (state.preview.isNotEmpty() && state.pendingJoinRecord.isNotBlank()) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    Text("You were invited by", style = MaterialTheme.typography.bodySmall)
+                    Text("You were invited to", style = MaterialTheme.typography.bodySmall)
                     Text(state.preview, style = MaterialTheme.typography.bodyMedium)
                 }
             }
             // Section 5.12: an invite that arrived by a deliberate act is
             // confirmed with one tap, and nothing happens without it.
             Button(
-                onClick = { model.join(pasted) },
+                onClick = { model.join(state.pendingJoinRecord) },
                 enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Join this Garden") }
+            ) { Text(if (state.busy) "Joining..." else "Join this Garden") }
         }
         if (state.message.isNotEmpty()) {
             Text(state.message, style = MaterialTheme.typography.bodySmall)
@@ -311,15 +392,11 @@ private fun StatusScreen(model: GardenModel) {
             ) { Text("Refresh") }
             Button(
                 onClick = { model.leave() },
-                enabled = !state.busy && state.record.isNotEmpty(),
+                enabled = !state.busy && (state.inGarden || state.canReturn),
                 modifier = Modifier.weight(1f),
-            ) { Text("Leave") }
+            ) { Text(if (state.canReturn) "Leave permanently" else "Leave") }
         }
-        // A phone that left keeps its seat until it leaves a second time,
-        // and the answer says so. The way back belongs on the screen that
-        // said goodbye, not in another scan of an invite the person who
-        // left may no longer have.
-        if (state.status.contains("\"can_return\":true")) {
+        if (state.canReturn) {
             Button(
                 onClick = { model.returnToGarden() },
                 enabled = !state.busy,
@@ -333,17 +410,7 @@ private fun StatusScreen(model: GardenModel) {
 }
 
 /**
- * Draw the QR a scanner reads. The content is whatever the core handed
- * back, so the phone never invents an invite of its own.
- */
-/**
  * What Android is allowing, after the way in.
- *
- * Permissions are not a thing you grant once at the start: a person
- * revokes notifications a week later, or a manufacturer's cleaner app
- * restricts the battery on its own. The validator would then go quiet
- * with nothing on screen to say why, so the state stays visible and
- * fixable from the screen that reports the work.
  */
 @Composable
 private fun PermissionCard(model: GardenModel) {
@@ -396,11 +463,6 @@ private fun PermissionCard(model: GardenModel) {
 
 /**
  * The Garden as a person reads it, not as the core writes it.
- *
- * The answer is JSON because the core speaks one language to the app, the
- * node and the tests alike. A screen is not a log: the fields that say
- * whether this phone is doing its job are pulled out and named, and the
- * raw answer stays available underneath for when something is wrong.
  */
 @Composable
 private fun GardenCard(status: String) {

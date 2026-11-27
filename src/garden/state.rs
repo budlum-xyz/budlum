@@ -627,6 +627,9 @@ impl GardenState {
         let host = self.host();
         let limits = self.genesis.limits.clone();
         let sender_status = self.validators.get(&sender).map(|v| v.status);
+        if self.status == DomainStatus::Retired {
+            return Err("garden is retired; it has no next block".into());
+        }
         match &signed.tx.kind {
             GardenTxKind::Join {
                 name,
@@ -2687,5 +2690,53 @@ mod tests {
                 net.ledger.state.state_root_over(&net.ledger.state.content_root())
             );
         }
+    }
+
+    #[test]
+    fn garden_leave_and_resume_cannot_resurrect_retired_garden_in_same_block() {
+        let mut net = Net::new();
+        let host = net.host;
+        let leave = net.tx(&host, GardenTxKind::Leave);
+        let resume = GardenTx {
+            chain_id: net.ledger.state.chain_id(),
+            sender: host,
+            nonce: leave.tx.nonce + 1,
+            kind: GardenTxKind::Resume {
+                address: String::new(),
+            },
+        }
+        .sign(net.key(&host))
+        .unwrap();
+        let refusal = net
+            .commit(vec![leave, resume])
+            .expect_err("Leave + Resume in the same block must not resurrect a Retired Garden");
+        assert!(
+            refusal.contains("retired"),
+            "expected retired refusal, got: {refusal}"
+        );
+
+        let solo_leave = net.tx(&host, GardenTxKind::Leave);
+        net.commit(vec![solo_leave]).unwrap();
+        assert_eq!(net.ledger.state.status, DomainStatus::Retired);
+        let mut scratch = net.ledger.state.clone();
+        let post_retire_leave = net.tx(&host, GardenTxKind::Leave);
+        assert!(
+            scratch
+                .apply_tx(&post_retire_leave, scratch.height + 1, None)
+                .is_err(),
+            "apply_tx must refuse Leave when already Retired"
+        );
+        let post_retire_resume = net.tx(
+            &host,
+            GardenTxKind::Resume {
+                address: String::new(),
+            },
+        );
+        assert!(
+            scratch
+                .apply_tx(&post_retire_resume, scratch.height + 1, None)
+                .is_err(),
+            "apply_tx must refuse Resume when already Retired"
+        );
     }
 }

@@ -19,8 +19,8 @@
 //! Section 2.8 keeps message, post and trace queries out of the app, so
 //! they are not exported here even though the core has them.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use budlum_core::garden::{GardenOptions, GardenService};
 use tokio::runtime::Runtime;
@@ -85,6 +85,7 @@ pub struct GardenPhone {
     runtime: Runtime,
     service: GardenService,
     data_dir: PathBuf,
+    local_http_address: Mutex<Option<String>>,
 }
 
 #[uniffi::export]
@@ -96,7 +97,15 @@ impl GardenPhone {
     /// key when a Garden is created or joined.
     #[uniffi::constructor]
     pub fn new(data_dir: String) -> Result<Arc<Self>, GardenError> {
+        if data_dir.trim().is_empty() || data_dir.contains('\0') {
+            return Err(GardenError::of(
+                "the app directory path is empty or invalid",
+            ));
+        }
         let dir = PathBuf::from(&data_dir);
+        if !Path::new(&data_dir).is_absolute() {
+            return Err(GardenError::of("the app directory path must be absolute"));
+        }
         std::fs::create_dir_all(&dir)
             .map_err(|e| GardenError::of(format!("the app directory is not writable: {e}")))?;
         // A phone has few cores and a battery. The core's own round timing
@@ -111,7 +120,34 @@ impl GardenPhone {
             runtime,
             service,
             data_dir: dir,
+            local_http_address: Mutex::new(None),
         }))
+    }
+
+    /// Register or clear the phone's local HTTP `host:port` share address so
+    /// [`Self::invite`] formats `record_qr` as `http://<addr>/g#<record>`.
+    pub fn set_local_http_address(&self, address: Option<String>) -> Result<(), GardenError> {
+        let cleaned = match address {
+            Some(raw) => {
+                let trimmed = raw.trim().to_string();
+                if trimmed.is_empty() {
+                    None
+                } else if !is_valid_http_host_port(&trimmed) {
+                    return Err(GardenError::of(
+                        "local HTTP address must be bare host or host:port without URL delimiters",
+                    ));
+                } else {
+                    Some(trimmed)
+                }
+            }
+            None => None,
+        };
+        let mut guard = self
+            .local_http_address
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = cleaned;
+        Ok(())
     }
 
     /// Start a Garden and become its host.
@@ -162,9 +198,35 @@ impl GardenPhone {
     /// The invite record to hand out, with its QR content.
     ///
     /// This is the Invite screen of section 2.5: the link, the QR and
-    /// something to share.
+    /// something to share. Uses any registered local HTTP share address.
     pub fn invite(&self) -> Result<GardenAnswer, GardenError> {
-        answer(self.runtime.block_on(self.service.invite()))
+        let local = self
+            .local_http_address
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        self.invite_for(local)
+    }
+
+    /// The invite record with an explicit optional local HTTP `host:port`
+    /// override for `record_qr`.
+    pub fn invite_for(&self, local_address: Option<String>) -> Result<GardenAnswer, GardenError> {
+        let cleaned = match local_address {
+            Some(raw) if !raw.trim().is_empty() => {
+                let trimmed = raw.trim().to_string();
+                if !is_valid_http_host_port(&trimmed) {
+                    return Err(GardenError::of(
+                        "local HTTP address must be bare host or host:port without URL delimiters",
+                    ));
+                }
+                Some(trimmed)
+            }
+            _ => None,
+        };
+        answer(
+            self.runtime
+                .block_on(self.service.invite_for(cleaned.as_deref())),
+        )
     }
 
     /// Read an invite record without acting on it, so the Join screen can
@@ -175,7 +237,7 @@ impl GardenPhone {
 
     /// Join the Garden an invite record names.
     pub fn join(&self, record: String, name: String) -> Result<GardenAnswer, GardenError> {
-        let options = Self::options();
+        let options = Self::join_options();
         answer(
             self.runtime
                 .block_on(self.service.join(record, name, options)),
@@ -341,6 +403,11 @@ impl GardenPhone {
             .map(|ip| format!("/ip4/{ip}/tcp/0"))
     }
 
+    /// Joiner listen options: bind every interface behind NAT on an ephemeral port.
+    fn join_options() -> GardenOptions {
+        Self::options()
+    }
+
     /// The listen address a phone uses: every interface, a port the system
     /// picks. A phone moves between networks and cannot be told a port.
     /// Founding a Garden overrides this, because a host must be dialable.
@@ -366,6 +433,15 @@ impl GardenPhone {
             Err(e) => step("write to private storage", false, e.to_string()),
         }
     }
+}
+
+fn is_valid_http_host_port(address: &str) -> bool {
+    !address.is_empty()
+        && !address.bytes().any(|b| {
+            b.is_ascii_control()
+                || b.is_ascii_whitespace()
+                || matches!(b, b'/' | b'?' | b'#' | b'@' | b'\\' | b'%')
+        })
 }
 
 fn step(name: &str, passed: bool, detail: String) -> SelfTestStep {
@@ -459,4 +535,183 @@ fn local_ipv4_from_fib_trie() -> Option<std::net::Ipv4Addr> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TempDirGuard(PathBuf);
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir(label: &str) -> TempDirGuard {
+        let seq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!("budlum_garden_ffi_{label}_{seq}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        TempDirGuard(dir)
+    }
+
+    #[test]
+    fn phone_create_http_qr_join_status_leave_and_rejoin_round_trip() {
+        let host_dir = temp_dir("host");
+        let guest_dir = temp_dir("guest");
+        let host = GardenPhone::new(host_dir.0.to_string_lossy().into_owned()).unwrap();
+        let guest = GardenPhone::new(guest_dir.0.to_string_lossy().into_owned()).unwrap();
+
+        let self_test = host.self_test();
+        assert!(
+            self_test.passed,
+            "self_test must pass: {:?}",
+            self_test
+                .steps
+                .iter()
+                .map(|s| (&s.name, s.passed, &s.detail))
+                .collect::<Vec<_>>()
+        );
+
+        let created = host
+            .create(
+                "Phone Garden".into(),
+                "HostPhone".into(),
+                Some("/ip4/127.0.0.1/tcp/0".into()),
+            )
+            .unwrap();
+        let created_json: serde_json::Value = serde_json::from_str(&created.json).unwrap();
+        assert_eq!(
+            created_json
+                .pointer("/garden/me/member")
+                .and_then(|v| v.as_str()),
+            Some("Active")
+        );
+
+        let invite = host.invite().unwrap();
+        let invite_json: serde_json::Value = serde_json::from_str(&invite.json).unwrap();
+        let record_link = invite_json
+            .get("record")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        assert!(record_link.starts_with("budlum://garden/join#"));
+
+        let read = guest.read_record(record_link.clone()).unwrap();
+        let read_json: serde_json::Value = serde_json::from_str(&read.json).unwrap();
+        assert!(read_json.get("host").and_then(|v| v.as_str()).is_some());
+
+        let joined = guest.join(record_link, "GuestPhone".into()).unwrap();
+        let joined_json: serde_json::Value = serde_json::from_str(&joined.json).unwrap();
+        assert_eq!(
+            joined_json
+                .pointer("/garden/me/member")
+                .and_then(|v| v.as_str()),
+            Some("Active")
+        );
+
+        let status = guest.status().unwrap();
+        let status_json: serde_json::Value = serde_json::from_str(&status.json).unwrap();
+        assert_eq!(
+            status_json
+                .pointer("/garden/active_validators")
+                .and_then(|v| v.as_u64()),
+            Some(2)
+        );
+
+        let left = guest.leave().unwrap();
+        let left_json: serde_json::Value = serde_json::from_str(&left.json).unwrap();
+        assert_eq!(
+            left_json.get("can_return").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        let returned = guest.rejoin().unwrap();
+        let returned_json: serde_json::Value = serde_json::from_str(&returned.json).unwrap();
+        assert_eq!(
+            returned_json
+                .pointer("/garden/me/member")
+                .and_then(|v| v.as_str()),
+            Some("Active")
+        );
+
+        let _ = guest.leave();
+        let _ = host.leave();
+    }
+
+    #[test]
+    fn phone_new_rejects_empty_relative_and_nul_data_dir() {
+        for bad in ["", "   ", "relative/garden", "/tmp/bad\0dir"] {
+            assert!(
+                GardenPhone::new(bad.to_string()).is_err(),
+                "invalid data_dir {bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn phone_local_http_qr_and_invite_for_round_trip() {
+        let host_dir = temp_dir("http_host");
+        let guest_dir = temp_dir("http_guest");
+        let host = GardenPhone::new(host_dir.0.to_string_lossy().into_owned()).unwrap();
+        let guest = GardenPhone::new(guest_dir.0.to_string_lossy().into_owned()).unwrap();
+
+        host.create(
+            "LAN Room".into(),
+            "HostPhone".into(),
+            Some("/ip4/127.0.0.1/tcp/0".into()),
+        )
+        .unwrap();
+        assert!(host
+            .set_local_http_address(Some("bad/path#x".into()))
+            .is_err());
+        assert!(host.invite_for(Some("bad@host".into())).is_err());
+
+        host.set_local_http_address(Some("127.0.0.1:43210".into()))
+            .unwrap();
+        let inv = host.invite().unwrap();
+        let inv_json: serde_json::Value = serde_json::from_str(&inv.json).unwrap();
+        let http_qr = inv_json
+            .get("record_qr")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        assert!(
+            http_qr.starts_with("http://127.0.0.1:43210/g#"),
+            "unexpected local QR format: {http_qr}"
+        );
+
+        let preview = guest.read_record(http_qr.clone()).unwrap();
+        let preview_json: serde_json::Value = serde_json::from_str(&preview.json).unwrap();
+        assert!(preview_json.get("host").and_then(|v| v.as_str()).is_some());
+
+        let joined = guest.join(http_qr, "GuestPhone".into()).unwrap();
+        let joined_json: serde_json::Value = serde_json::from_str(&joined.json).unwrap();
+        assert_eq!(
+            joined_json
+                .pointer("/garden/me/member")
+                .and_then(|v| v.as_str()),
+            Some("Active")
+        );
+
+        host.set_local_http_address(None).unwrap();
+        let cleared = host.invite().unwrap();
+        let cleared_json: serde_json::Value = serde_json::from_str(&cleared.json).unwrap();
+        let plain_qr = cleared_json
+            .get("record_qr")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        // Loopback host address may still advertise http://127.0.0.1:<port>/g#
+        // or fall back to budlum://garden/join# when no override is set.
+        assert!(
+            plain_qr.starts_with("budlum://garden/join#") || plain_qr.starts_with("http://127.0.0.1:"),
+            "unexpected cleared QR: {plain_qr}"
+        );
+
+        let _ = guest.leave();
+        let _ = host.leave();
+    }
 }

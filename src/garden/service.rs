@@ -379,24 +379,47 @@ impl GardenService {
     ) -> Result<Value, String> {
         let limits = options.limits()?;
         let mut slot = self.slot.lock().await;
-        match &*slot {
-            Slot::Running(..) => {
-                return Err("this node already runs a Garden; leave it first".into())
+        let prior = match std::mem::replace(&mut *slot, Slot::Empty) {
+            Slot::Running(handle, seat) => {
+                *slot = Slot::Running(handle, seat);
+                return Err("this node already runs a Garden; leave it first".into());
             }
-            Slot::Away(seat, invite) => self.forget(seat, invite).await,
-            Slot::Empty => {}
-        }
-        *slot = Slot::Empty;
+            Slot::Away(seat, invite) => Some((seat, invite)),
+            Slot::Empty => None,
+        };
         let seat = Seat {
             secret: random_bytes(),
             config: self.config(name, &options),
         };
-        let (handle, seat, status) = self
+        let (handle, seat, status) = match self
             .enter(GardenEntry::Create { title, limits }, seat)
-            .await?;
-        let invite = handle.invite().await?;
-        let link = invite.to_link();
-        let qr = invite.qr_content()?;
+            .await
+        {
+            Ok(entered) => entered,
+            Err(e) => {
+                if let Some((old_seat, old_invite)) = prior {
+                    *slot = Slot::Away(old_seat, old_invite);
+                }
+                return Err(e);
+            }
+        };
+        let (invite, link, qr) = match handle.invite().await.and_then(|invite| {
+            let link = invite.to_link();
+            let qr = invite.qr_content()?;
+            Ok((invite, link, qr))
+        }) {
+            Ok(triple) => triple,
+            Err(e) => {
+                let _ = handle.leave().await;
+                if let Some((old_seat, old_invite)) = prior {
+                    *slot = Slot::Away(old_seat, old_invite);
+                }
+                return Err(e);
+            }
+        };
+        if let Some((old_seat, old_invite)) = prior {
+            self.forget(&old_seat, &old_invite).await;
+        }
         self.keep_seat(&seat, &invite);
         *slot = Slot::Running(handle, seat);
         drop(slot);
@@ -428,40 +451,47 @@ impl GardenService {
             GardenInvite::parse(&invite)?
         };
         let mut slot = self.slot.lock().await;
-        match &*slot {
-            Slot::Running(..) => {
-                return Err("this node already runs a Garden; leave it first".into())
+        let prior = match std::mem::replace(&mut *slot, Slot::Empty) {
+            Slot::Running(handle, seat) => {
+                *slot = Slot::Running(handle, seat);
+                return Err("this node already runs a Garden; leave it first".into());
             }
-            Slot::Away(_, away) if away.chain_id == invite.chain_id => {
+            Slot::Away(seat, away) if away.chain_id == invite.chain_id => {
+                *slot = Slot::Away(seat, away);
                 return Err(
                     "this node only stepped out of that Garden; use bud_gardenReturn".into(),
-                )
+                );
             }
-            Slot::Away(seat, away) => self.forget(seat, away).await,
-            Slot::Empty => {}
-        }
-        *slot = Slot::Empty;
+            Slot::Away(seat, away) => Some((seat, away)),
+            Slot::Empty => None,
+        };
         let seat = Seat {
             secret: random_bytes(),
             config: self.config(name, &options),
         };
-        // The seat is kept for the failure arm too, so a refused door leaves
-        // the same key able to try again rather than a stranger's.
+        // The seat is kept for the failure arm too when no prior Away seat was
+        // held, so a refused door leaves the same key able to try again.
         let kept = seat.clone();
         match self.enter(GardenEntry::Invite(invite.clone()), seat).await {
             Ok((handle, seat, status)) => {
+                if let Some((old_seat, old_away)) = prior {
+                    self.forget(&old_seat, &old_away).await;
+                }
                 self.keep_seat(&seat, &invite);
                 *slot = Slot::Running(handle, seat);
                 drop(slot);
                 Ok(json!({ "garden": status }))
             }
             Err(e) => {
-                // The node reached the Garden's door and was not let in - it
-                // may be frozen or full. That is a step out, not a forgotten
-                // Garden: `return` tries the same door again, and keeping
-                // the seat on disk means a later run can try it too.
-                self.keep_seat(&kept, &invite);
-                *slot = Slot::Away(kept, invite);
+                // Preserve an unrelated prior Away seat if joining a different
+                // Garden fails before admission; otherwise keep the new Away
+                // seat on disk and in memory so `rejoin` retries the same door.
+                if let Some((old_seat, old_away)) = prior {
+                    *slot = Slot::Away(old_seat, old_away);
+                } else {
+                    self.keep_seat(&kept, &invite);
+                    *slot = Slot::Away(kept, invite);
+                }
                 drop(slot);
                 Err(e)
             }
@@ -628,6 +658,20 @@ impl GardenService {
     /// Refuses when the node is not running in a Garden, and when it has no
     /// address another node can dial.
     pub async fn invite(&self) -> Result<Value, String> {
+        self.invite_for(None).await
+    }
+
+    /// The invite link and signed record of the running Garden, optionally
+    /// formatting the QR content for a local HTTP share endpoint `http://<addr>/g#<record>`.
+    ///
+    /// WIRING: wired through [`Self::invite`] and called directly by
+    /// `mobile/garden-ffi` when local HTTP APK/invite sharing is active.
+    ///
+    /// # Errors
+    ///
+    /// Refuses when the node is not running in a Garden, when it has no
+    /// dialable address, or when `local_address` contains URL delimiters.
+    pub async fn invite_for(&self, local_address: Option<&str>) -> Result<Value, String> {
         let handle = self.running().await?;
         let invite = handle.invite().await?;
         let link = invite.to_link();
@@ -642,14 +686,13 @@ impl GardenService {
         // operator has to be able to see.
         let mut answer = json!({ "invite": link, "qr": qr });
         let local_authority = qr_local_authority(&invite);
+        let effective_local = local_address.or(local_authority.as_deref());
         match handle.record().await {
             Ok(record) => {
+                let record_qr = record.to_qr(effective_local)?;
                 if let Some(fields) = answer.as_object_mut() {
                     fields.insert("record".into(), json!(record.to_link()));
-                    fields.insert(
-                        "record_qr".into(),
-                        json!(record.to_qr(local_authority.as_deref())?),
-                    );
+                    fields.insert("record_qr".into(), json!(record_qr));
                     fields.insert("owner".into(), json!(hex::encode(record.owner)));
                     fields.insert("host".into(), json!(hex::encode(record.host)));
                     fields.insert("expires_at_ms".into(), json!(record.expires_at_ms));
@@ -1308,5 +1351,89 @@ mod tests {
             "away status must surface the matching genesis record"
         );
         let _ = running.leave().await;
+    }
+
+    #[tokio::test]
+    async fn join_accepts_http_local_qr_record_and_rejects_bad_qr() {
+        let host = GardenService::new(None, None);
+        host.create("qr-room".into(), "host".into(), options())
+            .await
+            .unwrap();
+        let inv = host.invite().await.unwrap();
+        let record_link = text(&inv, "/record");
+        let parsed = crate::garden::record::GardenRecord::parse(&record_link).unwrap();
+        let http_qr = parsed.to_qr(Some("127.0.0.1:8080")).unwrap();
+        assert!(http_qr.starts_with("http://127.0.0.1:8080/g#"));
+
+        let guest = GardenService::new(None, None);
+        let joined = guest
+            .join(http_qr, "guest".into(), options())
+            .await
+            .expect("GardenService::join must accept http://<addr>/g#<record> QR");
+        assert_eq!(text(&joined, "/garden/me/member"), "Active");
+
+        let bad_join = GardenService::new(None, None)
+            .join(
+                "http://127.0.0.1:8080/g#notbase64!".into(),
+                "x".into(),
+                options(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            bad_join.contains("base64url") || bad_join.contains("invite record"),
+            "malformed /g# QR should return record parse error, got: {bad_join}"
+        );
+
+        guest.leave().await.unwrap();
+        host.leave().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_and_join_failures_preserve_prior_away_seat() {
+        let host = GardenService::new(None, None);
+        host.create("keep-away".into(), "host".into(), options())
+            .await
+            .unwrap();
+        let inv = text(&host.invite().await.unwrap(), "/invite");
+
+        let guest_dir = tempfile::tempdir().unwrap();
+        let guest = GardenService::new(None, Some(guest_dir.path().to_path_buf()));
+        guest.join(inv, "guest".into(), options()).await.unwrap();
+        let left = guest.leave().await.unwrap();
+        assert_eq!(left["can_return"], json!(true));
+        let original_chain = text(&left, "/chain_id");
+        let seat_path = guest_dir.path().join(SEAT_FILE);
+        assert!(seat_path.exists(), "away seat file must exist after leave");
+
+        let bad_opts = GardenOptions {
+            listen: Some("/ip4/0.0.0.0/tcp/0".into()),
+            ..options()
+        };
+        assert!(
+            guest
+                .create("new-room".into(), "guest".into(), bad_opts)
+                .await
+                .is_err(),
+            "unspecified listen address without announce must refuse create"
+        );
+        assert!(
+            seat_path.exists(),
+            "failed create must not wipe the prior kept seat file"
+        );
+        let status = guest.status().await.unwrap();
+        assert_eq!(
+            status.pointer("/garden/chain_id").and_then(Value::as_str),
+            Some(original_chain.as_str()),
+            "failed create must preserve prior Away seat instead of wiping it"
+        );
+
+        let returned = guest
+            .rejoin()
+            .await
+            .expect("preserved Away seat must rejoin");
+        assert_eq!(text(&returned, "/garden/me/member"), "Active");
+        guest.leave().await.unwrap();
+        host.leave().await.unwrap();
     }
 }

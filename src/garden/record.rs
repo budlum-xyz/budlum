@@ -216,6 +216,18 @@ impl GardenRecord {
         // A Garden runs on its own chain id. A record naming a primary
         // Budlum chain is refused with the name of that network.
         verify_garden_execution_chain(self.chain_id)?;
+        if self.genesis_hash == [0u8; 32] {
+            return Err("invite record has an empty genesis hash".into());
+        }
+        if self.token == [0u8; 32] {
+            return Err("invite record has an empty invite token".into());
+        }
+        if self.owner == [0u8; 32] {
+            return Err("invite record has an empty owner key".into());
+        }
+        if self.host == [0u8; 32] {
+            return Err("invite record has an empty host key".into());
+        }
         if self.peers.is_empty() {
             return Err("invite record names nowhere to knock".into());
         }
@@ -365,21 +377,28 @@ impl GardenRecord {
     }
 }
 
-/// The record inside `http://<address>/g#<record>`, when that is the shape.
-///
-/// Only the path this code writes is accepted. A stray `http` link that
-/// happens to carry a `#` is not an invite and is not read as one.
+/// True when `address` is a bare `host` or `host:port` with no URL
+/// delimiters (`/`/`\`/`@`/`?`/`#`/`%`), whitespace, or control bytes.
 fn is_safe_qr_authority(address: &str) -> bool {
     !address.is_empty()
         && address
             .bytes()
-            .all(|b| b.is_ascii_graphic() && !matches!(b, b'/' | b'\\' | b'@' | b'?' | b'#'))
+            .all(|b| b.is_ascii_graphic() && !matches!(b, b'/' | b'\\' | b'@' | b'?' | b'#' | b'%'))
 }
 
+/// The record inside `http://<address>/g#<record>`, when that is the shape.
+///
+/// Only the path this code writes is accepted. A stray `http` link that
+/// happens to carry a `#` is not an invite and is not read as one.
 fn local_qr_body(text: &str) -> Option<&str> {
     let rest = text.strip_prefix("http://")?;
     let (address, fragment) = rest.split_once("/g#")?;
-    if !is_safe_qr_authority(address) || fragment.is_empty() || fragment.contains('#') {
+    if !is_safe_qr_authority(address)
+        || fragment.is_empty()
+        || fragment.bytes().any(|b| {
+            b.is_ascii_control() || b.is_ascii_whitespace() || matches!(b, b'/' | b'?' | b'#')
+        })
+    {
         return None;
     }
     Some(fragment)
@@ -399,7 +418,7 @@ fn take<'a>(bytes: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8], Strin
 
 /// Read a single byte and walk the cursor past it.
 fn one(bytes: &[u8], at: &mut usize) -> Result<u8, String> {
-    take(bytes, at, 1).map(|slice| slice[0])
+    take(bytes, at, 1).and_then(|slice| slice.first().copied().ok_or_else(short))
 }
 
 fn array2(slice: &[u8]) -> Result<[u8; 2], String> {
@@ -456,7 +475,10 @@ const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 fn base64url_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(base64url_len(bytes.len()));
     for chunk in bytes.chunks(3) {
-        let b0 = u32::from(chunk[0]);
+        let Some(&first) = chunk.first() else {
+            continue;
+        };
+        let b0 = u32::from(first);
         let b1 = chunk.get(1).copied().map_or(0, u32::from);
         let b2 = chunk.get(2).copied().map_or(0, u32::from);
         let packed = b0 << 16 | b1 << 8 | b2;
@@ -495,6 +517,11 @@ fn base64url_decode(text: &str) -> Result<Vec<u8>, String> {
             let value = ALPHABET.iter().position(|a| a == c).ok_or_else(bad)?;
             let value = u32::try_from(value).map_err(|_| bad())?;
             packed |= value << (18 - i * 6);
+        }
+        if (chunk.len() == 2 && (packed & 0x0000_f000) != 0)
+            || (chunk.len() == 3 && (packed & 0x0000_00c0) != 0)
+        {
+            return Err("invite record has non-canonical base64url trailing bits".into());
         }
         out.push(byte_at(packed, 16));
         if chunk.len() >= 3 {
@@ -778,5 +805,114 @@ mod tests {
             links.push(record.to_link());
         }
         assert_ne!(links[0], links[1], "two owners produced one record");
+    }
+
+    #[test]
+    fn base64url_trailing_spare_bits_are_rejected_for_canonical_spelling() {
+        assert_eq!(base64url_decode("AA").unwrap(), vec![0u8]);
+        assert!(
+            base64url_decode("AB").is_err(),
+            "non-zero 4-bit trailing spare bits must be refused"
+        );
+        assert_eq!(base64url_decode("AAA").unwrap(), vec![0u8, 0u8]);
+        assert!(
+            base64url_decode("AAB").is_err(),
+            "non-zero 2-bit trailing spare bits must be refused"
+        );
+    }
+
+    #[test]
+    fn record_check_refuses_all_zero_genesis_token_and_host() {
+        let signer = key(1);
+        let host = key(9).public_key_bytes();
+        assert!(
+            GardenRecord::issue(
+                CHAIN,
+                [0u8; 32],
+                [0xcd; 32],
+                host,
+                vec![short_peer(1)],
+                NOW,
+                DEFAULT_RECORD_TTL_MS,
+                5,
+                &signer,
+            )
+            .is_err(),
+            "all-zero genesis_hash must be refused"
+        );
+        assert!(
+            GardenRecord::issue(
+                CHAIN,
+                [0xab; 32],
+                [0u8; 32],
+                host,
+                vec![short_peer(1)],
+                NOW,
+                DEFAULT_RECORD_TTL_MS,
+                5,
+                &signer,
+            )
+            .is_err(),
+            "all-zero invite token must be refused"
+        );
+        assert!(
+            GardenRecord::issue(
+                CHAIN,
+                [0xab; 32],
+                [0xcd; 32],
+                [0u8; 32],
+                vec![short_peer(1)],
+                NOW,
+                DEFAULT_RECORD_TTL_MS,
+                5,
+                &signer,
+            )
+            .is_err(),
+            "all-zero host key must be refused"
+        );
+    }
+
+    #[test]
+    fn to_qr_and_local_qr_body_refuse_url_delimiter_injection() {
+        let record = GardenRecord::issue(
+            CHAIN,
+            [0xab; 32],
+            [0xcd; 32],
+            key(9).public_key_bytes(),
+            vec![short_peer(1)],
+            NOW,
+            DEFAULT_RECORD_TTL_MS,
+            5,
+            &key(1),
+        )
+        .unwrap();
+        for bad_addr in [
+            "evil.example/phish#",
+            "192.168.1.5:8080?x=1",
+            "user@evil.example",
+            "192.168.1.5:8080/extra",
+            "192.168.1.5:8080\\evil",
+            "192.168.1.5:8080\r\n",
+        ] {
+            assert!(
+                record.to_qr(Some(bad_addr)).is_err(),
+                "local_address with URL delimiter must be refused: {bad_addr:?}"
+            );
+        }
+        let body = record
+            .to_link()
+            .strip_prefix(RECORD_LINK_PREFIX)
+            .unwrap()
+            .to_string();
+        for bad_qr in [
+            format!("http://192.168.1.5:8080?x=1/g#{body}"),
+            format!("http://user@192.168.1.5:8080/g#{body}"),
+            format!("http://192.168.1.5:8080\\evil/g#{body}"),
+        ] {
+            assert!(
+                local_qr_body(&bad_qr).is_none() && GardenRecord::parse(&bad_qr).is_err(),
+                "malformed http local QR authority must be refused: {bad_qr}"
+            );
+        }
     }
 }

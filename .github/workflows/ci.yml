@@ -3702,7 +3702,9 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Gate canary (proof it is not vacuous)
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- garden-scenario --self-test
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- garden-scenario --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- garden-acceptance --self-test
       - name: Garden unit tests
         run: |
           set -euo pipefail
@@ -3720,3 +3722,4 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --test garden_acceptance -- --test-threads=1 2>&1 | tee /tmp/garden-acceptance.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- garden-acceptance /tmp/garden-acceptance.txt

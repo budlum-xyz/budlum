@@ -33,11 +33,6 @@ import org.json.JSONObject
  * the group stores, and this screen is the thing being stored: data,
  * sent over the chain through B.U.D. 3.0, coming back out verified
  * rather than trusted.
- *
- * Until now the phone could join a group and then do nothing with it,
- * which made the whole thing look like an empty ceremony. The core
- * could already publish, resolve and list; the phone simply had no way
- * to ask.
  */
 @Composable
 fun DataScreen(model: GardenModel) {
@@ -80,16 +75,20 @@ fun DataScreen(model: GardenModel) {
         )
         Button(
             onClick = {
-                model.send(text.trim(), caption.trim())
-                text = ""
-                caption = ""
+                model.send(text.trim(), caption.trim()) {
+                    text = ""
+                    caption = ""
+                }
             },
             enabled = text.isNotBlank() && !state.busy,
             modifier = Modifier.fillMaxWidth(),
         ) { Text(if (state.busy) "Sending..." else "Send into the Garden") }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { model.refreshFeed() }) { Text("Refresh") }
+            OutlinedButton(
+                onClick = { model.refreshFeed() },
+                enabled = !state.busy,
+            ) { Text("Refresh") }
         }
 
         Text("WHAT THE GROUP HAS SENT", style = MaterialTheme.typography.labelSmall)

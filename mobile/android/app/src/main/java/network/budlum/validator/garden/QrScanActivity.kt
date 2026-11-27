@@ -28,6 +28,7 @@ import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
 import java.util.EnumMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The camera half of section 2.6.
@@ -48,7 +49,7 @@ import java.util.concurrent.Executors
 class QrScanActivity : ComponentActivity() {
 
     private val executor = Executors.newSingleThreadExecutor()
-    private var answered = false
+    private val answered = AtomicBoolean(false)
     private var preview: PreviewView? = null
 
     private val reader = QRCodeReader()
@@ -163,44 +164,41 @@ class QrScanActivity : ComponentActivity() {
     }
 
     private fun read(image: ImageProxy) {
-        if (answered) {
-            image.close()
-            return
-        }
-        val text = runCatching { decode(image) }.getOrNull()
-        image.close()
-        if (!text.isNullOrBlank()) {
-            answered = true
-            runOnUiThread {
-                setResult(Activity.RESULT_OK, Intent().putExtra(RESULT_TEXT, text))
-                finish()
+        try {
+            if (answered.get()) {
+                return
             }
+            val text = runCatching { decode(image) }.getOrNull()
+            if (!text.isNullOrBlank() && answered.compareAndSet(false, true)) {
+                runOnUiThread {
+                    setResult(Activity.RESULT_OK, Intent().putExtra(RESULT_TEXT, text))
+                    finish()
+                }
+            }
+        } finally {
+            image.close()
         }
     }
 
     /**
      * One frame, tried the way it arrived and then turned.
      *
-     * The Y plane alone is the luminance zxing wants, but it is padded to
-     * `rowStride`, so that - not the image width - is the width of the
-     * buffer. The crop is then the real image inside it.
+     * The Y plane alone is the luminance zxing wants, packed across both
+     * `rowStride` and `pixelStride`, and frames arrive in sensor orientation
+     * so we try up to four quarter-turns with `TRY_HARDER`.
      */
     private fun decode(image: ImageProxy): String? {
         val plane = image.planes.firstOrNull() ?: return null
-        val buffer = plane.buffer
-        val bytes = ByteArray(buffer.remaining())
-        buffer.get(bytes)
-        val stride = plane.rowStride.takeIf { it >= image.width } ?: image.width
-        val rows = bytes.size / stride
-        val height = minOf(image.height, rows)
-        if (height <= 0) return null
+        val width = image.width
+        val height = image.height
+        val yBytes = extractLuminance(plane, width, height) ?: return null
         var source: LuminanceSource = PlanarYUVLuminanceSource(
-            bytes,
-            stride,
+            yBytes,
+            width,
             height,
             0,
             0,
-            image.width,
+            width,
             height,
             false,
         )
@@ -225,5 +223,53 @@ class QrScanActivity : ComponentActivity() {
     companion object {
         /** The extra the scanned text comes back in. */
         const val RESULT_TEXT = "garden.scanned.record"
+
+        /**
+         * Copy Y luminance rows into a packed `width * height` byte array while
+         * honoring `plane.rowStride` and `plane.pixelStride`.
+         */
+        fun extractLuminance(
+            plane: ImageProxy.PlaneProxy,
+            width: Int,
+            height: Int,
+        ): ByteArray? = extractLuminanceFromBuffer(
+            src = plane.buffer,
+            rowStride = plane.rowStride,
+            pixelStride = plane.pixelStride,
+            width = width,
+            height = height,
+        )
+
+        fun extractLuminanceFromBuffer(
+            src: java.nio.ByteBuffer,
+            rowStride: Int,
+            pixelStride: Int,
+            width: Int,
+            height: Int,
+        ): ByteArray? {
+            if (width <= 0 || height <= 0 || rowStride < width) return null
+            val step = pixelStride.coerceAtLeast(1)
+            val buffer = src.duplicate()
+            buffer.rewind()
+            val out = ByteArray(width * height)
+            if (step == 1 && rowStride == width && buffer.remaining() >= out.size) {
+                buffer.get(out)
+                return out
+            }
+            val rowScratch = ByteArray(rowStride)
+            for (row in 0 until height) {
+                val remaining = buffer.remaining()
+                if (remaining <= 0) return null
+                val toRead = minOf(rowStride, remaining)
+                buffer.get(rowScratch, 0, toRead)
+                val outOffset = row * width
+                for (col in 0 until width) {
+                    val srcIdx = col * step
+                    if (srcIdx >= toRead) return null
+                    out[outOffset + col] = rowScratch[srcIdx]
+                }
+            }
+            return out
+        }
     }
 }

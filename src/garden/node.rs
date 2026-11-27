@@ -404,7 +404,8 @@ fn gossip_bytes(item: &GardenGossip) -> usize {
 }
 
 /// Append `item` to a peer's gossip outbox while enforcing both item-count and
-/// byte budgets. Oldest entries are dropped first to make room.
+/// byte budgets. Oldest non-presence entries are dropped first to make room so
+/// content bursts cannot starve or evict the presence heartbeat.
 fn queue_gossip_item(
     queue: &mut VecDeque<GardenGossip>,
     item: GardenGossip,
@@ -419,7 +420,11 @@ fn queue_gossip_item(
     while queue.len() >= max_items
         || (!queue.is_empty() && queued_bytes.saturating_add(item_bytes) > max_bytes)
     {
-        let Some(dropped) = queue.pop_front() else {
+        let evict_idx = queue
+            .iter()
+            .position(|entry| !matches!(entry, GardenGossip::Presence(_)))
+            .unwrap_or(0);
+        let Some(dropped) = queue.remove(evict_idx) else {
             break;
         };
         queued_bytes = queued_bytes.saturating_sub(gossip_bytes(&dropped));
@@ -427,14 +432,34 @@ fn queue_gossip_item(
     queue.push_back(item);
 }
 
+/// Move queued presence signals ahead of other gossip while keeping their
+/// relative order. Presence renews on a clock: if a busy publication leaves
+/// it behind content in a capped queue, validators read the host as frozen
+/// even while the host is running.
+fn prioritize_presence(queue: &mut VecDeque<GardenGossip>) {
+    let mut presence = VecDeque::with_capacity(queue.len());
+    let mut rest = VecDeque::with_capacity(queue.len());
+    while let Some(item) = queue.pop_front() {
+        if matches!(item, GardenGossip::Presence(_)) {
+            presence.push_back(item);
+        } else {
+            rest.push_back(item);
+        }
+    }
+    presence.append(&mut rest);
+    *queue = presence;
+}
+
 /// Drain the next outbound gossip batch from `queue` without crossing either
-/// `max_items`, `max_bytes`, or the wire request frame limit.
+/// `max_items`, `max_bytes`, or the wire request frame limit. Presence goes
+/// ahead of queued content.
 fn drain_gossip_batch(
     queue: &mut VecDeque<GardenGossip>,
     max_items: usize,
     max_bytes: usize,
 ) -> Vec<GardenGossip> {
     const FRAME_OVERHEAD: u64 = 64;
+    prioritize_presence(queue);
     let mut batch = Vec::new();
     let mut batch_bytes = 0usize;
     let mut wire_bytes = FRAME_OVERHEAD;
@@ -748,6 +773,7 @@ pub async fn spawn(
             if address.is_empty() {
                 // The invite carries the host address. Without one nobody
                 // could ever join, so the Garden is not founded at all.
+                let _ = garden_net.commands.send(NetCommand::Shutdown).await;
                 return Err(
                     "a Garden host needs an address the others can dial: listen on one \
                      interface or set the announce option"
@@ -945,13 +971,16 @@ async fn wait_at_the_door(handle: &GardenHandle) -> Result<(), String> {
         if member == Some("Active") || member == Some("Waiting") {
             return Ok(());
         }
-        if status.get("turned_away") == Some(&Value::Bool(true)) {
+        if status.pointer("/me/turned_away") == Some(&Value::Bool(true)) {
+            let _ = handle.leave().await;
             return Err("the Garden turned this key away".into());
         }
         if status.get("status").and_then(Value::as_str) == Some("Retired") {
+            let _ = handle.leave().await;
             return Err("the Garden was retired before this key could join".into());
         }
         if status.pointer("/me/stopped") == Some(&Value::Bool(true)) {
+            let _ = handle.leave().await;
             return Err("this node stopped before the Garden placed its key".into());
         }
         if started.elapsed() >= JOIN_ENTER_TIMEOUT {
@@ -1796,12 +1825,12 @@ impl Node {
             let unjoined_grace = self.unjoined_grace();
             let already = self.peers.contains_key(&peer);
             let mut admit = false;
-            let response = if no_room {
-                GardenResponse::Refused("the Garden has no seat for this key".into())
-            } else if *chain_id != self.chain_id() {
+            let response = if *chain_id != self.chain_id() {
                 GardenResponse::Refused("this node runs another Garden".into())
             } else if !self.holds_invite(peer, key, invite_signature) {
                 GardenResponse::Refused("the invite does not match this Garden".into())
+            } else if no_room {
+                GardenResponse::Refused("the Garden has no seat for this key".into())
             } else if !known_validator && self.turned_away_keys.contains(key) {
                 self.disconnect_after
                     .insert(peer, Instant::now() + Duration::from_millis(250));
@@ -3538,17 +3567,13 @@ impl Node {
         }
     }
 
-    async fn on_tick(&mut self) {
-        let limits = self.limits().clone();
-        // A node that stood still heard nobody for that long, and that says
-        // nothing about the others. Without this a host that wakes up holds
-        // every validator as silent, and the first block it leads reports
-        // them all and leaves the host alone in the electorate. The host's
-        // own clock is not touched: a validator that wakes up waits for the
-        // next presence signal of the host before it counts the host in.
-        let gap = self.last_tick.elapsed();
-        self.last_tick = Instant::now();
-        if stood_still(gap, &limits) {
+    fn forgive_silence_if_stood_still(
+        &mut self,
+        gap: Duration,
+        limits: &GardenLimits,
+        now: Instant,
+    ) {
+        if stood_still(gap, limits) {
             let host = self.ledger.state.host();
             let me = self.me;
             let others = self
@@ -3558,8 +3583,22 @@ impl Node {
                 .keys()
                 .copied()
                 .filter(|key| *key != host && *key != me);
-            forgive_silence(&mut self.last_seen, others, self.last_tick);
+            forgive_silence(&mut self.last_seen, others, now);
         }
+    }
+
+    async fn on_tick(&mut self) {
+        let limits = self.limits().clone();
+        // A node that stood still heard nobody for that long, and that says
+        // nothing about the others. Without this a host that wakes up holds
+        // every validator as silent, and the first block it leads reports
+        // them all and leaves the host alone in the electorate. The host's
+        // own clock is not touched: a validator that wakes up waits for the
+        // next presence signal of the host before it counts the host in.
+        let now = Instant::now();
+        let gap = now.saturating_duration_since(self.last_tick);
+        self.last_tick = now;
+        self.forgive_silence_if_stood_still(gap, &limits, now);
         self.drop_strangers().await;
         if self.last_presence.elapsed() >= millis(limits.presence_interval_ms) {
             self.last_presence = Instant::now();
@@ -3637,6 +3676,12 @@ impl Node {
                 }
             }
         }
+        // Also guard against long stalls inside the I/O phase of `on_tick`
+        // itself before proposing or voting on absence reports.
+        let after_io = Instant::now();
+        let intra_tick_gap = after_io.saturating_duration_since(self.last_tick);
+        self.last_tick = after_io;
+        self.forgive_silence_if_stood_still(intra_tick_gap, &limits, after_io);
         self.ensure_membership().await;
         self.renew_departure().await;
         self.try_propose().await;
@@ -8181,6 +8226,161 @@ mod tests {
              unseated_hijacked_sync={unseated_hijacked_sync}, \
              non_holder_deposit_leaked={non_holder_deposit_leaked}, \
              idle_cycler_blocked={idle_cycler_blocked}"
+        );
+    }
+
+    #[test]
+    fn drain_gossip_batch_puts_presence_ahead_of_content_when_full() {
+        let chain_id = 0x4741_0000_0000_0099;
+        let key = KeyPair::from_seed(&[3u8; 32]).unwrap();
+        let mut queue = VecDeque::new();
+        for n in 0..4u64 {
+            let tx = GardenTx {
+                chain_id,
+                sender: key.public_key_bytes(),
+                nonce: n,
+                kind: GardenTxKind::Leave,
+            }
+            .sign(&key)
+            .unwrap();
+            queue_gossip_item(&mut queue, GardenGossip::Tx(tx), 16, 1024 * 1024);
+        }
+        let signal = GardenPresence::sign(chain_id, 1, &key);
+        queue_gossip_item(&mut queue, GardenGossip::Presence(signal), 16, 1024 * 1024);
+        let batch = drain_gossip_batch(&mut queue, 2, 1024 * 1024);
+        assert_eq!(batch.len(), 2, "batch must respect max_items");
+        assert!(
+            matches!(batch.first(), Some(GardenGossip::Presence(_))),
+            "presence must leave ahead of queued non-presence gossip when queue is capped"
+        );
+
+        // Under queue saturation, older non-presence gossip is evicted before
+        // presence so bursts never wipe the heartbeat before it drains.
+        let mut saturated = VecDeque::new();
+        queue_gossip_item(
+            &mut saturated,
+            GardenGossip::Presence(GardenPresence::sign(chain_id, 2, &key)),
+            2,
+            1024 * 1024,
+        );
+        for n in 10..14u64 {
+            let tx = GardenTx {
+                chain_id,
+                sender: key.public_key_bytes(),
+                nonce: n,
+                kind: GardenTxKind::Leave,
+            }
+            .sign(&key)
+            .unwrap();
+            queue_gossip_item(&mut saturated, GardenGossip::Tx(tx), 2, 1024 * 1024);
+        }
+        assert!(
+            saturated
+                .iter()
+                .any(|item| matches!(item, GardenGossip::Presence(_))),
+            "presence must not be evicted by subsequent non-presence bursts"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn garden_full_node_refuses_unauthenticated_hello_before_leaking_no_room() {
+        let full = spawn(
+            GardenEntry::Create {
+                title: "FullOracle".into(),
+                limits: GardenLimits {
+                    max_validators: 1,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let full_invite = full.invite().await.unwrap();
+
+        let mut forged = full_invite.clone();
+        forged.token = random_bytes();
+        let forged_err = tokio::time::timeout(
+            Duration::from_secs(20),
+            spawn(
+                GardenEntry::Invite(forged),
+                config("forger", "/ip4/127.0.0.1/tcp/0"),
+                random_bytes(),
+                None,
+            ),
+        )
+        .await
+        .expect("forged join timed out")
+        .err()
+        .expect("forged invite must be refused");
+        assert!(
+            !forged_err.contains("no seat"),
+            "unauthenticated forged Hello leaked no-room/membership oracle: {forged_err}"
+        );
+        assert!(
+            forged_err.contains("does not match"),
+            "expected invite authentication refusal, got: {forged_err}"
+        );
+
+        let genuine_err = tokio::time::timeout(
+            Duration::from_secs(20),
+            spawn(
+                GardenEntry::Invite(full_invite),
+                config("latecomer", "/ip4/127.0.0.1/tcp/0"),
+                random_bytes(),
+                None,
+            ),
+        )
+        .await
+        .expect("genuine join timed out")
+        .err()
+        .expect("full Garden must refuse extra joiner");
+        assert!(
+            genuine_err.contains("no seat"),
+            "genuine invite holder should still see clear capacity refusal: {genuine_err}"
+        );
+
+        full.leave().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_at_the_door_fast_fails_on_me_turned_away_and_leaves() {
+        let (tx, mut rx) = mpsc::channel::<GardenCommand>(8);
+        let handle = GardenHandle {
+            commands: tx,
+            chain_id: 0x4741_0000_0000_0098,
+            genesis_hash: [0x11; 32],
+        };
+        let left = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let left_seen = std::sync::Arc::clone(&left);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    GardenCommand::Status(reply) => {
+                        let _ = reply.send(json!({
+                            "status": "Active",
+                            "me": { "member": Value::Null, "turned_away": true, "stopped": false }
+                        }));
+                    }
+                    GardenCommand::Leave(reply) => {
+                        left_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                        drop(reply);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(2), wait_at_the_door(&handle))
+            .await
+            .expect("wait_at_the_door must fast-fail on /me/turned_away instead of timing out");
+        let err = outcome.expect_err("turned_away must fail wait_at_the_door");
+        assert!(err.contains("turned this key away"), "{err}");
+        assert!(
+            left.load(std::sync::atomic::Ordering::SeqCst),
+            "wait_at_the_door must send handle.leave() on refusal"
         );
     }
 }

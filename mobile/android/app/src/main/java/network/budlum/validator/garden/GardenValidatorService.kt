@@ -12,6 +12,8 @@ import android.os.IBinder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -33,7 +35,7 @@ import org.json.JSONObject
 class GardenValidatorService : Service() {
 
     private var watch: Job? = null
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -147,6 +149,7 @@ class GardenValidatorService : Service() {
     override fun onDestroy() {
         watch?.cancel()
         watch = null
+        scope.cancel()
         super.onDestroy()
     }
 

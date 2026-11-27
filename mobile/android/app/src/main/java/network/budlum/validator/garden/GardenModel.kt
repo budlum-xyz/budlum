@@ -1,277 +1,676 @@
 package network.budlum.validator.garden
 
-import android.app.Activity
+import android.app.Application
+import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
+import android.os.Build
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import uniffi.budlum_garden_ffi.GardenPhone
 import uniffi.budlum_garden_ffi.SelfTestStep
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.net.InetAddress
 
-/** Everything the three screens read. */
+/**
+ * The screen state for the Garden flow.
+ *
+ * Every mutation happens strictly on the Main dispatcher after FFI work on
+ * `Dispatchers.IO` completes, and state-changing core calls are serialized
+ * through `opMutex` in `GardenModel`.
+ */
 data class GardenState(
+    val readiness: Readiness,
+    val setupDone: Boolean = false,
+    val selfTest: List<SelfTestStep> = emptyList(),
+    val selfTestMs: ULong = 0uL,
+    val selectedTab: Int = 0,
     val record: String = "",
     val recordQr: String = "",
     val expiry: String = "",
     val uses: Int = 0,
-    val status: String = "This phone is in no Garden.",
+    val localShareUrl: String = "",
+    val pendingJoinRecord: String = "",
+    val clipboardSuggestion: String? = null,
+    val nearbyInvites: List<Pair<String, String>> = emptyList(),
     val preview: String = "",
+    val status: String = "",
+    val feed: String = "",
+    val fetched: String = "",
     val message: String = "",
     val busy: Boolean = false,
-    val selfTest: List<SelfTestStep> = emptyList(),
-    /** What the group has sent, as the core reports it. */
-    val feed: String = "",
-    /** One piece of data pulled back out and checked. */
-    val fetched: String = "",
-    val selfTestMs: Long = 0,
-    /** What Android still has to be told to allow. */
-    val readiness: Readiness = Readiness(
-        notifications = false,
-        batteryUnrestricted = true,
-        camera = false,
-        batteryPath = "",
-        batteryFamily = "",
-    ),
+) {
+    /** True once the phone can honestly hold a validator seat. */
+    val readyForGarden: Boolean
+        get() = readiness.canValidate && selfTest.isNotEmpty() && selfTest.all { it.passed }
+
+    /** True when the validator stepped out and can come back without a fresh invite. */
+    val canReturn: Boolean
+        get() = GardenModel.parseStatusFlags(status).canReturn
+
+    /** True when the phone currently sits in a Garden (running or away). */
+    val hasSeat: Boolean
+        get() = GardenModel.parseStatusFlags(status).hasSeat
+
+    /** True when the phone is actively sitting in a Garden right now. */
+    val inGarden: Boolean
+        get() = GardenModel.parseStatusFlags(status).let { it.hasSeat && !it.isAway }
+}
+
+internal data class GardenStatusFlags(
+    val hasSeat: Boolean = false,
+    val hasChainId: Boolean = false,
+    val canReturn: Boolean = false,
+    val isAway: Boolean = false,
+)
+
+private data class ParsedInvite(
+    val record: String = "",
+    val recordQr: String = "",
+    val expiry: String = "",
+    val uses: Int = 0,
+    val title: String = "",
 )
 
 /**
- * The bridge between the three screens and the Garden the phone runs.
- *
- * Every call goes to `budlum-core`'s own Garden through UniFFI. This class
- * holds no Garden rules of its own: it moves text between a screen and the
- * core, and it keeps the one rule section 4 puts on the app, which is that
- * nothing is created or joined until the self test has passed.
+ * Coordinates the Garden validator FFI, foreground service, QR scanner, and LAN sharing.
  */
 class GardenModel(
-    context: Context,
-    private val scope: CoroutineScope,
+    private val app: Application,
+    private val askNotifications: () -> Unit,
+    private val openScanner: () -> Unit,
 ) {
-    private val app: Context = context.applicationContext
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val opMutex = Mutex()
+    private val localShare = GardenLocalShare(app)
 
-    // One validator per process, shared with the service that keeps it
-    // running while no screen is up.
-    private val phone: GardenPhone = GardenHolder.phone(context)
-    private val name: String = android.os.Build.MODEL ?: "phone"
-
-    var state by mutableStateOf(GardenState())
+    var state by mutableStateOf(GardenState(readiness = GardenReadiness.read(app)))
         private set
 
-    /** The share text of section 5.7: where to get the app, then the invite. */
-    fun shareText(): String =
-        "Budlum Garden: " + APK_SOURCE + "\n" + state.record
+    private var inviteScreenVisible = false
+    private var currentTitle = ""
 
-    /**
-     * Section 4: run the self test at first open, before anything else is
-     * offered. A Garden is not created or joined while it fails.
-     */
-    fun runSelfTest() = background {
-        val report = phone.selfTest()
-        state = state.copy(
-            selfTest = report.steps,
-            selfTestMs = report.elapsedMs.toLong(),
-            message = if (report.passed) {
-                ""
-            } else {
-                "This phone did not pass its own check, so it will not join a Garden."
-            },
-        )
-    }
-
-    fun create(title: String) = background {
-        if (!selfTestPassed()) return@background
-        val answer = phone.create(title, name, null)
-        readInvite(phone.invite())
-        state = state.copy(status = answer.json)
-        // The network exists the moment the core says so. Whether Android
-        // also allows the ongoing notice is a separate question, and a
-        // refusal there must not be reported as a network that failed to
-        // start - it is a network running without its notice.
-        val refused = runCatching { startValidating() }.exceptionOrNull()
-        state = state.copy(
-            message = if (refused == null) {
-                "Your network is running. Invite someone from this screen."
-            } else {
-                "Your network is running, but Android refused the ongoing " +
-                    "notice: " + (refused.message ?: "no reason given") +
-                    ". The Garden keeps working while this screen is open."
-            },
-        )
-    }
-
-    /**
-     * Send data into the Garden.
-     *
-     * This is the point of the thing. There is no token and nothing to
-     * pay; the validators' work is checking blocks and holding a share of
-     * what is sent, and this is what gets sent.
-     */
-    fun send(text: String, caption: String) = background {
-        if (text.isBlank()) {
-            state = state.copy(message = "There is nothing to send yet.")
-            return@background
+    /** Run the core self-test that proves this phone can validate. */
+    fun runSelfTest() {
+        scope.launch {
+            opMutex.withLock {
+                state = state.copy(busy = true, message = "")
+                val result = runCatching {
+                    withContext(Dispatchers.IO) {
+                        GardenHolder.phone(app).selfTest()
+                    }
+                }
+                result.fold(
+                    onSuccess = { report ->
+                        state = state.copy(
+                            selfTest = report.steps,
+                            selfTestMs = report.elapsedMs,
+                            setupDone = state.setupDone || (report.passed && state.readiness.canValidate),
+                            message = if (report.passed) {
+                                ""
+                            } else {
+                                "This phone did not pass its own check, so it will not join a Garden."
+                            },
+                            busy = false,
+                        )
+                    },
+                    onFailure = { err ->
+                        state = state.copy(
+                            selfTest = listOf(
+                                SelfTestStep(
+                                    name = "Self test",
+                                    passed = false,
+                                    detail = err.message ?: "failed",
+                                ),
+                            ),
+                            busy = false,
+                        )
+                    },
+                )
+            }
         }
-        val answer = phone.send(text, caption)
-        state = state.copy(message = "Sent. " + answer.json)
-        refreshFeed()
     }
 
-    /** What the Garden has been sent. */
-    fun refreshFeed() = background {
-        state = state.copy(feed = phone.feed(FEED_LIMIT).json)
+    /** Re-read Android permissions when returning from system settings. */
+    fun readPermissions() {
+        val current = GardenReadiness.read(app)
+        val selfOk = state.selfTest.isNotEmpty() && state.selfTest.all { it.passed }
+        state = state.copy(
+            readiness = current,
+            setupDone = state.setupDone || (current.canValidate && selfOk),
+        )
     }
 
-    /** Pull one piece of data back out and check it against the chain. */
-    fun fetch(contentId: String) = background {
-        if (contentId.isBlank()) return@background
-        state = state.copy(fetched = phone.fetch(contentId.trim()).json)
+    /** Ask Android for notification permission (required for the honest FGS notification). */
+    fun askForNotifications() {
+        askNotifications()
     }
 
-    fun refreshInvite() = background {
-        readInvite(phone.invite())
+    /** Launch the camera QR scanner activity. */
+    fun scan() {
+        openScanner()
     }
 
-    /** Show who is inviting before anybody agrees to anything. */
-    fun preview(record: String) {
-        if (record.isBlank()) {
+    /** Select an active tab on the Garden screen (`0 = Data`, `1 = Invite`, `2 = Status`). */
+    fun selectTab(index: Int) {
+        val clamped = index.coerceIn(0, 2)
+        state = state.copy(selectedTab = clamped)
+    }
+
+    /** Update the pending join invite input field and preview it when shaped like an invite. */
+    fun updatePendingInvite(raw: String) {
+        state = state.copy(pendingJoinRecord = raw)
+        val trimmed = raw.trim()
+        if (trimmed.startsWith("budlum://") || trimmed.startsWith("http://") || trimmed.startsWith("budlum-garden:")) {
+            preview(trimmed)
+        } else if (trimmed.isEmpty()) {
             state = state.copy(preview = "")
+        }
+    }
+
+    /** Resume any persisted seat across app restarts or process kills. */
+    fun resumeIfSeated() {
+        scope.launch {
+            opMutex.withLock {
+                val res = runCatching {
+                    withContext(Dispatchers.IO) {
+                        val phone = GardenHolder.phone(app)
+                        val st = phone.status().json
+                        val stFlags = parseStatusFlags(st)
+                        val active = if (stFlags.canReturn) {
+                            runCatching { phone.rejoin().json }.getOrDefault(st)
+                        } else {
+                            st
+                        }
+                        val activeFlags = parseStatusFlags(active)
+                        val inv = if (activeFlags.hasChainId && !activeFlags.isAway) {
+                            runCatching { phone.invite().json }.getOrNull()
+                        } else {
+                            null
+                        }
+                        active to inv
+                    }
+                }
+                res.onSuccess { (active, inv) ->
+                    val flags = parseStatusFlags(active)
+                    val hasSeat = flags.hasChainId
+                    val isActive = hasSeat && !flags.isAway
+                    val fgsError = if (isActive) {
+                        runCatching { GardenValidatorService.start(app) }.exceptionOrNull()
+                    } else {
+                        if (!hasSeat) {
+                            runCatching { GardenValidatorService.stop(app) }
+                        }
+                        null
+                    }
+                    val parsed = parseInviteJson(inv)
+                    if (parsed.title.isNotEmpty()) {
+                        currentTitle = parsed.title
+                    }
+                    state = state.copy(
+                        setupDone = state.setupDone || hasSeat,
+                        status = active,
+                        record = parsed.record.ifEmpty { state.record },
+                        recordQr = parsed.recordQr.ifEmpty { parsed.record.ifEmpty { state.recordQr } },
+                        expiry = parsed.expiry.ifEmpty { state.expiry },
+                        uses = if (parsed.uses > 0) parsed.uses else state.uses,
+                        message = fgsError?.let { foregroundNoticeWarning(it) } ?: state.message,
+                    )
+                }
+            }
+        }
+    }
+
+    /** Start a new Garden with this device's label and keep the validator service running. */
+    fun create(title: String) {
+        val cleanTitle = title.trim()
+        if (cleanTitle.isEmpty()) return
+        scope.launch {
+            opMutex.withLock {
+                if (!ensureSelfTestPassed()) return@withLock
+                state = state.copy(busy = true, message = "")
+                val res = runCatching {
+                    withContext(Dispatchers.IO) {
+                        val phone = GardenHolder.phone(app)
+                        val st = phone.create(cleanTitle, deviceValidatorName(), null).json
+                        val inv = runCatching { phone.invite().json }.getOrNull()
+                        st to inv
+                    }
+                }
+                res.fold(
+                    onSuccess = { (st, inv) ->
+                        val fgsError = runCatching { GardenValidatorService.start(app) }.exceptionOrNull()
+                        val parsed = parseInviteJson(inv)
+                        currentTitle = parsed.title.ifEmpty { cleanTitle }
+                        state = state.copy(
+                            status = st,
+                            record = parsed.record,
+                            recordQr = parsed.recordQr.ifEmpty { parsed.record },
+                            expiry = parsed.expiry,
+                            uses = parsed.uses,
+                            selectedTab = 1,
+                            message = fgsError?.let { foregroundNoticeWarning(it) }
+                                ?: "Your network is running. Invite someone from this screen.",
+                            busy = false,
+                        )
+                        if (inviteScreenVisible) {
+                            syncInviteShareLocked()
+                        }
+                    },
+                    onFailure = { err ->
+                        state = state.copy(
+                            message = err.message ?: "could not start Garden",
+                            busy = false,
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    /**
+     * Send data into the Garden and refresh the feed cleanly inside the serialized lock.
+     *
+     * Calls [onSent] on the Main dispatcher only after the publication succeeds so
+     * form drafts are preserved if publishing fails.
+     */
+    fun send(text: String, caption: String, onSent: () -> Unit = {}) {
+        val trimmedText = text.trim()
+        val trimmedCaption = caption.trim()
+        if (trimmedText.isEmpty()) {
+            state = state.copy(message = "There is nothing to send yet.")
             return
         }
         scope.launch {
-            val shown = withContext(Dispatchers.IO) {
-                runCatching {
-                    val json = JSONObject(phone.readRecord(record.trim()).json)
-                    val owner = json.optString("owner").take(16)
-                    val until = stamp(json.optLong("expires_at_ms"))
-                    "validator " + owner + ", good until " + until
-                }.getOrElse { "" }
+            opMutex.withLock {
+                state = state.copy(busy = true, message = "")
+                val res = runCatching {
+                    withContext(Dispatchers.IO) {
+                        val phone = GardenHolder.phone(app)
+                        val answer = phone.send(trimmedText, trimmedCaption).json
+                        val updatedFeed = runCatching { phone.feed(FEED_LIMIT).json }.getOrNull()
+                        answer to updatedFeed
+                    }
+                }
+                res.fold(
+                    onSuccess = { (answer, updatedFeed) ->
+                        state = state.copy(
+                            feed = updatedFeed ?: state.feed,
+                            message = "Sent. $answer",
+                            busy = false,
+                        )
+                        onSent()
+                    },
+                    onFailure = { err ->
+                        state = state.copy(
+                            message = err.message ?: "could not send data",
+                            busy = false,
+                        )
+                    },
+                )
             }
-            state = state.copy(preview = shown)
         }
     }
 
-    fun join(record: String) = background {
-        if (!selfTestPassed()) return@background
-        val answer = phone.join(record.trim(), name)
-        state = state.copy(status = answer.json, preview = "")
-        readInvite(phone.invite())
-        startValidating()
-    }
-
-    fun refreshStatus() = background {
-        state = state.copy(status = phone.status().json)
-    }
-
-    /**
-     * Return to the Garden this phone stepped out of.
-     *
-     * Leaving keeps the seat unless it was the second leave, and the answer
-     * says so in can_return. Without this the only way back was the invite
-     * again, which the person who left may no longer have.
-     */
-    fun returnToGarden() = background {
-        val answer = phone.rejoin()
-        state = state.copy(status = answer.json, preview = "")
-        readInvite(phone.invite())
-        startValidating()
-    }
-
-    fun leave() = background {
-        val answer = phone.leave()
-        // Stepping out keeps the seat and the way back; retiring gives the
-        // Garden up. Only the second ends the duty, so only the second
-        // takes the notification away.
-        if (!answer.json.contains("\"can_return\":true")) {
-            GardenValidatorService.stop(app)
+    /** Load what the Garden has sent through B.U.D. 3.0. */
+    fun refreshFeed() {
+        scope.launch {
+            opMutex.withLock {
+                state = state.copy(busy = true, message = "")
+                val res = runCatching {
+                    withContext(Dispatchers.IO) {
+                        GardenHolder.phone(app).feed(FEED_LIMIT).json
+                    }
+                }
+                res.fold(
+                    onSuccess = { feedJson ->
+                        state = state.copy(feed = feedJson, busy = false)
+                    },
+                    onFailure = { err ->
+                        state = state.copy(
+                            message = err.message ?: "could not load feed",
+                            busy = false,
+                        )
+                    },
+                )
+            }
         }
-        state = GardenState(
-            status = answer.json,
-            selfTest = state.selfTest,
-            selfTestMs = state.selfTestMs,
-        )
     }
 
-    /**
-     * Pick up a Garden this phone already belongs to.
-     *
-     * The seat survives the process, so opening the app after it was
-     * closed - or after the phone was switched off - finds the Garden
-     * still there and puts the validator back on the network without
-     * asking for the invite again.
-     */
-    fun resumeIfSeated() = background {
-        if (!GardenHolder.hasGarden(app)) return@background
-        startValidating()
-        state = state.copy(status = phone.status().json)
-        runCatching { readInvite(phone.invite()) }
-    }
-
-    /** Hand the scan off to the activity, which owns the camera. */
-    fun scan() {
-        (scanner ?: return).invoke()
-    }
-
-    /** Set by the activity so the model does not reach for an Activity. */
-    var scanner: (() -> Unit)? = null
-
-    /**
-     * Set by the activity, which owns the permission dialog.
-     *
-     * The model asks; the activity is the only thing Android will show a
-     * permission prompt for.
-     */
-    var permissionAsker: ((String) -> Unit)? = null
-
-    /** Ask Android for the one permission the background work needs. */
-    fun askForNotifications() {
-        val permission = GardenReadiness.notificationPermission()
-        if (permission == null) {
-            // Before Android 13 there is nothing to ask for; the switch in
-            // settings is the only thing that can be off.
-            readPermissions()
-            return
+    /** Pull one piece of data back out by content id and verify it against the chain. */
+    fun fetch(contentId: String) {
+        val trimmed = contentId.trim()
+        if (trimmed.isEmpty()) return
+        scope.launch {
+            opMutex.withLock {
+                state = state.copy(busy = true, message = "")
+                val res = runCatching {
+                    withContext(Dispatchers.IO) {
+                        GardenHolder.phone(app).fetch(trimmed).json
+                    }
+                }
+                res.fold(
+                    onSuccess = { fetchedJson ->
+                        state = state.copy(fetched = fetchedJson, busy = false)
+                    },
+                    onFailure = { err ->
+                        state = state.copy(
+                            message = err.message ?: "could not fetch item",
+                            busy = false,
+                        )
+                    },
+                )
+            }
         }
-        permissionAsker?.invoke(permission)
     }
 
-    /** Read what Android currently allows. Cheap, so it runs on every resume. */
-    fun readPermissions() {
-        state = state.copy(readiness = GardenReadiness.read(app))
+    /** Read an invite record without joining it so the Join screen can preview it first. */
+    fun preview(raw: String) {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return
+        scope.launch {
+            opMutex.withLock {
+                runPreviewLocked(trimmed)
+            }
+        }
+    }
+
+    /** Handle a QR scan result by staging it into Join and previewing safely. */
+    fun scanned(raw: String) {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return
+        scope.launch {
+            opMutex.withLock {
+                state = state.copy(
+                    pendingJoinRecord = trimmed,
+                    message = "",
+                )
+                runPreviewLocked(trimmed)
+            }
+        }
+    }
+
+    /** Stage an incoming deep link invite onto the Join screen for explicit one-tap confirmation. */
+    fun stageIncomingInvite(raw: String) {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return
+        scope.launch {
+            opMutex.withLock {
+                state = state.copy(
+                    pendingJoinRecord = trimmed,
+                    message = "",
+                )
+                runPreviewLocked(trimmed)
+            }
+        }
+    }
+
+    /** Use an explicit clipboard or LAN discovery invite by filling and previewing it. */
+    fun acceptSuggestedInvite(raw: String) {
+        stageIncomingInvite(raw)
+        state = state.copy(clipboardSuggestion = null)
+    }
+
+    /** Join a Garden using an invite record (requires user confirmation tap). */
+    fun join(raw: String) {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return
+        scope.launch {
+            opMutex.withLock {
+                if (!ensureSelfTestPassed()) return@withLock
+                state = state.copy(busy = true, message = "")
+                val res = runCatching {
+                    withContext(Dispatchers.IO) {
+                        val phone = GardenHolder.phone(app)
+                        val st = phone.join(trimmed, deviceValidatorName()).json
+                        val inv = runCatching { phone.invite().json }.getOrNull()
+                        st to inv
+                    }
+                }
+                res.fold(
+                    onSuccess = { (st, inv) ->
+                        val fgsError = runCatching { GardenValidatorService.start(app) }.exceptionOrNull()
+                        val parsed = parseInviteJson(inv)
+                        if (parsed.title.isNotEmpty()) {
+                            currentTitle = parsed.title
+                        }
+                        state = state.copy(
+                            status = st,
+                            record = parsed.record,
+                            recordQr = parsed.recordQr.ifEmpty { parsed.record },
+                            expiry = parsed.expiry,
+                            uses = parsed.uses,
+                            pendingJoinRecord = "",
+                            clipboardSuggestion = null,
+                            preview = "",
+                            selectedTab = 0,
+                            message = fgsError?.let { foregroundNoticeWarning(it) } ?: "Joined Garden.",
+                            busy = false,
+                        )
+                    },
+                    onFailure = { err ->
+                        state = state.copy(
+                            message = err.message ?: "could not join Garden",
+                            busy = false,
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    /** Refresh the current invite record and local-HTTP share link. */
+    fun refreshInvite() {
+        scope.launch {
+            opMutex.withLock {
+                state = state.copy(busy = true, message = "")
+                syncInviteShareLocked()
+                state = state.copy(busy = false)
+            }
+        }
+    }
+
+    /** Format share text cleanly for external messaging apps. */
+    fun shareText(): String {
+        val title = currentTitle.ifBlank { "this Garden" }
+        val link = state.record
+        return if (link.isBlank()) {
+            ""
+        } else {
+            "Budlum Garden ($title): $APK_SOURCE\n$link"
+        }
+    }
+
+    /** Refresh validator status from the core. */
+    fun refreshStatus() {
+        scope.launch {
+            opMutex.withLock {
+                val res = runCatching {
+                    withContext(Dispatchers.IO) { GardenHolder.phone(app).status().json }
+                }
+                res.fold(
+                    onSuccess = { st -> state = state.copy(status = st) },
+                    onFailure = { err -> state = state.copy(message = err.message ?: "status failed") },
+                )
+            }
+        }
+    }
+
+    /** Step back into a Garden after stepping out (`Away -> Active`). */
+    fun returnToGarden() {
+        scope.launch {
+            opMutex.withLock {
+                state = state.copy(busy = true, message = "")
+                val res = runCatching {
+                    withContext(Dispatchers.IO) {
+                        val phone = GardenHolder.phone(app)
+                        val st = phone.rejoin().json
+                        val inv = runCatching { phone.invite().json }.getOrNull()
+                        st to inv
+                    }
+                }
+                res.fold(
+                    onSuccess = { (st, inv) ->
+                        val fgsError = runCatching { GardenValidatorService.start(app) }.exceptionOrNull()
+                        val parsed = parseInviteJson(inv)
+                        if (parsed.title.isNotEmpty()) {
+                            currentTitle = parsed.title
+                        }
+                        state = state.copy(
+                            status = st,
+                            record = parsed.record,
+                            recordQr = parsed.recordQr.ifEmpty { parsed.record },
+                            expiry = parsed.expiry,
+                            uses = parsed.uses,
+                            message = fgsError?.let { foregroundNoticeWarning(it) } ?: "Back in the Garden.",
+                            busy = false,
+                        )
+                        if (inviteScreenVisible) {
+                            syncInviteShareLocked()
+                        }
+                    },
+                    onFailure = { err ->
+                        state = state.copy(
+                            message = err.message ?: "could not return",
+                            busy = false,
+                        )
+                    },
+                )
+            }
+        }
     }
 
     /**
-     * Hand the duty to the service that outlives the screen.
+     * Step out (`Active -> Away`) on first tap, or retire (`Away -> None`) on second tap.
      *
-     * Android refuses to start a foreground service in more cases every
-     * release. A refusal here does not undo the Garden this phone just
-     * joined, so it is reported as what it is - the validator is seated
-     * but not running in the background - instead of being thrown over
-     * the join itself or, worse, swallowed.
+     * Preserves readiness/permission state so leaving a Garden never drops the
+     * user back onto the first-run permissions screen.
      */
-    private fun startValidating() {
-        val failure = runCatching { GardenValidatorService.start(app) }.exceptionOrNull()
-            ?: return
-        state = state.copy(
-            message = "In the Garden, but Android would not let the background " +
-                "validator start: " + (failure.message ?: failure.toString()) +
-                " - check notifications and battery in setup.",
-        )
+    fun leave() {
+        scope.launch {
+            opMutex.withLock {
+                state = state.copy(busy = true, message = "")
+                val res = runCatching {
+                    withContext(Dispatchers.IO) { GardenHolder.phone(app).leave().json }
+                }
+                val currentReadiness = GardenReadiness.read(app)
+                res.fold(
+                    onSuccess = { st ->
+                        val obj = runCatching { JSONObject(st) }.getOrNull()
+                        val retired = obj?.optBoolean("retired", true) ?: true
+                        val canReturn = obj?.optBoolean("can_return", false) ?: false
+                        val stillSeated = !retired && canReturn
+                        if (!stillSeated) {
+                            GardenValidatorService.stop(app)
+                            withContext(Dispatchers.IO) {
+                                localShare.stopShare()
+                                runCatching { GardenHolder.phone(app).setLocalHttpAddress(null) }
+                            }
+                            currentTitle = ""
+                        }
+                        val chainId = obj?.optString("chain_id").orEmpty()
+                        val awayStatusJson = if (stillSeated) {
+                            JSONObject().put(
+                                "garden",
+                                JSONObject()
+                                    .put("chain_id", chainId)
+                                    .put("status", "Away")
+                                    .put("can_return", true),
+                            ).put("can_return", true).toString()
+                        } else {
+                            ""
+                        }
+                        state = state.copy(
+                            readiness = currentReadiness,
+                            status = awayStatusJson,
+                            record = if (stillSeated) state.record else "",
+                            recordQr = if (stillSeated) state.recordQr else "",
+                            expiry = if (stillSeated) state.expiry else "",
+                            uses = if (stillSeated) state.uses else 0,
+                            localShareUrl = if (stillSeated) state.localShareUrl else "",
+                            feed = if (stillSeated) state.feed else "",
+                            fetched = if (stillSeated) state.fetched else "",
+                            message = if (stillSeated) {
+                                "Stepped away from the Garden. Tap Leave again to retire permanently."
+                            } else {
+                                "Left the Garden."
+                            },
+                            busy = false,
+                        )
+                    },
+                    onFailure = { err ->
+                        state = state.copy(
+                            readiness = currentReadiness,
+                            message = err.message ?: "could not leave",
+                            busy = false,
+                        )
+                    },
+                )
+            }
+        }
     }
 
-    /** Section 5.12: a scanned invite joins without a second detour. */
-    fun scanned(record: String) {
-        preview(record)
-        join(record)
+    /** Toggle the temporary local-HTTP + mDNS share server when the Invite screen opens or closes. */
+    fun setInviteVisible(visible: Boolean) {
+        inviteScreenVisible = visible
+        scope.launch {
+            opMutex.withLock {
+                if (visible && state.inGarden) {
+                    syncInviteShareLocked()
+                } else {
+                    withContext(Dispatchers.IO) {
+                        localShare.stopShare()
+                        runCatching { GardenHolder.phone(app).setLocalHttpAddress(null) }
+                    }
+                    state = state.copy(localShareUrl = "")
+                }
+            }
+        }
     }
 
-    private fun selfTestPassed(): Boolean {
+    /** Start LAN invite discovery and check clipboard when entering foreground. */
+    fun onForeground() {
+        localShare.startDiscovery { label, discoveredRecord ->
+            scope.launch {
+                val existing = state.nearbyInvites
+                if (existing.none { it.second == discoveredRecord }) {
+                    state = state.copy(nearbyInvites = existing + (label to discoveredRecord))
+                }
+            }
+        }
+        checkClipboardInvite()
+    }
+
+    /** Stop LAN discovery and temporary invite HTTP sharing when backgrounded. */
+    fun onBackground() {
+        localShare.stopDiscovery()
+        if (!inviteScreenVisible) return
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                localShare.stopShare()
+                runCatching { GardenHolder.phone(app).setLocalHttpAddress(null) }
+            }
+            state = state.copy(localShareUrl = "")
+        }
+    }
+
+    /** Clean up background discovery, HTTP sharing, and coroutines on destroy. */
+    fun shutdown() {
+        inviteScreenVisible = false
+        localShare.stopDiscovery()
+        localShare.stopShare()
+        scope.cancel()
+    }
+
+    private fun ensureSelfTestPassed(): Boolean {
         val passed = state.selfTest.isNotEmpty() && state.selfTest.all { it.passed }
         if (!passed) {
             state = state.copy(
@@ -281,46 +680,220 @@ class GardenModel(
         return passed
     }
 
-    private fun readInvite(answer: uniffi.budlum_garden_ffi.GardenAnswer) {
-        val json = JSONObject(answer.json)
-        val record = json.optString("record")
-        state = state.copy(
-            record = if (record == "null") "" else record,
-            recordQr = json.optString("record_qr"),
-            expiry = stamp(json.optLong("expires_at_ms")),
-            uses = json.optInt("uses"),
-            message = json.optString("record_refused"),
+    private fun foregroundNoticeWarning(failure: Throwable): String =
+        "Your network is running, but Android refused the ongoing notice: " +
+            (failure.message ?: "no reason given") +
+            ". The Garden keeps working while this screen is open."
+
+    private suspend fun runPreviewLocked(trimmed: String) {
+        state = state.copy(busy = true, message = "")
+        val res = runCatching {
+            withContext(Dispatchers.IO) {
+                val json = GardenHolder.phone(app).readRecord(trimmed).json
+                formatPreviewSummary(json)
+            }
+        }
+        res.fold(
+            onSuccess = { summary ->
+                state = state.copy(preview = summary, busy = false)
+            },
+            onFailure = { err ->
+                state = state.copy(
+                    preview = "",
+                    message = err.message ?: "unreadable invite",
+                    busy = false,
+                )
+            },
         )
     }
 
-    private fun stamp(millis: Long): String =
-        if (millis <= 0) {
-            "unknown"
-        } else {
-            SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(millis))
-        }
-
-    private fun background(work: suspend () -> Unit) {
-        scope.launch {
-            state = state.copy(busy = true, message = "")
-            val failure = withContext(Dispatchers.IO) {
-                runCatching { work() }.exceptionOrNull()
+    private suspend fun syncInviteShareLocked() {
+        val res = runCatching {
+            withContext(Dispatchers.IO) {
+                val phone = GardenHolder.phone(app)
+                val baseJson = phone.inviteFor(null).json
+                val baseParsed = parseInviteJson(baseJson)
+                val hostPort = if (inviteScreenVisible && baseParsed.record.isNotBlank()) {
+                    localShare.startShare(baseParsed.record)
+                } else {
+                    localShare.stopShare()
+                    null
+                }
+                phone.setLocalHttpAddress(hostPort)
+                val activeJson = if (hostPort != null) phone.inviteFor(hostPort).json else baseJson
+                Triple(activeJson, baseParsed, hostPort)
             }
-            state = state.copy(
-                busy = false,
-                message = failure?.message ?: state.message,
-            )
+        }
+        res.fold(
+            onSuccess = { (activeJson, baseParsed, hostPort) ->
+                val activeParsed = parseInviteJson(activeJson)
+                val canonical = activeParsed.record.ifEmpty { baseParsed.record }
+                val qr = activeParsed.recordQr.ifEmpty { canonical }
+                if (activeParsed.title.isNotEmpty()) {
+                    currentTitle = activeParsed.title
+                }
+                val shareHttp = hostPort?.let { "http://$it/g" }.orEmpty()
+                state = state.copy(
+                    record = canonical,
+                    recordQr = qr,
+                    expiry = activeParsed.expiry.ifEmpty { baseParsed.expiry },
+                    uses = if (activeParsed.uses > 0) activeParsed.uses else baseParsed.uses,
+                    localShareUrl = shareHttp,
+                )
+            },
+            onFailure = { err ->
+                state = state.copy(message = err.message ?: "could not load invite")
+            },
+        )
+    }
+
+    private fun checkClipboardInvite() {
+        val suggestion = runCatching {
+            val cm = app.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                ?: return@runCatching null
+            val clip = cm.primaryClip ?: return@runCatching null
+            if (clip.itemCount == 0) return@runCatching null
+            val raw = clip.getItemAt(0).coerceToText(app)?.toString()?.trim()
+            extractCandidateFromClipboard(raw)
+        }.getOrNull()
+        if (suggestion != null && suggestion != state.pendingJoinRecord && suggestion != state.record) {
+            state = state.copy(clipboardSuggestion = suggestion)
         }
     }
 
-    private companion object {
-        /** Section 5.7 asks the share text to say where the app comes from. */
-        /** Enough of the feed to see what the group has sent. */
-        const val FEED_LIMIT = 50u
+    private fun deviceValidatorName(): String =
+        Build.MODEL?.trim()?.takeIf { it.isNotEmpty() } ?: "Phone"
 
-        const val APK_SOURCE = "https://github.com/budlum-xyz/budlum/releases"
+    companion object {
+        private const val FEED_LIMIT = 50u
+        private const val APK_SOURCE = "https://github.com/budlum-xyz/budlum/releases"
+
+        internal fun parseStatusFlags(statusJson: String?): GardenStatusFlags {
+            if (statusJson.isNullOrBlank()) return GardenStatusFlags()
+            return runCatching {
+                val root = JSONObject(statusJson)
+                val garden = root.optJSONObject("garden")
+                val hasSeat = garden != null
+                val hasChainId = garden != null && garden.optString("chain_id").isNotBlank()
+                val isAway = garden?.optString("status") == "Away" ||
+                    root.optString("status") == "Away"
+                val canReturn = root.optBoolean("can_return", false) ||
+                    (garden?.optBoolean("can_return", false) == true) ||
+                    (hasSeat && isAway)
+                GardenStatusFlags(
+                    hasSeat = hasSeat,
+                    hasChainId = hasChainId,
+                    canReturn = canReturn,
+                    isAway = isAway,
+                )
+            }.getOrDefault(GardenStatusFlags())
+        }
+
+        private fun formatExpiryMs(ms: Long): String {
+            if (ms <= 0L) return ""
+            return java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US)
+                .format(java.util.Date(ms))
+        }
+
+        private fun parseInviteJson(json: String?): ParsedInvite {
+            if (json.isNullOrBlank()) return ParsedInvite()
+            return runCatching {
+                val obj = JSONObject(json)
+                val record = obj.optString("record").ifBlank { obj.optString("invite") }
+                val qr = obj.optString("record_qr")
+                    .ifBlank { record }
+                    .ifBlank { obj.optString("qr") }
+                val expiry = formatExpiryMs(obj.optLong("expires_at_ms", 0L))
+                val uses = obj.optInt("uses", 0)
+                val title = obj.optString("title")
+                ParsedInvite(
+                    record = record,
+                    recordQr = qr,
+                    expiry = expiry,
+                    uses = uses,
+                    title = title,
+                )
+            }.getOrDefault(ParsedInvite())
+        }
+
+        private fun formatPreviewSummary(json: String): String =
+            runCatching {
+                val obj = JSONObject(json)
+                val chainId = obj.optString("chain_id").take(12)
+                val owner = obj.optString("owner").take(12)
+                val uses = obj.optInt("uses", 0)
+                val peers = obj.optJSONArray("peers")?.length() ?: 0
+                val expires = formatExpiryMs(obj.optLong("expires_at_ms", 0L))
+                buildString {
+                    append("Garden ")
+                    append(if (chainId.isNotEmpty()) chainId else "invite")
+                    if (owner.isNotEmpty()) append(" from $owner")
+                    if (peers > 0) append(", $peers peer(s)")
+                    if (uses > 0) append(", $uses seat(s) left")
+                    if (expires.isNotEmpty()) append(" (good until $expires)")
+                }
+            }.getOrDefault(json)
+
+        fun extractAllowedInviteFromUri(uri: Uri?): String? {
+            if (uri == null) return null
+            val scheme = uri.scheme?.lowercase() ?: return null
+            val fragment = uri.fragment?.trim().orEmpty()
+            if (fragment.isEmpty()) return null
+            return when (scheme) {
+                "budlum" -> {
+                    if (uri.host?.lowercase() == "garden" &&
+                        uri.path.orEmpty().trimEnd('/') == "/join"
+                    ) {
+                        uri.toString()
+                    } else {
+                        null
+                    }
+                }
+                "http" -> {
+                    val host = uri.host?.trim().orEmpty()
+                    val path = uri.path.orEmpty()
+                    if (isLocalIpLiteral(host) && (path == "/g" || path == "/g/")) {
+                        uri.toString()
+                    } else {
+                        null
+                    }
+                }
+                else -> null
+            }
+        }
+
+        fun extractCandidateFromClipboard(text: String?): String? {
+            val trimmed = text?.trim().orEmpty()
+            if (trimmed.isEmpty()) return null
+            if (trimmed.startsWith("budlum://garden/join#") && trimmed.length > "budlum://garden/join#".length) {
+                return trimmed
+            }
+            if (trimmed.startsWith("http://")) {
+                val parsed = runCatching { Uri.parse(trimmed) }.getOrNull()
+                return extractAllowedInviteFromUri(parsed)
+            }
+            return null
+        }
+
+        /**
+         * Pure lexical IPv4/IPv6 private/CGNAT/loopback literal check without DNS lookup.
+         */
+        fun isLocalIpLiteral(rawHost: String?): Boolean {
+            val host = rawHost?.trim()?.removePrefix("[")?.removeSuffix("]") ?: return false
+            if (host.isEmpty()) return false
+            val isIpv4 = host.count { it == '.' } == 3 && host.all { it.isDigit() || it == '.' }
+            val isIpv6 = host.contains(':') && host.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' || it == ':' }
+            if (!isIpv4 && !isIpv6) return false
+            val addr = runCatching { InetAddress.getByName(host) }.getOrNull() ?: return false
+            if (addr.isAnyLocalAddress || addr.isMulticastAddress) return false
+            if (addr.isSiteLocalAddress || addr.isLinkLocalAddress || addr.isLoopbackAddress) return true
+            val raw = addr.address
+            if (raw.size == 4) {
+                val b0 = raw[0].toInt() and 0xFF
+                val b1 = raw[1].toInt() and 0xFF
+                if (b0 == 100 && b1 in 64..127) return true
+            }
+            return false
+        }
     }
 }
-
-/** Convenience for an Activity that owns a scope. */
-fun Activity.gardenModel(scope: CoroutineScope): GardenModel = GardenModel(this, scope)

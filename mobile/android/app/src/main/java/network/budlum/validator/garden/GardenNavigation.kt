@@ -53,7 +53,7 @@ fun ChooseScreen(
     onBack: () -> Unit,
 ) {
     val state = model.state
-    val seated = state.status.contains("\"chain_id\"")
+    val seated = state.hasSeat
     Column(
         modifier = Modifier
             .fillMaxSize()

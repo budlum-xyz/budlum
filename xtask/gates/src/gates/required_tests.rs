@@ -19,26 +19,54 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-/// The gate modules that carry a required-test list, with the list.
-fn registry() -> Vec<(&'static str, &'static [&'static str])> {
+/// The gate modules that carry a required-test list, with an optional
+/// standalone integration-test file path when the Cargo job executes a
+/// single `[[test]]` target (`--test <name>`).
+fn registry() -> Vec<(&'static str, Option<&'static str>, &'static [&'static str])> {
     vec![
-        ("bns", super::bns_gate::TESTS),
-        ("bud-e2e", super::bud_e2e::TESTS),
-        ("economy-invariants", super::economy_invariants::TESTS),
-        ("fork-choice", super::fork_choice_gate::TESTS),
-        ("gateway", super::gateway_gate::TESTS),
-        ("governance-invariants", super::governance_invariants::TESTS),
-        ("network-hardening", super::network_hardening_gate::TESTS),
+        ("bns", None, super::bns_gate::TESTS),
+        ("bud-e2e", None, super::bud_e2e::TESTS),
+        ("economy-invariants", None, super::economy_invariants::TESTS),
+        ("fork-choice", None, super::fork_choice_gate::TESTS),
+        ("gateway", None, super::gateway_gate::TESTS),
+        (
+            "governance-invariants",
+            None,
+            super::governance_invariants::TESTS,
+        ),
+        (
+            "network-hardening",
+            None,
+            super::network_hardening_gate::TESTS,
+        ),
         (
             "node-classification",
+            None,
             super::node_classification_gate::TESTS,
         ),
-        ("poa-compliance", super::poa_compliance_gate::TESTS),
-        ("pq-core", super::pq_core_gate::TESTS),
-        ("storage-provider", super::storage_provider_gate::TESTS),
-        ("wallet-core", super::wallet_core_gate::TESTS),
-        ("garden-scenario", super::garden_scenario::TESTS),
-        ("garden-nat", super::garden_nat::TESTS),
+        ("poa-compliance", None, super::poa_compliance_gate::TESTS),
+        ("pq-core", None, super::pq_core_gate::TESTS),
+        (
+            "storage-provider",
+            None,
+            super::storage_provider_gate::TESTS,
+        ),
+        ("wallet-core", None, super::wallet_core_gate::TESTS),
+        (
+            "garden-scenario",
+            Some("tests/garden/garden_scenario.rs"),
+            super::garden_scenario::TESTS,
+        ),
+        (
+            "garden-acceptance",
+            Some("tests/garden/garden_acceptance.rs"),
+            super::garden_acceptance::TESTS,
+        ),
+        (
+            "garden-nat",
+            Some("tests/garden/garden_nat.rs"),
+            super::garden_nat::TESTS,
+        ),
     ]
 }
 
@@ -212,9 +240,26 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mut total = 0usize;
     let mut all: Vec<String> = Vec::new();
     let reg = registry();
-    for (gate, names) in &reg {
+    for (gate, scope, names) in &reg {
         total += names.len();
-        all.extend(check_list(gate, names, &defs));
+        let scoped_defs: Vec<FnDef>;
+        let target_defs: &[FnDef] = match scope {
+            Some(rel_file) => {
+                scoped_defs = defs
+                    .iter()
+                    .filter(|d| d.file == *rel_file)
+                    .map(|d| FnDef {
+                        file: d.file.clone(),
+                        name: d.name.clone(),
+                        is_test: d.is_test,
+                        ignored: d.ignored,
+                    })
+                    .collect();
+                &scoped_defs
+            }
+            None => &defs,
+        };
+        all.extend(check_list(gate, names, target_defs));
     }
     if !all.is_empty() {
         let mut msg = String::from("FAIL: required tests that are not tests:\n");

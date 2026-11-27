@@ -812,9 +812,6 @@ const STEPS: usize = 11;
 type Step = fn(&mut Scenario) -> Result<(), String>;
 
 fn run_scenario() -> Vec<Result<(), String>> {
-    let _guard = NETWORK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut results: Vec<Result<(), String>> = Vec::new();
     let mut scenario = match Node::start("host").and_then(step_01) {
         Ok(scenario) => {
@@ -852,6 +849,11 @@ fn run_scenario() -> Vec<Result<(), String>> {
 /// The result of acceptance step `number` (1 based).
 fn step(number: usize) -> Result<(), String> {
     static RESULTS: OnceLock<Vec<Result<(), String>>> = OnceLock::new();
+    // Serialize the shared scenario even when invoked without --test-threads=1
+    // so parallel Gardens do not compete for the same host timing budget.
+    let _guard = NETWORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     RESULTS
         .get_or_init(run_scenario)
         .get(number.saturating_sub(1))
@@ -1393,7 +1395,7 @@ fn garden_rpc_is_refused_on_the_public_listener() -> Result<(), String> {
 /// host is alone with all eight objects, and when the host leaves too there
 /// is nothing left on its disk.
 #[test]
-fn garden_storage_shrink() -> Result<(), String> {
+fn garden_eight_validator_storage_shrink() -> Result<(), String> {
     let _guard = NETWORK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
