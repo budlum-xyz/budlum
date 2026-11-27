@@ -101,8 +101,11 @@ fn read_u8_word(buf: &[u8], offset: usize) -> Option<u8> {
     word.get(31).copied()
 }
 
-fn read_dyn_bytes(args: &[u8], head_offset: usize) -> Option<Vec<u8>> {
+fn read_dyn_bytes(args: &[u8], head_offset: usize, min_rel: usize) -> Option<Vec<u8>> {
     let rel = read_usize_word(args, head_offset)?;
+    if rel < min_rel {
+        return None;
+    }
     let len = read_usize_word(args, rel)?;
     if len > MAX_PRECOMPILE_BYTES {
         return None;
@@ -121,12 +124,16 @@ pub fn decode_precompile_call(calldata: &[u8]) -> Option<ParsedPrecompileCall> {
     let sel = calldata.get(..4)?;
     let args = calldata.get(4..)?;
     if sel == SEL_UNIVERSAL_CALL {
-        if args.len() < 32 * 5 {
+        const HEAD_BYTES: usize = 32 * 5;
+        if args.len() < HEAD_BYTES {
             return None;
         }
         let target_ee = read_u8_word(args, 0)?;
-        let target = read_dyn_bytes(args, 32)?;
-        let input = read_dyn_bytes(args, 64)?;
+        let target = read_dyn_bytes(args, 32, HEAD_BYTES)?;
+        if target.len() > budlum_uel_abi::types::MAX_IDENTITY_BYTES {
+            return None;
+        }
+        let input = read_dyn_bytes(args, 64, HEAD_BYTES)?;
         let value_attos = read_u128_word(args, 96)?;
         let gas_bgu = read_u64_word(args, 128)?;
         Some(ParsedPrecompileCall {
@@ -138,12 +145,16 @@ pub fn decode_precompile_call(calldata: &[u8]) -> Option<ParsedPrecompileCall> {
             gas_bgu,
         })
     } else if sel == SEL_UNIVERSAL_STATIC_CALL {
-        if args.len() < 32 * 4 {
+        const HEAD_BYTES: usize = 32 * 4;
+        if args.len() < HEAD_BYTES {
             return None;
         }
         let target_ee = read_u8_word(args, 0)?;
-        let target = read_dyn_bytes(args, 32)?;
-        let input = read_dyn_bytes(args, 64)?;
+        let target = read_dyn_bytes(args, 32, HEAD_BYTES)?;
+        if target.len() > budlum_uel_abi::types::MAX_IDENTITY_BYTES {
+            return None;
+        }
+        let input = read_dyn_bytes(args, 64, HEAD_BYTES)?;
         let gas_bgu = read_u64_word(args, 96)?;
         Some(ParsedPrecompileCall {
             is_static_selector: true,
@@ -275,7 +286,7 @@ pub fn decode_uol_call(calldata: &[u8]) -> Option<DecodedUolCall> {
     if sel == uol_selector("balanceOf(bytes32,bytes)") {
         let mut class_id = [0u8; 32];
         class_id.copy_from_slice(read_word(args, 0)?);
-        let holder = read_dyn_bytes(args, 32)?;
+        let holder = read_dyn_bytes(args, 32, 64)?;
         return Some(DecodedUolCall::BalanceOf { class_id, holder });
     }
     if sel == uol_selector("holderOf(bytes32)") {
@@ -288,7 +299,7 @@ pub fn decode_uol_call(calldata: &[u8]) -> Option<DecodedUolCall> {
         class_id.copy_from_slice(read_word(args, 0)?);
         let mut asset_id = [0u8; 32];
         asset_id.copy_from_slice(read_word(args, 32)?);
-        let to = read_dyn_bytes(args, 64)?;
+        let to = read_dyn_bytes(args, 64, 128)?;
         let amount = read_u128_word(args, 96)?;
         return Some(DecodedUolCall::Transfer {
             class_id,
@@ -302,8 +313,8 @@ pub fn decode_uol_call(calldata: &[u8]) -> Option<DecodedUolCall> {
         class_id.copy_from_slice(read_word(args, 0)?);
         let mut asset_id = [0u8; 32];
         asset_id.copy_from_slice(read_word(args, 32)?);
-        let taker = read_dyn_bytes(args, 64)?;
-        let payment = read_dyn_bytes(args, 96)?;
+        let taker = read_dyn_bytes(args, 64, 192)?;
+        let payment = read_dyn_bytes(args, 96, 192)?;
         let amount = read_u128_word(args, 128)?;
         let expiry = read_u64_word(args, 160)?;
         return Some(DecodedUolCall::Offer {
@@ -366,12 +377,18 @@ pub fn decode_uol_offer_bytes(raw: &[u8]) -> Option<UolOfferRecord> {
     let mut tl_arr = [0u8; 4];
     tl_arr.copy_from_slice(raw.get(108..112)?);
     let taker_len = usize::try_from(u32::from_le_bytes(tl_arr)).ok()?;
+    if taker_len != 0 && taker_len != UOL_TAKER_LEN {
+        return None;
+    }
     let taker_end = 112usize.checked_add(taker_len)?;
     let taker = raw.get(112..taker_end)?.to_vec();
     let mut pl_arr = [0u8; 4];
     let pl_end = taker_end.checked_add(4)?;
     pl_arr.copy_from_slice(raw.get(taker_end..pl_end)?);
     let pay_len = usize::try_from(u32::from_le_bytes(pl_arr)).ok()?;
+    if pay_len > MAX_PRECOMPILE_BYTES {
+        return None;
+    }
     let pay_end = pl_end.checked_add(pay_len)?;
     if raw.len() != pay_end {
         return None;
