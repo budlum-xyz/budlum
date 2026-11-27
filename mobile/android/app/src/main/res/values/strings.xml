@@ -128,10 +128,6 @@
     <string name="g_without_notifications">Without the notification permission this phone validates only while the screen is on, and stops when it is off. Not impossible, just worse.</string>
     <string name="g_self_test_failed_why">The check above did not pass. You can go on anyway, but it means something on this phone will not hold.</string>
     <string name="w_search_hint">search anything</string>
-    <string name="w_menu_ao">a.o</string>
-    <string name="w_menu_market">market</string>
-    <string name="w_menu_ecosystem">ecosystem</string>
-    <string name="w_menu_participation">participation</string>
     <string name="w_no_wallet_yet">no wallet yet</string>
     <string name="w_noted_go_on">Noted, go on</string>
     <string name="w_thats_it">That is it</string>
@@ -221,7 +217,6 @@
     <string name="b_validator">validator</string>
     <string name="b_wallet">wallet</string>
     <string name="b_garden">garden</string>
-    <string name="b_drag_hint">tap a block to open, hold to move</string>
     <string name="g_keys_room">chat message room</string>
     <string name="g_keys_people">people invite code qr</string>
     <string name="g_keys_status">status validator bud3 parts</string>
@@ -230,4 +225,5 @@
     <string name="g_keys_scan">qr camera scan</string>
     <string name="g_keys_setup">setup permissions battery notifications</string>
     <string name="g_keys_testnet">testnet faucet rpc balance</string>
+    <string name="g_all_options">all options</string>
 </resources>

@@ -128,10 +128,6 @@
     <string name="g_without_notifications">Bildirim izni olmadan bu telefon yalnız ekran açıkken doğrular; ekran kapanınca durur. Çalışmaz değil, daha kötü çalışır.</string>
     <string name="g_self_test_failed_why">Yukarıdaki sınama geçmedi. Yine de sürdürebilirsiniz, ama bu telefonda bir şeyin tutmayacağı anlamına gelir.</string>
     <string name="w_search_hint">herhangi bir şey ara</string>
-    <string name="w_menu_ao">a.o</string>
-    <string name="w_menu_market">market</string>
-    <string name="w_menu_ecosystem">ecosystem</string>
-    <string name="w_menu_participation">participation</string>
     <string name="w_no_wallet_yet">henüz cüzdan yok</string>
     <string name="w_noted_go_on">Not aldım ilerle</string>
     <string name="w_thats_it">Tamamdır</string>
@@ -221,7 +217,6 @@
     <string name="b_validator">doğrulayıcı</string>
     <string name="b_wallet">cüzdan</string>
     <string name="b_garden">bahçe</string>
-    <string name="b_drag_hint">açmak için dokun, taşımak için basılı tut</string>
     <string name="g_keys_room">sohbet mesaj oda chat</string>
     <string name="g_keys_people">kisiler davet kod qr</string>
     <string name="g_keys_status">durum dogrulayici bud3 parca</string>
@@ -230,4 +225,5 @@
     <string name="g_keys_scan">qr kamera tara okut</string>
     <string name="g_keys_setup">hazirlik izin pil bildirim</string>
     <string name="g_keys_testnet">testnet musluk rpc bakiye</string>
+    <string name="g_all_options">tüm seçenekler</string>
 </resources>

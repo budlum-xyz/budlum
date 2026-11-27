@@ -2,13 +2,11 @@ package network.budlum.validator.garden
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -40,8 +38,6 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -67,6 +63,7 @@ private const val SPAN = 2
 private const val HALO = 2.2f
 
 /** What a block leads to when tapped. */
+/** Where the opening screen can take a person. */
 enum class BlockGoes {
     /** The testnet screen: faucet and RPC balance. */
     Testnet,
@@ -79,35 +76,33 @@ enum class BlockGoes {
 
     /** The Garden room, people and validator work. */
     Garden,
-
-    /** A quiet field block that can still be rearranged. */
-    Nowhere,
 }
 
 /**
- * One block: which floor tile it sits on and where it leads.
+ * One block: which floor tile it sits on.
  *
- * No label. The sheet writes nothing inside a lit cell, and putting the
- * destination's name in the block was an invention, not the design.
+ * A block carries no label and no destination. The sheet writes nothing
+ * inside a lit cell, and hanging the app's navigation off cells scattered
+ * through a field put the four places a person can go in four different
+ * corners of the screen with nothing to say which was which. The field is
+ * the sheet's field; where a person can go is a list, at the bottom,
+ * where lists belong.
  */
 data class Block(
     val id: Int,
     val column: Int,
     val row: Int,
-    val goes: BlockGoes,
 )
 
 /** Where the blocks start out. Scattered, the way the sheet scatters them. */
 private fun openingBlocks(): List<Block> = listOf(
-    Block(0, 3, 7, BlockGoes.Testnet),
-    Block(1, 9, 4, BlockGoes.Validator),
-    Block(2, 5, 13, BlockGoes.Wallet),
-    Block(3, 12, 17, BlockGoes.Garden),
-    Block(4, 1, 2, BlockGoes.Nowhere),
-    Block(5, 11, 9, BlockGoes.Nowhere),
-    Block(6, 0, 20, BlockGoes.Nowhere),
-    Block(7, 14, 24, BlockGoes.Nowhere),
-    Block(8, 6, 27, BlockGoes.Nowhere),
+    Block(0, 2, 2),
+    Block(1, 9, 4),
+    Block(2, 5, 9),
+    Block(3, 13, 11),
+    Block(4, 1, 15),
+    Block(5, 10, 18),
+    Block(6, 6, 22),
 )
 
 /**
@@ -199,46 +194,18 @@ fun BlockFieldScreen(
 
             BlockField(
                 skin = skin,
-                onGo = onGo,
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
             )
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Row(
+            DestinationMenu(
+                skin = skin,
+                onGo = onGo,
+                onJoin = onJoin,
+                onChoose = onChoose,
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Label(
-                    text = stringResource(R.string.b_drag_hint),
-                    skin = skin,
-                    color = skin.muted,
-                )
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Label(
-                        text = stringResource(R.string.g_was_invited),
-                        skin = skin,
-                        color = skin.accent,
-                        modifier = Modifier
-                            .clickable(onClick = onJoin)
-                            .padding(vertical = 4.dp),
-                    )
-                    GardenBrandMark(
-                        skin = skin,
-                        height = 14.dp,
-                        onSurface = false,
-                        modifier = Modifier
-                            .clickable(onClick = onChoose)
-                            .padding(vertical = 4.dp),
-                    )
-                }
-            }
+            )
         }
     }
 }
@@ -253,7 +220,6 @@ fun BlockFieldScreen(
 @Composable
 fun BlockField(
     skin: Skin,
-    onGo: (BlockGoes) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val blocks = remember { mutableStateListOf<Block>().apply { addAll(openingBlocks()) } }
@@ -283,15 +249,9 @@ fun BlockField(
             val dy = if (lifted) carry.y else 0f
             val clampedRow = block.row.coerceIn(0, (rowsDrawn - SPAN).coerceAtLeast(0))
 
-            // The sheet writes nothing inside a lit cell, so the name of
-            // the destination is spoken rather than drawn: a screen
-            // reader announces the block, the screen stays as drawn.
-            val spoken = blockName(block.goes)?.let { stringResource(it) }
-
             Box(
                 modifier = Modifier
                     .zIndex(if (lifted) 2f else 0f)
-                    .semantics { if (spoken != null) contentDescription = spoken }
                     .offset {
                         IntOffset(
                             (block.column * cellPx + dx).roundToInt(),
@@ -303,13 +263,12 @@ fun BlockField(
                     // glows into the dark around it, and the floor's
                     // four-petal mark still reads through the light.
                     .drawBehind {
-                        val quiet = block.goes == BlockGoes.Nowhere
-                        val reach = cellPx * if (quiet) HALO * 0.75f else HALO
+                        val reach = cellPx * HALO
                         drawRect(
                             brush = Brush.radialGradient(
                                 colors = listOf(
-                                    glowFor(skin).copy(alpha = if (quiet) 0.55f else if (lifted) 1f else 0.85f),
-                                    glowFor(skin).copy(alpha = if (quiet) 0.24f else if (lifted) 0.55f else 0.40f),
+                                    glowFor(skin).copy(alpha = if (lifted) 1f else 0.85f),
+                                    glowFor(skin).copy(alpha = if (lifted) 0.55f else 0.40f),
                                     glowFor(skin).copy(alpha = 0f),
                                 ),
                                 center = center,
@@ -318,7 +277,7 @@ fun BlockField(
                             topLeft = Offset(-reach, -reach),
                             size = Size(size.width + reach * 2, size.height + reach * 2),
                         )
-                        drawRect(color = fillFor(block.goes, skin, lifted))
+                        drawRect(color = fillFor(skin, lifted))
                         val step = cellPx.toInt()
                         for (down in 0 until SPAN) {
                             for (across in 0 until SPAN) {
@@ -331,17 +290,6 @@ fun BlockField(
                                 )
                             }
                         }
-                    }
-                    .pointerInput(block.id) {
-                        detectTapGestures(
-                            onLongPress = {},
-                            onTap = {
-                                if (block.goes != BlockGoes.Nowhere) {
-                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                    onGo(block.goes)
-                                }
-                            },
-                        )
                     }
                     .pointerInput(block.id, rowsDrawn) {
                         detectDragGesturesAfterLongPress(
@@ -387,27 +335,75 @@ fun BlockField(
 }
 
 /**
- * What a block is filled with.
+ * Where a person can go, bottom left, one word a line.
  *
- * A quiet block used to be drawn as a dark square, which read as a hole
- * punched in the floor. The sheet has no dark blocks - every block it
- * draws is lit, some further from the eye than others - so a quiet one
- * is the same light, dimmer.
+ * The sheet puts its own menu here - a.o, market, ecosystem,
+ * participation - in lowercase against the floor. Those are sections of
+ * a website and there is nothing behind them in a phone, so printing
+ * them would have been four words that do nothing. The place and the
+ * treatment are the sheet's; the words are the four places this app
+ * actually goes.
+ *
+ * They were scattered across the field as lit cells before, each one
+ * indistinguishable from the next, which meant the only way to find the
+ * wallet was to tap blocks until one opened it.
  */
-private fun fillFor(goes: BlockGoes, skin: Skin, lifted: Boolean): Color = when {
-    lifted -> Chalk
-    goes == BlockGoes.Nowhere -> glowFor(skin).copy(alpha = 0.72f)
-    skin == Skin.Sage -> Page
-    else -> Sage
+@Composable
+private fun DestinationMenu(
+    skin: Skin,
+    onGo: (BlockGoes) -> Unit,
+    onJoin: () -> Unit,
+    onChoose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val places = listOf(
+        BlockGoes.Testnet to R.string.b_testnet,
+        BlockGoes.Validator to R.string.b_validator,
+        BlockGoes.Wallet to R.string.b_wallet,
+        BlockGoes.Garden to R.string.b_garden,
+    )
+    Column(modifier = modifier) {
+        places.forEach { (goes, label) ->
+            Text(
+                text = stringResource(label).lowercase(),
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.ink,
+                modifier = Modifier
+                    .clickable { onGo(goes) }
+                    .padding(vertical = 5.dp),
+            )
+        }
+        // Two quieter lines under the four: arriving on somebody else's
+        // invitation, and the long way round through every option.
+        Row(
+            modifier = Modifier.padding(top = 7.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.g_was_invited).lowercase(),
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.muted,
+                modifier = Modifier
+                    .clickable(onClick = onJoin)
+                    .padding(vertical = 4.dp),
+            )
+            Text(
+                text = stringResource(R.string.g_all_options).lowercase(),
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.muted,
+                modifier = Modifier
+                    .clickable(onClick = onChoose)
+                    .padding(vertical = 4.dp),
+            )
+        }
+    }
 }
 
-/** What a block is called, for a screen reader. Never drawn on screen. */
-private fun blockName(goes: BlockGoes): Int? = when (goes) {
-    BlockGoes.Testnet -> R.string.b_testnet
-    BlockGoes.Validator -> R.string.b_validator
-    BlockGoes.Wallet -> R.string.b_wallet
-    BlockGoes.Garden -> R.string.b_garden
-    BlockGoes.Nowhere -> null
+/** What a block is filled with. Lit, or brighter still while carried. */
+private fun fillFor(skin: Skin, lifted: Boolean): Color = when {
+    lifted -> Chalk
+    skin == Skin.Sage -> Page
+    else -> Sage
 }
 
 /** What colour the light around a lit block is, per skin. */

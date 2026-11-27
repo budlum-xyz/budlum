@@ -2175,16 +2175,24 @@ impl Node {
             .await;
             return;
         }
-        match self.store.reserve_background_write(content_id, &bytes) {
-            Ok(Some((path, charged_len))) => {
+        // Taken out of the match head on purpose: the arm below gives the
+        // deposit's bytes away, and a borrow living to the end of the
+        // match would stop it.
+        let reservation = self.store.reserve_background_write(content_id, &bytes);
+        match reservation {
+            Ok(Some((path, recipe, charged_len))) => {
                 self.total_deposits_in_flight =
                     self.total_deposits_in_flight.saturating_add(1);
                 *self.deposits_in_flight.entry(peer).or_insert(0) += 1;
                 let tx = self.deposit_tx.clone();
+                // The deposit's own bytes are not what lands on disk: the
+                // recipe is. They were needed to code it and are dropped
+                // here, which is the whole point of an object layer.
+                drop(bytes);
                 tokio::spawn(async move {
                     let outcome = tokio::task::spawn_blocking(move || {
                         let res =
-                            GardenContentStore::write_object_file_blocking(path, bytes);
+                            GardenContentStore::write_object_file_blocking(path, recipe);
                         drop(frame_budget);
                         res
                     })
@@ -8055,12 +8063,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store_root = dir.path().join("objects");
         let mut store = GardenContentStore::open(Some(&store_root), 1024 * 1024).unwrap();
-        let (path, _charged_len) = store
+        let (path, recipe, _charged_len) = store
             .reserve_background_write(non_held_id, &non_held_bytes)
             .unwrap()
             .unwrap();
-        let wrote_new =
-            GardenContentStore::write_object_file_blocking(path, non_held_bytes.clone()).unwrap();
+        let wrote_new = GardenContentStore::write_object_file_blocking(path, recipe).unwrap();
         assert!(wrote_new);
 
         let host_pk = host_key.public_key_bytes();

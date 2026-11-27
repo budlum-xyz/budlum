@@ -18,13 +18,22 @@
 //! purpose: it gets the record across the room. What the record buys is
 //! a seat in the waiting row, not a seat at the table - the host still
 //! has to admit the key.
+//!
+//! Two things make it behave like the code an e-mail sends you rather
+//! than a walkie-talkie channel. It is written down, so closing the app
+//! and opening it again an hour later finds the same code with the time
+//! it has left, instead of a dead desk and a number the other person is
+//! still holding. And it burns: the first phone to redeem it gets the
+//! record, and the digits stop meaning anything from that moment, so a
+//! code said out loud in a room cannot be used twice.
 
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The port both sides agree on. Chosen high and fixed so neither phone
 /// has to tell the other anything except the six digits.
@@ -58,9 +67,24 @@ pub struct Desk {
     code: String,
     record: String,
     port: u16,
-    born: Instant,
+    /// Wall clock, not a monotonic instant: the hour has to keep running
+    /// while the app is closed, and an `Instant` does not survive that.
+    born: u64,
+    /// Set by the answering thread the moment it hands the record over.
+    /// Read by everything else to know the code is spent.
+    burnt: Arc<AtomicBool>,
+    /// Where the code is written down, if it is written down at all.
+    note: Option<PathBuf>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+}
+
+/// Seconds since the epoch, or zero if the clock is before it.
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl Desk {
@@ -73,8 +97,51 @@ impl Desk {
         Self::open_on(PORT, code, record)
     }
 
+    /// Open a code and write it down in `dir`, so it survives a restart.
+    pub fn open_noted(dir: &Path, code: String, record: String) -> Result<Self, String> {
+        let desk = Self::start(PORT, code, record, now_secs(), Some(note_path(dir)))?;
+        desk.write_note()?;
+        Ok(desk)
+    }
+
+    /// Pick up a code written down earlier, if it is still good.
+    ///
+    /// A code outlives the process that opened it. Without this the
+    /// first thing a restart did was forget a number somebody else was
+    /// holding, and the only cure was to read out a new one.
+    pub fn resume(dir: &Path) -> Option<Self> {
+        let path = note_path(dir);
+        let text = std::fs::read_to_string(&path).ok()?;
+        let mut lines = text.lines();
+        let code = lines.next()?.trim().to_owned();
+        let born: u64 = lines.next()?.trim().parse().ok()?;
+        let record = lines.collect::<Vec<_>>().join("\n");
+        if !is_valid_code(&code) || !is_valid_record(&record) {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+        if now_secs().saturating_sub(born) >= LIFETIME.as_secs() {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+        match Self::start(PORT, code, record, born, Some(path.clone())) {
+            Ok(desk) => Some(desk),
+            Err(_) => None,
+        }
+    }
+
     /// Start answering `code` with `record` on `port` until the code expires.
     pub fn open_on(port: u16, code: String, record: String) -> Result<Self, String> {
+        Self::start(port, code, record, now_secs(), None)
+    }
+
+    fn start(
+        port: u16,
+        code: String,
+        record: String,
+        born: u64,
+        note: Option<PathBuf>,
+    ) -> Result<Self, String> {
         if !is_valid_code(&code) {
             return Err("a code is six digits".into());
         }
@@ -92,15 +159,20 @@ impl Desk {
             .map_err(|e| e.to_string())?;
 
         let stop = Arc::new(AtomicBool::new(false));
-        let born = Instant::now();
+        let burnt = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
+        let burnt_flag = Arc::clone(&burnt);
+        let note_for_thread = note.clone();
         let match_code = code.clone();
         let reply_record = record.clone();
 
         let handle = std::thread::spawn(move || {
             let mut buffer = [0u8; MAX_DATAGRAM];
             while !stop_flag.load(Ordering::Acquire) {
-                if born.elapsed() >= LIFETIME {
+                if now_secs().saturating_sub(born) >= LIFETIME.as_secs() {
+                    break;
+                }
+                if burnt_flag.load(Ordering::Acquire) {
                     break;
                 }
                 let (read, from) = match socket.recv_from(&mut buffer) {
@@ -123,7 +195,16 @@ impl Desk {
                     continue;
                 }
                 let reply = format!("{TELL}{reply_record}");
-                let _ = socket.send_to(reply.as_bytes(), from);
+                if socket.send_to(reply.as_bytes(), from).is_ok() {
+                    // Spent. One redemption is the whole contract: the
+                    // next phone to try these digits finds nothing,
+                    // whoever they are and however they got them.
+                    burnt_flag.store(true, Ordering::Release);
+                    if let Some(path) = note_for_thread.as_ref() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    break;
+                }
             }
         });
 
@@ -132,9 +213,37 @@ impl Desk {
             record,
             port: bound_port,
             born,
+            burnt,
+            note,
             stop,
             handle: Some(handle),
         })
+    }
+
+    /// Write the code, the hour it started and the record it stands for.
+    fn write_note(&self) -> Result<(), String> {
+        let Some(path) = self.note.as_ref() else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("the code could not be written down: {e}"))?;
+        }
+        std::fs::write(path, format!("{}\n{}\n{}", self.code, self.born, self.record))
+            .map_err(|e| format!("the code could not be written down: {e}"))
+    }
+
+    /// True once somebody has redeemed the code.
+    pub fn burnt(&self) -> bool {
+        self.burnt.load(Ordering::Acquire)
+    }
+
+    /// Put the code out by hand, and rub out what was written down.
+    pub fn burn(&self) {
+        self.burnt.store(true, Ordering::Release);
+        if let Some(path) = self.note.as_ref() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     /// The six digits a person reads out.
@@ -154,12 +263,17 @@ impl Desk {
 
     /// Seconds left before the code stops working.
     pub fn seconds_left(&self) -> u64 {
-        LIFETIME.saturating_sub(self.born.elapsed()).as_secs()
+        if self.burnt() {
+            return 0;
+        }
+        LIFETIME
+            .as_secs()
+            .saturating_sub(now_secs().saturating_sub(self.born))
     }
 
-    /// True once the code has run out.
+    /// True once the code has run out or been used.
     pub fn expired(&self) -> bool {
-        self.born.elapsed() >= LIFETIME
+        self.burnt() || now_secs().saturating_sub(self.born) >= LIFETIME.as_secs()
     }
 }
 
@@ -175,6 +289,11 @@ impl Drop for Desk {
             let _ = handle.join();
         }
     }
+}
+
+/// Where an open code is written down inside the app's own directory.
+fn note_path(dir: &Path) -> PathBuf {
+    dir.join("open-code.txt")
 }
 
 /// Shout `code` on the local network and wait for the record.
@@ -323,6 +442,57 @@ pub fn loopback_desk() -> SocketAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A code is a one-time password, not a channel. The second phone to
+    /// try the same digits must come away with nothing, or a code read
+    /// out in a room full of people lets in everyone who overheard it.
+    #[test]
+    fn a_redeemed_code_cannot_be_redeemed_again() {
+        let desk = Desk::open_on(0, "314159".into(), "budlum://garden/join#once".into())
+            .expect("desk opens");
+        let addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), desk.port()));
+
+        let first = ask("314159", Duration::from_secs(2), Some(addr))
+            .expect("the first redemption is answered");
+        assert_eq!(first, "budlum://garden/join#once");
+
+        let second = ask("314159", Duration::from_millis(600), Some(addr));
+        assert!(second.is_err(), "a spent code must not answer twice");
+        assert!(desk.burnt(), "the desk knows the code is spent");
+        assert_eq!(desk.seconds_left(), 0, "a spent code has no time left");
+        assert!(desk.expired(), "a spent code counts as over");
+    }
+
+    /// The hour belongs to the code, not to the process. Closing the app
+    /// used to cancel a number the other person was still holding.
+    #[test]
+    fn a_written_down_code_survives_the_process_that_opened_it() {
+        let dir = std::env::temp_dir().join(format!("budlum-code-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let _ = std::fs::remove_file(note_path(&dir));
+
+        let opened = Desk::open_noted(&dir, "271828".into(), "budlum://garden/join#kept".into())
+            .expect("desk opens and is written down");
+        let left = opened.seconds_left();
+        assert!(left > LIFETIME.as_secs() - 5, "a fresh code has its hour");
+        drop(opened);
+
+        let resumed = Desk::resume(&dir).expect("the code is picked back up");
+        assert_eq!(resumed.code(), "271828");
+        assert_eq!(resumed.record(), "budlum://garden/join#kept");
+        assert!(
+            resumed.seconds_left() + 5 >= left,
+            "the hour continues where it was"
+        );
+        resumed.burn();
+        drop(resumed);
+
+        assert!(
+            Desk::resume(&dir).is_none(),
+            "a burnt code is not picked back up"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn reopening_desk_immediately_after_drop_releases_port() {

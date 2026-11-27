@@ -237,7 +237,6 @@ fun GardenApp(
                                 }
                             }
                         }
-                        BlockGoes.Nowhere -> Unit
                     }
                 },
                 onJoin = { step = Step.Join },

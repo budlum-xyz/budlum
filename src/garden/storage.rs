@@ -2,17 +2,24 @@
 //!
 //! Messages, posts and images are content addressed with Budlum's one
 //! content id (`storage::content_id::ContentId`). The Garden chain carries
-//! the content id; the bytes live here. Every reader recomputes the id from
-//! the bytes it got, so a holder cannot hand out other bytes under the same
-//! id.
+//! the content id. Every reader recomputes the id from the bytes it got, so
+//! a holder cannot hand out other bytes under the same id.
 //!
-//! This is the storage seam of a Garden. The object encoding of B.U.D. 3.0 is
-//! not on `main` yet, so the store keeps each object as one chunk under its
-//! content id and writes no encoder of its own. When the object layer lands,
-//! it replaces the inside of this module and nothing else moves.
+//! What this store writes down is not the content. An object handed in is
+//! coded by B.U.D. 3.0 first, and the record and symbols that come out of
+//! the coder - the recipe - are what lands on disk. Reading an object means
+//! rebuilding it from its recipe and checking it still hashes to the id it
+//! was filed under. Nothing here is a file server with a coder bolted on
+//! the side: there is no copy of the content to serve.
+//!
+//! That is also what lets a holder pass an object on. A recipe is the same
+//! thing the wire carries, so a node can hand an object to a new holder
+//! without ever having the whole of it in memory as content, and a node
+//! that restarts can still answer for everything it holds.
 //!
 //! A file name is always the 64 hex digits of a content id that was computed
-//! here from the bytes. No caller-provided string reaches the file system.
+//! here from the bytes, plus `.bud3`. No caller-provided string reaches the
+//! file system.
 
 use crate::domain::types::Hash32;
 use crate::storage::bud3::fountain::Symbol;
@@ -113,6 +120,24 @@ pub struct GardenContentStore {
     parts: Bud3PartCounts,
 }
 
+/// What a node keeps for an object: the B.U.D. 3.0 recipe, not the object.
+///
+/// The coder turns bytes into a record and a set of symbols. Those are
+/// what travel, what prove the object, and what rebuild it. Keeping the
+/// original bytes beside them made the coding a formality - the node
+/// claimed an object layer and served a file. This is the object: the
+/// recipe is written down and the content is whatever the recipe makes
+/// when somebody asks for it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Recipe {
+    record: ObjectRecord,
+    symbols: Vec<Symbol>,
+}
+
+/// What a recipe file is called. The suffix keeps recipes apart from the
+/// plain object files earlier versions wrote under a bare content id.
+const RECIPE_SUFFIX: &str = ".bud3";
+
 fn scan_disk_bytes(root: &Path) -> u64 {
     let mut total = 0u64;
     if let Ok(entries) = fs::read_dir(root) {
@@ -133,8 +158,17 @@ fn scan_disk_bytes(root: &Path) -> u64 {
                 }
                 continue;
             }
+            if let Some(stem) = name.strip_suffix(RECIPE_SUFFIX) {
+                if hex::decode(stem).is_ok_and(|bytes| bytes.len() == 32) {
+                    total = total.saturating_add(charged_bytes(meta.len()));
+                }
+                continue;
+            }
+            // An object file from before recipes were kept. It is not the
+            // object any more, and leaving it would both mislead a reader
+            // and charge the node for bytes it no longer serves from.
             if hex::decode(name).is_ok_and(|bytes| bytes.len() == 32) {
-                total = total.saturating_add(charged_bytes(meta.len()));
+                let _ = fs::remove_file(&path);
             }
         }
     }
@@ -189,7 +223,26 @@ impl GardenContentStore {
     fn path_of(&self, content_id: &Hash32) -> Option<PathBuf> {
         self.root
             .as_ref()
-            .map(|root| root.join(hex::encode(content_id)))
+            .map(|root| root.join(format!("{}{RECIPE_SUFFIX}", hex::encode(content_id))))
+    }
+
+    /// Turn bytes into the recipe this node will keep for them.
+    fn recipe_blob(coded: &CodedObject) -> Result<Vec<u8>, String> {
+        let recipe = Recipe {
+            record: coded.record.clone(),
+            symbols: coded.segments.iter().flatten().cloned().collect(),
+        };
+        bincode::serialize(&recipe)
+            .map_err(|e| format!("the B.U.D. 3.0 recipe cannot be written down: {e}"))
+    }
+
+    /// Read a recipe back off the disk, or out of memory.
+    fn recipe_of(&self, content_id: &Hash32) -> Option<Recipe> {
+        let blob = match self.path_of(content_id) {
+            Some(path) => fs::read(path).ok()?,
+            None => self.memory.get(content_id)?.clone(),
+        };
+        bincode::deserialize(&blob).ok()
     }
 
     /// Store `bytes` and return their content id.
@@ -203,14 +256,13 @@ impl GardenContentStore {
         }
         let content_id = ContentId::of(bytes).0;
         // Code the object with B.U.D. 3.0 before a single byte is written.
-        // The Garden keeps the plain bytes as its cache, but the object it
-        // claims to hold is the coded one: if BOF-1 cannot represent it,
-        // this node does not get to say it stored it.
+        // If BOF-1 cannot represent it, this node does not get to say it
+        // stored it - there would be nothing to store.
         self.code_and_count(content_id, bytes)?;
-        // A node that cannot keep the bytes must not keep the coding
+        // A node that cannot keep the recipe must not keep the coding
         // either: `get_coded` would otherwise answer for an object this
         // node does not hold.
-        match self.store_bytes(content_id, bytes) {
+        match self.store_recipe(content_id) {
             Ok(()) => Ok(content_id),
             Err(e) => {
                 self.drop_coding(&content_id);
@@ -219,8 +271,14 @@ impl GardenContentStore {
         }
     }
 
-    /// Write the bytes themselves, once the object layer has accepted them.
-    fn store_bytes(&mut self, content_id: Hash32, bytes: &[u8]) -> Result<(), String> {
+    /// Write the recipe down, once the coder has produced one.
+    fn store_recipe(&mut self, content_id: Hash32) -> Result<(), String> {
+        let coded = self
+            .coded
+            .get(&content_id)
+            .ok_or_else(|| "this object has no B.U.D. 3.0 coding to store".to_string())?;
+        let blob = Self::recipe_blob(coded)?;
+        let bytes: &[u8] = &blob;
         let len = charged_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         match self.path_of(&content_id) {
             Some(path) => {
@@ -270,7 +328,7 @@ impl GardenContentStore {
         &mut self,
         content_id: Hash32,
         bytes: &[u8],
-    ) -> Result<Option<(PathBuf, u64)>, String> {
+    ) -> Result<Option<(PathBuf, Vec<u8>, u64)>, String> {
         if bytes.is_empty() || bytes.len() > self.max_object_bytes {
             return Err(format!(
                 "object size {} is outside 1..={} bytes",
@@ -284,7 +342,7 @@ impl GardenContentStore {
         self.code_and_count(content_id, bytes)?;
         // Same rule as `put`: a reservation that fails leaves no coding
         // behind for an object this node will not hold.
-        match self.reserve_room(content_id, bytes) {
+        match self.reserve_room(content_id) {
             Ok(room) => Ok(room),
             Err(e) => {
                 self.drop_coding(&content_id);
@@ -293,13 +351,17 @@ impl GardenContentStore {
         }
     }
 
-    /// Account for the bytes of a deposit and say where they go.
+    /// Account for a deposit's recipe and say where it goes.
     fn reserve_room(
         &mut self,
         content_id: Hash32,
-        bytes: &[u8],
-    ) -> Result<Option<(PathBuf, u64)>, String> {
-        let len = charged_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+    ) -> Result<Option<(PathBuf, Vec<u8>, u64)>, String> {
+        let coded = self
+            .coded
+            .get(&content_id)
+            .ok_or_else(|| "this object has no B.U.D. 3.0 coding to store".to_string())?;
+        let blob = Self::recipe_blob(coded)?;
+        let len = charged_bytes(u64::try_from(blob.len()).unwrap_or(u64::MAX));
         if let Some(path) = self.path_of(&content_id) {
             if self.contains(&content_id) {
                 return Ok(None);
@@ -311,7 +373,7 @@ impl GardenContentStore {
                 ));
             }
             self.total_bytes = self.total_bytes.saturating_add(len);
-            Ok(Some((path, len)))
+            Ok(Some((path, blob, len)))
         } else {
             if !self.memory.contains_key(&content_id) {
                 if !self.can_fit(len) {
@@ -320,7 +382,7 @@ impl GardenContentStore {
                         self.max_total_bytes
                     ));
                 }
-                self.memory.insert(content_id, bytes.to_vec());
+                self.memory.insert(content_id, blob);
                 self.total_bytes = self.total_bytes.saturating_add(len);
             }
             Ok(None)
@@ -477,10 +539,22 @@ impl GardenContentStore {
     /// stored copy, decodes the symbols that `put` produced, and checks the
     /// result against the content id the chain carries.
     pub fn get_coded(&mut self, content_id: &Hash32) -> Option<Vec<u8>> {
-        let coded = self.coded.get(content_id)?;
-        let symbols: Vec<Symbol> = coded.segments.iter().flatten().cloned().collect();
+        // Fall back to what was written down when the in-memory coding has
+        // been evicted by the symbol budget, or when the node has only just
+        // started. The recipe is the object, so there is always something
+        // to decode as long as this node still holds it.
+        let (record, symbols) = match self.coded.get(content_id) {
+            Some(coded) => (
+                coded.record.clone(),
+                coded.segments.iter().flatten().cloned().collect::<Vec<_>>(),
+            ),
+            None => {
+                let recipe = self.recipe_of(content_id)?;
+                (recipe.record, recipe.symbols)
+            }
+        };
         let used = count_of(symbols.len());
-        let bytes = view_public(&coded.record, symbols).ok()?;
+        let bytes = view_public(&record, symbols).ok()?;
         if ContentId::of(&bytes).0 != *content_id {
             return None;
         }
@@ -497,11 +571,16 @@ impl GardenContentStore {
     /// result hashes to the id it was promised.
     #[must_use]
     pub fn coded_parts(&self, content_id: &Hash32) -> Option<(ObjectRecord, Vec<Symbol>)> {
-        let coded = self.coded.get(content_id)?;
-        Some((
-            coded.record.clone(),
-            coded.segments.iter().flatten().cloned().collect(),
-        ))
+        if let Some(coded) = self.coded.get(content_id) {
+            return Some((
+                coded.record.clone(),
+                coded.segments.iter().flatten().cloned().collect(),
+            ));
+        }
+        // Not cached - read what was written down. A node that has
+        // restarted can still hand the object on to a new holder.
+        let recipe = self.recipe_of(content_id)?;
+        Some((recipe.record, recipe.symbols))
     }
 
     /// Rebuild an object from B.U.D. 3.0 parts a peer sent, without
@@ -531,17 +610,6 @@ impl GardenContentStore {
         Ok(bytes)
     }
 
-    /// Take an object as B.U.D. 3.0 parts and keep it if it rebuilds.
-    pub fn put_coded(
-        &mut self,
-        expected: &Hash32,
-        record: &ObjectRecord,
-        symbols: Vec<Symbol>,
-    ) -> Result<Hash32, String> {
-        let bytes = self.rebuild_coded(expected, record, symbols)?;
-        self.put(&bytes)
-    }
-
     /// The B.U.D. 3.0 record of a held object, if this node coded it.
     #[must_use]
     pub fn record_of(&self, content_id: &Hash32) -> Option<&ObjectRecord> {
@@ -556,10 +624,8 @@ impl GardenContentStore {
 
     /// Read an object and check it against its content id.
     pub fn get(&self, content_id: &Hash32) -> Option<Vec<u8>> {
-        let bytes = match self.path_of(content_id) {
-            Some(path) => fs::read(path).ok()?,
-            None => self.memory.get(content_id)?.clone(),
-        };
+        let recipe = self.recipe_of(content_id)?;
+        let bytes = view_public(&recipe.record, recipe.symbols).ok()?;
         (ContentId::of(&bytes).0 == *content_id).then_some(bytes)
     }
 
@@ -572,19 +638,11 @@ impl GardenContentStore {
 
     /// The byte length of a stored object, without reading it.
     pub fn stored_len(&self, content_id: &Hash32) -> Option<u64> {
-        self.path_of(content_id).map_or_else(
-            || {
-                self.memory
-                    .get(content_id)
-                    .and_then(|bytes| u64::try_from(bytes.len()).ok())
-            },
-            |path| {
-                fs::metadata(path)
-                    .ok()
-                    .filter(fs::Metadata::is_file)
-                    .map(|meta| meta.len())
-            },
-        )
+        // The object's length, not the recipe's. The chain accounts for
+        // what was published; a recipe carries repair symbols and is a
+        // different size, so reporting the file size here would make every
+        // holder look like it held the wrong thing.
+        self.recipe_of(content_id).map(|r| r.record.object_len)
     }
 
     /// Drop one object, when this node no longer holds it.
@@ -640,6 +698,7 @@ impl GardenContentStore {
                     let known = path
                         .file_name()
                         .and_then(|n| n.to_str())
+                        .and_then(|s| s.strip_suffix(RECIPE_SUFFIX))
                         .and_then(|s| hex::decode(s).ok())
                         .and_then(|bytes| Hash32::try_from(bytes.as_slice()).ok())
                         .is_some_and(|id| keep.contains(&id));
@@ -711,8 +770,48 @@ mod tests {
         let root = dir.path().join("garden");
         let mut store = GardenContentStore::open(Some(&root), 1024).unwrap();
         let id = store.put(b"original").unwrap();
-        fs::write(root.join(hex::encode(id)), b"tampered").unwrap();
+        fs::write(
+            root.join(format!("{}{RECIPE_SUFFIX}", hex::encode(id))),
+            b"tampered",
+        )
+        .unwrap();
         assert!(store.get(&id).is_none());
+    }
+
+    /// The object is the recipe. Nothing under the store root may be the
+    /// content itself, or the coding is decoration over a file server.
+    #[test]
+    fn what_lands_on_disk_is_the_recipe_and_not_the_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("garden");
+        let mut store = GardenContentStore::open(Some(&root), 1024 * 1024).unwrap();
+        let secret = b"the content itself must not be lying around on disk".repeat(7);
+        let id = store.put(&secret).unwrap();
+
+        let mut files = 0usize;
+        for entry in fs::read_dir(&root).unwrap().flatten() {
+            files += 1;
+            let raw = fs::read(entry.path()).unwrap();
+            assert_ne!(raw, secret, "the plain object was written to disk");
+            assert!(
+                !raw
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_slice()),
+                "the plain object is sitting inside {}",
+                entry.path().display()
+            );
+        }
+        assert_eq!(files, 1, "one recipe per object, and nothing else");
+
+        // And the recipe still answers for the object, from a cold store
+        // that never saw the content.
+        let reopened = GardenContentStore::open(Some(&root), 1024 * 1024).unwrap();
+        assert_eq!(reopened.get(&id).expect("the recipe rebuilds it"), secret);
+        assert_eq!(
+            reopened.stored_len(&id),
+            u64::try_from(secret.len()).ok(),
+            "length is the object's, not the recipe's"
+        );
     }
 
     #[test]

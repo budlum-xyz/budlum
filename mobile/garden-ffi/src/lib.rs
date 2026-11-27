@@ -209,10 +209,19 @@ impl GardenPhone {
 
     /// Open a six digit code that stands for this Garden's invite.
     ///
-    /// The code is answered on the local network for an hour. It is a
-    /// meeting point, not the invite itself: six digits cannot carry a
+    /// The code is answered for an hour and is written down, so closing
+    /// the app does not cancel a number somebody else is holding. It is
+    /// a meeting point, not the invite itself: six digits cannot carry a
     /// chain id, a genesis hash, a token and an address.
+    ///
+    /// A code already open and still good is handed back as it is rather
+    /// than replaced. Opening the screen twice used to mint a second
+    /// code and kill the first, which is how a person ends up reading
+    /// out digits that stopped working while they were speaking.
     pub fn open_code(&self) -> Result<GardenCode, GardenError> {
+        if let Some(live) = self.code_now() {
+            return Ok(live);
+        }
         let record = self
             .runtime
             .block_on(self.service.invite())
@@ -232,7 +241,7 @@ impl GardenPhone {
         // Drop and join any active desk first so the shared UDP port is freed
         // before opening a fresh code.
         *guard = None;
-        let desk = rendezvous::Desk::open(code, record.clone())
+        let desk = rendezvous::Desk::open_noted(&self.data_dir, code, record.clone())
             .map_err(|e| GardenError::Refused { reason: e })?;
         let answer = GardenCode {
             code: desk.code().to_owned(),
@@ -244,8 +253,18 @@ impl GardenPhone {
     }
 
     /// The code this phone is currently answering, if any is still good.
+    ///
+    /// Picks a written-down code back up on the first call after a
+    /// restart, so the hour continues where it was rather than starting
+    /// again from nothing.
     pub fn code_now(&self) -> Option<GardenCode> {
-        let desk = self.desk.lock().unwrap_or_else(|e| e.into_inner());
+        let mut desk = self.desk.lock().unwrap_or_else(|e| e.into_inner());
+        if desk.as_ref().is_some_and(rendezvous::Desk::expired) {
+            *desk = None;
+        }
+        if desk.is_none() {
+            *desk = rendezvous::Desk::resume(&self.data_dir);
+        }
         desk.as_ref().filter(|d| !d.expired()).map(|d| GardenCode {
             code: d.code().to_owned(),
             seconds_left: d.seconds_left(),
@@ -264,6 +283,14 @@ impl GardenPhone {
             Some(rendezvous::loopback_desk()),
         )
         .map_err(|reason| GardenError::Refused { reason })?;
+        // A phone can redeem its own code against its own desk while
+        // testing. Burn it here too, so the single-use rule holds on
+        // this side of the exchange as well as the answering side.
+        if let Some(desk) = self.desk.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            if desk.code() == code.trim() {
+                desk.burn();
+            }
+        }
         self.join(record, name)
     }
 
