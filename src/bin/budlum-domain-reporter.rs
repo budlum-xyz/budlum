@@ -60,10 +60,14 @@ struct Cli {
 
 fn task_id(text: &str) -> Result<[u8; 32], String> {
     let clean = text.trim().strip_prefix("0x").unwrap_or(text.trim());
-    hex::decode(clean)
+    let arr: [u8; 32] = hex::decode(clean)
         .map_err(|e| format!("task id is not hex: {e}"))?
         .try_into()
-        .map_err(|_| "the task id must be exactly 32 bytes".to_string())
+        .map_err(|_| "the task id must be exactly 32 bytes".to_string())?;
+    if arr == [0u8; 32] {
+        return Err("the task id must be non-zero".to_string());
+    }
+    Ok(arr)
 }
 
 fn quantity(value: &Value, field: &str) -> Result<u64, String> {
@@ -149,6 +153,18 @@ fn http_client() -> Result<reqwest::Client, String> {
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
+    const MAX_PAYLOAD_FILE_BYTES: u64 = 16 * 1024 * 1024;
+    if cli.fee == 0 {
+        return Err("transaction fee must be non-zero".to_string());
+    }
+    let meta = std::fs::metadata(&cli.payload)
+        .map_err(|e| format!("cannot inspect payload {}: {e}", cli.payload.display()))?;
+    if meta.len() > MAX_PAYLOAD_FILE_BYTES {
+        return Err(format!(
+            "payload {} exceeds {MAX_PAYLOAD_FILE_BYTES}-byte limit",
+            cli.payload.display()
+        ));
+    }
     let payload: budlum_core::domain::VerifiedDomainCommitment = serde_json::from_slice(
         &std::fs::read(&cli.payload)
             .map_err(|e| format!("cannot read payload {}: {e}", cli.payload.display()))?,
@@ -271,5 +287,14 @@ mod tests {
             "the submitted transaction is signed"
         );
         server.stop().unwrap();
+    }
+
+    #[test]
+    fn task_id_refuses_all_zero_identifier() {
+        let zero_hex = format!("0x{}", "00".repeat(32));
+        assert!(
+            task_id(&zero_hex).is_err(),
+            "all-zero 32-byte proof-market task_id must be refused"
+        );
     }
 }
