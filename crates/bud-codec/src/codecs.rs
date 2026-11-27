@@ -465,6 +465,11 @@ mod range_coder {
             out.push(val);
             prev = val;
         }
+        if payload.len() > pos.saturating_add(4) {
+            return Err(CodecError::Malformed(String::from(
+                "trailing bytes after Codec 8 stream",
+            )));
+        }
         Ok(out)
     }
 }
