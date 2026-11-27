@@ -85,6 +85,9 @@ impl ShardManager {
     /// Just wait for deals; they help maintain the network's health by
     /// Caching CIDs that are "close" to them in the XOR keyspace.
     pub fn should_cache(&self, cid: &ContentId) -> bool {
+        if self.config.replication_factor == 0 {
+            return false;
+        }
         if self.config.mobile_mode && !self.is_resource_buffer_sufficient() {
             return false; // Skip caching on mobile if low on battery/budget
         }
@@ -234,5 +237,22 @@ mod tests {
 
         // Very unlikely to be 0
         assert!(!manager.should_cache(&cid));
+    }
+
+    #[test]
+    fn zero_replication_factor_disables_opportunistic_caching() {
+        let manager = ShardManager::new(
+            fixed_peer_id(),
+            ShardingConfig {
+                replication_factor: 0,
+                max_xor_distance: U256::MAX,
+                mandatory: false,
+                mobile_mode: false,
+            },
+        );
+        assert!(
+            !manager.should_cache(&ContentId([0x11; 32])),
+            "replication_factor == 0 must disable opportunistic shard caching"
+        );
     }
 }

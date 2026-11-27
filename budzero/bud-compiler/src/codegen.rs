@@ -38,6 +38,8 @@ pub struct Codegen {
         std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     /// The declared return type of every function, so `f().x` resolves.
     function_returns: std::collections::HashMap<String, String>,
+    /// Byte offsets under [`crate::WITNESS_BASE`] for declared private witness fields.
+    witness_offsets: std::collections::HashMap<String, i32>,
 }
 
 impl Default for Codegen {
@@ -58,6 +60,7 @@ impl Codegen {
             struct_layouts: std::collections::HashMap::new(),
             struct_field_types: std::collections::HashMap::new(),
             function_returns: std::collections::HashMap::new(),
+            witness_offsets: std::collections::HashMap::new(),
         }
     }
 
@@ -74,10 +77,22 @@ impl Codegen {
             struct_layouts: std::collections::HashMap::new(),
             struct_field_types: std::collections::HashMap::new(),
             function_returns: std::collections::HashMap::new(),
+            witness_offsets: std::collections::HashMap::new(),
         }
     }
 
     pub fn generate(&mut self, contract: &Contract) -> Result<Vec<u64>, CompileError> {
+        self.witness_offsets.clear();
+        for (idx, w) in contract.witnesses.iter().enumerate() {
+            if idx >= crate::MAX_WITNESS_SLOTS {
+                return Err(CompileError::CodegenError(format!(
+                    "witness count exceeds max {}",
+                    crate::MAX_WITNESS_SLOTS
+                )));
+            }
+            let offset = crate::WITNESS_BASE + (idx as i32) * 8;
+            self.witness_offsets.insert(w.name.clone(), offset);
+        }
         // Populate struct layouts
         for s in &contract.structs {
             let mut fields = Vec::new();
@@ -694,15 +709,40 @@ impl Codegen {
             Expr::Ident(name) => match scope.get(name) {
                 Some(vi) => vi.reg,
                 None => {
+                    if let Some(&offset) = self.witness_offsets.get(name) {
+                        let addr_reg = self.alloc_reg();
+                        self.emit(Opcode::Load, addr_reg, 0, 0, offset);
+                        let val_reg = self.alloc_reg();
+                        self.emit(Opcode::Load, val_reg, addr_reg, 0, 0);
+                        val_reg
+                    } else {
+                        if self.error.is_none() {
+                            self.error = Some(CompileError::CodegenError(format!(
+                                "Undefined variable in codegen: {}",
+                                name
+                            )));
+                        }
+                        0
+                    }
+                }
+            },
+            Expr::WitnessRead(name) => {
+                if let Some(&offset) = self.witness_offsets.get(name) {
+                    let addr_reg = self.alloc_reg();
+                    self.emit(Opcode::Load, addr_reg, 0, 0, offset);
+                    let val_reg = self.alloc_reg();
+                    self.emit(Opcode::Load, val_reg, addr_reg, 0, 0);
+                    val_reg
+                } else {
                     if self.error.is_none() {
                         self.error = Some(CompileError::CodegenError(format!(
-                            "Undefined variable in codegen: {}",
+                            "Unknown witness field in codegen: {}",
                             name
                         )));
                     }
                     0
                 }
-            },
+            }
             Expr::StorageRead(name) => {
                 let reg = self.alloc_reg();
                 let slot = match storage.get(name) {

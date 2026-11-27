@@ -382,10 +382,15 @@ pub struct PresentationReceipt {
     /// The subject's Ed25519 account key - the V4
     /// derivation makes the key bytes the address itself, so a verifier
     /// needs no registry lookup to know who must have signed.
+    ///
+    /// IDENTITY: excluded - the key behind `subject`, which the digest binds:
+    /// `verify_binding` refuses a key whose address is not `subject`.
     #[serde(default)]
     pub subject_public_key: Vec<u8>,
     /// Over [`Self::digest`]: requester, document and epoch are inside the
     /// signed bytes, so none of the three can be rewritten afterwards.
+    ///
+    /// IDENTITY: excluded - the signature over the digest itself.
     #[serde(default)]
     pub signature: Vec<u8>,
 }

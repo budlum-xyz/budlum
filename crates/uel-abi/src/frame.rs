@@ -74,20 +74,24 @@ impl From<io::Error> for FrameError {
 
 /// The ABI version at the head of an encoded envelope: field 1, a varint. A
 /// body that does not start with that field reads as version 0 (proto3 omits a
-/// zero), which no peer speaks.
-fn peek_version(body: &[u8]) -> u32 {
+/// zero), which no peer speaks. Non-minimal overlong varint encodings return
+/// `None` so callers reject them as malformed wire bytes.
+fn peek_version(body: &[u8]) -> Option<u32> {
     if body.first() != Some(&0x08) {
-        return 0;
+        return Some(0);
     }
     let mut value: u64 = 0;
     for (i, byte) in body.iter().skip(1).take(5).enumerate() {
         value |= u64::from(byte & 0x7F) << (7 * i);
         if byte & 0x80 == 0 {
-            return u32::try_from(value).unwrap_or(u32::MAX);
+            if i > 0 && *byte == 0 {
+                return None;
+            }
+            return Some(u32::try_from(value).unwrap_or(u32::MAX));
         }
     }
     // An unterminated or over-long varint is not a version this crate knows.
-    u32::MAX
+    Some(u32::MAX)
 }
 
 fn check_version(got: u32) -> Result<(), FrameError> {
@@ -105,7 +109,9 @@ fn decode_body(body: &[u8]) -> Result<pb::Envelope, FrameError> {
     if body.is_empty() {
         return Err(FrameError::Empty);
     }
-    check_version(peek_version(body))?;
+    let version = peek_version(body)
+        .ok_or_else(|| FrameError::Decode("non-minimal abi_version varint".into()))?;
+    check_version(version)?;
     let envelope = pb::Envelope::decode(body).map_err(|e| FrameError::Decode(e.to_string()))?;
     // Protobuf allows repeated scalar fields where the last occurrence wins;
     // re-check the decoded scalar so a peer cannot override `abi_version`.

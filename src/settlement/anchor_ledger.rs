@@ -95,10 +95,18 @@ pub struct AnchorKeyLedger {
     /// The Root Seal keys, slots `0..n`.
     pub seal_keys: Vec<LedgerKey>,
     /// The suspensions evidence has caused.
+    ///
+    /// IDENTITY: excluded - state, not identity: `digest` names the key set of
+    /// the epoch, and a suspended slot is refused at verification time
+    /// (`validate`, `pq_anchor_verify`), not by a change of digest.
     #[serde(default)]
     pub suspended: BTreeSet<Suspension>,
     /// Family and SHA3-256 fingerprint of each key suspended for equivocation.
     /// Unlike a slot number, a fingerprint survives rotation and reordering.
+    ///
+    /// IDENTITY: excluded - state, not identity, like `suspended`: a revoked
+    /// fingerprint is refused by `validate` and when the next epoch's keys are
+    /// installed, not by a change of digest.
     #[serde(default)]
     pub revoked_key_hashes: BTreeSet<(KeyFamily, [u8; 32])>,
 }

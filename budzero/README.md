@@ -71,6 +71,8 @@ This crate set is the [`budzero/`](./) tree **inside this monorepo** (there is n
 | Item | Status |
 | --- | --- |
 | Public inputs (Z-A) | Bound (incl. event_digest Log fix ) |
+| Soundness negative taxonomy (`tests/soundness_negatives.rs`) | Four-layer suite: (1) VM-step mutation -> real prove/verify refusal, (2) Direct AIR-witness & independent Register / Memory+Storage / Program LogUp + Div(0)/Inv(0)/padding mutations -> `prove_matrix_envelope` -> verifier refusal, (3) Public-input, program & `BudL` private `witness` binding, (4) Serialized proof corruption + `ZkVerificationPolicy::StrictZeroKnowledgePcs` guard |
+| Private `witness` input (`BudL` + `bud-vm`) | `witness { name: u64 }` / `witness::name` staged in `[WITNESS_BASE, HEAP_BASE)` (`2048..4096`), proved through `initial_memory_reads` & Memory LogUp (`budzero/bud-proof/src/hiding.rs` explicitly rejects `StrictZeroKnowledgePcs` on `TwoAdicFriPcs` `Pcs::ZK == false` to avoid unblinded LogUp lookup-terminal leakage) |
 | `VerifyMerkle` path AIR (Z-B) | Expansion + Poseidon round checks; pre-round currents, single-round path hash, original-only root check, expand gas |
 | Valid 64-depth prove | OK `proves_verify_merkle_valid_64_depth` green (matrix chain + full prove/verify) |
 | Production gate | `MainnetActivation::default()` keeps `VerifyMerkle` and `VerifyInference` closed; ISA `is_experimental()==false` |

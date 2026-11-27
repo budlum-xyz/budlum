@@ -114,7 +114,10 @@ impl Namespace {
             && name.len() <= MAX_NAMESPACE_BYTES
             && name
                 .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-./".contains(&b));
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-./".contains(&b))
+            && !name
+                .split('/')
+                .any(|seg| seg.is_empty() || seg == "." || seg == "..");
         if ok {
             Ok(Self(name.to_string()))
         } else {

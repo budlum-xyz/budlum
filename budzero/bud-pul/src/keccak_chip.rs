@@ -62,14 +62,21 @@ pub fn keccak_f_trace(inputs: &[[u64; 25]]) -> Result<RowMajorMatrix<Goldilocks>
 /// The input state of permutation `index`, read back from a chip trace.
 /// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub fn input_state(trace: &RowMajorMatrix<Goldilocks>, index: usize) -> [u64; 25] {
-    let row = index * ROWS_PER_PERMUTATION;
+    let Some(row) = index.checked_mul(ROWS_PER_PERMUTATION) else {
+        return [0u64; 25];
+    };
     read_state(trace, row, cols::preimage)
 }
 
 /// The output state of permutation `index`, read back from a chip trace.
 /// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub fn output_state(trace: &RowMajorMatrix<Goldilocks>, index: usize) -> [u64; 25] {
-    let row = index * ROWS_PER_PERMUTATION + (ROWS_PER_PERMUTATION - 1);
+    let Some(row) = index
+        .checked_mul(ROWS_PER_PERMUTATION)
+        .and_then(|r| r.checked_add(ROWS_PER_PERMUTATION - 1))
+    else {
+        return [0u64; 25];
+    };
     read_state(trace, row, cols::output)
 }
 

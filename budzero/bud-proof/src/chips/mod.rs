@@ -6,7 +6,9 @@
 //! the `BudZKVM` CPU trace.
 
 pub mod batch;
+pub mod ext_field;
 pub mod fib;
 pub mod fold;
 pub mod keccak;
+pub mod merkle_path;
 pub mod mldsa_ntt;

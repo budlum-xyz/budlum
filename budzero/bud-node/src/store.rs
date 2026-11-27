@@ -177,7 +177,11 @@ impl MemoryContentStore {
 
     /// The largest single chunk this store accepts.
     fn chunk_limit(&self) -> usize {
-        MAX_CHUNK_BYTES.min(self.max_bytes)
+        if self.max_capacity == 0 {
+            0
+        } else {
+            MAX_CHUNK_BYTES.min(self.max_bytes)
+        }
     }
 
     /// Would adding `len` bytes break the chunk or byte bound?
@@ -216,6 +220,12 @@ impl ContentStore for MemoryContentStore {
                 actual: computed,
             });
         }
+        if self.max_capacity == 0 {
+            return Err(StoreError::TooLarge {
+                len: data.len(),
+                max: 0,
+            });
+        }
         let limit = self.chunk_limit();
         if data.len() > limit {
             return Err(StoreError::TooLarge {
@@ -244,6 +254,12 @@ impl ContentStore for MemoryContentStore {
                 state.bytes = state.bytes.saturating_sub(old.len());
                 tracing::debug!(%oldest, "evicted oldest chunk (capacity reached)");
             }
+        }
+        if self.over_budget(&state, data.len()) {
+            return Err(StoreError::TooLarge {
+                len: data.len(),
+                max: limit,
+            });
         }
 
         state.bytes = state.bytes.saturating_add(data.len());
@@ -559,6 +575,26 @@ impl ContentStore for FileContentStore {
 
     fn get(&self, id: &ContentId) -> Result<Vec<u8>, StoreError> {
         let path = self.path_for(id);
+        let meta = fs::symlink_metadata(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                StoreError::NotFound(*id)
+            } else {
+                StoreError::Internal(format!("inspect stored content {}: {error}", id.to_hex()))
+            }
+        })?;
+        if !meta.file_type().is_file() {
+            return Err(StoreError::Internal(format!(
+                "stored content {} is not a regular file",
+                id.to_hex()
+            )));
+        }
+        let file_len = usize::try_from(meta.len()).unwrap_or(usize::MAX);
+        if file_len > MAX_CHUNK_BYTES {
+            return Err(StoreError::TooLarge {
+                len: file_len,
+                max: MAX_CHUNK_BYTES,
+            });
+        }
         let data = fs::read(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 StoreError::NotFound(*id)
@@ -592,7 +628,12 @@ impl ContentStore for FileContentStore {
     fn has(&self, id: &ContentId) -> bool {
         self.inner
             .read()
-            .map(|state| state.chunks.contains_key(id) && self.path_for(id).is_file())
+            .map(|state| {
+                state.chunks.contains_key(id)
+                    && fs::symlink_metadata(self.path_for(id))
+                        .map(|m| m.file_type().is_file())
+                        .unwrap_or(false)
+            })
             .unwrap_or(false)
     }
 
@@ -873,5 +914,44 @@ mod tests {
         reopened.delete(&entries[1].0).unwrap();
         reopened.put(entries[2].0, entries[2].1.clone()).unwrap();
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn zero_capacity_memory_store_and_symlink_or_oversized_file_get_fail_closed() {
+        // 1. MemoryContentStore::new(0) must refuse even a 0-byte chunk rather than storing 1 > 0.
+        let zero_mem = MemoryContentStore::new(0);
+        let empty_cid = ContentId::of(b"");
+        assert!(
+            zero_mem.put(empty_cid, Vec::new()).is_err(),
+            "zero-capacity MemoryContentStore must refuse 0-byte chunk"
+        );
+        assert_eq!(zero_mem.len(), 0);
+
+        // 2. FileContentStore::get must refuse a symlink swapped in after indexing.
+        #[cfg(unix)]
+        {
+            let path = scratch_store_path("symlink-get");
+            let secret_path = scratch_store_path("outside-secret");
+            let data = b"secret-bytes".to_vec();
+            let id = ContentId::of(&data);
+            let store = FileContentStore::open(&path, 4, 1024).unwrap();
+            store.put(id, data.clone()).unwrap();
+
+            std::fs::write(&secret_path, &data).unwrap();
+            let chunk_file = path.join(id.to_hex());
+            std::fs::remove_file(&chunk_file).unwrap();
+            std::os::unix::fs::symlink(&secret_path, &chunk_file).unwrap();
+
+            assert!(
+                !store.has(&id),
+                "has() must return false when chunk path was replaced by a symlink"
+            );
+            assert!(
+                matches!(store.get(&id), Err(StoreError::Internal(_))),
+                "get() must refuse to follow symlinks out of the content store root"
+            );
+            let _ = std::fs::remove_file(&secret_path);
+            let _ = std::fs::remove_dir_all(&path);
+        }
     }
 }

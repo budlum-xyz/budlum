@@ -196,6 +196,9 @@ pub struct AdmissionReport {
     /// the same names while swapping a meaningful corruption for a no-op.
     #[serde(default)]
     pub probe_commitment: [u8; 32],
+    /// IDENTITY: excluded - the verdict over the fields above. `register` and
+    /// `readmit` take it from a fresh `admit` run and refuse on it directly;
+    /// the stored report is a record of that run, not an input to a later one.
     pub admitted: bool,
 }
 

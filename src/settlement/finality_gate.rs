@@ -154,9 +154,10 @@ pub struct ValueGateVerdict {
 /// Compose and admit a cross-domain value route through [`compose_cross_domain_route`]
 /// and [`FinalityGuarantee::admits_cross_domain_value`].
 ///
-/// Returns `Some(route)` only when the source guarantee admits cross-domain
-/// value transfer, the composed route admits transfer, and the bottleneck fault
-/// tolerance is strictly positive.
+/// Returns `Some(route)` only when both the source and target domain
+/// guarantees admit cross-domain value transfer, the composed weakest-link
+/// route admits transfer, and the bottleneck fault tolerance is strictly
+/// positive.
 #[must_use]
 pub fn evaluate_route_guarantee(
     source: &FinalityGuarantee,
@@ -165,6 +166,7 @@ pub fn evaluate_route_guarantee(
 ) -> Option<RouteFinalityBound> {
     let route = compose_cross_domain_route(source, hub, target);
     if !source.admits_cross_domain_value()
+        || !target.admits_cross_domain_value()
         || !route.source_admits_value_transfer
         || route.bottleneck_fault_tolerance_bps == 0
     {
@@ -639,6 +641,41 @@ mod tests {
                 domain_id: 77,
                 reason: FinalityPendingReason::RuleNotSatisfied,
             }
+        );
+    }
+
+    #[test]
+    fn evaluate_route_guarantee_refuses_weak_or_unslashable_target_domain() {
+        let strong_source = FinalityGuarantee {
+            reversibility: FinalityReversibility::DeterministicQuorum,
+            quantum_posture: QuantumClass::Hash,
+            attestation: FINALITY_BINDS_ALL,
+            slashable_backing: true,
+            fault_tolerance_bps: 3_333,
+        };
+        let hub = FinalityGuarantee::settlement_hub();
+        let unslashable_target = FinalityGuarantee {
+            reversibility: FinalityReversibility::DeterministicQuorum,
+            quantum_posture: QuantumClass::Hash,
+            attestation: FINALITY_BINDS_ALL,
+            slashable_backing: false,
+            fault_tolerance_bps: 3_333,
+        };
+        assert!(
+            evaluate_route_guarantee(&strong_source, &hub, &unslashable_target).is_none(),
+            "route must fail closed when target domain lacks slashable cross-domain value admission"
+        );
+
+        let attested_target = FinalityGuarantee {
+            reversibility: FinalityReversibility::DeterministicQuorum,
+            quantum_posture: QuantumClass::Hash,
+            attestation: FINALITY_BINDS_ALL,
+            slashable_backing: true,
+            fault_tolerance_bps: 3_333,
+        };
+        assert!(
+            evaluate_route_guarantee(&strong_source, &hub, &attested_target).is_some(),
+            "established slashable source and target must pass evaluate_route_guarantee"
         );
     }
 }
