@@ -204,6 +204,34 @@ struct Ledger {
     grants_total: u64,
 }
 
+/// Canonicalize client IP addresses for faucet quota accounting:
+/// - IPv4-mapped IPv6 (`::ffff:a.b.c.d`) collapses to `IpAddr::V4(a.b.c.d)` so
+///   dual-stack callers cannot claim separate v4 and v6 grants.
+/// - Non-zero-prefix IPv6 addresses collapse to their `/64` routing prefix so
+///   rotating interface identifiers inside one `/64` allocation shares one slot.
+fn canonical_quota_ip(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            if segs.get(0..4) != Some(&[0, 0, 0, 0]) {
+                IpAddr::V6(std::net::Ipv6Addr::new(
+                    segs.first().copied().unwrap_or(0),
+                    segs.get(1).copied().unwrap_or(0),
+                    segs.get(2).copied().unwrap_or(0),
+                    segs.get(3).copied().unwrap_or(0),
+                    0,
+                    0,
+                    0,
+                    0,
+                ))
+            } else {
+                IpAddr::V6(v6)
+            }
+        }
+    }
+}
+
 impl Ledger {
     /// Refuse the request if a limit stands in the way; change nothing.
     fn check(
@@ -213,6 +241,7 @@ impl Ledger {
         ip: IpAddr,
         now: u64,
     ) -> Result<(), Refusal> {
+        let quota_ip = canonical_quota_ip(ip);
         self.roll_day(now);
         self.forget_expired(policy, now);
         if let Some(last) = self.by_address.get(to) {
@@ -223,7 +252,7 @@ impl Ledger {
                 });
             }
         }
-        if let Some(last) = self.by_ip.get(&ip) {
+        if let Some(last) = self.by_ip.get(&quota_ip) {
             let open_at = last.saturating_add(policy.cooldown_secs);
             if now < open_at {
                 return Err(Refusal::IpCooldown {
@@ -242,15 +271,16 @@ impl Ledger {
 
     /// Reserve an allowance before submission, even if the RPC response is lost.
     fn record(&mut self, policy: &Policy, to: Address, ip: IpAddr, now: u64) {
+        let quota_ip = canonical_quota_ip(ip);
         self.roll_day(now);
         self.by_address.insert(to, now);
-        self.by_ip.insert(ip, now);
+        self.by_ip.insert(quota_ip, now);
         self.sent_today = self.sent_today.saturating_add(policy.amount);
     }
 
     fn roll_day(&mut self, now: u64) {
         let day = now / SECONDS_PER_DAY;
-        if day != self.day {
+        if day > self.day {
             self.day = day;
             self.sent_today = 0;
         }
@@ -1466,5 +1496,59 @@ mod tests {
             budlum_core::core::transaction::SIGNATURE_VERSION_V5
         );
         assert!(tx.verify());
+    }
+
+    #[test]
+    fn ipv6_64_subnet_rotation_ipv4_mapped_and_backward_clock_do_not_bypass_limits() {
+        let p = Policy {
+            amount: 10 * budlum_core::tokenomics::BUD_UNIT,
+            cooldown_secs: 3600,
+            daily_cap: 20 * budlum_core::tokenomics::BUD_UNIT,
+        };
+        let mut ledger = Ledger::default();
+        let a1 = Address::from([0x11; 32]);
+        let a2 = Address::from([0x22; 32]);
+        let a3 = Address::from([0x33; 32]);
+
+        // Two distinct /128 addresses inside the same 2001:db8:abcd:0012::/64 subnet:
+        let v6_one: IpAddr = "2001:db8:abcd:12::1".parse().expect("ipv6 1");
+        let v6_two: IpAddr = "2001:db8:abcd:12::dead:beef".parse().expect("ipv6 2");
+        let day1 = 10 * super::SECONDS_PER_DAY + 500;
+        ledger
+            .check(&p, &a1, v6_one, day1)
+            .expect("first /64 grant allowed");
+        ledger.record(&p, a1, v6_one, day1);
+        assert!(
+            matches!(
+                ledger.check(&p, &a2, v6_two, day1 + 1),
+                Err(Refusal::IpCooldown { .. })
+            ),
+            "rotating lower 64 interface bits inside the same IPv6 /64 subnet must hit IpCooldown"
+        );
+
+        // IPv4 198.51.100.9 and IPv4-mapped IPv6 ::ffff:198.51.100.9 must share one quota slot:
+        let v4: IpAddr = "198.51.100.9".parse().expect("v4");
+        let v4_mapped: IpAddr = "::ffff:198.51.100.9".parse().expect("v4-mapped");
+        ledger
+            .check(&p, &a2, v4, day1 + 2)
+            .expect("second daily grant");
+        ledger.record(&p, a2, v4, day1 + 2);
+        assert!(
+            matches!(
+                ledger.check(&p, &a3, v4_mapped, day1 + 3),
+                Err(Refusal::IpCooldown { .. })
+            ),
+            "IPv4-mapped IPv6 address must share cooldown with its canonical IPv4 address"
+        );
+
+        // Daily cap is now reached (20 BUD == 20 BUD). A backward NTP clock jump to day 9
+        // must NOT reset sent_today back to 0!
+        let earlier_day = 9 * super::SECONDS_PER_DAY + 500;
+        let other_ip: IpAddr = "203.0.113.44".parse().expect("other v4");
+        assert_eq!(
+            ledger.check(&p, &a3, other_ip, earlier_day),
+            Err(Refusal::DailyCap),
+            "backward clock jump must not reset daily faucet cap"
+        );
     }
 }
