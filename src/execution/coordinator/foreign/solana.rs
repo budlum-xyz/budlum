@@ -216,14 +216,17 @@ pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeErr
     for _ in 0..key_count {
         account_keys.push(read_exact_32(raw, &mut cur)?);
     }
-    if usize::from(num_readonly_signed) > sig_count
+    if usize::from(num_readonly_signed) >= sig_count
         || usize::from(num_readonly_unsigned) > key_count - sig_count
     {
         return Err(SolanaEnvelopeError::HeaderInconsistent);
     }
-    for (index, key) in account_keys.iter().take(sig_count).enumerate() {
+    for (index, key) in account_keys.iter().enumerate() {
         if account_keys.iter().take(index).any(|prev| prev == key) {
-            return Err(SolanaEnvelopeError::DuplicateSigner { index });
+            if index < sig_count {
+                return Err(SolanaEnvelopeError::DuplicateSigner { index });
+            }
+            return Err(SolanaEnvelopeError::HeaderInconsistent);
         }
     }
     let recent_blockhash = read_exact_32(raw, &mut cur)?;
@@ -256,12 +259,13 @@ pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeErr
     }
 
     for instruction in &instructions {
-        if usize::from(instruction.program_id_index) >= key_count {
+        let pid = usize::from(instruction.program_id_index);
+        if pid < sig_count || pid >= key_count {
             return Err(SolanaEnvelopeError::ProgramIdOutOfRange);
         }
     }
 
-    let mut address_table_lookups = Vec::new();
+    let mut address_table_lookups: Vec<SolanaAddressTableLookup> = Vec::new();
     if is_v0 {
         let lut_count = read_compact_u16(raw, &mut cur)?;
         if lut_count > 64 {
@@ -269,6 +273,12 @@ pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeErr
         }
         for _ in 0..lut_count {
             let account_key = read_exact_32(raw, &mut cur)?;
+            if address_table_lookups
+                .iter()
+                .any(|existing| existing.account_key == account_key)
+            {
+                return Err(SolanaEnvelopeError::HeaderInconsistent);
+            }
             let w_len = read_compact_u16(raw, &mut cur)?;
             let writable_indexes = raw
                 .get(cur..cur + w_len)
@@ -281,6 +291,21 @@ pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeErr
                 .ok_or(SolanaEnvelopeError::Truncated)?
                 .to_vec();
             cur += r_len;
+            if writable_indexes.is_empty() && readonly_indexes.is_empty() {
+                return Err(SolanaEnvelopeError::HeaderInconsistent);
+            }
+            for (i, idx) in writable_indexes.iter().enumerate() {
+                if writable_indexes.iter().take(i).any(|prev| prev == idx)
+                    || readonly_indexes.contains(idx)
+                {
+                    return Err(SolanaEnvelopeError::HeaderInconsistent);
+                }
+            }
+            for (i, idx) in readonly_indexes.iter().enumerate() {
+                if readonly_indexes.iter().take(i).any(|prev| prev == idx) {
+                    return Err(SolanaEnvelopeError::HeaderInconsistent);
+                }
+            }
             address_table_lookups.push(SolanaAddressTableLookup {
                 account_key,
                 writable_indexes,
@@ -580,5 +605,144 @@ mod encoding_tests {
         assert!(decode_solana_base64("Zg=").is_err());
         assert!(decode_solana_base64("=m9v").is_err());
         assert!(decode_solana_base64(&"A".repeat(MAX_SOLANA_BASE64_BYTES + 4)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn encode_short_u16(mut value: usize, out: &mut Vec<u8>) {
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                break;
+            }
+            byte |= 0x80;
+            out.push(byte);
+        }
+    }
+
+    fn build_legacy_tx(
+        signer_key: &SigningKey,
+        num_required_sigs: u8,
+        num_readonly_signed: u8,
+        num_readonly_unsigned: u8,
+        keys: &[[u8; 32]],
+        program_id_index: u8,
+    ) -> Vec<u8> {
+        let mut msg = vec![
+            num_required_sigs,
+            num_readonly_signed,
+            num_readonly_unsigned,
+        ];
+        encode_short_u16(keys.len(), &mut msg);
+        for k in keys {
+            msg.extend_from_slice(k);
+        }
+        msg.extend_from_slice(&[0x11u8; 32]); // recent_blockhash
+        encode_short_u16(1, &mut msg);
+        msg.push(program_id_index);
+        encode_short_u16(0, &mut msg);
+        encode_short_u16(0, &mut msg);
+
+        let sig = signer_key.sign(&msg);
+        let mut raw = Vec::new();
+        encode_short_u16(usize::from(num_required_sigs), &mut raw);
+        for _ in 0..num_required_sigs {
+            raw.extend_from_slice(&sig.to_bytes());
+        }
+        raw.extend_from_slice(&msg);
+        raw
+    }
+
+    fn build_v0_tx_with_luts(
+        signer_key: &SigningKey,
+        luts: &[([u8; 32], Vec<u8>, Vec<u8>)],
+    ) -> Vec<u8> {
+        let pk = signer_key.verifying_key().to_bytes();
+        let prog = [0xAAu8; 32];
+        let mut msg = vec![0x80, 1, 0, 1];
+        encode_short_u16(2, &mut msg);
+        msg.extend_from_slice(&pk);
+        msg.extend_from_slice(&prog);
+        msg.extend_from_slice(&[0x22u8; 32]);
+        encode_short_u16(1, &mut msg);
+        msg.push(1);
+        encode_short_u16(0, &mut msg);
+        encode_short_u16(0, &mut msg);
+        encode_short_u16(luts.len(), &mut msg);
+        for (table, writable, readonly) in luts {
+            msg.extend_from_slice(table);
+            encode_short_u16(writable.len(), &mut msg);
+            msg.extend_from_slice(writable);
+            encode_short_u16(readonly.len(), &mut msg);
+            msg.extend_from_slice(readonly);
+        }
+        let sig = signer_key.sign(&msg);
+        let mut raw = Vec::new();
+        encode_short_u16(1, &mut raw);
+        raw.extend_from_slice(&sig.to_bytes());
+        raw.extend_from_slice(&msg);
+        raw
+    }
+
+    #[test]
+    fn solana_rejects_signer_as_program_id() {
+        let sk = SigningKey::from_bytes(&[0x12u8; 32]);
+        let pk = sk.verifying_key().to_bytes();
+        let raw = build_legacy_tx(&sk, 1, 0, 1, &[pk, [0x99u8; 32]], 0);
+        assert!(
+            decode_solana_tx(&raw).is_err(),
+            "signer account cannot be invoked as program_id_index"
+        );
+    }
+
+    #[test]
+    fn solana_rejects_readonly_fee_payer_and_duplicate_unsigned_static_keys() {
+        let sk = SigningKey::from_bytes(&[0x13u8; 32]);
+        let pk = sk.verifying_key().to_bytes();
+        let readonly_payer = build_legacy_tx(&sk, 1, 1, 1, &[pk, [0x99u8; 32]], 1);
+        assert!(
+            decode_solana_tx(&readonly_payer).is_err(),
+            "readonly fee payer (num_readonly_signed == sig_count) must be refused"
+        );
+
+        let dup_unsigned = build_legacy_tx(&sk, 1, 0, 1, &[pk, [0x99u8; 32], [0x99u8; 32]], 1);
+        assert!(
+            decode_solana_tx(&dup_unsigned).is_err(),
+            "duplicate unsigned static account key must be refused"
+        );
+    }
+
+    #[test]
+    fn solana_v0_rejects_duplicate_lut_table_and_overlapping_lut_indexes() {
+        let sk = SigningKey::from_bytes(&[0x14u8; 32]);
+        let dup_table = build_v0_tx_with_luts(
+            &sk,
+            &[
+                ([0x55u8; 32], vec![0], vec![]),
+                ([0x55u8; 32], vec![], vec![1]),
+            ],
+        );
+        assert!(
+            decode_solana_tx(&dup_table).is_err(),
+            "duplicate LUT table must be refused"
+        );
+
+        let empty_lut = build_v0_tx_with_luts(&sk, &[([0x55u8; 32], vec![], vec![])]);
+        assert!(
+            decode_solana_tx(&empty_lut).is_err(),
+            "empty LUT lookup must be refused"
+        );
+
+        let overlap_lut = build_v0_tx_with_luts(&sk, &[([0x55u8; 32], vec![3], vec![3])]);
+        assert!(
+            decode_solana_tx(&overlap_lut).is_err(),
+            "overlapping LUT index must be refused"
+        );
     }
 }
