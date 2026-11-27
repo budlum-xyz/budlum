@@ -49,6 +49,7 @@ pub fn slash_penalty(stake: u64, slash_ratio_fixed: u64) -> u64 {
 /// `*_slash_ratio_fixed` values are `FIXED_POINT_SCALE`-scaled fractions in
 /// `[0, FIXED_POINT_SCALE]` (e.g. `FIXED_POINT_SCALE / 2` == 50%).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawRegistryParams")]
 pub struct RegistryParams {
     /// Minimum stake required to *newly* register for a role.
     pub min_stake: u64,
@@ -120,6 +121,31 @@ impl Default for RegistryParams {
             // 100% - proven malice burns the whole bond.
             malicious_slash_ratio_fixed: FIXED_POINT_SCALE,
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct RawRegistryParams {
+    min_stake: u64,
+    unbonding_epochs: u64,
+    double_sign_slash_ratio_fixed: u64,
+    liveness_slash_ratio_fixed: u64,
+    malicious_slash_ratio_fixed: u64,
+}
+
+impl TryFrom<RawRegistryParams> for RegistryParams {
+    type Error = String;
+
+    fn try_from(raw: RawRegistryParams) -> Result<Self, Self::Error> {
+        let params = Self {
+            min_stake: raw.min_stake,
+            unbonding_epochs: raw.unbonding_epochs,
+            double_sign_slash_ratio_fixed: raw.double_sign_slash_ratio_fixed,
+            liveness_slash_ratio_fixed: raw.liveness_slash_ratio_fixed,
+            malicious_slash_ratio_fixed: raw.malicious_slash_ratio_fixed,
+        };
+        params.validate()?;
+        Ok(params)
     }
 }
 
