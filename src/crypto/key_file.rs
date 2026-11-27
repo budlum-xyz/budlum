@@ -42,6 +42,29 @@ use std::path::{Path, PathBuf};
 /// after this call returns; this module does not retain a copy.
 pub fn write_atomic_owner_only(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
     let tmp_path = sibling_temp_path(path)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "{} is a symbolic link; refusing atomic key write",
+                    path.display()
+                ),
+            ));
+        }
+        Ok(meta) if !meta.file_type().is_file() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "{} is not a regular file; refusing atomic key write",
+                    path.display()
+                ),
+            ));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     match std::fs::remove_file(&tmp_path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -99,7 +122,23 @@ pub const KEY_FILE_FORBIDDEN_MASK: u32 = 0o077;
 #[cfg(unix)]
 pub fn require_owner_only(path: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(path)?.permissions().mode();
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{} is a symbolic link; key files must be regular files",
+                path.display()
+            ),
+        ));
+    }
+    if !meta.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    let mode = meta.permissions().mode();
     if mode & KEY_FILE_FORBIDDEN_MASK != 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -272,5 +311,45 @@ mod tests {
         // The blocker is the caller's directory; the writer removed its own
         // temporary only, so the target is intact and no file remains.
         assert!(blocker.is_dir());
+    }
+
+    #[test]
+    fn require_owner_only_refuses_symlinks_and_directories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real_file = dir.path().join("real.key");
+        write_atomic_owner_only(&real_file, b"secret").expect("write");
+        let link = dir.path().join("link.key");
+        std::os::unix::fs::symlink(&real_file, &link).expect("symlink");
+        assert!(
+            require_owner_only(&link).is_err(),
+            "require_owner_only must refuse symlink targets"
+        );
+        let subdir = dir.path().join("sub");
+        std::fs::create_dir(&subdir).expect("mkdir");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        assert!(
+            require_owner_only(&subdir).is_err(),
+            "require_owner_only must refuse directories"
+        );
+    }
+
+    #[test]
+    fn write_atomic_owner_only_refuses_symlink_and_directory_targets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real_file = dir.path().join("real.key");
+        std::fs::write(&real_file, b"old").expect("seed");
+        let link = dir.path().join("link.key");
+        std::os::unix::fs::symlink(&real_file, &link).expect("symlink");
+        assert!(
+            write_atomic_owner_only(&link, b"new").is_err(),
+            "write_atomic_owner_only must refuse symlink targets"
+        );
+        let subdir = dir.path().join("sub");
+        std::fs::create_dir(&subdir).expect("mkdir");
+        assert!(
+            write_atomic_owner_only(&subdir, b"new").is_err(),
+            "write_atomic_owner_only must refuse directory targets"
+        );
     }
 }
