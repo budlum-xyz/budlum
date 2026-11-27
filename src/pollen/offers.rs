@@ -2255,15 +2255,45 @@ mod tests {
     }
 
     #[test]
-    fn offer_counter_saturates_and_encryption_policy_cap_holds() {
+    fn offer_counter_exhaustion_and_encryption_policy_cap_hold() {
         let mut reg = MarketplaceRegistry::new();
         let seller = addr(1);
         let cid = ContentId([0xEE; 32]);
-        reg.next_offer_id = u64::MAX;
-        let id = reg.create_offer(seller, cid, 50, 7).unwrap();
-        assert_eq!(id, u64::MAX);
-        assert_eq!(reg.next_offer_id, u64::MAX);
-        assert!(reg.create_offer(seller, cid, 50, 7).is_err());
+        // The counter is fail-closed (2026-11-26, `d708fe28`): `checked_add`
+        // runs BEFORE the insert, so `u64::MAX` itself is never mintable - the
+        // last usable id is `u64::MAX - 1`, and the mint that would need it
+        // refuses with a named reason instead of saturating back onto an id
+        // that is already live.
+        //
+        // This test used to assert the opposite: that `create_offer` returns
+        // `u64::MAX` and the counter *stays* at `u64::MAX`. Under the old
+        // `saturating_add` that held, and the reuse was caught one step later
+        // by the `contains_key` guard - i.e. the refusal existed but the
+        // counter never said so, and a restored `StateSnapshotV2` (which
+        // carries `offers` and `next_offer_id` as separate fields) could sit
+        // in that state indefinitely.
+        let last = u64::MAX - 1;
+        reg.next_offer_id = last;
+        assert_eq!(reg.create_offer(seller, cid, 50, 7).unwrap(), last);
+        assert_eq!(
+            reg.next_offer_id,
+            u64::MAX,
+            "the counter advances past the last usable id, it does not saturate on it"
+        );
+        // At `u64::MAX` the door refuses and nothing is minted.
+        let err = reg
+            .create_offer(seller, ContentId([0xEF; 32]), 50, 7)
+            .unwrap_err();
+        assert!(
+            err.contains("counter exhausted"),
+            "exhaustion must be named as such (a saturating counter would mint \
+             `u64::MAX` and only fail on the next call, as `already live`): {err}"
+        );
+        assert!(
+            !reg.offers.contains_key(&u64::MAX),
+            "a refused mint left a record behind"
+        );
+        assert_eq!(reg.next_offer_id, u64::MAX, "a refused mint moved the counter");
 
         for v in 1..=(MAX_ENCRYPTION_POLICIES as u32) {
             reg.set_encryption_policy(EncryptionPolicy::post_quantum(v, 100, None))
