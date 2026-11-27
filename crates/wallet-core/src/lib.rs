@@ -58,6 +58,9 @@ pub mod consent_screen;
 /// FIPS 205 context strings, the dual-verifier facade and the composite
 /// signature. The files are the node's own (`src/crypto`), mounted by path.
 pub mod crypto;
+/// Universal payment intents, quote verification, receipts, remote account
+/// derivation, and proof-backed unified balances.
+pub mod payment;
 mod privacy_crypto;
 mod privacy_transfer;
 /// JSON-RPC bodies and answers for the node's public listener.
@@ -1434,6 +1437,71 @@ impl Wallet {
     #[must_use]
     pub(crate) fn seed(&self) -> &[u8; ML_DSA_87_SEED_LEN] {
         &self.seed
+    }
+
+    // ----- universal payment & proof-backed balance surface -----
+
+    /// Sign a universal payment intent with ML-DSA-87, binding `chain_id`
+    /// against cross-chain replay.
+    ///
+    /// # Errors
+    ///
+    /// Refuses zero `chain_id`, payer mismatch, expired intents, or invalid rails.
+    /// WIRING: Wallet SDK entry point for universal payment intent signing.
+    pub fn sign_payment_intent(
+        &self,
+        intent: &payment::WalletPaymentIntent,
+        chain_id: u64,
+        now_unix_secs: u64,
+    ) -> Result<payment::SignedPaymentIntent, String> {
+        payment::SignedPaymentIntent::sign_with_wallet(self, intent, chain_id, now_unix_secs)
+    }
+
+    /// Sign a binding liquidity quote as a solver using ML-DSA-87.
+    ///
+    /// # Errors
+    ///
+    /// Refuses zero `chain_id`, zero quote ID/rate, or slippage above ceiling.
+    /// WIRING: Wallet SDK entry point for solver liquidity quote signing.
+    pub fn sign_liquidity_quote(
+        &self,
+        quote: &payment::WalletLiquidityQuote,
+        chain_id: u64,
+    ) -> Result<payment::SignedLiquidityQuote, String> {
+        payment::SignedLiquidityQuote::sign_with_wallet(self, quote, chain_id)
+    }
+
+    /// Verify native and remote balance proofs against a trusted light-client
+    /// header source and aggregate them into a single unified portfolio.
+    ///
+    /// # Errors
+    ///
+    /// Refuses forged RPC balances, stale headers, duplicates, or arithmetic overflow.
+    /// WIRING: Wallet SDK entry point for proof-backed unified balance verification.
+    pub fn verify_unified_balances<S: payment::BalanceHeaderSource + ?Sized>(
+        &self,
+        native_proofs: &[payment::NativeBalanceProof],
+        remote_proofs: &[payment::RemoteBalanceProof],
+        headers: &S,
+    ) -> Result<payment::UnifiedBalancePortfolio, String> {
+        let _ = self.address();
+        payment::UnifiedBalancePortfolio::from_verified_proofs(
+            native_proofs,
+            remote_proofs,
+            headers,
+        )
+    }
+
+    /// Check whether a candidate `.bud` recipient visually mimics a known contact.
+    /// WIRING: Wallet SDK entry point for confusable `.bud` recipient detection.
+    #[must_use]
+    pub fn check_confusable_bud_recipient(
+        &self,
+        candidate: &str,
+        known_names: &[&str],
+    ) -> Option<bns::ConfusableWarning> {
+        let _ = self.address();
+        bns::detect_confusable_bud_name(candidate, known_names)
     }
 
     // ----- privacy surface (wallet-bound) -----
