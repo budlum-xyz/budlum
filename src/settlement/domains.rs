@@ -185,6 +185,11 @@ pub enum SettlementTx {
     ///
     /// Appended to preserve existing bincode enum discriminants.
     DataLayer(Box<DataLayerTx>),
+
+    /// Register a compression dictionary, or take/drop a reference on one.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    Dictionary(Box<DictionaryTx>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -2110,7 +2115,64 @@ pub fn execute_settlement_tx(
         }
         SettlementTx::ViewGrant(grant_tx) => execute_view_grant(state, ctx, grant_tx),
         SettlementTx::DataLayer(layer_tx) => execute_data_layer(state, ctx, layer_tx),
+        SettlementTx::Dictionary(dict_tx) => execute_dictionary(state, ctx, dict_tx),
     }
+}
+
+/// A compression-dictionary action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DictionaryTx {
+    /// Announce a dictionary's id and size. Registration is content-addressed,
+    /// so it is idempotent and anyone may announce one.
+    Register {
+        /// The dictionary's content id.
+        id: crate::storage::content_id::ContentId,
+        /// Its size in bytes.
+        size: u64,
+    },
+    /// The sender is storing an object compressed against this dictionary.
+    Acquire {
+        /// The dictionary.
+        id: crate::storage::content_id::ContentId,
+    },
+    /// The sender no longer references this dictionary.
+    Release {
+        /// The dictionary.
+        id: crate::storage::content_id::ContentId,
+    },
+}
+
+/// Executes a dictionary transaction.
+///
+/// Reference counts are the consensus part: they decide when a dictionary
+/// becomes deletable, so they cannot be counted in one node's memory. The
+/// grace window opens at the block's epoch, not at a wall clock the nodes
+/// disagree about.
+fn execute_dictionary(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &DictionaryTx,
+) -> Result<(), SettlementTxError> {
+    use crate::storage::dictionary::DictionaryError;
+
+    let now_epoch = state.epoch_index;
+    let _ = ctx;
+    let result = match tx {
+        DictionaryTx::Register { id, size } => state
+            .settlement
+            .dictionaries
+            .register_dictionary(*id, *size),
+        DictionaryTx::Acquire { id } => state.settlement.dictionaries.acquire_dictionary(id, false),
+        DictionaryTx::Release { id } => {
+            state
+                .settlement
+                .dictionaries
+                .release_dictionary(id, now_epoch);
+            Ok(())
+        }
+    };
+    result
+        .map_err(|err: DictionaryError| SettlementTxError::Refused(format!("dictionary: {err:?}")))
 }
 
 /// A data-layering action.

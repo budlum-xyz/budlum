@@ -61,6 +61,15 @@ pub struct SettlementRegistries {
     /// declared a denomination, so its presence changes no root until used.
     #[serde(default)]
     pub denominations: crate::settlement::universal_asset::DenominationIndex,
+    /// The zstd dictionary registry: which dictionaries exist, how large, and
+    /// how many live objects reference each one.
+    ///
+    /// Reference counts decide deletability, so they are consensus facts: a
+    /// node that released a reference earlier than another would delete a
+    /// dictionary the other still needs, and one block later the same bytes
+    /// decompress on one node and not on the other.
+    #[serde(default)]
+    pub dictionaries: crate::storage::dictionary::DictionaryRegistry,
     /// The K1/K2/K3/K4 data-layering state machine.
     ///
     /// Optional because the registry carries a `chain_id` and refuses to be

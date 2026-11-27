@@ -4682,6 +4682,15 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
                 }
             }
         }
+        SettlementTx::Dictionary(dict_tx) => {
+            // Tag 20. Registering a dictionary fixes the bytes every bearer of
+            // it will decode against, so its id and size are signed.
+            use crate::settlement::domains::DictionaryTx;
+            put_u8(out, 20);
+            let bytes = postcard::to_allocvec(dict_tx)
+                .unwrap_or_else(|_| b"budlum/dictionary/fields-failed".to_vec());
+            put_bytes(out, &bytes);
+        }
         SettlementTx::DataLayer(layer_tx) => {
             // Tag 19. A layering move changes who can read the bytes, so the
             // whole action - including the owner signature that authorises it -
