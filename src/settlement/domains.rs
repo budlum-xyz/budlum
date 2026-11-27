@@ -5966,5 +5966,25 @@ mod tests {
             "unexpected err: {err}"
         );
         assert_eq!(state.get_balance(&funded), locked);
+
+        // 4. Retired is distinct from Frozen but is also not an active ZK domain.
+        let mut retired_dom =
+            default_domain(703, ConsensusKind::Zk, 70_300, "zk-proof-verification", 0);
+        retired_dom.zk_program_allowlist = vec![allow_hash];
+        state
+            .settlement
+            .domains
+            .register(retired_dom)
+            .expect("register retired zk");
+        state
+            .settlement
+            .domains
+            .set_status(703, DomainStatus::Retired)
+            .expect("retire domain");
+        let sub_retired = mk_sub(funded, 703, 1);
+        let err = submit_zk_proof(&mut state, &sub_retired, 45_262, 10, 0)
+            .expect_err("retired ZK domain must refuse submit_zk_proof");
+        assert!(err.contains("not active"), "unexpected err: {err}");
+        assert_eq!(state.get_balance(&funded), locked);
     }
 }

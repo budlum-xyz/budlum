@@ -238,6 +238,81 @@ fn an_oversized_claimed_trace_is_rejected_before_the_verifier_allocates() {
 }
 
 #[test]
+fn program_over_the_word_limit_is_refused_before_domain_lookup_or_fee() {
+    let mut bc = fresh_chain();
+    let (proof, pi, _) = real_proof();
+    let program = vec![0u64; crate::prover::MAX_ZK_PROGRAM_WORDS + 1];
+    register_domain_allowing(&mut bc, 1, &program);
+    let sender = addr(0x0c);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&sender, fee);
+    let before = bc.state.get_balance(&sender);
+
+    let err = bc
+        .submit_zk_proof(submission(sender, 1, 10, &proof, &pi, &program))
+        .expect_err("the program-size cap must refuse before verification");
+
+    assert!(err.contains("exceeds limit"), "unexpected refusal: {err}");
+    assert_eq!(
+        bc.state.get_balance(&sender),
+        before,
+        "no fee before size refusal"
+    );
+    assert!(bc.state.settlement.proof_claims.is_empty());
+}
+
+#[test]
+fn claim_advance_beyond_the_bound_is_refused_before_fee() {
+    let mut bc = fresh_chain();
+    let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
+    let sender = addr(0x0d);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&sender, fee);
+    let before = bc.state.get_balance(&sender);
+    let target = crate::prover::MAX_ZK_CLAIM_ADVANCE + 1;
+
+    let err = bc
+        .submit_zk_proof(submission(sender, 1, target, &proof, &pi, &program))
+        .expect_err("a proof cannot park the domain tip beyond the advance bound");
+
+    assert!(err.contains("advance at most"), "unexpected refusal: {err}");
+    assert_eq!(
+        bc.state.get_balance(&sender),
+        before,
+        "no fee before advance refusal"
+    );
+    assert!(bc.state.settlement.proof_claims.is_empty());
+}
+
+#[test]
+fn proof_fee_plus_reserve_overflow_refuses_without_charging_or_recording() {
+    let mut bc = fresh_chain();
+    let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
+    let sender = addr(0x0e);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&sender, fee);
+    let before = bc.state.get_balance(&sender);
+    let sub = submission(sender, 1, 10, &proof, &pi, &program);
+    let chain_id = bc.chain_id;
+    let chain_height = bc.chain.len() as u64;
+
+    let err = crate::settlement::domains::submit_zk_proof(
+        &mut bc.state,
+        &sub,
+        chain_id,
+        chain_height,
+        u64::MAX,
+    )
+    .expect_err("proof fee plus the transaction reserve must not wrap");
+
+    assert!(err.contains("overflows u64"), "unexpected refusal: {err}");
+    assert_eq!(bc.state.get_balance(&sender), before);
+    assert!(bc.state.settlement.proof_claims.is_empty());
+}
+
+#[test]
 fn insufficient_fee_rejected_without_verification() {
     let mut bc = fresh_chain();
     let (proof, pi, program) = real_proof();
