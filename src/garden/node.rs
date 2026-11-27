@@ -4294,7 +4294,7 @@ mod tests {
     /// as the result of the command.
     #[test]
     fn a_publish_answer_names_the_mempool_and_not_publication() {
-        let answer = GardenNode::publish_answer(
+        let answer = Node::publish_answer(
             [7u8; 32],
             [9u8; 32],
             GardenContentKind::parse("message").expect("a known kind"),
