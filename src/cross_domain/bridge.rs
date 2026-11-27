@@ -287,6 +287,8 @@ pub(crate) const SETTLED_RETENTION_BLOCKS: u64 =
 /// this bounds it. A burn with no expiry (`0`) is unaffected: that is the
 /// "never refunded" case the state machine already understands.
 pub(crate) const MAX_BURN_EXPIRY_BLOCKS: u64 = 100_000;
+const MAX_BRIDGE_ASSETS: usize = 65_536;
+const MAX_BRIDGE_TRANSFERS: usize = 262_144;
 
 /// Split an inbound bridge amount into the recipient's share and the relayer's.
 ///
@@ -454,8 +456,16 @@ impl BridgeState {
         asset_id: AssetId,
         domain: DomainId,
     ) -> Result<(), BridgeError> {
+        if asset_id == AssetId::zero() {
+            return Err(BridgeError("Bridge asset_id cannot be zero".into()));
+        }
         if self.asset_locations.contains_key(&asset_id) {
             return Err(BridgeError("Asset is already registered".into()));
+        }
+        if self.asset_locations.len() >= MAX_BRIDGE_ASSETS {
+            return Err(BridgeError(format!(
+                "Bridge asset registry is full (max {MAX_BRIDGE_ASSETS})"
+            )));
         }
         self.asset_locations
             .insert(asset_id, BridgeStatus::Active { domain });
@@ -484,6 +494,16 @@ impl BridgeState {
         // earlier one waiting on a deadline it does not have. The
         // production path already forced this; the state machine owns it
         // now, so no caller can skip it.
+        if source_domain == target_domain {
+            return Err(BridgeError(format!(
+                "Bridge source and target domains must differ (both={source_domain})"
+            )));
+        }
+        if amount == 0 {
+            return Err(BridgeError(
+                "Bridge lock amount must be greater than zero".into(),
+            ));
+        }
         if expiry_height == 0 {
             return Err(BridgeError(
                 "Bridge lock expiry must be set (zero never expires)".into(),
@@ -493,6 +513,11 @@ impl BridgeState {
             return Err(BridgeError(
                 "Bridge lock expiry must be after the source height".into(),
             ));
+        }
+        if self.transfers.len() >= MAX_BRIDGE_TRANSFERS {
+            return Err(BridgeError(format!(
+                "Bridge transfer table is full (max {MAX_BRIDGE_TRANSFERS})"
+            )));
         }
         self.require_asset_status(
             asset_id,
