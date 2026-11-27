@@ -356,14 +356,20 @@ fn run_entrypoint(
     let Ok(ns) = cairo_ns() else {
         return Err(b"cairo ns err");
     };
-    let Ok(Some(ch_bytes)) = host.read(&ns, &inst_key(contract_addr)) else {
-        return Err(b"CONTRACT_NOT_FOUND");
+    let ch_bytes = match host.read(&ns, &inst_key(contract_addr)) {
+        Ok(Some(b)) => b,
+        Ok(None) => return Err(b"CONTRACT_NOT_FOUND"),
+        Err(HostError::OutOfGas) => return Err(b"OUT_OF_GAS"),
+        Err(_) => return Err(b"CAIRO_STORAGE_READ_ERR"),
     };
     let Ok(ch32) = <[u8; 32]>::try_from(ch_bytes.as_slice()) else {
         return Err(b"corrupt contract class_hash");
     };
-    let Ok(Some(cls_bytes)) = host.read(&ns, &class_key(&ch32)) else {
-        return Err(b"CLASS_NOT_DECLARED");
+    let cls_bytes = match host.read(&ns, &class_key(&ch32)) {
+        Ok(Some(b)) => b,
+        Ok(None) => return Err(b"CLASS_NOT_DECLARED"),
+        Err(HostError::OutOfGas) => return Err(b"OUT_OF_GAS"),
+        Err(_) => return Err(b"CAIRO_STORAGE_READ_ERR"),
     };
     if !charge_class_bytes(gas_used, gas_limit, cls_bytes.len(), host) {
         return Err(b"OUT_OF_GAS");

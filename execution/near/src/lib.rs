@@ -293,12 +293,17 @@ fn run_near_ops(
             }
             NearOp::StorageAddU64 { key, delta } => {
                 let sk = state_key(scope.contract_id, key);
-                let cur = host
-                    .read(scope.ns, &sk)
-                    .ok()
-                    .flatten()
-                    .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
-                    .map_or(0u64, u64::from_le_bytes);
+                let cur = match host.read(scope.ns, &sk) {
+                    Ok(Some(bytes)) => {
+                        let Ok(arr) = <[u8; 8]>::try_from(bytes.as_slice()) else {
+                            return Err(b"corrupt u64 storage value".to_vec());
+                        };
+                        u64::from_le_bytes(arr)
+                    }
+                    Ok(None) => 0u64,
+                    Err(budlum_uel_abi::HostError::OutOfGas) => return Err(b"OUT_OF_GAS".to_vec()),
+                    Err(_) => return Err(b"storage read refused".to_vec()),
+                };
                 let Some(next) = cur.checked_add(*delta) else {
                     return Err(b"u64 storage overflow".to_vec());
                 };
@@ -334,10 +339,11 @@ fn run_near_ops(
                 }
             }
             NearOp::RequireOwner => {
-                let owner = host
-                    .read(scope.ns, &owner_key(scope.contract_id))
-                    .ok()
-                    .flatten();
+                let owner = match host.read(scope.ns, &owner_key(scope.contract_id)) {
+                    Ok(v) => v,
+                    Err(budlum_uel_abi::HostError::OutOfGas) => return Err(b"OUT_OF_GAS".to_vec()),
+                    Err(_) => return Err(b"owner read refused".to_vec()),
+                };
                 if owner.as_deref() != Some(scope.caller_id) {
                     return Err(b"caller is not the contract owner".to_vec());
                 }
@@ -348,11 +354,12 @@ fn run_near_ops(
                 }
             }
             NearOp::StorageReturn { key } => {
-                ret = host
-                    .read(scope.ns, &state_key(scope.contract_id, key))
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
+                ret = match host.read(scope.ns, &state_key(scope.contract_id, key)) {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) => Vec::new(),
+                    Err(budlum_uel_abi::HostError::OutOfGas) => return Err(b"OUT_OF_GAS".to_vec()),
+                    Err(_) => return Err(b"storage read refused".to_vec()),
+                };
             }
             NearOp::EmitEvent { event, data } => {
                 let topic: [u8; 32] = Sha256::digest(event.as_bytes()).into();
