@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// REST istek modeli.
+/// Generic REST request envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestRequest<T> {
     pub method: HttpMethod,

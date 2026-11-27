@@ -56,6 +56,8 @@ pub trait ChainClient {
 /// Why a DataMarket input could not be authorised.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrantAuthorizationError {
+    /// The consumer identity is all-zero and cannot hold an active grant.
+    ZeroConsumer,
     /// The source is malformed or does not identify its exact grant.
     InvalidSource(SourceError),
     /// This entry point is only for DataMarket-backed input.
@@ -129,6 +131,9 @@ fn authorize_data_market_input<C: ChainClient>(
     source: &SourceRef,
     consumer: &Hash32,
 ) -> Result<AuthorizedDataMarketInput, GrantAuthorizationError> {
+    if *consumer == [0u8; 32] {
+        return Err(GrantAuthorizationError::ZeroConsumer);
+    }
     source
         .validate()
         .map_err(GrantAuthorizationError::InvalidSource)?;
@@ -417,6 +422,17 @@ mod tests {
             Err(GrantAuthorizationError::WrongSourceKind {
                 found: SourceKind::StorageDeal
             })
+        );
+    }
+
+    #[test]
+    fn zero_consumer_is_refused_before_chain_query() {
+        let zero_consumer = [0u8; 32];
+        let chain = active_test_chain([3; 32], [8; 32], [1; 32], zero_consumer);
+        let source = SourceRef::data_market_grant([8; 32], [3; 32], [1; 32], 5);
+        assert_eq!(
+            authorize_data_market_input(&chain, &source, &zero_consumer),
+            Err(GrantAuthorizationError::ZeroConsumer)
         );
     }
 }

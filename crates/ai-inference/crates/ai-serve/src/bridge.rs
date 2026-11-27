@@ -145,6 +145,11 @@ impl Bridge {
         // 1. Naming. Free to check, and a bridge serving a third-party name is
         //    a problem no later check would notice.
         assert_served_name_is_ours(&config).map_err(StartupRefusal::Attribution)?;
+        if *model_id == [0u8; 32] {
+            return Err(StartupRefusal::NotReadyOnDevice(String::from(
+                "model_id cannot be all zero",
+            )));
+        }
 
         // 2. The model has a dense part. Checked before planning, because the
         //    planner treats "no per-token shards" as a plan with nothing to
@@ -154,6 +159,11 @@ impl Bridge {
             .any(|s| s.demand == Demand::EveryToken && s.bytes > 0)
         {
             return Err(StartupRefusal::NoPerTokenWeights);
+        }
+        if shards.iter().any(|s| s.content_id == [0u8; 32]) {
+            return Err(StartupRefusal::NotReadyOnDevice(String::from(
+                "a shard carries an all-zero content id",
+            )));
         }
         let mut seen = std::collections::BTreeSet::new();
         if !shards.iter().all(|s| seen.insert(s.content_id)) {
@@ -674,5 +684,32 @@ mod tests {
             );
             assert_ne!(*tier, Tier::Disk, "this device holds everything");
         }
+    }
+
+    #[test]
+    fn zero_model_id_or_zero_shard_content_id_is_refused() {
+        assert!(Bridge::start(
+            cfg(),
+            &[0; 32],
+            &shards(),
+            roomy(),
+            semantics(),
+            &FixedChain(true),
+            None,
+        )
+        .is_err());
+
+        let mut bad_shards = shards();
+        bad_shards.first_mut().expect("fixture shard").content_id = [0; 32];
+        assert!(Bridge::start(
+            cfg(),
+            &[9; 32],
+            &bad_shards,
+            roomy(),
+            semantics(),
+            &FixedChain(true),
+            None,
+        )
+        .is_err());
     }
 }

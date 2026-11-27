@@ -52,6 +52,8 @@ pub enum StripeError {
     WeightOverflow,
     /// Two entries name the same device.
     DuplicateDevice,
+    /// A device entry carried an all-zero identity.
+    ZeroDeviceId,
 }
 
 impl std::fmt::Display for StripeError {
@@ -62,6 +64,7 @@ impl std::fmt::Display for StripeError {
             Self::NoUsableDevice => write!(f, "staging: no device measured usable bandwidth"),
             Self::WeightOverflow => write!(f, "staging: measured weights overflow"),
             Self::DuplicateDevice => write!(f, "staging: a device is listed more than once"),
+            Self::ZeroDeviceId => write!(f, "staging: device identity cannot be all zero"),
         }
     }
 }
@@ -100,6 +103,9 @@ pub fn stripe_plan(len: u64, devices: &[StorageDevice]) -> Result<Vec<StripeChun
     }
     if devices.is_empty() {
         return Err(StripeError::NoDevice);
+    }
+    if devices.iter().any(|dev| dev.id == [0u8; 32]) {
+        return Err(StripeError::ZeroDeviceId);
     }
 
     let mut seen = std::collections::BTreeSet::new();
@@ -346,5 +352,13 @@ mod staging_tests {
         assert!(good.is_usable());
         assert!(!bad.is_usable());
         assert_eq!(good.weight_kib_s(), 6400);
+    }
+
+    #[test]
+    fn zero_device_id_is_refused() {
+        assert_eq!(
+            stripe_plan(1000, &[dev(0, 100), dev(1, 100)]),
+            Err(StripeError::ZeroDeviceId)
+        );
     }
 }

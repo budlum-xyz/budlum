@@ -79,11 +79,21 @@ impl ModelSpec {
         }
     }
 
-    /// A record without a SHA-256 is not fit for production admission.
+    /// A record without a canonical non-zero SHA-256, non-zero model ID, and
+    /// non-blank repository/license metadata is not fit for production admission.
     #[must_use]
     pub fn is_production_ready(&self) -> bool {
-        self.sha256.is_some()
+        self.model_id.0 != [0u8; 32]
+            && !self.base_repo.trim().is_empty()
+            && self.sha256.as_deref().is_some_and(is_valid_sha256_hex)
+            && !matches!(&self.license, ModelLicense::Other(text) if text.trim().is_empty())
     }
+}
+
+/// True when `hex` is a 64-character ASCII hex SHA-256 digest and not all zeros.
+#[must_use]
+pub fn is_valid_sha256_hex(hex: &str) -> bool {
+    hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) && hex.bytes().any(|b| b != b'0')
 }
 
 /// The digest the output lock and the manifest use: SHA-256 over a domain tag
@@ -156,5 +166,33 @@ mod tests {
             placeholder_digest(b"ai_inference"),
             placeholder_digest(b"lobot")
         );
+    }
+
+    #[test]
+    fn spec_production_readiness_rejects_malformed_zero_or_blank_fields() {
+        let mut spec = ModelSpec::new(
+            ModelId([1; 32]),
+            "example-org/base-checkpoint-light",
+            ModelLicense::Mit,
+            FineTuneSource::BaseModel,
+            crate::tier::ModelTier::Light,
+        );
+        for bad_sha in ["", "not-hex", &"00".repeat(32), &"ab".repeat(31)] {
+            spec.sha256 = Some(bad_sha.to_string());
+            assert!(
+                !spec.is_production_ready(),
+                "invalid sha256 {bad_sha:?} must not pass is_production_ready"
+            );
+        }
+        spec.sha256 = Some("ab".repeat(32));
+        assert!(spec.is_production_ready());
+
+        let mut zero_id = spec.clone();
+        zero_id.model_id = ModelId([0; 32]);
+        assert!(!zero_id.is_production_ready());
+
+        let mut blank_repo = spec.clone();
+        blank_repo.base_repo = "   ".to_string();
+        assert!(!blank_repo.is_production_ready());
     }
 }

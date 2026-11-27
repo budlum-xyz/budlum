@@ -5,7 +5,7 @@
 //! system as BF16 or FP16 (there is no FP4, because of the router-collapse
 //! risk; see research section 1.5).
 
-use crate::model::{placeholder_digest, Hash32, ModelId};
+use crate::model::{is_valid_sha256_hex, placeholder_digest, Hash32, ModelId};
 
 /// Adapter precision. FP4 is deliberately absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,11 +87,20 @@ impl LoRaManifest {
         placeholder_digest(&buf)
     }
 
-    /// Production acceptance: an output is not locked in without an adapter
-    /// hash and a date.
+    /// Production acceptance: an output is not locked in without a valid
+    /// non-zero adapter SHA-256, non-zero base model and LoRA rank/alpha, a
+    /// non-blank timestamp, and non-zero dataset references.
     #[must_use]
     pub fn is_production_ready(&self) -> bool {
-        self.adapter_sha256.is_some() && !self.trained_at.is_empty()
+        self.base_model.0 != [0u8; 32]
+            && self.rank > 0
+            && self.alpha > 0
+            && self
+                .adapter_sha256
+                .as_deref()
+                .is_some_and(is_valid_sha256_hex)
+            && !self.trained_at.trim().is_empty()
+            && self.dataset_refs.iter().all(|r| *r != [0u8; 32])
     }
 }
 
@@ -150,5 +159,33 @@ mod tests {
         assert_eq!(m.dtype, AdapterDtype::Bf16);
         // FP4 does not exist in this enum; the line below does not compile:
         // let _ = AdapterDtype::Fp4;
+    }
+
+    #[test]
+    fn manifest_production_readiness_requires_canonical_sha_nonzero_rank_and_nonblank_date() {
+        let mut m = LoRaManifest::new(ModelId([2; 32]), 16, 32);
+        m.trained_at = "2026-11-25T00:00:00Z".to_string();
+        for bad_sha in ["", "xyz", &"00".repeat(32)] {
+            m.adapter_sha256 = Some(bad_sha.to_string());
+            assert!(!m.is_production_ready());
+        }
+        m.adapter_sha256 = Some("cd".repeat(32));
+        assert!(m.is_production_ready());
+
+        let mut zero_rank = m.clone();
+        zero_rank.rank = 0;
+        assert!(!zero_rank.is_production_ready());
+
+        let mut zero_alpha = m.clone();
+        zero_alpha.alpha = 0;
+        assert!(!zero_alpha.is_production_ready());
+
+        let mut blank_date = m.clone();
+        blank_date.trained_at = "   ".to_string();
+        assert!(!blank_date.is_production_ready());
+
+        let mut zero_ds = m;
+        zero_ds.dataset_refs.push([0; 32]);
+        assert!(!zero_ds.is_production_ready());
     }
 }
