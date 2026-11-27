@@ -174,6 +174,7 @@ fn is_set(slice: &ClassSlice, field: &Option<String>) -> bool {
 }
 
 const MAX_PROGRAM_PROOF_BYTES: usize = 256 * 1024;
+const PROGRAM_RULE_GAS_LIMIT: u64 = 100_000;
 
 fn verify_program_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
     let Some(raw_code) = class_slice.get("program_bytecode") else {
@@ -193,7 +194,7 @@ fn verify_program_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
     }
     // A rule program is class data anyone can publish. Gas does not bound the
     // trace, so the rule gets the chain's own cap on recorded rows.
-    let mut vm = bud_vm::Vm::with_mainnet_mode(1024, 100_000, true)
+    let mut vm = bud_vm::Vm::with_mainnet_mode(1024, PROGRAM_RULE_GAS_LIMIT, true)
         .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
     let receipt = vm.run_receipt(&words);
     if !receipt.success || receipt.error.is_some() || receipt.exit_code != 0 {
@@ -203,11 +204,17 @@ fn verify_program_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
         if raw_proof.is_empty() || raw_proof.len() > MAX_PROGRAM_PROOF_BYTES {
             return Err(RuleRefusal::WrongShape);
         }
-        let (envelope, inputs): (ProofEnvelope, ExecutionPublicInputs) =
-            postcard::from_bytes(raw_proof).map_err(|_| RuleRefusal::WrongShape)?;
+        let ((envelope, inputs), remainder): ((ProofEnvelope, ExecutionPublicInputs), &[u8]) =
+            postcard::take_from_bytes(raw_proof).map_err(|_| RuleRefusal::WrongShape)?;
+        if !remainder.is_empty() {
+            return Err(RuleRefusal::WrongShape);
+        }
         envelope
             .validate_shape()
             .map_err(|_| RuleRefusal::WrongShape)?;
+        if inputs.gas_limit != PROGRAM_RULE_GAS_LIMIT {
+            return Err(RuleRefusal::WrongShape);
+        }
         if inputs.exit_code != 0
             || inputs.gas_used != receipt.gas_used
             || inputs.trace_len != receipt.trace_len
@@ -233,7 +240,7 @@ fn verify_replica_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
         }
         return Ok(());
     };
-    if root.len() != 32 {
+    if root.len() != 32 || root.iter().all(|&b| b == 0) {
         return Err(RuleRefusal::WrongShape);
     }
     let quorum_bytes: [u8; 4] = class_slice
@@ -790,6 +797,110 @@ mod tests {
         assert_eq!(
             apply_rule(&ClassRule::Program, &orphan_proof, &before, &verb),
             Err(RuleRefusal::WrongShape)
+        );
+    }
+
+    #[test]
+    fn program_proof_refuses_trailing_bytes_and_mismatched_gas_limit() {
+        use bud_isa::{Instruction, Opcode};
+
+        let before = AssetSlice::Unique { holder: acct(1) };
+        let verb = Verb::Transfer {
+            from: acct(1),
+            to: acct(2),
+            amount: 1,
+        };
+        let ok_prog = Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode()
+        .to_le_bytes()
+        .to_vec();
+        let mut base_slice = ClassSlice::new();
+        base_slice.insert(String::from("program_bytecode"), ok_prog);
+
+        let inputs = ExecutionPublicInputs {
+            chain_id: 0,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            program_hash: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: 100_000,
+            gas_used: 1,
+            exit_code: 0,
+            trace_len: 1,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+        let env = ProofEnvelope {
+            proof_format_version: bud_proof::adapter::PROOF_FORMAT_VERSION,
+            backend: String::from("Plonky3-Keccak-Goldilocks"),
+            p3_version: String::from("0.5.2"),
+            fri_params_id: String::from("test_fri_params"),
+            public_inputs_hash: inputs.hash(),
+            proof_bytes: vec![0xFFu8; 8],
+            degree_bits: 17,
+        };
+
+        // Appending trailing garbage bytes to a postcard-encoded program_proof must fail WrongShape.
+        let mut with_trailing = postcard::to_allocvec(&(env.clone(), inputs.clone())).expect("enc");
+        with_trailing.push(0xAA);
+        let mut trailing_slice = base_slice.clone();
+        trailing_slice.insert(String::from("program_proof"), with_trailing);
+        assert_eq!(
+            apply_rule(&ClassRule::Program, &trailing_slice, &before, &verb),
+            Err(RuleRefusal::WrongShape),
+            "trailing bytes after program_proof must be rejected as WrongShape"
+        );
+
+        // A program_proof claiming a gas_limit other than the rule VM budget (100_000) must fail WrongShape.
+        let mut bad_gas_inputs = inputs;
+        bad_gas_inputs.gas_limit = 999_999;
+        let mut bad_gas_env = env;
+        bad_gas_env.public_inputs_hash = bad_gas_inputs.hash();
+        let raw_bad_gas = postcard::to_allocvec(&(bad_gas_env, bad_gas_inputs)).expect("enc");
+        let mut bad_gas_slice = base_slice;
+        bad_gas_slice.insert(String::from("program_proof"), raw_bad_gas);
+        assert_eq!(
+            apply_rule(&ClassRule::Program, &bad_gas_slice, &before, &verb),
+            Err(RuleRefusal::WrongShape),
+            "mismatched program_proof gas_limit must be rejected as WrongShape"
+        );
+    }
+
+    #[test]
+    fn replica_rule_refuses_all_zero_state_root() {
+        let before = AssetSlice::Unique { holder: acct(1) };
+        let verb = Verb::Transfer {
+            from: acct(1),
+            to: acct(2),
+            amount: 1,
+        };
+        let zero_root = [0u8; 32];
+        let quorum = 3u32.to_le_bytes();
+        let weight = 4u32.to_le_bytes();
+        let mut h = Sha3_256::new();
+        h.update(b"BDLM_UOL_REPLICA_V1");
+        h.update(zero_root);
+        h.update(quorum);
+        h.update(weight);
+        let digest: [u8; 32] = h.finalize().into();
+
+        let mut slice = ClassSlice::new();
+        slice.insert(String::from("replica_state_root"), zero_root.to_vec());
+        slice.insert(String::from("replica_quorum"), quorum.to_vec());
+        slice.insert(String::from("replica_weight"), weight.to_vec());
+        slice.insert(String::from("replica_digest"), digest.to_vec());
+        assert_eq!(
+            apply_rule(&ClassRule::Replica, &slice, &before, &verb),
+            Err(RuleRefusal::WrongShape),
+            "all-zero replica_state_root must be rejected even with a matching self-computed digest"
         );
     }
 }

@@ -1600,3 +1600,176 @@ fn charter_refuses_blank_chain_or_endpoint_verifier_collision_and_nested_stipend
         Err(Refusal::NotAuthorized)
     );
 }
+
+#[test]
+fn charter_refuses_zero_addresses_zero_hashes_and_non_canonical_chain_metadata() {
+    use crate::object_layer::charter::{check_charter_at_state_root, CharterRefusal};
+    use crate::object_layer::family::evm::fixture::EvmFixture;
+
+    let canon = CanonicalCodeHashes {
+        endpoint: CANON_ENDPOINT,
+        verifier: CANON_VERIFIER,
+    };
+    let base = charter_for(HomeVmFamily::Evm, &EvmFixture);
+
+    let mut zero_endpoint = base.clone();
+    zero_endpoint.endpoint = vec![0u8; 20];
+    assert_eq!(
+        check_charter_at_state_root(&zero_endpoint, &good_proof(), Some(&canon), true, None),
+        Err(CharterRefusal::BadAddress),
+        "all-zero endpoint address must be rejected"
+    );
+
+    let mut zero_verifier = base.clone();
+    zero_verifier.verifier = vec![0u8; 20];
+    assert_eq!(
+        check_charter_at_state_root(&zero_verifier, &good_proof(), Some(&canon), true, None),
+        Err(CharterRefusal::BadAddress),
+        "all-zero verifier address must be rejected"
+    );
+
+    let mut padded_chain = base.clone();
+    padded_chain.chain_reference = String::from(" 31337 ");
+    assert_eq!(
+        check_charter_at_state_root(&padded_chain, &good_proof(), Some(&canon), true, None),
+        Err(CharterRefusal::BadAddress),
+        "chain_reference with leading/trailing whitespace must be rejected"
+    );
+
+    let mut ctrl_chain = base.clone();
+    ctrl_chain.chain_reference = String::from("31337\nspoof");
+    assert_eq!(
+        check_charter_at_state_root(&ctrl_chain, &good_proof(), Some(&canon), true, None),
+        Err(CharterRefusal::BadAddress),
+        "chain_reference with control chars must be rejected"
+    );
+
+    let mut oversized_prefix = base.clone();
+    oversized_prefix.address_prefix = "a".repeat(64);
+    assert_eq!(
+        check_charter_at_state_root(&oversized_prefix, &good_proof(), Some(&canon), true, None),
+        Err(CharterRefusal::BadAddress),
+        "oversized address_prefix must be rejected"
+    );
+
+    let mut ctrl_prefix = base.clone();
+    ctrl_prefix.address_prefix = String::from("wasm\r\n");
+    assert_eq!(
+        check_charter_at_state_root(&ctrl_prefix, &good_proof(), Some(&canon), true, None),
+        Err(CharterRefusal::BadAddress),
+        "control characters in address_prefix must be rejected"
+    );
+
+    let mut zero_ep_charter = base.clone();
+    zero_ep_charter.endpoint_code_hash = [0u8; 32];
+    let mut zero_ep_proof = good_proof();
+    zero_ep_proof.endpoint_code_hash = [0u8; 32];
+    let zero_ep_canon = CanonicalCodeHashes {
+        endpoint: [0u8; 32],
+        verifier: CANON_VERIFIER,
+    };
+    assert_eq!(
+        check_charter_at_state_root(
+            &zero_ep_charter,
+            &zero_ep_proof,
+            Some(&zero_ep_canon),
+            true,
+            None
+        ),
+        Err(CharterRefusal::NotCanonicalEndpoint),
+        "all-zero endpoint code hash must be rejected"
+    );
+
+    let mut zero_ver_charter = base;
+    zero_ver_charter.verifier_code_hash = [0u8; 32];
+    let mut zero_ver_proof = good_proof();
+    zero_ver_proof.verifier_code_hash = [0u8; 32];
+    let zero_ver_canon = CanonicalCodeHashes {
+        endpoint: CANON_ENDPOINT,
+        verifier: [0u8; 32],
+    };
+    assert_eq!(
+        check_charter_at_state_root(
+            &zero_ver_charter,
+            &zero_ver_proof,
+            Some(&zero_ver_canon),
+            true,
+            None
+        ),
+        Err(CharterRefusal::NotCanonicalVerifier),
+        "all-zero verifier code hash must be rejected"
+    );
+
+    let valid_base = charter_for(HomeVmFamily::Evm, &EvmFixture);
+    let zero_root_proof = CodeProof {
+        endpoint_code_hash: CANON_ENDPOINT,
+        verifier_code_hash: CANON_VERIFIER,
+        home_proof: Some(HomeCodeStateProof {
+            state_root: [0u8; 32],
+            endpoint_proof: Vec::new(),
+            verifier_proof: Vec::new(),
+        }),
+    };
+    assert_eq!(
+        check_charter_at_state_root(
+            &valid_base,
+            &zero_root_proof,
+            Some(&canon),
+            true,
+            Some([0u8; 32]),
+        ),
+        Err(CharterRefusal::ProofDisagrees),
+        "all-zero expected_home_state_root must be rejected"
+    );
+}
+
+#[test]
+fn adopt_tx_refuses_trailing_bytes_after_valid_proof() {
+    let mut w = World::new(HomeVmFamily::Evm);
+    let Holder::Account(alice_addr) = alice() else {
+        unreachable!()
+    };
+    let depositor = w.fx.address(0x5A);
+    let arr = w.fx.arrive(
+        &w.endpoint,
+        ArriveSpec {
+            kind: AssetKind::Fungible,
+            contract: &w.fungible,
+            native_id: &[],
+            amount: 50,
+            depositor: &depositor,
+            recipient: None,
+        },
+    );
+    let arr_proof = w.proof(arr);
+    w.reg.arrive(&arr_proof, &YES).expect("arrive");
+
+    let adopt_raw = w.fx.call(&w.endpoint, &depositor, 0, alice_addr.as_bytes());
+    let adopt_proof = w.proof(adopt_raw);
+    let clean_bytes = postcard::to_allocvec(&adopt_proof).expect("encode adopt proof");
+    let mut malleated = clean_bytes.clone();
+    malleated.extend_from_slice(&[0xDE, 0xAD]);
+
+    let active = |_: DomainId| true;
+    let ctx = TxContext {
+        height: 1,
+        signer: alice_addr,
+        activation: ObjectLayerActivation { height: Some(0) },
+        finality: &YES,
+        domain_active: &active,
+        home_state_root: None,
+        require_home_state_proofs: false,
+        home_stipend_verifier: None,
+    };
+
+    assert_eq!(
+        ObjectLayerTx::Adopt { home: malleated }.apply(&mut w.reg, &ctx),
+        Err(TxRefusal::Refused(Refusal::NotAuthorized)),
+        "trailing bytes after a postcard-encoded adopt proof must be rejected"
+    );
+    assert_eq!(
+        ObjectLayerTx::Adopt { home: clean_bytes }.apply(&mut w.reg, &ctx),
+        Ok(()),
+        "canonical adopt proof without trailing bytes must still succeed"
+    );
+}
