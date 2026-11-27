@@ -93,6 +93,20 @@ impl ConsentScreenPrompt {
     /// without a verified `YK6` non-blacklist predicate proof.
     /// exposed for: wallet consent confirmation flow ( Step 9).
     pub fn seal_for_chain(&self, blinding_salt: &[u8; 32]) -> Result<BlindedConsentRecord, String> {
+        if self.issuer_address == [0u8; 32] {
+            return Err("consent issuer_address must be non-zero".to_string());
+        }
+        if matches!(self.mode, ConsentMode::BlindGrant | ConsentMode::ProverOpen)
+            && self.grantee_address == [0u8; 32]
+        {
+            return Err("consent grantee_address must be non-zero".to_string());
+        }
+        if self.content_id == [0u8; 32] {
+            return Err("consent content_id must be non-zero".to_string());
+        }
+        if self.expiry_epoch == 0 {
+            return Err("consent expiry_epoch must be non-zero".to_string());
+        }
         if self.scope_label.trim().is_empty() {
             return Err("consent scope_label must not be empty".to_string());
         }
@@ -149,6 +163,13 @@ impl BlindedConsentRecord {
         revoked_handles: &[[u8; 32]],
         deleted_commitments: &[[u8; 32]],
     ) -> bool {
+        if self.hash_suite != HASH_SUITE_SHA3_256_V1
+            || self.grant_commitment == [0u8; 32]
+            || self.revocation_handle == [0u8; 32]
+            || self.expiry_epoch == 0
+        {
+            return false;
+        }
         if current_epoch > self.expiry_epoch {
             return false;
         }
@@ -166,10 +187,19 @@ impl BlindedConsentRecord {
 }
 
 /// One `GF(256)` Shamir share of a 32-byte key (`x = index != 0`,  TK7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ShamirShare32 {
     pub index: u8,
     pub value: [u8; 32],
+}
+
+impl std::fmt::Debug for ShamirShare32 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShamirShare32")
+            .field("index", &self.index)
+            .field("value", &"[redacted]")
+            .finish()
+    }
 }
 
 const fn gf256_mul(mut a: u8, mut b: u8) -> u8 {
@@ -349,5 +379,71 @@ mod tests {
         let sub_b = [shares[1], shares[3], shares[4]];
         assert_eq!(shamir_reconstruct_32(&sub_a, 3).unwrap(), secret);
         assert_eq!(shamir_reconstruct_32(&sub_b, 3).unwrap(), secret);
+    }
+
+    #[test]
+    fn consent_refuses_zero_addresses_zero_content_unknown_suite_and_redacts_shamir_debug() {
+        let valid = ConsentScreenPrompt {
+            issuer_address: [0x11; 32],
+            grantee_address: [0x22; 32],
+            content_id: [0x33; 32],
+            scope_label: "read:dataset".to_string(),
+            expiry_epoch: 50,
+            mode: ConsentMode::BlindGrant,
+        };
+        let salt = [0xAA; 32];
+
+        assert!(ConsentScreenPrompt {
+            issuer_address: [0u8; 32],
+            ..valid.clone()
+        }
+        .seal_for_chain(&salt)
+        .is_err());
+
+        assert!(ConsentScreenPrompt {
+            grantee_address: [0u8; 32],
+            ..valid.clone()
+        }
+        .seal_for_chain(&salt)
+        .is_err());
+
+        assert!(ConsentScreenPrompt {
+            content_id: [0u8; 32],
+            ..valid.clone()
+        }
+        .seal_for_chain(&salt)
+        .is_err());
+
+        assert!(ConsentScreenPrompt {
+            expiry_epoch: 0,
+            ..valid.clone()
+        }
+        .seal_for_chain(&salt)
+        .is_err());
+
+        let mut rec = valid.seal_for_chain(&salt).unwrap();
+        rec.hash_suite = 0x00;
+        assert!(
+            !rec.allows_new_session(10, &[], &[]),
+            "unknown hash_suite must fail closed"
+        );
+
+        let zero_rec = BlindedConsentRecord {
+            hash_suite: HASH_SUITE_SHA3_256_V1,
+            grant_commitment: [0u8; 32],
+            revocation_handle: [0x55; 32],
+            expiry_epoch: 50,
+        };
+        assert!(!zero_rec.allows_new_session(10, &[], &[]));
+
+        let share = ShamirShare32 {
+            index: 1,
+            value: [0xDE; 32],
+        };
+        let dbg = format!("{share:?}");
+        assert!(
+            !dbg.contains("222"),
+            "Debug formatting of ShamirShare32 leaked secret share bytes: {dbg}"
+        );
     }
 }
