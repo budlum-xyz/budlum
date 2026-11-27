@@ -122,6 +122,12 @@ impl HeaderStore {
     /// or a different hash at an index already held. The last is a sign of a
     /// fork, and is never quietly overwritten.
     pub fn accept(&mut self, header: TrackedHeader) -> Result<(), String> {
+        if header.state_root.trim().is_empty() || header.hash.trim().is_empty() {
+            return Err(format!(
+                "header {} omitted its state_root or block hash",
+                header.index
+            ));
+        }
         if !header.is_epoch_boundary() {
             return Err(format!(
                 "header {} is not an epoch boundary (EPOCH_LENGTH={EPOCH_LENGTH}); \
@@ -191,7 +197,7 @@ impl HeaderStore {
     /// must be final, and the result cannot be stronger than the strength of
     /// whatever source asserted that finality.
     pub fn strength_of<S: FinalitySource>(&self, source: &S, state_root: &str) -> Evidence {
-        let Some(header) = self.headers.iter().find(|h| h.state_root == state_root) else {
+        let Some(header) = self.headers.iter().rfind(|h| h.state_root == state_root) else {
             return Evidence::new().with(Claim::new(
                 "light-client",
                 Strength::Refused,
@@ -279,6 +285,9 @@ impl MerkleProof {
     /// must match the target address strictly.
     #[must_use]
     pub fn verify(&self, expected_root: &[u8; 32]) -> bool {
+        if self.leaf_hash == [0u8; 32] || *expected_root == [0u8; 32] {
+            return false;
+        }
         if self.siblings.len() != TRIE_DEPTH || self.directions.len() != TRIE_DEPTH {
             return false;
         }
@@ -458,5 +467,62 @@ mod tests {
             leaf_hash: [2u8; 32],
         };
         assert!(!proof.verify(&[0u8; 32]));
+    }
+
+    #[test]
+    fn empty_leaf_sentinel_is_refused_as_positive_account_inclusion_proof() {
+        let empty_root = finalize_root(&[0u8; 32]);
+        let target = [0x42u8; 32];
+        let mut directions = Vec::with_capacity(TRIE_DEPTH);
+        for i in 0..TRIE_DEPTH {
+            directions.push(get_bit(&target, TRIE_DEPTH - 1 - i));
+        }
+        let absent = MerkleProof {
+            address: target,
+            siblings: vec![[0u8; 32]; TRIE_DEPTH],
+            directions,
+            leaf_hash: [0u8; 32],
+        };
+        assert!(
+            !absent.verify(&empty_root),
+            "empty subtree sentinel [0; 32] indicates absence, never positive inclusion"
+        );
+    }
+
+    #[test]
+    fn header_store_refuses_blank_fields_and_evaluates_newest_matching_epoch() {
+        struct EpochThresholdFinality;
+        impl FinalitySource for EpochThresholdFinality {
+            fn finality_of(&self, header: &TrackedHeader) -> Claim {
+                if header.epoch >= 2 {
+                    Claim::new("finality", Strength::Verified, "epoch >= 2 finalized")
+                } else {
+                    Claim::new("finality", Strength::RpcClaimOnly, "older epoch")
+                }
+            }
+        }
+
+        let mut store = HeaderStore::new();
+        let mut blank_root = header(10);
+        blank_root.state_root = "   ".to_string();
+        assert!(store.accept(blank_root).is_err());
+
+        let mut blank_hash = header(10);
+        blank_hash.hash = String::new();
+        assert!(store.accept(blank_hash).is_err());
+
+        let mut h10 = header(10);
+        h10.state_root = "idle_root".to_string();
+        let mut h20 = header(20);
+        h20.state_root = "idle_root".to_string();
+        store.accept(h10).unwrap();
+        store.accept(h20).unwrap();
+
+        let ev = store.strength_of(&EpochThresholdFinality, "idle_root");
+        assert_eq!(
+            ev.weakest(),
+            Strength::Verified,
+            "strength_of must evaluate the newest followed epoch carrying state_root"
+        );
     }
 }
