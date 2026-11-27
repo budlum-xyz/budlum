@@ -83,6 +83,9 @@ fn peek_version(body: &[u8]) -> u32 {
     for (i, byte) in body.iter().skip(1).take(5).enumerate() {
         value |= u64::from(byte & 0x7F) << (7 * i);
         if byte & 0x80 == 0 {
+            if i > 0 && (*byte & 0x7F) == 0 {
+                return u32::MAX;
+            }
             return u32::try_from(value).unwrap_or(u32::MAX);
         }
     }

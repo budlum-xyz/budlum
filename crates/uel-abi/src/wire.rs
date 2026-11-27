@@ -8,7 +8,8 @@ use crate::pb;
 use crate::types::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog,
     EeOutcome, EeQuery, EeRefusal, HostError, OutcomeStatus, RefusalCode, UniversalCall,
-    UniversalResult, WireError, MAX_IDENTITY_BYTES, MAX_LOG_TOPICS, MAX_TOPIC_BYTES,
+    UniversalResult, WireError, MAX_IDENTITY_BYTES, MAX_LOG_TOPICS, MAX_NAMESPACE_BYTES,
+    MAX_TOPIC_BYTES,
 };
 
 fn ee_id(value: u32) -> Result<EeId, WireError> {
@@ -224,6 +225,16 @@ impl From<&CodeInfo> for pb::CodeInfo {
 impl TryFrom<pb::CodeInfo> for CodeInfo {
     type Error = WireError;
     fn try_from(value: pb::CodeInfo) -> Result<Self, WireError> {
+        if value.abi_tag.is_empty() || value.abi_tag.bytes().any(|b| b.is_ascii_control()) {
+            return Err(WireError::Missing {
+                field: "code_info.abi_tag",
+            });
+        }
+        if value.abi_tag.len() > MAX_NAMESPACE_BYTES {
+            return Err(WireError::TooLong {
+                field: "code_info.abi_tag",
+            });
+        }
         Ok(Self {
             code_hash: fixed32(&value.code_hash, "code_info.code_hash")?,
             abi_tag: value.abi_tag,

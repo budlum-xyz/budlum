@@ -112,9 +112,14 @@ impl Namespace {
     pub fn new(name: &str) -> Result<Self, WireError> {
         let ok = !name.is_empty()
             && name.len() <= MAX_NAMESPACE_BYTES
+            && !name.starts_with('/')
+            && !name.ends_with('/')
             && name
                 .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-./".contains(&b));
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-./".contains(&b))
+            && name
+                .split('/')
+                .all(|seg| !seg.is_empty() && seg != "." && seg != "..");
         if ok {
             Ok(Self(name.to_string()))
         } else {
