@@ -118,6 +118,12 @@ impl FamilyProfile for MoveFamily {
         _ctx: &FamilyContext<'_>,
         raw: &RawEndpointEvent,
     ) -> Result<EndpointEvent, FamilyError> {
+        const MAX_CALL_BYTES: usize = 8 * 1024;
+        if raw.emitter.len() != 32 || raw.topics.len() != 1 || !raw.attributes.is_empty() {
+            return Err(FamilyError::Malformed(
+                "Move endpoint event requires 32-byte emitter, single type tag, and empty attributes",
+            ));
+        }
         let tag = raw.topics.first().ok_or(FamilyError::UnknownEvent)?;
         let tag = std::str::from_utf8(tag).map_err(|_| FamilyError::UnknownEvent)?;
         let is = |event: &str| tag == type_tag(&raw.emitter, event);
@@ -150,6 +156,9 @@ impl FamilyProfile for MoveFamily {
             let nonce = r.u64_le()?;
             let len =
                 usize::try_from(r.uleb128()?).map_err(|_| FamilyError::Malformed("length"))?;
+            if len > MAX_CALL_BYTES {
+                return Err(FamilyError::Malformed("call list above the cap"));
+            }
             let calls = r.take(len)?.to_vec();
             EndpointEvent::Call {
                 sender,
@@ -390,5 +399,30 @@ mod tests {
             s,
             format!("aptos:2/nft:0x{}/0x{}", "ab".repeat(32), "01".repeat(32))
         );
+    }
+
+    #[test]
+    fn move_refuses_oversized_calls_and_smuggled_envelope_fields() {
+        use crate::object_layer::family::EventFixture;
+
+        let ctx = FamilyContext {
+            chain_reference: "4",
+            address_prefix: "",
+        };
+        let ep = [1u8; 32];
+        let sender = [7u8; 32];
+        let oversized = vec![0u8; 8 * 1024 + 1];
+        let raw_oversized = fixture::MoveFixture.call(&ep, &sender, 0, &oversized);
+        assert!(MoveFamily.translate_event(&ctx, &raw_oversized).is_err());
+
+        let mut smuggled_topics = fixture::MoveFixture.released(&ep, &DepartureId([9u8; 32]));
+        smuggled_topics.topics.push(b"extra-topic".to_vec());
+        assert!(MoveFamily.translate_event(&ctx, &smuggled_topics).is_err());
+
+        let mut smuggled_attrs = fixture::MoveFixture.released(&ep, &DepartureId([9u8; 32]));
+        smuggled_attrs
+            .attributes
+            .push(("spoof".to_string(), "1".to_string()));
+        assert!(MoveFamily.translate_event(&ctx, &smuggled_attrs).is_err());
     }
 }

@@ -225,10 +225,14 @@ impl FamilyProfile for CosmWasmFamily {
                 })
             }
             HOME_CALL_EVENT => {
+                const MAX_CALL_BYTES: usize = 8 * 1024;
                 let a = Attributes::parse(ctx, raw, &["sender", "nonce", "calls"])?;
                 let nonce = u64::try_from(decimal(a.get("nonce")?)?)
                     .map_err(|_| FamilyError::Malformed("nonce above u64"))?;
                 let calls = a.get("calls")?;
+                if calls.len() > MAX_CALL_BYTES * 2 {
+                    return Err(FamilyError::Malformed("call list above the cap"));
+                }
                 if calls.bytes().any(|b| b.is_ascii_uppercase()) {
                     return Err(FamilyError::Malformed("calls must be lower-case hex"));
                 }
@@ -504,5 +508,24 @@ mod tests {
         ] {
             assert!(decimal(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn cosmwasm_refuses_an_oversized_or_uppercase_call_list() {
+        let ep = vec![2u8; 32];
+        let sender = CosmWasmFixture.address(7);
+        let oversized = vec![0xabu8; 8 * 1024 + 1];
+        let raw_oversized = CosmWasmFixture.call(&ep, &sender, 1, &oversized);
+        assert!(CosmWasmFamily
+            .translate_event(&ctx(), &raw_oversized)
+            .is_err());
+
+        let mut raw_upper = CosmWasmFixture.call(&ep, &sender, 1, &[0xab, 0xcd]);
+        for (k, v) in &mut raw_upper.attributes {
+            if k == "calls" {
+                *v = "ABCD".to_string();
+            }
+        }
+        assert!(CosmWasmFamily.translate_event(&ctx(), &raw_upper).is_err());
     }
 }

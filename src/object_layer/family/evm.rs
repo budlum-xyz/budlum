@@ -129,7 +129,7 @@ impl FamilyProfile for EvmFamily {
             &addr20,
         )
         .map_err(|_| Refusal::UnprovenEvent)?;
-        if !slice.is_empty() && proof.storage_proofs.is_empty() {
+        if proof.storage_proofs.len() != slice.len() {
             return Err(Refusal::UnprovenEvent);
         }
         let mut verified_slots = std::collections::BTreeMap::<[u8; 32], [u8; 32]>::new();
@@ -140,10 +140,8 @@ impl FamilyProfile for EvmFamily {
             if proven != *expected_val {
                 return Err(Refusal::UnprovenEvent);
             }
-            if let Some(prev) = verified_slots.insert(*slot, proven) {
-                if prev != proven {
-                    return Err(Refusal::UnprovenEvent);
-                }
+            if verified_slots.insert(*slot, proven).is_some() {
+                return Err(Refusal::UnprovenEvent);
             }
         }
         // EIP-1967 admin storage slot: bytes32(uint256(keccak256('eip1967.proxy.admin')) - 1).
@@ -152,25 +150,48 @@ impl FamilyProfile for EvmFamily {
             0x01, 0x6e, 0x24, 0x3e, 0x63, 0xb6, 0xe8, 0xee, 0x11, 0x78, 0xd6, 0xa7, 0x17, 0x85,
             0x0b, 0x5d, 0x61, 0x03,
         ];
-        // Bind EVERY key/value in `slice` to a proven storage slot under
-        // `acct.storage_root`, never leaving arbitrary rule/pause/program
-        // entries unproven alongside a valid unrelated slot proof.
+        // Bind EVERY key/value in `slice` to a unique proven storage slot under
+        // `acct.storage_root`, never leaving arbitrary rule/pause/program entries
+        // unproven or allowing non-canonical keys to shadow `eip1967.admin`.
+        let mut matched_slots = std::collections::BTreeSet::<[u8; 32]>::new();
         for (field, val) in slice {
             let expected_slot = if field == self.upgrade_authority_field() {
                 PROXY_ADMIN_STORAGE_SLOT
-            } else if let Some(hex_str) = field.strip_prefix("0x") {
-                let decoded = hex::decode(hex_str).map_err(|_| Refusal::UnprovenEvent)?;
-                let slot: [u8; 32] = decoded.try_into().map_err(|_| Refusal::UnprovenEvent)?;
-                slot
-            } else if let Ok(slot_num) = field.parse::<u128>() {
-                let mut w = [0u8; 32];
-                if let Some(tail) = w.get_mut(16..) {
-                    tail.copy_from_slice(&slot_num.to_be_bytes());
-                }
-                w
             } else {
-                keccak256(field.as_bytes())
+                let resolved = if let Some(hex_str) = field.strip_prefix("0x") {
+                    if !hex_str
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    {
+                        return Err(Refusal::UnprovenEvent);
+                    }
+                    let decoded = hex::decode(hex_str).map_err(|_| Refusal::UnprovenEvent)?;
+                    let slot: [u8; 32] = decoded.try_into().map_err(|_| Refusal::UnprovenEvent)?;
+                    slot
+                } else if field == "0"
+                    || (field
+                        .bytes()
+                        .next()
+                        .is_some_and(|b| (b'1'..=b'9').contains(&b))
+                        && field.bytes().all(|b| b.is_ascii_digit()))
+                {
+                    let slot_num = field.parse::<u128>().map_err(|_| Refusal::UnprovenEvent)?;
+                    let mut w = [0u8; 32];
+                    if let Some(tail) = w.get_mut(16..) {
+                        tail.copy_from_slice(&slot_num.to_be_bytes());
+                    }
+                    w
+                } else {
+                    keccak256(field.as_bytes())
+                };
+                if resolved == PROXY_ADMIN_STORAGE_SLOT {
+                    return Err(Refusal::UnprovenEvent);
+                }
+                resolved
             };
+            if !matched_slots.insert(expected_slot) {
+                return Err(Refusal::UnprovenEvent);
+            }
             let Some(proven_word) = verified_slots.get(&expected_slot) else {
                 return Err(Refusal::UnprovenEvent);
             };
@@ -556,10 +577,35 @@ mod tests {
         );
 
         // Adding an unproven `paused` field alongside the valid admin slot MUST fail!
-        let mut forged_slice = honest_slice;
+        let mut forged_slice = honest_slice.clone();
         forged_slice.insert("paused".to_string(), vec![1u8]);
         assert_eq!(
             EvmFamily.verify_home_slice_proof("1", &addr20, &forged_slice, &proof),
+            Err(Refusal::UnprovenEvent)
+        );
+
+        // Shadowing `eip1967.admin` via its raw 0x-hex slot key MUST be refused so a
+        // registrant cannot hide an active proxy admin from `upgrade_authority_field()`.
+        let mut shadowed_admin = ClassSlice::new();
+        shadowed_admin.insert(format!("0x{}", hex::encode(admin_slot)), admin_val.to_vec());
+        assert_eq!(
+            EvmFamily.verify_home_slice_proof("1", &addr20, &shadowed_admin, &proof),
+            Err(Refusal::UnprovenEvent)
+        );
+
+        // Unreferenced or duplicate `storage_proofs` entries MUST be refused (strict bijection).
+        assert_eq!(
+            EvmFamily.verify_home_slice_proof("1", &addr20, &ClassSlice::new(), &proof),
+            Err(Refusal::UnprovenEvent)
+        );
+        let mut bloated_proof = proof.clone();
+        bloated_proof.storage_proofs.push((
+            admin_slot,
+            admin_val,
+            proof.storage_proofs.first().unwrap().2.clone(),
+        ));
+        assert_eq!(
+            EvmFamily.verify_home_slice_proof("1", &addr20, &honest_slice, &bloated_proof),
             Err(Refusal::UnprovenEvent)
         );
     }
