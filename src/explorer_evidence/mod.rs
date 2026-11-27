@@ -302,14 +302,21 @@ impl WalletContextGraph {
         if self.depth > 8 {
             return Err("WalletContextGraph depth too large".into());
         }
+        let mut seen_nodes = std::collections::BTreeSet::new();
         for node in &self.nodes {
             if node.address == Address::zero() {
                 return Err("WalletContextGraph node address cannot be zero".into());
+            }
+            if !seen_nodes.insert(node.address) {
+                return Err("WalletContextGraph contains duplicate node address".into());
             }
         }
         for edge in &self.edges {
             if edge.from == Address::zero() || edge.to == Address::zero() {
                 return Err("WalletContextGraph edge address cannot be zero".into());
+            }
+            if edge.from == edge.to {
+                return Err("WalletContextGraph self-loop edge is forbidden".into());
             }
             if edge.weight == 0 {
                 return Err("WalletContextGraph edge weight cannot be zero".into());
@@ -451,6 +458,14 @@ impl AtlasQueryEngine {
     /// Returns an error if the operation fails.
     pub fn insert_evidence_record(&mut self, record: EvidenceRecord) -> Result<(), String> {
         record.validate()?;
+        if let Some(existing) = self.evidence_records.iter_mut().find(|r| {
+            r.domain_id == record.domain_id
+                && r.domain_height == record.domain_height
+                && r.event_index == record.event_index
+        }) {
+            *existing = record;
+            return Ok(());
+        }
         if self.evidence_records.len() >= MAX_ATLAS_EVIDENCE_RECORDS {
             self.evidence_records.remove(0);
         }
