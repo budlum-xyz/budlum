@@ -277,6 +277,7 @@ impl SplitTenderLeg {
         let dst = self.target_delivered.to_le_bytes();
         let fee = self.fee_bps.to_le_bytes();
         let direct = [u8::from(self.direct_same_domain)];
+        let qid_present = [u8::from(self.quote_id.is_some())];
         let qid = self.quote_id.unwrap_or([0u8; 32]);
         hash_domain_fields(
             b"BDLM_SPLIT_LEG_V1",
@@ -288,6 +289,7 @@ impl SplitTenderLeg {
                 &dst,
                 &fee,
                 &direct,
+                &qid_present,
                 &qid,
             ],
         )
@@ -2846,5 +2848,29 @@ mod tests {
             verify_leg_against_target(&honest_direct, None, 1, [0x01; 32], 100, 1_500),
             Ok(400)
         );
+    }
+
+    #[test]
+    fn split_tender_leg_commitment_distinguishes_none_quote_id_from_all_zero_quote_id() {
+        let base = SplitTenderLeg {
+            source_domain: 1,
+            source_asset_id: [0x01; 32],
+            source_symbol: String::from("BUD"),
+            source_debited: 500,
+            target_delivered: 500,
+            fee_bps: 10,
+            direct_same_domain: false,
+            quote_id: None,
+        };
+        let zero_some = SplitTenderLeg {
+            quote_id: Some([0u8; 32]),
+            ..base.clone()
+        };
+        let nonzero_some = SplitTenderLeg {
+            quote_id: Some([0x11; 32]),
+            ..base.clone()
+        };
+        assert_ne!(base.commitment_hash(), zero_some.commitment_hash());
+        assert_ne!(zero_some.commitment_hash(), nonzero_some.commitment_hash());
     }
 }
