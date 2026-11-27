@@ -403,7 +403,7 @@ impl Proposal {
             proposer,
             p_type,
             start_epoch,
-            end_epoch: start_epoch + duration,
+            end_epoch: start_epoch.saturating_add(duration),
             votes_for: 0,
             votes_against: 0,
             status: ProposalStatus::Active,
@@ -437,6 +437,15 @@ impl Proposal {
     ) -> Result<(), String> {
         if self.status != ProposalStatus::Active {
             return Err("Proposal is not active".into());
+        }
+        if voter == Address::zero() {
+            return Err("Zero address cannot vote on governance proposals".into());
+        }
+        if stake == 0 {
+            return Err("Governance vote stake must be non-zero".into());
+        }
+        if current_epoch < self.start_epoch {
+            return Err("Voting period has not started".into());
         }
         // Voting window closed after end_epoch (pairs with finalize gate).
         if current_epoch >= self.end_epoch {
@@ -491,6 +500,10 @@ impl Proposal {
         }
         // Voting period must have elapsed before finalization
         if current_epoch < self.end_epoch {
+            return;
+        }
+        if total_stake == 0 || quorum_pct == 0 || quorum_pct > 100 {
+            self.status = ProposalStatus::Failed;
             return;
         }
         // Use u128 to prevent overflow in the quorum calculation
@@ -652,7 +665,13 @@ impl GovernanceState {
                 // time would make the outcome depend on submission order.
                 // The reviewed snapshot is bound here so the badge cannot be
                 // retargeted later (HIGH, CWE-345).
-                let _ = (app_id, developer, manifest_id, website_url_hash);
+                let _ = (app_id, manifest_id);
+                if *developer == Address::zero() {
+                    return Err("VerifyHubApp developer must be non-zero".into());
+                }
+                if website_url_hash == &[0u8; 32] {
+                    return Err("VerifyHubApp website_url_hash must be non-zero".into());
+                }
             }
             // Same bounds as `AccountState::execute_proposal`: a proposal that
             // execution would only warn about and drop must not take a slot.
