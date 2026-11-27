@@ -359,6 +359,9 @@ impl RecoveryProposal {
         chain_id: u64,
         account_nonce: u64,
     ) -> Result<Self, &'static str> {
+        if chain_id == 0 {
+            return Err("wallet recovery: zero chain_id");
+        }
         if current_owner == new_owner {
             return Err("wallet recovery: new==current");
         }
