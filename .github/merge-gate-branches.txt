@@ -1,0 +1,18 @@
+# Branches whose pull requests may close into the default branch.
+#
+# This list is the repository's claim about itself, and `merge-gate`
+# (xtask/tools/src/merge_gate.rs) reads it on every pull request that targets
+# the default branch. A head branch that is not named here is denied, so the
+# list is the whole permission: there is no wildcard, no prefix match and no
+# "same repository is enough".
+#
+# Why it is a file and not a condition in the workflow: the workflow that runs
+# the gate is what the protected branch requires, so the rule it applies has to
+# be reviewable as a diff, not as an expression inside the thing being gated.
+#
+# Measured 2026-11-27: branch protection on `consensus-of-consensuses` required
+# the context `merge-block-default-branch` and no workflow produced it, so the
+# delivery pull request sat blocked with every other check green. The gate that
+# produces it now reads this file.
+testnet-50
+ortak-teslim

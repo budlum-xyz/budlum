@@ -182,6 +182,7 @@ mod gates {
     pub mod refusals_no_mutate;
     pub mod rehearsal_and_field_matrix;
     pub mod rejection_tests;
+    pub mod required_contexts_are_produced;
     pub mod relay;
     pub mod release_profile_pins;
     pub mod repair_fires;
@@ -630,6 +631,14 @@ const GATES: &[Gate] = &[
         run: gates::ci_trigger_coverage::run,
         run_args: None,
         self_test: gates::ci_trigger_coverage::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "required-contexts-are-produced",
+        replaces: None,
+        run: gates::required_contexts_are_produced::run,
+        run_args: None,
+        self_test: gates::required_contexts_are_produced::self_test,
         run_log: None,
     },
     Gate {

@@ -1,0 +1,18 @@
+# Status contexts branch protection requires, and the branch each one protects.
+#
+# Format: `context<TAB>branch`, one pair per line; `#` starts a comment.
+#
+# Read by `budlum-gates required-contexts-are-produced`
+# (xtask/gates/src/gates/required_contexts_are_produced.rs). For every pair the
+# gate requires a workflow that declares a job whose check-run name is exactly
+# the context AND triggers on `pull_request` into that branch. The two halves
+# fail differently: a context no job names never reports at all, and a job whose
+# workflow does not fire on the branch reports on the wrong events.
+#
+# Measured 2026-11-27: this context was required by branch protection on
+# `consensus-of-consensuses` while no workflow in the repository declared a job
+# with that name - thirty-nine workflow files, zero producers. The delivery pull
+# request #215 therefore sat blocked with seventy-nine green checks beside a
+# context GitHub was still waiting for. The gate that produces it lives in
+# `.github/workflows/merge-gate.yml`, and this file is what keeps that true.
+merge-block-default-branch	consensus-of-consensuses

@@ -18,7 +18,7 @@ workflows: 24
 jobs: 88
 fanout: 98
 opaque: 0
-.github/workflows/audit-guard.yml	1	1	0
+.github/workflows/audit-guard.yml	2	2	0
 .github/workflows/benchmark.yml	1	1	0
 .github/workflows/cargo-vet.yml	1	1	0
 .github/workflows/ci.yml	41	45	0
@@ -27,7 +27,7 @@ opaque: 0
 .github/workflows/dependency-review.yml	1	1	0
 .github/workflows/determinism.yml	5	10	0
 .github/workflows/docker-smoke.yml	2	2	0
-.github/workflows/extra-tooling.yml	5	5	0
+.github/workflows/extra-tooling.yml	4	4	0
 .github/workflows/grype.yml	1	1	0
 .github/workflows/miri.yml	2	2	0
 .github/workflows/native-security-review.yml	1	1	0

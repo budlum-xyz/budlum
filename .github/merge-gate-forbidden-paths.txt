@@ -1,0 +1,29 @@
+# Paths the product tree does not accept, checked by `merge-gate` on every pull
+# request into the default branch.
+#
+# The rule these encode is stated in the delivery protocol: the product
+# repository carries code. Planning documents, audit notes, review reports and
+# pending-patch files are workspace artefacts; they live in the agents'
+# workspace repository and never enter the product repository. Before this list
+# existed the rule was prose, and prose is not a gate.
+#
+# The list names artefacts by the names they carry in the product tree's own
+# language, which is English; the workspace repository's Turkish-named
+# documents never reach this tree at all, and `preflight-budlum` in the
+# workspace refuses a push that carries one.
+#
+# Forms:
+#   trailing `/`   a directory, matched as a path prefix
+#   containing `/` a path prefix
+#   leading `*`    a suffix match over the base name
+#   anything else  an exact base name, at any depth
+#
+# A pull request that *deletes* one of these paths is not an offence: the diff
+# is read with `--diff-filter=d`, so removal is how the tree gets clean.
+review-notes/
+docs/audit/
+*.patch
+*.diff
+PLAN.md
+*_PLAN.md
+*_REPORT.md
