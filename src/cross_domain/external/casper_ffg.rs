@@ -792,7 +792,7 @@ impl ExternalFinalityAdapter for CasperFfgAdapter {
     }
 
     fn has_pinned_trust_anchor(&self) -> bool {
-        self.committee.is_some()
+        !self.network.trim().is_empty() && self.committee.is_some()
     }
 
     fn verify(
@@ -810,9 +810,10 @@ impl ExternalFinalityAdapter for CasperFfgAdapter {
         observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityAttestation, AdapterError> {
         let (attestation, all_pq) = self.verify_inner(evidence, policy)?;
-        observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         if all_pq {
             observer.observe(ObservedScheme::Scheme(SchemeId::ML_DSA_65));
+        } else {
+            observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         }
         Ok(attestation)
     }
@@ -865,6 +866,7 @@ impl ExternalFinalityAdapter for CasperFfgAdapter {
         parse_payload(&evidence.payload)
             .ok()
             .map(|parsed| parsed.parent_root)
+            .filter(|root| *root != [0u8; 32])
     }
 }
 
@@ -1618,5 +1620,56 @@ mod tests {
 
         // 4. Empty/whitespace network must be refused.
         assert!(CasperFfgAdapter::new("   ", &skewed_committee, None).is_err());
+    }
+
+    #[test]
+    fn casper_ffg_preserves_lattice_quantum_class_and_suppresses_zero_attested_parent() {
+        use crate::crypto::facts::QuantumClass;
+
+        let mut pq_signers = Vec::new();
+        let mut pq_members = Vec::new();
+        for seed in 1u8..=4 {
+            let key = KeyPair::from_seed(&[seed; 32]).expect("key");
+            let pubkey = key.public_key_bytes();
+            let pq = PqKeyPair::generate();
+            pq_members.push(FfgValidator {
+                pubkey,
+                stake: 100,
+                pq_pubkey: pq.public_key_bytes().to_vec(),
+            });
+            pq_signers.push(Signer {
+                key,
+                pubkey,
+                pq: Some(pq),
+            });
+        }
+        let pq_committee = PinnedFfgCommittee::new(TARGET_EPOCH, pq_members).expect("committee");
+        let pq_adapter = adapter_with(&pq_signers, &pq_committee);
+        let pq_ev = evidence_with(&pq_signers, 3, 3);
+        let mut facts = CryptoFacts::default();
+        pq_adapter
+            .verify_observed(&pq_ev, &policy(), &mut facts)
+            .expect("hybrid PQ Casper FFG verifies");
+        assert_eq!(
+            facts.quantum_class(),
+            Some(QuantumClass::Lattice),
+            "100% ML-DSA-65 Casper FFG committee must preserve QuantumClass::Lattice"
+        );
+
+        let mut zero_parent_ev = pq_ev;
+        zero_parent_ev.payload = encode(
+            SOURCE_EPOCH,
+            SOURCE_ROOT,
+            [0u8; 32],
+            TARGET_EPOCH,
+            TARGET_ROOT,
+            &[],
+            &[],
+        );
+        assert_eq!(
+            pq_adapter.attested_parent(&zero_parent_ev),
+            None,
+            "all-zero parent_root must not be reported as a bound parent"
+        );
     }
 }

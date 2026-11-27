@@ -385,6 +385,11 @@ impl SolanaTowerBftAdapter {
                 rule: "Solana Tower network identifier must not be empty".into(),
             });
         }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Solana Tower network identifier cannot be empty".into(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -600,6 +605,14 @@ impl SolanaTowerBftAdapter {
 impl ExternalFinalityAdapter for SolanaTowerBftAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        !self.network.trim().is_empty()
+            && self
+                .pinned
+                .as_ref()
+                .is_some_and(|p| Self::validate_pinned(p).is_ok())
     }
 
     fn verify(
@@ -1107,7 +1120,10 @@ mod tests {
         );
 
         // 4. Empty/whitespace network must be refused.
-        let blank_adapter = SolanaTowerBftAdapter::new("   ", Some(pinned));
+        let blank_adapter = SolanaTowerBftAdapter::new("   ", Some(pinned.clone()));
+        assert!(!blank_adapter.has_pinned_trust_anchor());
+        assert!(skewed_adapter.has_pinned_trust_anchor());
+        assert!(!SolanaTowerBftAdapter::new(NETWORK, None).has_pinned_trust_anchor());
         let mut blank_ev = golden;
         blank_ev.adapter = blank_adapter.descriptor().id;
         blank_ev.network = "   ".to_string();
