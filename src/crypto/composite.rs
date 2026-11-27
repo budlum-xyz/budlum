@@ -204,6 +204,17 @@ impl CompositePublicKey {
         let (pq, ed_bytes) = rest.split_at(shape.pq_public_key_len);
         let ed = <[u8; ED25519_PUBLIC_KEY_LEN]>::try_from(ed_bytes)
             .map_err(|_| CompositeError::BadEncoding("Ed25519 key"))?;
+        let mut pq_nz = 0u8;
+        for &b in pq {
+            pq_nz |= b;
+        }
+        let mut ed_nz = 0u8;
+        for &b in &ed {
+            ed_nz |= b;
+        }
+        if core::hint::black_box(pq_nz) == 0 || core::hint::black_box(ed_nz) == 0 {
+            return Err(CompositeError::BadEncoding("all-zero public key half"));
+        }
         Ok(Self {
             suite,
             pq: pq.to_vec(),
@@ -304,6 +315,17 @@ impl CompositeKeypair {
                 expected,
                 got: pq_seed.len(),
             }));
+        }
+        let mut pq_nz = 0u8;
+        for &b in pq_seed {
+            pq_nz |= b;
+        }
+        let mut ed_nz = 0u8;
+        for &b in ed_seed {
+            ed_nz |= b;
+        }
+        if core::hint::black_box(pq_nz) == 0 || core::hint::black_box(ed_nz) == 0 {
+            return Err(CompositeError::BadEncoding("all-zero seed half"));
         }
         Ok(Self {
             suite,
