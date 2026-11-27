@@ -2660,21 +2660,40 @@ impl Executor {
             } => {
                 // / M5: an anti-sybil registration fee. Symmetric with the H1 pattern
                 // in the BNS branch: the exact minimum fee is required and fully deducted.
-                if tx.amount < crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE {
+                let register_min_fee = crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE;
+                if tx.amount < register_min_fee {
                     return Err(BudlumError::validation(
                         "hub_insufficient_fee",
                         format!(
-                            "App registration requires {} fee, provided: {}",
-                            crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE,
+                            "App registration requires {register_min_fee} fee, provided: {}",
                             tx.amount
                         ),
                     ));
                 }
-                // A duplicate id means the registry's counter disagrees with
-                // its own contents. Refused rather than overwriting another
-                // developer's listing, and refused here, before the fee is
-                // taken below: charging for a registration that did not
-                // happen would be the worse of the two failures.
+                // Check total cost, vesting-gated spendable balance, liquid balance,
+                // and nonce overflow BEFORE mutating the app registry so a refused
+                // debit never leaves a partial app listing behind.
+                let hub_total = tx.fee.checked_add(register_min_fee).ok_or_else(|| {
+                    BudlumError::validation("cost_overflow", "hub total cost overflow")
+                })?;
+                let hub_spendable = state.spendable_balance(&tx.from);
+                if hub_spendable < hub_total {
+                    return Err(BudlumError::validation(
+                        "insufficient_funds",
+                        format!(
+                            "Hub registration requires {hub_total}, spendable balance: {hub_spendable}"
+                        ),
+                    ));
+                }
+                if state.get_balance(&tx.from).checked_sub(hub_total).is_none() {
+                    return Err(BudlumError::validation(
+                        "balance_underflow",
+                        "hub register cost underflow",
+                    ));
+                }
+                Self::checked_next_nonce(state.get_nonce(&tx.from))?;
+                // A duplicate id or invalid metadata is refused before any fee
+                // is deducted below.
                 state
                     .budlumxyz
                     .register_app(
@@ -2686,25 +2705,6 @@ impl Executor {
                         state.epoch_index,
                     )
                     .map_err(|e| BudlumError::validation("hub_register_refused", e.to_string()))?;
-                // Balance check before deduction - spendable, not raw
-                // the register fee is a spend, so
-                // the vesting lock applies. Read before the mutable borrow
-                // of get_or_create (E0502).
-                let hub_total = tx
-                    .fee
-                    .checked_add(crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE)
-                    .ok_or_else(|| {
-                        BudlumError::validation("cost_overflow", "hub total cost overflow")
-                    })?;
-                let hub_spendable = state.spendable_balance(&tx.from);
-                if hub_spendable < hub_total {
-                    return Err(BudlumError::validation(
-                        "insufficient_funds",
-                        format!(
-                            "Hub registration requires {hub_total}, spendable balance: {hub_spendable}"
-                        ),
-                    ));
-                }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender
                     .balance
@@ -2712,20 +2712,34 @@ impl Executor {
                     .ok_or_else(|| {
                         BudlumError::validation("balance_underflow", "hub fee underflow")
                     })?
-                    .checked_sub(crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE)
+                    .checked_sub(register_min_fee)
                     .ok_or_else(|| {
                         BudlumError::validation("balance_underflow", "hub register fee underflow")
                     })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::BudlumxyzAttestApp { app_id } => {
+                // Enforce vesting-gated spendable balance, liquid balance, and
+                // nonce overflow BEFORE mutating `developer_attested`.
+                let attest_spendable = state.spendable_balance(&tx.from);
+                if attest_spendable < tx.fee {
+                    return Err(BudlumError::validation(
+                        "insufficient_funds",
+                        format!(
+                            "Hub attestation requires {}, spendable balance: {attest_spendable}",
+                            tx.fee
+                        ),
+                    ));
+                }
+                if state.get_balance(&tx.from).checked_sub(tx.fee).is_none() {
+                    return Err(BudlumError::validation(
+                        "balance_underflow",
+                        "hub attest fee underflow",
+                    ));
+                }
+                Self::checked_next_nonce(state.get_nonce(&tx.from))?;
                 // Ownership proof, not audit. `attest_app_as_developer`
-                // refuses unless `tx.from` is the app's registered developer,
-                // and that refusal is the whole point of the transaction:
-                // before this existed, `developer_attested` and `verified`
-                // were hashed into the state root and no path could ever set
-                // either, so both were permanently false and the two bits
-                // were state that could not change.
+                // refuses unless `tx.from` is the app's registered developer.
                 state
                     .budlumxyz
                     .attest_app_as_developer(*app_id, &tx.from)
@@ -7667,5 +7681,167 @@ mod tests {
             signers.contains(&live_mobile),
             "bonded unslashed mobile validator remains eligible for duty lane"
         );
+    }
+
+    fn app_hub_mut(state: &mut AccountState) -> &mut crate::budlumxyz::BudlumxyzRegistry {
+        &mut state.budlumxyz
+    }
+
+    #[test]
+    fn hub_app_register_insufficient_or_vested_funds_does_not_mutate_registry() {
+        use crate::core::transaction::DEFAULT_CHAIN_ID;
+        let min_fee = 1_000_000_000_000_u64;
+
+        let dev = Address::from([0x91u8; 32]);
+        let mut state = AccountState::new();
+        // Balance covers the registration minimum fee alone, not fee + register cost.
+        state.add_balance(&dev, min_fee);
+        let cat = serde_json::from_str("\"Infrastructure\"").expect("infrastructure category");
+        let mut tx = Transaction::new_with_chain_id(
+            dev,
+            Address::zero(),
+            min_fee,
+            1,
+            0,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::BudlumxyzRegisterApp {
+                name: String::from("AcmeApp"),
+                category: cat,
+                website_url: String::from("https://acme.example"),
+                manifest_id: None,
+            },
+        );
+        tx.hash = tx.calculate_hash();
+        let err = Executor::apply_transaction_checked(&mut state, &tx)
+            .expect_err("insufficient funds for register + fee must fail");
+        assert!(
+            err.to_string().contains("spendable") || err.to_string().contains("vesting"),
+            "unexpected refusal: {err}"
+        );
+        assert_eq!(app_hub_mut(&mut state).apps.len(), 0);
+        assert_eq!(state.get_balance(&dev), min_fee);
+        assert_eq!(state.get_nonce(&dev), 0);
+
+        // Vesting-locked balance covering both amount and fee must also fail without partial writes.
+        let mut vested_state = AccountState::new();
+        let vested_total = min_fee + 1_000;
+        vested_state.add_balance(&dev, vested_total);
+        vested_state.team_vesting = Some((
+            dev,
+            crate::tokenomics::VestingSchedule {
+                total: vested_total,
+                start_epoch: 0,
+                cliff_epochs: 10,
+                duration_epochs: 100,
+            },
+        ));
+        assert!(Executor::apply_transaction_checked(&mut vested_state, &tx).is_err());
+        assert_eq!(app_hub_mut(&mut vested_state).apps.len(), 0);
+        assert_eq!(vested_state.get_balance(&dev), vested_total);
+        assert_eq!(vested_state.get_nonce(&dev), 0);
+    }
+
+    #[test]
+    fn hub_app_register_invalid_data_does_not_charge_fee_or_increment_nonce() {
+        use crate::core::transaction::DEFAULT_CHAIN_ID;
+        let min_fee = 1_000_000_000_000_u64;
+
+        let dev = Address::from([0x92u8; 32]);
+        let mut state = AccountState::new();
+        let initial = min_fee + 50;
+        state.add_balance(&dev, initial);
+        let cat = serde_json::from_str("\"Infrastructure\"").expect("infrastructure category");
+        let mut tx = Transaction::new_with_chain_id(
+            dev,
+            Address::zero(),
+            min_fee,
+            10,
+            0,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::BudlumxyzRegisterApp {
+                name: String::new(),
+                category: cat,
+                website_url: String::from("https://acme.example"),
+                manifest_id: None,
+            },
+        );
+        tx.hash = tx.calculate_hash();
+        assert!(Executor::apply_transaction_checked(&mut state, &tx).is_err());
+        assert_eq!(app_hub_mut(&mut state).apps.len(), 0);
+        assert_eq!(state.get_balance(&dev), initial);
+        assert_eq!(state.get_nonce(&dev), 0);
+    }
+
+    #[test]
+    fn hub_app_attest_with_vested_or_insufficient_funds_is_rejected_without_attesting() {
+        use crate::core::transaction::DEFAULT_CHAIN_ID;
+
+        let dev = Address::from([0x93u8; 32]);
+        let mut state = AccountState::new();
+        let cat = serde_json::from_str("\"DeFi\"").expect("defi category");
+        let app_id = app_hub_mut(&mut state)
+            .register_app(
+                String::from("VestedApp"),
+                dev,
+                cat,
+                String::from("https://vested.example"),
+                None,
+                0,
+            )
+            .expect("seed app");
+        state.add_balance(&dev, 1_000);
+        state.team_vesting = Some((
+            dev,
+            crate::tokenomics::VestingSchedule {
+                total: 1_000,
+                start_epoch: 0,
+                cliff_epochs: 10,
+                duration_epochs: 100,
+            },
+        ));
+        let mut tx = Transaction::new_with_chain_id(
+            dev,
+            Address::zero(),
+            0,
+            5,
+            0,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::BudlumxyzAttestApp { app_id },
+        );
+        tx.hash = tx.calculate_hash();
+        let err = Executor::apply_transaction_checked(&mut state, &tx)
+            .expect_err("vesting-locked account cannot pay attestation fee");
+        assert!(
+            err.to_string().contains("vesting") || err.to_string().contains("spendable"),
+            "unexpected refusal: {err}"
+        );
+        assert!(
+            !app_hub_mut(&mut state).apps[&app_id].developer_attested,
+            "developer_attested must stay false after refused fee payment"
+        );
+        assert_eq!(state.get_balance(&dev), 1_000);
+        assert_eq!(state.get_nonce(&dev), 0);
+
+        // Also check non-vested insufficient liquid balance fails without mutating attestation.
+        let mut broke_state = AccountState::new();
+        let broke_cat = serde_json::from_str("\"DeFi\"").expect("defi category");
+        let broke_app_id = app_hub_mut(&mut broke_state)
+            .register_app(
+                String::from("BrokeApp"),
+                dev,
+                broke_cat,
+                String::from("https://broke.example"),
+                None,
+                0,
+            )
+            .expect("seed broke app");
+        broke_state.add_balance(&dev, 4);
+        assert!(Executor::apply_transaction_checked(&mut broke_state, &tx).is_err());
+        assert!(!app_hub_mut(&mut broke_state).apps[&broke_app_id].developer_attested);
+        assert_eq!(broke_state.get_balance(&dev), 4);
+        assert_eq!(broke_state.get_nonce(&dev), 0);
     }
 }
