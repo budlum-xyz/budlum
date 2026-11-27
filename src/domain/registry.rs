@@ -58,6 +58,21 @@ pub const MAX_ACTIVE_DOMAINS_PER_OPERATOR: usize = 32;
 /// registry slot returns to the shared pool.
 pub const DOMAIN_INACTIVITY_RETIREMENT_BLOCKS: u64 = 100_000;
 
+// Cross-layer domain capacity invariants: every downstream catalog, sentry,
+// finality certificate, and light-proof bundle ceiling derives from or stays
+// bounded by `MAX_REGISTERED_DOMAINS` so no layer can silently exclude an
+// admitted domain.
+const _: () = {
+    assert!(MAX_REGISTERED_DOMAINS == 4096);
+    assert!(MAX_ACTIVE_DOMAINS_PER_OPERATOR > 0);
+    assert!(MAX_ACTIVE_DOMAINS_PER_OPERATOR < MAX_REGISTERED_DOMAINS);
+    assert!(MAX_ZK_PROGRAMS_PER_DOMAIN > 0);
+    assert!(crate::unification::domain_catalog::MAX_UNIVERSAL_DOMAINS == MAX_REGISTERED_DOMAINS);
+    assert!(crate::cross_domain::external::sentry::MAX_SENTRY_DOMAINS == MAX_REGISTERED_DOMAINS);
+    assert!(crate::aggregation::universal_light_proof::MAX_ULP_DOMAINS > 0);
+    assert!(crate::aggregation::universal_light_proof::MAX_ULP_DOMAINS <= MAX_REGISTERED_DOMAINS);
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConsensusDomainRegistry {
     domains: BTreeMap<DomainId, ConsensusDomain>,
@@ -142,22 +157,29 @@ impl ConsensusDomainRegistry {
         domain_id: DomainId,
         caip2: &str,
     ) -> Result<String, String> {
-        if !self.domains.contains_key(&domain_id) {
-            return Err(format!("Domain {domain_id} is not registered"));
-        }
+        let domain = self
+            .domains
+            .get(&domain_id)
+            .ok_or_else(|| format!("Domain {domain_id} is not registered"))?;
         let normalized = normalize_caip2(caip2)?;
-        if let Some(existing_domain) = self.domain_id_by_caip2(&normalized) {
-            if existing_domain != domain_id {
-                return Err(format!(
-                    "CAIP-2 reference '{normalized}' is already registered to domain {existing_domain}"
-                ));
-            }
-            return Ok(normalized);
-        }
         if let Some(existing_ref) = self.caip2_by_domain.get(&domain_id) {
             if existing_ref != &normalized {
                 return Err(format!(
                     "Domain {domain_id} is already bound to CAIP-2 '{existing_ref}'"
+                ));
+            }
+            return Ok(normalized);
+        }
+        if domain.status != DomainStatus::Active {
+            return Err(format!(
+                "Domain {domain_id} must be Active to bind CAIP-2 '{normalized}' (current: {:?})",
+                domain.status
+            ));
+        }
+        if let Some(existing_domain) = self.domain_id_by_caip2(&normalized) {
+            if existing_domain != domain_id {
+                return Err(format!(
+                    "CAIP-2 reference '{normalized}' is already registered to domain {existing_domain}"
                 ));
             }
         }
@@ -222,9 +244,10 @@ impl ConsensusDomainRegistry {
         }
     }
 
-    /// Retires and reclaims domains whose recorded activity has been stale for
-    /// at least `inactivity_window` global blocks, freeing their registry slots
-    /// and CAIP-2 bindings for new registrations.
+    /// Retires and reclaims non-frozen domains whose recorded activity has been
+    /// stale for at least `inactivity_window` global blocks, freeing their
+    /// registry slots and CAIP-2 bindings for new registrations while keeping
+    /// security-frozen (`DomainStatus::Frozen`) domains permanently quarantined.
     pub fn reclaim_inactive_domains(
         &mut self,
         current_block_height: u64,
@@ -237,6 +260,10 @@ impl ConsensusDomainRegistry {
             .last_activity_block
             .iter()
             .filter_map(|(&id, &last_seen)| {
+                let status = self.domains.get(&id)?.status;
+                if status == DomainStatus::Frozen {
+                    return None;
+                }
                 if current_block_height.saturating_sub(last_seen) >= inactivity_window {
                     Some(id)
                 } else {
@@ -1255,5 +1282,60 @@ mod tests {
             normalize_caip2("eip155:1.2").is_err(),
             "dot is disallowed in CAIP-2 reference"
         );
+    }
+
+    #[test]
+    fn frozen_domain_and_caip2_survive_inactivity_reclaim_and_refuse_inactive_caip2_binding() {
+        let mut reg = ConsensusDomainRegistry::new();
+        let d_frozen = default_domain(201, ConsensusKind::PoS, 10, "pos-qc-finality", 1);
+        let d_idle = default_domain(202, ConsensusKind::PoS, 42_161, "pos-qc-finality", 1);
+        let d_unbinder = default_domain(203, ConsensusKind::PoS, 8453, "pos-qc-finality", 1);
+
+        reg.register_with_caip2(d_frozen, "eip155:10")
+            .expect("register d_frozen");
+        reg.register_with_caip2(d_idle, "eip155:42161")
+            .expect("register d_idle");
+        reg.register(d_unbinder).expect("register d_unbinder");
+        reg.note_activity(201, 50);
+        reg.note_activity(202, 50);
+        reg.note_activity(203, 50 + DOMAIN_INACTIVITY_RETIREMENT_BLOCKS);
+
+        // Freeze domain 201 (e.g. proven fraud or quantum alarm isolation) and freeze 203.
+        reg.transition_status_checked(201, DomainStatus::Frozen)
+            .expect("freeze 201");
+        reg.transition_status_checked(203, DomainStatus::Frozen)
+            .expect("freeze 203");
+
+        // Binding a fresh CAIP-2 onto a non-Active (Frozen or Retired) domain must be refused
+        // without mutating registry state so inactive rows cannot squat CAIP-2 identities.
+        let root_before_squat = reg.root();
+        let squat_err = reg
+            .bind_caip2(203, "eip155:8453")
+            .expect_err("non-active domain must not acquire a new CAIP-2 binding");
+        assert!(squat_err.contains("Active"), "{squat_err}");
+        assert_eq!(reg.root(), root_before_squat);
+
+        // Advance past the inactivity retirement window: idle Active domain 202 must be reclaimed,
+        // whereas Frozen domain 201 and its CAIP-2 quarantine ("eip155:10") must survive!
+        let reclaimed = reg.reclaim_inactive_domains(
+            50 + DOMAIN_INACTIVITY_RETIREMENT_BLOCKS,
+            DOMAIN_INACTIVITY_RETIREMENT_BLOCKS,
+        );
+        assert_eq!(reclaimed, vec![202]);
+        assert_eq!(
+            reg.get(201).map(|d| d.status),
+            Some(DomainStatus::Frozen),
+            "frozen domain must never evaporate through inactivity reclamation"
+        );
+        assert_eq!(reg.domain_id_by_caip2("eip155:10"), Some(201));
+
+        // Attempting to re-register the quarantined CAIP-2 under a fresh domain id must be refused.
+        let d_reentry = default_domain(204, ConsensusKind::PoS, 10, "pos-qc-finality", 1);
+        let root_after_reclaim = reg.root();
+        let reentry_err = reg
+            .register_with_caip2(d_reentry, "eip155:10")
+            .expect_err("quarantined CAIP-2 must remain blocked while domain is Frozen");
+        assert!(reentry_err.contains("already registered"), "{reentry_err}");
+        assert_eq!(reg.root(), root_after_reclaim);
     }
 }
