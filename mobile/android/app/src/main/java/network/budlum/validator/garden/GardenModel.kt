@@ -145,7 +145,7 @@ class GardenModel(
         // Stepping out keeps the seat and the way back; retiring gives the
         // Garden up. Only the second ends the duty, so only the second
         // takes the notification away.
-        if (!answer.json.contains("\"can_return\":true")) {
+        if (!GardenSeat.canReturn(answer.json)) {
             GardenValidatorService.stop(app)
         }
         state = GardenState(

@@ -536,7 +536,7 @@ private fun StatusScreen(model: GardenModel) {
             // A phone that left keeps its seat until it leaves a second
             // time, and the answer says so. The way back belongs on the
             // screen that said goodbye.
-            if (state.status.contains("\"can_return\":true")) {
+            if (GardenSeat.canReturn(state.status) || GardenSeat.away(state.status)) {
                 Button(
                     onClick = { model.returnToGarden() },
                     enabled = !state.busy,
