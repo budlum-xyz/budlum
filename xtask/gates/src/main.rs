@@ -190,9 +190,9 @@ mod gates {
     pub mod rust_syntax_is_parseable;
     pub mod scheme_is_never_inferred;
     pub mod seals_move_with_their_tree;
+    pub mod secret_scopes_are_guarded;
     pub mod security_parameters;
     pub mod security_quality_wired;
-    pub mod secret_scopes_are_guarded;
     pub mod security_scans_can_fail;
     pub mod self_derived_ids_cover_every_field;
     pub mod self_interrogation;

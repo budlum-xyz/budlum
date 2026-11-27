@@ -71,7 +71,7 @@ struct Job {
 /// Returns `Err` when the file has no `jobs:` section at all: a workflow
 /// without jobs is not a workflow this gate can read, and reporting "no
 /// findings" for it would be the vacuous pass the crate's header warns about.
-fn jobs_of(text: &str) -> Result<Vec<Job>, String> {
+fn jobs_of(text: &str) -> Vec<Job> {
     let mut jobs = Vec::new();
     let mut in_jobs = false;
     let mut current: Option<Job> = None;
@@ -106,7 +106,7 @@ fn jobs_of(text: &str) -> Result<Vec<Job>, String> {
     if let Some(job) = current.take() {
         jobs.push(job);
     }
-    Ok(jobs)
+    jobs
 }
 
 /// A step block inside a job: the `- ` entry and the keys under it.
@@ -148,8 +148,8 @@ fn step_is_guarded(step: &[(usize, String)]) -> bool {
 
 /// Secrets named in a line, excluding the auto-minted token.
 fn secrets_in(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
     const PREFIX: &str = "secrets.";
+    let mut out = Vec::new();
     let mut rest = line;
     while let Some(pos) = rest.find(PREFIX) {
         let after = &rest[pos + PREFIX.len()..];
@@ -181,12 +181,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mut files: Vec<std::path::PathBuf> = rd
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| {
-            matches!(
-                p.extension().and_then(|x| x.to_str()),
-                Some("yml") | Some("yaml")
-            )
-        })
+        .filter(|p| matches!(p.extension().and_then(|x| x.to_str()), Some("yml" | "yaml")))
         .collect();
     files.sort();
     if files.is_empty() {
@@ -201,12 +196,12 @@ pub fn run(root: &Path) -> Result<String, String> {
             .unwrap_or(path)
             .to_string_lossy()
             .into_owned();
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("{name} is unreadable: {e}"))?;
+        let text =
+            std::fs::read_to_string(path).map_err(|e| format!("{name} is unreadable: {e}"))?;
         if !text.contains("secrets.") {
             continue;
         }
-        let jobs = jobs_of(&text)?;
+        let jobs = jobs_of(&text);
         if jobs.is_empty() {
             return Err(format!("{name} has no job this gate can read"));
         }
