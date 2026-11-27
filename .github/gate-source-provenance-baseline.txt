@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: 6f1e43dec51c8d58a0f8f14e31dd06a634b101c29d874ad842834b2978d998ca
+digest: 20a2f3d02f15738671a86b9148d637a9e60d0395e8fef3fddf2023a992ebd0f1
 files: 196
 Cargo.lock	7e8ca4b31fc0795bb139134686126f1d552e1e75e9ffbc2089fbc52944a48a1f
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407

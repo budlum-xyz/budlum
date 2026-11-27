@@ -193,9 +193,17 @@ const READ_CHAINS: &[&str] = &[
     // The joined finality root: `IntakeState::unified_finality_root` takes
     // `&self` and folds owned digests into a local vector, so `chain_actor`
     // answering `bud_unifiedFinalityRoot` reads consensus state without
-    // touching it. Pinned to the receiver chain, not to the method name: a
-    // future `unified_finality_root` on another receiver is still caught.
-    ".external_intake.unified_finality_root(",
+    // touching it.
+    //
+    // The pin starts at `.settlement` because that is where the chain after
+    // `self.blockchain.state` starts, and it carries the whole field path
+    // down to the call. An earlier `.external_intake.unified_finality_root(`
+    // pin could never match: `strip_prefix` sees `.settlement...` first, so
+    // the exemption was dead and `unified_finality_root_is_an_exact_read`
+    // failed while the production call was reported as a write. The method
+    // name is also in the nested-read list above; without it the pin is not
+    // consulted at all.
+    ".settlement.external_intake.unified_finality_root(",
 ];
 
 /// Calls on `self.state` inside a `Blockchain` method body that write it.
@@ -333,9 +341,12 @@ fn check_actor_state_access(actor: &str) -> Result<(), String> {
         }
         if let Some(method) = method {
             let chain = actor[at..].trim_start();
+            // Each name here must have its receiver pinned in READ_CHAINS;
+            // the prefix check below is what keeps a same-named method on a
+            // different receiver refused.
             let nested_read = matches!(
                 method.as_str(),
-                "query_json" | "clone" | "universal_finality_certificate"
+                "query_json" | "clone" | "universal_finality_certificate" | "unified_finality_root"
             ) && READ_CHAINS.iter().any(|allowed| {
                 chain.strip_prefix(allowed).is_some_and(|arguments| {
                     // Walk this call's balanced parentheses. A following
