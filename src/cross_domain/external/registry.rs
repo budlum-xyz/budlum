@@ -917,6 +917,28 @@ impl ExternalDomainRegistry {
             }));
         }
 
+        // 7. The caller's policy, against the backing the adapter attested.
+        //    Every adapter refuses an unslashable backing itself when the
+        //    policy demands one, and the registry repeats the rule here for
+        //    the reason it repeats the adapter binding in step 2: the
+        //    boundary stays fail-closed for an adapter that forgets. The rule
+        //    is the one every adapter in this tree applies - only a signature
+        //    set whose signers hold a bond the chain can take is slashable.
+        //    Accumulated work, a validity proof, a bare authority set and an
+        //    empty backing are not, whatever their other merits, so a caller
+        //    who asked for a bond is never handed one of them.
+        if policy.require_slashable
+            && !matches!(
+                attestation.security,
+                SecurityBacking::SignatureSet {
+                    slashable: true,
+                    ..
+                }
+            )
+        {
+            return Err(RegistryError::Adapter(AdapterError::UnslashableBacking));
+        }
+
         Ok((attestation, observed))
     }
 
