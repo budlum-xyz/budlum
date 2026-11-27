@@ -158,8 +158,13 @@ pub fn initialize_committee(
     Ok(())
 }
 
+const MAX_COMMITTEE_MEMBERS: usize = 512;
+
 fn validate_committee(config: &CommitteeConfig) -> Result<(), ProgramError> {
-    if config.budlum_chain_id == 0 || config.members.is_empty() {
+    if config.budlum_chain_id == 0
+        || config.members.is_empty()
+        || config.members.len() > MAX_COMMITTEE_MEMBERS
+    {
         return Err(ProgramError::Custom(ERR_INVALID_COMMITTEE));
     }
     let n = config.members.len();
@@ -313,6 +318,9 @@ where
     if handoff.signatures.len() < current.threshold as usize {
         return Err(ProgramError::Custom(ERR_QUORUM_NOT_MET));
     }
+    if handoff.signatures.len() > current.members.len() {
+        return Err(ProgramError::Custom(ERR_DUPLICATE_SIGNER));
+    }
 
     let msg = handoff_message(
         current.budlum_chain_id,
@@ -390,15 +398,22 @@ where
         return Err(ProgramError::Custom(ERR_DOMAIN_MISMATCH));
     }
 
+    let mut already_recorded = false;
     if let Some(existing) = state.checkpoints.iter().find(|c| c.height == height) {
-        if existing.state_root == state_root && existing.header_hash == header_hash {
-            return Ok(());
+        if existing.state_root != state_root
+            || existing.header_hash != header_hash
+            || existing.mode != proof.mode
+        {
+            return Err(ProgramError::Custom(ERR_CONFLICT));
         }
-        return Err(ProgramError::Custom(ERR_CONFLICT));
+        already_recorded = true;
     }
 
     if proof.signatures.len() < committee.threshold as usize {
         return Err(ProgramError::Custom(ERR_QUORUM_NOT_MET));
+    }
+    if proof.signatures.len() > committee.members.len() {
+        return Err(ProgramError::Custom(ERR_DUPLICATE_SIGNER));
     }
 
     let msg = signing_message(
@@ -429,6 +444,10 @@ where
 
     if valid_count < committee.threshold as usize {
         return Err(ProgramError::Custom(ERR_QUORUM_NOT_MET));
+    }
+
+    if already_recorded {
+        return Ok(());
     }
 
     state.checkpoints.push(CheckpointEntry {
@@ -620,6 +639,54 @@ mod tests {
                 |_, _, _| true
             ),
             Err(ProgramError::Custom(ERR_DUPLICATE_SIGNER))
+        );
+    }
+
+    #[test]
+    fn replay_rejects_mode_mismatch_unverified_sigs_and_oversized_committee() {
+        let mut state = VerifierState::default();
+        initialize_committee(&mut state, sample_committee()).unwrap();
+
+        let root = [0x42; 32];
+        let header = [0x99; 32];
+        let proof = sample_proof(&[0, 1, 2]);
+        record_with_verifier(&mut state, 42, root, header, &proof, |_, _, _| true).unwrap();
+
+        // Replay at same (height, root, header) with different FinalityMode must fail closed.
+        let mut downgraded = sample_proof(&[0, 1, 2]);
+        downgraded.mode = FinalityMode::ClassicalOnly;
+        assert_eq!(
+            record_with_verifier(&mut state, 42, root, header, &downgraded, |_, _, _| true),
+            Err(ProgramError::Custom(ERR_CONFLICT))
+        );
+
+        // Replay at same (height, root, header, mode) with forged/empty signatures must fail closed.
+        let mut empty_sigs = sample_proof(&[]);
+        empty_sigs.mode = FinalityMode::Hybrid;
+        assert_eq!(
+            record_with_verifier(&mut state, 42, root, header, &empty_sigs, |_, _, _| false),
+            Err(ProgramError::Custom(ERR_QUORUM_NOT_MET))
+        );
+
+        // Oversized committee (> 512 members) must be rejected before O(n^2) duplicate scan.
+        let mut huge_members = Vec::with_capacity(513);
+        for i in 0..513u16 {
+            let mut pk = [0u8; 32];
+            pk[0..2].copy_from_slice(&(i + 1).to_le_bytes());
+            huge_members.push(pk);
+        }
+        let mut fresh = VerifierState::default();
+        assert_eq!(
+            initialize_committee(
+                &mut fresh,
+                CommitteeConfig {
+                    budlum_chain_id: 1,
+                    epoch: 1,
+                    threshold: 343,
+                    members: huge_members,
+                }
+            ),
+            Err(ProgramError::Custom(ERR_INVALID_COMMITTEE))
         );
     }
 

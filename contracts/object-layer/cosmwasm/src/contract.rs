@@ -255,7 +255,9 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
             if height <= LAST_ACCEPTED_HEIGHT.load(deps.storage)? {
                 return Err(StdError::generic_err("not newer"));
             }
-            if !verifier::height_final(deps.storage, height) {
+            if !verifier::height_final(deps.storage, height)
+                || verifier::header_at(deps.storage, height) == [0u8; 32]
+            {
                 return Err(StdError::generic_err("not final"));
             }
             LAST_ACCEPTED_HEIGHT.save(deps.storage, &height)?;
