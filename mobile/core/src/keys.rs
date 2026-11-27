@@ -154,6 +154,12 @@ impl OperatorKey {
     /// length, and `mobile_operator_key_mismatch` when the seed derives
     /// another public key.
     pub fn open(vault: &dyn KeyVault, sealed: &SealedOperatorKey) -> Result<Self, CoreError> {
+        if sealed.public_key.is_empty() || sealed.sealed_seed.is_empty() {
+            return Err(CoreError::new(
+                "mobile_operator_key_sealed",
+                "sealed operator key fields must not be empty",
+            ));
+        }
         let context = vault_context(&sealed.public_key);
         let secret = vault
             .open(&sealed.sealed_seed, &context)

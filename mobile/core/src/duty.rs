@@ -151,6 +151,15 @@ impl MobileCore {
                 "the thermal pause cannot be disabled",
             ));
         }
+        if matches!(
+            policy.network,
+            crate::policy::NetworkPolicy::Metered { daily_cap_mb: 0 }
+        ) {
+            return Err(CoreError::new(
+                "mobile_metered_cap_zero",
+                "a metered network policy requires a non-zero daily cap",
+            ));
+        }
         let cap = self.class.max_custody_quota_bytes();
         if cap.is_some_and(|cap| policy.quota_bytes > cap) {
             return Err(CoreError::new(

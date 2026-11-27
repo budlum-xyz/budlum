@@ -34,15 +34,28 @@ pub struct MobileLightClient {
     registry: SchemeStatusRegistry,
 }
 
+const ZERO_HEX_64: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
 impl MobileLightClient {
     /// Bootstrap a mobile light client from a canonical [`TrustedCheckpoint`].
     ///
     /// # Errors
     ///
     /// Returns [`CheckpointVerifyError::MalformedHash`] if either anchor digest
-    /// is not a canonical 64-character lowercase hex string.
+    /// is not a canonical non-zero 64-character lowercase hex string, or
+    /// [`CheckpointVerifyError::TrustBinding`] if `chain_id` is zero.
     pub fn new(trusted: TrustedCheckpoint, chain_id: u64) -> Result<Self, CheckpointVerifyError> {
+        if chain_id == 0 {
+            return Err(CheckpointVerifyError::TrustBinding(
+                "light client chain_id must be non-zero".into(),
+            ));
+        }
         trusted.validate()?;
+        if trusted.block_hash == ZERO_HEX_64 || trusted.set_hash == ZERO_HEX_64 {
+            return Err(CheckpointVerifyError::MalformedHash(
+                "trusted anchor digests must not be all-zero".into(),
+            ));
+        }
         Ok(Self {
             trusted,
             chain_id,
@@ -84,6 +97,17 @@ impl MobileLightClient {
         blob: &QcBlob,
         snapshot: &ValidatorSetSnapshot,
     ) -> Result<VerifiedCheckpoint, CheckpointVerifyError> {
+        if header.block_hash == ZERO_HEX_64 || header.state_root == ZERO_HEX_64 {
+            return Err(CheckpointVerifyError::InvalidHeader(
+                "checkpoint header digests must not be all-zero".into(),
+            ));
+        }
+        if blob.created_epoch != blob.epoch {
+            return Err(CheckpointVerifyError::CertificateBinding(format!(
+                "QcBlob created_epoch {} != epoch {}",
+                blob.created_epoch, blob.epoch
+            )));
+        }
         let registry = &self.registry;
         budlum_types::checkpoint::verify_pq_checkpoint_with(
             &self.trusted,
@@ -358,6 +382,40 @@ mod tests {
         assert_eq!(verified200.height, 200);
         assert_eq!(verified200.external_root(), Some([0x33; 32]));
         assert_eq!(client.trusted().height, 200);
+
+        // Zero chain_id, all-zero anchor digests, and malleable created_epoch != epoch must fail closed.
+        assert!(MobileLightClient::new(
+            TrustedCheckpoint {
+                height: 100,
+                block_hash: "11".repeat(32),
+                set_hash: epoch4.set_hash.clone(),
+            },
+            0,
+        )
+        .is_err());
+        assert!(MobileLightClient::new(
+            TrustedCheckpoint {
+                height: 100,
+                block_hash: "00".repeat(32),
+                set_hash: epoch4.set_hash.clone(),
+            },
+            chain_id,
+        )
+        .is_err());
+
+        let mut malleable_qc = sign_qc(&epoch4, &seeds4, 250, &"25".repeat(32), &[0, 1, 2]);
+        malleable_qc.created_epoch = u64::MAX;
+        let header250 = CheckpointSummary {
+            height: 250,
+            block_hash: "25".repeat(32),
+            state_root: "35".repeat(32),
+        };
+        assert!(
+            client
+                .verify_pq_checkpoint(&header250, &malleable_qc, &epoch4)
+                .is_err(),
+            "mutated unsigned created_epoch header field in QcBlob must be refused"
+        );
 
         // Forged / tampered signature is strictly refused (never an accept-all stub).
         let mut tampered_qc = sign_qc(&epoch4, &seeds4, 300, &"44".repeat(32), &[0, 1, 2]);
