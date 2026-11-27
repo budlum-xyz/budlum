@@ -207,6 +207,17 @@ pub fn aptos_singlekey_secp256k1_address(uncompressed_pk65: &[u8; 65]) -> [u8; 3
     h.finalize().into()
 }
 
+fn is_valid_move_identifier(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if name.len() > 128 || !(first.is_ascii_alphabetic() || first == b'_') {
+        return false;
+    }
+    bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 /// Decodes and verifies a BCS-encoded Aptos `SignedTransaction`.
 ///
 /// # Errors
@@ -250,6 +261,12 @@ pub fn decode_aptos_tx(
             let fn_bytes = read_bcs_bytes(bcs_bytes, &mut cur)?;
             let function_name = String::from_utf8(fn_bytes)
                 .map_err(|_| AptosEnvelopeError::MalformedBcs(String::from("bad fn utf8")))?;
+            if !is_valid_move_identifier(&module_name) || !is_valid_move_identifier(&function_name)
+            {
+                return Err(AptosEnvelopeError::MalformedBcs(String::from(
+                    "invalid Move module or function identifier",
+                )));
+            }
             let args_bcs = read_bcs_bytes(bcs_bytes, &mut cur)?;
             AptosPayloadKind::EntryFunction {
                 module_address,
@@ -279,7 +296,7 @@ pub fn decode_aptos_tx(
             got: chain_id,
         });
     }
-    if now_timestamp_secs > expiration_timestamp_secs {
+    if now_timestamp_secs >= expiration_timestamp_secs {
         return Err(AptosEnvelopeError::Expired {
             now_secs: now_timestamp_secs,
             expiration_secs: expiration_timestamp_secs,
@@ -330,6 +347,16 @@ pub fn decode_aptos_tx(
                 return Err(AptosEnvelopeError::InvalidSignature(String::from(
                     "invalid MultiEd25519 threshold or key count",
                 )));
+            }
+            for i in 0..n_keys {
+                let ki = pks_concat.get(i * 32..(i + 1) * 32);
+                for j in (i + 1)..n_keys {
+                    if ki == pks_concat.get(j * 32..(j + 1) * 32) {
+                        return Err(AptosEnvelopeError::InvalidSignature(String::from(
+                            "duplicate MultiEd25519 public key",
+                        )));
+                    }
+                }
             }
             let mut auth_h = Sha3_256::new();
             auth_h.update(&pks_concat);
@@ -517,4 +544,120 @@ pub fn sign_aptos_ed25519_tx(
     write_uleb128_u32(64, &mut signed);
     signed.extend_from_slice(&sig.to_bytes());
     signed
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn sign_entry_fn_raw(
+        sk: &SigningKey,
+        module_name: &str,
+        function_name: &str,
+        expiration_timestamp_secs: u64,
+    ) -> Vec<u8> {
+        let pk32 = sk.verifying_key().to_bytes();
+        let sender = aptos_ed25519_address(&pk32);
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&sender);
+        raw.extend_from_slice(&1u64.to_le_bytes());
+        write_uleb128_u32(2, &mut raw); // EntryFunction
+        raw.extend_from_slice(&[0u8; 32]);
+        write_uleb128_u32(u32::try_from(module_name.len()).unwrap(), &mut raw);
+        raw.extend_from_slice(module_name.as_bytes());
+        write_uleb128_u32(u32::try_from(function_name.len()).unwrap(), &mut raw);
+        raw.extend_from_slice(function_name.as_bytes());
+        write_uleb128_u32(0, &mut raw);
+        raw.extend_from_slice(&100_000u64.to_le_bytes());
+        raw.extend_from_slice(&100u64.to_le_bytes());
+        raw.extend_from_slice(&expiration_timestamp_secs.to_le_bytes());
+        raw.push(1);
+        let sig = sk.sign(&aptos_signing_message(&raw));
+        let mut signed = raw;
+        write_uleb128_u32(0, &mut signed);
+        write_uleb128_u32(32, &mut signed);
+        signed.extend_from_slice(&pk32);
+        write_uleb128_u32(64, &mut signed);
+        signed.extend_from_slice(&sig.to_bytes());
+        signed
+    }
+
+    #[test]
+    fn aptos_multied25519_rejects_duplicate_signer_keys() {
+        let sk = SigningKey::from_bytes(&[0x55u8; 32]);
+        let pk32 = sk.verifying_key().to_bytes();
+        let mut pks_concat = Vec::new();
+        pks_concat.extend_from_slice(&pk32);
+        pks_concat.extend_from_slice(&pk32);
+        pks_concat.push(2); // threshold 2
+        let mut h = Sha3_256::new();
+        h.update(&pks_concat);
+        h.update([0x01]);
+        let sender: [u8; 32] = h.finalize().into();
+
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&sender);
+        raw.extend_from_slice(&1u64.to_le_bytes());
+        write_uleb128_u32(0, &mut raw); // Script
+        write_uleb128_u32(1, &mut raw);
+        raw.push(0x01);
+        raw.extend_from_slice(&100_000u64.to_le_bytes());
+        raw.extend_from_slice(&100u64.to_le_bytes());
+        raw.extend_from_slice(&2000u64.to_le_bytes());
+        raw.push(1);
+
+        let sig = sk.sign(&aptos_signing_message(&raw));
+        let mut sig_bytes = Vec::new();
+        sig_bytes.extend_from_slice(&sig.to_bytes());
+        sig_bytes.extend_from_slice(&sig.to_bytes());
+        sig_bytes.extend_from_slice(&[0xC0, 0x00, 0x00, 0x00]); // bits 0 and 1
+
+        let mut signed = raw;
+        write_uleb128_u32(1, &mut signed); // MultiEd25519
+        write_uleb128_u32(u32::try_from(pks_concat.len()).unwrap(), &mut signed);
+        signed.extend_from_slice(&pks_concat);
+        write_uleb128_u32(u32::try_from(sig_bytes.len()).unwrap(), &mut signed);
+        signed.extend_from_slice(&sig_bytes);
+
+        let err = decode_aptos_tx(&signed, 1, 1000).unwrap_err();
+        assert!(
+            matches!(err, AptosEnvelopeError::InvalidSignature(ref m) if m.contains("duplicate")),
+            "duplicate MultiEd25519 signer keys must be refused explicitly, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn aptos_entry_function_rejects_empty_or_malformed_identifiers() {
+        let sk = SigningKey::from_bytes(&[0x66u8; 32]);
+        let valid = sign_entry_fn_raw(&sk, "coin", "transfer", 2000);
+        assert!(
+            decode_aptos_tx(&valid, 1, 1000).is_ok(),
+            "valid EntryFunction baseline must decode"
+        );
+        for (m, f) in [
+            ("", "transfer"),
+            ("coin", ""),
+            ("coin/bad", "transfer"),
+            ("coin", "fn\nname"),
+        ] {
+            let signed = sign_entry_fn_raw(&sk, m, f, 2000);
+            let err = decode_aptos_tx(&signed, 1, 1000).unwrap_err();
+            assert!(
+                matches!(err, AptosEnvelopeError::MalformedBcs(_)),
+                "malformed EntryFunction identifier ({m}::{f}) must be refused with MalformedBcs, got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn aptos_tx_rejects_exact_expiration_boundary() {
+        let sk = SigningKey::from_bytes(&[0x77u8; 32]);
+        let signed = sign_entry_fn_raw(&sk, "coin", "transfer", 1000);
+        let err = decode_aptos_tx(&signed, 1, 1000).unwrap_err();
+        assert!(
+            matches!(err, AptosEnvelopeError::Expired { .. }),
+            "transaction at exact expiration timestamp must be refused with Expired, got: {err:?}"
+        );
+    }
 }
