@@ -300,3 +300,7 @@ pub mod rpc_admin_wallet_identity_coverage;
 // Property, invariant, and refutation coverage for Universal Finality certificates and bounds.
 #[cfg(test)]
 pub mod universal_finality_properties;
+
+// Every built-in verifier family refuses an anchor it does not hold.
+#[cfg(test)]
+pub mod external_family_pin_refusal;
