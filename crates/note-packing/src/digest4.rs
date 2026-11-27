@@ -131,12 +131,14 @@ pub struct SuiteTaggedCommitment {
 
 impl SuiteTaggedCommitment {
     /// Build a Poseidon G12 V2 commitment from a canonical `Digest4`, refusing
-    /// 64-bit single-limb truncated digests (`KP-2`).
+    /// all-zero and 64-bit single-limb truncated digests (`KP-2`).
     ///
     /// WIRING: exposed for V2 privacy note and consent commitment producers.
     #[must_use]
     pub const fn from_poseidon_digest4(d: Digest4) -> Option<Self> {
-        if d.is_single_limb_truncated() {
+        if (d.0[0] == 0 && d.0[1] == 0 && d.0[2] == 0 && d.0[3] == 0)
+            || d.is_single_limb_truncated()
+        {
             return None;
         }
         Some(Self {
@@ -156,8 +158,9 @@ impl SuiteTaggedCommitment {
         out
     }
 
-    /// Decode `[suite_byte, digest[0..32]]`, validating canonical Goldilocks
-    /// limbs and non-truncation when `suite == PoseidonG12V1`.
+    /// Decode `[suite_byte, digest[0..32]]`, refusing all-zero or 64-bit
+    /// zero-padded V1 truncated commitments across every suite and validating
+    /// canonical Goldilocks limbs when `suite == PoseidonG12V1`.
     ///
     /// WIRING: exposed for V2 wire decoding.
     #[must_use]
@@ -165,6 +168,11 @@ impl SuiteTaggedCommitment {
         let suite = HashSuiteId::from_byte(raw[0])?;
         let mut digest = [0u8; 32];
         digest.copy_from_slice(&raw[1..]);
+        // Refuse both all-zero commitments and 64-bit single-limb zero-padded
+        // commitments (`digest[8..32] == 0`) regardless of suite tag (`KP-2`).
+        if digest[8..].iter().all(|&b| b == 0) {
+            return None;
+        }
         if matches!(suite, HashSuiteId::PoseidonG12V1) {
             let d4 = Digest4::from_bytes_checked(&digest)?;
             if d4.is_single_limb_truncated() {
