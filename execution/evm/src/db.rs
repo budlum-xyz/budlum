@@ -18,7 +18,9 @@ use budlum_uel_abi::{
     UniversalResult,
 };
 use revm::database_interface::{DBErrorMarker, Database};
-use revm::primitives::{Address, Bytes, Log, StorageKey, StorageValue, B256, KECCAK_EMPTY, U256};
+use revm::primitives::{
+    keccak256, Address, Bytes, Log, StorageKey, StorageValue, B256, KECCAK_EMPTY, U256,
+};
 use revm::state::{AccountInfo, Bytecode, EvmState};
 use sha2::{Digest, Sha256};
 
@@ -121,8 +123,13 @@ fn read_basic_from_host(
             ..AccountInfo::default()
         })),
         Some(bytes) => {
-            let (nonce, code_hash) = decode_account_meta(&bytes)?;
-            let code = if code_hash == KECCAK_EMPTY || code_hash.is_zero() {
+            let (nonce, raw_code_hash) = decode_account_meta(&bytes)?;
+            let code_hash = if raw_code_hash.is_zero() {
+                KECCAK_EMPTY
+            } else {
+                raw_code_hash
+            };
+            let code = if code_hash == KECCAK_EMPTY {
                 Some(Bytecode::default())
             } else {
                 None
@@ -144,10 +151,19 @@ fn read_code_from_host(host: &dyn HostRead, code_hash: B256) -> Result<Bytecode,
     }
     let ns_code = ns(NS_EVM_CODE)?;
     let Some(bytes) = host.read(&ns_code, code_hash.as_slice())? else {
-        return Ok(Bytecode::default());
+        return Err(HostDbError(format!(
+            "missing ee/evm/code entry for non-empty code_hash {code_hash}"
+        )));
     };
     if bytes.is_empty() {
-        return Ok(Bytecode::default());
+        return Err(HostDbError(format!(
+            "empty ee/evm/code entry for non-empty code_hash {code_hash}"
+        )));
+    }
+    if keccak256(&bytes) != code_hash {
+        return Err(HostDbError(format!(
+            "corrupt ee/evm/code bytecode does not match code_hash {code_hash}"
+        )));
     }
     let raw = Bytes::from(bytes);
     Ok(Bytecode::new_raw_checked(raw.clone()).unwrap_or_else(|_| Bytecode::new_legacy(raw)))
@@ -309,6 +325,16 @@ pub fn commit_evm_state(
         }
     }
 
+    // Every non-zero host-settled debit recorded by 0x...B001 must belong to a
+    // touched account so it is reconciled into the commit balance conservation check.
+    for (&addr, &settled) in host_settled_debits {
+        if !settled.is_zero() && !ordered.contains_key(&addr) {
+            return Err(HostError::Invalid(
+                "settled host debit for untouched EVM account".into(),
+            ));
+        }
+    }
+
     let mut debits: Vec<(Address, u128)> = Vec::new();
     let mut credits: Vec<(Address, u128)> = Vec::new();
 
@@ -317,12 +343,23 @@ pub fn commit_evm_state(
             .get(&addr)
             .copied()
             .unwrap_or(U256::ZERO);
-        let orig_bal = u256_to_u128_clamped(acc.original_info().balance.saturating_sub(settled))?;
-        let curr_bal = u256_to_u128_clamped(acc.info.balance)?;
-        if curr_bal < orig_bal {
-            debits.push((addr, orig_bal - curr_bal));
-        } else if curr_bal > orig_bal {
-            credits.push((addr, curr_bal - orig_bal));
+        // Host already transferred `settled` out of `addr`, so `addr` needs
+        // `(curr_bal + settled) - orig_bal` net reconciliation against host balances.
+        // Comparing `curr + settled` against `orig` in U256 avoids clamping when
+        // `settled > orig_bal` (e.g. a contract receives value and forwards it in one tx).
+        let _ = u256_to_u128_clamped(acc.info.balance)?;
+        let orig_u256 = acc.original_info().balance;
+        let effective_curr_u256 = acc
+            .info
+            .balance
+            .checked_add(settled)
+            .ok_or_else(|| HostError::Invalid("EVM settled balance overflow".into()))?;
+        if effective_curr_u256 < orig_u256 {
+            let diff = u256_to_u128_clamped(orig_u256 - effective_curr_u256)?;
+            debits.push((addr, diff));
+        } else if effective_curr_u256 > orig_u256 {
+            let diff = u256_to_u128_clamped(effective_curr_u256 - orig_u256)?;
+            credits.push((addr, diff));
         }
 
         if acc.is_selfdestructed() {
@@ -341,6 +378,11 @@ pub fn commit_evm_state(
             if let Some(code) = &acc.info.code {
                 let raw = code.original_byte_slice();
                 if !raw.is_empty() {
+                    if keccak256(raw) != code_hash {
+                        return Err(HostError::Invalid(
+                            "EVM account bytecode does not match code_hash at commit".into(),
+                        ));
+                    }
                     host.write(&ns_code, code_hash.as_slice(), Some(raw))?;
                 }
             }
@@ -410,11 +452,16 @@ pub fn commit_evm_state(
     }
 
     for log in logs {
+        if log.data.topics().len() > MAX_LOG_TOPICS {
+            return Err(HostError::Invalid(format!(
+                "EVM log topic count {} exceeds MAX_LOG_TOPICS ({MAX_LOG_TOPICS})",
+                log.data.topics().len()
+            )));
+        }
         let topics: Vec<Vec<u8>> = log
             .data
             .topics()
             .iter()
-            .take(MAX_LOG_TOPICS)
             .map(|t| t.as_slice().to_vec())
             .collect();
         host.emit_log(EeLog {
@@ -425,4 +472,173 @@ pub fn commit_evm_state(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use budlum_uel_abi::mock::MemoryHost;
+    use revm::primitives::{keccak256, LogData};
+    use revm::state::Account;
+
+    #[test]
+    fn evmee01_read_code_fails_closed_on_missing_empty_or_tampered_bytecode() {
+        let mut host = MemoryHost::new(1_000_000);
+        let ns_acc = Namespace::new(NS_EVM_ACCOUNT).expect("ns_acc");
+        let ns_code = Namespace::new(NS_EVM_CODE).expect("ns_code");
+
+        // 1. Missing bytecode for a non-empty code_hash must error (never silently become empty EOA).
+        let expected_code = b"\x60\x01\x60\x00\x52\x60\x20\x60\x00\xf3";
+        let expected_hash = keccak256(expected_code);
+        {
+            let mut db = HostDb::new(&mut host, 45_261);
+            assert!(
+                db.code_by_hash(expected_hash).is_err(),
+                "missing bytecode for non-empty code_hash must fail closed"
+            );
+        }
+
+        // 2. Empty bytecode stored under non-empty code_hash must error.
+        host.write(&ns_code, expected_hash.as_slice(), Some(&[]))
+            .expect("write empty");
+        {
+            let mut db = HostDb::new(&mut host, 45_261);
+            assert!(
+                db.code_by_hash(expected_hash).is_err(),
+                "empty bytecode for non-empty code_hash must fail closed"
+            );
+        }
+
+        // 3. Tampered bytecode whose keccak256 != code_hash must error.
+        host.write(&ns_code, expected_hash.as_slice(), Some(b"\x00\x00\x00"))
+            .expect("write tampered");
+        {
+            let mut db = HostDb::new(&mut host, 45_261);
+            assert!(
+                db.code_by_hash(expected_hash).is_err(),
+                "bytecode with mismatched keccak256 must fail closed"
+            );
+        }
+
+        // 4. Valid matching bytecode succeeds.
+        host.write(&ns_code, expected_hash.as_slice(), Some(expected_code))
+            .expect("write valid");
+        {
+            let mut db = HostDb::new(&mut host, 45_261);
+            let loaded = db
+                .code_by_hash(expected_hash)
+                .expect("matching bytecode must load");
+            assert_eq!(loaded.original_byte_slice(), expected_code);
+        }
+
+        // 5. Stored zero code_hash normalizes to KECCAK_EMPTY for EXTCODEHASH consistency.
+        let eoa = Address::from([0x77u8; 20]);
+        let meta = encode_account_meta(3, B256::ZERO);
+        host.write(&ns_acc, eoa.as_slice(), Some(&meta))
+            .expect("write eoa");
+        {
+            let mut db = HostDb::new(&mut host, 45_261);
+            let info = db.basic(eoa).expect("basic").expect("some");
+            assert_eq!(
+                info.code_hash, KECCAK_EMPTY,
+                "zero stored code_hash must normalize to KECCAK_EMPTY"
+            );
+        }
+    }
+
+    #[test]
+    fn evmee02_commit_conserves_value_when_settled_exceeds_original_and_rejects_excess_topics() {
+        // 1. Alice (orig=1000) sends 500 to Contract C (orig=0); C forwards 400 via B001
+        //    (host_settled_debits[C] = 400, C.curr = 100, Alice.curr = 500).
+        //    commit_evm_state MUST transfer 500 from Alice to C (ZERO burn to Address::ZERO!).
+        let alice = Address::from([0x11u8; 20]);
+        let contract = Address::from([0x22u8; 20]);
+        let mut host = MemoryHost::new(1_000_000);
+        host.balances.insert(evm_identity(alice), 1_000);
+        // Simulate host already having debited 400 from contract or settling net balance:
+        // start contract at 400 on host so after -400 settled it has 0, then +500 commit -> 500
+        // (we check exact transferred deltas: Alice loses 500, contract gains 500, ZERO gets 0).
+        host.balances.insert(evm_identity(contract), 0);
+
+        let mut alice_acc = Account::from(AccountInfo {
+            balance: U256::from(1_000u64),
+            nonce: 0,
+            code_hash: KECCAK_EMPTY,
+            code: Some(Bytecode::default()),
+            ..AccountInfo::default()
+        });
+        alice_acc.info.balance = U256::from(500u64);
+        alice_acc.info.nonce = 1;
+        alice_acc.mark_touch();
+
+        let mut contract_acc = Account::from(AccountInfo {
+            balance: U256::ZERO,
+            nonce: 1,
+            code_hash: KECCAK_EMPTY,
+            code: Some(Bytecode::default()),
+            ..AccountInfo::default()
+        });
+        contract_acc.info.balance = U256::from(100u64);
+        contract_acc.mark_touch();
+
+        let mut state: EvmState = Default::default();
+        state.insert(alice, alice_acc);
+        state.insert(contract, contract_acc);
+
+        let mut settled = BTreeMap::new();
+        settled.insert(contract, U256::from(400u64));
+
+        commit_evm_state(&mut host, &state, &[], &settled)
+            .expect("commit with settled > original balance must conserve value");
+        assert_eq!(host.balances.get(&evm_identity(alice)).copied(), Some(500));
+        assert_eq!(
+            host.balances.get(&evm_identity(contract)).copied(),
+            Some(500),
+            "contract must receive full +500 credit (not clamped +100 with 400 burned to ZERO)"
+        );
+        assert_eq!(
+            host.balances
+                .get(&evm_identity(Address::ZERO))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "zero funds may be burned to Address::ZERO"
+        );
+
+        // 2. Non-zero settled debit for an untouched account must fail closed.
+        let mut host2 = MemoryHost::new(1_000_000);
+        let empty_state: EvmState = Default::default();
+        let mut bad_settled = BTreeMap::new();
+        bad_settled.insert(Address::from([0x99u8; 20]), U256::from(1u64));
+        assert!(
+            commit_evm_state(&mut host2, &empty_state, &[], &bad_settled).is_err(),
+            "settled debit for untouched account must be refused"
+        );
+
+        // 3. Log exceeding MAX_LOG_TOPICS must be refused rather than silently truncated.
+        let mut host3 = MemoryHost::new(1_000_000);
+        let bad_log = Log {
+            address: contract,
+            data: LogData::new_unchecked(vec![B256::ZERO; MAX_LOG_TOPICS + 1], Bytes::new()),
+        };
+        assert!(
+            commit_evm_state(&mut host3, &empty_state, &[bad_log], &BTreeMap::new()).is_err(),
+            "log with > MAX_LOG_TOPICS must be refused"
+        );
+
+        // 4. Persisting bytecode whose keccak256 != code_hash must fail closed.
+        let mut host4 = MemoryHost::new(1_000_000);
+        let mut bad_code_acc = Account::from(AccountInfo::default());
+        bad_code_acc.info.nonce = 1;
+        bad_code_acc.info.code_hash = B256::from([0xABu8; 32]);
+        bad_code_acc.info.code = Some(Bytecode::new_legacy(Bytes::from_static(b"\x60\x00")));
+        bad_code_acc.mark_touch();
+        bad_code_acc.mark_touch();
+        let mut bad_code_state: EvmState = Default::default();
+        bad_code_state.insert(contract, bad_code_acc);
+        assert!(
+            commit_evm_state(&mut host4, &bad_code_state, &[], &BTreeMap::new()).is_err(),
+            "mismatched bytecode hash at commit must fail closed"
+        );
+    }
 }
