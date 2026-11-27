@@ -9,9 +9,11 @@
 //! Usage:
 //!   garden-phone self-test <dir>
 //!   garden-phone read <dir> <record>
+//!   garden-phone create <dir> <title> [name] [listen multiaddr]
 //!   garden-phone join <dir> <record> <name>
 //!   garden-phone serve <dir> <port> [record] [name]
 //!   garden-phone return-check <dir> <record> [name]
+//!   garden-phone cleanup-check <dir> <record> [name]
 //!   garden-phone status <dir>
 //!   garden-phone send <dir> <text> [caption]
 //!   garden-phone feed <dir> [limit]
@@ -61,12 +63,12 @@ fn main() -> ExitCode {
     let dir = args.get(2).cloned().unwrap_or_default();
     if command.is_empty() || dir.is_empty() {
         eprintln!(
-            "usage: garden-phone <self-test|read|join|serve|return-check|status|send|feed|fetch|leave> <dir> [...]"
+            "usage: garden-phone <self-test|read|create|join|serve|return-check|cleanup-check|status|send|feed|fetch|trace|leave> <dir> [...]"
         );
         return ExitCode::from(2);
     }
 
-    let phone = match GardenPhone::new(dir) {
+    let phone = match GardenPhone::new(dir.clone()) {
         Ok(phone) => phone,
         Err(e) => {
             eprintln!("the phone did not start: {e}");
@@ -108,6 +110,21 @@ fn main() -> ExitCode {
             || Err("a record is needed".to_string()),
             |record| phone.read_record(record.clone()).map_err(|e| e.to_string()),
         )),
+        "create" => {
+            let title = args.get(3).cloned().unwrap_or_default();
+            let name = args.get(4).cloned().unwrap_or_else(|| "Phone".to_string());
+            if title.is_empty() {
+                eprintln!("usage: garden-phone create <dir> <title> [name] [listen multiaddr]");
+                return ExitCode::from(2);
+            }
+            if !gate(&phone) {
+                return ExitCode::FAILURE;
+            }
+            let address = args.get(5).cloned();
+            say(phone
+                .create_with_address(title, name, address)
+                .map_err(|e| e.to_string()))
+        }
         "join" => {
             let record = args.get(3).cloned().unwrap_or_default();
             let name = args.get(4).cloned().unwrap_or_else(|| "Phone".to_string());
@@ -179,6 +196,27 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "cleanup-check" => {
+            let record = args.get(3).cloned().unwrap_or_default();
+            let name = args.get(4).cloned().unwrap_or_else(|| "Phone".to_string());
+            if record.is_empty() {
+                eprintln!("a record is needed");
+                return ExitCode::from(2);
+            }
+            if !gate(&phone) {
+                return ExitCode::FAILURE;
+            }
+            match cleanup_round_trip(&phone, std::path::Path::new(&dir), record, name) {
+                Ok(()) => {
+                    println!("the phone wiped its Garden content on leave");
+                    ExitCode::SUCCESS
+                }
+                Err(reason) => {
+                    eprintln!("the cleanup check failed: {reason}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         "status" => say(phone.status().map_err(|e| e.to_string())),
         // The Data screen's three taps. A Garden is a group that sends
         // data over its own chain and reads it back verified, so the phone
@@ -203,15 +241,29 @@ fn main() -> ExitCode {
             match phone.send(text, caption) {
                 Ok(answer) => {
                     // What the core answers is a mempool acceptance, not a
-                    // block. Printing the JSON alone has been read as "it is
-                    // published", so the word is said next to the handle that
-                    // settles the question.
+                    // block. Because a CLI command is one process whose
+                    // mempool and validator swarm stop when main returns,
+                    // exiting before a block is agreed on would drop the
+                    // transaction before the Garden ever committed it. So the
+                    // mempool receipt is printed first, and this process stays
+                    // on the network until trace settles stage final.
                     println!("accepted into the mempool, not yet in a block");
                     println!("{}", answer.json);
-                    println!(
-                        "follow it with: garden-phone trace <dir> <tx_id>; stage final settles it"
-                    );
-                    ExitCode::SUCCESS
+                    let Some(tx_id) = json_field_str(&answer.json, "tx_id") else {
+                        eprintln!("refused: the publish answer carried no tx_id");
+                        return ExitCode::FAILURE;
+                    };
+                    match wait_until_final(&phone, &tx_id) {
+                        Ok(final_json) => {
+                            println!("committed in a final block");
+                            println!("{final_json}");
+                            ExitCode::SUCCESS
+                        }
+                        Err(reason) => {
+                            eprintln!("refused: {reason}");
+                            ExitCode::FAILURE
+                        }
+                    }
                 }
                 Err(reason) => {
                     eprintln!("refused: {reason}");
@@ -315,6 +367,101 @@ fn round_trip(phone: &Arc<GardenPhone>, record: String, name: String) -> Result<
         return Err("the phone came back to something that is not an active Garden".into());
     }
     Ok(())
+}
+
+fn json_field_str(json: &str, key: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()?
+        .get(key)?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Hold the validator online until `tx_id` reaches a finalized Garden block.
+fn wait_until_final(phone: &Arc<GardenPhone>, tx_id: &str) -> Result<String, String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut last_reason = String::from("the transaction has not been traced yet");
+    while std::time::Instant::now() < deadline {
+        match phone.trace(tx_id.to_owned()) {
+            Ok(trace) => {
+                if json_field_str(&trace.json, "stage").as_deref() == Some("final") {
+                    return Ok(trace.json);
+                }
+                last_reason = trace.json;
+            }
+            Err(e) => {
+                last_reason = e.to_string();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!(
+        "transaction {tx_id} did not reach a final block within 60s ({last_reason})"
+    ))
+}
+
+/// Join, publish to finality, verify non-empty `garden/` on disk, and verify
+/// that `leave` wipes `garden/` inside a single live process without relying
+/// on `GardenService::new`'s startup cleanup.
+fn cleanup_round_trip(
+    phone: &Arc<GardenPhone>,
+    dir: &std::path::Path,
+    record: String,
+    name: String,
+) -> Result<(), String> {
+    phone.join(record, name).map_err(|e| e.to_string())?;
+    let sent = phone
+        .send("live cleanup content".into(), "live cleanup".into())
+        .map_err(|e| e.to_string())?;
+    let parsed: serde_json::Value = serde_json::from_str(&sent.json).map_err(|e| e.to_string())?;
+    if parsed.get("published") != Some(&serde_json::Value::Bool(false)) {
+        return Err(format!(
+            "send claimed publication before block: {}",
+            sent.json
+        ));
+    }
+    let tx_id = json_field_str(&sent.json, "tx_id")
+        .ok_or_else(|| String::from("send returned no tx_id"))?;
+    wait_until_final(phone, &tx_id)?;
+
+    let garden_dir = dir.join("garden");
+    if !has_any_file(&garden_dir) {
+        return Err(String::from(
+            "garden/ held no stored content before leave, so leave would prove nothing",
+        ));
+    }
+    let left = phone.leave().map_err(|e| e.to_string())?;
+    if has_any_file(&garden_dir) {
+        return Err(String::from("Garden content under garden/ survived leave"));
+    }
+    let left_val: serde_json::Value =
+        serde_json::from_str(&left.json).map_err(|e| e.to_string())?;
+    let keeps_seat = left_val.get("can_return") == Some(&serde_json::Value::Bool(true));
+    let seat_exists = dir.join("seat.json").is_file();
+    if seat_exists != keeps_seat {
+        return Err(format!(
+            "seat.json ({seat_exists}) disagrees with can_return ({keeps_seat})"
+        ));
+    }
+    Ok(())
+}
+
+fn has_any_file(root: &std::path::Path) -> bool {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// The one field worth printing out of a long status answer.
@@ -483,6 +630,35 @@ fn answer_one(phone: &Arc<GardenPhone>, mut stream: TcpStream) {
     let _ = stream.flush();
 }
 
+fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            c if (c as u32) < 0x20 => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn say(result: Result<budlum_garden_ffi::GardenAnswer, String>) -> ExitCode {
+    match result {
+        Ok(answer) => {
+            println!("{}", answer.json);
+            ExitCode::SUCCESS
+        }
+        Err(reason) => {
+            eprintln!("refused: {reason}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 #[cfg(test)]
 mod status_door_tests {
     use super::*;
@@ -509,11 +685,13 @@ mod status_door_tests {
             "the head still carries a CORS grant: {head:?}"
         );
         assert!(
-            head.to_ascii_lowercase().contains("x-content-type-options: nosniff"),
+            head.to_ascii_lowercase()
+                .contains("x-content-type-options: nosniff"),
             "the head does not refuse a sniffed content type: {head:?}"
         );
         assert!(
-            head.to_ascii_lowercase().contains("cache-control: no-store"),
+            head.to_ascii_lowercase()
+                .contains("cache-control: no-store"),
             "the head does not refuse a cached Garden view: {head:?}"
         );
     }
@@ -548,8 +726,14 @@ mod status_door_tests {
         assert_eq!(route_for_path("/status"), DoorRoute::Status);
         assert_eq!(route_for_path("/feed"), DoorRoute::Feed(FEED_LIMIT_DEFAULT));
         assert_eq!(route_for_path("/feed/3"), DoorRoute::Feed(3));
-        assert_eq!(route_for_path("/feed/999999"), DoorRoute::Feed(FEED_LIMIT_MAX));
-        assert_eq!(route_for_path("/feed/two"), DoorRoute::Feed(FEED_LIMIT_DEFAULT));
+        assert_eq!(
+            route_for_path("/feed/999999"),
+            DoorRoute::Feed(FEED_LIMIT_MAX)
+        );
+        assert_eq!(
+            route_for_path("/feed/two"),
+            DoorRoute::Feed(FEED_LIMIT_DEFAULT)
+        );
         assert_eq!(route_for_path("/fetch/abc"), DoorRoute::Fetch("abc".into()));
         assert_eq!(route_for_path("/fetch/"), DoorRoute::Status);
         assert_eq!(route_for_path("/../etc/passwd"), DoorRoute::Status);
@@ -562,34 +746,5 @@ mod status_door_tests {
         assert!(read_request_line(&b"GET / HTTP/1.1\r\n"[..]).is_some());
         assert!(read_request_line(&[b'A'; 4096][..]).is_none());
         assert!(read_request_line(&b""[..]).is_none());
-    }
-}
-
-fn json_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push('"');
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            c if (c as u32) < 0x20 => out.push(' '),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-fn say(result: Result<budlum_garden_ffi::GardenAnswer, String>) -> ExitCode {
-    match result {
-        Ok(answer) => {
-            println!("{}", answer.json);
-            ExitCode::SUCCESS
-        }
-        Err(reason) => {
-            eprintln!("refused: {reason}");
-            ExitCode::FAILURE
-        }
     }
 }

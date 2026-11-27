@@ -2762,10 +2762,13 @@ impl Node {
                 if !self.first_sight(Seen::Presence(signal.validator, signal.window)) {
                     return;
                 }
-                self.presence_windows
-                    .insert(signal.validator, signal.window);
-                self.last_seen.insert(signal.validator, Instant::now());
+                let validator = signal.validator;
+                self.presence_windows.insert(validator, signal.window);
+                self.last_seen.insert(validator, Instant::now());
                 self.gossip(&GardenGossip::Presence(signal), from).await;
+                if validator == self.ledger.state.host() {
+                    self.report_to_budlum().await;
+                }
             }
         }
     }
@@ -2932,11 +2935,16 @@ impl Node {
             return;
         }
         let hash = vote.block_hash;
+        let voter = vote.voter;
+        self.last_seen.insert(voter, Instant::now());
         self.votes
             .entry(hash)
             .or_default()
-            .insert(vote.voter, vote.clone());
+            .insert(voter, vote.clone());
         self.gossip(&GardenGossip::Vote(vote), from).await;
+        if voter == self.ledger.state.host() {
+            self.report_to_budlum().await;
+        }
         self.consider(hash).await;
     }
 
@@ -4294,7 +4302,7 @@ mod tests {
     /// as the result of the command.
     #[test]
     fn a_publish_answer_names_the_mempool_and_not_publication() {
-        let answer = GardenNode::publish_answer(
+        let answer = Node::publish_answer(
             [7u8; 32],
             [9u8; 32],
             GardenContentKind::parse("message").expect("a known kind"),

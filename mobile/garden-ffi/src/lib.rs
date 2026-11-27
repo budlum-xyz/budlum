@@ -115,12 +115,14 @@ impl GardenPhone {
     }
 
     /// Start a Garden and become its host.
+    ///
+    /// A host is dialled by everyone it invites, so unlike a joiner it
+    /// cannot leave its address unsaid. Listening on every interface is
+    /// right for a joiner, whereas founding a Garden binds the address of
+    /// the network this phone is actually on so the invite names a dialable
+    /// endpoint.
     pub fn create(&self, title: String, name: String) -> Result<GardenAnswer, GardenError> {
-        let options = Self::options();
-        answer(
-            self.runtime
-                .block_on(self.service.create(title, name, options)),
-        )
+        self.create_with_address(title, name, None)
     }
 
     /// The invite record to hand out, with its QR content.
@@ -239,18 +241,83 @@ impl GardenPhone {
         SelfTestReport {
             steps,
             passed,
-            elapsed_ms: started
-                .elapsed()
-                .as_millis()
-                .try_into()
-                .unwrap_or(u64::MAX),
+            elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         }
     }
 }
 
 impl GardenPhone {
+    /// Start a Garden with an optional explicit listen multiaddr.
+    ///
+    /// The Android app calls [`Self::create`], which discovers the active
+    /// LAN interface automatically; `garden-phone` passes an explicit
+    /// multiaddr when exercising the founding path on a loopback or
+    /// namespace interface.
+    pub fn create_with_address(
+        &self,
+        title: String,
+        name: String,
+        address: Option<String>,
+    ) -> Result<GardenAnswer, GardenError> {
+        let mut options = Self::options();
+        if let Some(given) = address.filter(|a| !a.trim().is_empty()) {
+            options.listen = Some(given);
+            return answer(
+                self.runtime
+                    .block_on(self.service.create(title, name, options)),
+            );
+        }
+        options.listen = Some(Self::address_on_this_network().ok_or_else(|| {
+            GardenError::of(
+                "this phone is on no network the others could reach it on.                  Join the Wi-Fi the others are on, then start the network."
+                    .to_owned(),
+            )
+        })?);
+        answer(
+            self.runtime
+                .block_on(self.service.create(title, name, options)),
+        )
+    }
+
+    /// The address this phone answers at on the network it is on.
+    fn address_on_this_network() -> Option<String> {
+        use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+        let usable = |ip: Ipv4Addr| {
+            !ip.is_loopback()
+                && !ip.is_unspecified()
+                && !ip.is_link_local()
+                && !ip.is_multicast()
+                && !ip.is_broadcast()
+        };
+        for target in [
+            Ipv4Addr::new(198, 51, 100, 1),
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(192, 168, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 42, 0, 1),
+            Ipv4Addr::new(172, 16, 0, 1),
+            Ipv4Addr::new(172, 20, 10, 1),
+        ] {
+            let Ok(probe) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
+                continue;
+            };
+            if probe.connect((target, 9)).is_err() {
+                continue;
+            }
+            if let Ok(IpAddr::V4(ip)) = probe.local_addr().map(|local| local.ip()) {
+                if usable(ip) {
+                    return Some(format!("/ip4/{ip}/tcp/0"));
+                }
+            }
+        }
+        local_ipv4_from_fib_trie()
+            .filter(|ip| usable(*ip))
+            .map(|ip| format!("/ip4/{ip}/tcp/0"))
+    }
+
     /// The listen address a phone uses: every interface, a port the system
     /// picks. A phone moves between networks and cannot be told a port.
+    /// Founding a Garden overrides this, because a host must be dialable.
     fn options() -> GardenOptions {
         serde_json::from_value(serde_json::json!({ "listen": "/ip4/0.0.0.0/tcp/0" }))
             .unwrap_or_default()
@@ -329,4 +396,41 @@ fn check_object_round_trip() -> SelfTestStep {
         Ok(()) => step(name, true, String::new()),
         Err(e) => step(name, false, e),
     }
+}
+
+/// Inspect `/proc/net/fib_trie` (`Local:` table) on Linux to find an assigned
+/// non-loopback IPv4 interface address when the device has no default gateway.
+fn local_ipv4_from_fib_trie() -> Option<std::net::Ipv4Addr> {
+    let text = std::fs::read_to_string("/proc/net/fib_trie").ok()?;
+    let mut in_local = false;
+    let mut candidate: Option<std::net::Ipv4Addr> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed == "Local:" {
+            in_local = true;
+            candidate = None;
+            continue;
+        }
+        if !in_local {
+            continue;
+        }
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix("|-- ") {
+            candidate = rest.split_whitespace().next().and_then(|w| w.parse().ok());
+        } else if trimmed == "/32 host LOCAL" {
+            if let Some(ip) = candidate {
+                if !ip.is_loopback()
+                    && !ip.is_unspecified()
+                    && !ip.is_link_local()
+                    && !ip.is_multicast()
+                    && !ip.is_broadcast()
+                {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+    None
 }

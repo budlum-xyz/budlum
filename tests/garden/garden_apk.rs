@@ -208,21 +208,27 @@ impl Node {
             )
             .map_err(|e| format!("{e}\n{}", self.log_tail()))?;
         let line = text(&answer, "/invite")?;
-        let record = self
+        let invited = self
             .rpc("bud_gardenInvite", &json!([]))
             .map_err(|e| format!("{e}\n{}", self.log_tail()))?;
-        let record = text(&record, "/record")?;
-        Ok(Invite { line, record })
+        let record = text(&invited, "/record")?;
+        let record_qr = text(&invited, "/record_qr")?;
+        Ok(Invite {
+            line,
+            record,
+            record_qr,
+        })
     }
 }
 
-/// The two strings a Garden creation hands out.
+/// The invite forms a Garden creation hands out.
 struct Invite {
     /// The invite line, `budlum-garden:1?...`, which `join` parses.
     line: String,
-    /// The signed record, `budlum://garden/join#...`, which `read` parses
-    /// and which is what a phone's QR code carries.
+    /// The signed record, `budlum://garden/join#...`, which `read` and `join` parse.
     record: String,
+    /// The local QR content (`http://<ip>:<port>/g#<record>`), which `read` and `join` parse.
+    record_qr: String,
 }
 
 impl Drop for Node {
@@ -491,6 +497,20 @@ fn garden_apk_host_scenario() -> Result<(), String> {
             .map(|n| if n >= 2 { Some(()) } else { None })
             .ok_or_else(|| format!("no active validator count: {garden}"))
     })?;
+    let founder = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let (ok_create, create_log) = phone_verb(
+        founder.path(),
+        "create",
+        &["phone founded", "Founder", "/ip4/127.0.0.1/tcp/0"],
+    )?;
+    assert!(
+        ok_create,
+        "the phone could not found its own Garden: {create_log}"
+    );
+    assert!(
+        create_log.contains("\"Active\""),
+        "founding did not start an active Garden: {create_log}"
+    );
     Ok(())
 }
 
@@ -550,6 +570,23 @@ fn garden_apk_share() -> Result<(), String> {
             "the record does not carry {field}: {log}"
         );
     }
+    assert!(
+        invite.record_qr.starts_with("http://127.0.0.1:") && invite.record_qr.contains("/g#"),
+        "the local QR did not carry the http://<ip>:<port>/g#<record> shape: {}",
+        invite.record_qr
+    );
+    let qr_phone = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let (ok_qr_read, qr_read_log) = phone_verb(qr_phone.path(), "read", &[&invite.record_qr])?;
+    assert!(
+        ok_qr_read,
+        "the local QR payload could not be read: {qr_read_log}"
+    );
+    let (ok_qr_join, qr_join_log) =
+        phone_verb(qr_phone.path(), "join", &[&invite.record_qr, "QrJoiner"])?;
+    assert!(
+        ok_qr_join,
+        "joining over the local QR payload failed: {qr_join_log}"
+    );
     Ok(())
 }
 
@@ -810,6 +847,21 @@ fn garden_apk_cleanup() -> Result<(), String> {
     assert!(
         !back.contains("\"Active\""),
         "the phone is still in a Garden it left: {back}"
+    );
+
+    // Prove in a single live process (without GardenService::new's startup
+    // wipe running between send and leave) that non-empty B.U.D. 3.0 content
+    // under garden/ exists before leave and is wiped by leave itself.
+    let live_clean = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let (ok_live, live_log) = phone_verb(
+        live_clean.path(),
+        "cleanup-check",
+        &[&record, "LiveCleaner"],
+    )?;
+    assert!(ok_live, "single-process leave cleanup failed: {live_log}");
+    assert!(
+        live_log.contains("the phone wiped its Garden content on leave"),
+        "cleanup-check did not confirm content wipe: {live_log}"
     );
     Ok(())
 }

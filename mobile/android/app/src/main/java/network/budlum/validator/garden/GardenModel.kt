@@ -24,6 +24,8 @@ data class GardenState(
     val uses: Int = 0,
     val status: String = "This phone is in no Garden.",
     val preview: String = "",
+    /** The record the preview describes, so confirming joins that record. */
+    val previewRecord: String = "",
     val message: String = "",
     val busy: Boolean = false,
     val selfTest: List<SelfTestStep> = emptyList(),
@@ -98,7 +100,7 @@ class GardenModel(
     /** Show who is inviting before anybody agrees to anything. */
     fun preview(record: String) {
         if (record.isBlank()) {
-            state = state.copy(preview = "")
+            state = state.copy(preview = "", previewRecord = "")
             return
         }
         scope.launch {
@@ -110,14 +112,17 @@ class GardenModel(
                     "validator " + owner + ", good until " + until
                 }.getOrElse { "" }
             }
-            state = state.copy(preview = shown)
+            state = state.copy(
+                preview = shown,
+                previewRecord = if (shown.isEmpty()) "" else record.trim(),
+            )
         }
     }
 
     fun join(record: String) = background {
         if (!selfTestPassed()) return@background
         val answer = phone.join(record.trim(), name)
-        state = state.copy(status = answer.json, preview = "")
+        state = state.copy(status = answer.json, preview = "", previewRecord = "")
         readInvite(phone.invite())
         startValidating()
     }
@@ -135,7 +140,7 @@ class GardenModel(
      */
     fun returnToGarden() = background {
         val answer = phone.rejoin()
-        state = state.copy(status = answer.json, preview = "")
+        state = state.copy(status = answer.json, preview = "", previewRecord = "")
         readInvite(phone.invite())
         startValidating()
     }
@@ -145,7 +150,7 @@ class GardenModel(
         // Stepping out keeps the seat and the way back; retiring gives the
         // Garden up. Only the second ends the duty, so only the second
         // takes the notification away.
-        if (!answer.json.contains("\"can_return\":true")) {
+        if (!GardenSeat.canReturn(answer.json)) {
             GardenValidatorService.stop(app)
         }
         state = GardenState(

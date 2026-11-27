@@ -548,12 +548,17 @@ impl request_response::Codec for GardenCodec {
 /// the pool and locks out every other validator.
 const MAX_PENDING_INCOMING_PER_SOURCE: usize = 2;
 
-/// Source prefix of a pending or unjoined inbound peer, grouped by IPv4 `/24`
-/// or IPv6 `/64` so one host rotating addresses inside its prefix shares a cap.
+/// Source key of a pending or unjoined inbound peer. Public addresses are
+/// grouped by IPv4 `/24` or IPv6 `/64` so one remote host rotating addresses
+/// inside its prefix shares a cap, while RFC1918 / ULA private LAN addresses
+/// are keyed per device IP so multiple phones in the same room on one Wi-Fi or
+/// hotspot subnet can scan an invite and join concurrently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SourceKey {
     V4([u8; 3]),
+    PrivateV4([u8; 4]),
     V6([u8; 8]),
+    PrivateV6([u8; 16]),
     Relay(PeerId),
 }
 
@@ -563,6 +568,7 @@ impl SourceKey {
     pub const fn is_loopback(self) -> bool {
         match self {
             Self::V4(octets) => octets[0] == 127,
+            Self::PrivateV4(_) | Self::PrivateV6(_) | Self::Relay(_) => false,
             Self::V6(octets) => {
                 octets[0] == 0
                     && octets[1] == 0
@@ -573,8 +579,16 @@ impl SourceKey {
                     && octets[6] == 0
                     && octets[7] == 0
             }
-            Self::Relay(_) => false,
         }
+    }
+}
+
+const fn v4_source_key(ip: std::net::Ipv4Addr) -> SourceKey {
+    let octets = ip.octets();
+    if ip.is_private() {
+        SourceKey::PrivateV4(octets)
+    } else {
+        SourceKey::V4([octets[0], octets[1], octets[2]])
     }
 }
 
@@ -584,13 +598,14 @@ fn source_key(address: &Multiaddr) -> Option<SourceKey> {
     for part in address {
         match part {
             libp2p::multiaddr::Protocol::Ip4(ip) => {
-                let octets = ip.octets();
-                return Some(SourceKey::V4([octets[0], octets[1], octets[2]]));
+                return Some(v4_source_key(ip));
             }
             libp2p::multiaddr::Protocol::Ip6(ip) => {
                 if let Some(mapped) = ip.to_ipv4_mapped() {
-                    let octets = mapped.octets();
-                    return Some(SourceKey::V4([octets[0], octets[1], octets[2]]));
+                    return Some(v4_source_key(mapped));
+                }
+                if (ip.segments()[0] & 0xfe00) == 0xfc00 {
+                    return Some(SourceKey::PrivateV6(ip.octets()));
                 }
                 let octets = ip.octets();
                 return Some(SourceKey::V6([
@@ -2168,5 +2183,12 @@ mod tests {
         assert_eq!(key_a, key_b);
         assert_ne!(key_a, key_c);
         assert!(!key_a.is_loopback());
+
+        let lan_1: Multiaddr = "/ip4/192.168.1.10/tcp/4800".parse().unwrap();
+        let lan_2: Multiaddr = "/ip4/192.168.1.11/tcp/4800".parse().unwrap();
+        let pub_1: Multiaddr = "/ip4/203.0.113.10/tcp/4800".parse().unwrap();
+        let pub_2: Multiaddr = "/ip4/203.0.113.11/tcp/4800".parse().unwrap();
+        assert_ne!(source_key(&lan_1), source_key(&lan_2));
+        assert_eq!(source_key(&pub_1), source_key(&pub_2));
     }
 }

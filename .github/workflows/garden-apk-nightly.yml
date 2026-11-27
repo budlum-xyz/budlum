@@ -48,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --bin budlum-core
-          cargo build -p budlum-garden-ffi --bin garden-phone
+          cargo build --manifest-path mobile/garden-ffi/Cargo.toml --target-dir target --bin garden-phone
       - name: The ten checks, one thread at a time
         run: |
           set -euo pipefail

@@ -25,6 +25,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +61,23 @@ import org.json.JSONObject
 fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
     var step by remember { mutableStateOf(Step.Setup) }
     var mark by remember { mutableStateOf(GardenMark.Sparkle) }
+
+    // A phone that already holds a seat opens on its Garden. The seat
+    // survives the process, so a person who set the phone up once was
+    // walking Setup and Choose again on every open just to reach the
+    // home panel they already had. The jump happens once per launch:
+    // after it, Back still walks to Choose and Setup, and staying
+    // there is respected rather than snapped away from.
+    var landed by remember { mutableStateOf(false) }
+    LaunchedEffect(model.state.status) {
+        if (!landed && GardenSeat.seated(model.state.status)) {
+            landed = true
+            if (step == Step.Setup) {
+                step = Step.Garden
+                mark = GardenMark.Sparkle
+            }
+        }
+    }
 
     // Every step can be left the way it was entered. Before this the app
     // went forward only: a person who reached the Garden screens had no
@@ -422,11 +440,11 @@ private fun JoinScreen(model: GardenModel) {
             if (state.preview.isNotEmpty()) {
                 GardenMeta(listOf(state.preview))
             }
-            if (state.preview.isNotEmpty()) {
+            if (state.previewRecord.isNotEmpty()) {
                 // Section 5.12: an invite that arrived by a deliberate act
                 // is confirmed with one tap, and nothing happens without it.
                 Button(
-                    onClick = { model.join(pasted) },
+                    onClick = { model.join(state.previewRecord) },
                     enabled = !state.busy,
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Join this Garden") }
@@ -536,7 +554,7 @@ private fun StatusScreen(model: GardenModel) {
             // A phone that left keeps its seat until it leaves a second
             // time, and the answer says so. The way back belongs on the
             // screen that said goodbye.
-            if (state.status.contains("\"can_return\":true")) {
+            if (GardenSeat.canReturn(state.status) || GardenSeat.away(state.status)) {
                 Button(
                     onClick = { model.returnToGarden() },
                     enabled = !state.busy,
