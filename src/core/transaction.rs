@@ -6612,6 +6612,175 @@ mod v29_signing_tests {
     /// signing preimage: flip one at a time, the hash must change. Nested
     /// policies are written field by field, so a relay cannot loosen a
     /// registration's verification policy or swap its golden sample.
+    /// Every `AdapterSpec` variant must carry its own wire tag.
+    ///
+    /// Two variants sharing a tag would let a registration signed for one
+    /// consensus family be replayed as another: the preimage, and therefore
+    /// the signature, would not distinguish them. The tag is also the wire
+    /// format, so this test pins it: a tag may be appended, never reused and
+    /// never renumbered.
+    #[test]
+    fn every_adapter_spec_variant_carries_a_distinct_wire_tag() {
+        use crate::cross_domain::external::AdapterSpec;
+
+        let n = |s: &str| s.to_string();
+        // Every variant, unpinned: the tag is the first byte and does not
+        // depend on the pin. Built this way the list stays readable and still
+        // covers all of them.
+        let specs: Vec<AdapterSpec> = vec![
+            AdapterSpec::EthereumSync {
+                network: n("e"),
+                committee: None,
+            },
+            AdapterSpec::ZkVm {
+                network: n("z"),
+                program_hash: Some([0u8; 32]),
+                chain_id: Some(1),
+            },
+            AdapterSpec::BitcoinSpv {
+                network: n("b"),
+                anchor: None,
+            },
+            AdapterSpec::TendermintCommit {
+                network: n("t"),
+                chain_id: n("c"),
+                validator_set_hash: Some([0u8; 32]),
+            },
+            AdapterSpec::DataAvailability {
+                network: n("d"),
+                committee: None,
+            },
+            AdapterSpec::HotStuffQc {
+                network: n("h"),
+                committee: None,
+            },
+            AdapterSpec::DagCertificate {
+                network: n("g"),
+                committee: None,
+            },
+            AdapterSpec::CasperFfg {
+                network: n("f"),
+                committee: None,
+            },
+            AdapterSpec::MysticetiDag {
+                network: n("m"),
+                committee: None,
+            },
+            AdapterSpec::BitVmCovenant {
+                network: n("v"),
+                anchor: None,
+            },
+            AdapterSpec::SolanaTowerBft {
+                network: n("s"),
+                pinned: None,
+            },
+            AdapterSpec::PoSpaceVdf {
+                network: n("p"),
+                pinned: None,
+            },
+            AdapterSpec::AptosJolteonBft {
+                network: n("a"),
+                pinned: None,
+            },
+            AdapterSpec::NearDoomslugBft {
+                network: n("near"),
+                pinned: None,
+            },
+            AdapterSpec::ChainKeyNiDkg {
+                network: n("ck"),
+                pinned: None,
+            },
+            AdapterSpec::BabylonEots {
+                network: n("be"),
+                pinned: None,
+            },
+            AdapterSpec::NipopowSuperblock {
+                network: n("np"),
+                genesis: None,
+            },
+            AdapterSpec::Ghostdag {
+                network: n("gd"),
+                anchor: None,
+            },
+            AdapterSpec::HoneyBadgerBft {
+                network: n("hb"),
+                committee: None,
+            },
+            AdapterSpec::HeterogeneousMultiProver {
+                network: n("hm"),
+                pinned: None,
+            },
+            AdapterSpec::StarkValidityRollup {
+                network: n("sv"),
+                pinned: None,
+            },
+            AdapterSpec::AlgorandStateProof {
+                network: n("al"),
+                pinned: None,
+            },
+            AdapterSpec::ArweaveSpOra {
+                network: n("ar"),
+                pinned: None,
+            },
+            AdapterSpec::AuxPowPop {
+                network: n("ax"),
+                pinned: None,
+            },
+            AdapterSpec::BasedPreconf {
+                network: n("bp"),
+                pinned: None,
+            },
+            AdapterSpec::MinaSuccinctRecursive {
+                network: n("mi"),
+                pinned: None,
+            },
+            AdapterSpec::OuroborosMithril {
+                network: n("ou"),
+                pinned: None,
+            },
+            AdapterSpec::RestakingAvs {
+                network: n("ra"),
+                pinned: None,
+            },
+            AdapterSpec::SimplexBft {
+                network: n("si"),
+                pinned: None,
+            },
+            AdapterSpec::StellarScp {
+                network: n("st"),
+                pinned: None,
+            },
+            AdapterSpec::SymbioticVault {
+                network: n("sy"),
+                pinned: None,
+            },
+            AdapterSpec::TonCatchainBft {
+                network: n("tc"),
+                pinned: None,
+            },
+        ];
+
+        let mut tags: Vec<u8> = Vec::new();
+        for spec in &specs {
+            let mut out = Vec::new();
+            encode_adapter_spec(spec, &mut out);
+            let tag = *out
+                .first()
+                .expect("every spec writes its tag before anything else");
+            assert!(
+                !tags.contains(&tag),
+                "wire tag {tag} is used by two AdapterSpec variants"
+            );
+            tags.push(tag);
+        }
+
+        // The tags are the documented 0..=31, in declaration order, with no
+        // gap. A gap would mean a variant was removed rather than retired,
+        // and a reorder would silently change what an old signature means.
+        let expected: Vec<u8> = (0..32).collect();
+        assert_eq!(tags, expected, "the wire tags drifted from 0..=31 in order");
+    }
+
     #[test]
     fn external_domain_preimage_covers_every_field_it_claims() {
         use crate::cross_domain::external::{
