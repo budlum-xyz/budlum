@@ -9,7 +9,12 @@ pragma solidity 0.8.26;
 ///         when the external-domain finality verifier confirms its opening
 ///         against a finalized state root.
 import {BudlumHash} from "../lib/BudlumHash.sol";
-import {FinalityMode, IBudlumFinality} from "../external-domain/BudlumFinalityVerifier.sol";
+import {
+    FinalityMode,
+    IBudlumFinality,
+    IBudlumQuantumAlert,
+    QuantumAlertLevel
+} from "../external-domain/BudlumFinalityVerifier.sol";
 
 /// @notice Proof format accepted by an outbound Budlum finality verifier.
 enum ProofFormat {
@@ -29,7 +34,7 @@ interface IBudlumObjectLayerFinality {
     function finalityModeAt(uint64 height) external view returns (FinalityMode);
 }
 
-contract BudlumObjectLayerFinality is IBudlumObjectLayerFinality, IBudlumFinality {
+contract BudlumObjectLayerFinality is IBudlumObjectLayerFinality, IBudlumFinality, IBudlumQuantumAlert {
     uint256 private constant HEADER_OPENING_FIELDS = 3;
 
     IBudlumHeaderFinality public immutable finality;
@@ -48,6 +53,7 @@ contract BudlumObjectLayerFinality is IBudlumObjectLayerFinality, IBudlumFinalit
     error NotAccepted();
     error Conflict();
     error InvalidVerifier();
+    error ClassicalHaltedByQuantumAlert(QuantumAlertLevel currentLevel);
 
     constructor(IBudlumHeaderFinality finality_) {
         if (address(finality_) == address(0) || address(finality_).code.length == 0) {
@@ -72,6 +78,10 @@ contract BudlumObjectLayerFinality is IBudlumObjectLayerFinality, IBudlumFinalit
             return;
         }
         FinalityMode mode = _requireFinalizedHeader(height, headerHash, stateRootBody);
+        QuantumAlertLevel currentAlert = alertLevel();
+        if (mode == FinalityMode.ClassicalOnly && currentAlert != QuantumAlertLevel.Open) {
+            revert ClassicalHaltedByQuantumAlert(currentAlert);
+        }
         headerAt[height] = headerHash;
         rootAtHeight[height] = _computeStateRoot(headerHash, stateRootBody);
         finalityModeAt[height] = mode;
@@ -79,6 +89,21 @@ contract BudlumObjectLayerFinality is IBudlumObjectLayerFinality, IBudlumFinalit
             latestFinalHeight = height;
         }
         emit CheckpointRecorded(height, headerHash);
+    }
+
+    function alertLevel() public view override returns (QuantumAlertLevel) {
+        (bool ok, bytes memory data) = address(finality).staticcall(abi.encodeCall(IBudlumQuantumAlert.alertLevel, ()));
+        if (!ok) {
+            return QuantumAlertLevel.Open;
+        }
+        if (data.length != 32) {
+            return QuantumAlertLevel.Isolated;
+        }
+        uint256 level = abi.decode(data, (uint256));
+        if (level > uint256(QuantumAlertLevel.Isolated)) {
+            return QuantumAlertLevel.Isolated;
+        }
+        return QuantumAlertLevel(level);
     }
 
     function heightFinal(uint64 height)

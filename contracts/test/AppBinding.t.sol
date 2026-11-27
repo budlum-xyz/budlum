@@ -10,7 +10,7 @@ import {
     IBudlumFinality,
     PaymentProof
 } from "../app_binding/BudlumPaymentReceiver.sol";
-import {FinalityMode} from "../external-domain/BudlumFinalityVerifier.sol";
+import {FinalityMode, IBudlumQuantumAlert, QuantumAlertLevel} from "../external-domain/BudlumFinalityVerifier.sol";
 import {BudlumRemoteAccount, BudlumRemoteAccountFactory} from "../app_binding/BudlumRemoteAccountFactory.sol";
 
 contract Counter {
@@ -31,10 +31,15 @@ contract ClaimingApp is BudlumAppBindingClaimer {
     }
 }
 
-contract FinalityStub is IBudlumFinality {
+contract FinalityStub is IBudlumFinality, IBudlumQuantumAlert {
     mapping(uint64 => bytes32) public roots;
     mapping(uint64 => FinalityMode) public modes;
     uint64 public latestFinalHeight;
+    QuantumAlertLevel public override alertLevel;
+
+    function setAlertLevel(QuantumAlertLevel level) external {
+        alertLevel = level;
+    }
 
     function set(uint64 height, bytes32 root) external {
         setWithMode(height, root, root == bytes32(0) ? FinalityMode.None : FinalityMode.Hybrid);
@@ -541,5 +546,30 @@ contract AppBindingTest is Harness {
         account.execute(remoteProof, address(counter), 0, callData);
         assertEq(counter.count(), 1, "Hybrid finality executes remote call");
         assertEq(account.nonce(), 1, "Hybrid finality advances remote nonce");
+    }
+
+    function test_quantum_alert_halts_classical_only_withdrawals_even_for_opt_in_receiver() public {
+        FinalityStub finality = new FinalityStub();
+        bytes32 appId = keccak256("app-canary-alert");
+        OptimisticOptInReceiver optIn = new OptimisticOptInReceiver(finality, appId);
+        PaymentProof memory proof = _proof(Receiver(address(optIn)), finality, appId);
+        bytes32 root = finality.rootAtHeight(20);
+
+        finality.setWithMode(20, root, FinalityMode.ClassicalOnly);
+        assertTrue(finality.alertLevel() == QuantumAlertLevel.Open, "alert starts open");
+
+        // Escalate quantum alert: ClassicalOnly withdrawals must halt immediately.
+        finality.setAlertLevel(QuantumAlertLevel.Advisory);
+        assertEq(
+            keccak256(bytes(optIn.checkPayment(proof))),
+            keccak256("quantum alert: classical halted"),
+            "opt-in receiver refuses ClassicalOnly once quantum alert is raised"
+        );
+        vm.expectPartialRevert(BudlumPaymentReceiver.ProofInvalid.selector);
+        optIn.consume(proof);
+
+        // Hybrid finality remains accepted under Advisory.
+        finality.setWithMode(20, root, FinalityMode.Hybrid);
+        assertEq(optIn.consume(proof), 500, "Hybrid withdrawal still succeeds");
     }
 }

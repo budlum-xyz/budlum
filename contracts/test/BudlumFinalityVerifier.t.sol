@@ -6,10 +6,14 @@ import {
     Attestation,
     BudlumFinalityVerifier,
     FinalityMode,
-    IExternalFraudProofVerifier
+    IExternalFraudProofVerifier,
+    QuantumAlertAttestation,
+    QuantumAlertLevel
 } from "../external-domain/BudlumFinalityVerifier.sol";
 import {BudlumHash} from "../lib/BudlumHash.sol";
-import {BudlumObjectLayerFinality, IBudlumHeaderFinality, ProofFormat} from "../object-layer/BudlumFinalityVerifier.sol";
+import {
+    BudlumObjectLayerFinality, IBudlumHeaderFinality, ProofFormat
+} from "../object-layer/BudlumFinalityVerifier.sol";
 import {IBudlumFinality} from "../external-domain/BudlumFinalityVerifier.sol";
 import {BudlumStateReader} from "../lib/BudlumStateReader.sol";
 import {BudlumSettlementEndpoint, IBudlumObjectLayerFinality} from "../object-layer/BudlumSettlementEndpoint.sol";
@@ -166,8 +170,10 @@ contract BudlumFinalityVerifierTest is Harness {
 
     // Valid BLS fixture: PK = sk*G2 and the signature over this suite's
     // signing root, generated on the Rust side (see the file header).
-    bytes internal committee = hex"0000000000000000000000000000000003102696de47a8ff5f84b1e06a4c49f66d3d91db26aa983d9f682aa8dd40a04782774feade5b8283b66d110d932c98870000000000000000000000000000000016f2753675030c982f167778cccec6637d4a91b2c1942f879993d3af2562cfd982f0618f764a15b4dd369df28b35eb0b0000000000000000000000000000000001edbbe15bc722126ea27e155f354f5f89774ed035dd31077e6076eb702ce4ada29a68b8f2f523aa35407b818937c5df000000000000000000000000000000001273f61d9f71c16394cf54241a127dac1a380febcc1ee66eedb4859d7e17daa4dd6bcbdffbcd37c74ddbd9c9f1283dd9";
-    bytes internal generator = hex"00000000000000000000000000000000024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb80000000000000000000000000000000013e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e000000000000000000000000000000000ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801000000000000000000000000000000000606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be";
+    bytes internal committee =
+        hex"0000000000000000000000000000000003102696de47a8ff5f84b1e06a4c49f66d3d91db26aa983d9f682aa8dd40a04782774feade5b8283b66d110d932c98870000000000000000000000000000000016f2753675030c982f167778cccec6637d4a91b2c1942f879993d3af2562cfd982f0618f764a15b4dd369df28b35eb0b0000000000000000000000000000000001edbbe15bc722126ea27e155f354f5f89774ed035dd31077e6076eb702ce4ada29a68b8f2f523aa35407b818937c5df000000000000000000000000000000001273f61d9f71c16394cf54241a127dac1a380febcc1ee66eedb4859d7e17daa4dd6bcbdffbcd37c74ddbd9c9f1283dd9";
+    bytes internal generator =
+        hex"00000000000000000000000000000000024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb80000000000000000000000000000000013e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e000000000000000000000000000000000ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801000000000000000000000000000000000606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be";
     bytes internal mlDsaKey = _filled(1952, 0x06);
 
     function setUp() public {
@@ -225,8 +231,7 @@ contract BudlumFinalityVerifierTest is Harness {
     }
 
     function test_closed_endpoint_derives_home_nft_identity_without_wrapping() public {
-        BudlumObjectLayerFinality objectLayer =
-            new BudlumObjectLayerFinality(IBudlumHeaderFinality(address(verifier)));
+        BudlumObjectLayerFinality objectLayer = new BudlumObjectLayerFinality(IBudlumHeaderFinality(address(verifier)));
         BudlumSettlementEndpoint endpoint =
             new BudlumSettlementEndpoint(IBudlumObjectLayerFinality(address(objectLayer)), 100);
         address homeToken = address(0x1234);
@@ -264,8 +269,7 @@ contract BudlumFinalityVerifierTest is Harness {
     }
 
     function test_object_layer_ingress_is_closed_until_release_and_escape_work() public {
-        BudlumObjectLayerFinality objectLayer =
-            new BudlumObjectLayerFinality(IBudlumHeaderFinality(address(verifier)));
+        BudlumObjectLayerFinality objectLayer = new BudlumObjectLayerFinality(IBudlumHeaderFinality(address(verifier)));
         BudlumSettlementEndpoint endpoint =
             new BudlumSettlementEndpoint(IBudlumObjectLayerFinality(address(objectLayer)), 100);
         address owner = address(this);
@@ -633,7 +637,11 @@ contract BudlumFinalityVerifierTest is Harness {
         assertTrue(objectLayer.finalityModeAtHeight(88) == FinalityMode.Hybrid, "object layer finalityModeAtHeight");
     }
 
-    function _fourFactLeaves() internal pure returns (bytes32[4] memory leaves, bytes32[2] memory nodes, bytes32 root) {
+    function _fourFactLeaves()
+        internal
+        pure
+        returns (bytes32[4] memory leaves, bytes32[2] memory nodes, bytes32 root)
+    {
         leaves[0] = BudlumHash.balanceLeaf(bytes32(uint256(1)), bytes32(uint256(2)), uint128(500), uint64(3));
         leaves[1] = BudlumHash.bridgeBurnLeaf(
             bytes32(uint256(10)), uint32(1), uint32(2), bytes32(uint256(20)), uint128(250), bytes32(uint256(30))
@@ -729,5 +737,145 @@ contract BudlumFinalityVerifierTest is Harness {
             ),
             "cross-domain message inclusion must verify"
         );
+    }
+
+    function test_K7O_quantum_alert_starts_open_and_negative_guards() public {
+        assertTrue(verifier.alertLevel() == QuantumAlertLevel.Open, "alert starts Open");
+        BudlumObjectLayerFinality objectLayer = new BudlumObjectLayerFinality(IBudlumHeaderFinality(address(verifier)));
+        assertTrue(objectLayer.alertLevel() == QuantumAlertLevel.Open, "object layer alert starts Open");
+
+        bytes32 stateRoot = keccak256("canary-fired-root");
+        SeededFinalityVerifier seeded = new SeededFinalityVerifier(address(fraud));
+        seeded.seedFinalized(10, stateRoot);
+
+        QuantumAlertAttestation memory q = QuantumAlertAttestation({
+            height: 10,
+            stateRoot: stateRoot,
+            level: QuantumAlertLevel.Advisory,
+            g2AggregatePubkey: committee,
+            g2Generator: generator,
+            g1NegSignature: _filled(128, 0x04),
+            mlDsaSignature: _filled(3309, 0x05),
+            mlDsaPubkey: mlDsaKey,
+            mlDsaEthVariant: false
+        });
+
+        // Open (0) level is refused.
+        q.level = QuantumAlertLevel.Open;
+        vm.expectPartialRevert(BudlumFinalityVerifier.InvalidAlertLevel.selector);
+        seeded.submitQuantumAlert(q);
+
+        // Unfinalized height is refused.
+        q.level = QuantumAlertLevel.Advisory;
+        q.height = 11;
+        vm.expectPartialRevert(BudlumFinalityVerifier.AlertHeightNotFinal.selector);
+        seeded.submitQuantumAlert(q);
+
+        // Wrong stateRoot is refused.
+        q.height = 10;
+        q.stateRoot = bytes32(uint256(999));
+        vm.expectPartialRevert(BudlumFinalityVerifier.AlertRootMismatch.selector);
+        seeded.submitQuantumAlert(q);
+
+        // Untrusted key is refused.
+        q.stateRoot = stateRoot;
+        vm.expectPartialRevert(BudlumFinalityVerifier.UntrustedKey.selector);
+        seeded.submitQuantumAlert(q);
+
+        // On Cancun (no BLS, no ML-DSA precompiles) valid keys still fail closed with NoVerificationPath.
+        BudlumFinalityVerifier cancunAlert = new BudlumFinalityVerifier(
+            CHAIN, WINDOW, address(fraud), keccak256(committee), keccak256(generator), keccak256(mlDsaKey)
+        );
+        vm.expectPartialRevert(BudlumFinalityVerifier.AlertHeightNotFinal.selector);
+        cancunAlert.submitQuantumAlert(q);
+    }
+
+    function test_F06_quantum_alert_halts_classical_only_verify_settle_and_object_layer() public {
+        bytes memory pk =
+            hex"00000000000000000000000000000000049cd1dbb2d2c3581e54c088135fef36505a6823d61b859437bfc79b617030dc8b40e32bad1fa85b9c0f368af6d38d3c000000000000000000000000000000000d0273f6bf31ed37c3b8d68083ec3d8e20b5f2cc170fa24b9b5be35b34ed013f9a921f1cad1644d4bdb14674247234c80000000000000000000000000000000008b7ae4dbf802c17a6648842922c9467e460a71c88d393ee7af356da123a2f3619e80c3bdcc8e2b1da52f8cd9913ccdd0000000000000000000000000000000005ecf93654b7a1885695aaeeb7caf41b0239dc45e1022be55d37111af2aecef87799638bec572de86a7437898efa7020";
+        BudlumFinalityVerifier alertVerifier = new BudlumFinalityVerifier(
+            CHAIN, WINDOW, address(fraud), keccak256(pk), keccak256(generator), keccak256(mlDsaKey)
+        );
+        assertTrue(alertVerifier.hasBlsPrecompile(), "prague BLS precompile active");
+        assertTrue(alertVerifier.alertLevel() == QuantumAlertLevel.Open, "starts Open");
+
+        bytes32 body = bytes32(uint256(11));
+        bytes32 header = bytes32(uint256(22));
+        bytes32 stateRoot = hex"6110ef23437d65212be537bdc82c839c3216605c1a6fa1636660aa6b57f47779";
+
+        // 1. Open a real ClassicalOnly pending challenge at height 42.
+        Attestation memory a42 = Attestation({
+            height: 42,
+            stateRoot: bytes32(uint256(7)),
+            epoch: 3,
+            chainId: CHAIN,
+            g2AggregatePubkey: pk,
+            g2Generator: generator,
+            g1NegSignature: hex"000000000000000000000000000000000e4d98ce082b94098295a0d3cf710f8256c1673a5646e778accebf5d276f46301d3d28f8df4109574cc70694415160750000000000000000000000000000000010b5aef3d3950c839400718f77b7c24eb60682c3164df008dcce77ce3a60912aba7c344aadb7e98deb1e84b27db4dda9",
+            mlDsaSignature: _filled(3309, 0x05),
+            mlDsaPubkey: mlDsaKey,
+            mlDsaEthVariant: false
+        });
+        bytes32 pendingDigest42 = alertVerifier.verify(a42);
+
+        // 2. Finalize height 41 via real EIP-2537 BLS verification + settle.
+        Attestation memory a41 = Attestation({
+            height: 41,
+            stateRoot: stateRoot,
+            epoch: 3,
+            chainId: CHAIN,
+            g2AggregatePubkey: pk,
+            g2Generator: generator,
+            g1NegSignature: hex"000000000000000000000000000000000f1f7bfd860a2de506b623887e17c85fce652d7f3111ec60cb9c660ffb6869a70d1644b4e4fee9b474c7f58b57cdef0b000000000000000000000000000000000a2436c1cd9bf73e974555c8a35f9be8d91140cdfd77e5fed6df2db6b02f0e2382e58a4e5dcc191c25afdc9da34a2000",
+            mlDsaSignature: _filled(3309, 0x05),
+            mlDsaPubkey: mlDsaKey,
+            mlDsaEthVariant: false
+        });
+        bytes32 d41 = alertVerifier.verify(a41);
+        vm.roll(block.number + WINDOW);
+        alertVerifier.settle(d41);
+        assertTrue(alertVerifier.heightFinal(41), "height 41 finalized ClassicalOnly");
+
+        // 3. Escalate quantum alert at finalized height 41 using real EIP-2537 BLS signature.
+        QuantumAlertAttestation memory q = QuantumAlertAttestation({
+            height: 41,
+            stateRoot: stateRoot,
+            level: QuantumAlertLevel.Restricted,
+            g2AggregatePubkey: pk,
+            g2Generator: generator,
+            g1NegSignature: hex"00000000000000000000000000000000191cfce3dfdbbc957b5419fee12bb2ff775b3b7f3de575b296d56618ccffc267dea05ceb86e90556b64b9c9cacda12030000000000000000000000000000000001c93267b1fc9a9887a4c55f56f59effc52f84aff7a7f55fc8b8a2631663dba7cef0a03ec74229edd7640d1ccf0e6a80",
+            mlDsaSignature: _filled(3309, 0x05),
+            mlDsaPubkey: mlDsaKey,
+            mlDsaEthVariant: false
+        });
+        alertVerifier.submitQuantumAlert(q);
+        assertTrue(alertVerifier.alertLevel() == QuantumAlertLevel.Restricted, "alert escalated to Restricted");
+        assertEq(alertVerifier.alertHeight(), 41, "alertHeight recorded");
+        assertTrue(alertVerifier.alertLevelAtHeight(41) == QuantumAlertLevel.Restricted, "height alert recorded");
+
+        // Replay or downgrade of alert level must revert.
+        vm.expectPartialRevert(BudlumFinalityVerifier.InvalidAlertLevel.selector);
+        alertVerifier.submitQuantumAlert(q);
+
+        // 4. Previously pending ClassicalOnly challenge at height 42 CANNOT settle under alert.
+        vm.expectPartialRevert(BudlumFinalityVerifier.ClassicalHaltedByQuantumAlert.selector);
+        alertVerifier.settle(pendingDigest42);
+        assertTrue(!alertVerifier.heightFinal(42), "pending ClassicalOnly must not finalize under alert");
+
+        // 5. New ClassicalOnly attestations CANNOT even open a challenge window under alert.
+        Attestation memory a44 = _attestation(44, bytes32(uint256(9)));
+        a44.g2AggregatePubkey = pk;
+        a44.g1NegSignature =
+            hex"000000000000000000000000000000000ab77c1f3d7f2732a68fc68127bc2ac7d75634c437bda9dada01ed05c86d5b8f8677ae5a5fcaced9457de09a0cc11b2f00000000000000000000000000000000097e56d65265e24c8861038e5d7bef78521a09dc32aca4b0fd0ee7b2f8827b69c59125a83f61588857b27116cc211079";
+        vm.expectPartialRevert(BudlumFinalityVerifier.ClassicalHaltedByQuantumAlert.selector);
+        alertVerifier.verify(a44);
+
+        // 6. BudlumObjectLayerFinality mirrors alertLevel and refuses recording ClassicalOnly under alert.
+        BudlumObjectLayerFinality objectLayer =
+            new BudlumObjectLayerFinality(IBudlumHeaderFinality(address(alertVerifier)));
+        assertTrue(objectLayer.alertLevel() == QuantumAlertLevel.Restricted, "object layer mirrors Restricted");
+        vm.expectPartialRevert(BudlumObjectLayerFinality.ClassicalHaltedByQuantumAlert.selector);
+        objectLayer.record(41, header, body);
+        assertTrue(!objectLayer.heightFinal(41), "object layer must not record ClassicalOnly under alert");
     }
 }
