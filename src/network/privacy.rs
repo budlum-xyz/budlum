@@ -1,17 +1,14 @@
 //! Network egress privacy policy seam.
 //!
-//! WIRING: unwired - the egress policy seam is written before the network
-//! adapter that consults it (FSF adaptation plan, phase 5). `check_egress`
-//! is a refusal nothing calls yet, which is exactly the shape the
-//! guards-are-reachable gate is built to catch, so it is declared rather
-//! than left to be discovered. The dial path in the libp2p adapter is the
-//! intended caller and is not in this PR.
+//! WIRING: wired - `Node` in `src/network/node.rs` installs a network-derived
+//! [`NetworkPrivacyPolicy`] in `apply_network_security` and consults
+//! [`check_egress`] on outbound dials (`dial_multiaddr`), `dial`, `bootstrap`,
+//! mDNS discovery, and DNS seed resolution before calling `ToSocketAddrs` or
+//! `swarm.dial`.
 //!
 //! This module does not implement an anonymity network. It gives Budlum a small,
 //! deterministic boundary where outbound dials can be classified, routed through
-//! a local proxy/overlay, and logged without leaking the concrete address. The
-//! actual network adapter remains outside this file; this seam is the part that
-//! can be unit-tested before wiring it into the node dial path.
+//! a local proxy/overlay, and logged without leaking the concrete address.
 
 use std::fmt;
 
@@ -231,6 +228,18 @@ impl fmt::Display for NetworkPrivacyError {
 
 impl std::error::Error for NetworkPrivacyError {}
 
+/// Return true if `s` is an IPv4/IPv6 literal, including IPv6 link-local with
+/// an RFC 6874 zone identifier such as `fe80::1%eth0`.
+fn is_ip_literal(s: &str) -> bool {
+    if s.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    if let Some((addr, zone)) = s.split_once('%') {
+        return !zone.is_empty() && addr.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    false
+}
+
 /// The host part of a URL-style or `host:port` target: scheme, user info, path,
 /// query, port and the brackets of an IPv6 literal are removed. Multiaddr
 /// style targets (leading `/`) have no host in this sense.
@@ -244,7 +253,7 @@ fn host_part(lower: &str) -> Option<&str> {
     if let Some(inner) = rest.strip_prefix('[') {
         return inner.split_once(']').map(|(h, _)| h);
     }
-    // A bare IPv6 literal has several colons and no port to strip.
+    // A bare IPv6 literal (optionally with %zone) has several colons and no port.
     if rest.matches(':').count() > 1 {
         return Some(rest);
     }
@@ -253,39 +262,38 @@ fn host_part(lower: &str) -> Option<&str> {
 
 /// Classify a target without resolving it or parsing mutable external state.
 ///
-/// Bracketed IPv6 literals and URL-style targets are classified by their host
-/// so they cannot slip past a no-direct-DNS or no-direct-IP policy
-/// as `Opaque`. A bare dotless name stays `Opaque` on purpose: it is an
-/// adapter target the chosen proxy interprets, except `localhost`.
+/// Bracketed IPv6 literals, zone-scoped link-local IPv6 literals, and URL-style
+/// targets are classified by their host so they cannot slip past a no-direct-DNS
+/// or no-direct-IP policy as `Opaque`. A bare dotless name stays `Opaque` on
+/// purpose: it is an adapter target the chosen proxy interprets, except
+/// `localhost`.
 #[must_use]
 pub fn classify_target(target: &str) -> TargetKind {
-    let lower = target.to_ascii_lowercase();
-    if lower.contains("/dns") || looks_like_hostname(&lower) {
-        TargetKind::DnsName
-    } else if lower.contains("/ip4/")
-        || lower.contains("/ip6/")
-        || target.parse::<std::net::IpAddr>().is_ok()
-        || target
-            .rsplit_once(':')
-            .and_then(|(host, _)| host.parse::<std::net::IpAddr>().ok())
-            .is_some()
-    {
-        TargetKind::IpAddress
-    } else if lower.contains("mdns") || lower.contains("multicast") || lower.contains("/udp/5353") {
-        TargetKind::LocalDiscovery
-    } else if let Some(host) = host_part(&lower) {
-        if host.parse::<std::net::IpAddr>().is_ok() {
-            TargetKind::IpAddress
-        } else if host == "localhost"
-            || (!host.is_empty() && (lower.contains("://") || has_numeric_port(&lower)))
-        {
-            TargetKind::DnsName
-        } else {
-            TargetKind::Opaque
-        }
-    } else {
-        TargetKind::Opaque
+    let trimmed = target.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("mdns") || lower.contains("multicast") || lower.contains("/udp/5353") {
+        return TargetKind::LocalDiscovery;
     }
+    if lower.contains("/dns") {
+        return TargetKind::DnsName;
+    }
+    if lower.contains("/ip4/") || lower.contains("/ip6/") {
+        return TargetKind::IpAddress;
+    }
+    if let Some(host) = host_part(&lower) {
+        if is_ip_literal(host) {
+            return TargetKind::IpAddress;
+        }
+        let canonical_host = host.trim_end_matches('.');
+        if canonical_host == "localhost"
+            || (canonical_host.contains('.')
+                && canonical_host.bytes().any(|b| b.is_ascii_alphabetic()))
+            || (!canonical_host.is_empty() && (lower.contains("://") || has_numeric_port(&lower)))
+        {
+            return TargetKind::DnsName;
+        }
+    }
+    TargetKind::Opaque
 }
 
 /// Check whether an outbound dial/lookup is permitted and return a redacted
@@ -294,18 +302,19 @@ pub fn classify_target(target: &str) -> TargetKind {
 ///
 /// # Errors
 ///
-/// Returns an error when the target is empty, route id is invalid, or the policy
-/// refuses the selected route/target kind.
+/// Returns an error when the target is empty/whitespace, route id is invalid, or
+/// the policy refuses the selected route/target kind.
 pub fn check_egress(
     policy: &NetworkPrivacyPolicy,
     request: &EgressRequest,
 ) -> Result<EgressApproval, NetworkPrivacyError> {
-    if request.target.is_empty() {
+    let trimmed = request.target.trim();
+    if trimmed.is_empty() {
         return Err(NetworkPrivacyError::EmptyTarget);
     }
     request.route.validate()?;
 
-    let mut target_kind = classify_target(&request.target);
+    let mut target_kind = classify_target(trimmed);
     if request.purpose == EgressPurpose::LocalDiscovery {
         target_kind = TargetKind::LocalDiscovery;
     }
@@ -357,14 +366,6 @@ fn has_numeric_port(lower: &str) -> bool {
     })
 }
 
-fn looks_like_hostname(lower: &str) -> bool {
-    if lower.starts_with('/') || lower.parse::<std::net::IpAddr>().is_ok() {
-        return false;
-    }
-    let host = lower.rsplit_once(':').map_or(lower, |(host, _port)| host);
-    host.contains('.') && host.bytes().any(|b| b.is_ascii_alphabetic())
-}
-
 fn validate_route_id(route_id: &str) -> Result<(), NetworkPrivacyError> {
     let valid = !route_id.is_empty()
         && route_id.len() <= 64
@@ -413,6 +414,29 @@ mod tests {
         // A dotless host in a URL or with a port is still a name to resolve.
         assert_eq!(classify_target("http://intranet/x"), TargetKind::DnsName);
         assert_eq!(classify_target("intranet:4001"), TargetKind::DnsName);
+        // Hardened edge cases: whitespace, IPv6 zone IDs, trailing dot, multicast ordering, IP URL.
+        assert_eq!(classify_target("  127.0.0.1:4001  "), TargetKind::IpAddress);
+        assert_eq!(classify_target("fe80::1%eth0"), TargetKind::IpAddress);
+        assert_eq!(
+            classify_target("[fe80::1%eth0]:4001"),
+            TargetKind::IpAddress
+        );
+        assert_eq!(
+            classify_target("/ip4/224.0.0.251/udp/5353"),
+            TargetKind::LocalDiscovery
+        );
+        assert_eq!(classify_target("localhost."), TargetKind::DnsName);
+        assert_eq!(
+            classify_target("http://user:pass@127.0.0.1:8545/rpc"),
+            TargetKind::IpAddress
+        );
+        assert_eq!(
+            check_egress(
+                &NetworkPrivacyPolicy::devnet_clear(),
+                &EgressRequest::new(EgressPurpose::PeerDial, "   \t\n ", EgressRoute::Direct),
+            ),
+            Err(NetworkPrivacyError::EmptyTarget)
+        );
     }
 
     #[test]

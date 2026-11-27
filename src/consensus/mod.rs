@@ -484,6 +484,28 @@ pub trait ConsensusEngine: Send + Sync {
                 block.transactions.len()
             )));
         }
+        // Enforce canonical binary protobuf body/witness/per-transaction budgets
+        // before the legacy JSON envelope cap so oversized single transactions
+        // (> MAX_TX_BYTES) and witness/body overruns fail with exact section
+        // accounting.
+        crate::consensus::budget::validate_block_budget(block).map_err(|err| match err {
+            crate::consensus::budget::BudgetError::TxTooLarge(bytes) => ConsensusError(format!(
+                "Block exceeds binary budget: transaction size {bytes} exceeds MAX_TX_BYTES ({})",
+                crate::consensus::budget::MAX_TX_BYTES
+            )),
+            crate::consensus::budget::BudgetError::OverBudget(
+                crate::consensus::budget::Section::Body,
+            ) => ConsensusError(format!(
+                "Block exceeds binary budget: body section exceeds BODY_BUDGET_BYTES ({})",
+                crate::consensus::budget::BODY_BUDGET_BYTES
+            )),
+            crate::consensus::budget::BudgetError::OverBudget(
+                crate::consensus::budget::Section::Witness,
+            ) => ConsensusError(format!(
+                "Block exceeds binary budget: witness section exceeds WITNESS_BUDGET_BYTES ({})",
+                crate::consensus::budget::WITNESS_BUDGET_BYTES
+            )),
+        })?;
         // A silent empty serialization would let an oversized block pass
         // This size check. Surface the error instead of defaulting to empty.
         let serialized = serde_json::to_vec(block).map_err(|e| {

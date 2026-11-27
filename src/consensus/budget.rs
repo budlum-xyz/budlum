@@ -1,16 +1,21 @@
-//! Block budgets measured on the binary encoding.
+//! Block budgets measured on the canonical binary protobuf encoding.
 //!
 //! The measure is the protobuf `encoded_len` of the body and of the witness section, never the
 //! JSON length. The body budget is 1,000,000 bytes and the witness budget 2,000,000 bytes; the
-//! propagation measurement tunes the witness budget, so it is a constant here and not
-//! a consensus fact before then.
+//! per-transaction cap is 160 KiB across body plus witness bytes.
+
+use std::fmt;
+
+use prost::Message;
+
+use crate::core::block::Block;
+use crate::core::transaction::Transaction;
+use crate::network::proto_conversions::pb;
 
 /// The body budget in bytes (transactions, evidence, headers).
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
 pub const BODY_BUDGET_BYTES: usize = 1_000_000;
 
 /// The witness budget in bytes (composite signatures and their witnesses).
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
 pub const WITNESS_BUDGET_BYTES: usize = 2_000_000;
 
 /// The largest single transaction, in binary bytes.
@@ -18,7 +23,6 @@ pub const MAX_TX_BYTES: usize = 160 * 1024;
 
 /// Which budget an item is charged to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
 pub enum Section {
     /// The block body.
     Body,
@@ -26,9 +30,17 @@ pub enum Section {
     Witness,
 }
 
+impl fmt::Display for Section {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Body => f.write_str("body"),
+            Self::Witness => f.write_str("witness"),
+        }
+    }
+}
+
 /// Why an item was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
 pub enum BudgetError {
     /// One transaction is larger than [`MAX_TX_BYTES`].
     TxTooLarge(usize),
@@ -36,9 +48,28 @@ pub enum BudgetError {
     OverBudget(Section),
 }
 
+impl fmt::Display for BudgetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TxTooLarge(bytes) => write!(
+                f,
+                "transaction binary size {bytes} exceeds MAX_TX_BYTES ({MAX_TX_BYTES})"
+            ),
+            Self::OverBudget(Section::Body) => {
+                write!(f, "body section exceeds budget ({BODY_BUDGET_BYTES} bytes)")
+            }
+            Self::OverBudget(Section::Witness) => write!(
+                f,
+                "witness section exceeds budget ({WITNESS_BUDGET_BYTES} bytes)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BudgetError {}
+
 /// Running binary size of a block under construction or validation.
 #[derive(Debug, Default, Clone, Copy)]
-/// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
 pub struct BlockBudget {
     body: usize,
     witness: usize,
@@ -87,7 +118,6 @@ impl BlockBudget {
     /// # Errors
     ///
     /// [`BudgetError::TxTooLarge`] or [`BudgetError::OverBudget`]; nothing is charged on error.
-    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn charge_tx(
         &mut self,
         body_bytes: usize,
@@ -108,9 +138,67 @@ impl BlockBudget {
     }
 }
 
+/// Partition one transaction's canonical protobuf `encoded_len` into
+/// `(body_bytes, witness_bytes)`.
+///
+/// The witness section consists of signature and signer/authorization proof
+/// bytes (`signature`, `signer_public_key`, `authorization`, `auth_claim`);
+/// all other transaction fields are charged to the body section.
+#[must_use]
+pub fn tx_section_bytes(tx: &Transaction) -> (usize, usize) {
+    let mut proto = pb::ProtoTransaction::from(tx);
+    let total = proto.encoded_len();
+    proto.signature.clear();
+    proto.signer_public_key.clear();
+    proto.authorization = None;
+    proto.auth_claim.clear();
+    let body = proto.encoded_len();
+    let witness = total.saturating_sub(body);
+    (body, witness)
+}
+
+/// Partition a block's non-transaction envelope (header, slashing evidence, and
+/// block-level witnesses) into `(body_bytes, witness_bytes)` using canonical
+/// protobuf `encoded_len`.
+#[must_use]
+fn block_envelope_section_bytes(block: &Block) -> (usize, usize) {
+    let mut proto = pb::ProtoBlock::from(block);
+    proto.transactions.clear();
+    let total = proto.encoded_len();
+    proto.signature.clear();
+    proto.producer_public_key.clear();
+    proto.vrf_proof.clear();
+    proto.claim_frame.clear();
+    let body = proto.encoded_len();
+    let witness = total.saturating_sub(body);
+    (body, witness)
+}
+
+/// Validate a complete block against the canonical binary protobuf body,
+/// witness, and per-transaction budgets.
+///
+/// # Errors
+///
+/// Returns [`BudgetError::TxTooLarge`] if any single transaction exceeds
+/// [`MAX_TX_BYTES`], or [`BudgetError::OverBudget`] if the cumulative body or
+/// witness section exceeds its budget.
+pub fn validate_block_budget(block: &Block) -> Result<BlockBudget, BudgetError> {
+    let mut budget = BlockBudget::new();
+    let (header_body, header_witness) = block_envelope_section_bytes(block);
+    budget.charge(Section::Body, header_body)?;
+    budget.charge(Section::Witness, header_witness)?;
+    for tx in &block.transactions {
+        let (tx_body, tx_witness) = tx_section_bytes(tx);
+        budget.charge_tx(tx_body, tx_witness)?;
+    }
+    Ok(budget)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::address::Address;
+    use crate::core::transaction::TransactionType;
 
     #[test]
     fn a_transaction_over_the_bound_is_refused_and_uncharged() {
@@ -140,5 +228,41 @@ mod tests {
             .expect("fits");
         assert!(b.charge_tx(100, 100).is_err());
         assert_eq!(b.used(Section::Body), 0);
+    }
+
+    #[test]
+    fn protobuf_section_split_accounts_for_witness_separately_from_body() {
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([1u8; 32]),
+            Address::from([2u8; 32]),
+            10,
+            1,
+            0,
+            vec![0xAA; 1024],
+            45262,
+            TransactionType::Transfer,
+        );
+        tx.signature = Some(vec![0xBB; 3309]);
+        tx.signer_public_key = vec![0xCC; 1952];
+        let (body, witness) = tx_section_bytes(&tx);
+        assert!(body >= 1024, "body must account for payload bytes");
+        assert!(
+            witness >= 3309 + 1952,
+            "witness must account for PQ signature and public key bytes"
+        );
+        assert_eq!(
+            body + witness,
+            pb::ProtoTransaction::from(&tx).encoded_len()
+        );
+    }
+
+    #[test]
+    fn binary_block_budget_accepts_large_pq_witness_under_two_megabytes() {
+        let mut block = Block::new(1, "0".repeat(64), Vec::new());
+        block.signature = Some(vec![0x55; 1_500_000]);
+        let used = validate_block_budget(&block)
+            .expect("1.5 MB witness fits inside the 2 MB witness budget");
+        assert!(used.used(Section::Witness) >= 1_500_000);
+        assert!(used.used(Section::Body) < 10_000);
     }
 }

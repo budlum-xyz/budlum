@@ -9,7 +9,7 @@ D-Web Passport|9|78
 DeEd|12|31
 Developer OS|0|0
 Filiz (faucet)|1|14
-Filiz (leader election)|11|221
+Filiz (leader election)|10|216
 Fotosentez|6|14
 GT-1|0|0
 Gonca|0|0

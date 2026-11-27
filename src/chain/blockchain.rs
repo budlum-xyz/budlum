@@ -5480,6 +5480,18 @@ impl Blockchain {
         let tx_byte_budget = crate::consensus::MAX_BLOCK_SIZE
             .saturating_sub(BLOCK_HEADER_JSON_ALLOWANCE)
             .saturating_sub(BLOCK_EVIDENCE_JSON_ALLOWANCE);
+        let mut binary_budget = crate::consensus::budget::BlockBudget::new();
+        let _ = binary_budget.charge(
+            crate::consensus::budget::Section::Body,
+            BLOCK_HEADER_JSON_ALLOWANCE.saturating_add(BLOCK_EVIDENCE_JSON_ALLOWANCE),
+        );
+        if frame_taken {
+            let _ = binary_budget.charge(crate::consensus::budget::Section::Witness, frame_bytes);
+            for tx in &valid_txs {
+                let (tx_body, tx_witness) = crate::consensus::budget::tx_section_bytes(tx);
+                let _ = binary_budget.charge_tx(tx_body, tx_witness);
+            }
+        }
 
         while progress && valid_txs.len() < crate::consensus::MAX_TRANSACTIONS_PER_BLOCK {
             progress = false;
@@ -5517,6 +5529,18 @@ impl Blockchain {
                 if block_bytes.saturating_add(tx_bytes) > tx_byte_budget {
                     continue;
                 }
+                // Canonical binary protobuf section budget (`MAX_TX_BYTES`,
+                // `BODY_BUDGET_BYTES`, `WITNESS_BUDGET_BYTES`). Check on a copy
+                // so a rejected transaction leaves the running budget intact.
+                let (tx_body_bytes, tx_witness_bytes) =
+                    crate::consensus::budget::tx_section_bytes(tx);
+                let mut trial_binary_budget = binary_budget;
+                if trial_binary_budget
+                    .charge_tx(tx_body_bytes, tx_witness_bytes)
+                    .is_err()
+                {
+                    continue;
+                }
                 // Execute against a disposable candidate. Only a
                 // successful transaction publishes its state to the selection
                 // prefix; every error discards ALL partial writes. Replaying a
@@ -5529,6 +5553,7 @@ impl Blockchain {
                         contract_calls += 1;
                     }
                     block_bytes += tx_bytes;
+                    binary_budget = trial_binary_budget;
                     valid_txs.push(tx.clone());
                     included.insert(tx.hash.clone());
                     progress = true;
@@ -7161,26 +7186,7 @@ impl Blockchain {
                     block.state_root, computed_root
                 ));
             }
-            if self.sharding.is_active_at(block.index) {
-                let expected_shards =
-                    crate::sharding::shards_commitment(&commit_state, self.sharding.num_shards);
-                match block.shards_root {
-                    Some(actual) if actual == expected_shards => {}
-                    Some(actual) => {
-                        return Err(format!(
-                            "Shards commitment mismatch: expected {}, got {}",
-                            hex::encode(expected_shards),
-                            hex::encode(actual)
-                        ));
-                    }
-                    None => {
-                        return Err(format!(
-                            "Block {} is missing the shards commitment required from height {}",
-                            block.index, self.sharding.activation_height
-                        ));
-                    }
-                }
-            }
+            self.validate_shards_root(&commit_state, &block)?;
         }
 
         // Commit durably to database first, ensuring fail-closed security
@@ -7514,9 +7520,43 @@ impl Blockchain {
                     block.index
                 ));
             }
+            self.validate_shards_root(&next_state, block)
+                .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
             state = next_state;
         }
         Ok(state)
+    }
+
+    /// Enforce `Block::shards_root` identically across tip ingestion and
+    /// candidate-chain reorg validation:
+    /// - when sharding is active at `block.index`, `shards_root` must be
+    ///   present and match the recomputed commitment over `state`;
+    /// - when sharding is inactive at `block.index`, `shards_root` must be
+    ///   `None` so an unverified field cannot be injected into `Block::hash`.
+    fn validate_shards_root(&self, state: &AccountState, block: &Block) -> Result<(), String> {
+        if self.sharding.is_active_at(block.index) {
+            let expected_shards =
+                crate::sharding::shards_commitment(state, self.sharding.num_shards);
+            match block.shards_root {
+                Some(actual) if actual == expected_shards => Ok(()),
+                Some(actual) => Err(format!(
+                    "Shards commitment mismatch: expected {}, got {}",
+                    hex::encode(expected_shards),
+                    hex::encode(actual)
+                )),
+                None => Err(format!(
+                    "Block {} is missing the shards commitment required from height {}",
+                    block.index, self.sharding.activation_height
+                )),
+            }
+        } else if block.shards_root.is_some() {
+            Err(format!(
+                "Block {} carries unexpected shards commitment while sharding is inactive",
+                block.index
+            ))
+        } else {
+            Ok(())
+        }
     }
     /// Entries in a locator. The protocol accepts
     /// `MAX_HEADER_LOCATOR_HASHES`; the power-of-two stride below reaches

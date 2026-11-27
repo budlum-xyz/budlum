@@ -1479,6 +1479,11 @@ pub struct Node {
     pub accept_private_peer_addresses: bool,
     /// Sentry node architecture policy (shielded validator / public sentry / standard).
     pub sentry_policy: crate::network::sentry::SentryPolicy,
+    /// Outbound network egress privacy policy enforced before dialing or
+    /// resolving DNS seeds.
+    pub privacy_policy: crate::network::privacy::NetworkPrivacyPolicy,
+    /// Configured outbound egress route (`Direct`, `Proxy`, or `Overlay`).
+    pub egress_route: crate::network::privacy::EgressRoute,
     pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
     /// Whether this node runs the aggregation side of its chain; set by
     /// `NodeCommand::EnableAggregation`.
@@ -3534,6 +3539,8 @@ impl Node {
             sentry_shield: crate::network::sentry::SentryShieldConfig::default(),
             accept_private_peer_addresses: true,
             sentry_policy: crate::network::sentry::SentryPolicy::default(),
+            privacy_policy: crate::network::privacy::NetworkPrivacyPolicy::devnet_clear(),
+            egress_route: crate::network::privacy::EgressRoute::Direct,
             metrics: None,
             aggregation: false,
             storage_node,
@@ -3695,6 +3702,18 @@ impl Node {
         // routable advertisements; devnet, where loopback *is* the topology,
         // keeps them.
         self.accept_private_peer_addresses = !profile_rejects_private_advertisements(network);
+        self.privacy_policy = match network {
+            crate::core::chain_config::Network::Mainnet
+            | crate::core::chain_config::Network::Testnet => {
+                crate::network::privacy::NetworkPrivacyPolicy::public_node_no_dns_leak()
+            }
+            crate::core::chain_config::Network::Devnet => {
+                crate::network::privacy::NetworkPrivacyPolicy::devnet_clear()
+            }
+        };
+        if !self.privacy_policy.allow_local_discovery {
+            self.mdns_enabled = false;
+        }
     }
 
     pub fn with_identity(mut self, path: Option<String>) -> Self {
@@ -3741,6 +3760,82 @@ impl Node {
         self
     }
 
+    /// Install an explicit outbound network privacy policy on this node.
+    ///
+    /// WIRING: Node builder configuration hook for operator privacy policy.
+    #[must_use]
+    pub fn with_privacy_policy(
+        mut self,
+        policy: crate::network::privacy::NetworkPrivacyPolicy,
+    ) -> Self {
+        if !policy.allow_local_discovery {
+            self.mdns_enabled = false;
+        }
+        self.privacy_policy = policy;
+        self
+    }
+
+    /// Install an explicit outbound egress route (`Direct`, `Proxy`, or `Overlay`).
+    ///
+    /// WIRING: Node builder configuration hook for operator egress route.
+    #[must_use]
+    pub fn with_egress_route(mut self, route: crate::network::privacy::EgressRoute) -> Self {
+        self.egress_route = route;
+        self
+    }
+
+    /// Validate an outbound network target against [`Self::privacy_policy`] and
+    /// [`Self::egress_route`] before dialing or resolving.
+    ///
+    /// WIRING: Outbound dial/bootstrap/mDNS privacy gate.
+    pub fn check_egress_for(
+        &self,
+        purpose: crate::network::privacy::EgressPurpose,
+        target: &str,
+    ) -> Result<crate::network::privacy::EgressApproval, crate::network::privacy::NetworkPrivacyError>
+    {
+        let request =
+            crate::network::privacy::EgressRequest::new(purpose, target, self.egress_route.clone());
+        let approval = crate::network::privacy::check_egress(&self.privacy_policy, &request)?;
+        tracing::debug!(audit_label = %approval.audit_label, "Outbound network egress approved");
+        Ok(approval)
+    }
+
+    /// Filter `self.dns_seeds` through [`check_egress`] before invoking host OS
+    /// `ToSocketAddrs` resolution. Host OS DNS resolution is inherently a
+    /// direct host DNS lookup, so it is checked against `EgressRoute::Direct`
+    /// even when a proxy/overlay route is configured for P2P dials.
+    /// WIRING: Pre-resolution DNS seed privacy filter.
+    #[must_use]
+    pub fn filter_allowed_dns_seeds(&self) -> Vec<String> {
+        self.dns_seeds
+            .iter()
+            .filter(|seed| {
+                let target = if seed.contains(':') {
+                    (*seed).clone()
+                } else {
+                    format!("{seed}:{}", self.dns_seed_port)
+                };
+                let request = crate::network::privacy::EgressRequest::new(
+                    crate::network::privacy::EgressPurpose::DnsSeed,
+                    target,
+                    crate::network::privacy::EgressRoute::Direct,
+                );
+                match crate::network::privacy::check_egress(&self.privacy_policy, &request) {
+                    Ok(approval) => {
+                        tracing::debug!(audit_label = %approval.audit_label, "DNS seed resolution approved");
+                        true
+                    }
+                    Err(err) => {
+                        warn!(error = %err, "Refusing DNS seed resolution under network privacy policy");
+                        false
+                    }
+                }
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Configures the sentry-node architecture policy (shielded validator or
     /// public sentry node).
     ///
@@ -3782,10 +3877,17 @@ impl Node {
     /// concurrent dials to the same known `PeerId`.
     fn dial_multiaddr(
         &mut self,
+        purpose: crate::network::privacy::EgressPurpose,
         addr: Multiaddr,
         known_peer: Option<PeerId>,
     ) -> Result<(), libp2p::swarm::DialError> {
         use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
+
+        let target = addr.to_string();
+        if let Err(err) = self.check_egress_for(purpose, &target) {
+            warn!(purpose = ?purpose, error = %err, "Refusing outbound dial under network privacy policy");
+            return Err(libp2p::swarm::DialError::Aborted);
+        }
 
         let peer_id = known_peer.or_else(|| crate::network::sentry::peer_id_from_multiaddr(&addr));
         let opts = if let Some(peer_id) = peer_id {
@@ -3811,7 +3913,11 @@ impl Node {
             if self.peer_manager_lock().is_banned(&peer_id) || self.swarm.is_connected(&peer_id) {
                 continue;
             }
-            match self.dial_multiaddr(addr.clone(), Some(peer_id)) {
+            match self.dial_multiaddr(
+                crate::network::privacy::EgressPurpose::PeerDial,
+                addr.clone(),
+                Some(peer_id),
+            ) {
                 Ok(()) => {
                     info!("Shielded validator dialing sentry {peer_id} at {addr}");
                 }
@@ -3899,7 +4005,11 @@ impl Node {
                 .gossipsub
                 .add_explicit_peer(&peer_id);
             if !self.swarm.is_connected(&peer_id) {
-                match self.dial_multiaddr(addr.clone(), Some(peer_id)) {
+                match self.dial_multiaddr(
+                    crate::network::privacy::EgressPurpose::PeerDial,
+                    addr.clone(),
+                    Some(peer_id),
+                ) {
                     Ok(()) => {
                         info!("Sentry shield: dialing protected peer {peer_id} at {addr}");
                     }
@@ -3978,6 +4088,8 @@ impl Node {
     /// Returns an error if the address is invalid, refused by sentry policy,
     /// or rejected by the swarm.
     pub fn dial(&mut self, addr: &str) -> Result<(), Box<dyn Error>> {
+        self.check_egress_for(crate::network::privacy::EgressPurpose::PeerDial, addr)
+            .map_err(Box::new)?;
         let remote: Multiaddr = addr.parse()?;
         if let Err(reason) = self.sentry_policy.can_dial(None, &remote) {
             warn!("Refusing dial to {addr}: {reason}");
@@ -3995,7 +4107,11 @@ impl Node {
         {
             return Err("validator sentry shield refuses dialing non-sentry peer".into());
         }
-        match self.dial_multiaddr(remote, target_peer) {
+        match self.dial_multiaddr(
+            crate::network::privacy::EgressPurpose::PeerDial,
+            remote,
+            target_peer,
+        ) {
             Ok(()) | Err(libp2p::swarm::DialError::DialPeerConditionFalse(_)) => {}
             Err(e) => return Err(Box::new(e)),
         }
@@ -4014,6 +4130,8 @@ impl Node {
             info!("Skipping bootstrap for {addr}: peer discovery disabled by sentry policy");
             return Ok(());
         }
+        self.check_egress_for(crate::network::privacy::EgressPurpose::Bootstrap, addr)
+            .map_err(Box::new)?;
         let multiaddr: Multiaddr = addr.parse()?;
         if !self.dns_transport_available && Self::multiaddr_uses_dns(&multiaddr) {
             return Err(
@@ -4044,7 +4162,11 @@ impl Node {
         }
         if !self.sentry_policy.can_share_in_dht(&peer_id) {
             if !self.swarm.is_connected(&peer_id) {
-                let _ = self.dial_multiaddr(multiaddr, Some(peer_id));
+                let _ = self.dial_multiaddr(
+                    crate::network::privacy::EgressPurpose::Bootstrap,
+                    multiaddr,
+                    Some(peer_id),
+                );
             }
             return Ok(());
         }
@@ -4056,7 +4178,11 @@ impl Node {
                 .add_address(&peer_id, multiaddr.clone());
         }
         if !self.swarm.is_connected(&peer_id) {
-            let _ = self.dial_multiaddr(multiaddr, Some(peer_id));
+            let _ = self.dial_multiaddr(
+                crate::network::privacy::EgressPurpose::Bootstrap,
+                multiaddr,
+                Some(peer_id),
+            );
         }
         if !self.sentry_shield.is_validator_shielded() {
             self.swarm.behaviour_mut().kad.bootstrap()?;
@@ -4343,12 +4469,15 @@ impl Node {
                 }
             }
 
-            // Resolve and dial DNS seeds
+            // Resolve and dial DNS seeds (filtered by egress privacy policy before ToSocketAddrs).
             if !self.dns_seeds.is_empty() {
-                let dns_addrs = resolve_dns_seeds(&self.dns_seeds, self.dns_seed_port);
-                for addr in &dns_addrs {
-                    if let Err(e) = self.dial(addr) {
-                        warn!("DNS seed dial failed for {addr}: {e}");
+                let allowed_seeds = self.filter_allowed_dns_seeds();
+                if !allowed_seeds.is_empty() {
+                    let dns_addrs = resolve_dns_seeds(&allowed_seeds, self.dns_seed_port);
+                    for addr in &dns_addrs {
+                        if let Err(e) = self.dial(addr) {
+                            warn!("DNS seed dial failed for {addr}: {e}");
+                        }
                     }
                 }
             }
@@ -5199,7 +5328,11 @@ impl Node {
                                             .behaviour_mut()
                                             .gossipsub
                                             .add_explicit_peer(added_id);
-                                        match self.dial_multiaddr(addr.clone(), Some(*added_id)) {
+                                        match self.dial_multiaddr(
+                                            crate::network::privacy::EgressPurpose::PeerDial,
+                                            addr.clone(),
+                                            Some(*added_id),
+                                        ) {
                                             Ok(())
                                             | Err(
                                                 libp2p::swarm::DialError::DialPeerConditionFalse(_),
@@ -5716,9 +5849,21 @@ impl Node {
                             match event {
                                 mdns::Event::Discovered(peers) => {
                                     for (peer_id, addr) in peers {
+                                        let target = addr.to_string();
+                                        if let Err(err) = self.check_egress_for(
+                                            crate::network::privacy::EgressPurpose::LocalDiscovery,
+                                            &target,
+                                        ) {
+                                            warn!(error = %err, "Ignoring mDNS peer under network privacy policy");
+                                            continue;
+                                        }
                                         info!("mDNS discovered: {peer_id} at {addr}");
                                         self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                                        match self.dial_multiaddr(addr, Some(peer_id)) {
+                                        match self.dial_multiaddr(
+                                            crate::network::privacy::EgressPurpose::LocalDiscovery,
+                                            addr,
+                                            Some(peer_id),
+                                        ) {
                                             Ok(())
                                             | Err(
                                                 libp2p::swarm::DialError::DialPeerConditionFalse(_),
@@ -11098,5 +11243,107 @@ mod identity_file_tests {
         chain_a_task.abort();
         chain_b_task.abort();
         chain_val_task.abort();
+    }
+
+    #[tokio::test]
+    async fn node_enforces_network_privacy_policy_on_dials_bootstraps_and_dns_seeds() {
+        use crate::chain::blockchain::Blockchain;
+        use crate::chain::chain_actor::ChainActor;
+        use crate::consensus::pow::PoWEngine;
+        use crate::core::chain_config::Network;
+        use crate::network::privacy::{EgressPurpose, EgressRoute, NetworkPrivacyPolicy};
+
+        let make_node = || {
+            let consensus = std::sync::Arc::new(PoWEngine::new(1));
+            let blockchain = Blockchain::new(consensus, None, 45263, None);
+            let (actor, chain) = ChainActor::new(blockchain);
+            let actor_task = tokio::spawn(async move {
+                actor.run().await;
+            });
+            let node = Node::new(chain)
+                .expect("node init")
+                .with_dns_seeds(vec!["seed.example.org".to_string()], 26656);
+            (node, actor_task)
+        };
+
+        // 1. Mainnet/Testnet install public_node_no_dns_leak; Devnet installs devnet_clear.
+        let (mut node, task1) = make_node();
+        assert_eq!(node.privacy_policy, NetworkPrivacyPolicy::devnet_clear());
+        node.apply_network_security(Network::Mainnet);
+        assert_eq!(
+            node.privacy_policy,
+            NetworkPrivacyPolicy::public_node_no_dns_leak()
+        );
+        // DNS dials, DNS bootstraps, and DNS seed pre-resolution are all refused on Mainnet.
+        let dial_err = node
+            .dial("/dns4/seed.example.org/tcp/26656")
+            .expect_err("Mainnet public_node_no_dns_leak must refuse direct DNS dial");
+        assert!(
+            dial_err.to_string().contains("direct DNS egress denied"),
+            "unexpected dial error: {dial_err}"
+        );
+        let boot_err = node
+            .bootstrap("/dns4/seed.example.org/tcp/26656/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+            .expect_err("Mainnet public_node_no_dns_leak must refuse direct DNS bootstrap");
+        assert!(
+            boot_err.to_string().contains("direct DNS egress denied"),
+            "unexpected bootstrap error: {boot_err}"
+        );
+        assert!(
+            node.filter_allowed_dns_seeds().is_empty(),
+            "Mainnet must filter out DNS seeds before calling ToSocketAddrs"
+        );
+        let ip_ok = node
+            .check_egress_for(EgressPurpose::PeerDial, "/ip4/198.51.100.7/tcp/26656")
+            .expect("Mainnet allows direct numeric IP dial");
+        assert_eq!(ip_ok.audit_label, "network-egress:peer-dial:ip:direct");
+
+        // Testnet shares public_node_no_dns_leak; Devnet restores devnet_clear.
+        node.apply_network_security(Network::Testnet);
+        assert_eq!(
+            node.privacy_policy,
+            NetworkPrivacyPolicy::public_node_no_dns_leak()
+        );
+        node.apply_network_security(Network::Devnet);
+        assert_eq!(node.privacy_policy, NetworkPrivacyPolicy::devnet_clear());
+        assert_eq!(
+            node.filter_allowed_dns_seeds(),
+            vec!["seed.example.org".to_string()]
+        );
+        task1.abort();
+
+        // 2. strict_private() refuses all direct dials and disables mDNS.
+        let (mut strict_node, task2) = make_node();
+        strict_node.mdns_enabled = true;
+        strict_node = strict_node.with_privacy_policy(NetworkPrivacyPolicy::strict_private());
+        assert!(!strict_node.mdns_enabled);
+        let err_ip = strict_node
+            .dial("/ip4/198.51.100.7/tcp/26656")
+            .expect_err("strict_private must refuse direct IP dial");
+        assert!(
+            err_ip.to_string().contains("direct egress denied"),
+            "unexpected strict dial error: {err_ip}"
+        );
+        let err_boot = strict_node
+            .bootstrap("/ip4/198.51.100.7/tcp/26656/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+            .expect_err("strict_private must refuse direct IP bootstrap");
+        assert!(
+            err_boot.to_string().contains("direct egress denied"),
+            "unexpected strict bootstrap error: {err_boot}"
+        );
+
+        // 3. Even with a Proxy route, host ToSocketAddrs DNS seed resolution remains blocked,
+        // while proxied peer dial approval succeeds without leaking the target or route_id.
+        let proxied_node = strict_node.with_egress_route(EgressRoute::Proxy {
+            route_id: "operator-tor-socks".to_string(),
+        });
+        assert!(proxied_node.filter_allowed_dns_seeds().is_empty());
+        let approval = proxied_node
+            .check_egress_for(EgressPurpose::PeerDial, "/ip4/198.51.100.7/tcp/26656")
+            .expect("strict_private approves proxied peer dial");
+        assert_eq!(approval.audit_label, "network-egress:peer-dial:ip:proxy");
+        assert!(!approval.audit_label.contains("198.51.100.7"));
+        assert!(!approval.audit_label.contains("operator-tor-socks"));
+        task2.abort();
     }
 }

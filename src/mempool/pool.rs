@@ -458,13 +458,21 @@ impl Mempool {
         // here. A blanket zero-address exemption would let an attacker mint
         // unsigned transactions from 0x00..00.
         let registry_commitment = self.scheme_registry.commitment();
-        let authorization = bincode::serialize(&tx.authorization).unwrap_or_default();
+        let authorization = bincode::serialize(&tx.authorization).map_err(|_| {
+            MempoolError::InvalidTransaction("Failed to serialize transaction authorization".into())
+        })?;
+        let sig_present = [u8::from(tx.signature.is_some())];
+        let claim_present = [u8::from(tx.auth_claim.is_some())];
+        let claim_bytes = tx.auth_claim.unwrap_or([0u8; 32]);
         let digest = crate::mempool::authority_cache::authorization_digest(&[
             tx.hash.as_bytes(),
             &tx.signing_hash(),
+            &sig_present,
             tx.signature.as_deref().unwrap_or_default(),
             &tx.signer_public_key,
             &authorization,
+            &claim_present,
+            &claim_bytes,
         ]);
         if !self.authority_cache.contains(&digest, &registry_commitment) {
             if !tx.verify_in(&self.scheme_registry) {
@@ -514,7 +522,11 @@ impl Mempool {
             // is what stops churn. Replacing the pending batch is the client's
             // repair path when a phone collected one more audit before the
             // window closed.
-            if duty.is_none() {
+            // Only a duty batch replacing an existing duty batch at the same
+            // nonce is exempt from the RBF fee bump. A duty batch replacing a
+            // paying non-duty transaction must still honour the RBF fee bump so
+            // validators cannot cancel pending fee-paying transactions for free.
+            if duty.is_none() || existing.duty.is_none() {
                 let bump = (u128::from(existing.tx.fee) * u128::from(self.config.rbf_bump_percent))
                     .div_ceil(100);
                 let min_new_fee = existing
@@ -575,7 +587,7 @@ impl Mempool {
             // `get_sorted_transactions` can never hand to a producer. Admitted,
             // it would hold lane bytes until its TTL and carry nothing.
             let share = self.config.duty_block_bytes;
-            if batch.block_bytes <= cap && batch.block_bytes > share {
+            if batch.block_bytes > share {
                 return Err(MempoolError::DutyLaneRefused(
                     DutyRefusal::BatchExceedsBlockShare {
                         batch_bytes: batch.block_bytes,
