@@ -40,10 +40,11 @@ pub const MOBILE_MIN_QUOTA_BYTES: u64 = 1 << 30;
 pub const ANDROID_MAX_QUOTA_BYTES: u64 = 64 * (1 << 30);
 
 /// Maximum iOS `MobileOpportunistic` custody quota (`8 GiB`, Section 7.10).
-pub const IOS_OPPORTUNISTIC_MAX_QUOTA_BYTES: u64 = 8 * (1 << 30);
+pub const IOS_OPPORTUNISTIC_MAX_QUOTA_BYTES: u64 =
+    budlum_types::class::MOBILE_OPPORTUNISTIC_MAX_QUOTA_BYTES;
 
-/// Free-storage safety floor (`2 GiB`, `R-34`): falling below triggers `ReleaseShares`.
-pub const LOW_FREE_SPACE_RELEASE_THRESHOLD_BYTES: u64 = 2 * (1 << 30);
+/// Free-storage safety floor (`2 GB` decimal, Section 7.9.5 & `R-34`): falling below triggers `ReleaseShares`.
+pub const LOW_FREE_SPACE_RELEASE_THRESHOLD_BYTES: u64 = 2_000_000_000;
 
 /// Android Mobile audit window in hours (`24h`).
 pub const ANDROID_AUDIT_WINDOW_HOURS: u32 = 24;
@@ -51,11 +52,13 @@ pub const ANDROID_AUDIT_WINDOW_HOURS: u32 = 24;
 /// iOS `MobileOpportunistic` audit window in hours (`48h`, Section 7.10).
 pub const IOS_OPPORTUNISTIC_AUDIT_WINDOW_HOURS: u32 = 48;
 
-/// Android Mobile non-slashing suspension threshold in hours (`24h`).
-pub const ANDROID_SUSPENSION_HOURS: u32 = 24;
+/// Android Mobile non-slashing suspension threshold in hours (`72h`, Section 7.2 & `K-4`).
+pub const ANDROID_SUSPENSION_HOURS: u32 =
+    budlum_types::ValidatorClass::Mobile.suspension_hours() as u32;
 
-/// iOS `MobileOpportunistic` non-slashing suspension threshold in hours (`7 days = 168h`, Section 7.10).
-pub const IOS_OPPORTUNISTIC_SUSPENSION_HOURS_CAP: u32 = 7 * 24;
+/// iOS `MobileOpportunistic` non-slashing suspension threshold in hours (`7 days = 168h`, Section 7.10 & `K-4`).
+pub const IOS_OPPORTUNISTIC_SUSPENSION_HOURS_CAP: u32 =
+    budlum_types::ValidatorClass::MobileOpportunistic.suspension_hours() as u32;
 
 /// Minimum Mobile registration stake in base atoms (`10 BUD` onboarding flow / `100 BUD` class floor).
 pub const MOBILE_ONBOARDING_MIN_STAKE_ATOMS: u64 = 10_000_000;
@@ -781,6 +784,14 @@ mod tests {
         assert_eq!(p.class, MobileValidatorClass::MobileOpportunistic);
         assert_eq!(p.class.audit_window_hours(), 48);
         assert_eq!(p.class.suspension_hours(), 168);
+
+        let android = MobileValidatorPolicy::android_default();
+        assert_eq!(
+            u64::from(android.class.suspension_hours()),
+            budlum_types::ValidatorClass::Mobile.suspension_hours(),
+            "Android Mobile suspension_hours must match canonical K-4 72h table"
+        );
+        assert_eq!(LOW_FREE_SPACE_RELEASE_THRESHOLD_BYTES, 2_000_000_000);
     }
 
     #[test]
