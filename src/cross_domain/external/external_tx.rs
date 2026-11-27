@@ -27,6 +27,11 @@
 //!   the block that froze it, and until the intake guard's cooldown has
 //!   ended when that is later. The refusal names the block the door opens.
 //!
+//!   Neither registration nor readmission brings a domain whose observed
+//!   schemes are classical into service while the quantum alarm stands at
+//!   Isolate, and a domain that a transaction shows to be classical under
+//!   that alarm is isolated by the same transaction.
+//!
 //! - contradiction challenge: any non-self challenger supplying a second
 //!   cryptographically verified finality proof at the same external
 //!   `(height, evidence_version)` and distinct `state_root`; atomically
@@ -260,6 +265,10 @@ pub enum ExternalDomainTxError {
         current_block: u64,
         resolves_at: u64,
     },
+    #[error(
+        "the quantum alarm isolates domains whose observed schemes are classical; this one cannot enter service"
+    )]
+    ClassicalUnderQuantumAlarm,
 }
 
 impl From<IntakeError> for ExternalDomainTxError {
@@ -337,6 +346,32 @@ pub fn execute_external_domain_tx(
     if is_testnet(ctx.chain_id) && uses_ethereum_sync(state, tx) {
         return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
     }
+    apply_external_domain_tx(state, ctx, tx)?;
+    // The executor isolates the classical domains once, in the block the
+    // alarm reaches Isolate. A write that lands afterwards can show a serving
+    // domain to be classical (its first evidence under a second scheme, a
+    // record that named none until now), so the same sweep runs behind every
+    // accepted transaction for as long as the alarm stands. It moves nothing
+    // on a registry the alarm has already been applied to.
+    if state.settlement.quantum.alarm().level()
+        >= crate::security::quantum_canary::AlarmLevel::Isolate
+    {
+        state
+            .settlement
+            .external_intake
+            .registry
+            .isolate_classical_domains();
+    }
+    Ok(())
+}
+
+/// The door proper: one arm per variant, each deciding its refusals before it
+/// writes.
+fn apply_external_domain_tx(
+    state: &mut AccountState,
+    ctx: &ExternalDomainTxContext,
+    tx: &ExternalDomainTx,
+) -> Result<(), ExternalDomainTxError> {
     match tx {
         ExternalDomainTx::Register(request) => register(state, ctx, request),
         ExternalDomainTx::SubmitEvidence(evidence) => submit_evidence(state, ctx, evidence),
@@ -448,6 +483,23 @@ fn require_domain_mutable(
     Ok(())
 }
 
+/// Whether the quantum alarm keeps a domain with these observed schemes out
+/// of service.
+///
+/// The executor isolates every classical domain standing in the registry in
+/// the block the alarm reaches Isolate. That sweep cannot see a domain that
+/// registers later, nor one that was frozen when it ran and asks to come
+/// back, so the doors that bring a domain into service ask the same question
+/// here. The rule then holds for as long as the alarm stands and not only in
+/// the block that raised it.
+fn alarm_isolates(
+    alarm: &crate::security::quantum_canary::QuantumAlarmState,
+    observed: &crate::crypto::facts::CryptoFacts,
+) -> bool {
+    alarm.level() >= crate::security::quantum_canary::AlarmLevel::Isolate
+        && observed.quantum_class() == Some(crate::crypto::facts::QuantumClass::Classical)
+}
+
 fn register(
     state: &mut AccountState,
     ctx: &ExternalDomainTxContext,
@@ -466,6 +518,11 @@ fn register(
         .build(bls_for(&request.spec, ctx), Some(request.golden.clone()));
     let (_, observed_crypto) =
         crate::cross_domain::external::admit_observed(observer_adapter.as_ref(), &request.policy);
+    // Refused before the bond moves: a domain the alarm would isolate on
+    // arrival locks nothing and leaves no entry.
+    if alarm_isolates(state.settlement.quantum.alarm(), &observed_crypto) {
+        return Err(ExternalDomainTxError::ClassicalUnderQuantumAlarm);
+    }
     // The bond is locked first, from a balance already checked to hold it
     // and the fee, and handed back if the intake refuses: a registration
     // never stands without the bond behind it.
@@ -714,6 +771,24 @@ fn readmit(
     }
     require_registrant(state, ctx, domain)?;
     require_domain_mutable(state, domain)?;
+    {
+        // The alarm's sweep moves serving domains only, so a classical domain
+        // that was frozen when the alarm reached Isolate is still frozen and
+        // not isolated. Readmission would return it to service; it is refused
+        // ahead of the clocks, because no wait ends this refusal.
+        let recorded = state
+            .settlement
+            .external_intake
+            .registry
+            .domain(domain)
+            .ok_or(ExternalDomainTxError::UnknownDomain)?;
+        if alarm_isolates(
+            state.settlement.quantum.alarm(),
+            &recorded.record.crypto_facts,
+        ) {
+            return Err(ExternalDomainTxError::ClassicalUnderQuantumAlarm);
+        }
+    }
     {
         // Readmission re-runs the adapter's self-test. That says nothing
         // about why the domain froze, so the freeze is given its resolution
@@ -1797,6 +1872,167 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    /// Raises the alarm to Isolate the way a solved 256-bit curve canary does,
+    /// then applies what the reveal applies in its own block.
+    fn raise_the_alarm_to_isolate(
+        state: &mut AccountState,
+    ) -> crate::security::alarm_effects::AlarmEffectReport {
+        use crate::security::quantum_canary::{CanaryClaim, CanaryId};
+        state.settlement.quantum.force_solved(
+            CanaryId::EccK1,
+            CanaryClaim {
+                commit_height: 1,
+                claimer: addr(0xC4),
+                accepted_height: 2,
+            },
+        );
+        crate::security::alarm_effects::apply_to_state(state)
+    }
+
+    fn recorded_state(state: &AccountState, key: &DomainKey) -> DomainState {
+        state
+            .settlement
+            .external_intake
+            .registry
+            .domain(key)
+            .expect("the domain stays on record")
+            .record
+            .state
+    }
+
+    /// The reveal isolates the classical domains standing in the registry in
+    /// its own block. One that registers afterwards meets the same rule at
+    /// the door: it is refused before its bond moves and leaves no entry.
+    #[test]
+    fn a_classical_domain_registering_under_the_alarm_is_refused_and_locks_no_bond() {
+        let mut state = AccountState::new();
+        let poster = addr(9);
+        state.add_balance(&poster, bond() * 4);
+        if let AdapterSpec::EthereumSync {
+            network,
+            committee: Some(committee),
+        } = spec()
+        {
+            state
+                .settlement
+                .external_intake
+                .pin_ethereum_committee(network, committee);
+        }
+        let report = raise_the_alarm_to_isolate(&mut state);
+        assert_eq!(
+            report.external_isolated, 0,
+            "no domain stood in the registry when the alarm rang"
+        );
+
+        let root_before = state.settlement.root();
+        let refused = execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::Register(Box::new(request(poster))),
+        );
+        assert_eq!(
+            refused,
+            Err(ExternalDomainTxError::ClassicalUnderQuantumAlarm)
+        );
+        assert_eq!(state.settlement.root(), root_before);
+        assert!(state.settlement.external_intake.entries.is_empty());
+        assert!(state.external_bond_escrow.is_empty());
+        assert_eq!(state.get_balance(&poster), bond() * 4);
+    }
+
+    /// The sweep moves serving domains, so a classical domain that was frozen
+    /// when the alarm rang is still frozen and not isolated. Its freeze runs
+    /// out; readmission would return it to service under the alarm, and the
+    /// door refuses it at every height, writing nothing. With no alarm
+    /// standing the same domain reopens at the block its freeze resolves
+    /// (`a_freeze_that_arms_no_guard_cooldown_still_holds_readmission_for_the_period`).
+    #[test]
+    fn a_classical_domain_frozen_before_the_alarm_is_not_readmitted_under_it() {
+        const FROZEN_AT: u64 = 500;
+        let (mut state, key, poster) = registered();
+        state
+            .settlement
+            .external_intake
+            .on_block_committed(FROZEN_AT);
+        state
+            .settlement
+            .external_intake
+            .registry
+            .mark_faulted(&key, "an objective fault")
+            .expect("the domain freezes");
+
+        let report = raise_the_alarm_to_isolate(&mut state);
+        assert_eq!(
+            report.external_isolated, 0,
+            "the sweep leaves a frozen domain in its frozen state"
+        );
+        assert_eq!(recorded_state(&state, &key), DomainState::Faulted);
+
+        let mut early = state.clone();
+        let resolves_at = FROZEN_AT + FREEZE_RESOLUTION_BLOCKS;
+        for height in [resolves_at, resolves_at + 10_000] {
+            assert_eq!(
+                readmit_at(&mut state, key, poster, height),
+                Err(ExternalDomainTxError::ClassicalUnderQuantumAlarm),
+                "height {height}"
+            );
+        }
+        assert_eq!(recorded_state(&state, &key), DomainState::Faulted);
+        assert!(!recorded_state(&state, &key).serves());
+
+        // Before the freeze has run out the refusal is already the alarm's:
+        // no wait ends it, so it is not reported as a wait.
+        assert_eq!(
+            readmit_at(&mut early, key, poster, FROZEN_AT + 1),
+            Err(ExternalDomainTxError::ClassicalUnderQuantumAlarm)
+        );
+    }
+
+    /// A record that names no scheme gives the alarm nothing to act on, so
+    /// the reveal leaves that domain serving. The first evidence it carries
+    /// under the alarm is verified against a classical scheme, and the
+    /// transaction that records it isolates the domain.
+    #[test]
+    fn a_domain_shown_to_be_classical_under_the_alarm_is_isolated_by_that_transaction() {
+        let (mut state, key, poster) = registered();
+        state
+            .settlement
+            .external_intake
+            .registry
+            .domain_mut(&key)
+            .expect("the domain is registered")
+            .record
+            .crypto_facts = crate::crypto::facts::CryptoFacts::new();
+
+        let report = raise_the_alarm_to_isolate(&mut state);
+        assert_eq!(
+            report.external_isolated, 0,
+            "a record naming no scheme is not classical to the sweep"
+        );
+        assert!(recorded_state(&state, &key).serves());
+
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::SubmitEvidence(Box::new(evidence(poster, 200, [0xAA; 32]))),
+        )
+        .expect("the evidence is verified and recorded");
+
+        let record = &state
+            .settlement
+            .external_intake
+            .registry
+            .domain(&key)
+            .expect("the domain stays on record")
+            .record;
+        assert_eq!(
+            record.crypto_facts.quantum_class(),
+            Some(crate::crypto::facts::QuantumClass::Classical)
+        );
+        assert_eq!(record.state, DomainState::QuantumIsolated);
+        assert!(!record.state.serves());
     }
 
     /// A work witness names a proof-of-work rule. Against a domain of any

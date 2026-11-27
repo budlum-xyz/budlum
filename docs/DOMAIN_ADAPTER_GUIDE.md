@@ -94,6 +94,19 @@ While a domain is frozen:
   does not ask about the target domain, so no state of the domain can hold
   the refund.
 
+While the canary alarm stands at Isolate:
+
+- A domain whose observed schemes are classical does not serve. The domains
+  registered when the alarm is raised are isolated in that block.
+- `Register` refuses a classical domain before its bond is escrowed, so the
+  refusal locks nothing and leaves no entry.
+- `Readmit` refuses a classical domain that was frozen when the alarm was
+  raised. That refusal comes ahead of the resolution period: no wait ends
+  it.
+- A domain that an accepted transaction shows to be classical is isolated
+  by that transaction. The evidence stays on record; the domain reads with
+  no backing in force.
+
 External-domain writes are refused on mainnet until the mainnet readiness
 gates are met (`docs/MAINNET_READINESS.md`).
 
