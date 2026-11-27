@@ -158,8 +158,11 @@ fn check_keys(
         if usize::from(key.index) != slot {
             return Err("key-index-not-dense");
         }
-        if key.vendor.is_empty() || key.vendor.len() > MAX_VENDOR_LABEL_BYTES {
+        if key.vendor.trim().is_empty() || key.vendor.len() > MAX_VENDOR_LABEL_BYTES {
             return Err("vendor-label");
+        }
+        if crate::crypto::mainnet_policy::is_software_token_path(&key.vendor) {
+            return Err("software-token");
         }
         if pq::validate_public_key(scheme, &key.public_key).is_err() {
             return Err("public-key-length");
@@ -282,11 +285,26 @@ impl AnchorKeyLedger {
     /// Whether a slot is suspended at a key epoch.
     #[must_use]
     pub fn is_suspended(&self, family: KeyFamily, index: u8, key_epoch: u32) -> bool {
-        self.suspended.contains(&Suspension {
+        if self.suspended.contains(&Suspension {
             family,
             index,
             key_epoch,
-        })
+        }) {
+            return true;
+        }
+        if key_epoch == self.key_epoch {
+            let keys = match family {
+                KeyFamily::Anchor => &self.anchor_keys,
+                KeyFamily::Seal => &self.seal_keys,
+            };
+            if let Some(key) = keys.get(usize::from(index)) {
+                let fingerprint: [u8; 32] = Sha3_256::digest(&key.public_key).into();
+                if self.revoked_key_hashes.contains(&(family, fingerprint)) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// The vendors behind the anchor keys, sorted and distinct.
@@ -586,6 +604,18 @@ pub(crate) mod test_support {
             software_vendor.validate().unwrap_err(),
             LedgerError::Invalid("software-token")
         );
+        let mut software_seal = software_ledger(1, 1);
+        software_seal.seal_keys[0].vendor = "softhsm".to_string();
+        assert_eq!(
+            software_seal.validate().unwrap_err(),
+            LedgerError::Invalid("software-token")
+        );
+        let mut revoked_direct = software_ledger(1, 1);
+        let seal_fp: [u8; 32] = Sha3_256::digest(&revoked_direct.seal_keys[0].public_key).into();
+        revoked_direct
+            .revoked_key_hashes
+            .insert((KeyFamily::Seal, seal_fp));
+        assert!(revoked_direct.is_suspended(KeyFamily::Seal, 0, 1));
         let mut duplicate = software_ledger(1, 1);
         duplicate.anchor_keys[2].public_key = duplicate.anchor_keys[0].public_key.clone();
         assert_eq!(

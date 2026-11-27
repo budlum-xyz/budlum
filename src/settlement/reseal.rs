@@ -128,7 +128,7 @@ pub fn covered_root(anchors: &[(u64, [u8; 32])]) -> Result<[u8; 32], ResealError
     if anchors.is_empty() || anchors.len() > MAX_RESEAL_ANCHORS {
         return Err(ResealError::BadCoverage);
     }
-    if anchors.windows(2).any(|pair| pair[1].0 <= pair[0].0) {
+    if anchors[0].0 == 0 || anchors.windows(2).any(|pair| pair[1].0 <= pair[0].0) {
         return Err(ResealError::BadCoverage);
     }
     let leaves: Vec<[u8; 32]> = anchors.iter().map(|(h, r)| leaf(*h, r)).collect();
@@ -205,7 +205,11 @@ pub fn sign_with_anchor_keys(
 ) -> Result<ResealCertificate, ResealError> {
     let payload = reseal_payload(&cert);
     let mut signatures = Vec::new();
+    let mut seen_slots = std::collections::BTreeSet::new();
     for (index, key) in keys {
+        if !seen_slots.insert(*index) {
+            continue;
+        }
         if let Ok(signature) = key.sign(crate::crypto::ctx::RESEAL_V1, &payload) {
             signatures.push(AnchorSignature {
                 key_index: *index,
@@ -234,7 +238,7 @@ pub fn verify_reseal(
     registry: &SchemeStatusRegistry,
     covered: &[(u64, [u8; 32])],
 ) -> Result<(), ResealError> {
-    if cert.chain_id != chain_id {
+    if cert.chain_id != chain_id || ledger.chain_id != chain_id {
         return Err(ResealError::WrongChain);
     }
     if cert.key_epoch != ledger.key_epoch {
@@ -473,9 +477,23 @@ mod tests {
             Err(ResealError::StaleKeyEpoch)
         );
         assert_eq!(covered_root(&[]), Err(ResealError::BadCoverage));
+        assert_eq!(covered_root(&[(0, [1; 32])]), Err(ResealError::BadCoverage));
         assert_eq!(
             covered_root(&[(5, [0; 32]), (5, [1; 32])]),
             Err(ResealError::BadCoverage)
+        );
+        let foreign_ledger = software_ledger(CHAIN + 7, 1);
+        assert_eq!(
+            verify_reseal(&cert, CHAIN, &foreign_ledger, &registry, &covered()),
+            Err(ResealError::WrongChain)
+        );
+        let k0 = anchor_key(0);
+        assert_eq!(
+            sign_with_anchor_keys(
+                unsigned_certificate(CHAIN, 1, &covered()).expect("coverage"),
+                &[(0, &k0), (0, &k0)],
+            ),
+            Err(ResealError::ThresholdNotReached)
         );
     }
 }
