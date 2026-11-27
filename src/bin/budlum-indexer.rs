@@ -118,8 +118,32 @@ struct ClientRates {
     node_calls: BTreeMap<IpAddr, RateWindow>,
 }
 
+fn canonical_quota_ip(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            if segs.get(0..4) != Some(&[0, 0, 0, 0]) {
+                IpAddr::V6(std::net::Ipv6Addr::new(
+                    segs.first().copied().unwrap_or(0),
+                    segs.get(1).copied().unwrap_or(0),
+                    segs.get(2).copied().unwrap_or(0),
+                    segs.get(3).copied().unwrap_or(0),
+                    0,
+                    0,
+                    0,
+                    0,
+                ))
+            } else {
+                IpAddr::V6(v6)
+            }
+        }
+    }
+}
+
 impl ClientRates {
-    fn take(&mut self, ip: IpAddr, now: u64) -> bool {
+    fn take(&mut self, raw_ip: IpAddr, now: u64) -> bool {
+        let ip = canonical_quota_ip(raw_ip);
         if !self.clients.contains_key(&ip) && self.clients.len() >= MAX_CLIENTS {
             self.clients.retain(|_, window| {
                 window.expire(now);
@@ -141,7 +165,8 @@ impl ClientRates {
     /// The share is what keeps a caller inside the *shared* budget from being
     /// able to spend all of it: the per-client request limit alone permitted
     /// exactly two callers to consume every node call the service makes.
-    fn take_node(&mut self, ip: IpAddr, now: u64) -> bool {
+    fn take_node(&mut self, raw_ip: IpAddr, now: u64) -> bool {
+        let ip = canonical_quota_ip(raw_ip);
         if !self.node_calls.contains_key(&ip) && self.node_calls.len() >= MAX_CLIENTS {
             self.node_calls.retain(|_, window| {
                 window.expire(now);
@@ -953,5 +978,19 @@ mod tests {
         assert!(!clients.take(one, 59));
         assert!(clients.take(two, 59));
         assert!(clients.take(one, 60));
+    }
+
+    #[test]
+    fn ipv6_64_subnet_rotation_shares_client_and_node_budgets() {
+        let mut clients = ClientRates::default();
+        let v6_a: IpAddr = "2001:db8:cafe:42::1".parse().expect("v6 a");
+        let v6_b: IpAddr = "2001:db8:cafe:42::9999".parse().expect("v6 b");
+        for _ in 0..CLIENT_NODE_CALLS_PER_MINUTE {
+            assert!(clients.take_node(v6_a, 10));
+        }
+        assert!(
+            !clients.take_node(v6_b, 10),
+            "rotating interface bits inside the same IPv6 /64 prefix must not bypass CLIENT_NODE_CALLS_PER_MINUTE"
+        );
     }
 }
