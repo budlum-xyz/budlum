@@ -222,6 +222,10 @@ pub enum RegistryError {
         account: Address,
         role: RoleId,
     },
+    /// Zero or otherwise invalid account address.
+    InvalidAccount {
+        account: Address,
+    },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -259,6 +263,9 @@ impl std::fmt::Display for RegistryError {
             }
             Self::StakeOverflow { account, role } => {
                 write!(f, "stake of {account} as {role} would overflow")
+            }
+            Self::InvalidAccount { account } => {
+                write!(f, "invalid account address {account}")
             }
         }
     }
@@ -491,6 +498,9 @@ impl PermissionlessRegistry {
         stake: u64,
         current_epoch: u64,
     ) -> Result<(), RegistryError> {
+        if account == Address::zero() {
+            return Err(RegistryError::InvalidAccount { account });
+        }
         if stake < self.params.min_stake {
             return Err(RegistryError::InsufficientStake {
                 required: self.params.min_stake,
@@ -694,8 +704,12 @@ impl PermissionlessRegistry {
         total_stake: u64,
         current_epoch: u64,
     ) {
+        if account == Address::zero() {
+            return;
+        }
         let key = (role, account);
         let unbonding_epochs = self.params.unbonding_epochs;
+        let min_stake = self.params.min_stake;
         match self.registrations.get_mut(&key) {
             Some(reg) => {
                 if matches!(
@@ -712,6 +726,15 @@ impl PermissionlessRegistry {
                     // A full exit keeps the entry under the unbonding lock so a
                     // later report can still cut it. Removing it would free the
                     // stake at once.
+                    if matches!(reg.status, MemberStatus::Active) {
+                        reg.status = MemberStatus::Unbonding {
+                            release_epoch: current_epoch.saturating_add(unbonding_epochs),
+                        };
+                    }
+                } else if total_stake < min_stake {
+                    // Below the minimum stake floor a member cannot reactivate
+                    // from Unbonding and cannot remain Active.
+                    reg.stake = total_stake;
                     if matches!(reg.status, MemberStatus::Active) {
                         reg.status = MemberStatus::Unbonding {
                             release_epoch: current_epoch.saturating_add(unbonding_epochs),
@@ -1288,6 +1311,9 @@ impl PermissionlessRegistry {
         validator: Address,
         amount: u64,
     ) -> Result<(), String> {
+        if delegator == Address::zero() || validator == Address::zero() {
+            return Err("delegator and validator addresses must be non-zero".into());
+        }
         if amount == 0 {
             return Err("delegation amount must be non-zero".into());
         }
@@ -1370,8 +1396,20 @@ impl PermissionlessRegistry {
         let source = self
             .delegation_slot(delegator, from)
             .map_err(|_| "no active delegation to redelegate from".to_string())?;
-        if self.delegations[source].amount < amount {
+        let source_amount = self
+            .delegations
+            .get(source)
+            .map(|p| p.amount)
+            .ok_or_else(|| "no active delegation to redelegate from".to_string())?;
+        if source_amount < amount {
             return Err("redelegation exceeds the active position".into());
+        }
+        let remainder = source_amount - amount;
+        let floor = self.params.min_delegation_amount;
+        if remainder > 0 && remainder < floor {
+            return Err(format!(
+                "redelegation remainder {remainder} must be 0 or at least {floor} base units"
+            ));
         }
         match self.delegation_slot(delegator, to) {
             Ok(index) => {
@@ -1628,10 +1666,21 @@ impl PermissionlessRegistry {
         let position_index = self
             .delegation_slot(delegator, validator)
             .map_err(|_| "delegation position not found".to_string())?;
-        let available = self.delegations[position_index].amount;
+        let available = self
+            .delegations
+            .get(position_index)
+            .map(|p| p.amount)
+            .ok_or_else(|| "delegation position not found".to_string())?;
         if available < amount {
             return Err(format!(
                 "delegation unbond exceeds position: requested {amount}, available {available}"
+            ));
+        }
+        let remainder = available - amount;
+        let floor = self.params.min_delegation_amount;
+        if remainder > 0 && remainder < floor {
+            return Err(format!(
+                "delegation unbond remainder {remainder} must be 0 or at least {floor} base units"
             ));
         }
         let release_epoch = current_epoch.saturating_add(self.params.delegation_unbonding_epochs);

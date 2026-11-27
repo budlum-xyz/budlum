@@ -19,6 +19,10 @@ pub const FINALITY_PRUNE_DEPTH: u64 = 1000;
 /// ceiling against their own batching window.
 pub const MAX_NONCE_GAP: u64 = 65_536;
 
+/// Hard ceiling on distinct `(source_domain, target_domain, sender)` replay
+/// channels hashed into [`ReplayNonceStore::root`].
+const MAX_PROCESSED_CHANNELS: usize = 65_536;
+
 /// Replay protection for cross-domain messages, held as one high-water mark
 /// per (source, target, sender) direction.
 ///
@@ -120,11 +124,21 @@ impl ReplayNonceStore {
         nonce: u64,
         current_height: u64,
     ) -> Result<(), String> {
+        if source_domain == target_domain {
+            return Err(format!(
+                "Cross-domain replay channel source and target domains must differ (both={source_domain})"
+            ));
+        }
         if nonce == u64::MAX {
             return Err("Cross-domain message nonce u64::MAX is reserved".into());
         }
         let key = (source_domain, target_domain, *sender);
-        if let Some((high_water, _)) = self.processed_high_water.get(&key) {
+        if let Some((high_water, prev_height)) = self.processed_high_water.get(&key) {
+            if current_height < *prev_height {
+                return Err(format!(
+                    "Cross-domain replay height {current_height} precedes previous high-water height {prev_height}"
+                ));
+            }
             if nonce <= *high_water {
                 return Err("Cross-domain message was already processed".into());
             }
@@ -134,10 +148,17 @@ impl ReplayNonceStore {
                     "Cross-domain nonce gap {gap} exceeds {MAX_NONCE_GAP}"
                 ));
             }
-        } else if nonce > MAX_NONCE_GAP {
-            return Err(format!(
-                "Cross-domain initial nonce {nonce} exceeds {MAX_NONCE_GAP}"
-            ));
+        } else {
+            if nonce > MAX_NONCE_GAP {
+                return Err(format!(
+                    "Cross-domain initial nonce {nonce} exceeds {MAX_NONCE_GAP}"
+                ));
+            }
+            if self.processed_high_water.len() >= MAX_PROCESSED_CHANNELS {
+                return Err(format!(
+                    "Cross-domain replay channel table is full (max {MAX_PROCESSED_CHANNELS})"
+                ));
+            }
         }
         self.processed_high_water
             .insert(key, (nonce, current_height));
