@@ -19,12 +19,76 @@ use ai_tune::eval::{
 use ai_tune::plan::TunePlan;
 use cli::{parse, Command, HELP};
 use std::fmt::Write as _;
+use std::io::Read as _;
+use std::path::Path;
+
+/// Maximum JSONL dataset or response file size read by `ai-ops` (16 MiB).
+const MAX_OPS_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Read a regular, non-symlink file into UTF-8 text up to `max_bytes`.
+fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> Result<String, String> {
+    let lmeta = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("could not inspect {}: {e}", path.display()))?;
+    if lmeta.file_type().is_symlink() || !lmeta.file_type().is_file() {
+        return Err(format!(
+            "{} must be a regular file, not a symlink or special file",
+            path.display()
+        ));
+    }
+    if lmeta.len() > max_bytes {
+        return Err(format!(
+            "{} exceeds the maximum allowed size ({} > {max_bytes} bytes)",
+            path.display(),
+            lmeta.len()
+        ));
+    }
+    let file =
+        std::fs::File::open(path).map_err(|e| format!("could not open {}: {e}", path.display()))?;
+    let fmeta = file
+        .metadata()
+        .map_err(|e| format!("could not stat {}: {e}", path.display()))?;
+    if !fmeta.file_type().is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    if fmeta.len() > max_bytes {
+        return Err(format!(
+            "{} exceeds the maximum allowed size ({} > {max_bytes} bytes)",
+            path.display(),
+            fmeta.len()
+        ));
+    }
+    let mut buf = Vec::new();
+    let limit = max_bytes.saturating_add(1);
+    file.take(limit)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    if (buf.len() as u64) > max_bytes {
+        return Err(format!(
+            "{} exceeds the maximum allowed size ({max_bytes} bytes)",
+            path.display()
+        ));
+    }
+    String::from_utf8(buf).map_err(|e| format!("{} is not valid UTF-8: {e}", path.display()))
+}
+
+/// Parse an evaluation minimum score threshold; must be finite and within `0.0..=1.0`.
+fn parse_min_score(raw: &str) -> Result<f64, String> {
+    let score = raw
+        .parse::<f64>()
+        .map_err(|e| format!("the minimum score does not parse: {e}"))?;
+    if !score.is_finite() || !(0.0..=1.0).contains(&score) {
+        return Err(format!(
+            "the minimum score must be finite and within 0.0..=1.0, got {raw}"
+        ));
+    }
+    Ok(score)
+}
 
 /// Decode a JSONL file of instruction records. A broken line is a hard stop:
 /// a grader that silently skipped unreadable records would grade a different
 /// set than the one the operator meant to submit.
 fn load_records(path: &str) -> Vec<ai_data::jsonl::InstructionRecord> {
-    let text = match std::fs::read_to_string(path) {
+    let text = match read_regular_file_bounded(Path::new(path), MAX_OPS_FILE_BYTES) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("the dataset could not be read ({path}): {e}");
@@ -197,10 +261,10 @@ fn main() {
                 std::process::exit(1);
             }
             let gate = match min_score.as_deref() {
-                Some(v) => match v.parse::<f64>() {
+                Some(v) => match parse_min_score(v) {
                     Ok(f) => EvalGate::at_least(f),
                     Err(e) => {
-                        eprintln!("the minimum score does not parse: {e}");
+                        eprintln!("{e}");
                         std::process::exit(2);
                     }
                 },
@@ -209,7 +273,7 @@ fn main() {
             match responses {
                 None => println!("no responses given: the set identity is reported, but it\ncannot be graded without produced answers."),
                 Some(rp) => {
-                    let rtext = match std::fs::read_to_string(&rp) {
+                    let rtext = match read_regular_file_bounded(Path::new(&rp), MAX_OPS_FILE_BYTES) {
                         Ok(t) => t,
                         Err(e) => {
                             eprintln!("the responses could not be read ({rp}): {e}");
@@ -270,7 +334,7 @@ fn main() {
         },
         Command::Validate { path } => match path {
             None => println!("validate: <no jsonl file given>"),
-            Some(p) => match std::fs::read_to_string(&p) {
+            Some(p) => match read_regular_file_bounded(Path::new(&p), MAX_OPS_FILE_BYTES) {
                 Err(e) => {
                     eprintln!("the file could not be read ({p}): {e}");
                     std::process::exit(2);
@@ -313,11 +377,69 @@ fn digest_hex(hash: &[u8; 32]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_dataset;
+    use super::{decode_dataset, parse_min_score, read_regular_file_bounded, MAX_OPS_FILE_BYTES};
 
     #[test]
     fn a_record_with_an_empty_assistant_does_not_load() {
         let text = r#"{"user":"hello","assistant":"   "}"#;
         assert!(decode_dataset(text).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ai06_ops_refuses_symlinks_oversize_and_invalid_min_score() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!(
+            "ai_inference-ops-ai06-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let real = dir.join("real.jsonl");
+        std::fs::write(&real, "{\"user\":\"q\",\"assistant\":\"a\"}\n").unwrap();
+        assert!(read_regular_file_bounded(&real, MAX_OPS_FILE_BYTES).is_ok());
+
+        // 1. Symlink path must be refused.
+        let link = dir.join("link.jsonl");
+        symlink(&real, &link).unwrap();
+        assert!(
+            read_regular_file_bounded(&link, MAX_OPS_FILE_BYTES).is_err(),
+            "read_regular_file_bounded must refuse symlinks"
+        );
+
+        // 2. Directory (non-regular) path must be refused.
+        assert!(
+            read_regular_file_bounded(&dir, MAX_OPS_FILE_BYTES).is_err(),
+            "read_regular_file_bounded must refuse directories"
+        );
+
+        // 3. Oversized file (> limit) must be refused.
+        let big = dir.join("big.jsonl");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(MAX_OPS_FILE_BYTES + 1).unwrap();
+        drop(f);
+        assert!(
+            read_regular_file_bounded(&big, MAX_OPS_FILE_BYTES).is_err(),
+            "read_regular_file_bounded must refuse oversized files"
+        );
+
+        // 4. Non-finite or out-of-range min_score must be refused.
+        for bad in ["NaN", "inf", "-inf", "-0.1", "-5.0", "1.01", "2.0"] {
+            assert!(
+                parse_min_score(bad).is_err(),
+                "parse_min_score must reject {bad:?}"
+            );
+        }
+        assert!((parse_min_score("0.0").unwrap() - 0.0).abs() < f64::EPSILON);
+        assert!((parse_min_score("0.8").unwrap() - 0.8).abs() < f64::EPSILON);
+        assert!((parse_min_score("1.0").unwrap() - 1.0).abs() < f64::EPSILON);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

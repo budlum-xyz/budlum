@@ -217,15 +217,30 @@ fn is_ascii_scheme(scheme: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
+fn is_unsafe_display_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
 fn display_labels(labels: &str) -> String {
     let mut out = String::with_capacity(labels.len() + 8);
     for (i, label) in labels.split('.').enumerate() {
         if i > 0 {
             out.push('.');
         }
-        if label.chars().any(char::is_control) {
-            // A control character or an escape sequence never reaches the
-            // address bar or a terminal.
+        if label
+            .chars()
+            .any(|c| is_unsafe_display_char(c) || c == '\\')
+        {
+            // A control character, Bidi override, backslash, or escape sequence
+            // never reaches the address bar or a terminal.
             out.push_str("[?]");
         } else if label.is_ascii() {
             out.push_str(label);
@@ -262,10 +277,10 @@ pub fn display_form(name: &str) -> String {
     }
     if let Some((scheme, rest)) = name.split_once("://") {
         if is_ascii_scheme(scheme) {
-            let split_at = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let split_at = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
             let authority = &rest[..split_at];
             let tail = &rest[split_at..];
-            let safe_tail = if tail.chars().any(char::is_control) {
+            let safe_tail = if tail.chars().any(|c| is_unsafe_display_char(c) || c == '\\') {
                 "/[?]"
             } else {
                 tail
@@ -393,5 +408,25 @@ mod tests {
         let mixed = display_form("A\u{044F}z.bud");
         assert_eq!(mixed, mixed.to_ascii_lowercase());
         assert!(mixed.starts_with("xn--"));
+    }
+
+    #[test]
+    fn exp04_display_form_neutralizes_bidi_overrides_and_backslashes() {
+        // Bidi override in URL path must never pass through raw to the address bar.
+        let bidi_path = display_form("https://example.com/\u{202E}fdp.exe");
+        assert_eq!(bidi_path, "https://example.com/[?]");
+        assert!(!bidi_path.contains('\u{202E}'));
+
+        let bidi_isolate = display_form("https://example.com/\u{2066}evil\u{2069}");
+        assert_eq!(bidi_isolate, "https://example.com/[?]");
+
+        // Backslash authority confusion must be isolated and neutralized.
+        let backslash_url = display_form("https://bank.com\\evil.com/login");
+        assert_eq!(backslash_url, "https://bank.com/[?]");
+        assert!(!backslash_url.contains('\\'));
+
+        // Bidi control or backslash in bare labels must be replaced with `[?]`.
+        assert_eq!(display_form("ayaz.\u{202E}bud"), "ayaz.[?]");
+        assert_eq!(display_form("bank\\evil.bud"), "[?].bud");
     }
 }

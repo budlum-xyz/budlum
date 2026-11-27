@@ -6,11 +6,64 @@ use crate::redact::redact_model_strings;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::Path;
 
 /// The schema version: when the format changes the keys change with it, so
 /// stale records are not loaded.
 pub const SCHEMA_VERSION: &str = "2026-08-15-v1";
+
+/// Maximum cache file size loaded or written (16 MiB) to bound memory usage.
+///
+/// WIRING: Knowledge cache ceiling constant.
+pub const MAX_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Read a regular, non-symlink file into UTF-8 text up to `max_bytes`.
+fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> Result<Option<String>, String> {
+    let lmeta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("the cache metadata could not be read: {e}")),
+    };
+    if lmeta.file_type().is_symlink() || !lmeta.file_type().is_file() {
+        return Err(String::from(
+            "the cache path must be a regular file, not a symlink or special file",
+        ));
+    }
+    if lmeta.len() > max_bytes {
+        return Err(format!(
+            "the cache file exceeds the maximum allowed size ({} > {max_bytes} bytes)",
+            lmeta.len()
+        ));
+    }
+    let file =
+        std::fs::File::open(path).map_err(|e| format!("the cache could not be read: {e}"))?;
+    let fmeta = file
+        .metadata()
+        .map_err(|e| format!("the cache metadata could not be read: {e}"))?;
+    if !fmeta.file_type().is_file() {
+        return Err(String::from("the cache path is not a regular file"));
+    }
+    if fmeta.len() > max_bytes {
+        return Err(format!(
+            "the cache file exceeds the maximum allowed size ({} > {max_bytes} bytes)",
+            fmeta.len()
+        ));
+    }
+    let mut buf = Vec::new();
+    let limit = max_bytes.saturating_add(1);
+    file.take(limit)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("the cache could not be read: {e}"))?;
+    if (buf.len() as u64) > max_bytes {
+        return Err(format!(
+            "the cache file exceeds the maximum allowed size ({max_bytes} bytes)"
+        ));
+    }
+    String::from_utf8(buf)
+        .map(Some)
+        .map_err(|e| format!("the cache is not valid UTF-8: {e}"))
+}
 
 /// One cache line.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,18 +104,18 @@ impl LlmCache {
             enabled,
             items: BTreeMap::new(),
         };
-        if enabled && path.exists() {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("the cache could not be read: {e}"))?;
-            for line in text.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Ok(row) = serde_json::from_str::<CacheLine>(line) {
-                    if row.key.starts_with(&format!("{SCHEMA_VERSION}|")) {
-                        cache
-                            .items
-                            .insert(row.key, redact_model_strings(&row.parsed));
+        if enabled {
+            if let Some(text) = read_regular_file_bounded(path, MAX_CACHE_BYTES)? {
+                for line in text.lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    if let Ok(row) = serde_json::from_str::<CacheLine>(line) {
+                        if row.key.starts_with(&format!("{SCHEMA_VERSION}|")) {
+                            cache
+                                .items
+                                .insert(row.key, redact_model_strings(&row.parsed));
+                        }
                     }
                 }
             }
@@ -129,15 +182,60 @@ impl LlmCache {
             text.push_str(&json);
             text.push('\n');
         }
-        // Write beside the cache and rename over it, so a crash mid-write
-        // cannot leave a truncated cache file.
+        if (text.len() as u64) > MAX_CACHE_BYTES {
+            return Err(format!(
+                "the cache exceeds the maximum allowed size ({} > {MAX_CACHE_BYTES} bytes)",
+                text.len()
+            ));
+        }
+        match std::fs::symlink_metadata(&self.path) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.file_type().is_file() => {
+                return Err(String::from(
+                    "the cache target must be a regular file, not a symlink or special file",
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!("the cache target could not be inspected: {e}"));
+            }
+        }
+        // Write beside the cache with create_new (O_CREAT|O_EXCL, never follows
+        // symlinks) and owner-only 0600 permissions, then rename over it.
         let mut tmp_name = self.path.as_os_str().to_owned();
         tmp_name.push(".tmp");
         let tmp_path = std::path::PathBuf::from(tmp_name);
-        std::fs::write(&tmp_path, text)
-            .map_err(|e| format!("the cache could not be written: {e}"))?;
-        std::fs::rename(&tmp_path, &self.path)
-            .map_err(|e| format!("the cache could not be written: {e}"))
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let mut tmp_file = opts
+            .open(&tmp_path)
+            .map_err(|e| format!("the cache temp file could not be created: {e}"))?;
+        if let Err(e) = tmp_file
+            .write_all(text.as_bytes())
+            .and_then(|()| tmp_file.flush())
+        {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("the cache could not be written: {e}"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if let Err(e) = tmp_file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(format!("the cache permissions could not be set: {e}"));
+            }
+        }
+        drop(tmp_file);
+        if let Err(e) = std::fs::rename(&tmp_path, &self.path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("the cache could not be written: {e}"));
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -231,5 +329,72 @@ mod tests {
         assert!(!got.contains(&raw_secret), "{got}");
         assert!(got.contains(crate::redact::REDACTION_TOKEN), "{got}");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ai01_cache_refuses_symlinks_oversize_and_sets_owner_only_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = std::env::temp_dir().join(format!(
+            "ai_inference-cache-ai01-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 1. Symlink cache path must be rejected on open AND save.
+        let target = dir.join("victim.txt");
+        std::fs::write(&target, "ORIGINAL_VICTIM_DATA").unwrap();
+        let link = dir.join("cache-link.jsonl");
+        symlink(&target, &link).unwrap();
+        assert!(
+            LlmCache::open(&link, true).is_err(),
+            "open must reject symlink cache path"
+        );
+
+        // 2. Pre-planted <cache>.tmp symlink must NOT overwrite target on save.
+        let cache_path = dir.join("normal.jsonl");
+        let tmp_link = dir.join("normal.jsonl.tmp");
+        symlink(&target, &tmp_link).unwrap();
+        let mut cache = LlmCache::open(&cache_path, true).unwrap();
+        let k = LlmCache::key("p", "m", "t", &[3u8; 32]);
+        cache.set(k.clone(), serde_json::json!({"ok": true}));
+        assert!(
+            cache.save().is_err(),
+            "save must refuse pre-planted .tmp symlink"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "ORIGINAL_VICTIM_DATA",
+            "symlink target must never be clobbered"
+        );
+        let _ = std::fs::remove_file(&tmp_link);
+
+        // 3. Clean save creates owner-only (0600) permissions.
+        cache.save().unwrap();
+        let mode = std::fs::metadata(&cache_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "cache file must not be group/world readable, got {:o}",
+            mode
+        );
+
+        // 4. Oversized cache file (> 16 MiB) must be refused on open.
+        let big = dir.join("oversized.jsonl");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(16 * 1024 * 1024 + 1).unwrap();
+        drop(f);
+        assert!(
+            LlmCache::open(&big, true).is_err(),
+            "open must refuse oversized cache files"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

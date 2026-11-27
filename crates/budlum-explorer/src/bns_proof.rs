@@ -194,6 +194,15 @@ pub fn evaluate(
                 ));
                 return evidence;
             };
+            let mut seen_names = std::collections::BTreeSet::new();
+            if entries.iter().any(|e| !seen_names.insert(e.name.as_str())) {
+                evidence.push(Claim::new(
+                    "bns-resolution",
+                    Strength::Refused,
+                    "the presented registry contains duplicate name entries and is ambiguous",
+                ));
+                return evidence;
+            }
             let found = entries.iter().find(|e| {
                 e.name == resolved.name
                     && e.owner == resolved.owner
@@ -252,6 +261,13 @@ fn evaluate_per_name_claim(
     expected_bns_root: Option<[u8; 32]>,
     current_epoch: u64,
 ) -> Claim {
+    if resolved.content_id.is_some() && resolved.content_binding.is_none() {
+        return Claim::new(
+            "bns-resolution",
+            Strength::Refused,
+            "the resolved content_id has no committed content_binding in the per-name proof",
+        );
+    }
     let (expires_at, extras_digest, meta_digest) = digests;
     let leaf = bns_leaf_digest(
         &resolved.name,
@@ -641,5 +657,79 @@ mod tests {
             content_binding("ayaz.bud", [1u8; 32], &content),
             content_binding("ayaz.bud", [4u8; 32], &content)
         );
+    }
+
+    #[test]
+    fn exp01_per_name_proof_refuses_unbound_content_id_and_duplicate_registry_names() {
+        // An on-chain name has no content_binding, so the leaf commits to None.
+        // A malicious RPC attaches an arbitrary content_id to the valid proof;
+        // the browser must refuse rather than minting a Verified badge.
+        let unbound_with_forged_cid = ResolvedName {
+            name: String::from("ayaz.bud"),
+            owner: [1u8; 32],
+            storage_root: None,
+            content_id: Some(ContentId([0xAA; 32])),
+            content_binding: None,
+            is_expired: false,
+        };
+        let extras = [0x42u8; 32];
+        let meta = [0x24u8; 32];
+        let sibling = [0x77u8; 32];
+        let leaf = bns_leaf_digest(
+            &unbound_with_forged_cid.name,
+            unbound_with_forged_cid.owner,
+            25,
+            None,
+            None,
+            extras,
+        );
+        let names_root =
+            fold_bns_merkle_branch(&unbound_with_forged_cid.name, leaf, &[sibling]).unwrap();
+        let expected_root = bns_registry_root_from_parts(meta, names_root);
+        let proof = BnsInclusionProof::PerName {
+            expires_at: 25,
+            extras_digest: extras,
+            meta_digest: meta,
+            siblings: vec![sibling],
+        };
+        let forged = evaluate(&unbound_with_forged_cid, &proof, Some(expected_root), 10);
+        assert_eq!(forged.weakest(), Strength::Refused);
+        assert!(
+            forged.badge().contains("content_binding"),
+            "{}",
+            forged.badge()
+        );
+
+        // A legitimately unbound name (both content_id and content_binding None) still verifies.
+        let mut legitimately_unbound = unbound_with_forged_cid;
+        legitimately_unbound.content_id = None;
+        let ok = evaluate(&legitimately_unbound, &proof, Some(expected_root), 10);
+        assert_eq!(ok.weakest(), Strength::Verified);
+
+        // A Registry proof containing duplicate name entries is refused as ambiguous.
+        let dup_entries = vec![
+            RegistryEntry {
+                name: String::from("ayaz.bud"),
+                owner: [1u8; 32],
+                expires_at: 25,
+                content_id: Some(ContentId([9u8; 32])),
+                storage_root: Some([9u8; 32]),
+            },
+            RegistryEntry {
+                name: String::from("ayaz.bud"),
+                owner: [2u8; 32],
+                expires_at: 25,
+                content_id: Some(ContentId([0xEE; 32])),
+                storage_root: None,
+            },
+        ];
+        let dup_root = partial_registry_root(100, &dup_entries);
+        let dup_proof = BnsInclusionProof::Registry {
+            base_cost: 100,
+            entries: dup_entries,
+        };
+        let dup = evaluate(&resolved(), &dup_proof, Some(dup_root), 10);
+        assert_eq!(dup.weakest(), Strength::Refused);
+        assert!(dup.badge().contains("duplicate"), "{}", dup.badge());
     }
 }

@@ -296,7 +296,7 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
             let value = &body[..close];
             out.push_str(lead_ws);
             out.push_str(&q);
-            if value.is_empty() || value.starts_with(REDACTION_TOKEN) {
+            if value.is_empty() || value == REDACTION_TOKEN {
                 out.push_str(value);
             } else {
                 report.add("key_value");
@@ -317,7 +317,7 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
         let value = &body[..value_end];
         out.push_str(lead_ws);
         out.push_str(&q);
-        if value.is_empty() || value.starts_with(REDACTION_TOKEN) {
+        if value.is_empty() || value == REDACTION_TOKEN {
             out.push_str(value);
         } else {
             report.add("key_value");
@@ -490,24 +490,56 @@ fn pem_block_label(line: &str) -> Option<String> {
     Some(label.to_string())
 }
 
+/// Replace every case-insensitive occurrence of `REDACTION_TOKEN` with a space
+/// while preserving the case of all surrounding characters.
+fn strip_redaction_tokens(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    let tok_len = REDACTION_TOKEN.len();
+    while !rest.is_empty() {
+        if rest
+            .get(..tok_len)
+            .is_some_and(|head| head.eq_ignore_ascii_case(REDACTION_TOKEN))
+        {
+            out.push(' ');
+            rest = rest.get(tok_len..).unwrap_or("");
+        } else if let Some(ch) = rest.chars().next() {
+            out.push(ch);
+            rest = rest.get(ch.len_utf8()..).unwrap_or("");
+        } else {
+            break;
+        }
+    }
+    out
+}
+
 /// Is a value likely to contain a secret?
 #[must_use]
 pub fn looks_secretish(value: &str) -> bool {
-    let lower = value.to_lowercase();
-    if lower.contains(&REDACTION_TOKEN.to_lowercase()) {
-        return false;
-    }
+    let stripped = strip_redaction_tokens(value);
+    let lower = stripped.to_lowercase();
     if SECRET_KEYWORDS.iter().any(|kw| lower.contains(kw)) {
         return true;
     }
-    VALUE_PATTERNS.iter().any(|(_, detect)| detect(value))
+    if VALUE_PATTERNS.iter().any(|(_, detect)| detect(value)) {
+        return true;
+    }
+    stripped
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'))
+        .filter(|tok| !tok.is_empty())
+        .any(|tok| {
+            let core = tok.trim_matches('.');
+            VALUE_PATTERNS
+                .iter()
+                .any(|(_, detect)| detect(tok) || (!core.is_empty() && detect(core)))
+        })
 }
 
 /// Masks every string below a secret-named key (the whole value, whatever its shape).
 fn mask_all_strings(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::String(s) => {
-            if s.is_empty() || s.starts_with(REDACTION_TOKEN) {
+            if s.is_empty() || s == REDACTION_TOKEN {
                 serde_json::Value::String(s.clone())
             } else {
                 serde_json::Value::String(REDACTION_TOKEN.to_string())
@@ -897,5 +929,50 @@ mod tests {
         let r3 = redact_text("export TOKEN=delta_secret SECRET=echo_secret");
         assert!(!r3.text().contains("delta_secret"), "{}", r3.text());
         assert!(!r3.text().contains("echo_secret"), "{}", r3.text());
+    }
+
+    #[test]
+    fn ai07_redaction_token_prefix_cannot_smuggle_unmasked_secrets() {
+        let smuggled = "REAL_SMUGGLED_SECRET_98765";
+
+        // 1. Key-value text redaction must not bypass when value starts with <SECRET:MASKED>.
+        let kv_quoted = format!("password: \"{REDACTION_TOKEN}{smuggled}\"");
+        let r1 = redact_text(&kv_quoted);
+        assert!(
+            !r1.text().contains(smuggled),
+            "quoted prefix-anchor smuggled secret: {}",
+            r1.text()
+        );
+        assert!(r1.report().changed());
+
+        let kv_unquoted = format!("api_key={REDACTION_TOKEN}{smuggled}");
+        let r2 = redact_text(&kv_unquoted);
+        assert!(
+            !r2.text().contains(smuggled),
+            "unquoted prefix-anchor smuggled secret: {}",
+            r2.text()
+        );
+        assert!(r2.report().changed());
+
+        // 2. Structured JSON redaction must not bypass when string starts with <SECRET:MASKED>.
+        let json_in = serde_json::json!({
+            "password": format!("{REDACTION_TOKEN}{smuggled}"),
+        });
+        let json_out = redact_model_strings(&json_in).to_string();
+        assert!(
+            !json_out.contains(smuggled),
+            "json prefix-anchor smuggled secret: {json_out}"
+        );
+
+        // 3. looks_secretish must not short-circuit false when <SECRET:MASKED> sits beside a real secret.
+        let live_sk = format!("sk-{}", "abcdefghijklmnopqrstuvwxyz123");
+        assert!(
+            looks_secretish(&format!("{REDACTION_TOKEN} {live_sk}")),
+            "looks_secretish missed live sk- secret alongside redaction token"
+        );
+        assert!(
+            looks_secretish(&format!("{REDACTION_TOKEN} password=hunter2")),
+            "looks_secretish missed password keyword alongside redaction token"
+        );
     }
 }

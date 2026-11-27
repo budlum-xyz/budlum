@@ -9,6 +9,55 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, Write};
 use std::path::Path;
 
+/// Maximum task memory file size loaded or written (16 MiB).
+pub const MAX_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Read a regular, non-symlink file into UTF-8 text up to `max_bytes`.
+fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> Result<Option<String>, String> {
+    let lmeta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("could not inspect the memory file: {e}")),
+    };
+    if lmeta.file_type().is_symlink() || !lmeta.file_type().is_file() {
+        return Err(String::from(
+            "the memory path must be a regular file, not a symlink or special file",
+        ));
+    }
+    if lmeta.len() > max_bytes {
+        return Err(format!(
+            "the memory file exceeds the maximum allowed size ({} > {max_bytes} bytes)",
+            lmeta.len()
+        ));
+    }
+    let file = std::fs::File::open(path).map_err(|e| format!("could not read the memory: {e}"))?;
+    let fmeta = file
+        .metadata()
+        .map_err(|e| format!("could not inspect the memory file: {e}"))?;
+    if !fmeta.file_type().is_file() {
+        return Err(String::from("the memory path is not a regular file"));
+    }
+    if fmeta.len() > max_bytes {
+        return Err(format!(
+            "the memory file exceeds the maximum allowed size ({} > {max_bytes} bytes)",
+            fmeta.len()
+        ));
+    }
+    let mut buf = Vec::new();
+    let limit = max_bytes.saturating_add(1);
+    file.take(limit)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("could not read the memory: {e}"))?;
+    if (buf.len() as u64) > max_bytes {
+        return Err(format!(
+            "the memory file exceeds the maximum allowed size ({max_bytes} bytes)"
+        ));
+    }
+    String::from_utf8(buf)
+        .map(Some)
+        .map_err(|e| format!("the memory is not valid UTF-8: {e}"))
+}
+
 /// The summary record of one task run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRun {
@@ -85,9 +134,7 @@ impl TaskMemory {
             commands: Vec::new(),
             failures: Vec::new(),
         };
-        if path.exists() {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("could not read the memory: {e}"))?;
+        if let Some(text) = read_regular_file_bounded(path, MAX_MEMORY_BYTES)? {
             for line in text.lines() {
                 if line.trim().is_empty() {
                     continue;
@@ -139,17 +186,50 @@ impl TaskMemory {
         };
         let line = serde_json::to_string(&clean_rec)
             .map_err(|e| format!("could not encode the record: {e}"))?;
-        // Append in place: a failed read must never truncate the history.
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .open(&self.path)
-            .map_err(|e| format!("could not open the memory: {e}"))?;
-        let len = file
+        // Append in place without following symlinks and with owner-only 0600
+        // permissions on creation: a failed read must never truncate history.
+        let mut file = match std::fs::symlink_metadata(&self.path) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+                    return Err(String::from(
+                        "the memory path must be a regular file, not a symlink or special file",
+                    ));
+                }
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .append(true)
+                    .open(&self.path)
+                    .map_err(|e| format!("could not open the memory: {e}"))?
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let mut opts = std::fs::OpenOptions::new();
+                opts.read(true).append(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt as _;
+                    opts.mode(0o600);
+                }
+                let created = opts
+                    .open(&self.path)
+                    .map_err(|err| format!("could not create the memory: {err}"))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    created
+                        .set_permissions(std::fs::Permissions::from_mode(0o600))
+                        .map_err(|err| format!("could not set memory permissions: {err}"))?;
+                }
+                created
+            }
+            Err(e) => return Err(format!("could not inspect the memory: {e}")),
+        };
+        let meta = file
             .metadata()
-            .map_err(|e| format!("could not stat the memory: {e}"))?
-            .len();
+            .map_err(|e| format!("could not stat the memory: {e}"))?;
+        if !meta.file_type().is_file() {
+            return Err(String::from("the memory path is not a regular file"));
+        }
+        let len = meta.len();
         let mut chunk = String::new();
         if len > 0 {
             let mut last = [0u8; 1];
@@ -162,6 +242,11 @@ impl TaskMemory {
         }
         chunk.push_str(&line);
         chunk.push('\n');
+        if len.saturating_add(chunk.len() as u64) > MAX_MEMORY_BYTES {
+            return Err(format!(
+                "the memory file would exceed the maximum allowed size ({MAX_MEMORY_BYTES} bytes)"
+            ));
+        }
         file.write_all(chunk.as_bytes())
             .map_err(|e| format!("could not write the memory: {e}"))?;
         self.push_record(clean_rec);
@@ -377,6 +462,84 @@ mod tests {
         // The line still parses, so masking did not corrupt the format.
         let again = TaskMemory::open(&path).unwrap();
         assert_eq!(again.commands.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ai02_memory_refuses_symlinks_oversize_and_sets_owner_only_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = std::env::temp_dir().join(format!(
+            "ai_inference-mem-ai02-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 1. Existing symlink path must be refused on open.
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, "KEEP_ME").unwrap();
+        let link = dir.join("mem-link.jsonl");
+        symlink(&victim, &link).unwrap();
+        assert!(
+            TaskMemory::open(&link).is_err(),
+            "open must refuse symlink memory path"
+        );
+
+        // 2. Symlink planted between open (non-existent) and append must be refused.
+        let race_path = dir.join("race.jsonl");
+        let mut mem = TaskMemory::open(&race_path).unwrap();
+        symlink(&victim, &race_path).unwrap();
+        assert!(
+            mem.append(MemoryRecord::Decision(TaskDecision {
+                task_id: "t-race".into(),
+                decision: "d".into(),
+                rationale: None,
+                created_at: "2026-11-25".into(),
+            }))
+            .is_err(),
+            "append must refuse symlink target"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "KEEP_ME",
+            "victim file must remain untouched"
+        );
+
+        // 3. Clean append creates owner-only (0600) file.
+        let clean_path = dir.join("clean.jsonl");
+        let mut clean = TaskMemory::open(&clean_path).unwrap();
+        clean
+            .append(MemoryRecord::Decision(TaskDecision {
+                task_id: "t1".into(),
+                decision: "ok".into(),
+                rationale: None,
+                created_at: "2026-11-25".into(),
+            }))
+            .unwrap();
+        let mode = std::fs::metadata(&clean_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "memory file must not be group/world readable, got {:o}",
+            mode
+        );
+
+        // 4. Oversized memory file (> 16 MiB) must be refused on open.
+        let big = dir.join("oversized.jsonl");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(16 * 1024 * 1024 + 1).unwrap();
+        drop(f);
+        assert!(
+            TaskMemory::open(&big).is_err(),
+            "open must refuse oversized memory files"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

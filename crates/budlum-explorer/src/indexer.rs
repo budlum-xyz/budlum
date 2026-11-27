@@ -13,8 +13,14 @@
 
 use crate::bns_proof::{content_binding, BnsInclusionProof, NameContent, ResolvedName};
 use crate::content_id::ContentId;
+use crate::name_rule;
 use crate::resolve::NameResolver;
 use std::collections::BTreeMap;
+
+/// Maximum size of a single indexer JSON response body (64 KiB).
+///
+/// WIRING: Explorer indexer response body ceiling constant.
+pub const MAX_INDEXER_BODY_BYTES: usize = 64 * 1024;
 
 /// One value of a flat JSON object.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,58 +36,82 @@ pub enum FlatValue {
 ///
 /// # Errors
 ///
-/// Anything that is not one flat object of string keys.
+/// Anything that is not one flat object of unique string keys within
+/// [`MAX_INDEXER_BODY_BYTES`].
 /// exposed for: the scanner crate's API surface - its CLI consumers land with the scan rollout.
 pub fn flat_object(text: &str) -> Result<BTreeMap<String, FlatValue>, String> {
+    if text.len() > MAX_INDEXER_BODY_BYTES {
+        return Err(format!(
+            "indexer response is {} bytes, above the {MAX_INDEXER_BODY_BYTES} byte ceiling",
+            text.len()
+        ));
+    }
     let mut chars = text.trim().chars().peekable();
     let mut out = BTreeMap::new();
     if chars.next() != Some('{') {
         return Err("expected an object".into());
     }
-    loop {
-        skip_ws(&mut chars);
-        match chars.peek() {
-            Some('}') => {
-                chars.next();
-                break;
+    skip_ws(&mut chars);
+    if chars.peek() == Some(&'}') {
+        chars.next();
+    } else {
+        loop {
+            skip_ws(&mut chars);
+            if chars.peek() != Some(&'"') {
+                return Err("expected a key".into());
             }
-            Some('"') => {}
-            _ => return Err("expected a key".into()),
-        }
-        let key = string(&mut chars)?;
-        skip_ws(&mut chars);
-        if chars.next() != Some(':') {
-            return Err("expected ':'".into());
-        }
-        skip_ws(&mut chars);
-        let value = match chars.peek() {
-            Some('"') => FlatValue::Str(string(&mut chars)?),
-            Some('t' | 'f' | 'n') => {
-                let word: String =
-                    std::iter::from_fn(|| chars.next_if(char::is_ascii_alphabetic)).collect();
-                match word.as_str() {
-                    "true" => FlatValue::Bool(true),
-                    "false" => FlatValue::Bool(false),
-                    "null" => FlatValue::Null,
-                    _ => return Err(format!("unexpected word {word}")),
+            let key = string(&mut chars)?;
+            skip_ws(&mut chars);
+            if chars.next() != Some(':') {
+                return Err("expected ':'".into());
+            }
+            skip_ws(&mut chars);
+            let value = match chars.peek() {
+                Some('"') => FlatValue::Str(string(&mut chars)?),
+                Some('t' | 'f' | 'n') => {
+                    let word: String =
+                        std::iter::from_fn(|| chars.next_if(char::is_ascii_alphabetic)).collect();
+                    match word.as_str() {
+                        "true" => FlatValue::Bool(true),
+                        "false" => FlatValue::Bool(false),
+                        "null" => FlatValue::Null,
+                        _ => return Err(format!("unexpected word {word}")),
+                    }
                 }
+                Some(c) if c.is_ascii_digit() || *c == '-' => FlatValue::Num(number(&mut chars)?),
+                _ => return Err("nested or unknown value".into()),
+            };
+            if out.contains_key(&key) {
+                return Err(format!("duplicate key {key:?}"));
             }
-            Some(c) if c.is_ascii_digit() || *c == '-' => FlatValue::Num(
-                std::iter::from_fn(|| chars.next_if(|c| c.is_ascii_digit() || *c == '-')).collect(),
-            ),
-            _ => return Err("nested or unknown value".into()),
-        };
-        out.insert(key, value);
-        skip_ws(&mut chars);
-        match chars.next() {
-            Some(',') => {}
-            Some('}') => break,
-            _ => return Err("expected ',' or '}'".into()),
+            out.insert(key, value);
+            skip_ws(&mut chars);
+            match chars.next() {
+                Some(',') => {}
+                Some('}') => break,
+                _ => return Err("expected ',' or '}'".into()),
+            }
         }
     }
     skip_ws(&mut chars);
     if chars.next().is_some() {
         return Err("trailing characters".into());
+    }
+    Ok(out)
+}
+
+fn number(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<String, String> {
+    let mut out = String::new();
+    if chars.next_if(|c| *c == '-').is_some() {
+        out.push('-');
+    }
+    let mut digits = 0usize;
+    while let Some(d) = chars.next_if(char::is_ascii_digit) {
+        out.push(d);
+        digits += 1;
+    }
+    if digits == 0 || matches!(chars.peek(), Some('-')) {
+        return Err("malformed number".into());
     }
     Ok(out)
 }
@@ -99,8 +129,11 @@ fn string(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<String
         match chars.next() {
             Some('"') => return Ok(out),
             // The indexer writes names, hex and base-ten numbers only; an
-            // escape would mean a string this reader was not made for.
+            // escape or raw control character violates RFC 8259 / flat schema.
             Some('\\') | None => return Err("escapes and unterminated strings are refused".into()),
+            Some(c) if c.is_control() => {
+                return Err("control characters in strings are refused".into())
+            }
             Some(c) => out.push(c),
         }
     }
@@ -188,8 +221,21 @@ impl<F: Fn(&str) -> Result<String, String>> IndexerResolver<F> {
 
 impl<F: Fn(&str) -> Result<String, String>> NameResolver for IndexerResolver<F> {
     fn resolve_bud(&self, name: &str) -> Result<(ResolvedName, BnsInclusionProof), String> {
+        if let Err(rejection) = name_rule::check_resolvable(name) {
+            return Err(format!("invalid .bud name: {rejection}"));
+        }
+        if name_rule::suffix_of(name) != Some("bud") {
+            return Err("the Budlum indexer resolves .bud names only".into());
+        }
         let body = (self.get)(&format!("/v1/bns/{name}"))?;
-        Ok((resolution_from_indexer(&body)?, BnsInclusionProof::None))
+        let resolved = resolution_from_indexer(&body)?;
+        if resolved.name != name {
+            return Err(format!(
+                "indexer name mismatch: requested {name:?}, received {:?}",
+                resolved.name
+            ));
+        }
+        Ok((resolved, BnsInclusionProof::None))
     }
 
     fn bns_root(&self) -> Option<[u8; 32]> {
@@ -235,5 +281,37 @@ mod tests {
         assert!(flat_object(r#"{"a":{"b":1}}"#).is_err());
         assert!(flat_object(r#"{"a":"x\"y"}"#).is_err());
         assert!(flat_object(r#"{"a":1} extra"#).is_err());
+    }
+
+    #[test]
+    fn exp05_indexer_rejects_duplicate_keys_bad_nums_ctrl_oversized_traversal_and_name_mismatch() {
+        // Duplicate JSON keys must fail closed instead of silently overwriting.
+        assert!(flat_object(r#"{"owner":"0x11","owner":"0x22"}"#).is_err());
+        // Trailing comma must be rejected.
+        assert!(flat_object(r#"{"a":1,}"#).is_err());
+        // Malformed numbers must be rejected.
+        for bad_num in [r#"{"n":---}"#, r#"{"n":-}"#, r#"{"n":12-34}"#] {
+            assert!(flat_object(bad_num).is_err(), "{bad_num} must be refused");
+        }
+        // Raw control characters inside JSON strings violate RFC 8259.
+        assert!(flat_object("{\"a\":\"line1\nline2\"}").is_err());
+        assert!(flat_object("{\"a\":\"nul\0byte\"}").is_err());
+        // Oversized indexer response (> 64 KiB) must be refused.
+        let huge = format!("{{\"a\":\"{}\"}}", "x".repeat(70 * 1024));
+        assert!(flat_object(&huge).is_err());
+
+        // Path traversal / query injection in resolve_bud must never reach the transport.
+        let resolver = IndexerResolver::new(|_path: &str| {
+            panic!("transport must not be called for invalid .bud name")
+        });
+        assert!(resolver.resolve_bud("../../admin?x=1").is_err());
+        assert!(resolver.resolve_bud("ayaz.eth").is_err());
+
+        // Mismatched name in indexer response must be refused.
+        let mismatched = IndexerResolver::new(|_path: &str| Ok(ANSWER.to_string()));
+        let err = mismatched
+            .resolve_bud("other.bud")
+            .expect_err("mismatched name must be rejected");
+        assert!(err.contains("mismatch"), "{err}");
     }
 }

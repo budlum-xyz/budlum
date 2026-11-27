@@ -20,6 +20,32 @@ use budlum_explorer::{
     Evidence,
 };
 use budlum_explorer::{name_rule, query};
+use std::io::Read;
+use std::path::Path;
+
+const MAX_PATCH_LIST_BYTES: u64 = 1024 * 1024;
+
+fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Result<String, String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if meta.file_type().is_symlink() {
+        return Err(String::from("refusing to follow symlink"));
+    }
+    if !meta.file_type().is_file() {
+        return Err(String::from("refusing non-regular file"));
+    }
+    if meta.len() > max_bytes {
+        return Err(format!("file exceeds {max_bytes} byte limit"));
+    }
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    if (buf.len() as u64) > max_bytes {
+        return Err(format!("file exceeds {max_bytes} byte limit"));
+    }
+    String::from_utf8(buf).map_err(|_| String::from("file is not valid UTF-8"))
+}
 
 fn usage() -> String {
     String::from(
@@ -63,9 +89,12 @@ fn name_cmd(name: &str) -> i32 {
 }
 
 fn patch_list_cmd(path: &str) -> i32 {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        eprintln!("{path} could not be read");
-        return 2;
+    let text = match read_bounded_regular_file(Path::new(path), MAX_PATCH_LIST_BYTES) {
+        Ok(text) => text,
+        Err(reason) => {
+            eprintln!("{path} could not be read: {reason}");
+            return 2;
+        }
     };
     match patchset::parse_list(&text) {
         Ok(entries) => {
@@ -162,25 +191,28 @@ fn self_test() -> i32 {
     }
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let code = match args.split_first() {
+fn dispatch(args: &[String]) -> i32 {
+    match args.split_first() {
         None => {
             print!("{}", usage());
             2
         }
-        Some((cmd, rest)) => match (cmd.as_str(), rest.first()) {
-            ("classify", Some(input)) => classify_cmd(input),
-            ("name-rule", Some(name)) => name_cmd(name),
-            ("patch-list", Some(path)) => patch_list_cmd(path),
-            ("self-test", _) => self_test(),
+        Some((cmd, rest)) => match (cmd.as_str(), rest) {
+            ("classify", [input]) => classify_cmd(input),
+            ("name-rule", [name]) => name_cmd(name),
+            ("patch-list", [path]) => patch_list_cmd(path),
+            ("self-test", []) => self_test(),
             _ => {
                 print!("{}", usage());
                 2
             }
         },
-    };
-    std::process::exit(code);
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    std::process::exit(dispatch(&args));
 }
 
 #[cfg(test)]
@@ -209,5 +241,58 @@ mod tests {
     fn a_verdict_that_is_vacuous_is_not_ok() {
         assert!(!Verdict::Vacuous(String::from("x")).is_ok());
         assert!(Verdict::Pass(String::from("x")).is_ok());
+    }
+
+    #[test]
+    fn exp07_patch_list_rejects_symlink_oversized_and_extra_cli_args() {
+        let dir = std::env::temp_dir().join(format!("budlum_exp07_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 1. Valid regular patch list passes.
+        let good = dir.join("good.list");
+        std::fs::write(&good, "browser/patches/01.patch\n").unwrap();
+        assert_eq!(patch_list_cmd(good.to_str().unwrap()), 0);
+
+        // 2. Symlink must be refused (exit 2), never followed.
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.list");
+            std::os::unix::fs::symlink(&good, &link).unwrap();
+            assert_eq!(
+                patch_list_cmd(link.to_str().unwrap()),
+                2,
+                "symlink patch list must be refused"
+            );
+        }
+
+        // 3. Oversized patch list (> 1 MiB) must be refused (exit 2).
+        let big = dir.join("big.list");
+        std::fs::write(&big, vec![b'#'; 1024 * 1024 + 64]).unwrap();
+        assert_eq!(
+            patch_list_cmd(big.to_str().unwrap()),
+            2,
+            "oversized patch list must be refused"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 4. Extra trailing CLI arguments must be rejected (exit 2) rather than dropped.
+        assert_eq!(
+            dispatch(&[
+                String::from("classify"),
+                String::from("ayaz.bud"),
+                String::from("extra"),
+            ]),
+            2
+        );
+        assert_eq!(
+            dispatch(&[String::from("self-test"), String::from("extra")]),
+            2
+        );
+        assert_eq!(
+            dispatch(&[String::from("classify"), String::from("ayaz.bud")]),
+            0
+        );
     }
 }

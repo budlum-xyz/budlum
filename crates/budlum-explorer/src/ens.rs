@@ -65,12 +65,27 @@ pub enum ContentHash {
     Onion3(String),
 }
 
-/// Read an unsigned-varint.
+/// Upper bound on an EIP-1577 `contenthash` byte string so hostile RPC
+/// responses cannot force unbounded allocation before protocol checks run.
+///
+/// WIRING: ENS contenthash ceiling constant.
+pub const MAX_CONTENTHASH_BYTES: usize = 2048;
+
+/// Read a canonical unsigned-varint: rejects trailing zero bytes (overlong
+/// encodings) and 10th-byte shifts that overflow `u64`.
 fn read_varint(bytes: &[u8]) -> Option<(u64, usize)> {
     let mut value: u64 = 0;
     let mut shift = 0;
     for (i, b) in bytes.iter().enumerate() {
         if shift >= 64 {
+            return None;
+        }
+        // Reject non-canonical trailing zero bytes (e.g. `0xe3 0x81 0x00`).
+        if i > 0 && *b == 0 {
+            return None;
+        }
+        // On the 10th byte (shift == 63) only bit 0 fits in a u64.
+        if shift == 63 && (*b & 0x7f) > 1 {
             return None;
         }
         value |= u64::from(b & 0x7f) << shift;
@@ -82,18 +97,33 @@ fn read_varint(bytes: &[u8]) -> Option<(u64, usize)> {
     None
 }
 
+/// Validate a Tor v3 onion host: exactly 56 lowercase RFC 4648 base32
+/// characters (`a-z`, `2-7`), optionally followed by `.onion`.
+fn is_valid_onion3(s: &str) -> bool {
+    let host = s.strip_suffix(".onion").unwrap_or(s);
+    host.len() == 56 && host.bytes().all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'))
+}
+
 /// Decode a `contenthash` byte string.
 ///
 /// # Errors
 ///
-/// An empty field, a corrupt varint, or a protocol this browser has no fetcher
-/// for. For an unrecognized protocol nothing is **guessed**: a target whose
-/// network is unknown, if downgraded to HTTPS, would make the user believe an
-/// unverified page was verified.
+/// An empty or oversized field, a corrupt or non-canonical varint, an invalid
+/// `onion3` address, or a protocol this browser has no fetcher for. For an
+/// unrecognized protocol nothing is **guessed**: a target whose network is
+/// unknown, if downgraded to HTTPS, would make the user believe an unverified
+/// page was verified.
 pub fn decode_contenthash(bytes: &[u8]) -> Result<ContentHash, String> {
     if bytes.is_empty() {
         return Err(String::from(
             "the contenthash is empty: the name is not bound to any content",
+        ));
+    }
+    if bytes.len() > MAX_CONTENTHASH_BYTES {
+        return Err(format!(
+            "the contenthash is {} bytes, above the {} byte ceiling",
+            bytes.len(),
+            MAX_CONTENTHASH_BYTES
         ));
     }
     let (proto, n) =
@@ -109,9 +139,16 @@ pub fn decode_contenthash(bytes: &[u8]) -> Result<ContentHash, String> {
         0xe5 => Ok(ContentHash::Ipns(body.to_vec())),
         0xe4 => Ok(ContentHash::Swarm(body.to_vec())),
         0xb2_9910 => Ok(ContentHash::Arweave(body.to_vec())),
-        0xbd => String::from_utf8(body.to_vec())
-            .map(ContentHash::Onion3)
-            .map_err(|_| String::from("the onion3 body is not UTF-8")),
+        0xbd => {
+            let text = String::from_utf8(body.to_vec())
+                .map_err(|_| String::from("the onion3 body is not UTF-8"))?;
+            if !is_valid_onion3(&text) {
+                return Err(String::from(
+                    "the onion3 body is not a valid 56-character lowercase base32 v3 onion address",
+                ));
+            }
+            Ok(ContentHash::Onion3(text))
+        }
         other => Err(format!(
             "there is no fetcher for contenthash protocol {other:#x}; the browser does not know \
              which network to fetch it from and does not guess"
@@ -207,5 +244,66 @@ mod tests {
     #[test]
     fn an_empty_contenthash_says_so() {
         assert!(decode_contenthash(&[]).is_err());
+    }
+
+    #[test]
+    fn exp02_rejects_overlong_overflowing_varints_oversized_and_invalid_onion3() {
+        // Overlong trailing-zero varint for 0xe3 (ipfs-ns): 0xe3 0x81 0x00 instead of 0xe3 0x01.
+        let overlong = [0xe3u8, 0x81, 0x00, 0x01, 0x70, 0x12, 0x20];
+        assert!(
+            decode_contenthash(&overlong).is_err(),
+            "overlong varint must be refused"
+        );
+
+        // 10th-byte u64 overflow in varint (bits past bit 63).
+        let mut overflow = vec![0x80u8; 9];
+        overflow.push(0x02);
+        overflow.push(0x01);
+        assert!(
+            decode_contenthash(&overflow).is_err(),
+            "u64-overflowing varint must be refused"
+        );
+
+        // Oversized contenthash payload (> 2048 bytes).
+        let mut huge = vec![0xe3u8, 0x01];
+        huge.resize(2051, 0x41);
+        assert!(
+            decode_contenthash(&huge).is_err(),
+            "oversized contenthash must be refused"
+        );
+
+        // Arbitrary scheme/CRLF/path strings smuggled inside onion3 (0xbd 0x01).
+        for bad in [
+            "https://evil.com/phish",
+            "evil.onion\r\nX-Injected: 1",
+            "../../etc/passwd",
+            "not-base32-upper-AAAA",
+            "short",
+        ] {
+            let mut raw = vec![0xbdu8, 0x01];
+            raw.extend_from_slice(bad.as_bytes());
+            assert!(
+                decode_contenthash(&raw).is_err(),
+                "malformed onion3 {bad:?} must be refused"
+            );
+        }
+
+        // Valid 56-char lowercase base32 Tor v3 onion address (with and without .onion).
+        let valid_host = "a2b3c4d5e6f7g2h3i4j5k6l7m2n3o4p5q6r7s2t3u4v5w6x7y2z3a4b5";
+        assert_eq!(valid_host.len(), 56);
+        let mut raw_bare = vec![0xbdu8, 0x01];
+        raw_bare.extend_from_slice(valid_host.as_bytes());
+        assert_eq!(
+            decode_contenthash(&raw_bare).unwrap(),
+            ContentHash::Onion3(valid_host.to_string())
+        );
+
+        let valid_with_suffix = format!("{valid_host}.onion");
+        let mut raw_suffix = vec![0xbdu8, 0x01];
+        raw_suffix.extend_from_slice(valid_with_suffix.as_bytes());
+        assert_eq!(
+            decode_contenthash(&raw_suffix).unwrap(),
+            ContentHash::Onion3(valid_with_suffix)
+        );
     }
 }

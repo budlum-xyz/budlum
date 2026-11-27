@@ -140,22 +140,87 @@ impl core::fmt::Debug for ServeConfig {
     }
 }
 
-/// The base URL must be a plain http(s) URL with no credentials, spaces or
-/// query string, so it can neither carry a secret nor smuggle a header.
+/// Parse a strict decimal TCP port (`1..=65535`).
+fn validate_port(port_str: &str) -> Result<(), String> {
+    if port_str.is_empty() || !port_str.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(String::from("base_url port must be digits 1..=65535"));
+    }
+    match port_str.parse::<u16>() {
+        Ok(p) if p > 0 => Ok(()),
+        _ => Err(String::from("base_url port must be within 1..=65535")),
+    }
+}
+
+/// The base URL must be a plain http(s) URL with a valid host/port and no
+/// credentials, fragments, backslashes, traversal segments, spaces or query
+/// string, so it can neither carry a secret nor smuggle a header or authority.
 fn check_base_url(url: &str) -> Result<(), String> {
     let rest = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
         .ok_or_else(|| String::from("base_url must start with http:// or https://"))?;
-    let authority = rest.split('/').next().unwrap_or("");
-    if authority.is_empty()
-        || authority.contains('@')
-        || url.contains('?')
+    if url.contains('?')
+        || url.contains('#')
+        || url.contains('\\')
         || url.chars().any(|c| c.is_whitespace() || c.is_control())
     {
         return Err(String::from(
-            "base_url must name a host and carry no credentials, query or whitespace",
+            "base_url must carry no query, fragment, backslash, control char or whitespace",
         ));
+    }
+    let (authority, path_opt) = match rest.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (rest, None),
+    };
+    if authority.is_empty() || authority.contains('@') {
+        return Err(String::from(
+            "base_url must name a host and carry no credentials",
+        ));
+    }
+    if let Some(after_open) = authority.strip_prefix('[') {
+        let Some((ipv6_str, after_close)) = after_open.split_once(']') else {
+            return Err(String::from("base_url has an unclosed IPv6 host bracket"));
+        };
+        if ipv6_str.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(String::from("base_url contains an invalid IPv6 host"));
+        }
+        if !after_close.is_empty() {
+            let Some(port_str) = after_close.strip_prefix(':') else {
+                return Err(String::from(
+                    "base_url has unexpected trailing characters after IPv6 host",
+                ));
+            };
+            validate_port(port_str)?;
+        }
+    } else {
+        if authority.contains('[') || authority.contains(']') {
+            return Err(String::from("base_url has malformed host brackets"));
+        }
+        let host = match authority.split_once(':') {
+            Some((h, port_str)) => {
+                validate_port(port_str)?;
+                h
+            }
+            None => authority,
+        };
+        if host.is_empty()
+            || host.len() > 253
+            || host.starts_with('.')
+            || host.ends_with('.')
+            || host.contains("..")
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        {
+            return Err(String::from("base_url must name a valid host"));
+        }
+    }
+    if let Some(path) = path_opt {
+        if path.split('/').any(|seg| seg == "..") {
+            return Err(String::from(
+                "base_url path must not contain '..' traversal",
+            ));
+        }
     }
     Ok(())
 }
@@ -211,17 +276,33 @@ pub fn assert_served_name_is_ours(cfg: &ServeConfig) -> Result<(), String> {
         ));
     }
     // The name must have the tier shape `ai_inference-{tier}-{version}` for
-    // the configured tier, so a Light bridge cannot be listed under the
-    // Normal name and no third-party model name passes.
+    // the configured tier, with a bounded, identifier-safe version suffix so a
+    // Light bridge cannot be listed under the Normal name and no control,
+    // whitespace, traversal or third-party model name passes.
     let prefix = cfg.tier.served_model_name("");
-    match cfg.served_model_name.strip_prefix(prefix.as_str()) {
-        Some(version) if !version.is_empty() => Ok(()),
-        _ => Err(format!(
+    let Some(version) = cfg.served_model_name.strip_prefix(prefix.as_str()) else {
+        return Err(format!(
             "served_model_name must be {prefix}<version> for the {} tier: {}",
             cfg.tier.as_str(),
             cfg.served_model_name
-        )),
+        ));
+    };
+    const MAX_VERSION_LEN: usize = 64;
+    if !ModelTier::is_valid_version(version)
+        || version.len() > MAX_VERSION_LEN
+        || version.starts_with('.')
+        || version.contains("..")
+        || !version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+    {
+        return Err(format!(
+            "served_model_name version suffix is invalid for the {} tier: {}",
+            cfg.tier.as_str(),
+            cfg.served_model_name
+        ));
     }
+    Ok(())
 }
 
 /// Whether this bridge may be put into the consensus path.
@@ -1027,5 +1108,54 @@ mod tests {
         )
         .is_ok());
         assert!(checked_system_prompt().is_ok());
+    }
+
+    #[test]
+    fn ai03_base_url_rejects_fragments_backslashes_bad_ports_and_path_traversal() {
+        for bad in [
+            "http://127.0.0.1:8000/v1#secret",
+            "http://evil.com\\127.0.0.1/v1",
+            "http://:8000/v1",
+            "http://127.0.0.1:99999/v1",
+            "http://127.0.0.1:0/v1",
+            "http://127.0.0.1:abc/v1",
+            "http://127.0.0.1:/v1",
+            "http://[::1/v1",
+            "http://[]/v1",
+            "http://[::1]:99999/v1",
+            "http://127.0.0.1:8000/v1/../admin",
+            "http://..badhost/v1",
+        ] {
+            assert!(
+                check_base_url(bad).is_err(),
+                "check_base_url must reject {bad:?}"
+            );
+        }
+        assert!(check_base_url("http://[::1]:8000/v1").is_ok());
+    }
+
+    #[test]
+    fn ai04_served_model_name_rejects_control_path_and_oversized_suffixes() {
+        let too_long = format!("ai_inference-light-{}", "v".repeat(65));
+        for bad in [
+            "ai_inference-light-v1\r\nX-Injected: evil",
+            "ai_inference-light-v1\nline2",
+            "ai_inference-light-v1 bad",
+            "ai_inference-light-../../etc/passwd",
+            "ai_inference-light-v1/sub",
+            "ai_inference-light-v1\\sub",
+            "ai_inference-light-v1..v2",
+            "ai_inference-light-.hidden",
+            too_long.as_str(),
+        ] {
+            let cfg = ServeConfig {
+                served_model_name: bad.to_string(),
+                ..Default::default()
+            };
+            assert!(
+                assert_served_name_is_ours(&cfg).is_err(),
+                "assert_served_name_is_ours must reject {bad:?}"
+            );
+        }
     }
 }

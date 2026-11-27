@@ -259,13 +259,71 @@ pub fn touched_files(diff: &str) -> Vec<String> {
     out
 }
 
-/// A patch path stays inside its tree: it is relative and has no `..`
-/// segment, so a string prefix test on it means what it says.
+/// A patch path stays inside its tree: it is relative, has no `..` segment,
+/// no backslash separator, no C-quoting, and no control characters, so a
+/// string prefix test on it means what it says.
 fn path_stays_in_tree(path: &str) -> bool {
     !path.starts_with('/')
+        && !path.contains('\\')
+        && !path.contains('"')
+        && !path.chars().any(char::is_control)
         && !path
             .split('/')
             .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+}
+
+/// Inspect non-body diff headers that `touched_files` does not include
+/// (`--- a/...` source/deletion targets, git rename/copy headers, and binary
+/// patch sections) so a patch cannot smuggle out-of-tree deletions, renames, or
+/// opaque binary payloads alongside a benign `+++ b/` hunk.
+fn extra_header_problems(name: &str, diff: &str, allowed_roots: &[&str]) -> Vec<String> {
+    let mut problems = Vec::new();
+    let (mut old_left, mut new_left) = (0usize, 0usize);
+    let check_path = |problems: &mut Vec<String>, path: &str| {
+        if !path_stays_in_tree(path) || !allowed_roots.iter().any(|root| path.starts_with(root)) {
+            problems.push(format!(
+                "{name}: {path} is outside the allowed trees ({})",
+                allowed_roots.join(", ")
+            ));
+        }
+    };
+    for line in diff.lines() {
+        if old_left > 0 || new_left > 0 {
+            if line.starts_with('+') {
+                new_left = new_left.saturating_sub(1);
+            } else if line.starts_with('-') {
+                old_left = old_left.saturating_sub(1);
+            } else if !line.starts_with('\\') {
+                old_left = old_left.saturating_sub(1);
+                new_left = new_left.saturating_sub(1);
+            }
+            continue;
+        }
+        if let Some((old, new)) = parse_hunk_header(line) {
+            old_left = old;
+            new_left = new;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("--- ") {
+            let path = rest.split('\t').next().unwrap_or(rest).trim();
+            if path != "/dev/null" {
+                let path = path.strip_prefix("a/").unwrap_or(path);
+                check_path(&mut problems, path);
+            }
+            continue;
+        }
+        for prefix in ["rename from ", "rename to ", "copy from ", "copy to "] {
+            if let Some(rest) = line.strip_prefix(prefix) {
+                check_path(&mut problems, rest.trim());
+            }
+        }
+        if line == "GIT binary patch" || line.starts_with("Binary files ") {
+            problems.push(format!(
+                "{name}: binary patches are not permitted in the text patchset"
+            ));
+        }
+    }
+    problems
 }
 
 /// Every hunk header's line counts against the lines that follow it.
@@ -366,6 +424,7 @@ pub fn check_patch_shape(name: &str, diff: &str, allowed_roots: &[&str]) -> Verd
         ));
     }
     let mut problems = hunk_count_errors(name, diff);
+    problems.extend(extra_header_problems(name, diff, allowed_roots));
     for path in &touched {
         if !path_stays_in_tree(path) || !allowed_roots.iter().any(|root| path.starts_with(root)) {
             problems.push(format!(
@@ -642,5 +701,70 @@ mod tests {
             render_in_order(&ordered),
             "02-second.patch\n!01-first.patch\n"
         );
+    }
+
+    #[test]
+    fn exp06_patch_shape_rejects_backslash_quoted_deletion_traversal_rename_and_binary() {
+        // Windows backslash traversal in +++ header.
+        let backslash_diff = "\
+--- a/browser/a.js
++++ b/browser/..\\..\\etc\\passwd
+@@ -1 +1 @@
+-a
++b
+";
+        assert!(!check_patch_shape("x.patch", backslash_diff, &["browser/"]).is_ok());
+
+        // C-quoted git path escaping allowed root.
+        let quoted_diff = "\
+--- a/browser/a.js
++++ \"b/browser/../../etc/passwd\"
+@@ -1 +1 @@
+-a
++b
+";
+        assert!(!check_patch_shape("x.patch", quoted_diff, &["browser/"]).is_ok());
+
+        // Benign hunk paired with an out-of-tree deletion (`--- a/../../etc/passwd` + `+++ /dev/null`).
+        let sneaky_delete = "\
+--- a/browser/a.js
++++ b/browser/a.js
+@@ -1 +1 @@
+-a
++b
+--- a/../../etc/passwd
++++ /dev/null
+@@ -1 +0,0 @@
+-root
+";
+        assert!(!check_patch_shape("x.patch", sneaky_delete, &["browser/"]).is_ok());
+
+        // Out-of-tree git rename extended header.
+        let sneaky_rename = "\
+diff --git a/browser/a.js b/browser/a.js
+--- a/browser/a.js
++++ b/browser/a.js
+@@ -1 +1 @@
+-a
++b
+diff --git a/browser/x.js b/etc/pwn
+rename from browser/x.js
+rename to ../../etc/pwn
+";
+        assert!(!check_patch_shape("x.patch", sneaky_rename, &["browser/"]).is_ok());
+
+        // Binary patch payload hidden alongside a text hunk.
+        let sneaky_binary = "\
+--- a/browser/a.js
++++ b/browser/a.js
+@@ -1 +1 @@
+-a
++b
+diff --git a/browser/bin b/browser/bin
+GIT binary patch
+literal 1
+IcmZQz0000100001
+";
+        assert!(!check_patch_shape("x.patch", sneaky_binary, &["browser/"]).is_ok());
     }
 }

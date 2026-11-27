@@ -103,7 +103,6 @@ crates/budlum-explorer/src/light_client.rs	fn	strength_of
 crates/budlum-explorer/src/light_client.rs	struct	HeaderStore
 crates/budlum-explorer/src/light_client.rs	struct	TrackedHeader
 crates/budlum-explorer/src/light_client.rs	trait	FinalitySource
-crates/budlum-explorer/src/name_rule.rs	fn	check_resolvable
 crates/budlum-explorer/src/patchset.rs	enum	Verdict
 crates/budlum-explorer/src/patchset.rs	fn	check_no_foreign_brand
 crates/budlum-explorer/src/patchset.rs	fn	touched_files

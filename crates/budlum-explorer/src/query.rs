@@ -106,6 +106,18 @@ fn strip_ascii_prefix<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
+fn is_unsafe_bar_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
 fn hex_bytes(s: &str) -> Option<Vec<u8>> {
     let s = strip_ascii_prefix(s, "0x").unwrap_or(s);
     if s.is_empty() || !s.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -158,7 +170,20 @@ pub fn classify(raw: &str) -> Query {
         return classify_name(rest);
     }
     if let Some(rest) = strip_ascii_prefix(input, "ipfs://") {
-        return Query::Cid(rest.trim().to_string());
+        let cid = rest.trim();
+        let bad_cid = cid.is_empty()
+            || cid.chars().any(|c| {
+                c.is_whitespace()
+                    || is_unsafe_bar_char(c)
+                    || matches!(c, '/' | '\\' | ':' | '?' | '#')
+            });
+        if bad_cid {
+            return Query::RefusedScheme {
+                input: input.to_string(),
+                scheme: String::from("ipfs"),
+            };
+        }
+        return Query::Cid(cid.to_string());
     }
 
     // 2. HTTPS must be written out. Someone typing `evil.com` may have wanted
@@ -166,8 +191,17 @@ pub fn classify(raw: &str) -> Query {
     //    return `Ambiguous` (below). RFC 3986 section 3.1 defines schemes as
     //    ASCII case-insensitive, so `HTTPS://` normalizes to `https://`.
     if let Some(rest) = strip_ascii_prefix(input, "https://") {
-        let has_ws = rest.chars().any(char::is_whitespace);
-        if rest.is_empty() || rest.starts_with('/') || has_ws {
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = &rest[..authority_end];
+        let bad_https = rest.is_empty()
+            || rest.starts_with('/')
+            || authority.is_empty()
+            || authority.starts_with(':')
+            || authority.contains('@')
+            || rest
+                .chars()
+                .any(|c| c.is_whitespace() || is_unsafe_bar_char(c) || c == '\\');
+        if bad_https {
             return Query::RefusedScheme {
                 input: input.to_string(),
                 scheme: String::from("https"),
@@ -226,12 +260,16 @@ pub fn classify(raw: &str) -> Query {
         };
     }
 
-    // 6. Does it look like an IPFS CID? (`Qm...` or `bafy.../bafk...`)
-    if (input.len() == 46 && input.starts_with("Qm"))
-        || (input.starts_with("baf")
-            && input.len() > 20
-            && input.chars().all(|c| c.is_ascii_alphanumeric()))
-    {
+    // 6. Does it look like an IPFS CID? (`Qm...` Base58 or `bafy.../bafk...`)
+    let is_cid_v0 = input.len() == 46
+        && input.starts_with("Qm")
+        && input
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() && !matches!(c, '0' | 'O' | 'I' | 'l'));
+    let is_cid_v1 = input.starts_with("baf")
+        && input.len() > 20
+        && input.chars().all(|c| c.is_ascii_alphanumeric());
+    if is_cid_v0 || is_cid_v1 {
         return Query::Cid(input.to_string());
     }
 
@@ -443,5 +481,53 @@ mod tests {
         );
         let evm20 = format!("0X{}", "22".repeat(20));
         assert_eq!(classify(&evm20), Query::EvmAddress([0x22; 20]));
+    }
+
+    #[test]
+    fn exp03_refuses_https_userinfo_backslash_control_bidi_and_malformed_ipfs_cid() {
+        for bad_https in [
+            "https://bank.com@evil.com/login",
+            "https://user:pass@evil.com/",
+            "https://bank.com\\evil.com/",
+            "https://:443/path",
+            "https://example.com/\x1b[31mspoof",
+            "https://example.com/\0null",
+            "https://example.com/\u{202E}fdp.exe",
+            "https://example.com/\u{2066}spoof\u{2069}",
+        ] {
+            assert!(
+                matches!(
+                    classify(bad_https),
+                    Query::RefusedScheme { ref scheme, .. } if scheme == "https"
+                ),
+                "{bad_https:?} must be refused as https scheme"
+            );
+        }
+
+        for bad_ipfs in [
+            "ipfs://",
+            "ipfs://   ",
+            "ipfs://javascript:alert(1)",
+            "ipfs://../../etc/passwd",
+            "ipfs://cid\r\nX-Injected: 1",
+            "ipfs://cid\u{202E}spoof",
+            "ipfs://cid?evil=1",
+        ] {
+            assert!(
+                matches!(
+                    classify(bad_ipfs),
+                    Query::RefusedScheme { ref scheme, .. } if scheme == "ipfs"
+                ),
+                "{bad_ipfs:?} must be refused as ipfs scheme"
+            );
+        }
+
+        // Bare 46-char string starting with Qm containing non-Base58 / path chars is not a CID.
+        let fake_qm = "Qm../../etc/passwd/0OIl!!!!!!!!!!!!!!!!!!!!!!!";
+        assert_eq!(fake_qm.len(), 46);
+        assert!(
+            !matches!(classify(fake_qm), Query::Cid(_)),
+            "non-base58 Qm payload must not classify as Cid"
+        );
     }
 }
