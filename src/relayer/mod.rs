@@ -1,3 +1,4 @@
+pub mod bundle;
 pub mod policy;
 pub mod worker;
 pub use policy::{
