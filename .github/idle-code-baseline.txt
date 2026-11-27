@@ -34,7 +34,6 @@ budzero/bud-node/src/sharding.rs	fn	should_cache
 budzero/bud-node/src/sharding.rs	fn	xor_distance
 budzero/bud-proof/src/bud_stark/folder.rs	struct	AuxWindow
 budzero/bud-proof/src/bud_stark/prover.rs	fn	quotient_values
-budzero/bud-proof/src/bud_stark/sub_builder.rs	struct	SubAirBuilder
 budzero/bud-proof/src/bud_stark/sub_builder.rs	struct	SubSliced
 budzero/bud-proof/src/bud_stark/symbolic.rs	fn	get_log_quotient_degree_extension
 budzero/bud-proof/src/bud_stark/verifier.rs	enum	VerificationError
