@@ -24,6 +24,7 @@ module budlum::budlum_verifier {
 
     /// ProofFormat discriminants (`1 = Signature`, `2 = Succinct`).
     const PROOF_FORMAT_SIGNATURE: u8 = 1;
+    const MAX_COMMITTEE_MEMBERS: u64 = 512;
 
     /// Error codes.
     const E_NOT_AUTHORIZED: u64 = 1;
@@ -75,7 +76,7 @@ module budlum::budlum_verifier {
         assert!(signer::address_of(publisher) == @budlum, E_NOT_AUTHORIZED);
         assert!(!exists<Committee>(@budlum), E_ALREADY_INITIALIZED);
         let n = vector::length(&members);
-        assert!(budlum_chain_id > 0 && n > 0, E_INVALID_COMMITTEE);
+        assert!(budlum_chain_id > 0 && n > 0 && n <= MAX_COMMITTEE_MEMBERS, E_INVALID_COMMITTEE);
         assert!(threshold > 0 && threshold <= n, E_INVALID_COMMITTEE);
         assert!((threshold as u128) * 3 > (n as u128) * 2, E_INVALID_COMMITTEE);
 
@@ -113,7 +114,10 @@ module budlum::budlum_verifier {
         assert!(next_epoch == committee.epoch + 1, E_DOMAIN_MISMATCH);
 
         let next_n = vector::length(&next_members);
-        assert!(next_n > 0 && next_threshold > 0 && next_threshold <= next_n, E_INVALID_COMMITTEE);
+        assert!(
+            next_n > 0 && next_n <= MAX_COMMITTEE_MEMBERS && next_threshold > 0 && next_threshold <= next_n,
+            E_INVALID_COMMITTEE,
+        );
         assert!((next_threshold as u128) * 3 > (next_n as u128) * 2, E_INVALID_COMMITTEE);
         let a = 0;
         while (a < next_n) {
@@ -127,9 +131,11 @@ module budlum::budlum_verifier {
             a = a + 1;
         };
 
+        let cur_n = vector::length(&committee.members);
         let sig_count = vector::length(&signatures);
         assert!(sig_count == vector::length(&signer_indices), E_INVALID_SIGNATURE);
         assert!(sig_count >= committee.threshold, E_QUORUM_NOT_MET);
+        assert!(sig_count <= cur_n, E_DUPLICATE_SIGNER);
 
         let msg = handoff_message(
             committee.budlum_chain_id,
@@ -138,7 +144,6 @@ module budlum::budlum_verifier {
             (next_threshold as u32),
             &next_members,
         );
-        let cur_n = vector::length(&committee.members);
         let seen = vector::empty<bool>();
         let k = 0;
         while (k < cur_n) {
@@ -219,21 +224,24 @@ module budlum::budlum_verifier {
         assert!(chain_id == committee.budlum_chain_id && epoch == committee.epoch, E_DOMAIN_MISMATCH);
 
         let c = borrow_global_mut<Checkpoints>(@budlum);
-        if (table::contains(&c.records, height)) {
+        let already_recorded = table::contains(&c.records, height);
+        if (already_recorded) {
             let existing = table::borrow(&c.records, height);
             assert!(
-                existing.state_root == state_root && existing.header_hash == header_hash,
+                existing.state_root == state_root
+                    && existing.header_hash == header_hash
+                    && existing.mode == mode,
                 E_CONFLICT,
             );
-            return
         };
 
+        let n = vector::length(&committee.members);
         let sig_count = vector::length(&signatures);
         assert!(sig_count == vector::length(&signer_indices), E_INVALID_SIGNATURE);
         assert!(sig_count >= committee.threshold, E_QUORUM_NOT_MET);
+        assert!(sig_count <= n, E_DUPLICATE_SIGNER);
 
         let msg = signing_message(chain_id, epoch, height, &state_root, &header_hash, mode);
-        let n = vector::length(&committee.members);
         let seen = vector::empty<bool>();
         let k = 0;
         while (k < n) {
@@ -261,6 +269,9 @@ module budlum::budlum_verifier {
             idx = idx + 1;
         };
         assert!(valid >= committee.threshold, E_QUORUM_NOT_MET);
+        if (already_recorded) {
+            return
+        };
 
         table::add(&mut c.records, height, CheckpointRecord {
             state_root,
