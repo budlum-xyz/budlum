@@ -9,6 +9,23 @@ use std::collections::BTreeMap;
 /// message cost memory and hashing time without limit.
 const MAX_CUSTOM_KIND_BYTES: usize = 256;
 
+/// Maximum live messages held in the registry (every row is Merkle-hashed into `root()`).
+///
+/// Convenience: pub so relayer and bridge callers enforce the same global ceiling.
+pub const MAX_REGISTERED_MESSAGES: usize = 65_536;
+
+/// Maximum concurrent messages a single sender may hold in the registry so one
+/// account cannot saturate [`MAX_REGISTERED_MESSAGES`].
+///
+/// Convenience: pub so relayer and bridge callers enforce the same per-sender bound.
+pub const MAX_MESSAGES_PER_SENDER: usize = 256;
+
+/// Maximum byte length accepted for `sender_public_key` or `sender_signature`
+/// (covers FIPS 204 ML-DSA-87 and composite signatures while refusing DoS blobs).
+///
+/// Convenience: pub so cross-domain message builders stay within the auth ceiling.
+pub const MAX_MESSAGE_AUTH_BYTES: usize = 8_192;
+
 /// Longest a message row may be retained. `expiry_height` and `source_height`
 /// are chosen by whoever built the message, so a row that names `u64::MAX`
 /// would otherwise never be pruned and the registry would grow without bound.
@@ -69,6 +86,21 @@ impl CrossDomainMessageRegistry {
                 message.source_domain
             ));
         }
+        if message.sender == crate::core::address::Address::zero()
+            || message.recipient == crate::core::address::Address::zero()
+        {
+            return Err("Cross-domain message sender and recipient cannot be zero".into());
+        }
+        if message.payload_hash == [0u8; 32] {
+            return Err("Cross-domain message payload_hash cannot be all-zero".into());
+        }
+        if message.sender_public_key.len() > MAX_MESSAGE_AUTH_BYTES
+            || message.sender_signature.len() > MAX_MESSAGE_AUTH_BYTES
+        {
+            return Err(format!(
+                "Cross-domain message auth fields exceed {MAX_MESSAGE_AUTH_BYTES} bytes"
+            ));
+        }
         if let MessageKind::Custom(tag) = &message.kind {
             if tag.len() > MAX_CUSTOM_KIND_BYTES {
                 return Err(format!(
@@ -81,6 +113,21 @@ impl CrossDomainMessageRegistry {
             return Err(format!(
                 "Message {} already registered",
                 hex::encode(message.message_id)
+            ));
+        }
+        if self.messages.len() >= MAX_REGISTERED_MESSAGES {
+            return Err(format!(
+                "Cross-domain message registry is full (max {MAX_REGISTERED_MESSAGES})"
+            ));
+        }
+        let sender_count = self
+            .messages
+            .values()
+            .filter(|existing| existing.sender == message.sender)
+            .count();
+        if sender_count >= MAX_MESSAGES_PER_SENDER {
+            return Err(format!(
+                "Sender reached maximum concurrent cross-domain messages ({MAX_MESSAGES_PER_SENDER})"
             ));
         }
         self.messages.insert(message.message_id, message);
