@@ -397,6 +397,50 @@ pub struct IntakeEntry {
     pub registrant: Address,
 }
 
+impl IntakeEntry {
+    const TENDERMINT_UNBONDING_PERIOD_SECS: u64 = 21 * 24 * 60 * 60;
+
+    /// Builds the live verification adapter for [`IntakeState::submit_evidence`].
+    ///
+    /// For `TendermintCommit` domains, attaches the `ICS-07` [`TendermintEraAnchor`]
+    /// derived from the verified `golden` checkpoint (updated on every two-phase
+    /// or multi-step bisection rotation) so a pinned or retired validator set
+    /// cannot leap past `MAX_HEIGHT_DRIFT` without bisection or finalize commits
+    /// after its `14`-day trusting window expires.
+    fn build_submission_adapter(
+        &self,
+        bls: Option<Box<dyn BlsVerifier>>,
+    ) -> Result<Box<dyn ExternalFinalityAdapter>, IntakeError> {
+        if let AdapterSpec::TendermintCommit {
+            network,
+            chain_id,
+            validator_set_hash,
+        } = &self.spec
+        {
+            use crate::cross_domain::external::tendermint::{
+                TendermintCommitEvidence, TendermintEraAnchor, TendermintLightParams,
+            };
+
+            let golden_commit = TendermintCommitEvidence::decode(&self.golden.payload)
+                .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+            let params = TendermintLightParams::standard_for_unbonding(
+                Self::TENDERMINT_UNBONDING_PERIOD_SECS,
+            )
+            .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+            let era = TendermintEraAnchor {
+                pinned_height: golden_commit.height,
+                pinned_time_secs: golden_commit.commit_time,
+                params,
+            };
+            return Ok(Box::new(
+                TendermintFinalityAdapter::new_pinned(network, chain_id, *validator_set_hash)
+                    .with_trusted_era(era),
+            ));
+        }
+        Ok(self.spec.build(bls, None))
+    }
+}
+
 /// The consensus-resident intake state: the framework registry plus the
 /// entries needed to rebuild each adapter. This is the struct `Blockchain`
 /// holds and the storage layer persists.
@@ -1595,7 +1639,7 @@ impl IntakeState {
         {
             return Err(IntakeError::CommitteeNotPinned);
         }
-        let adapter = entry.spec.build(bls, None);
+        let adapter = entry.build_submission_adapter(bls)?;
         // `now` is the live clock, not the
         // registration timestamp. A policy stored `now` forever, so
         // `max_age` was measured against a frozen instant and newer evidence
@@ -4859,6 +4903,114 @@ mod tests {
             .submit_evidence(&mk_raw(&post_rot_h121), None)
             .expect("rotated validator set commit must be accepted");
         assert_eq!(attested.height, 121);
+
+        // 5. Era enforcement on `submit_evidence`:
+        //    (a) A single-step height leap past `pinned_height + MAX_HEIGHT_DRIFT`
+        //        without ICS-07 bisection rotation must fail closed and leave
+        //        the domain tip at 121.
+        let leap_height = 120 + crate::cross_domain::external::tendermint::MAX_HEIGHT_DRIFT + 1;
+        let (_, leap_commit) = sign_tendermint_rotation_commit(
+            "noble-1",
+            leap_height,
+            1_700_000_120,
+            [0x73u8; 32],
+            [0u8; 32],
+            rotated_refs,
+            &[0, 1, 2],
+        );
+        let leap_res = intake.submit_evidence(&mk_raw(&leap_commit), None);
+        assert!(
+            matches!(
+                leap_res,
+                Err(IntakeError::Registry(RegistryError::Adapter(
+                    AdapterError::ConsensusRule { .. }
+                )))
+            ),
+            "height leap past MAX_HEIGHT_DRIFT without bisection must fail closed, got: {leap_res:?}"
+        );
+        assert_eq!(
+            intake.registry.domain(&key).and_then(|d| d
+                .attestations
+                .keys()
+                .next_back()
+                .map(|(h, _)| *h)),
+            Some(121),
+            "rejected era-leap commit must not advance domain tip"
+        );
+
+        //    (b) Once the live clock reaches `pinned_time_secs + DEFAULT_TRUSTING_PERIOD_SECS`
+        //        without rotating the anchor, commits signed by that validator set
+        //        must be refused as `AdapterError::Stale` even when fresh relative to `now`.
+        let mut expired_intake = IntakeState::new();
+        expired_intake.pin_tendermint_anchor(
+            "noble-expired",
+            crate::cross_domain::external::tendermint::PinnedTendermintAnchor {
+                chain_id: "noble-1".to_string(),
+                validator_set_hash: honest_hash,
+            },
+        );
+        let exp_spec = AdapterSpec::TendermintCommit {
+            network: "noble-expired".to_string(),
+            chain_id: "noble-1".to_string(),
+            validator_set_hash: Some(honest_hash),
+        };
+        let exp_id = exp_spec.build(None, None).descriptor().id;
+        let mk_exp = |c: &crate::cross_domain::external::tendermint::TendermintCommitEvidence| {
+            RawConsensusEvidence {
+                adapter: exp_id,
+                evidence_version: EVIDENCE_VERSION,
+                network: "noble-expired".to_string(),
+                declared_height: c.height,
+                declared_root: c.app_hash,
+                payload: bincode::serialize(c).expect("encode commit"),
+                submitter: addr(1),
+            }
+        };
+        let default_trusting_secs = IntakeState::MAX_TENDERMINT_TRUSTING_PERIOD_SECS;
+        let mut exp_policy = VerificationPolicy::strict(1_700_000_000);
+        exp_policy.max_age = default_trusting_secs * 2;
+        expired_intake
+            .register_domain(
+                RegistrationRequest {
+                    spec: exp_spec.clone(),
+                    policy: exp_policy,
+                    economics: IntakeState::conservative_economics(1_000_000),
+                    versions: versions_for(&exp_spec),
+                    golden: mk_exp(anchor_h100),
+                    bond_atoms: economics_bond(),
+                    poster: addr(1),
+                },
+                None,
+            )
+            .expect("register noble-expired");
+        // Set the stored policy clock at the exact trusting-period expiry boundary
+        // while keeping the submitted commit itself 0s old relative to `now`.
+        let expired_ts = 1_700_000_000 + default_trusting_secs;
+        if let Some(e) = expired_intake
+            .entries
+            .get_mut(&DomainKey::from_parts(&exp_id, "noble-expired"))
+        {
+            e.policy.now = expired_ts;
+        }
+        let (_, post_expiry_h105) = sign_tendermint_rotation_commit(
+            "noble-1",
+            105,
+            expired_ts,
+            [0x74u8; 32],
+            [0u8; 32],
+            honest_refs,
+            &[0, 1, 2],
+        );
+        let exp_res = expired_intake.submit_evidence(&mk_exp(&post_expiry_h105), None);
+        assert!(
+            matches!(
+                exp_res,
+                Err(IntakeError::Registry(RegistryError::Adapter(
+                    AdapterError::Stale { .. }
+                )))
+            ),
+            "unrotated anchor past trusting_period_secs must fail closed as Stale, got: {exp_res:?}"
+        );
 
         intake
             .registry
