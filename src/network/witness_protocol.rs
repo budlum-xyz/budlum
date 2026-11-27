@@ -61,7 +61,7 @@ impl WitnessRequest {
     /// Decode a request; anything malformed or over a bound is `None`.
     #[must_use]
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 12 {
+        if bytes.len() < 12 || bytes.len() > MAX_WITNESS_REQUEST_BYTES {
             return None;
         }
         let block_height = u64::from_le_bytes(bytes[..8].try_into().ok()?);
@@ -108,6 +108,9 @@ impl WitnessResponse {
     /// Decode a response; anything malformed or over a bound is `None`.
     #[must_use]
     pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() > MAX_WITNESS_RESPONSE_BYTES {
+            return None;
+        }
         match bytes.first()? {
             0 if bytes.len() == 1 => Some(Self::NotAvailable),
             1 => {
@@ -116,11 +119,16 @@ impl WitnessResponse {
                     return None;
                 }
                 let mut at = 5usize;
+                let mut total_witness_bytes = 0usize;
                 let mut witnesses = Vec::with_capacity(count);
                 for _ in 0..count {
                     let len = u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize;
                     at += 4;
                     if len > MAX_WITNESS_BYTES {
+                        return None;
+                    }
+                    total_witness_bytes = total_witness_bytes.checked_add(len)?;
+                    if total_witness_bytes > MAX_WITNESS_RESPONSE_BYTES {
                         return None;
                     }
                     witnesses.push(bytes.get(at..at.checked_add(len)?)?.to_vec());
@@ -371,5 +379,22 @@ mod tests {
         assert_ne!(a, witness_root(&other_ids, &witnesses(2)));
         assert_ne!(a, witness_root(&ids(3), &witnesses(3)));
         assert_ne!(witness_root(&[], &[]), a);
+    }
+
+    #[test]
+    fn witness_response_decode_refuses_total_bytes_above_max_witness_response_bytes() {
+        // 30 valid-size witnesses (150 KiB each <= MAX_WITNESS_BYTES = 160 KiB) sum to
+        // ~4.5 MiB, which exceeds MAX_WITNESS_RESPONSE_BYTES (4 MiB).
+        let huge = WitnessResponse::Witnesses(vec![vec![0xAB; 150_000]; 30]);
+        let wire = huge.encode();
+        assert!(wire.len() > MAX_WITNESS_RESPONSE_BYTES);
+        assert!(WitnessResponse::decode(&wire).is_none());
+
+        let too_many_ids = WitnessRequest {
+            block_height: 7,
+            tx_ids: vec![[0x22; 32]; MAX_WITNESS_REQUEST_IDS + 1],
+        };
+        let req_wire = too_many_ids.encode();
+        assert!(WitnessRequest::decode(&req_wire).is_none());
     }
 }
