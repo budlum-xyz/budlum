@@ -969,7 +969,7 @@ impl ExternalFinalityAdapter for MysticetiDagAdapter {
     }
 
     fn has_pinned_trust_anchor(&self) -> bool {
-        self.committee.is_some()
+        !self.network.trim().is_empty() && self.committee.is_some()
     }
 
     fn verify(
@@ -987,9 +987,10 @@ impl ExternalFinalityAdapter for MysticetiDagAdapter {
         observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityAttestation, AdapterError> {
         let (att, all_pq) = self.verify_inner(evidence, policy)?;
-        observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         if all_pq {
             observer.observe(ObservedScheme::Scheme(SchemeId::ML_DSA_65));
+        } else {
+            observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         }
         Ok(att)
     }
@@ -998,6 +999,7 @@ impl ExternalFinalityAdapter for MysticetiDagAdapter {
         decode_mysticeti_evidence(&evidence.payload)
             .ok()
             .map(|w| w.commitment.parent_anchor_digest)
+            .filter(|digest| *digest != [0u8; 32])
     }
 
     fn fault_probes(&self) -> Vec<FaultProbe> {
@@ -1345,5 +1347,26 @@ mod tests {
             blank_adapter.verify(&blank_raw, &wave_policy()),
             Err(AdapterError::ConsensusRule { .. })
         ));
+    }
+
+    #[test]
+    fn mysticeti_preserves_lattice_quantum_class_and_rejects_blank_trust_anchor() {
+        use crate::crypto::facts::QuantumClass;
+
+        let (signers, committee) = committee_fixture();
+        let (_wave, raw) = wave_bundle(&signers);
+        let adapter = MysticetiDagAdapter::new(NET, Some(committee.clone()));
+        assert!(adapter.has_pinned_trust_anchor());
+        assert!(!MysticetiDagAdapter::new("  ", Some(committee)).has_pinned_trust_anchor());
+
+        let mut facts = CryptoFacts::default();
+        adapter
+            .verify_observed(&raw, &wave_policy(), &mut facts)
+            .expect("100% PQ Mysticeti wave verifies");
+        assert_eq!(
+            facts.quantum_class(),
+            Some(QuantumClass::Lattice),
+            "100% ML-DSA-65 Mysticeti wave must preserve QuantumClass::Lattice"
+        );
     }
 }
