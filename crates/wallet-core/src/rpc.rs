@@ -6,6 +6,10 @@
 //! and hands the answer back to the matching reader. The crate gains no
 //! network dependency, and the same code runs in wasm and native builds.
 
+use std::collections::HashSet;
+
+const MAX_RPC_ANSWER_BYTES: usize = 4 * 1024 * 1024;
+
 fn json_escape_str(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for ch in raw.chars() {
@@ -15,7 +19,13 @@ fn json_escape_str(raw: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() => {}
+            c if c.is_control() => {
+                let code = c as u32;
+                if code <= 0xFFFF {
+                    use std::fmt::Write as _;
+                    let _ = write!(out, "\\u{code:04x}");
+                }
+            }
             c => out.push(c),
         }
     }
@@ -58,9 +68,18 @@ pub fn get_balance(address_hex: &str) -> String {
 
 /// `bud_sendRawTransaction` of a signed transaction's JSON
 /// (`transfer::signed_transfer_json`).
+///
+/// Re-serializes a validated single JSON object so malformed or injected input
+/// can never break out of the outer JSON-RPC `params` envelope.
 #[must_use]
 pub fn send_raw_transaction(signed_json: &str) -> String {
-    request("bud_sendRawTransaction", &format!("[{signed_json}]"), 1)
+    let safe_param = match serde_json::from_str::<serde_json::Value>(signed_json) {
+        Ok(val) if val.is_object() => {
+            serde_json::to_string(&val).unwrap_or_else(|_| "null".to_string())
+        }
+        _ => "null".to_string(),
+    };
+    request("bud_sendRawTransaction", &format!("[{safe_param}]"), 1)
 }
 
 /// `bud_bnsResolve` of a validated `<label>.bud` or `<sub_label>.<label>.bud` name.
@@ -117,45 +136,56 @@ pub fn bns_reverse_resolve(address_hex: &str) -> String {
     request("bud_bnsReverseResolve", &format!("[\"{address}\"]"), 1)
 }
 
-/// Locate a top-level JSON object key outside nested objects, arrays, and
-/// string literals, returning the trimmed slice starting at its value.
-fn top_level_value<'a>(answer: &'a str, key: &str) -> Option<&'a str> {
+/// Reject any JSON object that repeats a top-level key (e.g. a non-null
+/// `"error"` shadowed by a later `"error": null`, or duplicate `"result"`
+/// keys, including Unicode-escaped spellings like `"\u0065rror"`).
+///
+/// Called only after `serde_json::from_str::<serde_json::Value>` has already
+/// confirmed `answer` is syntactically valid RFC 8259 JSON whose root is an
+/// object.
+fn reject_duplicate_top_level_keys(answer: &str) -> Result<(), String> {
     let bytes = answer.as_bytes();
     let mut i = 0usize;
     let mut depth = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
+    let mut expect_key = false;
+    let mut seen = HashSet::new();
+
+    while let Some(&b) = bytes.get(i) {
+        match b {
             b'"' => {
-                let str_start = i + 1;
+                let start = i;
                 i += 1;
-                let mut has_escape = false;
-                while i < bytes.len() {
-                    if bytes[i] == b'\\' {
-                        has_escape = true;
-                        i = (i + 2).min(bytes.len());
+                while let Some(&cur) = bytes.get(i) {
+                    if cur == b'\\' {
+                        i = i.saturating_add(2);
                         continue;
                     }
-                    if bytes[i] == b'"' {
+                    if cur == b'"' {
+                        i += 1;
                         break;
                     }
                     i += 1;
                 }
-                if i >= bytes.len() {
-                    return None;
-                }
-                let str_end = i;
-                i += 1;
-                if depth == 1 && !has_escape && &answer[str_start..str_end] == key {
-                    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                        i += 1;
+                if depth == 1 && expect_key {
+                    let raw = answer
+                        .get(start..i)
+                        .ok_or_else(|| "invalid JSON-RPC key slice".to_string())?;
+                    let decoded: String = serde_json::from_str(raw)
+                        .map_err(|e| format!("invalid JSON-RPC key escape: {e}"))?;
+                    if !seen.insert(decoded) {
+                        return Err("RPC answer contains duplicate top-level JSON keys".into());
                     }
-                    if i < bytes.len() && bytes[i] == b':' {
-                        i += 1;
-                        return answer.get(i..).map(str::trim_start);
-                    }
+                    expect_key = false;
                 }
             }
-            b'{' | b'[' => {
+            b'{' => {
+                depth += 1;
+                if depth == 1 {
+                    expect_key = true;
+                }
+                i += 1;
+            }
+            b'[' => {
                 depth += 1;
                 i += 1;
             }
@@ -163,84 +193,88 @@ fn top_level_value<'a>(answer: &'a str, key: &str) -> Option<&'a str> {
                 depth = depth.saturating_sub(1);
                 i += 1;
             }
+            b',' => {
+                if depth == 1 {
+                    expect_key = true;
+                }
+                i += 1;
+            }
             _ => {
                 i += 1;
             }
         }
     }
-    None
+    Ok(())
 }
 
-/// Read a string or scalar token from the start of a JSON value slice.
-fn read_scalar_or_string(rest: &str) -> Option<&str> {
-    if let Some(quoted) = rest.strip_prefix('"') {
-        let bytes = quoted.as_bytes();
-        let mut i = 0usize;
-        while i < bytes.len() {
-            if bytes[i] == b'\\' {
-                i = (i + 2).min(bytes.len());
-                continue;
-            }
-            if bytes[i] == b'"' {
-                return quoted.get(..i);
-            }
-            i += 1;
+/// Strictly parse a JSON-RPC 2.0 answer object, enforcing size limits, valid
+/// JSON syntax, unique top-level keys, and fail-closed `error` detection.
+fn parse_rpc_result(answer: &str) -> Result<serde_json::Value, String> {
+    if answer.len() > MAX_RPC_ANSWER_BYTES {
+        return Err(format!(
+            "RPC answer exceeds maximum allowed size ({} > {MAX_RPC_ANSWER_BYTES} bytes)",
+            answer.len()
+        ));
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(answer).map_err(|e| format!("RPC answer is not valid JSON: {e}"))?;
+    let serde_json::Value::Object(mut map) = parsed else {
+        return Err("RPC answer root must be a JSON object".into());
+    };
+    reject_duplicate_top_level_keys(answer)?;
+    if let Some(err_val) = map.get("error") {
+        if !err_val.is_null() {
+            return Err(format!("the node refused: {answer}"));
         }
-        return None;
     }
-    let end = rest
-        .find(|c: char| c == ',' || c == '}' || c == ']' || c.is_whitespace())
-        .unwrap_or(rest.len());
-    if end == 0 {
-        None
-    } else {
-        rest.get(..end)
-    }
-}
-
-fn has_non_null_error(answer: &str) -> bool {
-    let Some(val) = top_level_value(answer, "error") else {
-        return false;
-    };
-    let Some(tok) = val
-        .strip_prefix("null")
-        .filter(|tail| tail.is_empty() || tail.starts_with([',', '}', ' ', '\t', '\r', '\n']))
-    else {
-        return true;
-    };
-    let _ = tok;
-    false
+    map.remove("result")
+        .ok_or_else(|| format!("the answer has no result: {answer}"))
 }
 
 /// The `result` of an answer as text, or the node's error.
 ///
 /// # Errors
 ///
-/// The answer carries an `error`, or no `result`.
+/// The answer carries an `error`, is malformed JSON, or carries no scalar string/number `result`.
 /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
 pub fn string_result(answer: &str) -> Result<String, String> {
-    if has_non_null_error(answer) {
-        return Err(format!("the node refused: {answer}"));
+    match parse_rpc_result(answer)? {
+        serde_json::Value::String(s) => Ok(s),
+        serde_json::Value::Number(n) => Ok(n.to_string()),
+        _ => Err(format!(
+            "the answer result is not a string or number: {answer}"
+        )),
     }
-    top_level_value(answer, "result")
-        .and_then(read_scalar_or_string)
-        .map(str::to_string)
-        .ok_or_else(|| format!("the answer has no result: {answer}"))
 }
 
-/// The `result` of an answer as a number (`0x` quantity or decimal).
+/// The `result` of an answer as a number (`0x`/`0X` quantity or decimal).
 ///
 /// # Errors
 ///
-/// As [`string_result`], or a result that is not a number.
+/// As [`string_result`], or a result that is not a non-negative integer.
 /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
 pub fn quantity_result(answer: &str) -> Result<u64, String> {
-    let text = string_result(answer)?;
-    match text.strip_prefix("0x") {
-        Some(hex) => u64::from_str_radix(hex, 16),
-        None => text.parse(),
+    match parse_rpc_result(answer)? {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .ok_or_else(|| format!("the result '{n}' is not a non-negative integer")),
+        serde_json::Value::String(text) => {
+            if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+                if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(format!("the result '{text}' is not a valid hex quantity"));
+                }
+                u64::from_str_radix(hex, 16)
+                    .map_err(|e| format!("the result '{text}' is not a number: {e}"))
+            } else {
+                if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(format!("the result '{text}' is not a decimal quantity"));
+                }
+                text.parse::<u64>()
+                    .map_err(|e| format!("the result '{text}' is not a number: {e}"))
+            }
+        }
+        other => Err(format!("the result '{other}' is not a number")),
     }
-    .map_err(|e| format!("the result '{text}' is not a number: {e}"))
 }
 
 /// Parse a `bud_bnsResolve` JSON-RPC answer into `Ok(None)` (`"result": null`)
@@ -248,24 +282,29 @@ pub fn quantity_result(answer: &str) -> Result<u64, String> {
 ///
 /// # Errors
 ///
-/// Refuses RPC error responses, malformed hex, or the zero address.
+/// Refuses RPC error responses, malformed hex, string `"null"`, or the zero address.
 /// exposed for: the wallet crate's SDK surface - browser and mobile hosts call these directly.
 pub fn optional_address_result(answer: &str) -> Result<Option<[u8; 32]>, String> {
-    let text = string_result(answer)?;
-    if text == "null" {
-        return Ok(None);
+    match parse_rpc_result(answer)? {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(text) => {
+            let clean = strip_hex_prefix(&text);
+            if clean.len() != 64 {
+                return Err(format!("resolved address '{text}' is not 32 bytes"));
+            }
+            let bytes =
+                hex::decode(clean).map_err(|e| format!("invalid resolved address hex: {e}"))?;
+            let mut addr = [0u8; 32];
+            addr.copy_from_slice(&bytes);
+            if addr == [0u8; 32] {
+                return Err("resolved BNS target cannot be the zero address".into());
+            }
+            Ok(Some(addr))
+        }
+        other => Err(format!(
+            "resolved address must be a hex string or null, got {other}"
+        )),
     }
-    let clean = strip_hex_prefix(&text);
-    if clean.len() != 64 {
-        return Err(format!("resolved address '{text}' is not 32 bytes"));
-    }
-    let bytes = hex::decode(clean).map_err(|e| format!("invalid resolved address hex: {e}"))?;
-    let mut addr = [0u8; 32];
-    addr.copy_from_slice(&bytes);
-    if addr == [0u8; 32] {
-        return Err("resolved BNS target cannot be the zero address".into());
-    }
-    Ok(Some(addr))
 }
 
 /// Parse a `bud_bnsReverseResolve` JSON-RPC answer into `Ok(None)` (`"result": null`)
@@ -273,17 +312,21 @@ pub fn optional_address_result(answer: &str) -> Result<Option<[u8; 32]>, String>
 ///
 /// # Errors
 ///
-/// Refuses RPC error responses or any returned string that violates `.bud` label rules.
+/// Refuses RPC error responses, string `"null"`, or any returned string that violates `.bud` label rules.
 /// exposed for: the wallet crate's SDK surface - browser and mobile hosts call these directly.
 pub fn optional_bud_name_result(answer: &str) -> Result<Option<String>, String> {
-    let text = string_result(answer)?;
-    if text == "null" {
-        return Ok(None);
+    match parse_rpc_result(answer)? {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(text) => {
+            if !crate::bns::is_valid_bud_name(&text) {
+                return Err(format!("RPC returned invalid reverse .bud name '{text}'"));
+            }
+            Ok(Some(text))
+        }
+        other => Err(format!(
+            "reverse .bud name must be a string or null, got {other}"
+        )),
     }
-    if !crate::bns::is_valid_bud_name(&text) {
-        return Err(format!("RPC returned invalid reverse .bud name '{text}'"));
-    }
-    Ok(Some(text))
 }
 
 #[cfg(test)]
@@ -376,5 +419,104 @@ mod tests {
             "{\"jsonrpc\":\"2.0\",\"result\":\"Spoof.bud\",\"id\":1}"
         )
         .is_err());
+    }
+
+    #[test]
+    fn walcore02_rpc_blocks_unicode_error_bypass_dup_keys_string_null_and_injection() {
+        // 1. Unicode-escaped `"error"` key must NOT bypass error detection.
+        let unicode_err =
+            r#"{"jsonrpc":"2.0","\u0065rror":{"code":-32000},"result":"0x10","id":1}"#;
+        assert!(
+            string_result(unicode_err).is_err(),
+            "unicode-escaped error key must be refused"
+        );
+        assert!(
+            quantity_result(unicode_err).is_err(),
+            "quantity_result must refuse unicode-escaped error key"
+        );
+
+        // 2. Duplicate `"error"` keys (non-null shadowed by later null, or vice versa) must be refused.
+        let dup_err =
+            r#"{"jsonrpc":"2.0","error":{"code":-32000},"error":null,"result":"0x10","id":1}"#;
+        assert!(
+            string_result(dup_err).is_err(),
+            "duplicate top-level error keys must be refused"
+        );
+        let dup_res = r#"{"jsonrpc":"2.0","result":"0x1","result":"0x2","id":1}"#;
+        assert!(
+            string_result(dup_res).is_err(),
+            "duplicate top-level result keys must be refused"
+        );
+
+        // 3. Truncated JSON, trailing garbage, object/array/bool results must be refused.
+        for malformed in [
+            r#"{"result":"0x10""#,
+            r#"{"result":"0x10"} trailing"#,
+            r#"{"result":{"nested":1}}"#,
+            r#"{"result":[1,2]}"#,
+            r#"{"result":true}"#,
+            r#"[{"result":"0x10"}]"#,
+        ] {
+            assert!(
+                string_result(malformed).is_err(),
+                "malformed/non-scalar RPC answer must be refused: {malformed}"
+            );
+        }
+
+        // 4. JSON string `"null"` must NOT be confused with JSON `null` in optional readers.
+        assert!(
+            optional_address_result(r#"{"jsonrpc":"2.0","result":"null","id":1}"#).is_err(),
+            "quoted string \"null\" must not decode as Ok(None) address"
+        );
+        assert!(
+            optional_bud_name_result(r#"{"jsonrpc":"2.0","result":"null","id":1}"#).is_err(),
+            "quoted string \"null\" must not decode as Ok(None) bud name"
+        );
+
+        // 5. Quantity parser rejects `+7`, `0x+7`, negative/float, and accepts `0X1f`.
+        for bad_qty in [
+            r#"{"result":"+7"}"#,
+            r#"{"result":"0x+7"}"#,
+            r#"{"result":"0x"}"#,
+            r#"{"result":-1}"#,
+            r#"{"result":1.5}"#,
+        ] {
+            assert!(
+                quantity_result(bad_qty).is_err(),
+                "invalid quantity must be refused: {bad_qty}"
+            );
+        }
+        assert_eq!(quantity_result(r#"{"result":"0X1f"}"#), Ok(31));
+
+        // 6. `send_raw_transaction` must never allow JSON-RPC envelope breakout.
+        let evil_tx = r#"{"a":1}],"method":"bud_admin","params":[{"x":1}"#;
+        let body = send_raw_transaction(evil_tx);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("send_raw_transaction must always emit valid JSON");
+        assert_eq!(parsed["method"], "bud_sendRawTransaction");
+        assert!(
+            !body.contains("\"method\":\"bud_admin\""),
+            "injected method must not break out of params"
+        );
+
+        // 7. Oversized RPC answer (> 4 MiB) must be refused before parsing.
+        let huge = format!("{{\"result\":\"{}\"}}", "a".repeat(4 * 1024 * 1024 + 1));
+        assert!(
+            string_result(&huge).is_err(),
+            "oversized RPC response must be refused"
+        );
+
+        // 8. Unicode-escaped duplicate error key shadowed by later null must be refused.
+        let uni_dup =
+            r#"{"jsonrpc":"2.0","\u0065rror":{"code":-1},"error":null,"result":"0x1","id":1}"#;
+        assert!(
+            string_result(uni_dup).is_err(),
+            "unicode-escaped duplicate error key must be refused"
+        );
+
+        // 9. Control characters in address parameters are escaped as \u00XX, producing valid JSON.
+        let ctrl_body = get_balance("0xab\u{0000}cd");
+        assert!(ctrl_body.contains("\\u0000"));
+        assert!(serde_json::from_str::<serde_json::Value>(&ctrl_body).is_ok());
     }
 }
