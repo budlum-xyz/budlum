@@ -524,9 +524,24 @@ pub fn verify_jolteon_equivocation(
     epoch_state: &PinnedJolteonEpochState,
     proof: &JolteonEquivocationProof,
 ) -> Result<([u8; 32], u64), AdapterError> {
-    if proof.epoch != epoch_state.epoch {
+    if network.trim().is_empty() {
         return Err(AdapterError::ConsensusRule {
-            rule: "Jolteon equivocation epoch mismatches pinned EpochState".into(),
+            rule: "Jolteon equivocation network cannot be empty".into(),
+        });
+    }
+    let (member_map, _) = AptosJolteonAdapter::build_committee_map(epoch_state)?;
+    if proof.epoch != epoch_state.epoch || proof.round == 0 {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Jolteon equivocation epoch mismatches pinned EpochState or round is zero".into(),
+        });
+    }
+    if proof.first_target.0 == [0u8; 32]
+        || proof.first_target.1 == [0u8; 32]
+        || proof.second_target.0 == [0u8; 32]
+        || proof.second_target.1 == [0u8; 32]
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Jolteon equivocation target carries zero block_hash or state_root".into(),
         });
     }
     if proof.first_target == proof.second_target {
@@ -545,11 +560,7 @@ pub fn verify_jolteon_equivocation(
         });
     }
     let offender = proof.first_sig.signer_pubkey;
-    let Some(member) = epoch_state
-        .validators
-        .iter()
-        .find(|v| v.ed25519_pubkey == offender)
-    else {
+    let Some(&member) = member_map.get(&offender) else {
         return Err(AdapterError::ConsensusRule {
             rule: "Jolteon equivocation signer absent from EpochState".into(),
         });
@@ -664,14 +675,20 @@ impl AptosJolteonAdapter {
         policy: &VerificationPolicy,
     ) -> Result<(FinalityAttestation, bool), AdapterError> {
         if evidence.adapter != self.descriptor.id {
-            return Err(AdapterError::ConsensusRule {
-                rule: "evidence adapter ID does not match AptosJolteonAdapter".into(),
+            return Err(AdapterError::WrongAdapter {
+                expected: self.descriptor.name.clone(),
+                found: hex::encode(evidence.adapter.as_bytes()),
             });
         }
         if evidence.evidence_version != EVIDENCE_VERSION {
             return Err(AdapterError::UnsupportedEvidenceVersion {
                 version: evidence.evidence_version,
                 accepted: EVIDENCE_VERSION.to_string(),
+            });
+        }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Jolteon network identifier cannot be empty".into(),
             });
         }
         if evidence.network != self.network {
@@ -702,7 +719,13 @@ impl AptosJolteonAdapter {
                 required: policy.min_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > b0.height {
+        if policy.max_age > 0 {
+            if b0.height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: b0.height - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now - b0.height;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -760,6 +783,14 @@ impl ExternalFinalityAdapter for AptosJolteonAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        !self.network.trim().is_empty()
+            && self
+                .pinned
+                .as_ref()
+                .is_some_and(|p| Self::build_committee_map(p).is_ok())
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,
@@ -775,9 +806,10 @@ impl ExternalFinalityAdapter for AptosJolteonAdapter {
         observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityAttestation, AdapterError> {
         let (att, all_pq) = self.verify_inner(evidence, policy)?;
-        observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         if all_pq {
             observer.observe(ObservedScheme::Scheme(SchemeId::ML_DSA_65));
+        } else {
+            observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         }
         Ok(att)
     }
@@ -1057,6 +1089,41 @@ mod tests {
                 Err(AdapterError::UnslashableBacking)
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
+        );
+    }
+
+    #[test]
+    fn jolteon_preserves_lattice_quantum_class_pins_anchor_and_refuses_future_height_or_wrong_adapter(
+    ) {
+        use crate::crypto::facts::{CryptoFacts, QuantumClass};
+
+        let (_, _, adapter, ev) = sample_adapter_with_round_skip_tc();
+        assert!(adapter.has_pinned_trust_anchor());
+        assert!(!AptosJolteonAdapter::new("aptos-mainnet", None).has_pinned_trust_anchor());
+
+        let policy = VerificationPolicy::strict(0);
+        let mut facts = CryptoFacts::default();
+        adapter
+            .verify_observed(&ev, &policy, &mut facts)
+            .expect("Jolteon verifies");
+        assert_eq!(
+            facts.quantum_class(),
+            Some(QuantumClass::Lattice),
+            "100% ML-DSA-65 Jolteon 2-chain committee must preserve QuantumClass::Lattice"
+        );
+
+        let mut wrong_adapter_ev = ev.clone();
+        wrong_adapter_ev.adapter = AdapterId::from_name("foreign-jolteon-v1");
+        assert!(matches!(
+            adapter.verify(&wrong_adapter_ev, &policy),
+            Err(AdapterError::WrongAdapter { .. })
+        ));
+
+        let mut future_policy = VerificationPolicy::strict(ev.declared_height.saturating_sub(1));
+        future_policy.max_age = 50;
+        assert!(
+            matches!(adapter.verify(&ev, &future_policy), Err(AdapterError::Stale { .. })),
+            "future Jolteon ordered_block height above policy.now must fail closed when max_age > 0"
         );
     }
 }

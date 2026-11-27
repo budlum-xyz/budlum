@@ -191,13 +191,16 @@ pub fn adjudicate(
     if already_decided.contains(&key) {
         return Ruling::Refused(Refusal::AlreadyAdjudicated);
     }
-    let Some(parent) = successor.attested_parent else {
+    let Some(parent) = successor.attested_parent.filter(|h| *h != [0u8; 32]) else {
         return Ruling::Refused(Refusal::NoParentBinding);
     };
-    let Some(block) = predecessor.attested_block_hash else {
+    let Some(block) = predecessor.attested_block_hash.filter(|h| *h != [0u8; 32]) else {
         return Ruling::Refused(Refusal::NoBlockBinding);
     };
-    if parent == block {
+    if bool::from(subtle::ConstantTimeEq::ct_eq(
+        parent.as_slice(),
+        block.as_slice(),
+    )) {
         return Ruling::Refused(Refusal::NoContradiction);
     }
     Ruling::Refuted {
@@ -413,5 +416,27 @@ mod tests {
             adjudicate(&later, &top, addr(0x42), &BTreeSet::new()),
             Ruling::Refused(Refusal::NotAdjacent { .. })
         ));
+    }
+
+    #[test]
+    fn zero_parent_or_zero_block_or_zero_carrier_never_slashes() {
+        let decided = BTreeSet::new();
+        let earlier = slot(100, 0xAA, 0xB1);
+        let mut zero_parent_succ = successor(101, 0xBB, 0x00);
+        zero_parent_succ.attested_parent = Some([0u8; 32]);
+        assert_eq!(
+            adjudicate(&zero_parent_succ, &earlier, addr(0x42), &decided),
+            Ruling::Refused(Refusal::NoParentBinding),
+            "Some([0u8; 32]) attested_parent is an unset hash, not a conflicting parent"
+        );
+
+        let mut zero_block_pred = slot(100, 0xAA, 0x00);
+        zero_block_pred.attested_block_hash = Some([0u8; 32]);
+        let valid_succ = successor(101, 0xBB, 0xB2);
+        assert_eq!(
+            adjudicate(&valid_succ, &zero_block_pred, addr(0x42), &decided),
+            Ruling::Refused(Refusal::NoBlockBinding),
+            "Some([0u8; 32]) attested_block_hash is an unset hash, not an attested block"
+        );
     }
 }
