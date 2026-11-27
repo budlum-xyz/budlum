@@ -36,7 +36,8 @@ const RESERVED_SET = new Set(RESERVED_LABELS);
 /**
  * Validate a single DNS-safe BNS label matching `src/bns/registry.rs`:
  * lowercase ASCII letters, digits, or internal hyphens; no leading or
- * trailing hyphen; length within [minLen, 32].
+ * trailing hyphen; no RFC 5891 R-LDH / Punycode `--` tag at indices 2..4;
+ * length within [minLen, 32].
  */
 export function isValidLabel(label, minLen = 3) {
   if (typeof label !== "string") {
@@ -46,6 +47,9 @@ export function isValidLabel(label, minLen = 3) {
     return false;
   }
   if (label.startsWith("-") || label.endsWith("-")) {
+    return false;
+  }
+  if (label.length >= 4 && label.charCodeAt(2) === 45 && label.charCodeAt(3) === 45) {
     return false;
   }
   for (let i = 0; i < label.length; i += 1) {
@@ -123,4 +127,154 @@ export function parseBnsHost(rawHost, suffix = DEFAULT_GATEWAY_SUFFIX) {
   }
 
   return { ok: false, reason: "nested subdomains deeper than one level are not allowed" };
+}
+
+/**
+ * Fold a lowercase ASCII `.bud` label into its visual lookalike skeleton,
+ * mirroring `crates/wallet-core/src/bns.rs::bns_visual_skeleton`.
+ */
+export function bnsVisualSkeleton(label) {
+  let out = "";
+  let i = 0;
+  while (i < label.length) {
+    if (i + 1 < label.length) {
+      const pair = label.slice(i, i + 2);
+      if (pair === "rn") {
+        out += "m";
+        i += 2;
+        continue;
+      }
+      if (pair === "vv") {
+        out += "w";
+        i += 2;
+        continue;
+      }
+      if (pair === "cl") {
+        out += "d";
+        i += 2;
+        continue;
+      }
+    }
+    const ch = label[i];
+    if (ch === "-") {
+      // Drop hyphens so pay-pal.bud collides with paypal.bud.
+    } else if (ch === "0") {
+      out += "o";
+    } else if (ch === "1" || ch === "i") {
+      out += "l";
+    } else if (ch === "3") {
+      out += "e";
+    } else if (ch === "5") {
+      out += "s";
+    } else if (ch === "8") {
+      out += "b";
+    } else {
+      out += ch;
+    }
+    i += 1;
+  }
+  return out;
+}
+
+function editDistanceIsOne(a, b) {
+  if (Math.abs(a.length - b.length) > 1) {
+    return false;
+  }
+  if (a.length === b.length) {
+    let diffs = 0;
+    for (let i = 0; i < a.length; i += 1) {
+      if (a[i] !== b[i]) {
+        diffs += 1;
+        if (diffs > 1) {
+          return false;
+        }
+      }
+    }
+    return diffs === 1;
+  }
+  const [shortStr, longStr] = a.length < b.length ? [a, b] : [b, a];
+  let si = 0;
+  let li = 0;
+  let skipped = false;
+  while (si < shortStr.length && li < longStr.length) {
+    if (shortStr[si] === longStr[li]) {
+      si += 1;
+      li += 1;
+    } else if (!skipped) {
+      skipped = true;
+      li += 1;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isSyntacticallyValidBudName(name) {
+  if (typeof name !== "string" || !name.endsWith(".bud")) {
+    return false;
+  }
+  const stem = name.slice(0, -".bud".length);
+  const parts = stem.split(".");
+  if (parts.length === 1) {
+    return isValidLabel(parts[0], 3);
+  }
+  if (parts.length === 2) {
+    return isValidLabel(parts[0], 1) && isValidLabel(parts[1], 3);
+  }
+  return false;
+}
+
+/**
+ * Inspect `candidate` against `knownNames` and return a warning object if
+ * `candidate` is a distinct valid `.bud` name that visually mimics one of
+ * `knownNames` (including reserved protocol names such as `budlum.bud` or
+ * `faucet.bud`). Returns `null` for exact matches or invalid names.
+ */
+export function detectConfusableBudName(candidate, knownNames) {
+  if (typeof candidate !== "string" || !Array.isArray(knownNames)) {
+    return null;
+  }
+  if (!isSyntacticallyValidBudName(candidate)) {
+    return null;
+  }
+  for (const known of knownNames) {
+    if (known === candidate) {
+      return null;
+    }
+  }
+  const candStem = candidate.slice(0, -".bud".length);
+  const candSkel = bnsVisualSkeleton(candStem);
+
+  for (const known of knownNames) {
+    if (!isSyntacticallyValidBudName(known)) {
+      continue;
+    }
+    const knownStem = known.slice(0, -".bud".length);
+    if (candSkel === bnsVisualSkeleton(knownStem)) {
+      return {
+        candidate,
+        similarTo: known,
+        reason: "visual_skeleton_match",
+      };
+    }
+  }
+
+  if (candStem.length >= 4) {
+    for (const known of knownNames) {
+      if (!isSyntacticallyValidBudName(known)) {
+        continue;
+      }
+      const knownStem = known.slice(0, -".bud".length);
+      if (knownStem.length >= 4 && editDistanceIsOne(candStem, knownStem)) {
+        return {
+          candidate,
+          similarTo: known,
+          reason: "near_edit_distance",
+        };
+      }
+    }
+  }
+
+  return null;
 }

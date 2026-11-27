@@ -9,7 +9,8 @@
 // Security invariant: unverified RPC responses are NEVER rendered, and
 // decryption keys for Sealed B.U.D. 3.0 objects NEVER leave the browser.
 
-import { parseBnsHost } from "./bns_host.js";
+import { detectConfusableBudName, parseBnsHost } from "./bns_host.js";
+import { formatPaymentPrompt, parsePaymentRequestUri } from "./payment_uri.js";
 
 const statusEl = document.getElementById("status");
 const detailEl = document.getElementById("detail");
@@ -70,7 +71,23 @@ async function run() {
   const params = new URLSearchParams(window.location.search);
   const rawTarget = params.get("target") || "";
   if (!rawTarget) {
-    showError("Missing target URL", "Open a .bud or *.budlum.xyz address to resolve it locally.");
+    showError("Missing target URL", "Open a .bud, *.budlum.xyz, or budlum:pay/v1 address to verify it locally.");
+    return;
+  }
+
+  if (rawTarget.startsWith("budlum:pay/")) {
+    const parsedPay = parsePaymentRequestUri(rawTarget);
+    if (!parsedPay.ok) {
+      showError("Fail-closed: invalid payment request URI", parsedPay.reason);
+      return;
+    }
+    const prompt = formatPaymentPrompt(parsedPay.value, "UNITS");
+    statusEl.textContent = "Verified payment request: " + prompt.headline;
+    statusEl.className = "status ok";
+    detailEl.textContent =
+      "Canonical budlum:pay/v1 URI validated locally. Confirm recipient and deadline in your wallet before signing.";
+    summaryEl.hidden = false;
+    summaryEl.textContent = JSON.stringify(prompt, null, 2);
     return;
   }
 
@@ -82,16 +99,31 @@ async function run() {
     return;
   }
 
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    showError("Refused URL scheme", "Only http:, https:, or canonical budlum:pay/v1 URIs are permitted.");
+    return;
+  }
+
   const hostResult = parseBnsHost(parsedUrl.host);
   if (!hostResult.ok) {
     showError("Refused host", hostResult.reason);
     return;
   }
 
-  const { rpcEndpoints = [], trustedHeaders = [] } = await chrome.storage.local.get([
+  const { rpcEndpoints = [], trustedHeaders = [], trustedNames = [] } = await chrome.storage.local.get([
     "rpcEndpoints",
-    "trustedHeaders"
+    "trustedHeaders",
+    "trustedNames"
   ]);
+
+  const confusable = detectConfusableBudName(hostResult.name, trustedNames);
+  if (confusable) {
+    showError(
+      "Warning: confusable .bud name detected",
+      `${confusable.candidate} closely resembles your trusted name ${confusable.similarTo} (${confusable.reason}). Verify the exact recipient before continuing.`
+    );
+    return;
+  }
 
   if (!Array.isArray(rpcEndpoints) || rpcEndpoints.length === 0) {
     showError("No RPC endpoints configured", "Configure at least one Budlum RPC endpoint in the extension popup.");
