@@ -19,10 +19,10 @@ impl Address {
     }
 
     pub fn from_hex(s: &str) -> Result<Self, String> {
-        let s = s.strip_prefix("0x").unwrap_or(s);
-        if s == "0" {
-            return Ok(Address::zero());
-        }
+        let s = s
+            .strip_prefix("0x")
+            .or_else(|| s.strip_prefix("0X"))
+            .unwrap_or(s);
         let bytes = hex::decode(s).map_err(|e| e.to_string())?;
         if bytes.len() != 32 {
             return Err(format!(

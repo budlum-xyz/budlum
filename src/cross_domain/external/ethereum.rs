@@ -2212,9 +2212,14 @@ mod slashable_policy_tests {
             Some(Box::new(AcceptAllBls)),
         );
         let ev = evidence(&adapter);
-        assert!(adapter
+        let att = adapter
             .verify(&ev, &VerificationPolicy::strict(1_000))
-            .is_ok());
+            .expect("sync committee verifies");
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("Ethereum Gasper shape");
         let mut policy = VerificationPolicy::strict(1_000);
         policy.require_slashable = true;
         let err = adapter.verify(&ev, &policy).unwrap_err();
