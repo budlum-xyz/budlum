@@ -142,6 +142,38 @@ fn emit<E: BorshSerialize>(name: &str, event: &E) -> ProgramResult {
     Ok(())
 }
 
+/// Deserialize a Borsh-encoded PDA state prefix while requiring any remaining
+/// preallocated capacity bytes to be strictly zero. Never falls back to Default
+/// on truncated, malformed, or non-zero trailing account data.
+fn load_pda_state<T: BorshDeserialize>(account: &AccountInfo<'_>) -> Result<T, ProgramError> {
+    let data = account.try_borrow_data()?;
+    let mut reader: &[u8] = &data;
+    let state = T::deserialize(&mut reader).map_err(|_| ProgramError::InvalidAccountData)?;
+    if reader.iter().any(|&b| b != 0) {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    Ok(state)
+}
+
+/// Serialize a Borsh-encoded PDA state into a preallocated account buffer and
+/// zero-fill the remaining tail so shrinking state never leaves stale bytes.
+fn store_pda_state<T: BorshSerialize>(
+    account: &AccountInfo<'_>,
+    state: &T,
+) -> Result<(), ProgramError> {
+    let mut encoded = Vec::new();
+    state
+        .serialize(&mut encoded)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    let mut data = account.try_borrow_mut_data()?;
+    if encoded.len() > data.len() {
+        return Err(ProgramError::AccountDataTooSmall);
+    }
+    data[..encoded.len()].copy_from_slice(&encoded);
+    data[encoded.len()..].fill(0);
+    Ok(())
+}
+
 fn token_amount(account: &AccountInfo) -> Result<u64, ProgramError> {
     // SPL token account layout: mint (32), owner (32), amount (u64 LE).
     let data = account.try_borrow_data()?;
@@ -258,15 +290,12 @@ pub fn process_instruction(
             if *nonce_account.key != expected || nonce_account.owner != program_id {
                 return Err(ProgramError::InvalidSeeds);
             }
-            let mut state =
-                NonceState::try_from_slice(&nonce_account.try_borrow_data()?).unwrap_or_default();
+            let mut state: NonceState = load_pda_state(nonce_account)?;
             let nonce = state.next;
             state.next = nonce
                 .checked_add(1)
                 .ok_or(ProgramError::ArithmeticOverflow)?;
-            state
-                .serialize(&mut &mut nonce_account.try_borrow_mut_data()?[..])
-                .map_err(|_| ProgramError::AccountDataTooSmall)?;
+            store_pda_state(nonce_account, &state)?;
             emit(
                 "HomeCallEvent",
                 &HomeCallEvent {
@@ -282,13 +311,9 @@ pub fn process_instruction(
             if *verifier_account.key != expected || verifier_account.owner != program_id {
                 return Err(ProgramError::InvalidSeeds);
             }
-            let mut vstate =
-                verifier::VerifierState::try_from_slice(&verifier_account.try_borrow_data()?)
-                    .unwrap_or_default();
+            let mut vstate: verifier::VerifierState = load_pda_state(verifier_account)?;
             verifier::initialize_committee(&mut vstate, committee)?;
-            vstate
-                .serialize(&mut &mut verifier_account.try_borrow_mut_data()?[..])
-                .map_err(|_| ProgramError::AccountDataTooSmall)
+            store_pda_state(verifier_account, &vstate)
         }
         Instruction::RotateCommittee { handoff } => {
             let verifier_account = next_account_info(&mut it)?;
@@ -297,13 +322,9 @@ pub fn process_instruction(
             if *verifier_account.key != expected || verifier_account.owner != program_id {
                 return Err(ProgramError::InvalidSeeds);
             }
-            let mut vstate =
-                verifier::VerifierState::try_from_slice(&verifier_account.try_borrow_data()?)
-                    .unwrap_or_default();
+            let mut vstate: verifier::VerifierState = load_pda_state(verifier_account)?;
             verifier::rotate_committee(&mut vstate, sysvar_ix_account, &handoff)?;
-            vstate
-                .serialize(&mut &mut verifier_account.try_borrow_mut_data()?[..])
-                .map_err(|_| ProgramError::AccountDataTooSmall)
+            store_pda_state(verifier_account, &vstate)
         }
         Instruction::RecordCheckpoint {
             height,
@@ -317,9 +338,7 @@ pub fn process_instruction(
             if *verifier_account.key != expected || verifier_account.owner != program_id {
                 return Err(ProgramError::InvalidSeeds);
             }
-            let mut vstate =
-                verifier::VerifierState::try_from_slice(&verifier_account.try_borrow_data()?)
-                    .unwrap_or_default();
+            let mut vstate: verifier::VerifierState = load_pda_state(verifier_account)?;
             verifier::record(
                 &mut vstate,
                 sysvar_ix_account,
@@ -328,9 +347,7 @@ pub fn process_instruction(
                 header_hash,
                 &proof,
             )?;
-            vstate
-                .serialize(&mut &mut verifier_account.try_borrow_mut_data()?[..])
-                .map_err(|_| ProgramError::AccountDataTooSmall)
+            store_pda_state(verifier_account, &vstate)
         }
         Instruction::AcceptHeader { height } => {
             let state_account = next_account_info(&mut it)?;
@@ -343,22 +360,17 @@ pub fn process_instruction(
             if *verifier_account.key != expected_verifier || verifier_account.owner != program_id {
                 return Err(ProgramError::InvalidSeeds);
             }
-            let mut state = EndpointState::try_from_slice(&state_account.try_borrow_data()?)
-                .unwrap_or_default();
+            let mut state: EndpointState = load_pda_state(state_account)?;
             if height <= state.last_accepted_height {
                 return Err(ProgramError::Custom(NOT_NEWER));
             }
-            let vstate =
-                verifier::VerifierState::try_from_slice(&verifier_account.try_borrow_data()?)
-                    .unwrap_or_default();
+            let vstate: verifier::VerifierState = load_pda_state(verifier_account)?;
             if !verifier::height_final(&vstate, height) {
                 return Err(ProgramError::Custom(NOT_FINAL));
             }
             state.last_accepted_height = height;
             state.last_accepted_at = Clock::get()?.unix_timestamp;
-            state
-                .serialize(&mut &mut state_account.try_borrow_mut_data()?[..])
-                .map_err(|_| ProgramError::AccountDataTooSmall)
+            store_pda_state(state_account, &state)
         }
         // Both need an opening of the object-layer root in an accepted
         // Budlum header.
@@ -394,6 +406,7 @@ fn spl_transfer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use borsh::BorshSerialize;
 
     #[test]
     fn custody_and_home_call_are_closed_before_accounts_are_touched() {
@@ -408,6 +421,116 @@ mod tests {
                 process_instruction(&Pubkey::new_unique(), &[], input),
                 Err(ProgramError::Custom(NOT_OPEN))
             );
+        }
+    }
+
+    #[test]
+    fn preallocated_verifier_pda_rejects_committee_reinitialization_and_corrupted_tail() {
+        let program_id = Pubkey::new_unique();
+        let (verifier_key, _) = Pubkey::find_program_address(&[b"verifier"], &program_id);
+        let mut lamports = 1_000_000u64;
+        // Preallocated 4096-byte zeroed PDA buffer, matching standard Solana PDA allocation.
+        let mut raw_data = vec![0u8; 4096];
+
+        let honest_committee = verifier::CommitteeConfig {
+            budlum_chain_id: 1,
+            epoch: 7,
+            threshold: 3,
+            members: vec![[0x11; 32], [0x22; 32], [0x33; 32], [0x44; 32]],
+        };
+        let attacker_committee = verifier::CommitteeConfig {
+            budlum_chain_id: 1,
+            epoch: 1,
+            threshold: 1,
+            members: vec![[0xEE; 32]],
+        };
+
+        let mut init_honest = vec![2u8];
+        honest_committee.serialize(&mut init_honest).unwrap();
+
+        let mut init_attacker = vec![2u8];
+        attacker_committee.serialize(&mut init_attacker).unwrap();
+
+        {
+            let acct = AccountInfo::new(
+                &verifier_key,
+                false,
+                true,
+                &mut lamports,
+                &mut raw_data,
+                &program_id,
+                false,
+                0,
+            );
+            process_instruction(&program_id, &[acct], &init_honest).unwrap();
+        }
+
+        // Second InitVerifier on the same preallocated PDA must fail closed and preserve
+        // the honest committee instead of falling back to Default via trailing-zero bytes.
+        {
+            let acct = AccountInfo::new(
+                &verifier_key,
+                false,
+                true,
+                &mut lamports,
+                &mut raw_data,
+                &program_id,
+                false,
+                0,
+            );
+            let err = process_instruction(&program_id, &[acct], &init_attacker).unwrap_err();
+            assert_eq!(err, ProgramError::Custom(verifier::ERR_ALREADY_INITIALIZED));
+        }
+
+        // Non-zero garbage in the trailing capacity region must fail closed as InvalidAccountData.
+        raw_data[4000] = 0xFF;
+        {
+            let acct = AccountInfo::new(
+                &verifier_key,
+                false,
+                true,
+                &mut lamports,
+                &mut raw_data,
+                &program_id,
+                false,
+                0,
+            );
+            let err = process_instruction(&program_id, &[acct], &init_attacker).unwrap_err();
+            assert_eq!(err, ProgramError::InvalidAccountData);
+        }
+
+        // Shrinking state in a preallocated buffer must zero-fill stale trailing bytes.
+        raw_data.fill(0);
+        let larger_state = verifier::VerifierState {
+            committee: Some(verifier::CommitteeConfig {
+                budlum_chain_id: 1,
+                epoch: 7,
+                threshold: 4,
+                members: vec![[0x11; 32], [0x22; 32], [0x33; 32], [0x44; 32], [0x55; 32]],
+            }),
+            latest_final_height: 42,
+            checkpoints: Vec::new(),
+        };
+        let smaller_state = verifier::VerifierState {
+            committee: Some(honest_committee),
+            latest_final_height: 42,
+            checkpoints: Vec::new(),
+        };
+        {
+            let acct = AccountInfo::new(
+                &verifier_key,
+                false,
+                true,
+                &mut lamports,
+                &mut raw_data,
+                &program_id,
+                false,
+                0,
+            );
+            store_pda_state(&acct, &larger_state).unwrap();
+            store_pda_state(&acct, &smaller_state).unwrap();
+            let loaded: verifier::VerifierState = load_pda_state(&acct).unwrap();
+            assert_eq!(loaded, smaller_state);
         }
     }
 }

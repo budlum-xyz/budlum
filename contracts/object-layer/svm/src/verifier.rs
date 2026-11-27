@@ -218,18 +218,15 @@ pub fn matches_ed25519_precompile_data(
     signature: &[u8; 64],
     message: &[u8],
 ) -> bool {
-    if data.len() < 16 {
+    if data.len() < 16 || data[1] != 0 {
         return false;
     }
     let num_sigs = usize::from(data[0]);
-    if num_sigs == 0 {
+    if num_sigs == 0 || 2 + num_sigs * 14 > data.len() {
         return false;
     }
     for i in 0..num_sigs {
         let off = 2 + i * 14;
-        if off + 14 > data.len() {
-            return false;
-        }
         let sig_off = usize::from(u16::from_le_bytes([data[off], data[off + 1]]));
         let sig_ix = u16::from_le_bytes([data[off + 2], data[off + 3]]);
         let pk_off = usize::from(u16::from_le_bytes([data[off + 4], data[off + 5]]));
@@ -390,12 +387,18 @@ where
         return Err(ProgramError::Custom(ERR_DOMAIN_MISMATCH));
     }
 
-    if let Some(existing) = state.checkpoints.iter().find(|c| c.height == height) {
-        if existing.state_root == state_root && existing.header_hash == header_hash {
-            return Ok(());
-        }
-        return Err(ProgramError::Custom(ERR_CONFLICT));
-    }
+    let already_recorded =
+        if let Some(existing) = state.checkpoints.iter().find(|c| c.height == height) {
+            if existing.state_root != state_root
+                || existing.header_hash != header_hash
+                || existing.mode != proof.mode
+            {
+                return Err(ProgramError::Custom(ERR_CONFLICT));
+            }
+            true
+        } else {
+            false
+        };
 
     if proof.signatures.len() < committee.threshold as usize {
         return Err(ProgramError::Custom(ERR_QUORUM_NOT_MET));
@@ -431,14 +434,16 @@ where
         return Err(ProgramError::Custom(ERR_QUORUM_NOT_MET));
     }
 
-    state.checkpoints.push(CheckpointEntry {
-        height,
-        state_root,
-        header_hash,
-        mode: proof.mode,
-    });
-    if height > state.latest_final_height {
-        state.latest_final_height = height;
+    if !already_recorded {
+        state.checkpoints.push(CheckpointEntry {
+            height,
+            state_root,
+            header_hash,
+            mode: proof.mode,
+        });
+        if height > state.latest_final_height {
+            state.latest_final_height = height;
+        }
     }
     Ok(())
 }
@@ -726,5 +731,84 @@ mod tests {
         assert_eq!(root_at_height(&state, 100), [0xAA; 32]);
         assert_eq!(latest_final_height(&state), 100);
         assert_eq!(finality_mode_at_height(&state, 100), FinalityMode::Hybrid);
+    }
+
+    #[test]
+    fn record_rejects_conflicting_mode_unauthenticated_replay_and_bad_precompile_padding() {
+        let mut state = VerifierState::default();
+        initialize_committee(&mut state, sample_committee()).unwrap();
+
+        let root = [0x42; 32];
+        let header = [0x99; 32];
+        let msg = signing_message(1, 7, 42, &root, &header, FinalityMode::Hybrid);
+        let precompile_ixs: Vec<Vec<u8>> = (0..3)
+            .map(|i| {
+                build_precompile_ix(
+                    &decode_hex::<32>(MEMBER_PKS[i]),
+                    &decode_hex::<64>(MEMBER_SIGS[i]),
+                    &msg,
+                )
+            })
+            .collect();
+
+        // Non-canonical header padding byte (data[1] != 0) must be rejected.
+        let mut bad_padding_ix = precompile_ixs[0].clone();
+        bad_padding_ix[1] = 0xFF;
+        assert!(!matches_ed25519_precompile_data(
+            &bad_padding_ix,
+            &decode_hex::<32>(MEMBER_PKS[0]),
+            &decode_hex::<64>(MEMBER_SIGS[0]),
+            &msg,
+        ));
+
+        let valid_proof = sample_proof(&[0, 1, 2]);
+        record_with_verifier(&mut state, 42, root, header, &valid_proof, |pk, sig, m| {
+            precompile_ixs
+                .iter()
+                .any(|ix| matches_ed25519_precompile_data(ix, pk, sig, m))
+        })
+        .unwrap();
+        assert_eq!(state.checkpoints.len(), 1);
+
+        // Conflicting FinalityMode at the same height must fail closed with ERR_CONFLICT.
+        let mut conflicting_mode_proof = sample_proof(&[0, 1, 2]);
+        conflicting_mode_proof.mode = FinalityMode::ClassicalOnly;
+        let err = record_with_verifier(
+            &mut state,
+            42,
+            root,
+            header,
+            &conflicting_mode_proof,
+            |_, _, _| true,
+        )
+        .unwrap_err();
+        assert_eq!(err, ProgramError::Custom(ERR_CONFLICT));
+
+        // Unauthenticated empty-signature replay on an existing height must be rejected.
+        let unauthenticated_replay = SignedFinalityProof {
+            chain_id: 1,
+            epoch: 7,
+            mode: FinalityMode::Hybrid,
+            signatures: Vec::new(),
+        };
+        let err = record_with_verifier(
+            &mut state,
+            42,
+            root,
+            header,
+            &unauthenticated_replay,
+            |_, _, _| false,
+        )
+        .unwrap_err();
+        assert_eq!(err, ProgramError::Custom(ERR_QUORUM_NOT_MET));
+
+        // Authenticated replay with a valid quorum remains idempotent without duplicating entries.
+        record_with_verifier(&mut state, 42, root, header, &valid_proof, |pk, sig, m| {
+            precompile_ixs
+                .iter()
+                .any(|ix| matches_ed25519_precompile_data(ix, pk, sig, m))
+        })
+        .unwrap();
+        assert_eq!(state.checkpoints.len(), 1);
     }
 }

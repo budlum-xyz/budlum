@@ -313,14 +313,19 @@ pub fn record(
         ));
     }
 
-    if let Some(existing) = CHECKPOINTS.may_load(storage, height)? {
-        if existing.state_root == state_root && existing.header_hash == header_hash {
-            return Ok(());
+    let already_recorded = if let Some(existing) = CHECKPOINTS.may_load(storage, height)? {
+        if existing.state_root != state_root
+            || existing.header_hash != header_hash
+            || existing.mode != proof.mode
+        {
+            return Err(StdError::generic_err(
+                "budlum verifier: conflicting checkpoint at height",
+            ));
         }
-        return Err(StdError::generic_err(
-            "budlum verifier: conflicting checkpoint at height",
-        ));
-    }
+        true
+    } else {
+        false
+    };
 
     if proof.signatures.len() < committee.threshold as usize {
         return Err(StdError::generic_err(
@@ -375,19 +380,21 @@ pub fn record(
         ));
     }
 
-    CHECKPOINTS.save(
-        storage,
-        height,
-        &CheckpointRecord {
-            state_root,
-            header_hash,
-            mode: proof.mode,
-        },
-    )?;
+    if !already_recorded {
+        CHECKPOINTS.save(
+            storage,
+            height,
+            &CheckpointRecord {
+                state_root,
+                header_hash,
+                mode: proof.mode,
+            },
+        )?;
 
-    let prev_latest = LATEST_FINAL_HEIGHT.may_load(storage)?.unwrap_or(0);
-    if height > prev_latest {
-        LATEST_FINAL_HEIGHT.save(storage, &height)?;
+        let prev_latest = LATEST_FINAL_HEIGHT.may_load(storage)?.unwrap_or(0);
+        if height > prev_latest {
+            LATEST_FINAL_HEIGHT.save(storage, &height)?;
+        }
     }
 
     Ok(())
@@ -674,6 +681,68 @@ mod tests {
         assert_eq!(
             finality_mode_at_height(&deps.storage, 100),
             FinalityMode::Hybrid
+        );
+    }
+
+    #[test]
+    fn record_rejects_conflicting_mode_and_unauthenticated_replay_at_existing_height() {
+        let mut deps = mock_dependencies();
+        initialize_committee(deps.as_mut().storage, &sample_committee()).unwrap();
+
+        let root = [0x42; 32];
+        let header = [0x99; 32];
+        let valid_proof = sample_proof(&[0, 1, 2]);
+        record(&mut deps.storage, &deps.api, 42, root, header, &valid_proof).unwrap();
+
+        // Conflicting FinalityMode for an existing height must fail closed.
+        let mut conflicting_mode_proof = sample_proof(&[0, 1, 2]);
+        conflicting_mode_proof.mode = FinalityMode::ClassicalOnly;
+        let err = record(
+            &mut deps.storage,
+            &deps.api,
+            42,
+            root,
+            header,
+            &conflicting_mode_proof,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("conflicting"), "{err}");
+
+        // Replay with empty signatures must fail closed instead of short-circuiting quorum checks.
+        let empty_replay = SignedFinalityProof {
+            chain_id: 1,
+            epoch: 7,
+            mode: FinalityMode::Hybrid,
+            signatures: Vec::new(),
+        };
+        let err = record(
+            &mut deps.storage,
+            &deps.api,
+            42,
+            root,
+            header,
+            &empty_replay,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("insufficient quorum"), "{err}");
+
+        // Replay with forged signature bytes must also fail closed.
+        let mut forged_replay = sample_proof(&[0, 1, 2]);
+        let mut bad_sig = forged_replay.signatures[0].signature.to_vec();
+        bad_sig[0] ^= 0x01;
+        forged_replay.signatures[0].signature = Binary::from(bad_sig);
+        let err = record(
+            &mut deps.storage,
+            &deps.api,
+            42,
+            root,
+            header,
+            &forged_replay,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid ed25519 signature"),
+            "{err}"
         );
     }
 }

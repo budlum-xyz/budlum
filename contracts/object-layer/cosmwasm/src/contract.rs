@@ -304,4 +304,132 @@ mod tests {
             .unwrap()
             .is_none());
     }
+
+    #[test]
+    fn instantiate_record_query_and_accept_header_enforce_quorum_on_replays() {
+        let mut deps = mock_dependencies();
+        let env = mock_env();
+        let info = message_info(&Addr::unchecked("relayer"), &[]);
+        let pks = [
+            "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+            "204040e364c10f2bec9c1fe500a1cd4c247c89d650a01ed7e82caba867877c21",
+            "66cd608b928b88e50e0efeaa33faf1c43cefe07294b0b87e9fe0aba6a3cf7633",
+            "20828bf5c5bdcacb684863336c202fb5599da48be5596615742170705beca9f7",
+        ];
+        let sigs = [
+            "1376dada0ff884f37eba41a2f4be9d3a1df740abd4dc494422eb6202dec9a8b4da90327a59bfe0d366ffd3b33d26ef2cc03b7b08b5e3b7073b601e5146c47804",
+            "a5a778aad6a12dd0016361aafe9050fb5b1aad1bac6a0a317ef5bdda2f89be426deb088c24a723152347670fcd0f7f89c261237bf6a6b81eb10f282526dd0e0a",
+            "978eeb5b57ef4121f333ac4890607319d38551e1b493ff25beac307e73fc81683897a96beba2e615c08edfea3292eaeb195f05df5e57dc39148be3c75a5d900a",
+        ];
+        let committee = verifier::CommitteeConfig {
+            budlum_chain_id: 1,
+            epoch: 7,
+            threshold: 3,
+            members: pks
+                .iter()
+                .map(|h| Binary::from(hex::decode(h).unwrap()))
+                .collect(),
+        };
+        instantiate(
+            deps.as_mut(),
+            env.clone(),
+            info.clone(),
+            InstantiateMsg {
+                committee: Some(committee),
+            },
+        )
+        .unwrap();
+
+        let proof = verifier::SignedFinalityProof {
+            chain_id: 1,
+            epoch: 7,
+            mode: verifier::FinalityMode::Hybrid,
+            signatures: sigs
+                .iter()
+                .enumerate()
+                .map(|(i, s)| verifier::SignerSignature {
+                    signer_index: i as u32,
+                    signature: Binary::from(hex::decode(s).unwrap()),
+                })
+                .collect(),
+        };
+        execute(
+            deps.as_mut(),
+            env.clone(),
+            info.clone(),
+            ExecuteMsg::RecordCheckpoint {
+                height: 42,
+                state_root: [0x42; 32],
+                header_hash: [0x99; 32],
+                proof,
+            },
+        )
+        .unwrap();
+
+        let is_final: bool = from_json(
+            query(
+                deps.as_ref(),
+                env.clone(),
+                QueryMsg::HeightFinal { height: 42 },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(is_final);
+        let root: [u8; 32] = from_json(
+            query(
+                deps.as_ref(),
+                env.clone(),
+                QueryMsg::RootAtHeight { height: 42 },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(root, [0x42; 32]);
+        let latest: u64 =
+            from_json(query(deps.as_ref(), env.clone(), QueryMsg::LatestFinalHeight {}).unwrap())
+                .unwrap();
+        assert_eq!(latest, 42);
+        let mode: verifier::FinalityMode = from_json(
+            query(
+                deps.as_ref(),
+                env.clone(),
+                QueryMsg::FinalityModeAtHeight { height: 42 },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mode, verifier::FinalityMode::Hybrid);
+
+        execute(
+            deps.as_mut(),
+            env.clone(),
+            info.clone(),
+            ExecuteMsg::AcceptHeader { height: 42 },
+        )
+        .unwrap();
+
+        // Unauthenticated RecordCheckpoint replay must not emit a valid response.
+        let unauth_err = execute(
+            deps.as_mut(),
+            env,
+            info,
+            ExecuteMsg::RecordCheckpoint {
+                height: 42,
+                state_root: [0x42; 32],
+                header_hash: [0x99; 32],
+                proof: verifier::SignedFinalityProof {
+                    chain_id: 1,
+                    epoch: 7,
+                    mode: verifier::FinalityMode::Hybrid,
+                    signatures: Vec::new(),
+                },
+            },
+        )
+        .unwrap_err();
+        assert!(
+            unauth_err.to_string().contains("insufficient quorum"),
+            "{unauth_err}"
+        );
+    }
 }

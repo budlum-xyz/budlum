@@ -219,13 +219,15 @@ module budlum::budlum_verifier {
         assert!(chain_id == committee.budlum_chain_id && epoch == committee.epoch, E_DOMAIN_MISMATCH);
 
         let c = borrow_global_mut<Checkpoints>(@budlum);
-        if (table::contains(&c.records, height)) {
+        let already_recorded = table::contains(&c.records, height);
+        if (already_recorded) {
             let existing = table::borrow(&c.records, height);
             assert!(
-                existing.state_root == state_root && existing.header_hash == header_hash,
+                existing.state_root == state_root
+                    && existing.header_hash == header_hash
+                    && existing.mode == mode,
                 E_CONFLICT,
             );
-            return
         };
 
         let sig_count = vector::length(&signatures);
@@ -262,13 +264,15 @@ module budlum::budlum_verifier {
         };
         assert!(valid >= committee.threshold, E_QUORUM_NOT_MET);
 
-        table::add(&mut c.records, height, CheckpointRecord {
-            state_root,
-            header_hash,
-            mode,
-        });
-        if (height > c.latest_final_height) {
-            c.latest_final_height = height;
+        if (!already_recorded) {
+            table::add(&mut c.records, height, CheckpointRecord {
+                state_root,
+                header_hash,
+                mode,
+            });
+            if (height > c.latest_final_height) {
+                c.latest_final_height = height;
+            };
         };
     }
 
