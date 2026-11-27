@@ -350,6 +350,11 @@ fn fold_checked_merkle(
         let is_odd_tail = idx.is_multiple_of(2) && idx.saturating_add(1) == width;
         if !is_odd_tail {
             let step = step_iter.next()?;
+            if step.sibling == [0u8; 32]
+                || bool::from(step.sibling.as_slice().ct_eq(cur.as_slice()))
+            {
+                return None;
+            }
             let expect_left = (idx % 2) == 1;
             if step.sibling_is_left != expect_left {
                 return None;
@@ -829,6 +834,15 @@ pub struct AlgorandEquivocationProof {
     pub sig_b: Vec<u8>,
 }
 
+fn is_valid_pinned_algorand_verifier(pinned: &PinnedAlgorandVerifier) -> bool {
+    pinned.genesis_hash != [0u8; 32]
+        && pinned.voters_commitment != [0u8; 32]
+        && pinned.voter_count > 0
+        && pinned.total_weight > 0
+        && pinned.first_round <= pinned.last_round
+        && (MIN_THRESHOLD_BPS..=MAX_THRESHOLD_BPS).contains(&pinned.threshold_bps)
+}
+
 /// Verify an [`AlgorandEquivocationProof`] against `pinned`, returning the
 /// equivocating voter's proven stake weight (`upper - lower`) on success.
 ///
@@ -841,6 +855,11 @@ pub fn verify_algorand_equivocation(
     pinned: &PinnedAlgorandVerifier,
     proof: &AlgorandEquivocationProof,
 ) -> Result<u128, AdapterError> {
+    if network.trim().is_empty() || !is_valid_pinned_algorand_verifier(pinned) {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Algorand equivocation network or pinned verifier parameters are invalid".into(),
+        });
+    }
     let a = &proof.message_a;
     let b = &proof.message_b;
     if !bool::from(
@@ -1023,6 +1042,11 @@ impl AlgorandStateProofAdapter {
                 accepted: EVIDENCE_VERSION.to_string(),
             });
         }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Algorand StateProof network identifier cannot be empty".into(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -1115,6 +1139,14 @@ impl AlgorandStateProofAdapter {
 impl ExternalFinalityAdapter for AlgorandStateProofAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        !self.network.trim().is_empty()
+            && self
+                .pinned
+                .as_ref()
+                .is_some_and(is_valid_pinned_algorand_verifier)
     }
 
     fn verify(
@@ -1817,5 +1849,52 @@ pub(crate) mod equivocation_support {
             (build(0, path_0), intervals[0].1 - intervals[0].0),
             (build(1, path_1), intervals[1].1 - intervals[1].0),
         )
+    }
+
+    #[test]
+    fn algorand_reports_pinned_anchor_and_refuses_zero_sibling_merkle_or_blank_network() {
+        let net = "algorand-mainnet-v1";
+        let (mut eq_pin, mut eq_proof, _) = conflicting_voter_fixture(net);
+        let adapter = AlgorandStateProofAdapter::new(net, Some(eq_pin.clone()));
+        assert!(adapter.has_pinned_trust_anchor());
+        assert!(!AlgorandStateProofAdapter::new(net, None).has_pinned_trust_anchor());
+
+        assert!(
+            verify_algorand_equivocation("   ", &eq_pin, &eq_proof).is_err(),
+            "blank network in verify_algorand_equivocation must fail closed"
+        );
+
+        // Forge a voter Merkle path carrying an all-zero sibling and matching forged root.
+        let rev = &eq_proof.reveal_a;
+        let leaf = algorand_voter_leaf_hash(&AlgorandVoterLeaf {
+            position: rev.position,
+            lower_weight: rev.lower_weight,
+            upper_weight: rev.upper_weight,
+            key_first_round: rev.key_first_round,
+            key_last_round: rev.key_last_round,
+            pubkey_commitment: algorand_pubkey_commitment(&rev.mldsa65_pubkey),
+        });
+        let zero_root = merkle_parent(VOTER_NODE_TAG, &leaf, &[0u8; 32]);
+        eq_pin.voter_count = 2;
+        eq_pin.voters_commitment = zero_root;
+        eq_proof.reveal_a.merkle_path = vec![StateProofMerkleStep {
+            sibling: [0u8; 32],
+            sibling_is_left: false,
+        }];
+        assert!(
+            verify_algorand_equivocation(net, &eq_pin, &eq_proof).is_err(),
+            "all-zero sibling in Algorand voter Merkle path must fail closed"
+        );
+
+        let dup_root = merkle_parent(VOTER_NODE_TAG, &leaf, &leaf);
+        eq_pin.voters_commitment = dup_root;
+        eq_proof.reveal_a.merkle_path = vec![StateProofMerkleStep {
+            sibling: leaf,
+            sibling_is_left: false,
+        }];
+        assert!(
+            verify_algorand_equivocation(net, &eq_pin, &eq_proof).is_err(),
+            "equal-sibling collision in Algorand voter Merkle path must fail closed"
+        );
     }
 }
