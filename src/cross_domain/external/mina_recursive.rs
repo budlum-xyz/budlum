@@ -377,8 +377,13 @@ impl SuccinctRecursiveAdapter {
                     .into(),
             });
         }
-        if pinned.slots_per_sub_window == 0 || pinned.slots_per_epoch < SAMASIKA_SUB_WINDOWS as u64
-        {
+        let min_epoch_slots = pinned
+            .slots_per_sub_window
+            .checked_mul(SAMASIKA_SUB_WINDOWS as u64)
+            .ok_or_else(|| AdapterError::ConsensusRule {
+                rule: "pinned Samasika slot geometry overflows u64".into(),
+            })?;
+        if pinned.slots_per_sub_window == 0 || pinned.slots_per_epoch < min_epoch_slots {
             return Err(AdapterError::ConsensusRule {
                 rule: "pinned Samasika slot geometry is degenerate".into(),
             });
@@ -499,9 +504,12 @@ impl SuccinctRecursiveAdapter {
         if tip.blockchain_length == 0
             || tip.snarked_ledger_root == [0u8; 32]
             || tip.previous_state_hash == [0u8; 32]
+            || tip.staking_ledger_root == [0u8; 32]
+            || tip.next_epoch_ledger_root == [0u8; 32]
         {
             return Err(AdapterError::ConsensusRule {
-                rule: "succinct tip height, snarked_ledger_root, and previous_state_hash must be non-zero".into(),
+                rule: "succinct tip height, ledger roots, and previous_state_hash must be non-zero"
+                    .into(),
             });
         }
         if tip.blockchain_length > tip.global_slot.saturating_add(1) {
@@ -530,6 +538,9 @@ impl SuccinctRecursiveAdapter {
                 reason: "a proven recursive STARK attestation carries zero confirmation depth"
                     .into(),
             });
+        }
+        if policy.require_slashable {
+            return Err(AdapterError::UnslashableBacking);
         }
         if policy.max_age > 0 {
             if tip.blockchain_length > policy.now {
@@ -651,6 +662,10 @@ impl SuccinctRecursiveAdapter {
 impl ExternalFinalityAdapter for SuccinctRecursiveAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned.is_some()
     }
 
     fn verify(
@@ -1033,5 +1048,44 @@ mod tests {
             .unwrap()
             .attestations
             .contains_key(&(120, EVIDENCE_VERSION)));
+    }
+
+    #[test]
+    fn mina_reports_pinned_anchor_refuses_slashable_policy_and_degenerate_samasika_epoch_geometry()
+    {
+        let (pinned, _, mut bundle, mut ev) = build_succinct_fixture([0x77; 32], None);
+        let pinned_adapter = SuccinctRecursiveAdapter::new("mina-stark-1", Some(pinned.clone()));
+        assert!(
+            pinned_adapter.has_pinned_trust_anchor(),
+            "pinned Mina recursive STARK adapter must advertise has_pinned_trust_anchor=true"
+        );
+        assert!(!SuccinctRecursiveAdapter::new("mina-stark-1", None).has_pinned_trust_anchor());
+
+        // SecurityBacking::Zk carries no local Budlum slash escrow -> require_slashable must fail closed.
+        let mut slash_policy = VerificationPolicy::proven(130);
+        slash_policy.require_slashable = true;
+        assert!(matches!(
+            pinned_adapter.verify(&ev, &slash_policy),
+            Err(AdapterError::UnslashableBacking)
+        ));
+
+        // Degenerate Samasika geometry where slots_per_epoch < slots_per_sub_window * 11 must fail closed.
+        let mut bad_geom = pinned.clone();
+        bad_geom.slots_per_sub_window = 20;
+        bad_geom.slots_per_epoch = 110; // 110 < 20 * 11 = 220
+        let bad_geom_adapter = SuccinctRecursiveAdapter::new("mina-stark-1", Some(bad_geom));
+        assert!(matches!(
+            bad_geom_adapter.verify(&ev, &VerificationPolicy::proven(130)),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // Zero next_epoch_ledger_root inside tip must also fail closed.
+        bundle.tip.next_epoch_ledger_root = [0u8; 32];
+        bundle.tip.protocol_state_hash = bundle.tip.compute_hash("mina-stark-1");
+        ev.payload = encode_recursive_evidence(&bundle).unwrap();
+        assert!(matches!(
+            pinned_adapter.verify(&ev, &VerificationPolicy::proven(130)),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
     }
 }
