@@ -174,9 +174,8 @@ pub fn shard_state_root(state: &AccountState, shard: ShardId, num_shards: u16) -
 /// The commitment over all per-shard roots, in shard order.
 ///
 /// This is the value a block header carries in `Block::shards_root` when
-/// sharding is active. Nothing computes or checks it during block validation
-/// yet: the commitment is a deterministic function of state that a
-/// future validator rule can recompute, but today no code rejects a mismatch.
+/// sharding is active, and that `Blockchain` recomputes and enforces during
+/// block production and validation.
 #[must_use]
 pub fn shards_commitment(state: &AccountState, num_shards: u16) -> [u8; 32] {
     let num_shards = num_shards.clamp(1, MAX_SHARDS);
@@ -216,11 +215,19 @@ pub fn apply_cross_shard_transfer(
     tx: &Transaction,
     num_shards: u16,
 ) -> Result<(), String> {
+    if !(2..=MAX_SHARDS).contains(&num_shards) {
+        return Err(format!(
+            "invalid shard count {num_shards}: expected 2..={MAX_SHARDS}"
+        ));
+    }
     if !is_cross_shard(tx, num_shards) {
         return Err("apply_cross_shard_transfer requires a cross-shard transfer".into());
     }
     if tx.tx_type != TransactionType::Transfer {
         return Err("apply_cross_shard_transfer requires a Transfer".into());
+    }
+    if tx.from == Address::zero() {
+        return Err("cross-shard transfer missing non-zero sender".into());
     }
     if tx.to == Address::zero() {
         return Err("cross-shard transfer missing non-zero recipient".into());
@@ -287,7 +294,9 @@ mod tests {
     use crate::tokenomics::VestingSchedule;
 
     fn addr(first: u8) -> Address {
-        Address::from([first; 32])
+        let mut bytes = [first; 32];
+        bytes[31] = 1;
+        Address::from(bytes)
     }
 
     fn transfer(from: Address, to: Address, amount: u64, fee: u64) -> Transaction {

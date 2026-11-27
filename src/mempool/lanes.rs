@@ -408,7 +408,9 @@ impl MultiLaneMempool {
         block_bgu_budget: u64,
         now_unix_s: Option<u64>,
     ) -> Vec<LaneEntry> {
-        let mut candidates: Vec<(u128, LaneEntry)> = Vec::new();
+        let mut ordered_queues: BTreeMap<(LaneKind, [u8; 32], u64), Vec<(u64, LaneEntry)>> =
+            BTreeMap::new();
+        let mut ready_queues: Vec<VecDeque<LaneEntry>> = Vec::new();
         for lane in self.lanes.values() {
             for entry in lane.entries.values() {
                 if matches!(
@@ -425,20 +427,79 @@ impl MultiLaneMempool {
                 ) {
                     continue;
                 }
-                if let Some(tip) = entry.effective_priority_fee(base_fee_atto) {
-                    candidates.push((tip, entry.clone()));
+                match &entry.replay {
+                    LaneReplayRule::AccountNonce { sender, nonce } => {
+                        ordered_queues
+                            .entry((entry.lane, *sender, 0))
+                            .or_default()
+                            .push((*nonce, entry.clone()));
+                    }
+                    LaneReplayRule::AptosSequence {
+                        sender, sequence, ..
+                    } => {
+                        ordered_queues
+                            .entry((entry.lane, *sender, 0))
+                            .or_default()
+                            .push((*sequence, entry.clone()));
+                    }
+                    LaneReplayRule::CosmosSequence {
+                        sender,
+                        account_number,
+                        sequence,
+                    } => {
+                        ordered_queues
+                            .entry((entry.lane, *sender, *account_number))
+                            .or_default()
+                            .push((*sequence, entry.clone()));
+                    }
+                    LaneReplayRule::SolanaWindow { .. } | LaneReplayRule::DutyWindow { .. } => {
+                        let mut queue = VecDeque::with_capacity(1);
+                        queue.push_back(entry.clone());
+                        ready_queues.push(queue);
+                    }
                 }
             }
         }
-        // Sort descending by effective priority fee, breaking ties deterministically by tx_hash.
-        candidates.sort_by(|(tip_a, a), (tip_b, b)| {
-            tip_b.cmp(tip_a).then_with(|| a.tx_hash.cmp(&b.tx_hash))
-        });
+        for mut items in ordered_queues.into_values() {
+            items.sort_by(|(seq_a, a), (seq_b, b)| {
+                seq_a.cmp(seq_b).then_with(|| a.tx_hash.cmp(&b.tx_hash))
+            });
+            ready_queues.push(items.into_iter().map(|(_, entry)| entry).collect());
+        }
 
+        // Select greedily from the frontier of queue heads by descending
+        // effective priority fee (tie-broken by tx_hash). A higher nonce/sequence
+        // only enters the frontier after every preceding nonce for the same
+        // `(lane, sender, isolator)` has been selected, preventing unexecutable
+        // nonce gaps or inverted ordering.
         let mut picked = Vec::new();
         let mut used_bgu: u64 = 0;
-        for (_, entry) in candidates {
-            if used_bgu.saturating_add(entry.gas_limit_bgu) <= block_bgu_budget {
+        loop {
+            let mut best: Option<(usize, u128, [u8; 32])> = None;
+            for (idx, queue) in ready_queues.iter().enumerate() {
+                let Some(head) = queue.front() else {
+                    continue;
+                };
+                let Some(tip) = head.effective_priority_fee(base_fee_atto) else {
+                    continue;
+                };
+                if used_bgu.saturating_add(head.gas_limit_bgu) > block_bgu_budget {
+                    continue;
+                }
+                let is_better = match best {
+                    None => true,
+                    Some((_, best_tip, best_hash)) => {
+                        tip > best_tip || (tip == best_tip && head.tx_hash < best_hash)
+                    }
+                };
+                if is_better {
+                    best = Some((idx, tip, head.tx_hash));
+                }
+            }
+            let Some((best_idx, _, _)) = best else {
+                break;
+            };
+            if let Some(entry) = ready_queues.get_mut(best_idx).and_then(VecDeque::pop_front) {
                 used_bgu = used_bgu.saturating_add(entry.gas_limit_bgu);
                 picked.push(entry);
             }
