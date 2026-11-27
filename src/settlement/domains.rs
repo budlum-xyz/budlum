@@ -175,6 +175,11 @@ pub enum SettlementTx {
     ///
     /// Appended to preserve existing bincode enum discriminants.
     UniversalPayment(Box<UniversalPaymentTx>),
+
+    /// Issue a view grant for stored content.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    ViewGrant(Box<ViewGrantTx>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -2098,6 +2103,73 @@ pub fn execute_settlement_tx(
         SettlementTx::UniversalPayment(payment_tx) => {
             execute_universal_payment(state, ctx, payment_tx)
         }
+        SettlementTx::ViewGrant(grant_tx) => execute_view_grant(state, ctx, grant_tx),
+    }
+}
+
+/// A view-grant action.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ViewGrantTx {
+    /// Open access to one content id.
+    Issue {
+        /// The content this grant covers.
+        content_id: crate::storage::content_id::ContentId,
+        /// Who may open it; `None` for a public-key-id or owner-only policy.
+        grantee: Option<Address>,
+        /// The key this grant is bound to.
+        key_id: [u8; 32],
+        /// The policy.
+        policy: crate::storage::view_grant::ViewPolicy,
+    },
+    /// Close a grant (the revoker must be the issuer or the content owner).
+    Revoke {
+        /// The grant id.
+        grant_id: u64,
+    },
+}
+
+/// Executes a view-grant transaction.
+///
+/// The issuer is the sender. A grant naming somebody else as its issuer would
+/// let one account hand out another's access rights, which is exactly the
+/// permission the registry exists to record.
+fn execute_view_grant(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &ViewGrantTx,
+) -> Result<(), SettlementTxError> {
+    use crate::storage::view_grant::ViewGrantError;
+
+    match tx {
+        ViewGrantTx::Issue {
+            content_id,
+            grantee,
+            key_id,
+            policy,
+        } => {
+            state
+                .settlement
+                .view_grants
+                .issue(
+                    *content_id,
+                    ctx.sender,
+                    *grantee,
+                    *key_id,
+                    policy.clone(),
+                    state.epoch_index,
+                )
+                .map_err(|err: ViewGrantError| {
+                    SettlementTxError::Refused(format!("view grant: {err:?}"))
+                })?;
+            Ok(())
+        }
+        ViewGrantTx::Revoke { grant_id } => state
+            .settlement
+            .view_grants
+            .revoke(*grant_id, ctx.sender, state.epoch_index)
+            .map_err(|err: ViewGrantError| {
+                SettlementTxError::Refused(format!("view grant revoke: {err:?}"))
+            }),
     }
 }
 

@@ -4682,6 +4682,16 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
                 }
             }
         }
+        SettlementTx::ViewGrant(grant_tx) => {
+            // Tag 18. A grant is a permission, so the grantee and the policy go
+            // into the signed preimage: a permission whose audience could be
+            // rewritten after signing is not a permission.
+            use crate::settlement::domains::ViewGrantTx;
+            put_u8(out, 18);
+            let bytes = postcard::to_allocvec(grant_tx.as_ref())
+                .unwrap_or_else(|_| b"budlum/view-grant/fields-failed".to_vec());
+            put_bytes(out, &bytes);
+        }
         SettlementTx::UniversalPayment(payment_tx) => {
             // Tag 17. The intent is the whole claim - target, deadline,
             // slippage - and is signed through its own canonical bytes; the

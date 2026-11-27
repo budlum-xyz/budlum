@@ -61,6 +61,14 @@ pub struct SettlementRegistries {
     /// declared a denomination, so its presence changes no root until used.
     #[serde(default)]
     pub denominations: crate::settlement::universal_asset::DenominationIndex,
+    /// View grants: who may open which stored content, and until when.
+    ///
+    /// `ViewGrantRegistry::issue` was complete and its result lived nowhere, so
+    /// a grant one node issued did not exist for another and did not survive a
+    /// restart. An access right that only the issuing process remembers is not
+    /// an access right.
+    #[serde(default)]
+    pub view_grants: crate::storage::view_grant::ViewGrantRegistry,
     /// The universal multi-token atomic payment router.
     ///
     /// This is the "settle in any mix of tokens, on any mix of chains, and
