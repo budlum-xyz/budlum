@@ -67,7 +67,10 @@ impl SuiRpcResponse {
 }
 
 fn parse_sui_hex32(raw: &str) -> Option<[u8; 32]> {
-    let trimmed = raw.strip_prefix("0x").unwrap_or(raw);
+    let trimmed = raw.strip_prefix("0x")?;
+    if trimmed.len() != 64 || !trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
     let bytes = hex::decode(trimmed).ok()?;
     bytes.as_slice().try_into().ok()
 }
@@ -78,8 +81,33 @@ fn mist_balance_of(state: &AccountState, sui_addr: &[u8; 32]) -> u64 {
     let Some(acct) = state.accounts.get(&addr) else {
         return 0;
     };
-    let attos = acct.checked_total_attos().unwrap_or(0);
+    let attos = acct.checked_total_attos().unwrap_or(u128::MAX);
     u64::try_from(attos / ATTO_PER_MIST).unwrap_or(u64::MAX)
+}
+
+/// Evaluates a raw Sui JSON-RPC 2.0 request string against read-only `state`.
+///
+/// Convenience: bounded raw JSON-RPC envelope entry point for Sui callers.
+#[must_use]
+pub fn handle_sui_jsonrpc(
+    state: &AccountState,
+    policy: SuiActivationPolicy,
+    raw_json: &str,
+) -> String {
+    if raw_json.len() > MAX_SUI_RPC_REQUEST_BYTES {
+        let resp = SuiRpcResponse::err(
+            Value::Null,
+            -32005,
+            "request payload exceeds MAX_SUI_RPC_REQUEST_BYTES",
+        );
+        return serde_json::to_string(&resp).unwrap_or_default();
+    }
+    let Ok(req) = serde_json::from_str::<SuiRpcRequest>(raw_json) else {
+        let resp = SuiRpcResponse::err(Value::Null, -32700, "Parse error");
+        return serde_json::to_string(&resp).unwrap_or_default();
+    };
+    let resp = handle_sui_rpc(state, policy, req);
+    serde_json::to_string(&resp).unwrap_or_default()
 }
 
 /// Handle a read-only or height-gated Sui JSON-RPC 2.0 request.
@@ -107,18 +135,47 @@ pub fn handle_sui_rpc(
     }
     match req.method.as_str() {
         "sui_getChainIdentifier" => {
+            if !req.params.is_empty() {
+                return SuiRpcResponse::err(req.id, -32602, "unexpected parameters");
+            }
             SuiRpcResponse::ok(req.id, json!(format!("{:08x}", policy.chain_id)))
         }
         "sui_getLatestCheckpointSequenceNumber" => {
+            if !req.params.is_empty() {
+                return SuiRpcResponse::err(req.id, -32602, "unexpected parameters");
+            }
             SuiRpcResponse::ok(req.id, json!(policy.block_height.to_string()))
         }
         "suix_getBalance" => {
-            let Some(addr_str) = req.params.first().and_then(Value::as_str) else {
+            if req.params.is_empty() || req.params.len() > 2 {
+                return SuiRpcResponse::err(
+                    req.id,
+                    -32602,
+                    "suix_getBalance requires [owner, coinType?]",
+                );
+            }
+            let Some(addr_str) = req.params[0].as_str() else {
                 return SuiRpcResponse::err(req.id, -32602, "missing Sui address");
             };
             let Some(addr32) = parse_sui_hex32(addr_str) else {
                 return SuiRpcResponse::err(req.id, -32602, "invalid 32-byte Sui hex address");
             };
+            let coin_type = match req.params.get(1) {
+                None | Some(Value::Null) => SUI_BUD_COIN_TYPE,
+                Some(Value::String(ct)) if !ct.is_empty() => ct.as_str(),
+                Some(_) => return SuiRpcResponse::err(req.id, -32602, "invalid coinType"),
+            };
+            if coin_type != SUI_BUD_COIN_TYPE {
+                return SuiRpcResponse::ok(
+                    req.id,
+                    json!({
+                        "coinType": coin_type,
+                        "coinObjectCount": 0,
+                        "totalBalance": "0",
+                        "lockedBalance": {}
+                    }),
+                );
+            }
             let mist = mist_balance_of(state, &addr32);
             SuiRpcResponse::ok(
                 req.id,
@@ -131,7 +188,10 @@ pub fn handle_sui_rpc(
             )
         }
         "suix_getAllBalances" => {
-            let Some(addr_str) = req.params.first().and_then(Value::as_str) else {
+            if req.params.len() != 1 {
+                return SuiRpcResponse::err(req.id, -32602, "suix_getAllBalances requires [owner]");
+            }
+            let Some(addr_str) = req.params[0].as_str() else {
                 return SuiRpcResponse::err(req.id, -32602, "missing Sui address");
             };
             let Some(addr32) = parse_sui_hex32(addr_str) else {
@@ -149,7 +209,10 @@ pub fn handle_sui_rpc(
             )
         }
         "sui_getObject" => {
-            let Some(id_str) = req.params.first().and_then(Value::as_str) else {
+            if req.params.len() != 1 {
+                return SuiRpcResponse::err(req.id, -32602, "sui_getObject requires [object_id]");
+            }
+            let Some(id_str) = req.params[0].as_str() else {
                 return SuiRpcResponse::err(req.id, -32602, "missing object_id");
             };
             let Some(_oid) = parse_sui_hex32(id_str) else {
@@ -164,10 +227,23 @@ pub fn handle_sui_rpc(
             )
         }
         "sui_executeTransactionBlock" => {
-            let Some(hex_env) = req.params.first().and_then(Value::as_str) else {
+            if req.params.len() != 1 {
+                return SuiRpcResponse::err(
+                    req.id,
+                    -32602,
+                    "sui_executeTransactionBlock requires [hex_envelope]",
+                );
+            }
+            let Some(hex_env) = req.params[0].as_str() else {
                 return SuiRpcResponse::err(req.id, -32602, "missing hex envelope");
             };
-            let Ok(raw) = hex::decode(hex_env.strip_prefix("0x").unwrap_or(hex_env)) else {
+            let trimmed_hex = hex_env.strip_prefix("0x").unwrap_or(hex_env);
+            if trimmed_hex.len()
+                > crate::execution::coordinator::foreign::sui::MAX_SUI_ENVELOPE_BYTES * 2
+            {
+                return SuiRpcResponse::err(req.id, -32602, "Sui envelope exceeds 256 KiB limit");
+            }
+            let Ok(raw) = hex::decode(trimmed_hex) else {
                 return SuiRpcResponse::err(req.id, -32602, "invalid hex envelope");
             };
             match decode_and_recover_sui_tx(&raw, policy) {
@@ -274,5 +350,75 @@ mod tests {
     #[test]
     fn max_sui_rpc_request_bytes_is_bounded() {
         assert_eq!(MAX_SUI_RPC_REQUEST_BYTES, 1 << 20);
+    }
+
+    #[test]
+    fn suix_get_balance_respects_coin_type_filter_and_requires_0x_addresses() {
+        let mut state = AccountState::new();
+        let sui_addr = [0x55u8; 32];
+        let bud_addr = derive_foreign_account(ForeignScheme::SuiEd25519, &sui_addr);
+        state.add_balance(&bud_addr, 7);
+        let policy = SuiActivationPolicy {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: 100,
+            activation_height: Some(100),
+        };
+
+        // Querying a foreign coinType must NOT return native BUD balance.
+        let other_coin = handle_sui_rpc(
+            &state,
+            policy,
+            SuiRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: json!(1),
+                method: "suix_getBalance".into(),
+                params: vec![
+                    json!(format!("0x{}", hex::encode(sui_addr))),
+                    json!("0xdead::usdc::USDC"),
+                ],
+            },
+        );
+        let res = other_coin.result.expect("zero coin balance response");
+        assert_eq!(res["coinType"].as_str(), Some("0xdead::usdc::USDC"));
+        assert_eq!(res["totalBalance"].as_str(), Some("0"));
+        assert_eq!(res["coinObjectCount"].as_u64(), Some(0));
+
+        // Unprefixed address must be rejected.
+        let no_prefix = handle_sui_rpc(
+            &state,
+            policy,
+            SuiRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: json!(2),
+                method: "suix_getBalance".into(),
+                params: vec![json!(hex::encode(sui_addr))],
+            },
+        );
+        assert!(no_prefix.error.is_some());
+
+        // Oversized hex envelope must be rejected before hex::decode.
+        let huge_hex = format!(
+            "0x{}",
+            "aa".repeat(crate::execution::coordinator::foreign::sui::MAX_SUI_ENVELOPE_BYTES + 1)
+        );
+        let over_env = handle_sui_rpc(
+            &state,
+            policy,
+            SuiRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: json!(3),
+                method: "sui_executeTransactionBlock".into(),
+                params: vec![json!(huge_hex)],
+            },
+        );
+        assert_eq!(
+            over_env.error.as_ref().and_then(|e| e["code"].as_i64()),
+            Some(-32602)
+        );
+
+        // handle_sui_jsonrpc enforces MAX_SUI_RPC_REQUEST_BYTES.
+        let oversized = " ".repeat(MAX_SUI_RPC_REQUEST_BYTES + 1);
+        let raw_over = handle_sui_jsonrpc(&state, policy, &oversized);
+        assert!(raw_over.contains("-32005"), "raw_over: {raw_over}");
     }
 }
