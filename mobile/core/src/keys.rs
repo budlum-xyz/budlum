@@ -107,6 +107,12 @@ impl OperatorKey {
     }
 
     fn from_seed(seed: Zeroizing<[u8; OPERATOR_SEED_LEN]>) -> Result<Self, CoreError> {
+        if *seed == [0u8; OPERATOR_SEED_LEN] {
+            return Err(CoreError::new(
+                "mobile_operator_entropy_zero",
+                "operator key entropy cannot be all zero",
+            ));
+        }
         let public_key = pq::ml_dsa_public_key(OPERATOR_KEY_SCHEME, &seed)
             .map_err(|e| key_error("mobile_operator_key", &e))?;
         Ok(Self { seed, public_key })
@@ -154,6 +160,12 @@ impl OperatorKey {
     /// length, and `mobile_operator_key_mismatch` when the seed derives
     /// another public key.
     pub fn open(vault: &dyn KeyVault, sealed: &SealedOperatorKey) -> Result<Self, CoreError> {
+        if sealed.public_key.is_empty() || sealed.sealed_seed.is_empty() {
+            return Err(CoreError::new(
+                "mobile_operator_key_sealed",
+                "sealed operator key cannot have an empty public key or ciphertext",
+            ));
+        }
         let context = vault_context(&sealed.public_key);
         let secret = vault
             .open(&sealed.sealed_seed, &context)
