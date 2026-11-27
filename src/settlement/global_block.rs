@@ -100,8 +100,11 @@ pub struct GlobalBlockHeader {
     pub checkpoint_height: u64,
 
     /// The external-domain intake digest (V6), when the intake holds any
-    /// record: the registrations, prover bonds, quorum rounds and accepted
-    /// attestations a light client checks external finality against.
+    /// record: one hash over the whole intake state - registrations, prover
+    /// bonds, quorum rounds and accepted attestations. It is a state
+    /// commitment, not an opening root: no single attestation can be proved
+    /// against it without the whole state. A light client reads external
+    /// finality from `ulp_domains_root`, whose per-domain leaves open.
     #[serde(default)]
     pub external_intake_root: Option<Hash32>,
 
