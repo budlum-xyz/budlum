@@ -706,13 +706,51 @@ fn garden_apk_cleanup() -> Result<(), String> {
     // What a leave touches is the Garden's own data: the content tree under
     // `<app dir>/garden/<chain id>` and the seat at the top. A file put at the
     // top of the app directory is not Garden data and is not the leave's to
-    // remove, so the check is made on the Garden's own paths. A phone that
-    // only joined published nothing, so the content tree may be empty here -
-    // that is not a failure, and the seat is what a join certainly leaves.
+    // remove, so the check is made on the Garden's own paths.
     let before = files_under(dir.path());
     assert!(
         before.iter().any(|path| path == "seat.json"),
         "the join left no seat to clean up: {before:?}"
+    );
+    // The check that names a regression has to be able to see it. A phone
+    // that only joined holds no content, so "nothing survived the leave" is
+    // true before the leave runs and stays true when `leave` removes nothing.
+    // So the phone publishes first, follows the publish to a final block, and
+    // only then leaves: the absence afterwards means the leave did the work.
+    let (ok, sent) = phone_verb(dir.path(), "send", &["cleanup content", "cleanup"])?;
+    assert!(ok, "the publish before the leave was refused: {sent}");
+    let answered: Value = serde_json::from_str(
+        sent.lines()
+            .find(|line| line.trim_start().starts_with('{'))
+            .ok_or_else(|| format!("the send printed no JSON: {sent}"))?,
+    )
+    .map_err(|e| format!("the send answered with unreadable JSON: {e}"))?;
+    let tx_id = text(&answered, "/tx_id")?;
+    wait_for("the publish to reach a final block", || {
+        let (ok, out) = phone_verb(dir.path(), "trace", &[&tx_id])?;
+        if !ok {
+            return Err(out);
+        }
+        let value: Value = serde_json::from_str(
+            out.lines()
+                .find(|line| line.trim_start().starts_with('{'))
+                .ok_or_else(|| format!("the trace printed no JSON: {out}"))?,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(if value["stage"] == json!("final") {
+            Some(())
+        } else {
+            None
+        })
+    })
+    .map_err(|e| {
+        format!("the content never reached a block, so the leave has nothing to prove: {e}")
+    })?;
+    let with_content = files_under(dir.path());
+    assert!(
+        with_content.iter().any(|path| path.starts_with("garden/")),
+        "the publish left no Garden content behind, so an empty tree after the leave would \
+         prove nothing: {with_content:?}"
     );
 
     let (ok, left) = phone_verb(dir.path(), "leave", &[])?;

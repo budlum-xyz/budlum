@@ -16,6 +16,7 @@
 //!   garden-phone send <dir> <text> [caption]
 //!   garden-phone feed <dir> [limit]
 //!   garden-phone fetch <dir> <content id>
+//!   garden-phone trace <dir> <id>
 //!   garden-phone leave <dir>
 
 use std::io::BufRead;
@@ -199,7 +200,24 @@ fn main() -> ExitCode {
             if !gate(&phone) || !return_first(&phone) {
                 return ExitCode::FAILURE;
             }
-            say(phone.send(text, caption).map_err(|e| e.to_string()))
+            match phone.send(text, caption) {
+                Ok(answer) => {
+                    // What the core answers is a mempool acceptance, not a
+                    // block. Printing the JSON alone has been read as "it is
+                    // published", so the word is said next to the handle that
+                    // settles the question.
+                    println!("accepted into the mempool, not yet in a block");
+                    println!("{}", answer.json);
+                    println!(
+                        "follow it with: garden-phone trace <dir> <tx_id>; stage final settles it"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(reason) => {
+                    eprintln!("refused: {reason}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         "feed" => {
             let limit = args
@@ -223,6 +241,19 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             say(phone.fetch(content_id).map_err(|e| e.to_string()))
+        }
+        "trace" => {
+            let id = match args.get(3) {
+                Some(id) => id.clone(),
+                None => {
+                    eprintln!("usage: garden-phone trace <dir> <tx id or content id>");
+                    return ExitCode::from(2);
+                }
+            };
+            if !return_first(&phone) {
+                return ExitCode::FAILURE;
+            }
+            say(phone.trace(id).map_err(|e| e.to_string()))
         }
         "leave" => say(phone.leave().map_err(|e| e.to_string())),
         other => {

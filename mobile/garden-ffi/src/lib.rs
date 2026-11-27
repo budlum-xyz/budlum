@@ -175,6 +175,16 @@ impl GardenPhone {
     /// stores is this - a note, a file, a reading from something. The
     /// bytes go down the B.U.D. 3.0 path, so what comes back out is
     /// verified against the chain rather than trusted.
+    ///
+    /// # What the answer promises, and what it does not
+    ///
+    /// `send` returns when the signed publish transaction is in this
+    /// validator's mempool and has been handed to the validators that will
+    /// hold the bytes; it does **not** wait for a block. The answer therefore
+    /// carries `"stage": "mempool"` and `"published": false`, and `trace` is
+    /// the call that follows `tx_id` past the mempool to `"stage": "final"`.
+    /// Reporting success here would be reporting a block that has not been
+    /// produced.
     pub fn send(&self, text: String, caption: String) -> Result<GardenAnswer, GardenError> {
         let caption = if caption.trim().is_empty() {
             None
@@ -188,6 +198,16 @@ impl GardenPhone {
             None,
             caption,
         )))
+    }
+
+    /// Follow a transaction, or a published object, through the chain.
+    ///
+    /// This is what turns `send`'s `"stage": "mempool"` into a verdict: the
+    /// answer carries `"stage": "final"` once a finalized block contains the
+    /// transaction and names the validators that signed that block. A caller
+    /// that stops at `send` has accepted the transaction, not published it.
+    pub fn trace(&self, id: String) -> Result<GardenAnswer, GardenError> {
+        answer(self.runtime.block_on(self.service.trace(id)))
     }
 
     /// What the Garden has been sent, newest first.
