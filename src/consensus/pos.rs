@@ -308,10 +308,21 @@ impl PoSEngine {
     /// matter of mechanism design*, whatever its length. A candidate that
     /// does not contain the checkpoint is such a fork.
     pub fn chain_honours_checkpoint(&self, chain: &[Block]) -> bool {
-        let Some((height, hash)) = self.last_checkpoint() else {
+        // Read the store here rather than through `last_checkpoint`: that
+        // helper folds a read failure into `None`, and in this gate `None`
+        // means "nothing established", which is the one answer a chain that
+        // departs before the limit must never get. A poisoned lock is not an
+        // empty store, so it is answered as a violation.
+        let Ok(checkpoints) = self.checkpoints.read() else {
+            return false;
+        };
+        let Some(last) = checkpoints.last() else {
             // Nothing established yet: nothing to violate.
             return true;
         };
+        let height = last.block_index;
+        let hash = last.block_hash.clone();
+        drop(checkpoints);
         // Locate the block by its height, not by its slice position: the
         // slices handed to fork choice are not required to start at genesis,
         // and on a suffix `chain[height]` names the wrong block (or none),
@@ -1901,6 +1912,38 @@ mod tests {
             !error.0.contains("checkpoint"),
             "unexpected checkpoint rejection: {}",
             error.0
+        );
+    }
+
+    /// Reading the checkpoint store is a security read: it is the revert limit
+    /// a long-range fork has to beat. A poisoned lock hides whether a
+    /// checkpoint exists, and folding that into "no checkpoint yet" turned the
+    /// fork-choice gate into an open door. The only safe answer when the store
+    /// cannot be read is that the chain violates the limit.
+    #[test]
+    fn poisoned_checkpoint_lock_does_not_open_the_revert_limit() {
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        engine
+            .add_checkpoint(&Block::new(10, "prev".into(), vec![]), None)
+            .unwrap();
+
+        // While the store is readable, a chain without the checkpoint is
+        // refused: that is the behaviour the poison must not change.
+        let chain = synthetic_pos_chain(4, 3);
+        assert!(
+            !engine.chain_honours_checkpoint(&chain),
+            "a chain that lacks the checkpoint must be refused"
+        );
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = engine.checkpoints.write().unwrap();
+            panic!("poison the checkpoint lock on purpose");
+        }));
+        assert!(poisoned.is_err(), "the checkpoint lock was not poisoned");
+
+        assert!(
+            !engine.chain_honours_checkpoint(&chain),
+            "a poisoned checkpoint store read as 'no checkpoint'"
         );
     }
 
