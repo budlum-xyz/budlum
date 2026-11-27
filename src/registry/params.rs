@@ -458,6 +458,17 @@ impl RegistryParams {
         if self.bridge_relayer_fee_ppm >= PPM_DENOMINATOR {
             return Err("bridge_relayer_fee_ppm must be below 100%".into());
         }
+        // Protocol bridge fee and relayer cut are both deducted from the same
+        // arriving bridge transfer; their sum must stay strictly below 100%.
+        if self
+            .bridge_fee_ppm
+            .checked_add(self.bridge_relayer_fee_ppm)
+            .is_none_or(|sum| sum >= PPM_DENOMINATOR)
+        {
+            return Err(
+                "combined bridge_fee_ppm and bridge_relayer_fee_ppm must be below 100%".into(),
+            );
+        }
         // A protocol cut at or above 100% takes the whole amount, and on a
         // transfer that means the recipient is credited nothing while the
         // sender is debited everything. Refuse the rate rather than discover

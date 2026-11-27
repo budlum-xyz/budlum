@@ -32,6 +32,16 @@ fn grace_end_of(record: &NameRecord) -> u64 {
     record.expires_at.saturating_add(GRACE_PERIOD)
 }
 
+/// Overflow-safe grace expiry predicate: a record whose `expires_at + GRACE_PERIOD`
+/// exceeds `u64::MAX` has NOT left its grace window at any reachable `u64` epoch.
+#[must_use]
+const fn is_past_grace(record: &NameRecord, current_epoch: u64) -> bool {
+    match record.expires_at.checked_add(GRACE_PERIOD) {
+        Some(end) => current_epoch >= end,
+        None => false,
+    }
+}
+
 fn default_max_names() -> usize {
     crate::registry::params::DEFAULT_MAX_NAMES
 }
@@ -315,7 +325,7 @@ impl BnsRegistry {
         let Some(record) = self.names.get(name) else {
             return Ok(());
         };
-        if current_epoch < grace_end_of(record) {
+        if !is_past_grace(record, current_epoch) {
             return Err(BnsError::NameTaken);
         }
         self.remove_record(name);
@@ -338,18 +348,23 @@ impl BnsRegistry {
             .collect();
         let mut removed = 0;
         for (grace_end, name) in due {
-            if self
-                .names
-                .get(&name)
-                .is_some_and(|record| grace_end_of(record) == grace_end)
-            {
+            let expired_match = self.names.get(&name).is_some_and(|record| {
+                grace_end_of(record) == grace_end && is_past_grace(record, current_epoch)
+            });
+            if expired_match {
                 if let Some(record) = self.names.remove(&name) {
                     self.clear_primary_names_for_record(&name, &record);
                 }
                 self.name_tree.touch(&name);
                 removed += 1;
+                self.expired_by_grace_end.remove(&(grace_end, name));
+            } else if !self
+                .names
+                .get(&name)
+                .is_some_and(|record| grace_end_of(record) == grace_end)
+            {
+                self.expired_by_grace_end.remove(&(grace_end, name));
             }
-            self.expired_by_grace_end.remove(&(grace_end, name));
         }
         removed
     }
@@ -406,9 +421,7 @@ impl BnsRegistry {
     pub fn active_name_count_for_owner(&self, owner: &Address, current_epoch: u64) -> usize {
         self.names
             .values()
-            .filter(|r| {
-                &r.owner == owner && current_epoch < r.expires_at.saturating_add(Self::GRACE_PERIOD)
-            })
+            .filter(|r| &r.owner == owner && !is_past_grace(r, current_epoch))
             .count()
     }
 
@@ -516,7 +529,7 @@ impl BnsRegistry {
         }
         match self.names.get(name) {
             None => true,
-            Some(record) => current_epoch >= record.expires_at.saturating_add(Self::GRACE_PERIOD),
+            Some(record) => is_past_grace(record, current_epoch),
         }
     }
 
@@ -535,7 +548,7 @@ impl BnsRegistry {
         let rec = self.names.get(name)?;
         if current_epoch < rec.expires_at {
             Some(NameStatus::Active)
-        } else if current_epoch < rec.expires_at.saturating_add(Self::GRACE_PERIOD) {
+        } else if !is_past_grace(rec, current_epoch) {
             Some(NameStatus::Grace)
         } else {
             Some(NameStatus::Expired)
@@ -545,9 +558,9 @@ impl BnsRegistry {
     /// Whether `owner` may renew `name` at `current_epoch` (either `Active` or inside `Grace`).
     #[must_use]
     pub fn is_renewable_by(&self, name: &str, owner: &Address, current_epoch: u64) -> bool {
-        self.names.get(name).is_some_and(|rec| {
-            &rec.owner == owner && current_epoch < rec.expires_at.saturating_add(Self::GRACE_PERIOD)
-        })
+        self.names
+            .get(name)
+            .is_some_and(|rec| &rec.owner == owner && !is_past_grace(rec, current_epoch))
     }
 
     pub fn calculate_cost(&self, name: &str, duration: u64) -> u64 {
@@ -611,15 +624,15 @@ impl BnsRegistry {
         if !Self::is_valid_duration(duration) {
             return Err(BnsError::InvalidDuration);
         }
-        let replacing_same_owner_in_grace = self.names.get(&name).is_some_and(|r| {
-            r.owner == owner && current_epoch < r.expires_at.saturating_add(Self::GRACE_PERIOD)
-        });
+        let replacing_same_owner_in_grace = self
+            .names
+            .get(&name)
+            .is_some_and(|r| r.owner == owner && !is_past_grace(r, current_epoch));
         if let Some(record) = self.names.get(&name) {
             if record.expires_at > current_epoch {
                 return Err(BnsError::NameTaken);
             }
-            let grace_until = record.expires_at.saturating_add(Self::GRACE_PERIOD);
-            if current_epoch < grace_until && record.owner != owner {
+            if !is_past_grace(record, current_epoch) && record.owner != owner {
                 return Err(BnsError::NameTaken);
             }
         }
@@ -645,10 +658,14 @@ impl BnsRegistry {
         // first. The index answers the same question - which name's grace
         // window closed earliest - in the time it takes to look at the head.
         if self.names.len() >= self.max_names && !self.names.contains_key(&name) {
-            let Some((_, expired_key)) = self
-                .expired_by_grace_end
-                .iter()
-                .find(|(grace_end, _)| *grace_end < current_epoch)
+            let Some((_, expired_key)) =
+                self.expired_by_grace_end.iter().find(|(grace_end, key)| {
+                    *grace_end <= current_epoch
+                        && self
+                            .names
+                            .get(key)
+                            .is_some_and(|rec| is_past_grace(rec, current_epoch))
+                })
             else {
                 return Err(BnsError::NameTaken);
             };
@@ -688,8 +705,7 @@ impl BnsRegistry {
         if &record.owner != caller {
             return Err(BnsError::NotOwner);
         }
-        let grace_expires_at = record.expires_at.saturating_add(Self::GRACE_PERIOD);
-        if current_epoch >= grace_expires_at {
+        if is_past_grace(record, current_epoch) {
             return Err(BnsError::Expired);
         }
         let base_epoch = record.expires_at.max(current_epoch);

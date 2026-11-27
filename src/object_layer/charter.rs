@@ -171,12 +171,21 @@ pub fn check_charter_at_state_root(
     if charter.silence_window == 0 {
         return Err(CharterRefusal::ZeroSilenceWindow);
     }
+    if charter.endpoint_code_hash == [0u8; 32] {
+        return Err(CharterRefusal::NotCanonicalEndpoint);
+    }
+    if charter.verifier_code_hash == [0u8; 32] {
+        return Err(CharterRefusal::NotCanonicalVerifier);
+    }
     if proof.endpoint_code_hash != charter.endpoint_code_hash
         || proof.verifier_code_hash != charter.verifier_code_hash
     {
         return Err(CharterRefusal::ProofDisagrees);
     }
     if let Some(expected_root) = expected_home_state_root {
+        if expected_root == [0u8; 32] {
+            return Err(CharterRefusal::ProofDisagrees);
+        }
         let Some(hp) = proof.home_proof.as_ref() else {
             return Err(CharterRefusal::ProofDisagrees);
         };
@@ -185,6 +194,9 @@ pub fn check_charter_at_state_root(
         }
     }
     if let Some(hp) = proof.home_proof.as_ref() {
+        if hp.state_root == [0u8; 32] {
+            return Err(CharterRefusal::ProofDisagrees);
+        }
         family.verify_home_code_entry(
             &charter.chain_reference,
             &charter.endpoint,
@@ -201,10 +213,10 @@ pub fn check_charter_at_state_root(
         )?;
     }
     let canonical = canonical.ok_or(CharterRefusal::NoCanonicalHashes)?;
-    if charter.endpoint_code_hash != canonical.endpoint {
+    if canonical.endpoint == [0u8; 32] || charter.endpoint_code_hash != canonical.endpoint {
         return Err(CharterRefusal::NotCanonicalEndpoint);
     }
-    if charter.verifier_code_hash != canonical.verifier {
+    if canonical.verifier == [0u8; 32] || charter.verifier_code_hash != canonical.verifier {
         return Err(CharterRefusal::NotCanonicalVerifier);
     }
     Ok(())

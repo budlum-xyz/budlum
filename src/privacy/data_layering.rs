@@ -55,6 +55,9 @@ pub const DOMAIN_PRIVACY_LAYER_ROOT: &[u8] = b"BDLM_PRIVACY_LAYER_ROOT_V1";
 /// Maximum layered records held in one registry before fail-closed refusal.
 pub const MAX_LAYERED_RECORDS: usize = 16_384;
 
+/// Maximum layered records a single owner key may hold concurrently.
+const MAX_LAYERED_RECORDS_PER_OWNER: usize = 256;
+
 /// Maximum unlinkable view-grant tags attached to a single `K3` record.
 pub const MAX_LAYER_GRANTS_PER_RECORD: usize = 64;
 
@@ -287,8 +290,11 @@ impl DataLayerRegistry {
         if commitment == [0u8; 32] {
             return Err(DataLayerError::ZeroParameter("commitment"));
         }
+        if declared_byte_len == 0 {
+            return Err(DataLayerError::ZeroParameter("declared_byte_len"));
+        }
         let owner_pk_digest = hash_valid_owner_pk(owner_ml_dsa_65_pk)?;
-        self.ensure_insertable(&record_id)?;
+        self.ensure_insertable(&record_id, &owner_pk_digest)?;
         self.records.insert(
             record_id,
             LayeredDataRecord {
@@ -334,7 +340,7 @@ impl DataLayerRegistry {
             return Err(DataLayerError::ZeroParameter("declared_byte_len"));
         }
         let owner_pk_digest = hash_valid_owner_pk(owner_ml_dsa_65_pk)?;
-        self.ensure_insertable(&record_id)?;
+        self.ensure_insertable(&record_id, &owner_pk_digest)?;
         self.records.insert(
             record_id,
             LayeredDataRecord {
@@ -386,6 +392,10 @@ impl DataLayerRegistry {
                 max: MAX_LAYER_GRANTS_PER_RECORD,
             });
         }
+        let next_nonce = rec
+            .transition_nonce
+            .checked_add(1)
+            .ok_or(DataLayerError::ReplayOrChainMismatch)?;
         verify_owner_auth(
             self.chain_id,
             rec,
@@ -395,7 +405,7 @@ impl DataLayerRegistry {
         )?;
         if let Some(rec_mut) = self.records.get_mut(record_id) {
             rec_mut.active_grant_tags.insert(grant_tag);
-            rec_mut.transition_nonce = rec_mut.transition_nonce.saturating_add(1);
+            rec_mut.transition_nonce = next_nonce;
         }
         Ok(())
     }
@@ -429,6 +439,10 @@ impl DataLayerRegistry {
                 to: DataPrivacyLayer::K2Pseudonymous,
             });
         }
+        let next_nonce = rec
+            .transition_nonce
+            .checked_add(1)
+            .ok_or(DataLayerError::ReplayOrChainMismatch)?;
         let stealth_tag = derive_stealth_owner_tag(&rec.owner_pk_digest, stealth_salt);
         verify_owner_auth(
             self.chain_id,
@@ -440,7 +454,7 @@ impl DataLayerRegistry {
         if let Some(rec_mut) = self.records.get_mut(record_id) {
             rec_mut.layer = DataPrivacyLayer::K2Pseudonymous;
             rec_mut.stealth_tag = Some(stealth_tag);
-            rec_mut.transition_nonce = rec_mut.transition_nonce.saturating_add(1);
+            rec_mut.transition_nonce = next_nonce;
         }
         Ok(stealth_tag)
     }
@@ -466,6 +480,10 @@ impl DataLayerRegistry {
             .records
             .get(record_id)
             .ok_or(DataLayerError::UnknownRecord)?;
+        let next_nonce = rec
+            .transition_nonce
+            .checked_add(1)
+            .ok_or(DataLayerError::ReplayOrChainMismatch)?;
         let actual_len = u64::try_from(plaintext.len()).unwrap_or(u64::MAX);
         if actual_len != rec.declared_byte_len {
             return Err(DataLayerError::InvalidOpeningLength);
@@ -475,6 +493,9 @@ impl DataLayerRegistry {
             DataPrivacyLayer::K4OffChainAnchored => plaintext_digest,
             DataPrivacyLayer::K3Confidential | DataPrivacyLayer::K2Pseudonymous => {
                 let salt = blind_salt.ok_or(DataLayerError::CommitmentOpeningMismatch)?;
+                if *salt == [0u8; 32] {
+                    return Err(DataLayerError::ZeroParameter("blind_salt"));
+                }
                 compute_layer_commitment(record_id, salt, &plaintext_digest, actual_len)
             }
             DataPrivacyLayer::K1Public => return Err(DataLayerError::IrreversiblePublicExposure),
@@ -492,7 +513,7 @@ impl DataLayerRegistry {
         if let Some(rec_mut) = self.records.get_mut(record_id) {
             rec_mut.layer = DataPrivacyLayer::K1Public;
             rec_mut.disclosed_plaintext = Some(plaintext);
-            rec_mut.transition_nonce = rec_mut.transition_nonce.saturating_add(1);
+            rec_mut.transition_nonce = next_nonce;
         }
         Ok(())
     }
@@ -554,13 +575,27 @@ impl DataLayerRegistry {
         h.finalize().into()
     }
 
-    fn ensure_insertable(&self, record_id: &[u8; 32]) -> Result<(), DataLayerError> {
+    fn ensure_insertable(
+        &self,
+        record_id: &[u8; 32],
+        owner_pk_digest: &[u8; 32],
+    ) -> Result<(), DataLayerError> {
         if self.records.contains_key(record_id) {
             return Err(DataLayerError::DuplicateRecord);
         }
         if self.records.len() >= MAX_LAYERED_RECORDS {
             return Err(DataLayerError::RegistryFull {
                 max: MAX_LAYERED_RECORDS,
+            });
+        }
+        let owner_count = self
+            .records
+            .values()
+            .filter(|rec| rec.owner_pk_digest == *owner_pk_digest)
+            .count();
+        if owner_count >= MAX_LAYERED_RECORDS_PER_OWNER {
+            return Err(DataLayerError::RegistryFull {
+                max: MAX_LAYERED_RECORDS_PER_OWNER,
             });
         }
         Ok(())

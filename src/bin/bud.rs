@@ -1363,15 +1363,15 @@ fn parse_address(s: &str) -> Result<Address, String> {
     Address::from_hex(s).map_err(|e| format!("invalid address '{s}': {e}"))
 }
 
+/// Maximum bytes accepted when reading a signing-seed or wallet-password file.
+const MAX_KEY_FILE_BYTES: u64 = 4096;
+
 /// Parse a 32-byte hex signing seed.
 /// The signing seed comes from a file (`--priv-key-file`) or from the
 /// `BUD_PRIV_KEY` environment variable, in that order, never from `argv`.
 fn load_priv_key(path: Option<&std::path::Path>) -> Result<String, String> {
     if let Some(path) = path {
-        check_key_file_mode(path)?;
-        return std::fs::read_to_string(path)
-            .map(|s| s.trim().to_string())
-            .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()));
+        return read_key_file_checked(path).map(|s| s.trim().to_string());
     }
     std::env::var("BUD_PRIV_KEY").map_err(|_| {
         String::from(
@@ -1381,14 +1381,48 @@ fn load_priv_key(path: Option<&std::path::Path>) -> Result<String, String> {
     })
 }
 
-/// Refuse a seed file that group or others can read (Unix only).
-///
-/// A world-readable seed file is a leaked key; the user must `chmod 600` it.
-#[cfg(unix)]
-fn check_key_file_mode(path: &std::path::Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    let meta = std::fs::metadata(path)
+/// Open a secret key/password file, reject symlinks and group/world-accessible
+/// permissions on the opened descriptor, and read bounded UTF-8 text from that
+/// same descriptor so no path-swap TOCTOU window sits between check and read.
+fn read_key_file_checked(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let link_meta = std::fs::symlink_metadata(path)
         .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()))?;
+    if !link_meta.file_type().is_file() {
+        return Err(format!(
+            "priv key file {} must be a regular file, not a symlink or directory",
+            path.display()
+        ));
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()))?;
+    check_opened_key_file_mode(path, &file)?;
+    let mut buf = String::new();
+    let read = file
+        .take(MAX_KEY_FILE_BYTES + 1)
+        .read_to_string(&mut buf)
+        .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()))?;
+    if read as u64 > MAX_KEY_FILE_BYTES {
+        return Err(format!(
+            "priv key file {} exceeds {MAX_KEY_FILE_BYTES} bytes",
+            path.display()
+        ));
+    }
+    Ok(buf)
+}
+
+#[cfg(unix)]
+fn check_opened_key_file_mode(path: &std::path::Path, file: &std::fs::File) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()))?;
+    if !meta.file_type().is_file() {
+        return Err(format!(
+            "priv key file {} must be a regular file",
+            path.display()
+        ));
+    }
     let mode = meta.permissions().mode();
     if mode & 0o077 != 0 {
         return Err(format!(
@@ -1399,6 +1433,33 @@ fn check_key_file_mode(path: &std::path::Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_opened_key_file_mode(
+    _path: &std::path::Path,
+    _file: &std::fs::File,
+) -> Result<(), String> {
+    Ok(())
+}
+
+/// Refuse a seed or validator key file that is a symlink or readable by group
+/// or others (Unix only).
+///
+/// A world-readable seed file is a leaked key; the user must `chmod 600` it.
+#[cfg(unix)]
+fn check_key_file_mode(path: &std::path::Path) -> Result<(), String> {
+    let link_meta = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()))?;
+    if !link_meta.file_type().is_file() {
+        return Err(format!(
+            "priv key file {} must be a regular file, not a symlink or directory",
+            path.display()
+        ));
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()))?;
+    check_opened_key_file_mode(path, &file)
 }
 
 #[cfg(not(unix))]
@@ -2709,15 +2770,11 @@ fn run_genesis_assemble(
 /// `BUD_WALLET_PASSWORD` environment variable. Never an argument.
 fn wallet_password(file: Option<&std::path::Path>) -> Result<String, String> {
     let password = match file {
-        Some(path) => {
-            check_key_file_mode(path)?;
-            std::fs::read_to_string(path)
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))?
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .to_string()
-        }
+        Some(path) => read_key_file_checked(path)?
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string(),
         None => std::env::var("BUD_WALLET_PASSWORD").map_err(|_| {
             String::from(
                 "no wallet password: pass --password-file <path> or set BUD_WALLET_PASSWORD",
@@ -5524,6 +5581,32 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(check_key_file_mode(&path).is_ok());
         std::fs::remove_file(&path).ok();
+    }
+
+    /// A symlink pointing to a 600 key file is refused fail-closed.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_key_file_is_refused() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let target = std::env::temp_dir().join(format!("bud-key-target-{}", std::process::id()));
+        let link = std::env::temp_dir().join(format!("bud-key-link-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+        assert!(std::fs::write(&target, "00").is_ok());
+        assert!(std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).is_ok());
+        assert!(symlink(&target, &link).is_ok());
+        let err = read_key_file_checked(&link);
+        assert!(
+            err.as_ref().is_err_and(|msg| msg.contains("symlink")),
+            "symlink key file must be rejected: {err:?}"
+        );
+        let err_mode = check_key_file_mode(&link);
+        assert!(
+            err_mode.as_ref().is_err_and(|msg| msg.contains("symlink")),
+            "check_key_file_mode must reject symlinks: {err_mode:?}"
+        );
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
     }
 
     /// The transfer carries the chain id it was given, not the devnet default.

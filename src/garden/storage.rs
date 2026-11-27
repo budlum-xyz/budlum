@@ -504,7 +504,13 @@ impl GardenContentStore {
     /// Read an object and check it against its content id.
     pub fn get(&self, content_id: &Hash32) -> Option<Vec<u8>> {
         let bytes = match self.path_of(content_id) {
-            Some(path) => fs::read(path).ok()?,
+            Some(path) => {
+                let meta = fs::symlink_metadata(&path).ok()?;
+                if !meta.file_type().is_file() {
+                    return None;
+                }
+                fs::read(path).ok()?
+            }
             None => self.memory.get(content_id)?.clone(),
         };
         (ContentId::of(&bytes).0 == *content_id).then_some(bytes)
@@ -513,7 +519,7 @@ impl GardenContentStore {
     pub fn contains(&self, content_id: &Hash32) -> bool {
         self.path_of(content_id).map_or_else(
             || self.memory.contains_key(content_id),
-            |path| path.is_file(),
+            |path| fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_file()),
         )
     }
 
@@ -526,9 +532,9 @@ impl GardenContentStore {
                     .and_then(|bytes| u64::try_from(bytes.len()).ok())
             },
             |path| {
-                fs::metadata(path)
+                fs::symlink_metadata(path)
                     .ok()
-                    .filter(fs::Metadata::is_file)
+                    .filter(|meta| meta.file_type().is_file())
                     .map(|meta| meta.len())
             },
         )
@@ -542,9 +548,9 @@ impl GardenContentStore {
         self.drop_coding(content_id);
         match self.path_of(content_id) {
             Some(path) => {
-                let len = fs::metadata(&path)
+                let len = fs::symlink_metadata(&path)
                     .ok()
-                    .filter(fs::Metadata::is_file)
+                    .filter(|meta| meta.file_type().is_file())
                     .map_or(0, |meta| charged_bytes(meta.len()));
                 if fs::remove_file(path).is_ok() {
                     self.total_bytes = self.total_bytes.saturating_sub(len);
@@ -822,5 +828,43 @@ mod tests {
             1,
             "counters record work done, so removal must not rewind them"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_ignored_for_contains_len_get_and_remove_accounting() {
+        use std::os::unix::fs::symlink;
+        let base =
+            std::env::temp_dir().join(format!("budlum-garden-symlink-unit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let store_dir = base.join("store");
+        let victim = base.join("victim.bin");
+        assert!(fs::create_dir_all(&store_dir).is_ok());
+        assert!(fs::write(&victim, vec![0xAAu8; 65_536]).is_ok());
+
+        let Ok(mut store) = GardenContentStore::open_with_limit(Some(&store_dir), 16_384, 32_768)
+        else {
+            panic!("open_with_limit failed");
+        };
+        let Ok(legit_cid) = store.put(&vec![0x11u8; 8_192]) else {
+            panic!("put legit failed");
+        };
+        let before = store.total_bytes;
+        assert!(before >= 8_192);
+
+        let fake_cid = [0xEEu8; 32];
+        let fake_path = store_dir.join(hex::encode(fake_cid));
+        assert!(symlink(&victim, &fake_path).is_ok());
+
+        assert!(!store.contains(&fake_cid));
+        assert_eq!(store.stored_len(&fake_cid), None);
+        assert_eq!(store.get(&fake_cid), None);
+        store.remove(&fake_cid);
+        assert_eq!(
+            store.total_bytes, before,
+            "removing a symlink must not subtract the external target size"
+        );
+        assert!(store.contains(&legit_cid));
+        let _ = fs::remove_dir_all(&base);
     }
 }

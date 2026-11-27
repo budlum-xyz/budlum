@@ -277,6 +277,12 @@ impl PoAOnboarding {
                 domain,
             });
         }
+        if !self.is_permissioned(domain) {
+            return Err(PoaMembershipError::NotAnAdmin {
+                caller: applicant,
+                domain,
+            });
+        }
         self.registry
             .submit_application(domain, applicant, kyc_commitment)?;
         self.kyc_expiry.remove(&(domain, applicant));

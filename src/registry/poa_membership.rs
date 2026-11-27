@@ -156,10 +156,24 @@ impl PoaMembershipRegistry {
         self.members.len()
     }
 
+    /// Maximum number of `PoA` admins permitted on any single permissioned domain.
+    const MAX_ADMINS_PER_DOMAIN: usize = 64;
+
     /// Bootstrap an admin for a `PoA` domain. In production this is expected to be
-    /// Wired through governance; here it is the trust root of the permissioned
-    /// Sub-domain.
+    /// wired through governance; here it is the trust root of the permissioned
+    /// sub-domain. Zero addresses and additions beyond [`Self::MAX_ADMINS_PER_DOMAIN`]
+    /// are ignored fail-closed.
     pub fn add_admin(&mut self, domain: DomainId, admin: Address) {
+        if admin == Address::zero() {
+            return;
+        }
+        if self.admins.contains_key(&(domain, admin)) {
+            return;
+        }
+        let domain_admins = self.admins.keys().filter(|(d, _)| *d == domain).count();
+        if domain_admins >= Self::MAX_ADMINS_PER_DOMAIN {
+            return;
+        }
         self.admins.insert((domain, admin), ());
     }
 
