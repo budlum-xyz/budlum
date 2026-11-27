@@ -9,7 +9,8 @@ repository = "https://github.com/budlum-xyz/budlum"
 # Decoupled, standalone crate: it does NOT join the budlum-core workspace graph
 # (which is 900+ crates and cannot be compiled in every sandbox). It is built and
 # tested on its own. The recommended wiring into `src/cross_domain/external/
-# intake.rs` is documented in the workspace audit (denetim/bulgular/B-0283-*).
+# intake.rs` is described in the workspace audit note kept beside it; a commit
+# message is not the place to cite that note by an identifier.
 [workspace]
 
 [lib]

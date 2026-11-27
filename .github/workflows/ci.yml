@@ -1680,6 +1680,7 @@ jobs:
           workspaces: |
             crates/bpqs
             crates/bud-codec
+            crates/budlum-finality-core
             crates/budlum-nipopow
             crates/note-packing
             crates/uel-abi
@@ -1706,6 +1707,9 @@ jobs:
       - name: Format (bud-codec)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path crates/bud-codec/Cargo.toml --all -- --check
+      - name: Format (budlum-finality-core)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path crates/budlum-finality-core/Cargo.toml --all -- --check
       - name: Format (note-packing)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path crates/note-packing/Cargo.toml --all -- --check
@@ -1757,6 +1761,9 @@ jobs:
       - name: Clippy (bud-codec)
         if: always() && steps.rust.outcome == 'success'
         run: cargo clippy --manifest-path crates/bud-codec/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (budlum-finality-core)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --manifest-path crates/budlum-finality-core/Cargo.toml --all-targets -- -D warnings
       - name: Clippy (note-packing)
         if: always() && steps.rust.outcome == 'success'
         run: cargo clippy --manifest-path crates/note-packing/Cargo.toml --all-targets -- -D warnings
@@ -1808,6 +1815,14 @@ jobs:
       - name: Tests (bud-codec)
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path crates/bud-codec/Cargo.toml
+      - name: Tests (budlum-finality-core)
+        # The crate declares its own `[workspace]` and is not a member of the
+        # root package, so `cargo test --lib` at the root never compiles it and
+        # its security-verifier tests would never run. Named here for the same
+        # reason the other standalone crates are: an unbuilt test is not
+        # evidence.
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path crates/budlum-finality-core/Cargo.toml
       - name: Tests (note-packing)
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path crates/note-packing/Cargo.toml

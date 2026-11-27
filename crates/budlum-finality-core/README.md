@@ -44,7 +44,7 @@ in isolation.
 Call `verify_finality_backing(backing, policy)` from
 `src/cross_domain/external/intake.rs` immediately after an adapter produces a
 `SecurityBacking`, before it is folded into the `GlobalBlockHeader`. The exact
-diff is tracked in the workspace audit `denetim/bulgular/B-0283-*.md`.
+diff is tracked in the workspace audit note for cross-domain intake.
 
 [`FinalityProof`]: ./src/lib.rs
 [`verify_finality_backing`]: ./src/lib.rs
