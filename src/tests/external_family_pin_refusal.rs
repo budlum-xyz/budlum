@@ -23,6 +23,7 @@
 //! `external_unpinned_refusal.rs`.
 
 use crate::core::address::Address;
+use crate::cross_domain::external::selftest::FaultProbe;
 use crate::cross_domain::external::spec::{
     AdapterDescriptor, AdapterError, AdapterId, ExternalFinalityAdapter, FinalityAttestation,
     FinalityKind, RawConsensusEvidence, TimeUnit, TrustModel, VerificationPolicy,
@@ -30,7 +31,7 @@ use crate::cross_domain::external::spec::{
 use crate::cross_domain::external::{
     encode_external_evidence, ExternalDomainFinalityBridge, EXTERNAL_DOMAIN_FINALITY_ADAPTER,
 };
-use crate::domain::finality_adapter::FinalityStatus;
+use crate::domain::finality_adapter::{DomainFinalityAdapter, FinalityProof};
 use crate::domain::finality_proof_model::ExternalVerifierFamily;
 use crate::domain::types::{
     ConsensusDomain, ConsensusKind, DomainCommitment, DomainStatus, RootScheme,
@@ -98,10 +99,21 @@ impl ExternalFinalityAdapter for UnpinnedAdapter {
             found: evidence.network.clone(),
         })
     }
+
+    fn fault_probes(&self) -> Vec<FaultProbe> {
+        Vec::new()
+    }
 }
 
 /// The fixture pair for one consensus kind.
-fn fixture(kind: &str) -> (UnpinnedAdapter, ConsensusDomain, DomainCommitment, Vec<u8>) {
+fn fixture(
+    kind: &str,
+) -> (
+    UnpinnedAdapter,
+    ConsensusDomain,
+    DomainCommitment,
+    FinalityProof,
+) {
     let descriptor = AdapterDescriptor {
         id: AdapterId::from_name("unpinned-fixture"),
         name: "unpinned-fixture".to_string(),
@@ -160,7 +172,8 @@ fn fixture(kind: &str) -> (UnpinnedAdapter, ConsensusDomain, DomainCommitment, V
         producer: None,
         state_updates: std::collections::BTreeMap::new(),
     };
-    let proof = encode_external_evidence(&evidence).expect("encode fixture evidence");
+    let raw = encode_external_evidence(&evidence).expect("encode fixture evidence");
+    let proof = FinalityProof::Raw(raw);
     (
         UnpinnedAdapter(descriptor, evidence),
         domain,
