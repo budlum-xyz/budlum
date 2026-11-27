@@ -18,8 +18,8 @@ android {
         // Goes up with every build the owner is given, so Android can
         // tell a newer one from an older one. The name is what the
         // release is called on GitHub.
-        versionCode = 14
-        versionName = "0.14"
+        versionCode = 15
+        versionName = "0.15"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
