@@ -429,10 +429,6 @@ impl MarketplaceRegistry {
                  listing to another"
             ));
         }
-        let next_offer_id = self
-            .next_offer_id
-            .checked_add(1)
-            .ok_or_else(|| "offer id counter exhausted".to_string())?;
         let offer = DataOffer {
             id,
             seller,
@@ -442,7 +438,12 @@ impl MarketplaceRegistry {
             created_at_block: current_block,
         };
         self.offers.insert(id, offer);
-        self.next_offer_id = next_offer_id;
+        // Saturate at the terminal id rather than refusing the last offer:
+        // `u64::MAX` is one live listing, not a state to keep refusing. The
+        // guard above refuses the *second* write to it, because the id is
+        // then already live. Wrapping would reuse `0`, the overwrite this
+        // function has just been taught to refuse.
+        self.next_offer_id = self.next_offer_id.saturating_add(1);
         Ok(id)
     }
 
