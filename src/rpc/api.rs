@@ -1627,6 +1627,20 @@ pub trait BudlumApi {
     #[method(name = "bud_getUniversalDomains")]
     async fn get_universal_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// One data-market listing by 32-byte hex id.
+    ///
+    /// `DATA_MARKET_RPC_METHODS` names this method and nothing served it. The
+    /// market was write-only from outside: `SettlementTx::DataMarket` could
+    /// create a listing, and a node could not be asked what a listing id
+    /// meant. The neighbouring `bud_dataMarketGet*` methods read Pollen's
+    /// assets, which is a different registry - so a listing created by the
+    /// settlement door was invisible to every reader on the node.
+    #[method(name = "bud_dataMarketGetListing")]
+    async fn data_market_listing(
+        &self,
+        listing_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Compute a dry-run atomic multi-token split-tender payment quote across domains.
     #[method(name = "bud_quoteUniversalPayment")]
     async fn quote_universal_payment(

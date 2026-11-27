@@ -5852,6 +5852,21 @@ impl BudlumApiServer for RpcServer {
             .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
     }
 
+    async fn data_market_listing(
+        &self,
+        listing_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let id = parse_hex32_field(&listing_id, "listing_id")?;
+        match self.chain.get_data_market_listing(id).await {
+            Some(listing) => serde_json::to_value(listing)
+                .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>)),
+            // Null rather than an error: "there is no such active listing" is
+            // an answer, and a client has to be able to tell it apart from a
+            // node that refused to look.
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
     async fn get_universal_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let catalog = self.chain.get_universal_domains().await;
         let domains = catalog.list();

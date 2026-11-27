@@ -257,6 +257,30 @@ impl DataMarketRegistry {
         self.listings.get(id)
     }
 
+    /// Every listing, in listing-id order.
+    ///
+    /// The market's own read surface. It had none: `listing()` fetched one by
+    /// id, so a buyer had to already know the id of what it was looking for -
+    /// which is not a market, it is a lookup table. Ordered by the map's key so
+    /// two nodes answer with the same sequence and a client can page it.
+    pub fn listings(&self) -> Vec<&DataMarketListing> {
+        self.listings.values().collect()
+    }
+
+    /// Every listing that is still active, in listing-id order.
+    pub fn listenings(&self) -> Vec<DataMarketListing> {
+        self.listings
+            .values()
+            .filter(|l| l.active)
+            .cloned()
+            .collect()
+    }
+
+    /// Settled receipts, oldest first.
+    pub fn receipts_vec(&self) -> Vec<DataMarketPurchaseReceipt> {
+        self.receipts.clone()
+    }
+
     /// Atomically verify V5 PQ authorization, transfer `price_atoms` from buyer to seller,
     /// and issue an unlinkable `bud3::grants` [`GrantRow`] ( item 3, `G-4`).
     ///

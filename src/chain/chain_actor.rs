@@ -251,6 +251,16 @@ pub enum ChainCommand {
     /// Snapshot the state-rooted `ConsensusSentry` health and circuit breaker state.
     GetConsensusSentry(oneshot::Sender<crate::cross_domain::external::sentry::ConsensusSentry>),
     GetUniversalDomains(oneshot::Sender<crate::unification::UniversalDomainCatalog>),
+    /// The data market's active listings. Answered from committed state, so a
+    /// listing a user can see is a listing a block accepted.
+    GetDataMarketListings(oneshot::Sender<Vec<crate::data_market::DataMarketListing>>),
+    /// One listing by id, if it is active.
+    GetDataMarketListing(
+        [u8; 32],
+        oneshot::Sender<Option<crate::data_market::DataMarketListing>>,
+    ),
+    /// Settled purchase receipts, newest last.
+    GetDataMarketReceipts(oneshot::Sender<Vec<crate::data_market::DataMarketPurchaseReceipt>>),
     GetDomainCommitments(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetDomainCommitmentsWithGarden(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetConsensusDomains(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
@@ -1892,6 +1902,39 @@ impl ChainHandle {
     pub async fn get_universal_domains(&self) -> crate::unification::UniversalDomainCatalog {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetUniversalDomains(tx)).await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// Every data-market listing currently offered.
+    ///
+    /// Read from committed state, not from an indexer: a listing is visible
+    /// exactly when a block that contains it has been applied, which is the
+    /// only ordering a buyer's payment can rely on.
+    pub async fn get_data_market_listings(&self) -> Vec<crate::data_market::DataMarketListing> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetDataMarketListings(tx)).await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// One active listing, if it exists.
+    pub async fn get_data_market_listing(
+        &self,
+        id: [u8; 32],
+    ) -> Option<crate::data_market::DataMarketListing> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetDataMarketListing(id, tx))
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// Settled purchase receipts.
+    pub async fn get_data_market_receipts(
+        &self,
+    ) -> Vec<crate::data_market::DataMarketPurchaseReceipt> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetDataMarketReceipts(tx)).await;
         rx.await.unwrap_or_default()
     }
 
@@ -3719,6 +3762,23 @@ impl ChainActor {
                         &self.blockchain.state,
                     );
                     let _ = tx.send(catalog);
+                }
+                ChainCommand::GetDataMarketListings(tx) => {
+                    let _ = tx.send(self.blockchain.state.settlement.data_market.listenings());
+                }
+                ChainCommand::GetDataMarketListing(id, tx) => {
+                    let _ = tx.send(
+                        self.blockchain
+                            .state
+                            .settlement
+                            .data_market
+                            .listing(&id)
+                            .filter(|l| l.active)
+                            .cloned(),
+                    );
+                }
+                ChainCommand::GetDataMarketReceipts(tx) => {
+                    let _ = tx.send(self.blockchain.state.settlement.data_market.receipts_vec());
                 }
                 ChainCommand::GetFinalityCertificate(checkpoint_height, tx) => {
                     let tip = self.blockchain.chain.last().map_or(0, |b| b.index);
