@@ -31,7 +31,7 @@ use crate::cross_domain::external::spec::{
 use crate::cross_domain::external::{
     encode_external_evidence, ExternalDomainFinalityBridge, EXTERNAL_DOMAIN_FINALITY_ADAPTER,
 };
-use crate::domain::finality_adapter::{DomainFinalityAdapter, FinalityProof};
+use crate::domain::finality_adapter::{DomainFinalityAdapter, FinalityProof, FinalityStatus};
 use crate::domain::finality_proof_model::ExternalVerifierFamily;
 use crate::domain::types::{
     ConsensusDomain, ConsensusKind, DomainCommitment, DomainStatus, RootScheme,
@@ -172,8 +172,7 @@ fn fixture(
         producer: None,
         state_updates: std::collections::BTreeMap::new(),
     };
-    let raw = encode_external_evidence(&evidence).expect("encode fixture evidence");
-    let proof = FinalityProof::Raw(raw);
+    let proof = encode_external_evidence(&evidence).expect("encode fixture evidence");
     (
         UnpinnedAdapter(descriptor, evidence),
         domain,
