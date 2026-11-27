@@ -376,7 +376,13 @@ fn check_funds(
             }
         )
     })?;
+    if *payer == Address::zero() || terms.operator == Address::zero() {
+        return Err("paid storage deal payer and operator must be non-zero addresses".to_string());
+    }
     let fee = terms.economics.total_fee(held, epochs);
+    if fee == 0 {
+        return Err("paid storage deal total fee must be non-zero".to_string());
+    }
     let bond = terms.economics.operator_bond;
 
     // `spendable_balance`, not `get_balance`: the vesting lock is a spend gate
