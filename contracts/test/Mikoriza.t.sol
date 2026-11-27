@@ -38,8 +38,14 @@ contract AllocationManagerStub is IAllocationManager {
         returns (uint256, uint256[] memory shares)
     {
         lastSlashed = params.operator;
-        shares = new uint256[](params.strategies.length);
+        shares = new uint256[](shortShares ? 0 : params.strategies.length);
         return (1, shares);
+    }
+
+    bool public shortShares;
+
+    function setShortShares(bool value) external {
+        shortShares = value;
     }
 }
 
@@ -310,5 +316,34 @@ contract MikorizaTest is Harness {
         assertTrue(registrar.wasBound(validator, OPERATOR, hex"01"), "the key that signed is still answerable");
         assertTrue(registrar.wasBound(validator, OPERATOR, hex"02"), "the key it rotated to is too");
         assertTrue(!registrar.wasBound(validator, OPERATOR, hex"ff"), "a key never bound is not");
+    }
+
+    function test_report_allocation_works_at_block_zero_and_refuses_u32_block_overflow() public {
+        bytes32 validator = bytes32(uint256(7));
+        manager.setMember(OPERATOR, 5e9);
+        registrar.forceBind(OPERATOR, validator, new bytes(96));
+
+        vm.roll(0);
+        uint64 units = registrar.reportAllocation(OPERATOR);
+        assertEq(units, 5, "first report at genesis block 0 must succeed");
+
+        vm.expectPartialRevert(BudlumRegistrar.AlreadyReported.selector);
+        registrar.reportAllocation(OPERATOR);
+
+        vm.roll(uint256(type(uint32).max) + 1);
+        bytes4 overflowSelector = bytes4(keccak256("BlockNumberOverflow(uint256)"));
+        vm.expectPartialRevert(overflowSelector);
+        registrar.allocatedUnits(OPERATOR);
+    }
+
+    function test_slash_for_double_vote_rejects_mismatched_shares_and_empty_key_was_bound() public {
+        bytes32 validator = bytes32(uint256(8));
+        registrar.forceRebind(OPERATOR, validator, hex"cc", hex"");
+        assertTrue(!registrar.wasBound(validator, OPERATOR, hex""), "empty uncompressed key must never report bound");
+
+        manager.setShortShares(true);
+        vm.prank(address(registrar.slasher()));
+        vm.expectPartialRevert(BudlumRegistrar.InvalidStakeMatrix.selector);
+        registrar.slashForDoubleVote(OPERATOR, "double vote");
     }
 }
