@@ -333,6 +333,45 @@ pub struct RestakedValidator {
     pub bls_public_key: Vec<u8>,
 }
 
+fn external_chain_scope_key(chain: crate::core::transaction::ExternalChain) -> String {
+    match chain {
+        crate::core::transaction::ExternalChain::Ethereum => "eth".to_string(),
+        crate::core::transaction::ExternalChain::Solana => "sol".to_string(),
+        crate::core::transaction::ExternalChain::Bitcoin => "btc".to_string(),
+        crate::core::transaction::ExternalChain::Avalanche => "avax".to_string(),
+        crate::core::transaction::ExternalChain::Polygon => "poly".to_string(),
+        crate::core::transaction::ExternalChain::Arbitrum => "arb".to_string(),
+        crate::core::transaction::ExternalChain::Optimism => "op".to_string(),
+        crate::core::transaction::ExternalChain::Custom(id) => format!("custom:{id}"),
+    }
+}
+
+/// Canonical `(external_chain, bls_public_key)` quarantine key.
+#[must_use]
+fn chain_bls_quarantine_key(
+    chain: crate::core::transaction::ExternalChain,
+    bls_public_key: &[u8],
+) -> String {
+    format!(
+        "{}:{}",
+        external_chain_scope_key(chain),
+        hex::encode(bls_public_key)
+    )
+}
+
+/// Canonical `(external_chain, budlum_validator)` scope key.
+#[must_use]
+fn chain_validator_scope_key(
+    chain: crate::core::transaction::ExternalChain,
+    validator: &Address,
+) -> String {
+    format!(
+        "{}:{}",
+        external_chain_scope_key(chain),
+        hex::encode(validator.as_bytes())
+    )
+}
+
 /// The Mikoriza state: registrar contracts per external domain, the
 /// restaked validators, and the allocation messages already used.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -353,6 +392,20 @@ pub struct SharedSecurityRegistry {
     /// Permanent quarantine records for slashed `(source, operator)` keys.
     #[serde(default)]
     pub slashed_operators: BTreeMap<String, ExternalSlashRecord>,
+    /// Permanent `(external_chain, bls_public_key)` quarantine set surviving
+    /// cross-chain validator row overwrites.
+    #[serde(default)]
+    pub slashed_bls_keys: BTreeSet<String>,
+    /// Permanent `(external_chain, budlum_validator)` quarantine set preventing
+    /// a slashed validator on one external chain from clearing its quarantine via
+    /// a sibling source or cross-chain round-trip.
+    #[serde(default)]
+    pub slashed_validators: BTreeSet<String>,
+    /// Highest observed external epoch per `(external_chain, budlum_validator)`,
+    /// scoping validator epoch monotonicity to compatible external-chain clocks
+    /// while preserving stale-replay protection across chain migrations.
+    #[serde(default)]
+    pub validator_chain_epochs: BTreeMap<String, u64>,
 }
 
 impl SharedSecurityRegistry {
@@ -364,6 +417,9 @@ impl SharedSecurityRegistry {
             && self.attested_at.is_empty()
             && self.operator_epochs.is_empty()
             && self.slashed_operators.is_empty()
+            && self.slashed_bls_keys.is_empty()
+            && self.slashed_validators.is_empty()
+            && self.validator_chain_epochs.is_empty()
     }
 
     /// The registry root, folded into the settlement root once the registry
@@ -388,6 +444,60 @@ impl SharedSecurityRegistry {
     pub fn is_operator_slashed(&self, source: RestakeSource, operator: &[u8; 20]) -> bool {
         self.slashed_operators
             .contains_key(&source.operator_map_key(operator))
+    }
+
+    /// Return `true` iff `bls_public_key` has been permanently slashed on `chain`.
+    #[must_use]
+    fn is_bls_key_slashed(
+        &self,
+        chain: crate::core::transaction::ExternalChain,
+        bls_public_key: &[u8],
+    ) -> bool {
+        self.slashed_bls_keys
+            .contains(&chain_bls_quarantine_key(chain, bls_public_key))
+            || self.validators.values().any(|row| {
+                row.status == RestakeStatus::Slashed
+                    && row.source.external_chain() == chain
+                    && row.bls_public_key == bls_public_key
+            })
+    }
+
+    /// Return `true` iff `validator` has been permanently slashed on `chain`.
+    #[must_use]
+    fn is_validator_slashed_on_chain(
+        &self,
+        chain: crate::core::transaction::ExternalChain,
+        validator: &Address,
+    ) -> bool {
+        self.slashed_validators
+            .contains(&chain_validator_scope_key(chain, validator))
+            || self.validators.get(validator).is_some_and(|row| {
+                row.status == RestakeStatus::Slashed && row.source.external_chain() == chain
+            })
+    }
+
+    /// Highest observed epoch recorded for `(chain, validator)`.
+    #[must_use]
+    fn highest_validator_chain_epoch(
+        &self,
+        chain: crate::core::transaction::ExternalChain,
+        validator: &Address,
+    ) -> Option<u64> {
+        let tracked = self
+            .validator_chain_epochs
+            .get(&chain_validator_scope_key(chain, validator))
+            .copied();
+        let current = self
+            .validators
+            .get(validator)
+            .filter(|row| row.source.external_chain() == chain)
+            .map(|row| row.observed_epoch);
+        match (tracked, current) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
     }
 
     /// Highest observed epoch recorded for `(source, operator)` across all validators.
@@ -593,16 +703,19 @@ fn observe(
     if state
         .settlement
         .shared_security
-        .validators
-        .values()
-        .any(|row| {
-            row.status == RestakeStatus::Slashed
-                && row.source.external_chain() == attested_on
-                && row.bls_public_key == allocation.bls_public_key
-        })
+        .is_bls_key_slashed(attested_on, &allocation.bls_public_key)
     {
         return Err(refused(
             "shared-security consensus BLS key is permanently slashed on this external chain",
+        ));
+    }
+    if state
+        .settlement
+        .shared_security
+        .is_validator_slashed_on_chain(attested_on, &allocation.budlum_validator)
+    {
+        return Err(refused(
+            "shared-security validator backing is permanently slashed on this external chain",
         ));
     }
     if allocation.allocated_units > 0
@@ -664,25 +777,30 @@ fn observe(
             ));
         }
     }
-    let validator_exists =
-        if let Some(previous) = registry.validators.get(&allocation.budlum_validator) {
-            if previous.status == RestakeStatus::Slashed
-                && previous.source == source
-                && previous.eth_operator == allocation.eth_operator
-            {
-                return Err(refused(
-                    "shared-security validator backing is permanently slashed",
+    let validator_exists = if let Some(previous) =
+        registry.validators.get(&allocation.budlum_validator)
+    {
+        if previous.source.external_chain() != attested_on
+            && previous.status == RestakeStatus::Active
+        {
+            return Err(refused(
+                    "shared-security validator must exit active external-chain backing before rebinding to another chain",
                 ));
-            }
-            if allocation.observed_epoch <= previous.observed_epoch {
-                return Err(refused(
-                    "Mikoriza allocation is not newer than the recorded one",
-                ));
-            }
-            true
-        } else {
-            false
-        };
+        }
+        true
+    } else {
+        false
+    };
+    if let Some(prev_chain_epoch) =
+        registry.highest_validator_chain_epoch(attested_on, &allocation.budlum_validator)
+    {
+        if allocation.observed_epoch <= prev_chain_epoch {
+            return Err(refused(
+                "Mikoriza allocation is not newer than the recorded one",
+            ));
+        }
+    }
+    let val_chain_key = chain_validator_scope_key(attested_on, &allocation.budlum_validator);
     let operator_has_other_active = registry.validators.values().any(|row| {
         row.budlum_validator != allocation.budlum_validator
             && row.source == source
@@ -705,11 +823,21 @@ fn observe(
     {
         return Err(refused("shared-security operator epoch table is full"));
     }
+    if !registry.validator_chain_epochs.contains_key(&val_chain_key)
+        && registry.validator_chain_epochs.len() >= MAX_USED_ALLOCATION_MESSAGES
+    {
+        return Err(refused(
+            "shared-security validator chain epoch table is full",
+        ));
+    }
 
     registry.used_messages.insert(message_id);
     registry
         .operator_epochs
         .insert(op_key, allocation.observed_epoch);
+    registry
+        .validator_chain_epochs
+        .insert(val_chain_key, allocation.observed_epoch);
     for row in registry.validators.values_mut() {
         if row.budlum_validator != allocation.budlum_validator
             && row.source == source
@@ -853,6 +981,42 @@ pub fn execute_tendermint_misbehaviour_slash(
                 .contains_key(key)
         })
         .count();
+    let new_bls_keys = state
+        .settlement
+        .shared_security
+        .validators
+        .values()
+        .filter(|row| {
+            row.source.external_chain() == chain && culprit_addrs.contains(&row.eth_operator)
+        })
+        .map(|row| chain_bls_quarantine_key(chain, &row.bls_public_key))
+        .filter(|key| {
+            !state
+                .settlement
+                .shared_security
+                .slashed_bls_keys
+                .contains(key)
+        })
+        .collect::<BTreeSet<_>>()
+        .len();
+    let new_val_keys = state
+        .settlement
+        .shared_security
+        .validators
+        .iter()
+        .filter(|(_, row)| {
+            row.source.external_chain() == chain && culprit_addrs.contains(&row.eth_operator)
+        })
+        .map(|(addr, _)| chain_validator_scope_key(chain, addr))
+        .filter(|key| {
+            !state
+                .settlement
+                .shared_security
+                .slashed_validators
+                .contains(key)
+        })
+        .collect::<BTreeSet<_>>()
+        .len();
     if state
         .settlement
         .shared_security
@@ -860,6 +1024,20 @@ pub fn execute_tendermint_misbehaviour_slash(
         .len()
         .saturating_add(new_quarantine_keys)
         > MAX_RESTAKED_VALIDATORS
+        || state
+            .settlement
+            .shared_security
+            .slashed_bls_keys
+            .len()
+            .saturating_add(new_bls_keys)
+            > MAX_USED_ALLOCATION_MESSAGES
+        || state
+            .settlement
+            .shared_security
+            .slashed_validators
+            .len()
+            .saturating_add(new_val_keys)
+            > MAX_USED_ALLOCATION_MESSAGES
     {
         return Err(refused("shared-security slash quarantine table is full"));
     }
@@ -993,19 +1171,44 @@ pub fn quarantine_correlated_sources(
             written += 1;
         }
     }
-    // Every active row of a correlated source for these operators loses its
-    // weight at the next boundary, including rows the evidence never named.
+    // Every correlated row for these operators loses its weight at the next
+    // boundary, and when `status == Slashed` its `(chain, bls_public_key)` and
+    // `(chain, validator)` identities are permanently quarantined so a later
+    // cross-chain observation cannot overwrite and launder the slash record.
+    let mut newly_slashed_bls: Vec<String> = Vec::new();
+    let mut newly_slashed_vals: Vec<String> = Vec::new();
     for (address, row) in &mut state.settlement.shared_security.validators {
-        if row.status == RestakeStatus::Active
-            && row.source.external_chain() == chain
-            && operators.contains(&row.eth_operator)
-        {
-            row.allocated_units = 0;
-            row.status = status;
-            if let Some(validator) = state.validators.get_mut(address) {
-                validator.restaked_weight = 0;
+        if row.source.external_chain() == chain && operators.contains(&row.eth_operator) {
+            if status == RestakeStatus::Slashed {
+                newly_slashed_bls.push(chain_bls_quarantine_key(chain, &row.bls_public_key));
+                newly_slashed_vals.push(chain_validator_scope_key(chain, address));
+                row.status = RestakeStatus::Slashed;
+                row.allocated_units = 0;
+                if let Some(validator) = state.validators.get_mut(address) {
+                    validator.restaked_weight = 0;
+                }
+            } else if row.status == RestakeStatus::Active {
+                row.allocated_units = 0;
+                row.status = status;
+                if let Some(validator) = state.validators.get_mut(address) {
+                    validator.restaked_weight = 0;
+                }
             }
         }
+    }
+    for bls_key in newly_slashed_bls {
+        state
+            .settlement
+            .shared_security
+            .slashed_bls_keys
+            .insert(bls_key);
+    }
+    for val_key in newly_slashed_vals {
+        state
+            .settlement
+            .shared_security
+            .slashed_validators
+            .insert(val_key);
     }
     written
 }
@@ -2457,5 +2660,456 @@ mod tests {
             state.settlement.shared_security.validators[&val].status,
             RestakeStatus::Slashed
         );
+    }
+
+    #[test]
+    fn slashed_bls_key_cannot_be_laundered_by_cross_chain_row_overwrite() {
+        let eth_op = Address::from([0x01; 32]);
+        let btc_op = Address::from([0x02; 32]);
+        let carrier = Address::from([0x03; 32]);
+        let mut state = state_with_registrar(eth_op);
+
+        let btc_domain_id = crate::core::transaction::ExternalChain::Bitcoin.domain_id();
+        let mut btc_domain = crate::domain::plugin::default_domain(
+            btc_domain_id,
+            crate::domain::ConsensusKind::PoW,
+            20_002,
+            crate::domain::POW_HEADER_CHAIN_ADAPTER,
+            6,
+        );
+        btc_domain.operator = Some(btc_op);
+        state.add_balance(&btc_op, btc_domain.operator_bond.saturating_add(FEE));
+        crate::settlement::domains::register_domain(&mut state, btc_domain).expect("btc domain");
+        let btc_reg = [0xBBu8; 20];
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(btc_op, devnet()),
+            &SharedSecurityTx::SetRegistrar {
+                domain_key: btc_domain_id,
+                registrar: btc_reg.to_vec(),
+            },
+        )
+        .expect("btc registrar");
+
+        let val_1 = Address::from([0xA1; 32]);
+        let val_3 = Address::from([0xA3; 32]);
+        let slashed_bls = vec![0xD7; BLS_PUBLIC_KEY_BYTES];
+
+        let cl_eth = AllocationClaim {
+            budlum_validator: val_1,
+            eth_operator: [0x71; 20],
+            allocated_units: 10_000,
+            observed_epoch: 5,
+            bls_public_key: slashed_bls.clone(),
+        };
+        let ev_eth = anchored_for_source(
+            &mut state,
+            DOMAIN,
+            &REGISTRAR,
+            RestakeSource::EigenLayer,
+            &cl_eth,
+            1,
+        );
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(carrier, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: DOMAIN,
+                source: RestakeSource::EigenLayer,
+                allocation: cl_eth,
+                evidence: ev_eth,
+            },
+        )
+        .expect("initial Ethereum allocation records");
+
+        quarantine_correlated_sources(
+            &mut state,
+            RestakeSource::EigenLayer,
+            &[[0x71; 20]],
+            RestakeStatus::Slashed,
+        );
+
+        // Moving `val_1` onto an independent Bitcoin downside (`Babylon`) overwrites
+        // `validators[val_1]`, which previously erased the only record that `slashed_bls`
+        // was permanently slashed on Ethereum.
+        let cl_btc = AllocationClaim {
+            budlum_validator: val_1,
+            eth_operator: [0x72; 20],
+            allocated_units: 20_000,
+            observed_epoch: 6,
+            bls_public_key: vec![0xD8; BLS_PUBLIC_KEY_BYTES],
+        };
+        let ev_btc = anchored_for_source(
+            &mut state,
+            btc_domain_id,
+            &btc_reg,
+            RestakeSource::Babylon,
+            &cl_btc,
+            2,
+        );
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(carrier, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: btc_domain_id,
+                source: RestakeSource::Babylon,
+                allocation: cl_btc,
+                evidence: ev_btc,
+            },
+        )
+        .expect("independent Bitcoin downside records");
+
+        let cl_launder = AllocationClaim {
+            budlum_validator: val_3,
+            eth_operator: [0x73; 20],
+            allocated_units: 15_000,
+            observed_epoch: 7,
+            bls_public_key: slashed_bls,
+        };
+        let ev_launder = anchored_for_source(
+            &mut state,
+            DOMAIN,
+            &REGISTRAR,
+            RestakeSource::Symbiotic,
+            &cl_launder,
+            3,
+        );
+        let root_before = state.settlement.shared_security.root();
+        let err = execute_shared_security_tx(
+            &mut state,
+            &ctx(carrier, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: DOMAIN,
+                source: RestakeSource::Symbiotic,
+                allocation: cl_launder,
+                evidence: ev_launder,
+            },
+        )
+        .expect_err("slashed Ethereum BLS key must stay quarantined after row overwrite");
+        let SettlementTxError::Refused(reason) = err else {
+            panic!("expected Refused error, got {err:?}");
+        };
+        assert!(
+            reason.contains("permanently slashed"),
+            "unexpected refusal reason: {reason}"
+        );
+        assert_eq!(state.settlement.shared_security.root(), root_before);
+    }
+
+    #[test]
+    fn slashed_validator_cannot_launder_same_chain_quarantine_via_sibling_source() {
+        let eth_op = Address::from([0x01; 32]);
+        let carrier = Address::from([0x03; 32]);
+        let mut state = state_with_registrar(eth_op);
+
+        let val_1 = Address::from([0xB1; 32]);
+        let cl_1 = AllocationClaim {
+            budlum_validator: val_1,
+            eth_operator: [0x81; 20],
+            allocated_units: 10_000,
+            observed_epoch: 1,
+            bls_public_key: vec![0xE7; BLS_PUBLIC_KEY_BYTES],
+        };
+        let ev_1 = anchored_for_source(
+            &mut state,
+            DOMAIN,
+            &REGISTRAR,
+            RestakeSource::EigenLayer,
+            &cl_1,
+            1,
+        );
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(carrier, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: DOMAIN,
+                source: RestakeSource::EigenLayer,
+                allocation: cl_1,
+                evidence: ev_1,
+            },
+        )
+        .expect("initial EigenLayer allocation records");
+
+        quarantine_correlated_sources(
+            &mut state,
+            RestakeSource::EigenLayer,
+            &[[0x81; 20]],
+            RestakeStatus::Slashed,
+        );
+
+        let cl_proxy = AllocationClaim {
+            budlum_validator: val_1,
+            eth_operator: [0x82; 20],
+            allocated_units: 0,
+            observed_epoch: 2,
+            bls_public_key: vec![0xE8; BLS_PUBLIC_KEY_BYTES],
+        };
+        let ev_proxy = anchored_for_source(
+            &mut state,
+            DOMAIN,
+            &REGISTRAR,
+            RestakeSource::Symbiotic,
+            &cl_proxy,
+            2,
+        );
+        let root_before = state.settlement.shared_security.root();
+        let err = execute_shared_security_tx(
+            &mut state,
+            &ctx(carrier, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: DOMAIN,
+                source: RestakeSource::Symbiotic,
+                allocation: cl_proxy,
+                evidence: ev_proxy,
+            },
+        )
+        .expect_err("slashed validator on Ethereum must not clear Slashed status via Symbiotic");
+        let SettlementTxError::Refused(reason) = err else {
+            panic!("expected Refused error, got {err:?}");
+        };
+        assert!(
+            reason.contains("permanently slashed"),
+            "unexpected refusal reason: {reason}"
+        );
+        assert_eq!(state.settlement.shared_security.root(), root_before);
+    }
+
+    #[test]
+    fn exited_validator_rebinds_across_chains_with_lower_epoch_and_blocks_stale_replay() {
+        let ics_op = Address::from([0x11; 32]);
+        let btc_op = Address::from([0x12; 32]);
+        let carrier = Address::from([0x13; 32]);
+        let mut state = AccountState::new();
+
+        let ics_domain_id = 88u32;
+        let mut ics_domain = crate::domain::plugin::default_domain(
+            ics_domain_id,
+            crate::domain::ConsensusKind::Bft,
+            8800,
+            "bft-quorum-commit",
+            1,
+        );
+        ics_domain.operator = Some(ics_op);
+        state.add_balance(&ics_op, ics_domain.operator_bond.saturating_add(FEE));
+        crate::settlement::domains::register_domain(&mut state, ics_domain).expect("ics domain");
+        let ics_reg = [0xCCu8; 20];
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(ics_op, devnet()),
+            &SharedSecurityTx::SetRegistrar {
+                domain_key: ics_domain_id,
+                registrar: ics_reg.to_vec(),
+            },
+        )
+        .expect("ics registrar");
+
+        let btc_domain_id = crate::core::transaction::ExternalChain::Bitcoin.domain_id();
+        let mut btc_domain = crate::domain::plugin::default_domain(
+            btc_domain_id,
+            crate::domain::ConsensusKind::PoW,
+            20_002,
+            crate::domain::POW_HEADER_CHAIN_ADAPTER,
+            6,
+        );
+        btc_domain.operator = Some(btc_op);
+        state.add_balance(&btc_op, btc_domain.operator_bond.saturating_add(FEE));
+        crate::settlement::domains::register_domain(&mut state, btc_domain).expect("btc domain");
+        let btc_reg = [0xDDu8; 20];
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(btc_op, devnet()),
+            &SharedSecurityTx::SetRegistrar {
+                domain_key: btc_domain_id,
+                registrar: btc_reg.to_vec(),
+            },
+        )
+        .expect("btc registrar");
+
+        let ics_source = RestakeSource::CosmosIcs {
+            domain_id: ics_domain_id,
+        };
+        let val = Address::from([0xC1; 32]);
+        let bls = vec![0xE9; BLS_PUBLIC_KEY_BYTES];
+
+        let cl_ics_active = AllocationClaim {
+            budlum_validator: val,
+            eth_operator: [0x91; 20],
+            allocated_units: 12_000,
+            observed_epoch: 500_000,
+            bls_public_key: bls.clone(),
+        };
+        let ev_ics_active = anchored_for_source(
+            &mut state,
+            ics_domain_id,
+            &ics_reg,
+            ics_source,
+            &cl_ics_active,
+            1,
+        );
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(carrier, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: ics_domain_id,
+                source: ics_source,
+                allocation: cl_ics_active,
+                evidence: ev_ics_active,
+            },
+        )
+        .expect("high-epoch CosmosIcs allocation records");
+
+        // While `val` is still Active on CosmosIcs, a lower-epoch Babylon observation
+        // must be refused so permissionless carriers cannot clobber live backing.
+        let cl_btc_clobber = AllocationClaim {
+            budlum_validator: val,
+            eth_operator: [0x92; 20],
+            allocated_units: 25_000,
+            observed_epoch: 12,
+            bls_public_key: bls.clone(),
+        };
+        let ev_btc_clobber = anchored_for_source(
+            &mut state,
+            btc_domain_id,
+            &btc_reg,
+            RestakeSource::Babylon,
+            &cl_btc_clobber,
+            2,
+        );
+        let root_active = state.settlement.shared_security.root();
+        let clobber_err = execute_shared_security_tx(
+            &mut state,
+            &ctx(carrier, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: btc_domain_id,
+                source: RestakeSource::Babylon,
+                allocation: cl_btc_clobber,
+                evidence: ev_btc_clobber,
+            },
+        )
+        .expect_err("active cross-chain backing must not be overwritten before exit");
+        let SettlementTxError::Refused(clobber_reason) = clobber_err else {
+            panic!("expected Refused error, got {clobber_err:?}");
+        };
+        assert!(
+            clobber_reason.contains("exit"),
+            "unexpected active cross-chain refusal reason: {clobber_reason}"
+        );
+        assert_eq!(state.settlement.shared_security.root(), root_active);
+
+        // Clean zero-unit exit on CosmosIcs at epoch 500_001.
+        let cl_ics_exit = AllocationClaim {
+            budlum_validator: val,
+            eth_operator: [0x91; 20],
+            allocated_units: 0,
+            observed_epoch: 500_001,
+            bls_public_key: bls.clone(),
+        };
+        let ev_ics_exit = anchored_for_source(
+            &mut state,
+            ics_domain_id,
+            &ics_reg,
+            ics_source,
+            &cl_ics_exit,
+            3,
+        );
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(carrier, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: ics_domain_id,
+                source: ics_source,
+                allocation: cl_ics_exit,
+                evidence: ev_ics_exit,
+            },
+        )
+        .expect("CosmosIcs zero-unit exit records");
+
+        // Honest migration onto Bitcoin (`Babylon`) at Bitcoin staking epoch 12 (`12 < 500_001`)
+        // must succeed because Bitcoin and CosmosIcs have independent epoch clocks.
+        let cl_btc_rebind = AllocationClaim {
+            budlum_validator: val,
+            eth_operator: [0x92; 20],
+            allocated_units: 25_000,
+            observed_epoch: 12,
+            bls_public_key: bls.clone(),
+        };
+        let ev_btc_rebind = anchored_for_source(
+            &mut state,
+            btc_domain_id,
+            &btc_reg,
+            RestakeSource::Babylon,
+            &cl_btc_rebind,
+            4,
+        );
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(carrier, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: btc_domain_id,
+                source: RestakeSource::Babylon,
+                allocation: cl_btc_rebind,
+                evidence: ev_btc_rebind,
+            },
+        )
+        .expect("exited validator rebinds onto Babylon despite lower Bitcoin epoch");
+
+        // Exit Babylon at epoch 13, then verify a stale CosmosIcs event (`400_000 <= 500_001`)
+        // is still refused via per-chain validator epoch history.
+        let cl_btc_exit = AllocationClaim {
+            budlum_validator: val,
+            eth_operator: [0x92; 20],
+            allocated_units: 0,
+            observed_epoch: 13,
+            bls_public_key: bls.clone(),
+        };
+        let ev_btc_exit = anchored_for_source(
+            &mut state,
+            btc_domain_id,
+            &btc_reg,
+            RestakeSource::Babylon,
+            &cl_btc_exit,
+            5,
+        );
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(carrier, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: btc_domain_id,
+                source: RestakeSource::Babylon,
+                allocation: cl_btc_exit,
+                evidence: ev_btc_exit,
+            },
+        )
+        .expect("Babylon exit records");
+
+        let cl_ics_stale = AllocationClaim {
+            budlum_validator: val,
+            eth_operator: [0x93; 20],
+            allocated_units: 9_000,
+            observed_epoch: 400_000,
+            bls_public_key: bls,
+        };
+        let ev_ics_stale = anchored_for_source(
+            &mut state,
+            ics_domain_id,
+            &ics_reg,
+            ics_source,
+            &cl_ics_stale,
+            6,
+        );
+        let root_after_exit = state.settlement.shared_security.root();
+        let stale_err = execute_shared_security_tx(
+            &mut state,
+            &ctx(carrier, devnet()),
+            &SharedSecurityTx::Observe {
+                domain_key: ics_domain_id,
+                source: ics_source,
+                allocation: cl_ics_stale,
+                evidence: ev_ics_stale,
+            },
+        )
+        .expect_err("stale CosmosIcs epoch must be refused after chain round-trip");
+        assert!(matches!(stale_err, SettlementTxError::Refused(_)));
+        assert_eq!(state.settlement.shared_security.root(), root_after_exit);
     }
 }
