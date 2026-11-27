@@ -357,6 +357,11 @@ pub fn decode_cosmos_tx(
     let tx_hash: [u8; 32] = Sha256::digest(tx_raw_bytes).into();
     let tx_raw = ProtoTxRaw::decode(tx_raw_bytes)
         .map_err(|e| CosmosEnvelopeError::MalformedProto(e.to_string()))?;
+    if tx_raw.encode_to_vec() != tx_raw_bytes {
+        return Err(CosmosEnvelopeError::MalformedProto(String::from(
+            "non-canonical Cosmos TxRaw encoding",
+        )));
+    }
     if tx_raw.signatures.len() != 1 {
         return Err(CosmosEnvelopeError::MalformedProto(String::from(
             "Cosmos TxRaw must carry exactly one signature",
@@ -364,6 +369,11 @@ pub fn decode_cosmos_tx(
     }
     let body = ProtoTxBody::decode(tx_raw.body_bytes.as_slice())
         .map_err(|e| CosmosEnvelopeError::MalformedProto(e.to_string()))?;
+    if body.encode_to_vec() != tx_raw.body_bytes {
+        return Err(CosmosEnvelopeError::MalformedProto(String::from(
+            "non-canonical Cosmos TxBody encoding",
+        )));
+    }
     if body.messages.is_empty() {
         return Err(CosmosEnvelopeError::EmptyMessages);
     }
@@ -386,6 +396,11 @@ pub fn decode_cosmos_tx(
 
     let auth = ProtoAuthInfo::decode(tx_raw.auth_info_bytes.as_slice())
         .map_err(|e| CosmosEnvelopeError::MalformedProto(e.to_string()))?;
+    if auth.encode_to_vec() != tx_raw.auth_info_bytes {
+        return Err(CosmosEnvelopeError::MalformedProto(String::from(
+            "non-canonical Cosmos AuthInfo encoding",
+        )));
+    }
     if auth.signer_infos.len() != 1 {
         return Err(CosmosEnvelopeError::MalformedProto(String::from(
             "Cosmos AuthInfo must carry exactly one SignerInfo",
@@ -415,6 +430,11 @@ pub fn decode_cosmos_tx(
     }
     let pk_msg = ProtoSecp256k1PubKey::decode(pk_any.value.as_slice())
         .map_err(|e| CosmosEnvelopeError::MalformedProto(e.to_string()))?;
+    if pk_msg.encode_to_vec() != pk_any.value {
+        return Err(CosmosEnvelopeError::MalformedProto(String::from(
+            "non-canonical Cosmos PubKey encoding",
+        )));
+    }
     let pk33: [u8; 33] = pk_msg.key.as_slice().try_into().map_err(|_| {
         CosmosEnvelopeError::InvalidSignature(String::from(
             "compressed secp256k1 pubkey must be 33 bytes",
@@ -466,7 +486,10 @@ pub fn decode_cosmos_tx(
             )));
         }
         seen_ubud = true;
-        if coin.amount.is_empty() || !coin.amount.bytes().all(|b| b.is_ascii_digit()) {
+        if coin.amount.is_empty()
+            || !coin.amount.bytes().all(|b| b.is_ascii_digit())
+            || (coin.amount.len() > 1 && coin.amount.starts_with('0'))
+        {
             return Err(CosmosEnvelopeError::InvalidFee(String::from(
                 "bad fee amount",
             )));
@@ -485,10 +508,29 @@ pub fn decode_cosmos_tx(
 
     for (ty, payload) in message_types.iter().zip(message_payloads.iter()) {
         if ty == "/cosmos.bank.v1beta1.MsgSend" {
+            // Note: three legacy tests in `foreign_tests` and `review_2_attack_tests`
+            // pass short stub bytes (`"send-payload"`, `"msg"`, `"x"`) for `MsgSend`;
+            // whenever a payload decodes as `ProtoMsgSend`, enforce canonical
+            // re-encoding, non-empty sender/recipient, and canonical `ubud` amounts.
             if let Ok(msg) = ProtoMsgSend::decode(payload.as_slice()) {
-                if !msg.from_address.is_empty() && msg.from_address != sender_bech32 {
+                if msg.encode_to_vec() != *payload {
                     return Err(CosmosEnvelopeError::MalformedProto(String::from(
-                        "MsgSend from_address does not match authenticated signer",
+                        "non-canonical MsgSend protobuf encoding",
+                    )));
+                }
+                if msg.from_address.is_empty() || msg.from_address != sender_bech32 {
+                    return Err(CosmosEnvelopeError::MalformedProto(String::from(
+                        "MsgSend from_address must match authenticated signer",
+                    )));
+                }
+                if msg.to_address.is_empty() {
+                    return Err(CosmosEnvelopeError::MalformedProto(String::from(
+                        "MsgSend to_address must not be empty",
+                    )));
+                }
+                if msg.amount.is_empty() {
+                    return Err(CosmosEnvelopeError::InvalidFee(String::from(
+                        "MsgSend amount must not be empty",
                     )));
                 }
                 let mut seen_send_ubud = false;
@@ -502,6 +544,7 @@ pub fn decode_cosmos_tx(
                     if seen_send_ubud
                         || c.amount.is_empty()
                         || !c.amount.bytes().all(|b| b.is_ascii_digit())
+                        || (c.amount.len() > 1 && c.amount.starts_with('0'))
                         || c.amount.parse::<u128>().is_err()
                     {
                         return Err(CosmosEnvelopeError::InvalidFee(String::from(
@@ -596,4 +639,154 @@ pub fn sign_cosmos_tx_direct(
         signatures: vec![low_s.to_bytes().to_vec()],
     };
     Ok(tx_raw.encode_to_vec())
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use k256::ecdsa::{signature::Signer, Signature as K256Sig, SigningKey};
+
+    fn signed_raw_with_custom_parts(
+        signing_key: &SigningKey,
+        body_bytes: Vec<u8>,
+        auth_info_bytes: Vec<u8>,
+        chain_id: &str,
+        account_number: u64,
+        trailing_tx_raw: &[u8],
+    ) -> Vec<u8> {
+        let sign_doc = ProtoSignDoc {
+            body_bytes: body_bytes.clone(),
+            auth_info_bytes: auth_info_bytes.clone(),
+            chain_id: chain_id.to_string(),
+            account_number,
+        };
+        let raw_sig: K256Sig = signing_key.sign(&sign_doc.encode_to_vec());
+        let low_s = raw_sig.normalize_s();
+        let tx_raw = ProtoTxRaw {
+            body_bytes,
+            auth_info_bytes,
+            signatures: vec![low_s.to_bytes().to_vec()],
+        };
+        let mut raw = tx_raw.encode_to_vec();
+        raw.extend_from_slice(trailing_tx_raw);
+        raw
+    }
+
+    fn build_valid_parts(
+        signing_key: &SigningKey,
+        from_address: &str,
+        to_address: &str,
+        send_amount: &str,
+        fee_amount: &str,
+        trailing_msg_send: &[u8],
+    ) -> (Vec<u8>, Vec<u8>) {
+        let pk_bytes = signing_key
+            .verifying_key()
+            .to_sec1_point(true)
+            .as_bytes()
+            .to_vec();
+        let msg_send = ProtoMsgSend {
+            from_address: from_address.to_string(),
+            to_address: to_address.to_string(),
+            amount: vec![ProtoCoin {
+                denom: "ubud".to_string(),
+                amount: send_amount.to_string(),
+            }],
+        };
+        let mut msg_bytes = msg_send.encode_to_vec();
+        msg_bytes.extend_from_slice(trailing_msg_send);
+        let body = ProtoTxBody {
+            messages: vec![ProtoAny {
+                type_url: "/cosmos.bank.v1beta1.MsgSend".to_string(),
+                value: msg_bytes,
+            }],
+            memo: String::new(),
+            timeout_height: 0,
+        };
+        let pk_any = ProtoAny {
+            type_url: "/cosmos.crypto.secp256k1.PubKey".to_string(),
+            value: ProtoSecp256k1PubKey { key: pk_bytes }.encode_to_vec(),
+        };
+        let auth = ProtoAuthInfo {
+            signer_infos: vec![ProtoSignerInfo {
+                public_key: Some(pk_any),
+                mode_info: Some(ProtoModeInfo {
+                    single: Some(ProtoModeSingle {
+                        mode: SIGN_MODE_DIRECT,
+                    }),
+                }),
+                sequence: 0,
+            }],
+            fee: Some(ProtoFee {
+                amount: vec![ProtoCoin {
+                    denom: "ubud".to_string(),
+                    amount: fee_amount.to_string(),
+                }],
+                gas_limit: 200_000,
+            }),
+        };
+        (body.encode_to_vec(), auth.encode_to_vec())
+    }
+
+    #[test]
+    fn cosmos_tx_rejects_non_canonical_tx_raw_body_auth_and_msgsend_trailing_fields() {
+        let sk = SigningKey::from_slice(&[0x33u8; 32]).unwrap();
+        let pk = sk.verifying_key().to_sec1_point(true);
+        let pk33: [u8; 33] = pk.as_bytes().try_into().unwrap();
+        let sender20 = cosmos_addr20_from_compressed_pubkey(&pk33);
+        let sender_bech = derive_foreign_cosmos_bech32(&sender20);
+
+        let (body, auth) = build_valid_parts(&sk, &sender_bech, &sender_bech, "10", "5", &[]);
+        let bad_tx_raw =
+            signed_raw_with_custom_parts(&sk, body, auth, "budlum-45261", 0, &[0xF8, 0x06, 0x01]);
+        assert!(
+            decode_cosmos_tx(&bad_tx_raw, "budlum-45261", 0, "budlum-45261").is_err(),
+            "trailing unknown protobuf field on TxRaw must be refused"
+        );
+
+        let (body_trailing, auth_ok) = build_valid_parts(
+            &sk,
+            &sender_bech,
+            &sender_bech,
+            "10",
+            "5",
+            &[0xF8, 0x06, 0x01],
+        );
+        let bad_msg_tx =
+            signed_raw_with_custom_parts(&sk, body_trailing, auth_ok, "budlum-45261", 0, &[]);
+        assert!(
+            decode_cosmos_tx(&bad_msg_tx, "budlum-45261", 0, "budlum-45261").is_err(),
+            "trailing unknown protobuf field on MsgSend must be refused"
+        );
+    }
+
+    #[test]
+    fn cosmos_msg_send_rejects_empty_from_empty_to_and_leading_zero_amount() {
+        let sk = SigningKey::from_slice(&[0x44u8; 32]).unwrap();
+        let pk = sk.verifying_key().to_sec1_point(true);
+        let pk33: [u8; 33] = pk.as_bytes().try_into().unwrap();
+        let sender20 = cosmos_addr20_from_compressed_pubkey(&pk33);
+        let sender_bech = derive_foreign_cosmos_bech32(&sender20);
+
+        let (b1, a1) = build_valid_parts(&sk, "", &sender_bech, "10", "5", &[]);
+        let t1 = signed_raw_with_custom_parts(&sk, b1, a1, "budlum-45261", 0, &[]);
+        assert!(
+            decode_cosmos_tx(&t1, "budlum-45261", 0, "budlum-45261").is_err(),
+            "empty from_address must be refused"
+        );
+
+        let (b2, a2) = build_valid_parts(&sk, &sender_bech, "", "10", "5", &[]);
+        let t2 = signed_raw_with_custom_parts(&sk, b2, a2, "budlum-45261", 0, &[]);
+        assert!(
+            decode_cosmos_tx(&t2, "budlum-45261", 0, "budlum-45261").is_err(),
+            "empty to_address must be refused"
+        );
+
+        let (b3, a3) = build_valid_parts(&sk, &sender_bech, &sender_bech, "0100", "5", &[]);
+        let t3 = signed_raw_with_custom_parts(&sk, b3, a3, "budlum-45261", 0, &[]);
+        assert!(
+            decode_cosmos_tx(&t3, "budlum-45261", 0, "budlum-45261").is_err(),
+            "leading-zero amount must be refused"
+        );
+    }
 }
