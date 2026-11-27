@@ -355,6 +355,91 @@ fn serve(dir: &Path, record: Option<&str>) -> Result<(Serving, Value), String> {
     Ok((serving, status))
 }
 
+/// Start `garden-phone host <dir> <port> <title> <name> [listen]` and wait for its door.
+fn host_phone(
+    dir: &Path,
+    title: &str,
+    name: &str,
+    listen: Option<&str>,
+) -> Result<(Serving, Value), String> {
+    let port = free_port()?;
+    let mut command = Command::new(phone_bin()?);
+    command
+        .arg("host")
+        .arg(dir)
+        .arg(port.to_string())
+        .arg(title)
+        .arg(name);
+    if let Some(listen) = listen {
+        command.arg(listen);
+    }
+    let child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("the founding phone did not start: {e}"))?;
+    let mut serving = Serving { child, port };
+    let status = wait_for("the founding phone's status door", || {
+        if let Ok(Some(exit)) = serving.child.try_wait() {
+            return Err(format!("the founding phone exited early with {exit}"));
+        }
+        status_over(serving.port).map(Some)
+    })?;
+    Ok((serving, status))
+}
+
+/// Send a JSON `POST` to a live `garden-phone` control door.
+fn post_json(port: u16, path: &str, body: &Value) -> Result<(u16, Value), String> {
+    let payload = body.to_string();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .map_err(|e| e.to_string())?;
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        payload.len()
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).map_err(|e| e.to_string())?;
+    let Some((head, resp_body)) = raw.split_once("\r\n\r\n") else {
+        return Err(format!("no body from POST {path}: {raw}"));
+    };
+    let code = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| format!("no status code from POST {path}: {head}"))?;
+    let parsed = serde_json::from_str(resp_body).map_err(|e| e.to_string())?;
+    Ok((code, parsed))
+}
+
+/// Send a raw HTTP request line and return `(status_code, raw_headers, json_body)`.
+fn raw_http(port: u16, method: &str, path: &str) -> Result<(u16, String, Value), String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|e| e.to_string())?;
+    let req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).map_err(|e| e.to_string())?;
+    let Some((head, resp_body)) = raw.split_once("\r\n\r\n") else {
+        return Err(format!("no body from {method} {path}: {raw}"));
+    };
+    let code = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| format!("no status code from {method} {path}: {head}"))?;
+    let parsed = serde_json::from_str(resp_body).unwrap_or(Value::Null);
+    Ok((code, head.to_string(), parsed))
+}
+
 /// Ask a `serve` door one path and read its JSON answer.
 fn get_path(port: u16, path: &str) -> Result<Value, String> {
     get_with_status(port, path).map(|(_, body)| body)
@@ -448,15 +533,20 @@ fn garden_apk_clean_install() -> Result<(), String> {
     Ok(())
 }
 
-/// 9.1 item 3: the first run gets through its own gate and leaves the app
-/// directory in a state the next screen can use.
+/// 9.1 item 3: the first run gets through its own gate within the time ceiling,
+/// founds a Garden with no manual setup, produces both the invite record and
+/// local QR content within their byte bounds, and decodes the QR content back.
 #[test]
 fn garden_apk_first_run() -> Result<(), String> {
     let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let started = Instant::now();
     let (ok, log) = phone_verb(dir.path(), "self-test", &[])?;
     assert!(ok, "the first run refused to get past its gate: {log}");
-    // The self test writes and removes its probe file; what must remain true
-    // is that the process could use the directory it was given.
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "first-run self test exceeded the 15s ceiling: {:?}",
+        started.elapsed()
+    );
     let (ok, status) = phone_verb(dir.path(), "status", &[])?;
     assert!(
         ok,
@@ -466,31 +556,233 @@ fn garden_apk_first_run() -> Result<(), String> {
         status.contains("\"garden\":null"),
         "the first run already joined something: {status}"
     );
+
+    // Found an isolated Garden on this phone and inspect its invite + QR record.
+    let (founder, founded_status) = host_phone(
+        dir.path(),
+        "First Run Room",
+        "Founder",
+        Some("/ip4/127.0.0.1/tcp/0"),
+    )?;
+    assert_eq!(
+        founded_status
+            .pointer("/garden/status")
+            .and_then(Value::as_str),
+        Some("Active"),
+        "the founded Garden is not Active: {founded_status}"
+    );
+    let chain_id = text(&founded_status, "/garden/chain_id")?;
+    let host_key = text(&founded_status, "/garden/me/key")?;
+
+    let (code, invite_json) = get_with_status(founder.port, "/invite")?;
+    assert_eq!(code, 200, "/invite refused: {invite_json}");
+    let record = text(&invite_json, "/record")?;
+    let record_qr = text(&invite_json, "/record_qr")?;
+    assert!(
+        record.starts_with("budlum://garden/join#") && record.len() <= 512,
+        "record outside format/512B ceiling ({}B): {record}",
+        record.len()
+    );
+    assert!(
+        record_qr.starts_with("http://") && record_qr.contains("/g#") && record_qr.len() <= 640,
+        "local QR outside http://<addr>/g# format or 640B ceiling ({}B): {record_qr}",
+        record_qr.len()
+    );
+
+    // The phone's own decoder reads the QR content back to the same Garden.
+    let reader_dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let (ok, decoded_raw) = phone_verb(reader_dir.path(), "read", &[&record_qr])?;
+    assert!(
+        ok,
+        "phone decoder rejected local HTTP QR content: {decoded_raw}"
+    );
+    let decoded: Value = serde_json::from_str(&decoded_raw).map_err(|e| e.to_string())?;
+    assert_eq!(text(&decoded, "/chain_id")?, chain_id);
+    assert_eq!(text(&decoded, "/host")?, host_key);
+    drop(founder);
     Ok(())
 }
 
-/// 9.1 item 4: a phone joins a real Garden node and the host sees it.
+/// 9.1 item 4: the phone itself founds and hosts an isolated Garden, at least
+/// five Linux validators plus a second phone validator (via local HTTP QR)
+/// join its network, tampered/uninvited joins are refused, the host phone
+/// uploads an image, and peers resolve and chain-verify it with equal content id.
 #[test]
 fn garden_apk_host_scenario() -> Result<(), String> {
-    let node = Node::start()?;
-    let invite = node.create("apk host scenario")?;
-    let record = invite.line.clone();
-    let dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
-    let (ok, log) = phone_verb(dir.path(), "join", &[&record, "Phone"])?;
-    assert!(ok, "the phone did not join: {log}");
-    assert!(
-        log.contains("joined") || log.contains("Active"),
-        "the join answered without a Garden: {log}"
+    let founder_dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let (founder, founded) = host_phone(
+        founder_dir.path(),
+        "Phone Founded Isolated Network",
+        "FounderPhone",
+        Some("/ip4/127.0.0.1/tcp/0"),
+    )?;
+    assert_eq!(
+        founded.pointer("/garden/status").and_then(Value::as_str),
+        Some("Active"),
+        "founder phone is not Active: {founded}"
     );
-    // The host sees the phone: a join nobody observes is not a join.
-    wait_for("the phone in the host's status", || {
-        let garden = node.rpc("bud_gardenStatus", &json!([]))?;
-        garden
+    assert_eq!(
+        founded.pointer("/garden/me/host").and_then(Value::as_bool),
+        Some(true),
+        "founder phone is not recorded as the host: {founded}"
+    );
+
+    let invite_json = get_path(founder.port, "/invite")?;
+    let record = text(&invite_json, "/record")?;
+    let record_qr = text(&invite_json, "/record_qr")?;
+    let invite_line = text(&invite_json, "/invite")?;
+
+    // Five real Linux validator nodes join the phone's isolated Garden.
+    let mut linux_validators = Vec::new();
+    for idx in 1..=5 {
+        let peer = Node::start()?;
+        let join_target = if idx % 2 == 0 { &record } else { &record_qr };
+        let joined = peer.rpc(
+            "bud_gardenJoin",
+            &json!([join_target, format!("LinuxVal{idx}"), { "listen": "/ip4/127.0.0.1/tcp/0" }]),
+        )?;
+        assert_eq!(
+            joined.pointer("/garden/me/member").and_then(Value::as_str),
+            Some("Active"),
+            "Linux validator {idx} did not become Active: {joined}"
+        );
+        linux_validators.push(peer);
+    }
+
+    // A second phone validator joins directly from the local HTTP QR string.
+    let second_phone_dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let (second_phone, second_status) = serve(second_phone_dir.path(), Some(&record_qr))?;
+    assert_eq!(
+        second_status
+            .pointer("/garden/status")
+            .and_then(Value::as_str),
+        Some("Active"),
+        "second phone did not join over local HTTP QR: {second_status}"
+    );
+
+    // Wait until the founder phone sees all 7 active validators (founder + 5 Linux + 1 peer phone).
+    wait_for("seven active validators on the phone-hosted Garden", || {
+        let st = get_path(founder.port, "/")?;
+        let count = st
             .pointer("/garden/active_validators")
             .and_then(Value::as_u64)
-            .map(|n| if n >= 2 { Some(()) } else { None })
-            .ok_or_else(|| format!("no active validator count: {garden}"))
+            .unwrap_or(0);
+        Ok((count == 7).then_some(()))
     })?;
+
+    // Adversarial check: an uninvited / wrong-genesis invite is refused fail-closed.
+    let rogue_dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let tampered_invite = invite_line.replacen("genesis=", "genesis=ff", 1);
+    let (rogue_ok, _rogue_log) =
+        phone_verb(rogue_dir.path(), "read", &["budlum://garden/join#AAAA"])?;
+    assert!(!rogue_ok, "malformed invite record was accepted");
+    let rogue_node = Node::start()?;
+    assert!(
+        rogue_node
+            .rpc(
+                "bud_gardenJoin",
+                &json!([tampered_invite, "Rogue", { "listen": "/ip4/127.0.0.1/tcp/0" }]),
+            )
+            .is_err(),
+        "wrong-genesis invite was admitted into the isolated Garden"
+    );
+    drop(rogue_node);
+
+    // The founder phone uploads a 32 KiB PNG-like image into its isolated Garden.
+    let mut image_bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    for i in 0..32_760u32 {
+        image_bytes.push(((i.wrapping_mul(31) ^ (i >> 3)) & 0xff) as u8);
+    }
+    let image_hex = hex::encode(&image_bytes);
+    let (post_code, published) = post_json(
+        founder.port,
+        "/send-image",
+        &json!({
+            "hex": image_hex,
+            "mime": "image/png",
+            "caption": "founder-phone-camera-frame"
+        }),
+    )?;
+    assert_eq!(
+        post_code, 200,
+        "founder phone image upload failed: {published}"
+    );
+    let content_id = text(&published, "/content_id")?;
+    let tx_id = text(&published, "/tx_id")?;
+
+    // A Linux validator waits for finality across the 7-validator PoA quorum and resolves the image.
+    let verifier_node = linux_validators
+        .first()
+        .ok_or_else(|| "missing Linux validator".to_string())?;
+    wait_for("phone-uploaded image transaction to finalize", || {
+        let trace = verifier_node.rpc("bud_gardenTrace", &json!([tx_id]))?;
+        Ok((text(&trace, "/stage")? == "final").then_some(()))
+    })?;
+    let resolved_on_linux = verifier_node.rpc("bud_gardenResolve", &json!([content_id]))?;
+    assert_eq!(text(&resolved_on_linux, "/content_id")?, content_id);
+    assert_eq!(text(&resolved_on_linux, "/hex")?, image_hex);
+    assert_eq!(
+        resolved_on_linux.get("verified").and_then(Value::as_bool),
+        Some(true)
+    );
+
+    // The second phone validator also fetches and chain-verifies the exact image bytes.
+    let resolved_on_phone = wait_for("second phone to fetch and verify the image", || {
+        let (st, body) = get_with_status(second_phone.port, &format!("/fetch/{content_id}"))?;
+        if st == 200 {
+            Ok(Some(body))
+        } else {
+            Ok(None)
+        }
+    })?;
+    assert_eq!(text(&resolved_on_phone, "/content_id")?, content_id);
+    assert_eq!(text(&resolved_on_phone, "/hex")?, image_hex);
+    assert_eq!(
+        resolved_on_phone.get("verified").and_then(Value::as_bool),
+        Some(true)
+    );
+
+    // Sudden departure of one non-host Linux validator keeps the isolated chain and content alive.
+    let dropped = linux_validators.pop();
+    drop(dropped);
+    let (msg_code, msg_pub) = post_json(
+        founder.port,
+        "/send",
+        &json!({ "text": "isolated network continues after peer drop", "caption": "after-drop" }),
+    )?;
+    assert_eq!(msg_code, 200, "post-drop send failed: {msg_pub}");
+    let msg_tx = text(&msg_pub, "/tx_id")?;
+    let remaining = linux_validators
+        .last()
+        .ok_or_else(|| "missing remaining Linux validator".to_string())?;
+    wait_for("post-drop message finality", || {
+        let trace = remaining.rpc("bud_gardenTrace", &json!([msg_tx]))?;
+        Ok((text(&trace, "/stage")? == "final").then_some(()))
+    })?;
+
+    // HTTP control door rejects unsafe methods, unknown routes, and carries no wildcard CORS.
+    let (bad_method, headers, _) = raw_http(founder.port, "DELETE", "/")?;
+    assert_eq!(
+        bad_method, 405,
+        "unexpected status for DELETE /: {bad_method}"
+    );
+    assert!(
+        !headers
+            .to_ascii_lowercase()
+            .contains("access-control-allow-origin: *"),
+        "control door exposed wildcard CORS: {headers}"
+    );
+    let (not_found, _, _) = raw_http(founder.port, "GET", "/unknown-route")?;
+    assert_eq!(
+        not_found, 404,
+        "unexpected status for unknown route: {not_found}"
+    );
+    let (bad_feed, _, _) = raw_http(founder.port, "GET", "/feed/0")?;
+    assert_eq!(bad_feed, 400, "unexpected status for /feed/0: {bad_feed}");
+
+    drop(second_phone);
+    drop(linux_validators);
+    drop(founder);
     Ok(())
 }
 
@@ -825,4 +1117,419 @@ fn is_root() -> bool {
     {
         false
     }
+}
+
+/// Airgapped multi-device isolated LAN proof: three separate `garden-phone`
+/// device validator processes inside isolated Linux network namespaces with
+/// zero default gateway (`0.0.0.0/0`) and zero internet access discover their
+/// LAN interface automatically, form a 3-validator PoA chain over a virtual
+/// L2 bridge, exchange and chain-verify content, and clean up completely.
+#[test]
+fn garden_apk_isolated_airgap_lan() -> Result<(), String> {
+    let can_netns = Command::new("sudo")
+        .args(["-n", "ip", "netns", "list"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !can_netns {
+        eprintln!("garden_apk_isolated_airgap_lan: skipped (sudo ip netns unavailable)");
+        return Ok(());
+    }
+
+    struct AirgapLan;
+    impl AirgapLan {
+        fn run_root(args: &[&str]) -> Result<String, String> {
+            let out = Command::new("sudo")
+                .arg("-n")
+                .args(args)
+                .output()
+                .map_err(|e| e.to_string())?;
+            if out.status.success() {
+                Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+            } else {
+                Err(format!(
+                    "sudo {}: {}",
+                    args.join(" "),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ))
+            }
+        }
+
+        fn clear() {
+            for ns in ["gdn-air-sw", "gdn-air-1", "gdn-air-2", "gdn-air-3"] {
+                if let Ok(pids) = Self::run_root(&["ip", "netns", "pids", ns]) {
+                    for pid in pids.split_whitespace() {
+                        let _ = Self::run_root(&["kill", "-9", pid]);
+                    }
+                }
+                let _ = Self::run_root(&["ip", "netns", "del", ns]);
+            }
+        }
+
+        fn setup() -> Result<Self, String> {
+            Self::clear();
+            let guard = Self;
+            Self::run_root(&["ip", "netns", "add", "gdn-air-sw"])?;
+            Self::run_root(&["ip", "-n", "gdn-air-sw", "link", "set", "lo", "up"])?;
+            Self::run_root(&[
+                "ip",
+                "-n",
+                "gdn-air-sw",
+                "link",
+                "add",
+                "br0",
+                "type",
+                "bridge",
+            ])?;
+            Self::run_root(&["ip", "-n", "gdn-air-sw", "link", "set", "br0", "up"])?;
+
+            for n in 1..=3 {
+                let ns = format!("gdn-air-{n}");
+                let v_dev = format!("ga{n}d");
+                let v_sw = format!("ga{n}s");
+                let ip = format!("10.77.0.1{n}/24");
+                Self::run_root(&["ip", "netns", "add", &ns])?;
+                Self::run_root(&["ip", "-n", &ns, "link", "set", "lo", "up"])?;
+                Self::run_root(&[
+                    "ip",
+                    "link",
+                    "add",
+                    &v_dev,
+                    "netns",
+                    &ns,
+                    "type",
+                    "veth",
+                    "peer",
+                    "name",
+                    &v_sw,
+                    "netns",
+                    "gdn-air-sw",
+                ])?;
+                Self::run_root(&[
+                    "ip",
+                    "-n",
+                    "gdn-air-sw",
+                    "link",
+                    "set",
+                    &v_sw,
+                    "master",
+                    "br0",
+                ])?;
+                Self::run_root(&["ip", "-n", "gdn-air-sw", "link", "set", &v_sw, "up"])?;
+                Self::run_root(&["ip", "-n", &ns, "addr", "add", &ip, "dev", &v_dev])?;
+                Self::run_root(&["ip", "-n", &ns, "link", "set", &v_dev, "up"])?;
+                // Deliberately add NO default gateway (`0.0.0.0/0`): pure isolated L2 LAN.
+            }
+            Ok(guard)
+        }
+    }
+    impl Drop for AirgapLan {
+        fn drop(&mut self) {
+            AirgapLan::clear();
+        }
+    }
+
+    fn ns_http(
+        ns: &str,
+        port: u16,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, String> {
+        let payload = body.map_or_else(String::new, Value::to_string);
+        let req = if body.is_some() {
+            format!(
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            )
+        } else {
+            format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        };
+        let py = "import socket,sys; s=socket.create_connection(('127.0.0.1', int(sys.argv[1])), 10); s.sendall(sys.argv[2].encode()); chunks=[]; \nwhile True:\n d=s.recv(65536)\n if not d: break\n chunks.append(d)\nsys.stdout.buffer.write(b''.join(chunks))";
+        let out = Command::new("sudo")
+            .args([
+                "-n",
+                "ip",
+                "netns",
+                "exec",
+                ns,
+                "python3",
+                "-c",
+                py,
+                &port.to_string(),
+                &req,
+            ])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+        }
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let Some((head, resp_body)) = raw.split_once("\r\n\r\n") else {
+            return Err(format!("short HTTP answer in {ns}: {raw}"));
+        };
+        let code = head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(0);
+        if code != 200 {
+            return Err(format!("HTTP {code} in {ns}: {resp_body}"));
+        }
+        serde_json::from_str(resp_body).map_err(|e| e.to_string())
+    }
+
+    let _lan = AirgapLan::setup()?;
+    let bin = phone_bin()?;
+    let uid = Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map_or_else(|| "1000".to_string(), |s| s.trim().to_string());
+    let dir1 = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let dir2 = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let dir3 = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let door_port: u16 = 19480;
+
+    // Device 1 starts in `gdn-air-1` (`10.77.0.11/24`, ZERO default gateway) with NO explicit address!
+    let mut dev1 = Command::new("sudo")
+        .args([
+            "-n",
+            "ip",
+            "netns",
+            "exec",
+            "gdn-air-1",
+            "sudo",
+            "-u",
+            &format!("#{uid}"),
+        ])
+        .arg(&bin)
+        .args([
+            "host",
+            &dir1.path().to_string_lossy(),
+            &door_port.to_string(),
+            "AirgapLAN",
+            "DeviceOne",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    let dev1_status = wait_for(
+        "DeviceOne founding validator on zero-gateway airgap LAN",
+        || ns_http("gdn-air-1", door_port, "GET", "/", None).map(Some),
+    );
+    if let Err(e) = &dev1_status {
+        let _ = dev1.kill();
+        let out = dev1.wait_with_output().ok();
+        let diag = out
+            .map(|o| {
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                )
+            })
+            .unwrap_or_default();
+        return Err(format!("{e}\nDeviceOne output:\n{diag}"));
+    }
+    let invite_json = ns_http("gdn-air-1", door_port, "GET", "/invite", None)?;
+    let record = text(&invite_json, "/record")?;
+    let record_qr = text(&invite_json, "/record_qr")?;
+    assert!(
+        record_qr.starts_with("http://10.77.0.11") && record_qr.contains("/g#"),
+        "zero-gateway LAN auto-discovery did not bind 10.77.0.11: {invite_json}"
+    );
+
+    // Device 2 (`10.77.0.12`) joins via the local HTTP QR record; Device 3 (`10.77.0.13`) joins via the record link.
+    let mut dev2 = Command::new("sudo")
+        .args([
+            "-n",
+            "ip",
+            "netns",
+            "exec",
+            "gdn-air-2",
+            "sudo",
+            "-u",
+            &format!("#{uid}"),
+        ])
+        .arg(&bin)
+        .args([
+            "serve",
+            &dir2.path().to_string_lossy(),
+            &door_port.to_string(),
+            &record_qr,
+            "DeviceTwo",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    let mut dev3 = Command::new("sudo")
+        .args([
+            "-n",
+            "ip",
+            "netns",
+            "exec",
+            "gdn-air-3",
+            "sudo",
+            "-u",
+            &format!("#{uid}"),
+        ])
+        .arg(&bin)
+        .args([
+            "serve",
+            &dir3.path().to_string_lossy(),
+            &door_port.to_string(),
+            &record,
+            "DeviceThree",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    let res = (|| -> Result<(), String> {
+        wait_for(
+            "three airgapped device validators in active consensus",
+            || {
+                for (label, child) in [
+                    ("dev1", &mut dev1),
+                    ("dev2", &mut dev2),
+                    ("dev3", &mut dev3),
+                ] {
+                    if let Ok(Some(st)) = child.try_wait() {
+                        let mut out = String::new();
+                        if let Some(mut s) = child.stdout.take() {
+                            let _ = s.read_to_string(&mut out);
+                        }
+                        if let Some(mut e) = child.stderr.take() {
+                            let _ = e.read_to_string(&mut out);
+                        }
+                        return Err(format!("{label} exited early ({st}): {out}"));
+                    }
+                }
+                let s1 = ns_http("gdn-air-1", door_port, "GET", "/", None)?;
+                let s2 = ns_http("gdn-air-2", door_port, "GET", "/", None)?;
+                let s3 = ns_http("gdn-air-3", door_port, "GET", "/", None)?;
+                let ok = s1.pointer("/garden/active_validators") == Some(&json!(3))
+                    && s2.pointer("/garden/active_validators") == Some(&json!(3))
+                    && s3.pointer("/garden/active_validators") == Some(&json!(3))
+                    && s1
+                        .pointer("/garden/connected_peers")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                        >= 2
+                    && s2
+                        .pointer("/garden/connected_peers")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                        >= 1
+                    && s3
+                        .pointer("/garden/connected_peers")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                        >= 1;
+                Ok(ok.then_some(()))
+            },
+        )?;
+
+        // Device 2 publishes a message on the airgapped LAN; Device 3 and Device 1 verify it!
+        let payload_msg = "hello across pure zero-internet airgap LAN";
+        let sent = ns_http(
+            "gdn-air-2",
+            door_port,
+            "POST",
+            "/send",
+            Some(&json!({ "text": payload_msg, "caption": "airgap-note" })),
+        )?;
+        let cid = text(&sent, "/content_id")?;
+
+        for reader_ns in ["gdn-air-1", "gdn-air-3"] {
+            let fetched = wait_for(&format!("{reader_ns} fetching airgapped object"), || {
+                ns_http(reader_ns, door_port, "GET", &format!("/fetch/{cid}"), None)
+                    .ok()
+                    .map(Ok)
+                    .transpose()
+            })?;
+            assert_eq!(text(&fetched, "/content_id")?, cid);
+            assert_eq!(
+                fetched.get("text").and_then(Value::as_str),
+                Some(payload_msg)
+            );
+            assert_eq!(fetched.get("verified").and_then(Value::as_bool), Some(true));
+        }
+        Ok(())
+    })();
+
+    let _ = dev3.kill();
+    let _ = dev2.kill();
+    let _ = dev1.kill();
+    let _ = dev3.wait();
+    let _ = dev2.wait();
+    let _ = dev1.wait();
+    res
+}
+
+/// Direct `GardenService` proof:
+/// `service.invite()` emits a local HTTP QR (`http://<addr>/g#<record>`) when
+/// the validator has a dialable address, `service.join()` accepts both
+/// `budlum://garden/join#...` and `http://<addr>/g#...` records, and
+/// authority/fragment-injected `http://` URLs are rejected fail-closed.
+#[tokio::test]
+async fn garden_apk_service_qr_join_and_ended_seat_cleanup() -> Result<(), String> {
+    use budlum_core::garden::{GardenOptions, GardenService};
+
+    let opts = || GardenOptions {
+        listen: Some("/ip4/127.0.0.1/tcp/0".into()),
+        round_ms: Some(200),
+        presence_interval_ms: Some(200),
+        host_timeout_ms: Some(1500),
+        suspend_after_ms: Some(3000),
+        ..GardenOptions::default()
+    };
+
+    let host_dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let qr_guest_dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+    let host = GardenService::new(None, Some(host_dir.path().to_path_buf()));
+    let qr_guest = GardenService::new(None, Some(qr_guest_dir.path().to_path_buf()));
+
+    host.create("QR Service Room".into(), "Host".into(), opts())
+        .await?;
+    let invite_val = host.invite().await?;
+    let record_link = text(&invite_val, "/record")?;
+    let local_qr = text(&invite_val, "/record_qr")?;
+    assert!(
+        local_qr.starts_with("http://127.0.0.1:") && local_qr.contains("/g#"),
+        "service.invite() did not emit http://<local>/g# record_qr: {local_qr}"
+    );
+    let fragment = record_link
+        .strip_prefix("budlum://garden/join#")
+        .ok_or_else(|| format!("unexpected record prefix: {record_link}"))?;
+
+    // Reject URL authority/query/fragment injection in local HTTP QR strings.
+    for injected in [
+        format!("http://127.0.0.1:8080@evil.example/g#{fragment}"),
+        format!("http://127.0.0.1:8080?x=1/g#{fragment}"),
+        format!("http://127.0.0.1:8080#x/g#{fragment}"),
+        format!("http://127.0.0.1:8080/g#{fragment}#extra"),
+    ] {
+        assert!(
+            GardenService::read_record(&injected).is_err(),
+            "injected QR URL was accepted: {injected}"
+        );
+    }
+
+    // Joining directly with the local HTTP QR string succeeds.
+    let joined = qr_guest.join(local_qr, "QrGuest".into(), opts()).await?;
+    assert_eq!(
+        joined.pointer("/garden/me/member").and_then(Value::as_str),
+        Some("Active")
+    );
+    let _ = qr_guest.leave().await?;
+    let _ = qr_guest.leave().await?;
+    let _ = host.leave().await?;
+    Ok(())
 }

@@ -226,6 +226,38 @@ impl GardenPhone {
         )))
     }
 
+    /// Publish binary content (an image or file encoded in hex) into the
+    /// Garden through B.U.D. 3.0.
+    pub fn send_image(
+        &self,
+        hex_bytes: String,
+        mime: String,
+        caption: String,
+    ) -> Result<GardenAnswer, GardenError> {
+        let kind = if mime.trim().starts_with("image/") {
+            "image"
+        } else {
+            "post"
+        };
+        let mime_opt = if mime.trim().is_empty() {
+            None
+        } else {
+            Some(mime)
+        };
+        let caption_opt = if caption.trim().is_empty() {
+            None
+        } else {
+            Some(caption)
+        };
+        answer(self.runtime.block_on(self.service.publish(
+            kind.to_owned(),
+            hex_bytes,
+            Some("hex".to_owned()),
+            mime_opt,
+            caption_opt,
+        )))
+    }
+
     /// What the Garden has been sent, newest first.
     pub fn feed(&self, limit: u32) -> Result<GardenAnswer, GardenError> {
         answer(self.runtime.block_on(self.service.feed(Some(limit))))
@@ -255,11 +287,7 @@ impl GardenPhone {
         SelfTestReport {
             steps,
             passed,
-            elapsed_ms: started
-                .elapsed()
-                .as_millis()
-                .try_into()
-                .unwrap_or(u64::MAX),
+            elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         }
     }
 }
@@ -274,26 +302,43 @@ impl GardenPhone {
     /// route, which is all that is being asked.
     fn address_on_this_network() -> Option<String> {
         use std::net::{IpAddr, Ipv4Addr, UdpSocket};
-        // TEST-NET-2, which is not routed anywhere. The question is which
-        // interface a packet would leave by, not whether it arrives.
-        for target in [Ipv4Addr::new(198, 51, 100, 1), Ipv4Addr::new(192, 168, 1, 1)] {
-            let probe = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
-                Ok(probe) => probe,
-                Err(_) => continue,
+        let usable = |ip: Ipv4Addr| {
+            !ip.is_loopback()
+                && !ip.is_unspecified()
+                && !ip.is_link_local()
+                && !ip.is_multicast()
+                && !ip.is_broadcast()
+        };
+        // Probe both routed destinations and common private RFC1918 ranges so
+        // a LAN without an internet gateway still resolves its interface when
+        // the phone sits in one of those ranges.
+        for target in [
+            Ipv4Addr::new(198, 51, 100, 1),
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(192, 168, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 42, 0, 1),
+            Ipv4Addr::new(172, 16, 0, 1),
+            Ipv4Addr::new(172, 20, 10, 1),
+        ] {
+            let Ok(probe) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
+                continue;
             };
             if probe.connect((target, 9)).is_err() {
                 continue;
             }
-            match probe.local_addr().map(|local| local.ip()) {
-                Ok(IpAddr::V4(ip))
-                    if !ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local() =>
-                {
+            if let Ok(IpAddr::V4(ip)) = probe.local_addr().map(|local| local.ip()) {
+                if usable(ip) {
                     return Some(format!("/ip4/{ip}/tcp/0"));
                 }
-                _ => {}
             }
         }
-        None
+        // Pure airgapped L2 LAN fallback (e.g. 10.77.0.0/24 with zero default
+        // gateway): read the kernel's local IPv4 FIB table (`fib_trie`) and
+        // pick the first active non-loopback host address.
+        local_ipv4_from_fib_trie()
+            .filter(|ip| usable(*ip))
+            .map(|ip| format!("/ip4/{ip}/tcp/0"))
     }
 
     /// The listen address a phone uses: every interface, a port the system
@@ -377,4 +422,41 @@ fn check_object_round_trip() -> SelfTestStep {
         Ok(()) => step(name, true, String::new()),
         Err(e) => step(name, false, e),
     }
+}
+
+/// Inspect `/proc/net/fib_trie` (`Local:` table) on Linux to find an assigned
+/// non-loopback IPv4 interface address when the device has no default gateway.
+fn local_ipv4_from_fib_trie() -> Option<std::net::Ipv4Addr> {
+    let text = std::fs::read_to_string("/proc/net/fib_trie").ok()?;
+    let mut in_local = false;
+    let mut candidate: Option<std::net::Ipv4Addr> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed == "Local:" {
+            in_local = true;
+            candidate = None;
+            continue;
+        }
+        if !in_local {
+            continue;
+        }
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix("|-- ") {
+            candidate = rest.split_whitespace().next().and_then(|w| w.parse().ok());
+        } else if trimmed == "/32 host LOCAL" {
+            if let Some(ip) = candidate {
+                if !ip.is_loopback()
+                    && !ip.is_unspecified()
+                    && !ip.is_link_local()
+                    && !ip.is_multicast()
+                    && !ip.is_broadcast()
+                {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+    None
 }

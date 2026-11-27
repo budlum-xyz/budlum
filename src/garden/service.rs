@@ -11,7 +11,7 @@ use super::invite::GardenInvite;
 use super::node::{
     now_ms, random_bytes, spawn, GardenEntry, GardenHandle, GardenLeaveOutcome, GardenNodeConfig,
 };
-use super::record::{GardenRecord, RECORD_LINK_PREFIX};
+use super::record::GardenRecord;
 use super::settlement::GardenBudlumLink;
 use super::types::{status_label, GardenAdmission, GardenContentKind, GardenLimits};
 use crate::chain::chain_actor::ChainHandle;
@@ -216,6 +216,27 @@ fn parse_id(label: &str, value: &str) -> Result<Hash32, String> {
     Hash32::try_from(bytes.as_slice()).map_err(|_| format!("{label} must be 64 hex digits"))
 }
 
+/// Extract `host:port` from a validator's own dialable multiaddr so `to_qr`
+/// can build the local `http://<address>/g#<record>` QR shape when available.
+fn qr_local_authority(invite: &GardenInvite) -> Option<String> {
+    use libp2p::multiaddr::Protocol;
+    let first = invite.peers.first()?;
+    let parsed: libp2p::Multiaddr = first.parse().ok()?;
+    let mut parts = parsed.iter();
+    let host_part = match parts.next()? {
+        Protocol::Ip4(ip) if !ip.is_unspecified() => ip.to_string(),
+        Protocol::Ip6(ip) if !ip.is_unspecified() => format!("[{ip}]"),
+        _ => return None,
+    };
+    let Protocol::Tcp(port) = parts.next()? else {
+        return None;
+    };
+    if port == 0 {
+        return None;
+    }
+    Some(format!("{host_part}:{port}"))
+}
+
 impl GardenService {
     /// Build the service of a node.
     ///
@@ -399,7 +420,7 @@ impl GardenService {
         // either the invite line or the signed record, so both are taken
         // here rather than making the reader know which one it was handed.
         // The record is verified before its contents are trusted.
-        let invite = if invite.trim().starts_with(RECORD_LINK_PREFIX) {
+        let invite = if GardenRecord::looks_like_record(&invite) {
             let record = GardenRecord::parse(&invite)?;
             record.check(now_ms())?;
             GardenInvite::parse(&record.to_invite_link())?
@@ -586,6 +607,7 @@ impl GardenService {
             },
         };
         // The validator stopped on its own: the Garden ended without it.
+        self.drop_seat();
         *slot = Slot::Empty;
         let budlum = match self.link() {
             Some(link) => link
@@ -619,11 +641,15 @@ impl GardenService {
         // enough to push the record past its ceiling is a thing an
         // operator has to be able to see.
         let mut answer = json!({ "invite": link, "qr": qr });
+        let local_authority = qr_local_authority(&invite);
         match handle.record().await {
             Ok(record) => {
                 if let Some(fields) = answer.as_object_mut() {
                     fields.insert("record".into(), json!(record.to_link()));
-                    fields.insert("record_qr".into(), json!(record.to_qr(None)?));
+                    fields.insert(
+                        "record_qr".into(),
+                        json!(record.to_qr(local_authority.as_deref())?),
+                    );
                     fields.insert("owner".into(), json!(hex::encode(record.owner)));
                     fields.insert("host".into(), json!(hex::encode(record.host)));
                     fields.insert("expires_at_ms".into(), json!(record.expires_at_ms));
@@ -921,6 +947,26 @@ mod tests {
         // retired Garden cannot be returned to, so nothing is kept: not the
         // content, and not the seat that would only promise a way back.
         assert!(files_under(dir.path()).is_empty());
+
+        // If a running validator stops on its own while `Slot::Running` still
+        // holds its handle, `status()` must drop `seat.json` too.
+        service
+            .create("Ephemeral".into(), "host".into(), options())
+            .await
+            .unwrap();
+        assert!(dir.path().join(SEAT_FILE).is_file());
+        {
+            let slot = service.slot.lock().await;
+            if let Slot::Running(handle, _) = &*slot {
+                let _ = handle.leave().await;
+            }
+        }
+        let ended = service.status().await.unwrap();
+        assert!(ended.get("ended").is_some(), "{ended}");
+        assert!(
+            !dir.path().join(SEAT_FILE).exists(),
+            "orphaned seat.json survived runtime termination"
+        );
     }
 
     #[tokio::test]

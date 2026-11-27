@@ -10,6 +10,7 @@
 //!   garden-phone self-test <dir>
 //!   garden-phone read <dir> <record>
 //!   garden-phone create <dir> <title> [name] [listen multiaddr]
+//!   garden-phone host <dir> <port> <title> [name] [listen multiaddr]
 //!   garden-phone join <dir> <record> <name>
 //!   garden-phone serve <dir> <port> [record] [name]
 //!   garden-phone return-check <dir> <record> [name]
@@ -19,12 +20,23 @@
 //!   garden-phone fetch <dir> <content id>
 //!   garden-phone leave <dir>
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
-use budlum_garden_ffi::GardenPhone;
+use budlum_garden_ffi::{GardenAnswer, GardenPhone};
+use serde_json::Value;
+
+/// Loopback bind address so a phone control door is never exposed to LAN peers.
+const STATUS_BIND_ADDR: &str = "127.0.0.1";
+/// Per-connection read and write deadline on the local control door.
+const STATUS_IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum bytes read for the HTTP request line + headers.
+const MAX_HTTP_HEAD_BYTES: u64 = 4_096;
+/// Maximum JSON body bytes accepted on local `POST` commands.
+const MAX_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -33,7 +45,7 @@ fn main() -> ExitCode {
     if command.is_empty() || dir.is_empty() {
         eprintln!(
             "usage: garden-phone \
-<self-test|read|create|join|serve|return-check|status|send|feed|fetch|leave> <dir> [...]"
+<self-test|read|create|host|join|serve|return-check|status|send|feed|fetch|leave> <dir> [...]"
         );
         return ExitCode::from(2);
     }
@@ -99,6 +111,31 @@ fn main() -> ExitCode {
             say(phone
                 .create(title, name, address)
                 .map_err(|e| e.to_string()))
+        }
+        // Found an isolated Garden on this device and keep the validator swarm
+        // alive for peers to dial while exposing the local loopback control door.
+        "host" => {
+            let port = args.get(3).and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
+            let title = args.get(4).cloned().unwrap_or_default();
+            let name = args.get(5).cloned().unwrap_or_else(|| "Phone".to_string());
+            let address = args.get(6).cloned();
+            if port == 0 || title.is_empty() {
+                eprintln!(
+                    "usage: garden-phone host <dir> <port> <title> [name] [listen multiaddr]"
+                );
+                return ExitCode::from(2);
+            }
+            if !gate(&phone) {
+                return ExitCode::FAILURE;
+            }
+            match phone.create(title, name, address) {
+                Ok(answer) => println!("founded: {}", answer.json),
+                Err(e) => {
+                    eprintln!("refused: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+            serve(&phone, port)
         }
         "join" => {
             let record = args.get(3).cloned().unwrap_or_default();
@@ -292,19 +329,16 @@ fn one_line(json: &str, field: &str) -> String {
     )
 }
 
-/// Hold the Garden open and answer the phone's own status on `port`.
-///
-/// Only the phone's view is served, exactly as `status` prints it. Nothing
-/// can be changed through this door: it reads, and that is all.
+/// Hold the Garden open and answer local operator queries on loopback `port`.
 fn serve(phone: &Arc<GardenPhone>, port: u16) -> ExitCode {
-    let listener = match TcpListener::bind(("0.0.0.0", port)) {
+    let listener = match TcpListener::bind((STATUS_BIND_ADDR, port)) {
         Ok(listener) => listener,
         Err(e) => {
-            eprintln!("the status door would not open on {port}: {e}");
+            eprintln!("the status door would not open on {STATUS_BIND_ADDR}:{port}: {e}");
             return ExitCode::FAILURE;
         }
     };
-    println!("the phone is in the Garden; its status is on port {port}");
+    println!("the phone is in the Garden; its status is on {STATUS_BIND_ADDR}:{port}");
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => answer_one(phone, stream),
@@ -314,39 +348,9 @@ fn serve(phone: &Arc<GardenPhone>, port: u16) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn answer_one(phone: &Arc<GardenPhone>, mut stream: TcpStream) {
-    // The first line names what is being asked for. Nothing here writes to
-    // the Garden: `status` is the phone's view, `feed` is what the Garden
-    // holds and `fetch` reads one object back out by content id. A path this
-    // door does not know answers the status, which is what it always did.
-    let mut first = String::new();
-    if BufReader::new(&stream).read_line(&mut first).is_err() {
-        return;
-    }
-    let path = first.split_whitespace().nth(1).unwrap_or("/");
-    let answer = if let Some(rest) = path.strip_prefix("/feed/") {
-        rest.parse::<u32>()
-            .map_or_else(|_| phone.feed(50), |limit| phone.feed(limit))
-    } else if let Some(content_id) = path.strip_prefix("/fetch/") {
-        phone.fetch(content_id.to_string())
-    } else if path.starts_with("/feed") {
-        phone.feed(50)
-    } else {
-        phone.status()
-    };
-    // A refusal is not a success with a sad body. A caller that only reads
-    // the status line - which is most of them - would take `{"error":...}`
-    // for an answer and go on to parse a Garden that was never read. The
-    // status says which it was, and the body says why.
-    let (status, body) = match answer {
-        Ok(answer) => ("200 OK", answer.json),
-        Err(e) => (
-            "409 CONFLICT",
-            format!("{{\"error\":{}}}", json_string(&e.to_string())),
-        ),
-    };
+fn write_http_json(stream: &mut TcpStream, status: &str, body: &str) {
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(head.as_bytes());
@@ -354,23 +358,184 @@ fn answer_one(phone: &Arc<GardenPhone>, mut stream: TcpStream) {
     let _ = stream.flush();
 }
 
-fn json_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push('"');
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            c if (c as u32) < 0x20 => out.push(' '),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+fn error_body(reason: &str) -> String {
+    format!("{{\"error\":{}}}", json_string(reason))
 }
 
-fn say(result: Result<budlum_garden_ffi::GardenAnswer, String>) -> ExitCode {
+fn answer_result(
+    stream: &mut TcpStream,
+    result: Result<GardenAnswer, budlum_garden_ffi::GardenError>,
+) {
+    match result {
+        Ok(answer) => write_http_json(stream, "200 OK", &answer.json),
+        Err(e) => write_http_json(stream, "409 CONFLICT", &error_body(&e.to_string())),
+    }
+}
+
+fn answer_one(phone: &Arc<GardenPhone>, mut stream: TcpStream) {
+    let _ = stream.set_read_timeout(Some(STATUS_IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(STATUS_IO_TIMEOUT));
+
+    let mut reader = BufReader::new((&mut stream).take(MAX_HTTP_HEAD_BYTES));
+    let mut first = String::new();
+    if reader.read_line(&mut first).is_err() || first.trim().is_empty() {
+        return;
+    }
+    let mut parts = first.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
+    if path.is_empty() || !path.starts_with('/') {
+        write_http_json(
+            &mut stream,
+            "400 BAD REQUEST",
+            &error_body("malformed request line"),
+        );
+        return;
+    }
+
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                if trimmed.is_empty() {
+                    break;
+                }
+                if let Some(val) = trimmed.to_ascii_lowercase().strip_prefix("content-length:") {
+                    match val.trim().parse::<usize>() {
+                        Ok(n) if n <= MAX_HTTP_BODY_BYTES => content_length = n,
+                        _ => {
+                            write_http_json(
+                                &mut stream,
+                                "400 BAD REQUEST",
+                                &error_body("invalid or oversized content-length"),
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                write_http_json(
+                    &mut stream,
+                    "400 BAD REQUEST",
+                    &error_body("header read failed"),
+                );
+                return;
+            }
+        }
+    }
+    let buffered = reader.buffer().to_vec();
+    drop(reader);
+
+    match method {
+        "GET" => {
+            if path == "/" || path == "/status" {
+                answer_result(&mut stream, phone.status());
+            } else if path == "/invite" {
+                answer_result(&mut stream, phone.invite());
+            } else if path == "/feed" {
+                answer_result(&mut stream, phone.feed(50));
+            } else if let Some(rest) = path.strip_prefix("/feed/") {
+                match rest.parse::<u32>() {
+                    Ok(limit) if (1..=200).contains(&limit) => {
+                        answer_result(&mut stream, phone.feed(limit));
+                    }
+                    _ => write_http_json(
+                        &mut stream,
+                        "400 BAD REQUEST",
+                        &error_body("feed limit must be an integer in 1..=200"),
+                    ),
+                }
+            } else if let Some(content_id) = path.strip_prefix("/fetch/") {
+                if content_id.len() != 64 || !content_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    write_http_json(
+                        &mut stream,
+                        "400 BAD REQUEST",
+                        &error_body("content id must be 64 hex digits"),
+                    );
+                } else {
+                    answer_result(&mut stream, phone.fetch(content_id.to_string()));
+                }
+            } else {
+                write_http_json(&mut stream, "404 NOT FOUND", &error_body("unknown route"));
+            }
+        }
+        "POST" => {
+            let mut body_bytes = Vec::with_capacity(content_length);
+            let take_buf = buffered.len().min(content_length);
+            if let Some(prefix) = buffered.get(..take_buf) {
+                body_bytes.extend_from_slice(prefix);
+            }
+            if body_bytes.len() < content_length {
+                let remaining = content_length.saturating_sub(body_bytes.len());
+                let mut tail = vec![0u8; remaining];
+                if stream.read_exact(&mut tail).is_err() {
+                    write_http_json(
+                        &mut stream,
+                        "400 BAD REQUEST",
+                        &error_body("incomplete body"),
+                    );
+                    return;
+                }
+                body_bytes.extend_from_slice(&tail);
+            }
+            let payload: Value = match serde_json::from_slice(&body_bytes) {
+                Ok(v) => v,
+                Err(_) => {
+                    write_http_json(&mut stream, "400 BAD REQUEST", &error_body("invalid json"));
+                    return;
+                }
+            };
+            if path == "/send" {
+                let Some(text) = payload.get("text").and_then(Value::as_str) else {
+                    write_http_json(&mut stream, "400 BAD REQUEST", &error_body("missing text"));
+                    return;
+                };
+                let caption = payload
+                    .get("caption")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                answer_result(&mut stream, phone.send(text.to_string(), caption));
+            } else if path == "/send-image" {
+                let Some(hex_bytes) = payload.get("hex").and_then(Value::as_str) else {
+                    write_http_json(&mut stream, "400 BAD REQUEST", &error_body("missing hex"));
+                    return;
+                };
+                let mime = payload
+                    .get("mime")
+                    .and_then(Value::as_str)
+                    .unwrap_or("image/png")
+                    .to_string();
+                let caption = payload
+                    .get("caption")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                answer_result(
+                    &mut stream,
+                    phone.send_image(hex_bytes.to_string(), mime, caption),
+                );
+            } else {
+                write_http_json(&mut stream, "404 NOT FOUND", &error_body("unknown route"));
+            }
+        }
+        _ => write_http_json(
+            &mut stream,
+            "405 METHOD NOT ALLOWED",
+            &error_body("method not allowed"),
+        ),
+    }
+}
+
+fn json_string(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn say(result: Result<GardenAnswer, String>) -> ExitCode {
     match result {
         Ok(answer) => {
             println!("{}", answer.json);

@@ -2764,8 +2764,12 @@ impl Node {
                 }
                 self.presence_windows
                     .insert(signal.validator, signal.window);
-                self.last_seen.insert(signal.validator, Instant::now());
+                let validator = signal.validator;
+                self.last_seen.insert(validator, Instant::now());
                 self.gossip(&GardenGossip::Presence(signal), from).await;
+                if validator == self.ledger.state.host() {
+                    self.report_to_budlum().await;
+                }
             }
         }
     }
@@ -2932,11 +2936,16 @@ impl Node {
             return;
         }
         let hash = vote.block_hash;
+        let voter = vote.voter;
+        self.last_seen.insert(voter, Instant::now());
         self.votes
             .entry(hash)
             .or_default()
-            .insert(vote.voter, vote.clone());
+            .insert(voter, vote.clone());
         self.gossip(&GardenGossip::Vote(vote), from).await;
+        if voter == self.ledger.state.host() {
+            self.report_to_budlum().await;
+        }
         self.consider(hash).await;
     }
 
