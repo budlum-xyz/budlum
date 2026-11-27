@@ -334,7 +334,10 @@ impl ObjectLayerTx {
                 registry.set_tentative_consent(ctx.signer, *consent);
             }
             Self::Adopt { home } => {
-                if let Ok(proof) = postcard::from_bytes::<HomeEventProof>(home) {
+                if let Ok((proof, remainder)) = postcard::take_from_bytes::<HomeEventProof>(home) {
+                    if !remainder.is_empty() {
+                        return Err(TxRefusal::Refused(Refusal::NotAuthorized));
+                    }
                     registry.adopt_with_proof(ctx.signer, &proof, ctx.finality)?;
                 } else {
                     registry.adopt(ctx.signer, home)?;

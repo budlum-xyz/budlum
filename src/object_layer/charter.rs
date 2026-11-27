@@ -15,6 +15,27 @@
 use crate::domain::types::Hash32;
 use crate::object_layer::family::{profile_for, FamilyContext, HomeVmFamily};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
+
+const MAX_CHAIN_REFERENCE_LEN: usize = 128;
+const MAX_ADDRESS_PREFIX_LEN: usize = 32;
+
+fn is_all_zero(bytes: &[u8]) -> bool {
+    bytes.iter().all(|&b| b == 0)
+}
+
+fn is_valid_chain_reference(reference: &str) -> bool {
+    !reference.is_empty()
+        && reference.len() <= MAX_CHAIN_REFERENCE_LEN
+        && reference.bytes().all(|b| b.is_ascii_graphic())
+}
+
+fn is_valid_address_prefix(prefix: &str) -> bool {
+    prefix.len() <= MAX_ADDRESS_PREFIX_LEN
+        && prefix
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CharterStatus {
@@ -155,9 +176,11 @@ pub fn check_charter_at_state_root(
     if !domain_active {
         return Err(CharterRefusal::DomainNotActive);
     }
-    if charter.chain_reference.trim().is_empty()
-        || charter.chain_reference.len() > 128
+    if !is_valid_chain_reference(&charter.chain_reference)
+        || !is_valid_address_prefix(&charter.address_prefix)
         || charter.endpoint == charter.verifier
+        || is_all_zero(&charter.endpoint)
+        || is_all_zero(&charter.verifier)
     {
         return Err(CharterRefusal::BadAddress);
     }
@@ -171,20 +194,26 @@ pub fn check_charter_at_state_root(
     if charter.silence_window == 0 {
         return Err(CharterRefusal::ZeroSilenceWindow);
     }
-    if proof.endpoint_code_hash != charter.endpoint_code_hash
-        || proof.verifier_code_hash != charter.verifier_code_hash
+    if !bool::from(proof.endpoint_code_hash.ct_eq(&charter.endpoint_code_hash))
+        || !bool::from(proof.verifier_code_hash.ct_eq(&charter.verifier_code_hash))
     {
         return Err(CharterRefusal::ProofDisagrees);
     }
     if let Some(expected_root) = expected_home_state_root {
+        if is_all_zero(&expected_root) {
+            return Err(CharterRefusal::ProofDisagrees);
+        }
         let Some(hp) = proof.home_proof.as_ref() else {
             return Err(CharterRefusal::ProofDisagrees);
         };
-        if hp.state_root != expected_root {
+        if !bool::from(hp.state_root.ct_eq(&expected_root)) {
             return Err(CharterRefusal::ProofDisagrees);
         }
     }
     if let Some(hp) = proof.home_proof.as_ref() {
+        if is_all_zero(&hp.state_root) {
+            return Err(CharterRefusal::ProofDisagrees);
+        }
         family.verify_home_code_entry(
             &charter.chain_reference,
             &charter.endpoint,
@@ -201,10 +230,14 @@ pub fn check_charter_at_state_root(
         )?;
     }
     let canonical = canonical.ok_or(CharterRefusal::NoCanonicalHashes)?;
-    if charter.endpoint_code_hash != canonical.endpoint {
+    if is_all_zero(&canonical.endpoint)
+        || !bool::from(charter.endpoint_code_hash.ct_eq(&canonical.endpoint))
+    {
         return Err(CharterRefusal::NotCanonicalEndpoint);
     }
-    if charter.verifier_code_hash != canonical.verifier {
+    if is_all_zero(&canonical.verifier)
+        || !bool::from(charter.verifier_code_hash.ct_eq(&canonical.verifier))
+    {
         return Err(CharterRefusal::NotCanonicalVerifier);
     }
     Ok(())

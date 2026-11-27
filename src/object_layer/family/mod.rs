@@ -314,8 +314,18 @@ pub trait FamilyProfile: Sync {
         proof: &HomeSliceProof,
     ) -> Result<(), Refusal> {
         use bincode::Options;
+        use subtle::ConstantTimeEq;
         const MAX_UOL_MERKLE_PROOF_BYTES: u64 = 64 * 1024;
         const MAX_UOL_MERKLE_DEPTH: usize = 64;
+        if !proof.storage_proofs.is_empty()
+            || proof.state_root.iter().all(|&b| b == 0)
+            || chain_reference.is_empty()
+            || !chain_reference.bytes().all(|b| b.is_ascii_graphic())
+            || contract.is_empty()
+            || contract.iter().all(|&b| b == 0)
+        {
+            return Err(Refusal::UnprovenEvent);
+        }
         let [raw] = proof.contract_account_proof.as_slice() else {
             return Err(Refusal::UnprovenEvent);
         };
@@ -347,7 +357,7 @@ pub trait FamilyProfile: Sync {
             contract,
             &slice_bytes,
         ]);
-        if merkle.leaf != expected_leaf || !merkle.verify(proof.state_root) {
+        if !bool::from(merkle.leaf.ct_eq(&expected_leaf)) || !merkle.verify(proof.state_root) {
             return Err(Refusal::UnprovenEvent);
         }
         Ok(())
@@ -373,8 +383,18 @@ pub trait FamilyProfile: Sync {
         proof_nodes: &[Vec<u8>],
     ) -> Result<(), CharterRefusal> {
         use bincode::Options;
+        use subtle::ConstantTimeEq;
         const MAX_UOL_MERKLE_PROOF_BYTES: u64 = 64 * 1024;
         const MAX_UOL_MERKLE_DEPTH: usize = 64;
+        if state_root.iter().all(|&b| b == 0)
+            || expected_code_hash.iter().all(|&b| b == 0)
+            || chain_reference.is_empty()
+            || !chain_reference.bytes().all(|b| b.is_ascii_graphic())
+            || address.is_empty()
+            || address.iter().all(|&b| b == 0)
+        {
+            return Err(CharterRefusal::ProofDisagrees);
+        }
         let [raw] = proof_nodes else {
             return Err(CharterRefusal::ProofDisagrees);
         };
@@ -396,7 +416,7 @@ pub trait FamilyProfile: Sync {
             address,
             &expected_code_hash,
         ]);
-        if merkle.leaf != expected_leaf || !merkle.verify(state_root) {
+        if !bool::from(merkle.leaf.ct_eq(&expected_leaf)) || !merkle.verify(state_root) {
             return Err(CharterRefusal::ProofDisagrees);
         }
         Ok(())
@@ -567,5 +587,112 @@ mod tests {
             profile.verify_home_slice_proof("solana:devnet", &[1; 32], &slice, &proof),
             Err(Refusal::UnprovenEvent)
         ));
+    }
+
+    #[test]
+    fn non_evm_home_slice_and_code_proofs_refuse_storage_proofs_and_zero_inputs() {
+        let profile = profile_for(HomeVmFamily::Svm);
+        let slice = ClassSlice::new();
+        let contract = [0x11u8; 32];
+        let leaf =
+            hash_fields_bytes(&[b"BDLM_UOL_SLICE_PROOF_V1", b"solana:devnet", &contract, &[]]);
+        let merkle = MerkleProof {
+            leaf,
+            index: 0,
+            siblings: Vec::new(),
+        };
+        let raw_merkle = bincode::serialize(&merkle).expect("encode merkle");
+
+        // Baseline valid non-EVM slice proof succeeds.
+        let valid_proof = HomeSliceProof {
+            state_root: leaf,
+            contract_account_proof: vec![raw_merkle.clone()],
+            storage_proofs: Vec::new(),
+        };
+        assert_eq!(
+            profile.verify_home_slice_proof("solana:devnet", &contract, &slice, &valid_proof),
+            Ok(())
+        );
+
+        // Non-empty unverified storage_proofs on a non-EVM family must be refused.
+        let mut with_storage = valid_proof.clone();
+        with_storage.storage_proofs = vec![([0xAA; 32], [0xBB; 32], vec![vec![0xDE, 0xAD]])];
+        assert_eq!(
+            profile.verify_home_slice_proof("solana:devnet", &contract, &slice, &with_storage),
+            Err(Refusal::UnprovenEvent),
+            "non-EVM home slice proof must reject unexpected storage_proofs"
+        );
+
+        // All-zero contract address must be refused even with a matching leaf proof.
+        let zero_contract = [0u8; 32];
+        let zero_leaf = hash_fields_bytes(&[
+            b"BDLM_UOL_SLICE_PROOF_V1",
+            b"solana:devnet",
+            &zero_contract,
+            &[],
+        ]);
+        let zero_merkle = bincode::serialize(&MerkleProof {
+            leaf: zero_leaf,
+            index: 0,
+            siblings: Vec::new(),
+        })
+        .expect("encode merkle");
+        let zero_contract_proof = HomeSliceProof {
+            state_root: zero_leaf,
+            contract_account_proof: vec![zero_merkle],
+            storage_proofs: Vec::new(),
+        };
+        assert_eq!(
+            profile.verify_home_slice_proof(
+                "solana:devnet",
+                &zero_contract,
+                &slice,
+                &zero_contract_proof
+            ),
+            Err(Refusal::UnprovenEvent)
+        );
+
+        // Home code entry must reject all-zero expected_code_hash, all-zero address, and blank chain_ref.
+        let zero_code_leaf = hash_fields_bytes(&[
+            b"BDLM_UOL_HOME_CODE_V1",
+            b"solana:devnet",
+            &contract,
+            &[0u8; 32],
+        ]);
+        let zero_code_merkle = bincode::serialize(&MerkleProof {
+            leaf: zero_code_leaf,
+            index: 0,
+            siblings: Vec::new(),
+        })
+        .expect("encode merkle");
+        assert_eq!(
+            profile.verify_home_code_entry(
+                "solana:devnet",
+                &contract,
+                [0u8; 32],
+                zero_code_leaf,
+                &[zero_code_merkle]
+            ),
+            Err(CharterRefusal::ProofDisagrees)
+        );
+
+        let blank_chain_leaf =
+            hash_fields_bytes(&[b"BDLM_UOL_HOME_CODE_V1", b"", &contract, &[0x22u8; 32]]);
+        let blank_chain_merkle = bincode::serialize(&MerkleProof {
+            leaf: blank_chain_leaf,
+            index: 0,
+            siblings: Vec::new(),
+        })
+        .expect("encode merkle");
+        assert_eq!(
+            profile.verify_home_code_entry(
+                "",
+                &contract,
+                [0x22u8; 32],
+                blank_chain_leaf,
+                &[blank_chain_merkle]
+            ),
+            Err(CharterRefusal::ProofDisagrees)
+        );
     }
 }
