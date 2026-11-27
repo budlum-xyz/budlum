@@ -1273,6 +1273,11 @@ mod tests {
             .verify_observed(&golden, &policy, &mut facts)
             .unwrap();
         assert_eq!(att.height, BATCH_INDEX);
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("MultiProver shape");
         assert_eq!(att.state_root, fx.claim.post_state_root);
         assert_eq!(att.attested_event_root, Some(fx.claim.withdrawal_root));
         assert_eq!(

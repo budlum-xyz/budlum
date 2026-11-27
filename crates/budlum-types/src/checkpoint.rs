@@ -146,6 +146,27 @@ impl ValidatorSetSnapshot {
     ///
     /// Returns a descriptive mismatch error if either field disagrees.
     pub fn validate_metadata(&self) -> Result<(), String> {
+        if self.validators.is_empty() {
+            return Err("ValidatorSetSnapshot validator set is empty".into());
+        }
+        let mut seen = BTreeSet::new();
+        for v in &self.validators {
+            if v.address == Address::zero() {
+                return Err("ValidatorSetSnapshot contains the zero address".into());
+            }
+            if v.stake == 0 {
+                return Err(format!(
+                    "ValidatorSetSnapshot validator {} has zero stake",
+                    v.address
+                ));
+            }
+            if !seen.insert(v.address) {
+                return Err(format!(
+                    "ValidatorSetSnapshot contains duplicate validator {}",
+                    v.address
+                ));
+            }
+        }
         let computed_hash = Self::compute_hash(&self.validators);
         if self.set_hash != computed_hash {
             return Err(format!(
@@ -548,13 +569,13 @@ impl QcBlob {
         if self.checkpoint_hash.is_empty() {
             return Err("QcBlob checkpoint hash is empty".into());
         }
+        if self.created_epoch > self.epoch {
+            return Err(format!(
+                "QcBlob created epoch {} is above its epoch {}",
+                self.created_epoch, self.epoch
+            ));
+        }
         if let Some(epoch) = current_epoch {
-            if self.created_epoch > self.epoch {
-                return Err(format!(
-                    "QcBlob created epoch {} is above its epoch {}",
-                    self.created_epoch, self.epoch
-                ));
-            }
             if self.is_expired(epoch) {
                 return Err(format!(
                     "QcBlob expired at epoch {} (created at {})",
@@ -575,6 +596,7 @@ impl QcBlob {
         }
 
         let mut verified_indices = BTreeSet::new();
+        let mut verified_addresses = BTreeSet::new();
         for entry in &self.pq_signatures {
             let idx = usize::try_from(entry.validator_index).map_err(|_| {
                 format!(
@@ -600,7 +622,13 @@ impl QcBlob {
                     validator.address
                 ));
             }
-            if !verified_indices.insert(idx) {
+            if entry.pq_signature.is_empty() {
+                return Err(format!(
+                    "Empty Dilithium signature for validator {}",
+                    validator.address
+                ));
+            }
+            if !verified_indices.insert(idx) || !verified_addresses.insert(validator.address) {
                 return Err(format!(
                     "Duplicate PQ signature for validator index {}",
                     entry.validator_index
@@ -916,5 +944,130 @@ mod tests {
         let mut trailing = raw;
         trailing.push(0);
         assert!(QcBlob::from_bytes(&trailing, 4).is_err());
+    }
+
+    #[test]
+    fn snapshot_metadata_and_qc_refuse_duplicate_zero_or_empty_validators() {
+        let empty = ValidatorSetSnapshot::new(1, Vec::new());
+        assert!(
+            empty.validate_metadata().is_err(),
+            "empty validator set must be refused"
+        );
+
+        let zero_addr = ValidatorSetSnapshot::new(
+            1,
+            vec![ValidatorEntry {
+                address: Address::zero(),
+                stake: 100,
+                bls_public_key: Vec::new(),
+                pop_signature: Vec::new(),
+                pq_public_key: vec![1; 32],
+            }],
+        );
+        assert!(
+            zero_addr.validate_metadata().is_err(),
+            "zero validator address must be refused"
+        );
+
+        let zero_stake = ValidatorSetSnapshot::new(
+            1,
+            vec![ValidatorEntry {
+                address: Address::from([0x11; 32]),
+                stake: 0,
+                bls_public_key: Vec::new(),
+                pop_signature: Vec::new(),
+                pq_public_key: vec![1; 32],
+            }],
+        );
+        assert!(
+            zero_stake.validate_metadata().is_err(),
+            "zero validator stake must be refused"
+        );
+
+        let dup_addr = Address::from([0x33; 32]);
+        let dup_entry = ValidatorEntry {
+            address: dup_addr,
+            stake: 50,
+            bls_public_key: Vec::new(),
+            pop_signature: Vec::new(),
+            pq_public_key: vec![4; 32],
+        };
+        let dup_snap = ValidatorSetSnapshot::new(2, vec![dup_entry.clone(), dup_entry]);
+        assert!(
+            dup_snap.validate_metadata().is_err(),
+            "duplicate validator address must be refused"
+        );
+
+        let qc = QcBlob::new(
+            2,
+            100,
+            "ab".repeat(32),
+            vec![
+                PqSignatureEntry {
+                    validator_index: 0,
+                    validator_address: dup_addr.to_hex(),
+                    pq_signature: vec![9; 16],
+                },
+                PqSignatureEntry {
+                    validator_index: 1,
+                    validator_address: dup_addr.to_hex(),
+                    pq_signature: vec![9; 16],
+                },
+            ],
+        );
+        assert!(
+            qc.verify_against_snapshot_with(&dup_snap, None, None, |_, _, _| Ok(()))
+                .is_err(),
+            "QcBlob must refuse duplicate validator address across distinct indices"
+        );
+    }
+
+    #[test]
+    fn qc_verify_refuses_future_created_epoch_without_clock_and_empty_signature() {
+        let addr = Address::from([0x44; 32]);
+        let snap = ValidatorSetSnapshot::new(
+            5,
+            vec![ValidatorEntry {
+                address: addr,
+                stake: 100,
+                bls_public_key: Vec::new(),
+                pop_signature: Vec::new(),
+                pq_public_key: vec![7; 32],
+            }],
+        );
+        let mut future_blob = QcBlob::new(
+            5,
+            200,
+            "cd".repeat(32),
+            vec![PqSignatureEntry {
+                validator_index: 0,
+                validator_address: addr.to_hex(),
+                pq_signature: vec![1; 32],
+            }],
+        );
+        future_blob.created_epoch = 6;
+        assert!(
+            future_blob
+                .verify_against_snapshot_with(&snap, None, None, |_, _, _| Ok(()))
+                .is_err(),
+            "created_epoch > epoch must be refused even when current_epoch is None"
+        );
+
+        let empty_sig_blob = QcBlob::new(
+            5,
+            200,
+            "cd".repeat(32),
+            vec![PqSignatureEntry {
+                validator_index: 0,
+                validator_address: addr.to_hex(),
+                pq_signature: Vec::new(),
+            }],
+        );
+        assert!(
+            empty_sig_blob
+                .verify_against_snapshot_with(&snap, None, None, |_, _, _| Ok(()))
+                .is_err(),
+            "empty PQ signature bytes must be refused before invoking verifier"
+        );
     }
 }
