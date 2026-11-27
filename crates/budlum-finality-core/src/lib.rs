@@ -280,6 +280,8 @@ pub enum FinalityProof {
     },
 }
 
+pub mod aggregation;
+
 #[cfg(test)]
 mod tests {
     use super::*;
