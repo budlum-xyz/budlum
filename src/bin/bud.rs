@@ -246,6 +246,35 @@ enum Command {
         #[arg(long, required = true)]
         anchored_at_block: u64,
     },
+    /// Submit any settlement transaction as JSON.
+    ///
+    /// The settlement enum has thirty-nine variants and the CLI named three of
+    /// them, so thirty-six complete doors - data market listings, app
+    /// registrations, education artifacts, universal payments, view grants,
+    /// data-layering moves, dictionaries, pins, masters - could be executed
+    /// only by hand-built RPC calls. A door nobody can walk through is a
+    /// function, not a door.
+    ///
+    /// One command instead of thirty-six flags sets: the JSON is the enum
+    /// itself, serialised the way the chain deserialises it, so a variant that
+    /// exists is a variant that is reachable, and a field that is required by
+    /// the door is required here without a second declaration to fall out of
+    /// step with.
+    Settle {
+        #[command(flatten)]
+        signer: V5Signer,
+        /// The transaction as JSON, e.g.
+        /// `{"DataMarket":{"Listing":{...}}}`. Read from the file when
+        /// `--file` is given, otherwise from this argument.
+        #[arg(long, conflicts_with = "file")]
+        tx: Option<String>,
+        /// Path to a file holding the JSON.
+        #[arg(long)]
+        file: Option<String>,
+        /// Print the parsed transaction and its id without sending it.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Universal finality certificates and cross-domain route guarantees.
     Finality {
         #[command(subcommand)]
@@ -2083,6 +2112,52 @@ fn run_denominate(
         budlum_core::settlement::domains::SettlementTx::Denominate(Box::new(denomination)),
     );
     send_v5(rpc_url, &key, v5_template(tx_type, 0, signer.fee), None)
+}
+
+fn run_settle(
+    rpc_url: &str,
+    signer: &V5Signer,
+    tx: Option<&str>,
+    file: Option<&str>,
+    dry_run: bool,
+) -> Result<(), String> {
+    use budlum_core::settlement::domains::SettlementTx;
+
+    let json = match (tx, file) {
+        (Some(inline), None) => inline.to_owned(),
+        (None, Some(path)) => {
+            std::fs::read_to_string(path).map_err(|err| format!("{path}: {err}"))?
+        }
+        (Some(_), Some(_)) => {
+            return Err(String::from("--tx and --file are mutually exclusive"));
+        }
+        (None, None) => {
+            return Err(String::from(
+                "one of --tx or --file is required: the settlement transaction JSON",
+            ));
+        }
+    };
+    // The door's own deserialiser decides what is well-formed, so the CLI
+    // cannot accept a shape the chain would refuse, nor refuse one it would
+    // accept.
+    let tx: SettlementTx = serde_json::from_str(&json)
+        .map_err(|err| format!("not a settlement transaction: {err}"))?;
+
+    if dry_run {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&tx).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+
+    let key = open_wallet(signer)?;
+    send_v5(
+        rpc_url,
+        &key,
+        v5_template(TransactionType::Settlement(tx), 0, signer.fee),
+        None,
+    )
 }
 
 fn run_delegation(
@@ -4582,6 +4657,18 @@ fn main() {
             anchor_root,
             *anchor_height,
             *anchored_at_block,
+        ),
+        Command::Settle {
+            signer,
+            tx,
+            file,
+            dry_run,
+        } => run_settle(
+            &cli.rpc_url,
+            signer,
+            tx.as_deref(),
+            file.as_deref(),
+            *dry_run,
         ),
         Command::Domain { action } => match action {
             DomainAction::RegisterPow {
