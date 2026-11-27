@@ -627,6 +627,17 @@ impl QcBlob {
 
 /// A Merkle path for a `u32` leaf index has at most 32 siblings.
 const MAX_MERKLE_PROOF_ELEMENTS: usize = 32;
+/// The P2P nested-payload budget; RPC must not admit a larger opaque proof.
+const MAX_ZK_QC_PROOF_BYTES: usize = 1024 * 1024;
+
+fn canonical_nonzero_digest(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 64
+        && bytes.iter().any(|byte| *byte != b'0')
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
 
 impl QcFaultProof {
     /// Version 2: proofs are produced and checked against the
@@ -811,14 +822,22 @@ impl QcFaultProof {
                 if proof_bytes.is_empty() {
                     return Err("Empty ZK QC proof".into());
                 }
-                if public_inputs.merkle_root.is_empty() {
-                    return Err("Empty ZK QC merkle root input".into());
+                if proof_bytes.len() > MAX_ZK_QC_PROOF_BYTES {
+                    return Err("ZK QC proof exceeds maximum size".into());
                 }
-                if public_inputs.pq_public_key_hash.is_empty() {
-                    return Err("Empty ZK QC PQ public key hash input".into());
-                }
-                if public_inputs.attestation_commitment.is_empty() {
-                    return Err("Empty ZK QC attestation commitment input".into());
+                for (label, value) in [
+                    ("merkle root", public_inputs.merkle_root.as_str()),
+                    ("public key hash", public_inputs.pq_public_key_hash.as_str()),
+                    (
+                        "attestation commitment",
+                        public_inputs.attestation_commitment.as_str(),
+                    ),
+                ] {
+                    if !canonical_nonzero_digest(value) {
+                        return Err(format!(
+                            "ZK QC {label} must be a canonical nonzero 32-byte lowercase hex digest"
+                        ));
+                    }
                 }
             }
         }
@@ -1533,11 +1552,11 @@ mod tests {
     }
 
     #[test]
-    fn test_zk_qc_fault_proof_is_versioned_but_stubbed() {
+    fn zk_qc_fault_proof_stays_closed_and_bounds_its_claims() {
         let (snapshot, keys) = make_snapshot_with_pq_keys(1);
         let entries = make_signed_entries(&snapshot, &keys, "cp");
         let blob = QcBlob::new(snapshot.epoch, 100, "cp".into(), entries);
-        let proof = QcFaultProof::new_zk_invalid_attestation(
+        let mut proof = QcFaultProof::new_zk_invalid_attestation(
             snapshot.epoch,
             100,
             "cp".into(),
@@ -1546,15 +1565,52 @@ mod tests {
             vec![1, 2, 3],
             ZkQcPublicInputs {
                 merkle_root: blob.merkle_root.clone(),
-                pq_public_key_hash: "pq_pk_hash".into(),
-                attestation_commitment: "attestation_commitment".into(),
+                pq_public_key_hash: "11".repeat(32),
+                attestation_commitment: "22".repeat(32),
             },
         );
 
+        assert!(proof.validate().is_ok());
         let result = proof.verify_against_blob(&blob, &snapshot);
         assert!(result
             .unwrap_err()
             .contains("ZK QC fault proof verifier not implemented"));
+
+        assert!(matches!(
+            proof.kind,
+            QcProofKind::ZkInvalidAttestationV1 { .. }
+        ));
+        if let QcProofKind::ZkInvalidAttestationV1 { proof_bytes, .. } = &mut proof.kind {
+            *proof_bytes = vec![0u8; 1_048_577];
+        }
+        assert!(proof
+            .validate()
+            .is_err_and(|err| err.contains("exceeds maximum size")));
+        if let QcProofKind::ZkInvalidAttestationV1 {
+            proof_bytes,
+            public_inputs,
+        } = &mut proof.kind
+        {
+            *proof_bytes = vec![1];
+            public_inputs.merkle_root = "00".repeat(31);
+        }
+        assert!(proof
+            .validate()
+            .is_err_and(|err| err.contains("merkle root")));
+        if let QcProofKind::ZkInvalidAttestationV1 { public_inputs, .. } = &mut proof.kind {
+            public_inputs.merkle_root = blob.merkle_root.clone();
+            public_inputs.pq_public_key_hash = "FF".repeat(32);
+        }
+        assert!(proof
+            .validate()
+            .is_err_and(|err| err.contains("public key hash")));
+        if let QcProofKind::ZkInvalidAttestationV1 { public_inputs, .. } = &mut proof.kind {
+            public_inputs.pq_public_key_hash = "11".repeat(32);
+            public_inputs.attestation_commitment = "00".repeat(32);
+        }
+        assert!(proof
+            .validate()
+            .is_err_and(|err| err.contains("attestation commitment")));
     }
 
     #[test]
