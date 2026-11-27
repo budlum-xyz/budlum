@@ -398,7 +398,7 @@ impl EvmFinalityAttestation {
     ///
     /// Returns an error if the operation fails.
     pub fn encode_verify_calldata(&self, evm_chain_id: u64) -> Result<Vec<u8>, EvmEncodingError> {
-        if self.budlum_chain_id == 0 {
+        if evm_chain_id == 0 || self.budlum_chain_id == 0 {
             return Err(EvmEncodingError::ZeroChainId);
         }
         if self.state_root == [0u8; 32] {
@@ -812,9 +812,14 @@ mod tests {
         zero_root.state_root = [0; 32];
         assert!(zero_root.encode_verify_calldata(11_155_111).is_err());
 
-        let mut zero_chain = valid;
+        let mut zero_chain = valid.clone();
         zero_chain.budlum_chain_id = 0;
         assert!(zero_chain.encode_verify_calldata(11_155_111).is_err());
+
+        assert!(
+            valid.encode_verify_calldata(0).is_err(),
+            "target evm_chain_id == 0 must fail closed with ZeroChainId"
+        );
     }
 
     #[test]
