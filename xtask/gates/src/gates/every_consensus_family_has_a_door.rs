@@ -1,0 +1,525 @@
+//! Every canonical external consensus family must be reachable from the
+//! production registration door.
+//!
+//! # What this measures
+//!
+//! `ExternalVerifierFamily` in `src/domain/finality_proof_model.rs` is the
+//! canonical list of external consensus families this node claims to verify:
+//! each variant owns a `consensus_kind` string, a descriptor profile
+//! (`verify_descriptor`) and a place in the shared proof model. It is the
+//! public statement of what "consensus of consensuses" covers.
+//!
+//! A family is only *reachable* if a chain can actually admit a domain of
+//! that family. There is exactly one production path that admits one:
+//!
+//! ```text
+//! ExternalDomainTx::Register { spec, .. }
+//!   -> IntakeState::register_domain(spec, ..)        (intake.rs)
+//!   -> AdapterSpec::build(..) -> Box<dyn ExternalFinalityAdapter>
+//!   -> adapter.descriptor().consensus_kind
+//!   -> ExternalDomainRegistry::register(..)
+//! ```
+//!
+//! So the reachable set is exactly the set of `consensus_kind` strings the
+//! adapters built by `AdapterSpec::build` declare. A family whose
+//! `consensus_kind` is produced by no `AdapterSpec` arm has a verifier, a
+//! profile and a shape, but **no door**: no transaction can ever install it.
+//! That is a reachability claim the tree makes in its model and does not keep
+//! at its door, and nothing else in the gate set measures it.
+//!
+//! # Why a gate rather than a note
+//!
+//! The gap is invisible from either side. Reading `finality_proof_model.rs`
+//! shows a family list; reading `intake.rs` shows a spec list; only the join
+//! shows that the lists differ. Each new adapter is written in its own module
+//! and registers its canonical kind there, so the join drifts silently every
+//! time a family is added without a spec variant.
+//!
+//! # How it reads the tree
+//!
+//! `syn`, not substrings. Three passes:
+//!
+//!   1. `ExternalVerifierFamily` variants and the `consensus_kind()` match,
+//!      from the proof model.
+//!   2. `AdapterSpec` variants and the `AdapterSpec::build` match arms, from
+//!      intake; each arm is reduced to the adapter type it constructs.
+//!   3. For each adapter type, the `consensus_kind: "..."` literal inside an
+//!      `impl` block for that type, across `src/cross_domain/external/*.rs`.
+//!
+//! The gate is fail-closed in both directions: an arm whose adapter type
+//! cannot be resolved, and an adapter type whose `consensus_kind` cannot be
+//! found, are both failures. An unresolved join must never read as "covered".
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
+use std::path::Path;
+
+use quote::ToTokens;
+use syn::{Expr, Item, Lit};
+
+const MODEL: &str = "src/domain/finality_proof_model.rs";
+const INTAKE: &str = "src/cross_domain/external/intake.rs";
+const EXTERNAL_DIR: &str = "src/cross_domain/external";
+
+fn parse(root: &Path, rel: &str) -> Result<syn::File, String> {
+    let path = root.join(rel);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("{rel} could not be read: {e}"))?;
+    syn::parse_file(&text).map_err(|e| format!("{rel} does not parse: {e}"))
+}
+
+/// Walk every item, including items nested in `mod` blocks.
+fn walk_items<'a>(items: &'a [Item], out: &mut Vec<&'a Item>) {
+    for item in items {
+        out.push(item);
+        if let Item::Mod(m) = item {
+            if let Some((_, inner)) = &m.content {
+                walk_items(inner, out);
+            }
+        }
+    }
+}
+
+fn flat_items(file: &syn::File) -> Vec<&Item> {
+    let mut out = Vec::new();
+    walk_items(&file.items, &mut out);
+    out
+}
+
+/// The canonical families and the `consensus_kind` each one claims.
+fn canonical_families(root: &Path) -> Result<BTreeMap<String, String>, String> {
+    let file = parse(root, MODEL)?;
+    let items = flat_items(&file);
+
+    let mut names: Vec<String> = Vec::new();
+    for item in &items {
+        if let Item::Enum(e) = item {
+            if e.ident == "ExternalVerifierFamily" {
+                names = e.variants.iter().map(|v| v.ident.to_string()).collect();
+            }
+        }
+    }
+    if names.is_empty() {
+        return Err(format!("{MODEL}: enum ExternalVerifierFamily not found"));
+    }
+
+    // `const fn consensus_kind(self) -> &'static str { match self { .. } }`
+    let mut kinds: BTreeMap<String, String> = BTreeMap::new();
+    for item in &items {
+        let Item::Impl(imp) = item else { continue };
+        if imp.self_ty.to_token_stream().to_string() != "ExternalVerifierFamily" {
+            continue;
+        }
+        for sub in &imp.items {
+            let syn::ImplItem::Fn(f) = sub else { continue };
+            if f.sig.ident != "consensus_kind" {
+                continue;
+            }
+            for stmt in &f.block.stmts {
+                let expr = match stmt {
+                    syn::Stmt::Expr(e, _) => e,
+                    _ => continue,
+                };
+                let Expr::Match(m) = expr else { continue };
+                for arm in &m.arms {
+                    let variant = arm
+                        .pat
+                        .to_token_stream()
+                        .to_string()
+                        .replace(' ', "")
+                        .trim_start_matches("Self::")
+                        .to_string();
+                    if let Expr::Lit(l) = &*arm.body {
+                        if let Lit::Str(s) = &l.lit {
+                            kinds.insert(variant, s.value());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out = BTreeMap::new();
+    for name in names {
+        let Some(kind) = kinds.get(&name) else {
+            return Err(format!(
+                "{MODEL}: ExternalVerifierFamily::{name} has no consensus_kind arm"
+            ));
+        };
+        out.insert(name, kind.clone());
+    }
+    Ok(out)
+}
+
+/// Every `AdapterSpec` variant, and the adapter type its `build` arm
+/// constructs. An arm that constructs nothing resolves to `None`, which the
+/// caller treats as a failure rather than as coverage.
+fn spec_arms(root: &Path) -> Result<BTreeMap<String, Option<String>>, String> {
+    let file = parse(root, INTAKE)?;
+    let items = flat_items(&file);
+
+    let mut variants: Vec<String> = Vec::new();
+    for item in &items {
+        if let Item::Enum(e) = item {
+            if e.ident == "AdapterSpec" {
+                variants = e.variants.iter().map(|v| v.ident.to_string()).collect();
+            }
+        }
+    }
+    if variants.is_empty() {
+        return Err(format!("{INTAKE}: enum AdapterSpec not found"));
+    }
+
+    let mut built: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for item in &items {
+        let Item::Impl(imp) = item else { continue };
+        if imp.self_ty.to_token_stream().to_string() != "AdapterSpec" {
+            continue;
+        }
+        for sub in &imp.items {
+            let syn::ImplItem::Fn(f) = sub else { continue };
+            if f.sig.ident != "build" {
+                continue;
+            }
+            for stmt in &f.block.stmts {
+                let expr = match stmt {
+                    syn::Stmt::Expr(e, _) => e,
+                    _ => continue,
+                };
+                let Expr::Match(m) = expr else { continue };
+                for arm in &m.arms {
+                    let pat = arm.pat.to_token_stream().to_string().replace(' ', "");
+                    let Some(variant) = pat
+                        .strip_prefix("Self::")
+                        .map(|p| {
+                            p.chars()
+                                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                                .collect::<String>()
+                        })
+                        .filter(|v| !v.is_empty())
+                    else {
+                        continue;
+                    };
+                    built.insert(variant, adapter_type_in(&arm.body));
+                }
+            }
+        }
+    }
+
+    let mut out = BTreeMap::new();
+    for v in variants {
+        let arm = built.get(&v).cloned().ok_or_else(|| {
+            format!("{INTAKE}: AdapterSpec::{v} has no arm in AdapterSpec::build")
+        })?;
+        out.insert(v, arm);
+    }
+    Ok(out)
+}
+
+/// The adapter type a build arm constructs.
+///
+/// Constructor names are not uniform across the arms (`new`, `new_pinned`,
+/// `new_optional`, a `pinned.build_adapter(..)` helper), so the arm is not
+/// matched on a function name. Every `<Type>::<assoc>` path in the arm whose
+/// `Type` ends in `Adapter` is collected instead; each arm names its adapter
+/// type at least once, through its constructor or through the
+/// `<Type>::with_golden` rebuild handle `box_with_golden` takes.
+///
+/// Fail-closed: zero candidates, or two different adapter types in one arm,
+/// resolve to `None`. A reader cannot tell which family such an arm admits,
+/// so neither may the gate.
+fn adapter_type_in(body: &Expr) -> Option<String> {
+    let text = body.to_token_stream().to_string().replace(' ', "");
+    let bytes = text.as_bytes();
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    let mut from = 0usize;
+    while let Some(i) = text[from..].find("::") {
+        let at = from + i;
+        from = at + 2;
+        let start = text[..at]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map_or(0, |i| i + 1);
+        let ty = &text[start..at];
+        // The segment may be the tail of a fully qualified path
+        // (`crate::..::module::TypeAdapter::new`); the type is the segment
+        // immediately before the `::`, wherever the path started.
+        if !ty.ends_with("Adapter") || !ty.starts_with(|c: char| c.is_ascii_uppercase()) {
+            continue;
+        }
+        // `Type::assoc` only: a trailing `::<` turbofish is not a call here.
+        if bytes.get(from).is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_') {
+            found.insert(ty.to_string());
+        }
+    }
+    if found.len() == 1 {
+        found.into_iter().next()
+    } else {
+        None
+    }
+}
+
+/// `adapter type -> consensus_kind` strings declared inside an `impl` for
+/// that type, over the whole external adapter directory.
+fn declared_kinds(root: &Path) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
+    let dir = root.join(EXTERNAL_DIR);
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("{EXTERNAL_DIR} could not be listed: {e}"))?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .collect();
+    entries.sort();
+
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for path in entries {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("{} could not be read: {e}", path.display()))?;
+        let Ok(file) = syn::parse_file(&text) else {
+            // Parseability is another gate's job; an unparsed file simply
+            // contributes nothing here, and a family left uncovered by it
+            // still fails this gate.
+            continue;
+        };
+        for item in flat_items(&file) {
+            let Item::Impl(imp) = item else { continue };
+            let ty = imp.self_ty.to_token_stream().to_string().replace(' ', "");
+            let ty = ty.split('<').next().unwrap_or(&ty).to_string();
+            let body = imp.to_token_stream().to_string();
+            for kind in kind_literals(&body) {
+                out.entry(ty.clone()).or_default().insert(kind);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `consensus_kind : "literal"` occurrences in a token-stream rendering.
+fn kind_literals(tokens: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let needle = "consensus_kind :";
+    let mut from = 0;
+    while let Some(i) = tokens[from..].find(needle) {
+        let at = from + i + needle.len();
+        from = at;
+        let rest = tokens[at..].trim_start();
+        if !rest.starts_with('"') {
+            continue;
+        }
+        let body = &rest[1..];
+        let Some(end) = body.find('"') else { continue };
+        out.push(body[..end].to_string());
+    }
+    out
+}
+
+/// # Errors
+///
+/// A canonical consensus family that no `AdapterSpec` variant can admit, a
+/// build arm whose adapter type cannot be resolved, or an adapter type whose
+/// `consensus_kind` is not declared in its own module.
+pub fn run(root: &Path) -> Result<String, String> {
+    let families = canonical_families(root)?;
+    let specs = spec_arms(root)?;
+    let kinds = declared_kinds(root)?;
+
+    let mut unresolved: Vec<String> = Vec::new();
+    let mut reachable: BTreeMap<String, String> = BTreeMap::new();
+    for (variant, adapter) in &specs {
+        let Some(adapter) = adapter else {
+            unresolved.push(format!(
+                "AdapterSpec::{variant} build arm constructs no adapter type"
+            ));
+            continue;
+        };
+        let Some(declared) = kinds.get(adapter) else {
+            unresolved.push(format!(
+                "AdapterSpec::{variant} builds {adapter}, which declares no consensus_kind"
+            ));
+            continue;
+        };
+        for kind in declared {
+            reachable.insert(kind.clone(), variant.clone());
+        }
+    }
+
+    let mut doorless: Vec<(&String, &String)> = families
+        .iter()
+        .filter(|(_, kind)| !reachable.contains_key(*kind))
+        .collect();
+    doorless.sort();
+
+    if !unresolved.is_empty() || !doorless.is_empty() {
+        let mut msg = String::new();
+        let _ = writeln!(
+            msg,
+            "{} of {} canonical consensus families are reachable from AdapterSpec.",
+            families.len() - doorless.len(),
+            families.len()
+        );
+        for (family, kind) in &doorless {
+            let _ = writeln!(
+                msg,
+                "  no door: ExternalVerifierFamily::{family} (\"{kind}\") has a verifier and a \
+                 profile, but no AdapterSpec variant builds an adapter that declares it, so \
+                 ExternalDomainTx::Register can never admit a domain of this family"
+            );
+        }
+        for u in &unresolved {
+            let _ = writeln!(msg, "  unresolved: {u}");
+        }
+        let _ = write!(
+            msg,
+            "Add the AdapterSpec variant (with its build, network and signature-preimage arms), \
+             or delete the family from ExternalVerifierFamily. A family the model names and the \
+             door refuses is a claim the node cannot keep."
+        );
+        return Err(msg);
+    }
+
+    Ok(format!(
+        "every consensus family has a door: {} canonical families, {} AdapterSpec variants, {} \
+         reachable consensus_kind(s); the model and the registration door agree",
+        families.len(),
+        specs.len(),
+        reachable.len()
+    ))
+}
+
+pub fn self_test() -> Result<String, String> {
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ecfhad")?;
+    let model_dir = dir.join("src/domain");
+    let ext_dir = dir.join(EXTERNAL_DIR);
+    std::fs::create_dir_all(&model_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&ext_dir).map_err(|e| e.to_string())?;
+
+    let model = |families: &str, arms: &str| {
+        format!(
+            "pub enum ExternalVerifierFamily {{\n{families}}}\n\
+             impl ExternalVerifierFamily {{\n    \
+             pub const fn consensus_kind(self) -> &'static str {{\n        \
+             match self {{\n{arms}        }}\n    }}\n}}\n"
+        )
+    };
+    let intake = |variants: &str, arms: &str| {
+        format!(
+            "pub enum AdapterSpec {{\n{variants}}}\n\
+             impl AdapterSpec {{\n    pub fn build(&self) -> u8 {{\n        \
+             match self {{\n{arms}        }}\n    }}\n}}\n"
+        )
+    };
+
+    let write = |families: &str, kind_arms: &str, variants: &str, build_arms: &str, adapters: &str| -> Result<(), String> {
+        std::fs::write(model_dir.join("finality_proof_model.rs"), model(families, kind_arms))
+            .map_err(|e| e.to_string())?;
+        std::fs::write(ext_dir.join("intake.rs"), intake(variants, build_arms))
+            .map_err(|e| e.to_string())?;
+        std::fs::write(ext_dir.join("adapters.rs"), adapters).map_err(|e| e.to_string())
+    };
+
+    let cleanup = |dir: &Path| {
+        let _ = std::fs::remove_dir_all(dir);
+    };
+
+    // Canary 1 - honest tree: one family, one spec, one adapter that declares
+    // the family's kind. Must pass.
+    write(
+        "    Alpha,\n",
+        "            Self::Alpha => \"alpha-bft\",\n",
+        "    AlphaSpec { network: String },\n",
+        "            Self::AlphaSpec { .. } => AlphaAdapter::new(1),\n",
+        "impl AlphaAdapter {\n    fn d(&self) -> D {\n        D { consensus_kind: \"alpha-bft\".to_string() }\n    }\n}\n",
+    )?;
+    if let Err(e) = run(&dir) {
+        cleanup(&dir);
+        return Err(format!("canary 1: an honest tree was rejected: {e}"));
+    }
+
+    // Canary 2 - a family with no door. Must fail and name the family.
+    write(
+        "    Alpha,\n    Beta,\n",
+        "            Self::Alpha => \"alpha-bft\",\n            Self::Beta => \"beta-pow\",\n",
+        "    AlphaSpec { network: String },\n",
+        "            Self::AlphaSpec { .. } => AlphaAdapter::new(1),\n",
+        "impl AlphaAdapter {\n    fn d(&self) -> D {\n        D { consensus_kind: \"alpha-bft\".to_string() }\n    }\n}\n",
+    )?;
+    match run(&dir) {
+        Ok(_) => {
+            cleanup(&dir);
+            return Err(String::from(
+                "canary 2: a family with no AdapterSpec variant was accepted",
+            ));
+        }
+        Err(e) if !e.contains("Beta") => {
+            cleanup(&dir);
+            return Err(format!("canary 2: failed without naming the family: {e}"));
+        }
+        Err(_) => {}
+    }
+
+    // Canary 3 - the spec exists but builds an adapter that declares a
+    // different kind. Coverage must not be inferred from the variant name.
+    write(
+        "    Beta,\n",
+        "            Self::Beta => \"beta-pow\",\n",
+        "    Beta { network: String },\n",
+        "            Self::Beta { .. } => AlphaAdapter::new(1),\n",
+        "impl AlphaAdapter {\n    fn d(&self) -> D {\n        D { consensus_kind: \"alpha-bft\".to_string() }\n    }\n}\n",
+    )?;
+    match run(&dir) {
+        Ok(_) => {
+            cleanup(&dir);
+            return Err(String::from(
+                "canary 3: a same-named spec building a foreign adapter was accepted",
+            ));
+        }
+        Err(_) => {}
+    }
+
+    // Canary 4 - a build arm that constructs nothing must be unresolved, not
+    // silently treated as covering its family.
+    write(
+        "    Alpha,\n",
+        "            Self::Alpha => \"alpha-bft\",\n",
+        "    Alpha { network: String },\n",
+        "            Self::Alpha { .. } => 0u8,\n",
+        "impl AlphaAdapter {\n    fn d(&self) -> D {\n        D { consensus_kind: \"alpha-bft\".to_string() }\n    }\n}\n",
+    )?;
+    match run(&dir) {
+        Ok(_) => {
+            cleanup(&dir);
+            return Err(String::from(
+                "canary 4: a build arm constructing no adapter was accepted as a door",
+            ));
+        }
+        Err(e) if !e.contains("unresolved") && !e.contains("no door") => {
+            cleanup(&dir);
+            return Err(format!("canary 4: failed for the wrong reason: {e}"));
+        }
+        Err(_) => {}
+    }
+
+    // Canary 5 - an adapter type with no declared consensus_kind is
+    // unresolved, so its family is still doorless.
+    write(
+        "    Alpha,\n",
+        "            Self::Alpha => \"alpha-bft\",\n",
+        "    Alpha { network: String },\n",
+        "            Self::Alpha { .. } => GhostAdapter::new(1),\n",
+        "impl AlphaAdapter {\n    fn d(&self) -> D {\n        D { consensus_kind: \"alpha-bft\".to_string() }\n    }\n}\n",
+    )?;
+    match run(&dir) {
+        Ok(_) => {
+            cleanup(&dir);
+            return Err(String::from(
+                "canary 5: an adapter declaring no consensus_kind was accepted as a door",
+            ));
+        }
+        Err(_) => {}
+    }
+
+    cleanup(&dir);
+    Ok(String::from(
+        "every-consensus-family-has-a-door self-test OK: 5 canaries (honest tree, doorless \
+         family, name-only match, empty build arm, undeclared adapter kind)",
+    ))
+}

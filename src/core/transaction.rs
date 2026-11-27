@@ -6019,6 +6019,488 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
+        AdapterSpec::AlgorandStateProof { network, pinned } => {
+            put_u8(out, 21);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    encode_algorand_state_proof_pin(pin, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::ArweaveSpOra { network, pinned } => {
+            put_u8(out, 22);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    encode_arweave_spora_pin(pin, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::AuxPowPop { network, pinned } => {
+            put_u8(out, 23);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    encode_auxpow_pop_pin(pin, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::BasedPreconf { network, pinned } => {
+            put_u8(out, 24);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    encode_based_preconf_pin(pin, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::MinaSuccinctRecursive { network, pinned } => {
+            put_u8(out, 25);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    encode_mina_succinct_recursive_pin(pin, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::OuroborosMithril { network, pinned } => {
+            put_u8(out, 26);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    encode_ouroboros_mithril_pin(pin, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::RestakingAvs { network, pinned } => {
+            put_u8(out, 27);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    encode_restaking_avs_pin(pin, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::SimplexBft { network, pinned } => {
+            put_u8(out, 28);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    encode_simplex_bft_pin(pin, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::StellarScp { network, pinned } => {
+            put_u8(out, 29);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    encode_stellar_scp_pin(pin, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::SymbioticVault { network, pinned } => {
+            put_u8(out, 30);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    encode_symbiotic_vault_pin(pin, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::TonCatchainBft { network, pinned } => {
+            put_u8(out, 31);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    encode_ton_catchain_bft_pin(pin, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+    }
+}
+
+/// The signed preimage of an `AdapterSpec::AlgorandStateProof` pin.
+///
+/// One function per family: the destructuring is exhaustive on purpose, so a
+/// field added to the pinned type stops compiling here instead of quietly
+/// leaving the new field outside the signature.
+fn encode_algorand_state_proof_pin(
+    pin: &crate::cross_domain::external::algorand_stateproof::PinnedAlgorandVerifier,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::algorand_stateproof::PinnedAlgorandVerifier {
+        genesis_hash,
+        interval_index,
+        first_round,
+        last_round,
+        voters_commitment,
+        voter_count,
+        total_weight,
+        threshold_bps,
+    } = pin;
+    put_fixed(out, genesis_hash);
+    put_u64(out, *interval_index);
+    put_u64(out, *first_round);
+    put_u64(out, *last_round);
+    put_fixed(out, voters_commitment);
+    put_u32(out, *voter_count);
+    put_u128(out, *total_weight);
+    put_u32(out, u32::from(*threshold_bps));
+}
+
+/// The signed preimage of an `AdapterSpec::ArweaveSpOra` pin.
+///
+/// One function per family: the destructuring is exhaustive on purpose, so a
+/// field added to the pinned type stops compiling here instead of quietly
+/// leaving the new field outside the signature.
+fn encode_arweave_spora_pin(
+    pin: &crate::cross_domain::external::arweave_spora::PinnedArweaveOperator,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::arweave_spora::PinnedArweaveOperator {
+        ed25519_pubkey,
+        pq_pubkey,
+    } = pin;
+    put_fixed(out, ed25519_pubkey);
+    put_bytes(out, pq_pubkey);
+}
+
+/// The signed preimage of an `AdapterSpec::AuxPowPop` pin.
+///
+/// One function per family: the destructuring is exhaustive on purpose, so a
+/// field added to the pinned type stops compiling here instead of quietly
+/// leaving the new field outside the signature.
+fn encode_auxpow_pop_pin(
+    pin: &crate::cross_domain::external::auxpow_pop::PinnedAuxPowAnchor,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::auxpow_pop::PinnedAuxPowAnchor {
+        aux_chain_id,
+        trusted_parent_hash,
+        max_target_bits,
+        min_cumulative_work,
+        min_confirmations,
+        pop_signers,
+    } = pin;
+    put_u32(out, *aux_chain_id);
+    put_fixed(out, trusted_parent_hash);
+    put_u32(out, *max_target_bits);
+    put_fixed(out, min_cumulative_work);
+    put_u64(out, *min_confirmations);
+    put_u64(out, pop_signers.len() as u64);
+    for signer in pop_signers {
+        let crate::cross_domain::external::auxpow_pop::PopAnchorSigner {
+            ed25519_pubkey,
+            bond_weight,
+            pq_pubkey,
+        } = signer;
+        put_fixed(out, ed25519_pubkey);
+        put_u64(out, *bond_weight);
+        put_bytes(out, pq_pubkey);
+    }
+}
+
+/// The signed preimage of an `AdapterSpec::BasedPreconf` pin.
+///
+/// One function per family: the destructuring is exhaustive on purpose, so a
+/// field added to the pinned type stops compiling here instead of quietly
+/// leaving the new field outside the signature.
+fn encode_based_preconf_pin(
+    pin: &crate::cross_domain::external::based_preconf::PinnedBasedPreconfCommittee,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::based_preconf::PinnedBasedPreconfCommittee {
+        epoch,
+        l1_chain_id,
+        require_focil,
+        members,
+    } = pin;
+    put_u64(out, *epoch);
+    put_u64(out, *l1_chain_id);
+    put_u8(out, u8::from(*require_focil));
+    put_u64(out, members.len() as u64);
+    for member in members {
+        let crate::cross_domain::external::based_preconf::BasedPreconfValidator {
+            ed25519_pubkey,
+            voting_weight,
+            pq_pubkey,
+        } = member;
+        put_fixed(out, ed25519_pubkey);
+        put_u64(out, *voting_weight);
+        put_bytes(out, pq_pubkey);
+    }
+}
+
+/// The signed preimage of an `AdapterSpec::MinaSuccinctRecursive` pin.
+///
+/// One function per family: the destructuring is exhaustive on purpose, so a
+/// field added to the pinned type stops compiling here instead of quietly
+/// leaving the new field outside the signature.
+fn encode_mina_succinct_recursive_pin(
+    pin: &crate::cross_domain::external::mina_recursive::PinnedSuccinctGenesis,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::mina_recursive::PinnedSuccinctGenesis {
+        genesis_state_hash,
+        genesis_staking_ledger_root,
+        step_program_hash,
+        slots_per_sub_window,
+        slots_per_epoch,
+        min_window_density_slots,
+        aggregator_pq_pubkey,
+    } = pin;
+    put_fixed(out, genesis_state_hash);
+    put_fixed(out, genesis_staking_ledger_root);
+    put_fixed(out, step_program_hash);
+    put_u64(out, *slots_per_sub_window);
+    put_u64(out, *slots_per_epoch);
+    put_u64(out, *min_window_density_slots);
+    put_bytes(out, aggregator_pq_pubkey);
+}
+
+/// The signed preimage of an `AdapterSpec::OuroborosMithril` pin.
+///
+/// One function per family: the destructuring is exhaustive on purpose, so a
+/// field added to the pinned type stops compiling here instead of quietly
+/// leaving the new field outside the signature.
+fn encode_ouroboros_mithril_pin(
+    pin: &crate::cross_domain::external::ouroboros_mithril::PinnedPraosEpochs,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::ouroboros_mithril::PinnedPraosEpochs { chain_id, epochs } =
+        pin;
+    put_u64(out, *chain_id);
+    put_u64(out, epochs.len() as u64);
+    for stake in epochs {
+        let crate::cross_domain::external::ouroboros_mithril::EpochStake { epoch, signers } = stake;
+        put_u64(out, *epoch);
+        put_u64(out, signers.len() as u64);
+        for signer in signers {
+            let crate::cross_domain::external::ouroboros_mithril::EpochSigner { public_key, stake } =
+                signer;
+            put_fixed(out, public_key);
+            put_u128(out, *stake);
+        }
+    }
+}
+
+/// The signed preimage of an `AdapterSpec::RestakingAvs` pin.
+///
+/// One function per family: the destructuring is exhaustive on purpose, so a
+/// field added to the pinned type stops compiling here instead of quietly
+/// leaving the new field outside the signature.
+fn encode_restaking_avs_pin(
+    pin: &crate::cross_domain::external::restaking_avs::PinnedRestakingAvsSet,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::restaking_avs::PinnedRestakingAvsSet {
+        epoch,
+        min_withdrawal_delay,
+        max_shared_avs_per_operator,
+        min_effective_restaked_stake,
+        native_validators,
+        restaked_operators,
+        eots_providers,
+    } = pin;
+    put_u64(out, *epoch);
+    put_u64(out, *min_withdrawal_delay);
+    put_u32(out, *max_shared_avs_per_operator);
+    put_u128(out, *min_effective_restaked_stake);
+    put_avs_quorum_members(out, native_validators);
+    put_u64(out, restaked_operators.len() as u64);
+    for operator in restaked_operators {
+        let crate::cross_domain::external::restaking_avs::RestakedOperator {
+            ed25519_pubkey,
+            raw_stake,
+            shared_avs_count,
+            pq_pubkey,
+        } = operator;
+        put_fixed(out, ed25519_pubkey);
+        put_u64(out, *raw_stake);
+        put_u32(out, *shared_avs_count);
+        put_bytes(out, pq_pubkey);
+    }
+    put_avs_quorum_members(out, eots_providers);
+}
+
+/// The signed preimage of an `AdapterSpec::SimplexBft` pin.
+///
+/// One function per family: the destructuring is exhaustive on purpose, so a
+/// field added to the pinned type stops compiling here instead of quietly
+/// leaving the new field outside the signature.
+fn encode_simplex_bft_pin(
+    pin: &crate::cross_domain::external::simplex_bft::PinnedSimplexCommittee,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::simplex_bft::PinnedSimplexCommittee { epoch, validators } =
+        pin;
+    put_u64(out, *epoch);
+    put_u64(out, validators.len() as u64);
+    for validator in validators {
+        let crate::cross_domain::external::simplex_bft::SimplexValidator {
+            ed25519_pubkey,
+            stake_weight,
+            pq_pubkey,
+        } = validator;
+        put_fixed(out, ed25519_pubkey);
+        put_u64(out, *stake_weight);
+        put_bytes(out, pq_pubkey);
+    }
+}
+
+/// The signed preimage of an `AdapterSpec::StellarScp` pin.
+///
+/// One function per family: the destructuring is exhaustive on purpose, so a
+/// field added to the pinned type stops compiling here instead of quietly
+/// leaving the new field outside the signature.
+fn encode_stellar_scp_pin(
+    pin: &crate::cross_domain::external::stellar_fba::PinnedScpTier,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::stellar_fba::PinnedScpTier {
+        network_passphrase,
+        has_bonded_slash_escrow,
+        nodes,
+    } = pin;
+    put_string(out, network_passphrase);
+    put_u8(out, u8::from(*has_bonded_slash_escrow));
+    put_u64(out, nodes.len() as u64);
+    for node in nodes {
+        let crate::cross_domain::external::stellar_fba::ScpValidatorNode {
+            ed25519_pubkey,
+            quorum_set,
+            pq_pubkey,
+        } = node;
+        put_fixed(out, ed25519_pubkey);
+        put_scp_quorum_set(out, quorum_set);
+        put_bytes(out, pq_pubkey);
+    }
+}
+
+/// The signed preimage of an `AdapterSpec::SymbioticVault` pin.
+///
+/// One function per family: the destructuring is exhaustive on purpose, so a
+/// field added to the pinned type stops compiling here instead of quietly
+/// leaving the new field outside the signature.
+fn encode_symbiotic_vault_pin(
+    pin: &crate::cross_domain::external::symbiotic_vault::PinnedSymbioticCommittee,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::symbiotic_vault::PinnedSymbioticCommittee {
+        classical_keys,
+        pq_keys,
+    } = pin;
+    put_u64(out, classical_keys.len() as u64);
+    for key in classical_keys {
+        put_bytes(out, key);
+    }
+    put_u64(out, pq_keys.len() as u64);
+    for key in pq_keys {
+        put_bytes(out, key);
+    }
+}
+
+/// The signed preimage of an `AdapterSpec::TonCatchainBft` pin.
+///
+/// One function per family: the destructuring is exhaustive on purpose, so a
+/// field added to the pinned type stops compiling here instead of quietly
+/// leaving the new field outside the signature.
+fn encode_ton_catchain_bft_pin(
+    pin: &crate::cross_domain::external::ton_catchain::PinnedTonMasterchainAnchor,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::ton_catchain::PinnedTonMasterchainAnchor {
+        key_block_seqno,
+        utime_since,
+        utime_until,
+        validators,
+    } = pin;
+    put_u64(out, *key_block_seqno);
+    put_u64(out, *utime_since);
+    put_u64(out, *utime_until);
+    put_u64(out, validators.len() as u64);
+    for validator in validators {
+        let crate::cross_domain::external::ton_catchain::TonValidator {
+            ed25519_pubkey,
+            weight,
+            pq_pubkey,
+        } = validator;
+        put_fixed(out, ed25519_pubkey);
+        put_u64(out, *weight);
+        put_bytes(out, pq_pubkey);
+    }
+}
+
+/// An AVS quorum member list, in declaration order.
+///
+/// `PinnedRestakingAvsSet` carries two lists of the same shape
+/// (`native_validators`, `eots_providers`). Encoding them through one helper
+/// is what keeps the two from drifting apart in the preimage: a field added
+/// to `AvsQuorumMember` breaks this destructuring once, not twice.
+fn put_avs_quorum_members(
+    out: &mut Vec<u8>,
+    members: &[crate::cross_domain::external::restaking_avs::AvsQuorumMember],
+) {
+    put_u64(out, members.len() as u64);
+    for member in members {
+        let crate::cross_domain::external::restaking_avs::AvsQuorumMember {
+            ed25519_pubkey,
+            stake_weight,
+            pq_pubkey,
+        } = member;
+        put_fixed(out, ed25519_pubkey);
+        put_u64(out, *stake_weight);
+        put_bytes(out, pq_pubkey);
+    }
+}
+
+/// An SCP quorum set, including its nested inner sets.
+///
+/// Stellar's quorum sets are recursive: a set names validators and further
+/// sets. The preimage has to follow that recursion, because two tiers that
+/// differ only inside an inner set are different trust assumptions and must
+/// not produce the same signed bytes.
+fn put_scp_quorum_set(
+    out: &mut Vec<u8>,
+    set: &crate::cross_domain::external::stellar_fba::ScpQuorumSet,
+) {
+    let crate::cross_domain::external::stellar_fba::ScpQuorumSet {
+        threshold,
+        validators,
+        inner_sets,
+    } = set;
+    put_u32(out, *threshold);
+    put_u64(out, validators.len() as u64);
+    for validator in validators {
+        put_fixed(out, validator);
+    }
+    put_u64(out, inner_sets.len() as u64);
+    for inner in inner_sets {
+        put_scp_quorum_set(out, inner);
     }
 }
 

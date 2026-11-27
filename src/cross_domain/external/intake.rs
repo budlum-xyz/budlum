@@ -348,6 +348,83 @@ pub enum AdapterSpec {
         pinned:
             Option<crate::cross_domain::external::stark_validity_rollup::PinnedStarkRollupConfig>,
     },
+    /// Algorand pure-`PoS` state proof, certified by a post-quantum voter
+    /// commitment over an interval of rounds (`encode_adapter_spec` tag `21`).
+    AlgorandStateProof {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::algorand_stateproof::PinnedAlgorandVerifier>,
+    },
+    /// Arweave `SPoRA` recall-weave storage finality, bound to a
+    /// governance-pinned hybrid weave operator (`encode_adapter_spec` tag `22`).
+    ArweaveSpOra {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::arweave_spora::PinnedArweaveOperator>,
+    },
+    /// Merged-mining `AuxPoW` with a proof-of-participation signer set, bound
+    /// to a pinned parent anchor (`encode_adapter_spec` tag `23`).
+    AuxPowPop {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::auxpow_pop::PinnedAuxPowAnchor>,
+    },
+    /// Based preconfirmation with `FOCIL` inclusion lists, bound to a pinned
+    /// L1 proposer committee (`encode_adapter_spec` tag `24`).
+    BasedPreconf {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::based_preconf::PinnedBasedPreconfCommittee>,
+    },
+    /// Mina succinct recursive (Samasika + STARK) finality, bound to a pinned
+    /// genesis and step program (`encode_adapter_spec` tag `25`).
+    MinaSuccinctRecursive {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::mina_recursive::PinnedSuccinctGenesis>,
+    },
+    /// Cardano Ouroboros Praos with Mithril STM certificates, bound to a
+    /// pinned epoch stake table (`encode_adapter_spec` tag `26`).
+    OuroborosMithril {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::ouroboros_mithril::PinnedPraosEpochs>,
+    },
+    /// Restaking AVS with EOTS attribution, bound to a pinned operator and
+    /// quorum set (`encode_adapter_spec` tag `27`).
+    RestakingAvs {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::restaking_avs::PinnedRestakingAvsSet>,
+    },
+    /// Simplex / `MonadBFT` two-round finality, bound to a pinned epoch
+    /// committee (`encode_adapter_spec` tag `28`).
+    SimplexBft {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::simplex_bft::PinnedSimplexCommittee>,
+    },
+    /// Stellar federated Byzantine agreement (SCP), bound to a pinned quorum
+    /// tier (`encode_adapter_spec` tag `29`).
+    StellarScp {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::stellar_fba::PinnedScpTier>,
+    },
+    /// Symbiotic curated vault finality, bound to a pinned curator committee
+    /// (`encode_adapter_spec` tag `30`).
+    SymbioticVault {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::symbiotic_vault::PinnedSymbioticCommittee>,
+    },
+    /// TON masterchain Catchain BFT finality, bound to a pinned key-block
+    /// validator set (`encode_adapter_spec` tag `31`).
+    TonCatchainBft {
+        network: String,
+        #[serde(default)]
+        pinned: Option<crate::cross_domain::external::ton_catchain::PinnedTonMasterchainAnchor>,
+    },
 }
 
 impl AdapterSpec {
@@ -376,7 +453,18 @@ impl AdapterSpec {
             | Self::NearDoomslugBft { network, .. }
             | Self::ChainKeyNiDkg { network, .. }
             | Self::HeterogeneousMultiProver { network, .. }
-            | Self::StarkValidityRollup { network, .. } => network,
+            | Self::StarkValidityRollup { network, .. }
+            | Self::AlgorandStateProof { network, .. }
+            | Self::ArweaveSpOra { network, .. }
+            | Self::AuxPowPop { network, .. }
+            | Self::BasedPreconf { network, .. }
+            | Self::MinaSuccinctRecursive { network, .. }
+            | Self::OuroborosMithril { network, .. }
+            | Self::RestakingAvs { network, .. }
+            | Self::SimplexBft { network, .. }
+            | Self::StellarScp { network, .. }
+            | Self::SymbioticVault { network, .. }
+            | Self::TonCatchainBft { network, .. } => network,
         }
     }
 
@@ -568,6 +656,125 @@ impl AdapterSpec {
                 },
                 golden,
                 crate::cross_domain::external::stark_validity_rollup::StarkValidityRollupAdapter::with_golden,
+            ),
+            Self::AlgorandStateProof { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::algorand_stateproof::AlgorandStateProofAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::algorand_stateproof::AlgorandStateProofAdapter::with_golden,
+            ),
+            // The three families below carry their pin as a named struct that
+            // owns the `build_adapter` step, because their adapters take the
+            // pin through a builder rather than through `new`. An unpinned
+            // spec still reaches `new`; the door refuses it before admission,
+            // and `has_pinned_trust_anchor` refuses it again at the bridge.
+            Self::ArweaveSpOra { network, pinned } => box_with_golden(
+                || match pinned {
+                    Some(pin) => pin.build_adapter(network),
+                    None => crate::cross_domain::external::arweave_spora::ArweaveSpOraAdapter::new(
+                        network,
+                    ),
+                },
+                golden,
+                crate::cross_domain::external::arweave_spora::ArweaveSpOraAdapter::with_golden,
+            ),
+            Self::AuxPowPop { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::auxpow_pop::AuxPowPopAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::auxpow_pop::AuxPowPopAdapter::with_golden,
+            ),
+            Self::BasedPreconf { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::based_preconf::BasedPreconfAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::based_preconf::BasedPreconfAdapter::with_golden,
+            ),
+            Self::MinaSuccinctRecursive { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::mina_recursive::SuccinctRecursiveAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::mina_recursive::SuccinctRecursiveAdapter::with_golden,
+            ),
+            Self::OuroborosMithril { network, pinned } => box_with_golden(
+                || match pinned {
+                    Some(pin) => pin.build_adapter(network),
+                    None => {
+                        crate::cross_domain::external::ouroboros_mithril::OuroborosMithrilAdapter::new(
+                            network, 0,
+                        )
+                    }
+                },
+                golden,
+                crate::cross_domain::external::ouroboros_mithril::OuroborosMithrilAdapter::with_golden,
+            ),
+            Self::RestakingAvs { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::restaking_avs::RestakingAvsAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::restaking_avs::RestakingAvsAdapter::with_golden,
+            ),
+            Self::SimplexBft { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::simplex_bft::SimplexBftAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::simplex_bft::SimplexBftAdapter::with_golden,
+            ),
+            Self::StellarScp { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::stellar_fba::StellarScpAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::stellar_fba::StellarScpAdapter::with_golden,
+            ),
+            Self::SymbioticVault { network, pinned } => box_with_golden(
+                || match pinned {
+                    Some(pin) => pin.build_adapter(network),
+                    None => {
+                        crate::cross_domain::external::symbiotic_vault::SymbioticVaultAdapter::new(
+                            network,
+                        )
+                    }
+                },
+                golden,
+                crate::cross_domain::external::symbiotic_vault::SymbioticVaultAdapter::with_golden,
+            ),
+            Self::TonCatchainBft { network, pinned } => box_with_golden(
+                || {
+                    crate::cross_domain::external::ton_catchain::TonCatchainAdapter::new(
+                        network,
+                        pinned.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::ton_catchain::TonCatchainAdapter::with_golden,
             ),
         }
     }
@@ -2096,6 +2303,17 @@ impl IntakeState {
                 | AdapterSpec::ChainKeyNiDkg { pinned: None, .. }
                 | AdapterSpec::HeterogeneousMultiProver { pinned: None, .. }
                 | AdapterSpec::StarkValidityRollup { pinned: None, .. }
+                | AdapterSpec::AlgorandStateProof { pinned: None, .. }
+                | AdapterSpec::ArweaveSpOra { pinned: None, .. }
+                | AdapterSpec::AuxPowPop { pinned: None, .. }
+                | AdapterSpec::BasedPreconf { pinned: None, .. }
+                | AdapterSpec::MinaSuccinctRecursive { pinned: None, .. }
+                | AdapterSpec::OuroborosMithril { pinned: None, .. }
+                | AdapterSpec::RestakingAvs { pinned: None, .. }
+                | AdapterSpec::SimplexBft { pinned: None, .. }
+                | AdapterSpec::StellarScp { pinned: None, .. }
+                | AdapterSpec::SymbioticVault { pinned: None, .. }
+                | AdapterSpec::TonCatchainBft { pinned: None, .. }
         ) {
             return Err(IntakeError::CommitteeNotPinned);
         }

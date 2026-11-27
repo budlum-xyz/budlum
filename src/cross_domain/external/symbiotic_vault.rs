@@ -25,8 +25,10 @@
 //!    finality (`FinalityKind::EconomicFinality`) and report both verified
 //!    signature schemes to the caller's [`CryptoObserver`].
 //!
-//! WIRING: unwired - external Symbiotic curated-vault adapter awaits `AdapterSpec`
-//! variant binding in `external_tx` domain intake.
+//! WIRING: reached from `AdapterSpec::SymbioticVault` through
+//! `IntakeState::register_domain`; the pin a registration carries is
+//! [`PinnedSymbioticCommittee`], and an unpinned spec is refused at the door
+//! with `IntakeError::CommitteeNotPinned`.
 
 use std::collections::BTreeSet;
 
@@ -456,11 +458,42 @@ fn verify_pq_quorum(
     Ok(())
 }
 
+/// The governance-pinned Symbiotic curator committee, as a registration
+/// carries it.
+///
+/// The adapter stores the pin as two commitments because that is all its
+/// verification compares. A registration carries the key sets themselves: a
+/// commitment in a transaction is a number nobody can check, while the key
+/// sets are the thing governance actually voted on, and
+/// [`Self::build_adapter`] recomputes the two roots from them with the same
+/// `key_set_commitment` the verifier uses. The signature preimage therefore
+/// covers the keys, not a digest of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedSymbioticCommittee {
+    /// The curator set's classical (ECDSA/secp256k1) public keys.
+    pub classical_keys: Vec<Vec<u8>>,
+    /// The same curator set's ML-DSA-65 public keys.
+    pub pq_keys: Vec<Vec<u8>>,
+}
+
+impl PinnedSymbioticCommittee {
+    /// Build the adapter this pin anchors.
+    #[must_use]
+    pub fn build_adapter(&self, network: &str) -> SymbioticVaultAdapter {
+        SymbioticVaultAdapter::new(network)
+            .with_pinned_committee_keys(&self.classical_keys, &self.pq_keys)
+    }
+}
+
 /// Symbiotic curated vault external finality adapter.
 #[derive(Debug, Clone)]
 pub struct SymbioticVaultAdapter {
     network: String,
     pinned_committee_roots: Option<(Hash32, Hash32)>,
+    /// The known-good sample `super::selftest::admit` needs. Admission
+    /// refuses an adapter that cannot show one, so a registration door for
+    /// this family is only usable once the adapter can carry it.
+    golden: Option<RawConsensusEvidence>,
 }
 
 impl SymbioticVaultAdapter {
@@ -470,6 +503,7 @@ impl SymbioticVaultAdapter {
         Self {
             network: network.into(),
             pinned_committee_roots: None,
+            golden: None,
         }
     }
 
@@ -486,6 +520,16 @@ impl SymbioticVaultAdapter {
         let c_root = key_set_commitment(b"classical-keys", classical_keys);
         let pq_root = key_set_commitment(b"pq-keys", pq_keys);
         self.pinned_committee_roots = Some((c_root, pq_root));
+        self
+    }
+
+    /// Attach a canonical golden sample for [`super::selftest::admit`].
+    ///
+    /// WIRING: `AdapterSpec::SymbioticVault` attaches it on the registration
+    /// path; `admit` refuses an adapter that has none.
+    #[must_use]
+    pub fn with_golden(mut self, golden: RawConsensusEvidence) -> Self {
+        self.golden = Some(golden);
         self
     }
 
@@ -691,6 +735,10 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
                 expect: ExpectedRefusal::Any,
             },
         ]
+    }
+
+    fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
+        self.golden.clone()
     }
 }
 

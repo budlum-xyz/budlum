@@ -22,8 +22,10 @@
 //!    domain-separated attestation digest binding the network, height, epoch,
 //!    weave root, chunk commitment and endowment parameters.
 //!
-//! WIRING: unwired - external Arweave `SPoRA` recall adapter awaits `AdapterSpec`
-//! variant binding in `external_tx` domain intake.
+//! WIRING: reached from `AdapterSpec::ArweaveSpOra` through
+//! `IntakeState::register_domain`; the pin a registration carries is
+//! [`PinnedArweaveOperator`], and an unpinned spec is refused at the door
+//! with `IntakeError::CommitteeNotPinned`.
 
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
@@ -380,11 +382,40 @@ fn verify_operator_signatures(
     Ok(())
 }
 
+/// The governance-pinned Arweave weave operator, as a registration carries it.
+///
+/// `ArweaveSpOraAdapter` holds the pin as a tuple because that is what its
+/// verification needs. A registration transaction cannot carry a tuple: it
+/// has to name its fields so the signature preimage can enumerate them and a
+/// reader can see what was signed. This is that named form, and
+/// [`Self::build_adapter`] is the single place it becomes the adapter's pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedArweaveOperator {
+    /// The weave operator's Ed25519 public key.
+    pub ed25519_pubkey: [u8; ED25519_PK_LEN],
+    /// The same operator's ML-DSA-65 public key. Both are required: the
+    /// adapter refuses a pin whose post-quantum half is empty.
+    pub pq_pubkey: Vec<u8>,
+}
+
+impl PinnedArweaveOperator {
+    /// Build the adapter this pin anchors.
+    #[must_use]
+    pub fn build_adapter(&self, network: &str) -> ArweaveSpOraAdapter {
+        ArweaveSpOraAdapter::new(network)
+            .with_pinned_operator(self.ed25519_pubkey, self.pq_pubkey.clone())
+    }
+}
+
 /// Arweave `SPoRA` / Recall-Weave permanent storage adapter.
 #[derive(Debug, Clone)]
 pub struct ArweaveSpOraAdapter {
     network: String,
     pinned_operator: Option<([u8; ED25519_PK_LEN], Vec<u8>)>,
+    /// The known-good sample `super::selftest::admit` needs. Admission
+    /// refuses an adapter that cannot show one, so a registration door for
+    /// this family is only usable once the adapter can carry it.
+    golden: Option<RawConsensusEvidence>,
 }
 
 impl ArweaveSpOraAdapter {
@@ -394,6 +425,7 @@ impl ArweaveSpOraAdapter {
         Self {
             network: network.into(),
             pinned_operator: None,
+            golden: None,
         }
     }
 
@@ -408,6 +440,16 @@ impl ArweaveSpOraAdapter {
         pq_pk: Vec<u8>,
     ) -> Self {
         self.pinned_operator = Some((ed25519_pk, pq_pk));
+        self
+    }
+
+    /// Attach a canonical golden sample for [`super::selftest::admit`].
+    ///
+    /// WIRING: `AdapterSpec::ArweaveSpOra` attaches it on the registration
+    /// path; `admit` refuses an adapter that has none.
+    #[must_use]
+    pub fn with_golden(mut self, golden: RawConsensusEvidence) -> Self {
+        self.golden = Some(golden);
         self
     }
 
@@ -611,6 +653,10 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
                 expect: ExpectedRefusal::Any,
             },
         ]
+    }
+
+    fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
+        self.golden.clone()
     }
 }
 
