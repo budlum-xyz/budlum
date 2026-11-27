@@ -6748,15 +6748,26 @@ mod tests {
 
     fn additional_family_specs_with_pins() -> Vec<AdapterSpec> {
         use crate::cross_domain::external::{
+            algorand_stateproof::PinnedAlgorandVerifier,
             aptos_jolteon_bft::{JolteonValidator, PinnedJolteonEpochState},
+            arweave_spora::PinnedArweaveOperator,
+            auxpow_pop::{PinnedAuxPowAnchor, PopAnchorSigner},
+            based_preconf::{BasedPreconfValidator, PinnedBasedPreconfCommittee},
             chain_key_ni_dkg::PinnedChainKeyRoot,
             heterogeneous_multiprover::{
                 MultiProverCommitteeMember, PinnedFaultProposer, PinnedMultiProverConfig,
             },
+            mina_recursive::PinnedSuccinctGenesis,
             near_doomslug::{NearBlockProducer, PinnedNearEpoch},
+            ouroboros_mithril::{EpochSigner, EpochStake, PinnedPraosEpochs},
             pospace_vdf::PinnedPoSpaceAnchor,
+            restaking_avs::{AvsQuorumMember, PinnedRestakingAvsSet, RestakedOperator},
+            simplex_bft::{PinnedSimplexCommittee, SimplexValidator},
             solana_tower_bft::{PinnedSolEpoch, SolanaValidator},
             stark_validity_rollup::PinnedStarkRollupConfig,
+            stellar_fba::{PinnedScpTier, ScpQuorumSet, ScpValidatorNode},
+            symbiotic_vault::PinnedSymbioticCommittee,
+            ton_catchain::{PinnedTonMasterchainAnchor, TonValidator},
         };
         let h = |b: u8| [b; 32];
         vec![
@@ -6858,7 +6869,244 @@ mod tests {
                     require_canonical_program: true,
                 }),
             },
+            // The eleven families whose verifier existed before any
+            // registration could reach it. Each pin here is non-degenerate on
+            // purpose: `has_pinned_trust_anchor` has to read true, or the
+            // bridge refuses the domain after the door let it in.
+            AdapterSpec::AlgorandStateProof {
+                network: "algorand-mainnet".to_string(),
+                pinned: Some(PinnedAlgorandVerifier {
+                    genesis_hash: h(0x21),
+                    interval_index: 7,
+                    first_round: 1_000,
+                    last_round: 1_255,
+                    voters_commitment: h(0x22),
+                    voter_count: 3,
+                    total_weight: 9_000,
+                    threshold_bps: 6_700,
+                }),
+            },
+            AdapterSpec::ArweaveSpOra {
+                network: "arweave-mainnet".to_string(),
+                pinned: Some(PinnedArweaveOperator {
+                    ed25519_pubkey: h(0x23),
+                    pq_pubkey: vec![0x24; 1952],
+                }),
+            },
+            AdapterSpec::AuxPowPop {
+                network: "auxpow-mainnet".to_string(),
+                pinned: Some(PinnedAuxPowAnchor {
+                    aux_chain_id: 42,
+                    trusted_parent_hash: h(0x25),
+                    max_target_bits: 0x1d00_ffff,
+                    min_cumulative_work: h(0x01),
+                    min_confirmations: 6,
+                    pop_signers: vec![PopAnchorSigner {
+                        ed25519_pubkey: h(0x26),
+                        bond_weight: 100,
+                        pq_pubkey: vec![0x27; 1952],
+                    }],
+                }),
+            },
+            AdapterSpec::BasedPreconf {
+                network: "based-mainnet".to_string(),
+                pinned: Some(PinnedBasedPreconfCommittee {
+                    epoch: 11,
+                    l1_chain_id: 1,
+                    require_focil: true,
+                    members: vec![BasedPreconfValidator {
+                        ed25519_pubkey: h(0x28),
+                        voting_weight: 32,
+                        pq_pubkey: vec![0x29; 1952],
+                    }],
+                }),
+            },
+            AdapterSpec::MinaSuccinctRecursive {
+                network: "mina-mainnet".to_string(),
+                pinned: Some(PinnedSuccinctGenesis {
+                    genesis_state_hash: h(0x2a),
+                    genesis_staking_ledger_root: h(0x2b),
+                    step_program_hash: h(0x2c),
+                    slots_per_sub_window: 7,
+                    slots_per_epoch: 7_140,
+                    min_window_density_slots: 77,
+                    aggregator_pq_pubkey: vec![0x2d; 1952],
+                }),
+            },
+            AdapterSpec::OuroborosMithril {
+                network: "cardano-mainnet".to_string(),
+                pinned: Some(PinnedPraosEpochs {
+                    chain_id: 764_824_073,
+                    epochs: vec![EpochStake {
+                        epoch: 500,
+                        signers: vec![EpochSigner {
+                            public_key: h(0x2e),
+                            stake: 1_000_000,
+                        }],
+                    }],
+                }),
+            },
+            AdapterSpec::RestakingAvs {
+                network: "avs-mainnet".to_string(),
+                pinned: Some(PinnedRestakingAvsSet {
+                    epoch: 9,
+                    min_withdrawal_delay: 100_800,
+                    max_shared_avs_per_operator: 4,
+                    min_effective_restaked_stake: 1_000,
+                    native_validators: vec![AvsQuorumMember {
+                        ed25519_pubkey: h(0x2f),
+                        stake_weight: 50,
+                        pq_pubkey: vec![0x30; 1952],
+                    }],
+                    restaked_operators: vec![RestakedOperator {
+                        ed25519_pubkey: h(0x31),
+                        raw_stake: 4_000,
+                        shared_avs_count: 2,
+                        pq_pubkey: vec![0x32; 1952],
+                    }],
+                    eots_providers: vec![AvsQuorumMember {
+                        ed25519_pubkey: h(0x33),
+                        stake_weight: 25,
+                        pq_pubkey: vec![0x34; 1952],
+                    }],
+                }),
+            },
+            AdapterSpec::SimplexBft {
+                network: "monad-mainnet".to_string(),
+                pinned: Some(PinnedSimplexCommittee {
+                    epoch: 3,
+                    validators: vec![SimplexValidator {
+                        ed25519_pubkey: h(0x35),
+                        stake_weight: 10,
+                        pq_pubkey: vec![0x36; 1952],
+                    }],
+                }),
+            },
+            AdapterSpec::StellarScp {
+                network: "stellar-pubnet".to_string(),
+                pinned: Some(PinnedScpTier {
+                    network_passphrase: "Public Global Stellar Network ; September 2015"
+                        .to_string(),
+                    has_bonded_slash_escrow: true,
+                    nodes: vec![ScpValidatorNode {
+                        ed25519_pubkey: h(0x37),
+                        quorum_set: ScpQuorumSet {
+                            threshold: 1,
+                            validators: vec![h(0x37)],
+                            inner_sets: Vec::new(),
+                        },
+                        pq_pubkey: vec![0x38; 1952],
+                    }],
+                }),
+            },
+            AdapterSpec::SymbioticVault {
+                network: "symbiotic-mainnet".to_string(),
+                pinned: Some(PinnedSymbioticCommittee {
+                    classical_keys: vec![vec![0x39; 33]],
+                    pq_keys: vec![vec![0x3a; 1952]],
+                }),
+            },
+            AdapterSpec::TonCatchainBft {
+                network: "ton-mainnet".to_string(),
+                pinned: Some(PinnedTonMasterchainAnchor {
+                    key_block_seqno: 1_000_000,
+                    utime_since: 1_700_000_000,
+                    utime_until: 1_700_065_536,
+                    validators: vec![TonValidator {
+                        ed25519_pubkey: h(0x3b),
+                        weight: 1,
+                        pq_pubkey: vec![0x3c; 1952],
+                    }],
+                }),
+            },
         ]
+    }
+
+    /// A door that admits a family the bridge then refuses is worse than no
+    /// door: the registrant pays a bond for a domain whose every proof is
+    /// rejected. `ExternalVerifierFamily::verify_descriptor` is the bridge's
+    /// check (`domain_bridge::verify_finality_observed`), so every spec the
+    /// door accepts must build an adapter that passes it with its own pin.
+    #[test]
+    fn every_pinned_family_spec_satisfies_its_own_verifier_profile() {
+        use crate::domain::finality_proof_model::ExternalVerifierFamily;
+
+        let specs = additional_family_specs_with_pins();
+        assert!(!specs.is_empty());
+        let mut checked = 0usize;
+        for spec in specs {
+            let adapter = spec.build(Some(Box::new(StrictTestBls)), None);
+            let descriptor = adapter.descriptor();
+            let family = ExternalVerifierFamily::from_consensus_kind(&descriptor.consensus_kind)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} is not a canonical verifier family, yet a spec builds it",
+                        descriptor.consensus_kind
+                    )
+                });
+            assert!(
+                adapter.has_pinned_trust_anchor(),
+                "{}: a pinned spec produced an adapter with no trust anchor",
+                descriptor.consensus_kind
+            );
+            assert_eq!(
+                family.verify_descriptor(&descriptor, true),
+                Ok(()),
+                "{}: the door admits this family but its own profile refuses it",
+                descriptor.consensus_kind
+            );
+            checked += 1;
+        }
+        assert!(checked >= 18, "expected every pinned family, saw {checked}");
+    }
+
+    /// The anchor is what makes the pin a trust root. A spec without one must
+    /// build an adapter that says so, which is what the bridge reads after
+    /// the door; the two refusals have to agree.
+    #[test]
+    fn an_unpinned_family_spec_builds_an_adapter_with_no_trust_anchor() {
+        use crate::domain::finality_proof_model::ExternalVerifierFamily;
+
+        let unpinned = [
+            AdapterSpec::AlgorandStateProof {
+                network: "algorand-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::ArweaveSpOra {
+                network: "arweave-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::OuroborosMithril {
+                network: "cardano-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::SymbioticVault {
+                network: "symbiotic-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::TonCatchainBft {
+                network: "ton-mainnet".to_string(),
+                pinned: None,
+            },
+        ];
+        for spec in unpinned {
+            let adapter = spec.build(Some(Box::new(StrictTestBls)), None);
+            let descriptor = adapter.descriptor();
+            assert!(
+                !adapter.has_pinned_trust_anchor(),
+                "{}: an unpinned spec claimed a trust anchor",
+                descriptor.consensus_kind
+            );
+            let family = ExternalVerifierFamily::from_consensus_kind(&descriptor.consensus_kind)
+                .expect("canonical family");
+            assert!(
+                family
+                    .verify_descriptor(&descriptor, adapter.has_pinned_trust_anchor())
+                    .is_err(),
+                "{}: an unanchored descriptor was accepted by its own profile",
+                descriptor.consensus_kind
+            );
+        }
     }
 
     #[test]
@@ -6905,6 +7153,50 @@ mod tests {
             },
             AdapterSpec::StarkValidityRollup {
                 network: "starknet-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::AlgorandStateProof {
+                network: "algorand-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::ArweaveSpOra {
+                network: "arweave-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::AuxPowPop {
+                network: "auxpow-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::BasedPreconf {
+                network: "based-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::MinaSuccinctRecursive {
+                network: "mina-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::OuroborosMithril {
+                network: "cardano-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::RestakingAvs {
+                network: "avs-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::SimplexBft {
+                network: "monad-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::StellarScp {
+                network: "stellar-pubnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::SymbioticVault {
+                network: "symbiotic-mainnet".to_string(),
+                pinned: None,
+            },
+            AdapterSpec::TonCatchainBft {
+                network: "ton-mainnet".to_string(),
                 pinned: None,
             },
         ];
