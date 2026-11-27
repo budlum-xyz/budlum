@@ -274,8 +274,10 @@ fn run_rv32em(
             PolkaVmInsn::SealSetStorageU32 { slot, rs } => {
                 let val = regs.get(rs as usize).copied().unwrap_or(0).to_le_bytes();
                 let sk = stor_key(scope.contract, &slot);
-                if host.write(scope.ns, &sk, Some(&val)).is_err() {
-                    return Err(b"SEAL_STORAGE_ERR");
+                match host.write(scope.ns, &sk, Some(&val)) {
+                    Ok(()) => {}
+                    Err(budlum_uel_abi::HostError::OutOfGas) => return Err(b"OUT_OF_GAS"),
+                    Err(_) => return Err(b"SEAL_STORAGE_ERR"),
                 }
             }
             PolkaVmInsn::SealGetStorageU32 { rd, slot } => {
@@ -297,20 +299,25 @@ fn run_rv32em(
             }
             PolkaVmInsn::SealDepositEvent { topic, rs } => {
                 let val = regs.get(rs as usize).copied().unwrap_or(0).to_le_bytes();
-                let _ = host.emit_log(EeLog {
+                match host.emit_log(EeLog {
                     emitter: EeIdentity {
                         ee: EeId::POLKAVM,
                         id: scope.contract.to_vec(),
                     },
                     topics: vec![topic.to_vec()],
                     data: val.to_vec(),
-                });
+                }) {
+                    Ok(()) => {}
+                    Err(budlum_uel_abi::HostError::OutOfGas) => return Err(b"OUT_OF_GAS"),
+                    Err(_) => return Err(b"SEAL_LOG_ERR"),
+                }
             }
             PolkaVmInsn::RequireOwner => {
-                let owner = host
-                    .read(scope.ns, &owner_key(scope.contract))
-                    .ok()
-                    .flatten();
+                let owner = match host.read(scope.ns, &owner_key(scope.contract)) {
+                    Ok(v) => v,
+                    Err(budlum_uel_abi::HostError::OutOfGas) => return Err(b"OUT_OF_GAS"),
+                    Err(_) => return Err(b"SEAL_OWNER_READ_ERR"),
+                };
                 if owner.as_deref() != Some(scope.caller.as_slice()) {
                     return Err(b"CALLER_NOT_OWNER");
                 }

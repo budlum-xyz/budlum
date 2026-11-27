@@ -677,13 +677,26 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         object_ids,
                         recipient,
                     } => {
+                        if *recipient == [0u8; 32] {
+                            return Err(ee_reverted(
+                                b"TransferObjects recipient cannot be zero".to_vec(),
+                                gas_used,
+                            ));
+                        }
                         if object_ids.len() > MAX_SUI_BATCH_ITEMS {
                             return Err(ee_reverted(
                                 b"TransferObjects exceeds max batch size".to_vec(),
                                 gas_used,
                             ));
                         }
+                        let mut seen_xfer = std::collections::BTreeSet::new();
                         for oid in object_ids {
+                            if !seen_xfer.insert(*oid) {
+                                return Err(ee_reverted(
+                                    b"duplicate object_id in TransferObjects".to_vec(),
+                                    gas_used,
+                                ));
+                            }
                             if charge_gas(&mut gas_used, call.gas_limit, SUI_CMD_STEP_BGU, host)
                                 .is_err()
                             {
@@ -755,9 +768,22 @@ impl ExecutionEnvironment for MoveSuiWorker {
                                 gas_used,
                             ));
                         }
+                        if shared_inputs.len() > MAX_SUI_BATCH_ITEMS {
+                            return Err(ee_reverted(
+                                b"MoveCall shared_inputs exceeds max batch size".to_vec(),
+                                gas_used,
+                            ));
+                        }
                         let package_prefix = format!("0x{}::", hex::encode(package_id));
                         let mut lamport_ver: u64 = 1;
+                        let mut seen_shared = std::collections::BTreeSet::new();
                         for sid in shared_inputs {
+                            if !seen_shared.insert(*sid) {
+                                return Err(ee_reverted(
+                                    b"duplicate shared input in MoveCall".to_vec(),
+                                    gas_used,
+                                ));
+                            }
                             let Ok(Some(mut sh)) = read_sui_object(host, sid) else {
                                 return Err(ee_reverted(
                                     b"shared input missing".to_vec(),
