@@ -464,7 +464,31 @@ impl EthereumCompatGateway {
                 let Some(raw_hex) = req.params.get(0).and_then(serde_json::Value::as_str) else {
                     return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "missing raw tx hex");
                 };
-                let Ok(raw_rlp) = hex::decode(raw_hex.trim_start_matches("0x")) else {
+                let Some(hex_body) = raw_hex.strip_prefix("0x") else {
+                    return JsonRpcResponse::err(
+                        id,
+                        JSONRPC_INVALID_PARAMS,
+                        "raw tx hex must start with 0x",
+                    );
+                };
+                if hex_body.is_empty()
+                    || hex_body.starts_with("0x")
+                    || hex_body.starts_with("0X")
+                {
+                    return JsonRpcResponse::err(
+                        id,
+                        JSONRPC_INVALID_PARAMS,
+                        "malformed raw tx hex prefix",
+                    );
+                }
+                if hex_body.len() > MAX_COMPAT_REQUEST_BYTES * 2 {
+                    return JsonRpcResponse::err(
+                        id,
+                        JSONRPC_LIMIT_EXCEEDED,
+                        "raw tx hex exceeds MAX_COMPAT_REQUEST_BYTES",
+                    );
+                }
+                let Ok(raw_rlp) = hex::decode(hex_body) else {
                     return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "invalid hex");
                 };
                 let env = ForeignTx::Ethereum {
@@ -515,7 +539,10 @@ impl EthereumCompatGateway {
             ),
             "eth_getBlockReceipts" => JsonRpcResponse::ok(id, serde_json::json!([])),
             "eth_getLogs" => {
-                let (from_b, to_b) = parse_filter_range(&req.params, self.block_height);
+                let (from_b, to_b) = match parse_filter_range(&req.params, self.block_height) {
+                    Ok(range) => range,
+                    Err(msg) => return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, msg),
+                };
                 if to_b.saturating_sub(from_b) > self.config.max_log_block_range {
                     return JsonRpcResponse::err(
                         id,
@@ -534,7 +561,11 @@ impl EthereumCompatGateway {
                 )
             }
             "eth_newFilter" => {
-                let (from_block, to_block) = parse_filter_range(&req.params, self.block_height);
+                let (from_block, to_block) =
+                    match parse_filter_range(&req.params, self.block_height) {
+                        Ok(range) => range,
+                        Err(msg) => return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, msg),
+                    };
                 if to_block.saturating_sub(from_block) > self.config.max_log_block_range {
                     return JsonRpcResponse::err(
                         id,
@@ -701,26 +732,47 @@ fn parse_param_word32(params: &serde_json::Value, idx: usize) -> Option<[u8; 32]
     <[u8; 32]>::try_from(bytes.as_slice()).ok()
 }
 
-fn parse_hex_u64(v: Option<&serde_json::Value>, default_val: u64) -> u64 {
-    let Some(s) = v.and_then(serde_json::Value::as_str) else {
-        return default_val;
+fn parse_hex_u64(v: Option<&serde_json::Value>, default_val: u64) -> Result<u64, &'static str> {
+    let Some(val) = v else {
+        return Ok(default_val);
     };
-    if s == "latest" || s == "pending" {
-        return default_val;
+    if val.is_null() {
+        return Ok(default_val);
+    }
+    let Some(s) = val.as_str() else {
+        return Err("block tag must be a string");
+    };
+    if s == "latest" || s == "pending" || s == "safe" || s == "finalized" {
+        return Ok(default_val);
     }
     if s == "earliest" {
-        return 0;
+        return Ok(0);
     }
-    u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(default_val)
+    let Some(hex_body) = s.strip_prefix("0x") else {
+        return Err("block hex must start with 0x");
+    };
+    if hex_body.is_empty() || !hex_body.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("invalid block hex");
+    }
+    u64::from_str_radix(hex_body, 16).map_err(|_| "block number overflows u64")
 }
 
-fn parse_filter_range(params: &serde_json::Value, head: u64) -> (u64, u64) {
-    let Some(obj) = params.get(0) else {
-        return (head, head);
+fn parse_filter_range(params: &serde_json::Value, head: u64) -> Result<(u64, u64), &'static str> {
+    let Some(first) = params.get(0) else {
+        return Ok((head, head));
     };
-    let from_b = parse_hex_u64(obj.get("fromBlock"), head);
-    let to_b = parse_hex_u64(obj.get("toBlock"), head);
-    (from_b, to_b)
+    if first.is_null() {
+        return Ok((head, head));
+    }
+    let Some(obj) = first.as_object() else {
+        return Err("filter parameter must be an object");
+    };
+    let from_b = parse_hex_u64(obj.get("fromBlock"), head)?;
+    let to_b = parse_hex_u64(obj.get("toBlock"), head)?;
+    if from_b > to_b {
+        return Err("fromBlock must not exceed toBlock");
+    }
+    Ok((from_b, to_b))
 }
 
 /// Refusal code when the EVM execution environment is unavailable on a read-only surface.
@@ -772,4 +824,91 @@ pub fn handle_eth_jsonrpc(state: &AccountState, peer: &str, raw_json: &str) -> S
     let resp = gw.handle_request(CompatListener::Public, peer, now_secs, &req, state);
     drop(guard);
     serde_json::to_string(&resp).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn eth_get_logs_and_new_filter_reject_inverted_and_malformed_block_ranges() {
+        let mut gw = EthereumCompatGateway::new(EthereumCompatConfig::default());
+        gw.set_block_height(20);
+        let state = AccountState::new();
+        let peer = "127.0.0.1";
+        let inverted = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "eth_getLogs".to_string(),
+            params: serde_json::json!([{ "fromBlock": "0x10", "toBlock": "0x02" }]),
+            id: serde_json::json!(1),
+        };
+        let resp = gw.handle_request(CompatListener::Public, peer, 100, &inverted, &state);
+        assert!(
+            resp.result.is_none(),
+            "inverted range must not return result"
+        );
+        assert_eq!(
+            resp.error.as_ref().map(|e| e.code),
+            Some(JSONRPC_INVALID_PARAMS),
+            "inverted block range must be refused with -32602"
+        );
+
+        let malformed = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "eth_newFilter".to_string(),
+            params: serde_json::json!([{ "fromBlock": "not-hex", "toBlock": "0x05" }]),
+            id: serde_json::json!(2),
+        };
+        let resp2 = gw.handle_request(CompatListener::Public, peer, 101, &malformed, &state);
+        assert!(
+            resp2.result.is_none(),
+            "malformed block tag must not return result"
+        );
+        assert_eq!(
+            resp2.error.as_ref().map(|e| e.code),
+            Some(JSONRPC_INVALID_PARAMS),
+            "malformed block tag must be refused with -32602"
+        );
+    }
+
+    #[test]
+    fn eth_send_raw_transaction_rejects_oversized_hex_and_double_0x_prefix() {
+        let mut gw = EthereumCompatGateway::new(EthereumCompatConfig::default());
+        let state = AccountState::new();
+        let peer = "127.0.0.1";
+        let huge_hex = format!("0x{}", "aa".repeat(MAX_COMPAT_REQUEST_BYTES + 1));
+        let req_huge = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "eth_sendRawTransaction".to_string(),
+            params: serde_json::json!([huge_hex]),
+            id: serde_json::json!(3),
+        };
+        let resp = gw.handle_request(CompatListener::Public, peer, 100, &req_huge, &state);
+        assert!(
+            resp.result.is_none(),
+            "oversized raw tx hex must not return result"
+        );
+        assert_eq!(
+            resp.error.as_ref().map(|e| e.code),
+            Some(JSONRPC_LIMIT_EXCEEDED),
+            "oversized raw tx hex must be refused with -32005"
+        );
+
+        let req_double = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "eth_sendRawTransaction".to_string(),
+            params: serde_json::json!(["0x0xf86b"]),
+            id: serde_json::json!(4),
+        };
+        let resp2 = gw.handle_request(CompatListener::Public, peer, 101, &req_double, &state);
+        assert!(
+            resp2.result.is_none(),
+            "double 0x prefix must not return result"
+        );
+        assert_eq!(
+            resp2.error.as_ref().map(|e| e.code),
+            Some(JSONRPC_INVALID_PARAMS),
+            "double 0x prefix must be refused with -32602"
+        );
+    }
 }
