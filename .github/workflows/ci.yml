@@ -1533,7 +1533,9 @@ jobs:
     # NDK and Xcode, which belong to the mobile app build jobs.
     name: Mobile FFI bindings
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # Raised from 40: the Garden crate's first cold build of the core now
+    # shares this job. Later runs hit the cache above.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1548,7 +1550,13 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: mobile-ffi
-          workspaces: mobile/ffi
+          # The Garden surface keeps its own target directory and its own
+          # dependency graph (its `ml-dsa` pin cannot share one with
+          # mobile/ffi), so its build is cached beside the mobile one rather
+          # than rebuilt cold on every run of this job.
+          workspaces: |
+            mobile/ffi
+            mobile/garden-ffi
       - name: Format
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path mobile/ffi/Cargo.toml --all -- --check
@@ -1558,6 +1566,15 @@ jobs:
       - name: Tests
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path mobile/ffi/Cargo.toml --locked
+      # The Garden surface is a crate of its own, so no step above touches it.
+      # Its unit tests are the only place the phone's status door is pinned:
+      # the loopback bind it opens on, the response head it refuses to send a
+      # cross-origin grant in, the 1024-byte request line it will not overrun
+      # and the socket timeout it sets. A test no workflow runs protects
+      # nothing, so they run here, on every pull request.
+      - name: Garden FFI tests (the phone's status door)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path mobile/garden-ffi/Cargo.toml --locked --bin garden-phone
       - name: Generate the Kotlin and Swift bindings
         if: always() && steps.rust.outcome == 'success'
         working-directory: mobile/ffi
