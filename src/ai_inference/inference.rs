@@ -77,6 +77,17 @@ pub fn build_ai_request(
     // Authority first. Even before the bound check, because someone without
     // permission learning why their request was rejected must not reveal
     // information about the shape of the request.
+    if requester == Address::zero() {
+        return Err("AI inference layer: requester address must be non-zero".into());
+    }
+    if model_id == AiModelId([0u8; 32]) {
+        return Err("AI inference layer: model_id must be non-zero".into());
+    }
+    if deadline_block <= submitted_at_block {
+        return Err(
+            "AI inference layer: deadline_block must strictly exceed submitted_at_block".into(),
+        );
+    }
     crate::ai_inference::validate_inference_grant(grant, &requester, submitted_at_block)?;
 
     if let Some(ref decl) = perception {
@@ -128,6 +139,12 @@ pub fn build_ai_result(
     nonce: u64,
     submitted_at_block: u64,
 ) -> Result<AiInferenceResult, String> {
+    if request_id == AiRequestId([0u8; 32]) {
+        return Err("AI inference layer: request_id must be non-zero".into());
+    }
+    if verifier == Address::zero() {
+        return Err("AI inference layer: verifier address must be non-zero".into());
+    }
     let output_ref = BoundedBytes::try_new(output.clone())?;
     // One definition of the commitment, shared with the check `submit_result`
     // makes: a producer that computed it its own way would be refused by a

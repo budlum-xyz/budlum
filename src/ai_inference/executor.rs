@@ -67,6 +67,9 @@ pub fn build_ai_transaction(
     grant: &crate::pollen::data_rights::AccessGrant,
     perception: Option<crate::ai_inference::perception::PerceptionRequest>,
 ) -> Result<Transaction, String> {
+    if chain_id == 0 {
+        return Err("AI inference layer: chain_id must be non-zero".into());
+    }
     let req = inference::build_ai_request(
         from,
         model_id,
