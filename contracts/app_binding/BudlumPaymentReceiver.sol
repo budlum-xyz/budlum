@@ -136,6 +136,9 @@ abstract contract BudlumPaymentReceiver {
         if (proof.header.version == 0) {
             return "header version";
         }
+        if (proof.header.checkpointHeight == 0 || proof.stateRootBody == bytes32(0)) {
+            return "state root opening";
+        }
         (bool fits, bytes32 window) = BudlumHash.rootFromProof(paymentLeaf(proof.payment), proof.index, proof.path);
         if (!fits || window != proof.paymentsRoot) {
             return "payment path";

@@ -12,6 +12,7 @@ import {
 } from "../app_binding/BudlumPaymentReceiver.sol";
 import {FinalityMode, IBudlumQuantumAlert, QuantumAlertLevel} from "../external-domain/BudlumFinalityVerifier.sol";
 import {BudlumRemoteAccount, BudlumRemoteAccountFactory} from "../app_binding/BudlumRemoteAccountFactory.sol";
+import {BudlumStateReader} from "../lib/BudlumStateReader.sol";
 
 contract Counter {
     uint256 public count;
@@ -600,6 +601,100 @@ contract AppBindingTest is Harness {
             }
         }
         assertTrue(found, "BudlumOutbound log must be emitted on fulfilment");
+    }
+
+    function _stateReaderProbe(IBudlumFinality f, uint64 h) external view returns (bool) {
+        bytes32[] memory sibs = new bytes32[](0);
+        return BudlumStateReader.verifyBalance(f, h, bytes32(uint256(1)), bytes32(uint256(2)), 100, 1, 0, sibs);
+    }
+
+    function test_SecurityGuardsCodelessTargetZeroRootsStateReaderAndZeroDomain() public {
+        vm.warp(1_800_000_000);
+        FinalityStub finality = new FinalityStub();
+        bytes32 appId = keccak256("sec-app");
+        bytes32 owner = keccak256("sec-owner");
+        BudlumRemoteAccountFactory factory = new BudlumRemoteAccountFactory(finality);
+        BudlumRemoteAccount account = BudlumRemoteAccount(payable(factory.deploy(appId, owner)));
+        vm.deal(address(account), 1 ether);
+
+        address codeless = address(0xCAFE);
+        bytes memory callData = abi.encodeCall(Counter.bump, ());
+        bytes32 authCodeless = account.callAuthorization(codeless, 0, callData, 0);
+
+        PaymentProof memory p;
+        p.payment = AppBindingPayment(
+            keccak256("pay-codeless"),
+            appId,
+            owner,
+            bytes32(uint256(10)),
+            500,
+            hex"aa",
+            authCodeless,
+            3,
+            uint64(block.chainid),
+            abi.encodePacked(address(account))
+        );
+        p.index = 0;
+        p.path = new bytes32[](0);
+        p.paymentsRoot = account.paymentLeaf(p.payment);
+        p.restHash = keccak256("rest");
+        p.header.version = 8;
+        p.header.timestampMs = uint128(block.timestamp) * 1000;
+        p.header.checkpointHeight = 30;
+        p.header.hasAppBindingRoot = true;
+        p.header.appBindingRoot = account.appBindingRegistryRoot(p.paymentsRoot, p.restHash);
+        p.stateRootBody = keccak256("body");
+        finality.setWithMode(
+            30, account.stateRootFromOpening(p.stateRootBody, account.headerHash(p.header)), FinalityMode.Hybrid
+        );
+
+        // 1. Codeless target with calldata must revert with InvalidCallTarget and not burn nonce/payment.
+        vm.expectPartialRevert(BudlumRemoteAccount.InvalidCallTarget.selector);
+        account.execute(p, codeless, 0, callData);
+        assertEq(account.nonce(), 0, "codeless call must not advance nonce");
+        assertTrue(!account.consumed(p.payment.paymentId), "codeless call must not consume payment");
+
+        // Plain native value transfer (`value > 0 && data.length == 0`) to EOA remains valid.
+        bytes32 authEth = account.callAuthorization(codeless, 123, "", 0);
+        p.payment.paymentId = keccak256("pay-eth");
+        p.payment.memoHash = authEth;
+        p.paymentsRoot = account.paymentLeaf(p.payment);
+        p.header.appBindingRoot = account.appBindingRegistryRoot(p.paymentsRoot, p.restHash);
+        finality.setWithMode(
+            30, account.stateRootFromOpening(p.stateRootBody, account.headerHash(p.header)), FinalityMode.Hybrid
+        );
+        account.execute(p, codeless, 123, "");
+        assertEq(codeless.balance, 123, "native transfer to EOA succeeds");
+        assertEq(account.nonce(), 1, "native transfer advances nonce");
+
+        // 2. Zero stateRootBody or zero checkpointHeight must be rejected by checkPayment.
+        Receiver receiver = new Receiver(finality, appId);
+        PaymentProof memory zeroBody = p;
+        zeroBody.payment.paymentId = keccak256("pay-zero-body");
+        zeroBody.payment.paidAtBlock = 0;
+        zeroBody.payment.targetReceiver = abi.encodePacked(address(receiver));
+        zeroBody.paymentsRoot = receiver.paymentLeaf(zeroBody.payment);
+        zeroBody.header.appBindingRoot = receiver.appBindingRegistryRoot(zeroBody.paymentsRoot, zeroBody.restHash);
+        zeroBody.stateRootBody = bytes32(0);
+        finality.setWithMode(
+            30,
+            receiver.stateRootFromOpening(zeroBody.stateRootBody, receiver.headerHash(zeroBody.header)),
+            FinalityMode.Hybrid
+        );
+        assertEq(
+            keccak256(bytes(receiver.checkPayment(zeroBody))),
+            keccak256(bytes("state root opening")),
+            "zero stateRootBody must fail checkPayment"
+        );
+
+        // 3. BudlumStateReader must return false (not revert) on codeless verifier or height 0.
+        assertTrue(!this._stateReaderProbe(IBudlumFinality(address(0xBEEF)), 30), "codeless finality returns false");
+        assertTrue(!this._stateReaderProbe(finality, 0), "height 0 returns false");
+
+        // 4. BudlumAppBindingClaimer must reject domainKey == 0.
+        ClaimingApp claimer = new ClaimingApp();
+        vm.expectPartialRevert(BudlumAppBindingClaimer.InvalidPayout.selector);
+        claimer.claim(0, bytes32(uint256(99)));
     }
 }
 

@@ -20,7 +20,7 @@ library BudlumStateReader {
         uint256 index,
         bytes32[] memory siblings
     ) internal view returns (bool) {
-        if (address(finality) == address(0)) {
+        if (address(finality) == address(0) || address(finality).code.length == 0 || height == 0) {
             return false;
         }
         if (!finality.heightFinal(height)) {
@@ -59,8 +59,7 @@ library BudlumStateReader {
         uint256 index,
         bytes32[] memory siblings
     ) internal view returns (bool) {
-        bytes32 leaf =
-            BudlumHash.bridgeBurnLeaf(burnId, sourceDomainId, destDomainId, token, amount, recipient);
+        bytes32 leaf = BudlumHash.bridgeBurnLeaf(burnId, sourceDomainId, destDomainId, token, amount, recipient);
         return verifyLeafAtHeight(finality, height, leaf, index, siblings);
     }
 
@@ -90,8 +89,7 @@ library BudlumStateReader {
         uint256 index,
         bytes32[] memory siblings
     ) internal view returns (bool) {
-        bytes32 leaf =
-            BudlumHash.crossDomainMessageLeaf(messageId, sourceDomainId, destDomainId, nonce, payloadHash);
+        bytes32 leaf = BudlumHash.crossDomainMessageLeaf(messageId, sourceDomainId, destDomainId, nonce, payloadHash);
         return verifyLeafAtHeight(finality, height, leaf, index, siblings);
     }
 }

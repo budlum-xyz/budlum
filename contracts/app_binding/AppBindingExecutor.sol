@@ -225,7 +225,7 @@ abstract contract BudlumAppBindingClaimer is BudlumOutboundEmitter {
     }
 
     function _claimBudlumPayout(uint32 domainKey, bytes32 payout) internal {
-        if (payout == bytes32(0)) {
+        if (domainKey == 0 || payout == bytes32(0)) {
             revert InvalidPayout();
         }
         bytes32 appBindingId = budlumAppBindingId(domainKey);
