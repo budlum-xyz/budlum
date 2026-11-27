@@ -758,6 +758,11 @@ pub trait DomainFinalityAdapter: Send + Sync {
 ///. The QC blob that carries the ML-DSA signatures themselves is
 /// checked on the chain's own import path, not here; what this adapter has
 /// verified is the set hash, which commits to both keys of each validator.
+/// Schemes a post-quantum native certificate (`PoSPq` / `BftPq`) exercised:
+/// the BLS aggregate always, ML-DSA-65 when every signer named by the bitmap
+/// binds a PQ key, which is what the QC verification of those proofs checked.
+/// Classic `PoS` / `Bft` proofs never reach here: they verify no ML-DSA
+/// signature, so a bound PQ key in their snapshot is not a fact about them.
 fn certificate_schemes(
     cert: &FinalityCert,
     snapshot: &ValidatorSetSnapshot,
@@ -1117,11 +1122,10 @@ impl DomainFinalityAdapter for PoSFinalityAdapter {
 
     fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
         match proof {
-            FinalityProof::PoS {
-                cert,
-                validator_snapshot,
-            }
-            | FinalityProof::PoSPq {
+            // The classic certificate carries one BLS aggregate; nothing in
+            // it was checked with ML-DSA, so nothing else is a fact.
+            FinalityProof::PoS { .. } => vec![ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG)],
+            FinalityProof::PoSPq {
                 cert,
                 validator_snapshot,
                 ..
@@ -1782,12 +1786,9 @@ impl DomainFinalityAdapter for BftFinalityAdapter {
 
     fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
         match proof {
-            FinalityProof::Bft {
-                cert,
-                validator_snapshot,
-                ..
-            }
-            | FinalityProof::BftPq {
+            // As for `PoS`: the classic BFT certificate is BLS-only.
+            FinalityProof::Bft { .. } => vec![ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG)],
+            FinalityProof::BftPq {
                 cert,
                 validator_snapshot,
                 ..
@@ -4837,11 +4838,25 @@ mod tests {
         }
     }
 
-    /// the native `PoS` and BFT adapters name BLS12-381 and ML-DSA-65.
-    /// ML-DSA-65 is named only when every signer's entry binds a PQ key; a
-    /// signer without one leaves BLS as the only fact.
+    fn empty_qc(cert: &FinalityCert) -> crate::consensus::qc::QcBlob {
+        crate::consensus::qc::QcBlob {
+            epoch: cert.epoch,
+            checkpoint_height: cert.checkpoint_height,
+            checkpoint_hash: cert.checkpoint_hash.clone(),
+            pq_signatures: Vec::new(),
+            merkle_root: String::new(),
+            created_epoch: cert.epoch,
+        }
+    }
+
+    /// A fact is a check that passed. The classic `PoS` and BFT certificates
+    /// carry one BLS aggregate and verify nothing else, so they name only
+    /// BLS12-381 - even when every signer happens to bind a PQ key. The
+    /// post-quantum variants verified an ML-DSA-65 quorum, so they name
+    /// ML-DSA-65 too, and only when every signer named by the bitmap binds a
+    /// PQ key.
     #[test]
-    fn native_certificates_report_bls_and_ml_dsa_65() {
+    fn classic_native_certificates_report_bls_only_and_pq_variants_add_ml_dsa_65() {
         use crate::crypto::facts::{CryptoFacts, ObservedScheme, QuantumClass};
         let bls = ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG);
         let ml_dsa = ObservedScheme::Scheme(SchemeId::ML_DSA_65);
@@ -4855,13 +4870,17 @@ mod tests {
         let bft = FinalityProof::Bft {
             round: 0,
             commit_hash: [1u8; 32],
-            cert,
-            validator_snapshot: bound,
+            cert: cert.clone(),
+            validator_snapshot: bound.clone(),
         };
         let mut facts = CryptoFacts::new();
         PoSFinalityAdapter.observe_finalized(&FinalityStatus::Finalized, &pos, &mut facts);
         assert_eq!(facts.count(bls), 1);
-        assert_eq!(facts.count(ml_dsa), 1);
+        assert_eq!(
+            facts.count(ml_dsa),
+            0,
+            "a classic PoS proof verified no ML-DSA signature"
+        );
         assert_eq!(facts.quantum_class(), Some(QuantumClass::Classical));
 
         let mut facts = CryptoFacts::new();
@@ -4871,21 +4890,54 @@ mod tests {
             &mut facts,
         );
         assert_eq!(facts.count(bls), 1);
-        assert_eq!(facts.count(ml_dsa), 1);
+        assert_eq!(
+            facts.count(ml_dsa),
+            0,
+            "a classic BFT proof verified no ML-DSA signature"
+        );
 
         let mut facts = CryptoFacts::new();
         PoSFinalityAdapter.observe_finalized(&FinalityStatus::Finalized, &bft, &mut facts);
         assert!(facts.is_empty(), "an adapter reads only its own proof kind");
 
-        // One signer with no PQ key: BLS only.
+        // The post-quantum variants name ML-DSA-65 when every signer binds a
+        // PQ key.
+        let pos_pq = FinalityProof::PoSPq {
+            cert: cert.clone(),
+            validator_snapshot: bound.clone(),
+            qc: empty_qc(&cert),
+        };
+        let bft_pq = FinalityProof::BftPq {
+            round: 0,
+            commit_hash: [1u8; 32],
+            cert: cert.clone(),
+            validator_snapshot: bound,
+            qc: empty_qc(&cert),
+        };
+        let mut facts = CryptoFacts::new();
+        PoSFinalityAdapter.observe_finalized(&FinalityStatus::Finalized, &pos_pq, &mut facts);
+        assert_eq!(facts.count(bls), 1);
+        assert_eq!(facts.count(ml_dsa), 1);
+        assert_eq!(facts.quantum_class(), Some(QuantumClass::Classical));
+        let mut facts = CryptoFacts::new();
+        BftFinalityAdapter::default().observe_finalized(
+            &FinalityStatus::Finalized,
+            &bft_pq,
+            &mut facts,
+        );
+        assert_eq!(facts.count(bls), 1);
+        assert_eq!(facts.count(ml_dsa), 1);
+
+        // One signer with no PQ key: BLS only, even for the PQ variant.
         let partial = snapshot_with_pq_keys(&[true, false, true]);
         let cert = cert_with_bitmap(&partial, vec![0b0000_0111]);
         let mut facts = CryptoFacts::new();
         PoSFinalityAdapter.observe_finalized(
             &FinalityStatus::Finalized,
-            &FinalityProof::PoS {
-                cert,
+            &FinalityProof::PoSPq {
+                cert: cert.clone(),
                 validator_snapshot: partial.clone(),
+                qc: empty_qc(&cert),
             },
             &mut facts,
         );
@@ -4897,9 +4949,10 @@ mod tests {
         let mut facts = CryptoFacts::new();
         PoSFinalityAdapter.observe_finalized(
             &FinalityStatus::Finalized,
-            &FinalityProof::PoS {
-                cert,
+            &FinalityProof::PoSPq {
+                cert: cert.clone(),
                 validator_snapshot: partial,
+                qc: empty_qc(&cert),
             },
             &mut facts,
         );
