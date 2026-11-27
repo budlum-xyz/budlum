@@ -343,6 +343,19 @@ pub enum AdapterSpec {
         #[serde(default)]
         epoch: Option<crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch>,
     },
+    /// Arweave `SPoRA` / Recall-Weave permanent-storage attestations.
+    ///
+    /// A storage claim is signed by the operator that makes it, so the only
+    /// thing that distinguishes a real attestation from a fabricated one is
+    /// *whose* key signed it: the spec therefore carries the expected hybrid
+    /// operator key, and `IntakeState` admits it only when it equals the
+    /// governance pin. Ed25519 alone is not enough - the ML-DSA-65 half is what
+    /// keeps a future quantum adversary from forging an operator identity.
+    ArweaveSpore {
+        network: String,
+        #[serde(default)]
+        operator: Option<crate::cross_domain::external::arweave_spora::PinnedSpore>,
+    },
 }
 
 impl AdapterSpec {
@@ -367,7 +380,8 @@ impl AdapterSpec {
             | Self::HoneyBadgerBft { network, .. }
             | Self::NearDoomslug { network, .. }
             | Self::OuroborosMithril { network, .. }
-            | Self::SolanaTower { network, .. } => network,
+            | Self::SolanaTower { network, .. }
+            | Self::ArweaveSpore { network, .. } => network,
         }
     }
 
@@ -535,6 +549,23 @@ impl AdapterSpec {
                 },
                 golden,
                 crate::cross_domain::external::solana_tower_bft::SolanaTowerBftAdapter::with_golden,
+            ),
+            Self::ArweaveSpore { network, operator } => box_with_golden(
+                || {
+                    let mut adapter =
+                        crate::cross_domain::external::arweave_spora::ArweaveSpOraAdapter::new(
+                            network,
+                        );
+                    if let Some(operator) = operator {
+                        adapter = adapter.with_pinned_operator(
+                            operator.ed25519,
+                            operator.ml_dsa_65.clone(),
+                        );
+                    }
+                    adapter
+                },
+                golden,
+                crate::cross_domain::external::arweave_spora::ArweaveSpOraAdapter::with_golden,
             ),
         }
     }
@@ -738,6 +769,13 @@ pub struct IntakeState {
             crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch,
         >,
     >,
+    /// Governance-pinned Arweave storage operators: the hybrid key an
+    /// attestation from `network` must be signed by.
+    #[serde(default)]
+    pub pinned_spore_operators: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::arweave_spora::PinnedSpore,
+    >,
     /// Governance-pinned `HoneyBadgerBFT` epoch committees keyed by external
     /// network.
     ///
@@ -786,6 +824,8 @@ pub enum AnchorFamily {
     OuroborosEpoch,
     /// One epoch's vote-account stake table (`Solana`).
     SolanaEpoch,
+    /// One operator's hybrid signing key (`Arweave` storage attestations).
+    SporeOperator,
 }
 
 impl AnchorFamily {
@@ -804,6 +844,7 @@ impl AnchorFamily {
             Self::NearEpoch => "near-epoch",
             Self::OuroborosEpoch => "ouroboros-epoch",
             Self::SolanaEpoch => "solana-epoch",
+            Self::SporeOperator => "spore-operator",
         }
     }
 }
@@ -839,6 +880,8 @@ pub enum PinnedExternalAnchor {
     OuroborosEpoch(crate::cross_domain::external::ouroboros_mithril::EpochStake),
     /// Vote-account stake table for a `TowerBFT` (Solana) epoch.
     SolanaEpoch(crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch),
+    /// The hybrid operator key a storage attestation must be signed by.
+    SporeOperator(crate::cross_domain::external::arweave_spora::PinnedSpore),
 }
 
 impl PinnedExternalAnchor {
@@ -857,6 +900,7 @@ impl PinnedExternalAnchor {
             Self::NearEpoch(_) => AnchorFamily::NearEpoch,
             Self::OuroborosEpoch(_) => AnchorFamily::OuroborosEpoch,
             Self::SolanaEpoch(_) => AnchorFamily::SolanaEpoch,
+            Self::SporeOperator(_) => AnchorFamily::SporeOperator,
         }
     }
 
@@ -962,6 +1006,25 @@ impl PinnedExternalAnchor {
                 // the wrong length, zero weight). A pin that does not validate
                 // cannot certify a single epoch.
                 committee.validate().map_err(|e| e.to_string())?;
+            }
+            Self::SporeOperator(operator) => {
+                // An all-zero Ed25519 key is not a key, and an empty ML-DSA-65
+                // half would silently downgrade the pin to classical-only,
+                // which is exactly the failure mode this family exists to
+                // avoid.
+                if operator.ed25519 == [0u8; 32] {
+                    return Err("the pinned Arweave operator key is all zeroes".into());
+                }
+                if operator.ml_dsa_65.is_empty() {
+                    return Err("the pinned Arweave operator key has no ML-DSA-65 half".into());
+                }
+                crate::crypto::pq::validate_public_key(
+                    crate::crypto::scheme::SchemeId::ML_DSA_65,
+                    &operator.ml_dsa_65,
+                )
+                .map_err(|_| {
+                    "the pinned Arweave operator's ML-DSA-65 half is not a public key".to_string()
+                })?;
             }
             Self::SolanaEpoch(epoch) => {
                 // Solana admission needs a real epoch: a genesis hash to bind
@@ -1802,6 +1865,33 @@ impl IntakeState {
             .insert(network.into(), committee);
     }
 
+    /// Installs or updates the pinned Arweave storage operator for `network`.
+    /// WIRING: genesis/test initializer; the production door is
+    /// `GovernanceAction::PinExternalAnchor` -> [`Self::install_pinned_anchor`].
+    pub fn pin_spore_operator(
+        &mut self,
+        network: impl Into<String>,
+        operator: crate::cross_domain::external::arweave_spora::PinnedSpore,
+    ) {
+        self.pinned_spore_operators.insert(network.into(), operator);
+    }
+
+    /// Installs the Arweave operator for `network` only if both halves of the
+    /// hybrid key are real keys.
+    ///
+    /// # Errors
+    ///
+    /// The named defect.
+    pub fn install_spore_operator(
+        &mut self,
+        network: impl Into<String>,
+        operator: crate::cross_domain::external::arweave_spora::PinnedSpore,
+    ) -> Result<(), String> {
+        PinnedExternalAnchor::SporeOperator(operator.clone()).validate()?;
+        self.pin_spore_operator(network, operator);
+        Ok(())
+    }
+
     /// Installs or updates the consensus-pinned `TowerBFT` (Solana) epoch for
     /// `epoch.epoch` on `network`.
     /// WIRING: genesis/test initializer; the production door is
@@ -1980,6 +2070,9 @@ impl IntakeState {
             PinnedExternalAnchor::SolanaEpoch(epoch) => {
                 self.pin_solana_epoch(network.to_string(), epoch);
             }
+            PinnedExternalAnchor::SporeOperator(operator) => {
+                self.pin_spore_operator(network.to_string(), operator);
+            }
         }
     }
 
@@ -2061,6 +2154,11 @@ impl IntakeState {
                 .and_then(|epochs| epochs.values().next_back())
                 .cloned()
                 .map(PinnedExternalAnchor::SolanaEpoch),
+            AnchorFamily::SporeOperator => self
+                .pinned_spore_operators
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::SporeOperator),
         }
     }
 
@@ -2304,6 +2402,17 @@ impl IntakeState {
                 return Err(IntakeError::CommitteeNotPinned);
             };
             if stake.as_ref() != Some(installed) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        if let AdapterSpec::ArweaveSpore { network, operator } = &spec {
+            // A storage attestation is only worth what its signer is worth.
+            // Without a pinned operator for `network` the submitter chooses
+            // the key that "proves" the data is stored.
+            let Some(installed) = self.pinned_spore_operators.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if operator.as_ref() != Some(installed) {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
@@ -6945,5 +7054,72 @@ mod tests {
             .pinned_solana_epoch(net, pinned.epoch + 1)
             .is_none());
         assert!(governed.pinned_ouroboros_epochs.is_empty());
+    }
+
+    #[test]
+    fn an_arweave_attestation_is_only_worth_the_operator_key_the_state_pinned() {
+        use crate::cross_domain::external::arweave_spora::spora_fixture;
+
+        let net = "arweave-mainnet";
+        let (ed, pq, golden) = spora_fixture(net);
+        let operator = crate::cross_domain::external::arweave_spora::PinnedSpore {
+            ed25519: ed,
+            ml_dsa_65: pq,
+        };
+        let spec = |pin: Option<_>| AdapterSpec::ArweaveSpore {
+            network: net.to_string(),
+            operator: pin,
+        };
+        let mut intake = IntakeState::default();
+
+        // No operator pinned: the submitter would be vouching for itself.
+        assert_eq!(
+            admit_near(&mut intake, spec(Some(operator.clone())), golden.clone()),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+
+        // An all-zero classical half is not a key; a missing ML-DSA-65 half
+        // would silently downgrade every attestation to classical.
+        let mut zeroed = operator.clone();
+        zeroed.ed25519 = [0u8; 32];
+        assert!(intake
+            .install_spore_operator(net, zeroed)
+            .is_err_and(|e| e.contains("all zeroes")));
+        let mut classical_only = operator.clone();
+        classical_only.ml_dsa_65.clear();
+        assert!(intake
+            .install_spore_operator(net, classical_only)
+            .is_err_and(|e| e.contains("no ML-DSA-65 half")));
+        assert!(intake.pinned_spore_operators.is_empty());
+
+        intake
+            .install_spore_operator(net, operator.clone())
+            .expect("the fixture operator key is a hybrid key");
+
+        // A registration naming another operator is refused even though the
+        // evidence itself is well formed: the key is the trust root, and the
+        // submitter does not get to choose it.
+        let mut other = operator.clone();
+        other.ml_dsa_65[0] ^= 0xff;
+        assert_eq!(
+            admit_near(&mut intake, spec(Some(other)), golden.clone()),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+        // A spec with no operator at all is equally refused once one is pinned.
+        assert_eq!(
+            admit_near(&mut intake, spec(None), golden.clone()),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+
+        admit_near(&mut intake, spec(Some(operator.clone())), golden)
+            .expect("the pinned operator admits");
+
+        // Governance and genesis doors agree on the same map.
+        let mut governed = IntakeState::default();
+        governed.install_pinned_anchor(net, PinnedExternalAnchor::SporeOperator(operator.clone()));
+        let mut genesis = IntakeState::default();
+        genesis.pin_spore_operator(net, operator.clone());
+        assert_eq!(governed.state_digest(), genesis.state_digest());
+        assert!(governed.pinned_solana_epochs.is_empty());
     }
 }

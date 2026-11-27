@@ -626,6 +626,49 @@ impl FinalityGuarantee {
                     fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
+            AdapterSpec::ArweaveSpore { operator, .. } => {
+                // Arweave guarantees *availability*, not a quorum: a recall
+                // proof shows the weave holds the data and that a known
+                // operator signed the claim. The posture is therefore
+                // availability-sampled (ranked with data-availability
+                // sampling) and the attestation is over the root only - a
+                // storage attestation makes no statement about parent links.
+                let valid = operator
+                    .as_ref()
+                    .is_some_and(|pin| pin.ed25519 != [0u8; 32] && !pin.ml_dsa_65.is_empty());
+                Self {
+                    reversibility: FinalityReversibility::DataAvailabilitySampled {
+                        min_samples: if valid {
+                            crate::cross_domain::external::arweave_spora::MIN_RECALL_SAMPLES
+                        } else {
+                            0
+                        },
+                    },
+                    // The pin's ML-DSA-65 half is what makes this lattice-grade
+                    // rather than classical: a pinned operator key is only
+                    // meaningful when the operator must prove possession of it.
+                    quantum_posture: if valid {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: false,
+                        event_root: valid,
+                        parent: false,
+                    },
+                    // Storage is a promise about availability, not a bond.
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid {
+                        // A single operator is a 1-of-1 witness; the honest
+                        // claim is the one-operator tolerance it really has.
+                        0
+                    } else {
+                        0
+                    },
+                }
+            }
             AdapterSpec::SolanaTower { epoch, .. } => {
                 // TowerBFT finality is a stake-weighted vote lock: a quorum,
                 // not a depth. A pin with no validators, an inverted slot

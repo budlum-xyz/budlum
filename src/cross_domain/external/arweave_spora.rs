@@ -22,8 +22,13 @@
 //!    domain-separated attestation digest binding the network, height, epoch,
 //!    weave root, chunk commitment and endowment parameters.
 //!
-//! WIRING: unwired - external Arweave `SPoRA` recall adapter awaits `AdapterSpec`
-//! variant binding in `external_tx` domain intake.
+//! WIRING: wired - `AdapterSpec::ArweaveSpore { network, operator }` (wire tag
+//! 22) builds this adapter from an intake registration. A storage claim is
+//! self-signed, so the adapter is only as good as the operator it expects:
+//! `IntakeState` refuses a registration whose hybrid operator key
+//! (Ed25519 + ML-DSA-65) is not the governance-pinned one
+//! (`IntakeState::install_arweave_operator`, reachable in production through
+//! `GovernanceAction::PinExternalAnchor`).
 
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
@@ -49,7 +54,14 @@ const EVIDENCE_VERSION: u32 = 1;
 const PAYLOAD_MAGIC: &[u8; 8] = b"BDLARA01";
 const MAX_PAYLOAD_BYTES: usize = 512 * 1024;
 const MAX_CHUNK_ID_LEN: usize = 128;
-const ED25519_PK_LEN: usize = 32;
+pub const ED25519_PK_LEN: usize = 32;
+
+/// Recall samples a storage attestation must commit to before its coverage is
+/// worth stating in a finality guarantee.
+///
+/// One: the adapter verifies a single weave Merkle path per attestation, and
+/// claiming more would be claiming sampling the evidence does not carry.
+pub const MIN_RECALL_SAMPLES: u16 = 1;
 const ED25519_SIG_LEN: usize = 64;
 /// 30% contamination ceiling in basis points.
 const CONTAMINATION_CAP_BPS: u128 = 3_000;
@@ -380,11 +392,33 @@ fn verify_operator_signatures(
     Ok(())
 }
 
+/// Governance pin: the hybrid operator key an Arweave storage attestation from
+/// one network must be signed by.
+///
+/// Both halves are pinned on purpose. An Ed25519-only pin could be satisfied by
+/// a forged classical signature once quantum forgery is cheap, and an empty
+/// ML-DSA-65 half would silently downgrade every attestation to classical.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedSpore {
+    /// The operator's Ed25519 signing key.
+    pub ed25519: [u8; ED25519_PK_LEN],
+    /// The same operator's ML-DSA-65 public key, mandatory.
+    pub ml_dsa_65: Vec<u8>,
+}
+
 /// Arweave `SPoRA` / Recall-Weave permanent storage adapter.
 #[derive(Debug, Clone)]
 pub struct ArweaveSpOraAdapter {
     network: String,
     pinned_operator: Option<([u8; ED25519_PK_LEN], Vec<u8>)>,
+    /// The known-good sample admission verifies against.
+    ///
+    /// `selftest::admit` asks the adapter for this, not for the registration's
+    /// copy: an adapter that cannot produce its own golden sample cannot be
+    /// admitted at all. Without this slot the adapter was unreachable from
+    /// `IntakeState::register_domain` - the wiring gate said so, and this field
+    /// is the fix.
+    golden: Option<RawConsensusEvidence>,
 }
 
 impl ArweaveSpOraAdapter {
@@ -394,6 +428,7 @@ impl ArweaveSpOraAdapter {
         Self {
             network: network.into(),
             pinned_operator: None,
+            golden: None,
         }
     }
 
@@ -408,6 +443,13 @@ impl ArweaveSpOraAdapter {
         pq_pk: Vec<u8>,
     ) -> Self {
         self.pinned_operator = Some((ed25519_pk, pq_pk));
+        self
+    }
+
+    /// Attach the known-good sample admission verifies against.
+    #[must_use]
+    pub fn with_golden(mut self, golden: RawConsensusEvidence) -> Self {
+        self.golden = Some(golden);
         self
     }
 
@@ -547,6 +589,10 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
         })
     }
 
+    fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
+        self.golden.clone()
+    }
+
     fn verify_observed(
         &self,
         evidence: &RawConsensusEvidence,
@@ -675,8 +721,33 @@ pub(crate) fn encode_arweave_spora_evidence(ev: &ArweaveSpOraEvidence) -> Vec<u8
     serde_json::to_vec(ev).expect("arweave evidence serializes")
 }
 
+/// The operator keys and golden evidence the intake tests register with.
+///
+/// Public within the crate because a registration end to end needs the same
+/// known-good sample admission will verify against; both the evidence type
+/// and the operator key material stay private to this module.
 #[cfg(test)]
-mod tests {
+pub(crate) fn spora_fixture(
+    network: &str,
+) -> ([u8; ED25519_PK_LEN], Vec<u8>, RawConsensusEvidence) {
+    let (ev, op) = sample_evidence_with_operator(network);
+    let ed = op.ed.public_key_bytes();
+    let pq = op.pq.public_key_bytes().to_vec();
+    let adapter = ArweaveSpOraAdapter::new(network).with_pinned_operator(ed, pq.clone());
+    let raw = RawConsensusEvidence {
+        adapter: adapter.descriptor().id,
+        evidence_version: EVIDENCE_VERSION,
+        network: network.to_string(),
+        payload: encode_arweave_spora_evidence(&ev),
+        declared_height: ev.block_height,
+        declared_root: ev.weave_root,
+        submitter: crate::core::address::Address([0; 32]),
+    };
+    (ed, pq, raw)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
     use super::*;
     use crate::crypto::facts::CryptoFacts;
 

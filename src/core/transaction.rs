@@ -5692,7 +5692,25 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
-        // Tag 21: Solana TowerBFT epoch adapter, appended last.
+        // Tag 22: Arweave SPoRA operator adapter, appended last.
+        //
+        // Both halves of the operator key reach the preimage. A relay that
+        // could substitute the Ed25519 half alone would keep a valid-looking
+        // pin while moving the ML-DSA-65 anchor, which is the half that
+        // survives quantum forgery.
+        AdapterSpec::ArweaveSpore { network, operator } => {
+            put_u8(out, 22);
+            put_string(out, network);
+            match operator {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.ed25519);
+                    put_bytes(out, &pin.ml_dsa_65);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 21: Solana TowerBFT epoch adapter.
         //
         // Genesis hash, epoch number, slot range and the whole vote-account
         // roster reach the preimage: redirecting a registration at an epoch
