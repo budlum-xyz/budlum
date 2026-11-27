@@ -27,6 +27,7 @@ pub mod header;
 pub mod mpt;
 pub mod outbound;
 pub mod receipt;
+pub mod rpc_client;
 pub mod rlp;
 pub mod sync_committee;
 pub mod verify;
