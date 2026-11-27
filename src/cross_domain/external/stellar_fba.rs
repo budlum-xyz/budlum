@@ -143,6 +143,12 @@ impl ScpQuorumSet {
             prev = Some(v);
         }
         for inner in &self.inner_sets {
+            *total_refs = total_refs.saturating_add(1);
+            if *total_refs > MAX_SCP_QSET_REFS {
+                return Err(AdapterError::ConsensusRule {
+                    rule: format!("SCP QuorumSet references exceed {MAX_SCP_QSET_REFS}"),
+                });
+            }
             inner.validate(depth.saturating_add(1), known_nodes, total_refs)?;
         }
         Ok(())
@@ -754,6 +760,11 @@ impl StellarScpAdapter {
                 accepted: EVIDENCE_VERSION.to_string(),
             });
         }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "SCP network identifier cannot be empty".into(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -947,6 +958,10 @@ impl StellarScpAdapter {
 impl ExternalFinalityAdapter for StellarScpAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned.is_some()
     }
 
     fn verify(
@@ -1416,5 +1431,89 @@ mod tests {
             ),
             "future-dated SCP ledger_seq above policy.now must fail closed when max_age > 0"
         );
+    }
+
+    #[test]
+    fn stellar_reports_pinned_anchor_and_caps_nested_inner_set_amplification() {
+        let (pinned, _nodes, _bundle, ev) = build_hierarchical_scp_fixture(true);
+        let pinned_adapter = StellarScpAdapter::new("stellar-pubnet", Some(pinned.clone()));
+        assert!(
+            pinned_adapter.has_pinned_trust_anchor(),
+            "pinned Stellar SCP adapter must advertise has_pinned_trust_anchor=true"
+        );
+        assert!(!StellarScpAdapter::new("stellar-pubnet", None).has_pinned_trust_anchor());
+
+        // Construct an inner-set fanout bomb: zero direct validators at depth 0..2,
+        // 100 inner sets containing 1 leaf validator -> > MAX_SCP_QSET_REFS (64) nodes
+        // even if leaf validator count per inner set is 1 or 0.
+        let leaf = ScpQuorumSet {
+            threshold: 1,
+            validators: vec![pinned.nodes[0].ed25519_pubkey],
+            inner_sets: Vec::new(),
+        };
+        // Empty inner sets with threshold=1 are already invalid, whereas nested inner sets
+        // with 10x10 fanout of `leaf` exceed 64 total tree nodes; even 70 nested inner_sets
+        // of depth-1 wrappers (each wrapping 0 direct validators + 1 leaf) must fail closed
+        // at the inner-set reference budget before exponential recursion.
+        let wrapper = ScpQuorumSet {
+            threshold: 1,
+            validators: Vec::new(),
+            inner_sets: vec![leaf],
+        };
+        let fanout_root = ScpQuorumSet {
+            threshold: 1,
+            validators: Vec::new(),
+            inner_sets: vec![wrapper; 40], // 40 wrappers + 40 inner leaves + 40 validator refs > 64, AND test pure inner-set count:
+        };
+        let mut known = BTreeMap::new();
+        known.insert(pinned.nodes[0].ed25519_pubkey, 0);
+        let mut refs = 0usize;
+        assert!(matches!(
+            fanout_root.validate(0, &known, &mut refs),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // Even when total leaf validator references <= 64 (e.g. 1 leaf validator wrapped inside
+        // 4-level binary/4-way inner-set chain exceeding 64 inner-set nodes), inner_sets themselves
+        // must count against MAX_SCP_QSET_REFS!
+        let leaf_single = ScpQuorumSet {
+            threshold: 1,
+            validators: vec![pinned.nodes[0].ed25519_pubkey],
+            inner_sets: Vec::new(),
+        };
+        // Build 65 nested inner-set nodes using only 1 leaf validator? No: 65 distinct copies of
+        // depth-3 -> depth-2 -> depth-1 -> leaf would have 65 validator refs, EXCEPT if 65 inner sets
+        // at depth 1..3 wrap a single leaf at the end? No, tree has >= leaves as branches unless
+        // threshold=1 and 1 branch has a leaf while 65 sibling inner_sets... wait: every inner_set
+        // needs threshold>=1 so each inner_set has >=1 child. A chain of depth 4 with 1 leaf has 4
+        // inner_sets, whereas 22 depth-3 chains (`22 * 3 = 66` inner_sets + `22` leaf validators:
+        // `22 <= 64` validator refs, `88 > 64` total nodes!) previously bypassed `total_refs <= 64`!
+        let mut chain = leaf_single;
+        for _ in 0..3 {
+            chain = ScpQuorumSet {
+                threshold: 1,
+                validators: Vec::new(),
+                inner_sets: vec![chain],
+            };
+        }
+        let deep_chains = ScpQuorumSet {
+            threshold: 1,
+            validators: Vec::new(),
+            inner_sets: vec![chain; 22],
+        };
+        let mut chain_refs = 0usize;
+        let err = deep_chains
+            .validate(0, &known, &mut chain_refs)
+            .expect_err("66 inner-set nodes + 22 validator leaves (88 > 64) must fail closed");
+        assert!(matches!(err, AdapterError::ConsensusRule { .. }));
+
+        // Empty/whitespace adapter network must also fail closed on verify().
+        let blank_net_adapter = StellarScpAdapter::new("   ", Some(pinned));
+        let mut blank_ev = ev;
+        blank_ev.network = "   ".to_string();
+        assert!(matches!(
+            blank_net_adapter.verify(&blank_ev, &VerificationPolicy::strict(52_000_010)),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
     }
 }
