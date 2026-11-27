@@ -4682,6 +4682,15 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
                 }
             }
         }
+        SettlementTx::ThreeNft(nft_tx) => {
+            // Tag 21. A pin commits to the exact bytes it stores, so the
+            // metadata and the recipe are hashed as one.
+            use crate::settlement::domains::ThreeNftTx;
+            put_u8(out, 21);
+            let bytes = postcard::to_allocvec(nft_tx)
+                .unwrap_or_else(|_| b"budlum/three-nft/fields-failed".to_vec());
+            put_bytes(out, &bytes);
+        }
         SettlementTx::Dictionary(dict_tx) => {
             // Tag 20. Registering a dictionary fixes the bytes every bearer of
             // it will decode against, so its id and size are signed.

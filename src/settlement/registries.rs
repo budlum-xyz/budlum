@@ -61,6 +61,17 @@ pub struct SettlementRegistries {
     /// declared a denomination, so its presence changes no root until used.
     #[serde(default)]
     pub denominations: crate::settlement::universal_asset::DenominationIndex,
+    /// Pinned Three objects: the recipe and the body, kept so the stream can
+    /// be re-emitted by anyone rather than only by the validator that first
+    /// held it.
+    ///
+    /// This is the "what survives in the network is the recipe, not any one
+    /// validator" rule made into state. Out of state, a pin existed only in the
+    /// mind of the process that made it: `drop_validator` and
+    /// `reemit_video_from_pin` read a registry that no other node had, so
+    /// whether pinned bytes came back depended on which node you asked.
+    #[serde(default)]
+    pub three_nft: crate::storage::three_nft::ThreeNftRegistry,
     /// The zstd dictionary registry: which dictionaries exist, how large, and
     /// how many live objects reference each one.
     ///

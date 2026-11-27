@@ -190,6 +190,11 @@ pub enum SettlementTx {
     ///
     /// Appended to preserve existing bincode enum discriminants.
     Dictionary(Box<DictionaryTx>),
+
+    /// Pin a Three object, or drop one validator's hold on it.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    ThreeNft(Box<ThreeNftTx>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -2116,6 +2121,78 @@ pub fn execute_settlement_tx(
         SettlementTx::ViewGrant(grant_tx) => execute_view_grant(state, ctx, grant_tx),
         SettlementTx::DataLayer(layer_tx) => execute_data_layer(state, ctx, layer_tx),
         SettlementTx::Dictionary(dict_tx) => execute_dictionary(state, ctx, dict_tx),
+        SettlementTx::ThreeNft(nft_tx) => execute_three_nft(state, ctx, nft_tx),
+    }
+}
+
+/// A Three NFT pin action.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ThreeNftTx {
+    /// Pin an object: its metadata and its recipe.
+    ///
+    /// The body is carried in the transaction, which is the point: a pin whose
+    /// body only the minting node had could not be re-emitted by anyone else.
+    Pin {
+        /// Marketplace metadata.
+        meta: crate::storage::three_nft::ThreeNftMeta,
+        /// The recipe and (for a `with_body`) record the body.
+        tarif: crate::storage::three_nft::RecipeRecord,
+    },
+    /// Drop `validator`'s hold. The pin stays; only the reference goes.
+    DropValidator {
+        /// The pin.
+        id: u64,
+        /// The validator dropping out.
+        validator: Address,
+    },
+}
+
+/// Executes a Three NFT transaction.
+fn execute_three_nft(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &ThreeNftTx,
+) -> Result<(), SettlementTxError> {
+    use crate::storage::three_nft::ThreeNftRegistryError;
+
+    match tx {
+        ThreeNftTx::Pin { meta, tarif } => {
+            // A pin is content-addressed by its recipe commitment, and the
+            // registry has no uniqueness check of its own: pinning the same
+            // recipe twice would mint a second id for bytes that are already
+            // held, and every marketplace row would point at one of two
+            // identities for the same object. The chain is where that is
+            // knowable, so the chain is where it is refused.
+            if state
+                .settlement
+                .three_nft
+                .iter()
+                .any(|(_, row)| row.meta.recipe_commitment == meta.recipe_commitment)
+            {
+                return Err(SettlementTxError::Refused(String::from(
+                    "three nft: this recipe is already pinned",
+                )));
+            }
+            let _ = ctx;
+            state
+                .settlement
+                .three_nft
+                .pin(crate::storage::three_nft::PinRow {
+                    meta: meta.clone(),
+                    tarif: tarif.clone(),
+                });
+            Ok(())
+        }
+        ThreeNftTx::DropValidator { id, validator } => {
+            let _ = validator;
+            state
+                .settlement
+                .three_nft
+                .drop_validator(*id)
+                .map_err(|err: ThreeNftRegistryError| {
+                    SettlementTxError::Refused(format!("three nft: {err:?}"))
+                })
+        }
     }
 }
 
