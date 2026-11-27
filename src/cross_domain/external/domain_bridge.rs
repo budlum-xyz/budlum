@@ -20,7 +20,7 @@
 //! commitment path are documented in `intake.rs`.
 
 use crate::cross_domain::external::spec::{
-    AdapterId, ExternalFinalityAdapter, RawConsensusEvidence, SecurityBacking, VerificationPolicy,
+    AdapterId, ExternalFinalityAdapter, RawConsensusEvidence, VerificationPolicy,
 };
 use crate::crypto::facts::{CryptoFacts, CryptoObserver, NullObserver};
 use crate::domain::finality_adapter::{
@@ -222,24 +222,15 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
 
         // The policy's `require_slashable` is enforced at
         // the BRIDGE, for every adapter - not only the one adapter that
-        // happened to check it. Slashability is a property of a signature
-        // set with an explicit local confiscation claim; proof-carrying,
-        // work-weighted, authority and empty backing are different security
-        // classes and must not be promoted to slashable here.
-        if self.policy.require_slashable {
-            let slashable = matches!(
-                &attestation.security,
-                SecurityBacking::SignatureSet {
-                    slashable: true,
-                    ..
-                }
-            );
-            if !slashable {
-                return Ok(FinalityStatus::Rejected(
-                    "the policy requires slashable backing; this attestation is not slashable"
-                        .to_string(),
-                ));
-            }
+        // happened to check it. The rule itself is the policy's
+        // (`VerificationPolicy::admits_backing`), the same text the registry's
+        // intake door reads, so the two doors cannot drift apart on what
+        // counts as slashable: a signature set with an explicit local
+        // confiscation claim, and nothing else.
+        if let Err(err) = self.policy.admits_backing(&attestation.security) {
+            return Ok(FinalityStatus::Rejected(format!(
+                "the bridge refused the attestation's backing: {err}"
+            )));
         }
         if attestation.adapter != self.adapter_id || evidence.adapter != self.adapter_id {
             return Ok(FinalityStatus::Rejected(
