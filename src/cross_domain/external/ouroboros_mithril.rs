@@ -75,6 +75,7 @@ use crate::crypto::facts::ObservedScheme;
 use crate::crypto::primitives::{verify_signature, KeyPair};
 use crate::crypto::scheme::SchemeId;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 /// A ceiling on the encoded payload, checked before deserialization.
 pub const MAX_PAYLOAD_BYTES: usize = 512 * 1024;
@@ -515,7 +516,8 @@ impl PraosEquivocationProof {
         crate::core::hash::hash_fields_bytes(&[&acc])
     }
 
-    /// Check the proof with nothing but the proof: two different messages, two
+    /// Check the proof with nothing but the proof: two distinct canonical Praos
+    /// vote messages for the claimed producer, slot, and heights, two
     /// signatures that verify under the named key over their own message, and
     /// a digest that matches its own fields.
     ///
@@ -526,15 +528,91 @@ impl PraosEquivocationProof {
         if self.first_message == self.second_message {
             return Err("the two blocks sign one message: not an equivocation".to_string());
         }
+        validate_praos_vote_message_binding(
+            &self.first_message,
+            &self.producer,
+            self.slot,
+            self.first_height,
+            "first block",
+        )?;
+        validate_praos_vote_message_binding(
+            &self.second_message,
+            &self.producer,
+            self.slot,
+            self.second_height,
+            "second block",
+        )?;
         verify_signature(&self.first_message, &self.first_signature, &self.producer)
             .map_err(|e| format!("first block: {e}"))?;
         verify_signature(&self.second_message, &self.second_signature, &self.producer)
             .map_err(|e| format!("second block: {e}"))?;
-        if self.proof_digest != self.recomputed_digest() {
+        if !bool::from(self.proof_digest.ct_eq(&self.recomputed_digest())) {
             return Err("the proof digest is not the digest of its own fields".to_string());
         }
         Ok(())
     }
+}
+
+/// Verify that `message` has the exact canonical layout produced by
+/// [`praos_vote_message`] and commits to `expected_producer`, `expected_slot`,
+/// and `expected_height`.
+fn validate_praos_vote_message_binding(
+    message: &[u8],
+    expected_producer: &[u8; ED25519_PUBLIC_KEY_LEN],
+    expected_slot: u64,
+    expected_height: u64,
+    label: &str,
+) -> Result<(), String> {
+    let tag_len = PRAOS_VOTE_TAG.len();
+    let expected_len = tag_len + ED25519_PUBLIC_KEY_LEN + 8 + 8 + 32 + 8;
+    if message.len() != expected_len {
+        return Err(format!(
+            "{label}: vote message length {} != canonical {expected_len}",
+            message.len()
+        ));
+    }
+    let tag = message
+        .get(..tag_len)
+        .ok_or_else(|| format!("{label}: missing vote domain tag"))?;
+    if tag != PRAOS_VOTE_TAG {
+        return Err(format!("{label}: message does not carry PRAOS_VOTE_TAG"));
+    }
+    let producer_end = tag_len + ED25519_PUBLIC_KEY_LEN;
+    let producer = message
+        .get(tag_len..producer_end)
+        .ok_or_else(|| format!("{label}: missing embedded producer"))?;
+    if !bool::from(producer.ct_eq(expected_producer)) {
+        return Err(format!(
+            "{label}: embedded producer does not match equivocation producer"
+        ));
+    }
+    let slot_end = producer_end + 8;
+    let slot_slice = message
+        .get(producer_end..slot_end)
+        .ok_or_else(|| format!("{label}: missing embedded slot"))?;
+    let slot_bytes: [u8; 8] = slot_slice
+        .try_into()
+        .map_err(|_| format!("{label}: malformed embedded slot"))?;
+    let embedded_slot = u64::from_le_bytes(slot_bytes);
+    if embedded_slot != expected_slot {
+        return Err(format!(
+            "{label}: embedded slot {embedded_slot} != claimed equivocation slot {expected_slot}"
+        ));
+    }
+    let height_end = slot_end + 8;
+    let height_slice = message
+        .get(slot_end..height_end)
+        .ok_or_else(|| format!("{label}: missing embedded height"))?;
+    let height_bytes: [u8; 8] = height_slice
+        .try_into()
+        .map_err(|_| format!("{label}: malformed embedded height"))?;
+    let embedded_height = u64::from_le_bytes(height_bytes);
+    if embedded_height != expected_height {
+        return Err(format!(
+            "{label}: embedded height {embedded_height} != claimed height {expected_height}"
+        ));
+    }
+    Ok(())
 }
 
 /// The Praos + Mithril finality adapter for one Cardano network.
@@ -800,6 +878,12 @@ impl OuroborosMithrilAdapter {
                     decoded.epoch
                 ))
             })?;
+            if signer_stake == 0 {
+                return Err(rule(format!(
+                    "certificate signature {index} is by a zero-stake key in epoch {}",
+                    decoded.epoch
+                )));
+            }
             let bytes = signature.exact_signature()?;
             verify_signature(&message, &bytes, &signature.public_key).map_err(|e| {
                 AdapterError::Crypto {
@@ -1521,6 +1605,73 @@ mod tests {
         assert_ne!(
             producer_address(&public_of(1)),
             producer_address(&public_of(2))
+        );
+    }
+
+    #[test]
+    fn equivocation_check_refuses_cross_slot_and_non_vote_forged_messages() {
+        let kp = producer_keypair(&[1u8; ED25519_SECRET_KEY_LEN]).expect("seed");
+        let producer = kp.public_key_bytes();
+
+        let slot_a_msg = praos_vote_message(&producer, 100, 10, &[0x11; 32], 5);
+        let slot_b_msg = praos_vote_message(&producer, 101, 11, &[0x22; 32], 6);
+        let mut cross_slot = PraosEquivocationProof {
+            producer,
+            slot: 100,
+            first_signature: kp.sign(&slot_a_msg).to_vec(),
+            second_signature: kp.sign(&slot_b_msg).to_vec(),
+            first_message: slot_a_msg.clone(),
+            second_message: slot_b_msg,
+            first_height: 10,
+            second_height: 11,
+            proof_digest: [0u8; 32],
+        };
+        cross_slot.proof_digest = cross_slot.recomputed_digest();
+        assert!(
+            cross_slot.check().is_err(),
+            "honest blocks from distinct slots must be refused as equivocation"
+        );
+
+        let cert_msg = mithril_certificate_message(5, 10, &[0x33; 32]);
+        let mut domain_confused = PraosEquivocationProof {
+            producer,
+            slot: 100,
+            first_signature: kp.sign(&slot_a_msg).to_vec(),
+            second_signature: kp.sign(&cert_msg).to_vec(),
+            first_message: slot_a_msg,
+            second_message: cert_msg,
+            first_height: 10,
+            second_height: 10,
+            proof_digest: [0u8; 32],
+        };
+        domain_confused.proof_digest = domain_confused.recomputed_digest();
+        assert!(
+            domain_confused.check().is_err(),
+            "non-vote message must be refused by PraosEquivocationProof::check"
+        );
+    }
+
+    #[test]
+    fn zero_stake_registered_signer_is_refused_in_certificate() {
+        let base = decoded(&golden_evidence());
+        let mut epoch_stake = stake_distribution(base.epoch);
+        let zero_key = public_of(99);
+        epoch_stake.signers.push(EpochSigner {
+            public_key: zero_key,
+            stake: 0,
+        });
+        let adapter_with_zero =
+            OuroborosMithrilAdapter::new(NETWORK, CHAIN_ID).with_epoch_stake(epoch_stake);
+        let msg = base.certificate_message();
+        let evidence = with_payload(&base, |copy| {
+            copy.signatures.push(sign_certificate(99, &msg));
+        });
+        assert!(
+            matches!(
+                adapter_with_zero.verify(&evidence, &policy()),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "registered key with zero stake must be refused in certificate"
         );
     }
 }

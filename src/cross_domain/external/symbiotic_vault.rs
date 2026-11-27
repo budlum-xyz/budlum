@@ -33,6 +33,7 @@ use std::collections::BTreeSet;
 use k256::ecdsa::signature::hazmat::PrehashVerifier;
 use k256::ecdsa::{Signature as SecpSignature, VerifyingKey as SecpVerifyingKey};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 use crate::core::hash::hash_fields_bytes;
 use crate::crypto::facts::{CryptoObserver, ObservedScheme};
@@ -167,6 +168,8 @@ impl SymbioticVaultEvidence {
             .iter()
             .map(|s| s.signer_index.to_le_bytes())
             .collect();
+        let classical_count = (self.classical_signatures.len() as u64).to_le_bytes();
+        let pq_count = (self.pq_signatures.len() as u64).to_le_bytes();
         let mut fields: Vec<&[u8]> = vec![
             b"BDLM_SYMBIOTIC_VAULT_V1",
             b"bundle",
@@ -181,11 +184,15 @@ impl SymbioticVaultEvidence {
             &pq_threshold,
             &classical_root,
             &pq_root,
+            b"classical-sigs",
+            &classical_count,
         ];
         for (idx, sig) in c_indices.iter().zip(&self.classical_signatures) {
             fields.push(idx);
             fields.push(&sig.signature);
         }
+        fields.push(b"pq-sigs");
+        fields.push(&pq_count);
         for (idx, sig) in pq_indices.iter().zip(&self.pq_signatures) {
             fields.push(idx);
             fields.push(&sig.signature);
@@ -506,7 +513,7 @@ impl SymbioticVaultAdapter {
         if let Some((expected_c, expected_pq)) = self.pinned_committee_roots {
             let got_c = key_set_commitment(b"classical-keys", &evidence.classical_signer_keys);
             let got_pq = key_set_commitment(b"pq-keys", &evidence.pq_signer_keys);
-            if got_c != expected_c || got_pq != expected_pq {
+            if !bool::from(got_c.ct_eq(&expected_c)) || !bool::from(got_pq.ct_eq(&expected_pq)) {
                 return Err(AdapterError::ConsensusRule {
                     rule: "Symbiotic signer committee does not match pinned vault anchor".into(),
                 });
@@ -577,7 +584,13 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
             });
         }
 
-        if policy.max_age > 0 && policy.now > ev.epoch {
+        if policy.max_age > 0 {
+            if ev.epoch > policy.now {
+                return Err(AdapterError::Stale {
+                    age: ev.epoch.saturating_sub(policy.now),
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now.saturating_sub(ev.epoch);
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -990,6 +1003,52 @@ mod tests {
                 Err(AdapterError::UnslashableBacking)
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
+        );
+    }
+
+    #[test]
+    fn digest_separates_classical_and_pq_signature_sections() {
+        let mut left = sample_evidence("mainnet");
+        let mut right = left.clone();
+        let moved = right
+            .classical_signatures
+            .pop()
+            .expect("at least one classical sig");
+        right.pq_signatures.insert(0, moved);
+        assert_ne!(
+            left.digest(),
+            right.digest(),
+            "shifting a signature across classical/pq boundary must not collide on digest"
+        );
+        left.pq_signatures.clear();
+        assert_ne!(left.digest(), right.digest());
+    }
+
+    #[test]
+    fn future_epoch_is_refused_when_max_age_is_enforced() {
+        let ev = sample_evidence("mainnet");
+        let adapter = SymbioticVaultAdapter::new("mainnet");
+        let raw = RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            evidence_version: EVIDENCE_VERSION,
+            network: "mainnet".to_string(),
+            payload: encode_symbiotic_evidence(&ev),
+            declared_height: ev.epoch,
+            declared_root: ev.collateral_root,
+            submitter: crate::core::address::Address([0; 32]),
+        };
+        let mut future_policy = default_policy();
+        future_policy.now = ev.epoch.saturating_sub(1);
+        future_policy.max_age = 10;
+        assert!(
+            matches!(
+                adapter.verify(&raw, &future_policy),
+                Err(AdapterError::Stale {
+                    age: 1,
+                    max_age: 10
+                })
+            ),
+            "future-dated Symbiotic epoch must fail closed when policy.max_age > 0"
         );
     }
 }

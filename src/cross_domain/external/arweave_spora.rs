@@ -491,7 +491,13 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
             });
         }
 
-        if policy.max_age > 0 && policy.now > ev.block_height {
+        if policy.max_age > 0 {
+            if ev.block_height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: ev.block_height.saturating_sub(policy.now),
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now.saturating_sub(ev.block_height);
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -838,6 +844,33 @@ mod tests {
                 Err(AdapterError::UnslashableBacking)
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
+        );
+    }
+
+    #[test]
+    fn future_block_height_is_refused_when_max_age_is_enforced() {
+        let (ev, _op) = sample_evidence_with_operator("arweave-mainnet");
+        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet");
+        let raw = RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            evidence_version: EVIDENCE_VERSION,
+            network: "arweave-mainnet".to_string(),
+            payload: encode_arweave_spora_evidence(&ev),
+            declared_height: ev.block_height,
+            declared_root: ev.weave_root,
+            submitter: crate::core::address::Address([0; 32]),
+        };
+        let mut future_policy = VerificationPolicy::strict(ev.block_height.saturating_sub(5));
+        future_policy.max_age = 20;
+        assert!(
+            matches!(
+                adapter.verify(&raw, &future_policy),
+                Err(AdapterError::Stale {
+                    age: 5,
+                    max_age: 20
+                })
+            ),
+            "future-dated Arweave block_height must fail closed when policy.max_age > 0"
         );
     }
 }
