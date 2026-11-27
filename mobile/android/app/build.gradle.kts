@@ -130,6 +130,15 @@ tasks.withType<org.gradle.api.tasks.bundling.AbstractArchiveTask>().configureEac
 // not resolve. This is a test-only working directory, never an APK input.
 tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
     workingDir = rootProject.projectDir.parentFile.parentFile
+    // A failing safety check says which check failed in its message. The
+    // default console shows only the exception class, which told a reader
+    // that something in a seventeen-part specification broke and nothing
+    // more. Print the message and whatever the test wrote on its way there.
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showStandardStreams = true
+    }
 }
 
 // Zero third-party analytics, tracking, or remote crash SDKs (Section 7.9 /).

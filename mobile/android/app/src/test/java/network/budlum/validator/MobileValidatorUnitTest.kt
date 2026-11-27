@@ -31,6 +31,12 @@ import network.budlum.validator.devicetests.DeviceFieldHarness
  * Can run both under JUnit and directly from `kotlinc` via `main()` in CI.
  */
 object MobileValidatorUnitTest {
+    /** Name the part before running it, so a failure says where it stopped. */
+    private fun step(name: String, body: () -> Unit) {
+        println("  running $name")
+        body()
+    }
+
     private fun check(condition: Boolean, message: String) {
         if (!condition) {
             throw AssertionError("Test assertion failed: $message")
@@ -477,23 +483,23 @@ object MobileValidatorUnitTest {
 
     @JvmStatic
     fun main(args: Array<String>) {
-        android_policy_wifi_only_by_default()
-        android_thermal_pause_cannot_be_disabled()
-        android_keys_are_keystore_wrapped()
-        android_unwrap_requires_existing_wrapping_key()
-        android_strongbox_fallback_is_narrow()
-        android_share_admission_is_atomic_and_fail_closed()
-        android_concurrent_share_admission_respects_quota()
-        android_unconnected_policy_and_stake_do_not_create_duties()
-        android_unbound_leave_keeps_local_shares()
-        android_unbound_low_space_does_not_silently_delete_shares()
-        android_release_requires_real_generated_wallet_binding()
-        android_unconnected_onboarding_is_fail_closed()
-        android_unfunded_engine_cannot_register_from_faucet_ui()
-        android_owner_string_never_unlocks_stake_rotation_or_duty()
-        android_unbound_worker_cannot_claim_custody_audits_or_rewards()
-        android_presence_digest_matches_shared_sha3_vector_without_claiming_a_signature()
-        android_reproducible_build_matches()
+        step("android_policy_wifi_only_by_default") { android_policy_wifi_only_by_default() }
+        step("android_thermal_pause_cannot_be_disabled") { android_thermal_pause_cannot_be_disabled() }
+        step("android_keys_are_keystore_wrapped") { android_keys_are_keystore_wrapped() }
+        step("android_unwrap_requires_existing_wrapping_key") { android_unwrap_requires_existing_wrapping_key() }
+        step("android_strongbox_fallback_is_narrow") { android_strongbox_fallback_is_narrow() }
+        step("android_share_admission_is_atomic_and_fail_closed") { android_share_admission_is_atomic_and_fail_closed() }
+        step("android_concurrent_share_admission_respects_quota") { android_concurrent_share_admission_respects_quota() }
+        step("android_unconnected_policy_and_stake_do_not_create_duties") { android_unconnected_policy_and_stake_do_not_create_duties() }
+        step("android_unbound_leave_keeps_local_shares") { android_unbound_leave_keeps_local_shares() }
+        step("android_unbound_low_space_does_not_silently_delete_shares") { android_unbound_low_space_does_not_silently_delete_shares() }
+        step("android_release_requires_real_generated_wallet_binding") { android_release_requires_real_generated_wallet_binding() }
+        step("android_unconnected_onboarding_is_fail_closed") { android_unconnected_onboarding_is_fail_closed() }
+        step("android_unfunded_engine_cannot_register_from_faucet_ui") { android_unfunded_engine_cannot_register_from_faucet_ui() }
+        step("android_owner_string_never_unlocks_stake_rotation_or_duty") { android_owner_string_never_unlocks_stake_rotation_or_duty() }
+        step("android_unbound_worker_cannot_claim_custody_audits_or_rewards") { android_unbound_worker_cannot_claim_custody_audits_or_rewards() }
+        step("android_presence_digest_matches_shared_sha3_vector_without_claiming_a_signature") { android_presence_digest_matches_shared_sha3_vector_without_claiming_a_signature() }
+        step("android_reproducible_build_matches") { android_reproducible_build_matches() }
         println("ANDROID JVM SAFETY TESTS PASSED; VALIDATOR DUTIES REMAIN DISABLED")
     }
 }
