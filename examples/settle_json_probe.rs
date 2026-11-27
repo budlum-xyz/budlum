@@ -43,7 +43,14 @@ fn roundtrip(label: &str, tx: &SettlementTx) -> bool {
         println!("     second: {second}");
         return false;
     }
-    println!("ok   {label}  {}", if first.len() > 110 { &first[..110] } else { &first });
+    println!(
+        "ok   {label}  {}",
+        if first.len() > 110 {
+            &first[..110]
+        } else {
+            &first
+        }
+    );
     true
 }
 
@@ -71,11 +78,9 @@ fn main() {
     );
     check(
         "Master::Hold",
-        &SettlementTx::Master(Box::new(
-            budlum_core::settlement::domains::MasterTx::Hold {
-                master_id: budlum_core::storage::content_id::ContentId::of(b"probe master body"),
-            },
-        )),
+        &SettlementTx::Master(Box::new(budlum_core::settlement::domains::MasterTx::Hold {
+            master_id: budlum_core::storage::content_id::ContentId::of(b"probe master body"),
+        })),
     );
 
     println!("\nok {ok}/{total} doors round-trip");

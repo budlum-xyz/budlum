@@ -4694,7 +4694,6 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
             // Tag 23. Moving a scheme is a change to what the chain accepts as
             // a signature, so the whole action and its claimed authority are
             // signed.
-            use crate::settlement::domains::SchemeTransitionTx;
             put_u8(out, 23);
             let bytes = postcard::to_allocvec(scheme_tx.as_ref())
                 .unwrap_or_else(|_| b"budlum/scheme-transition/fields-failed".to_vec());
@@ -4703,7 +4702,6 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
         SettlementTx::Master(master_tx) => {
             // Tag 22. Releasing a master is the removal of a content address
             // from the chain, so the action and its id are signed.
-            use crate::settlement::domains::MasterTx;
             put_u8(out, 22);
             let bytes = postcard::to_allocvec(master_tx)
                 .unwrap_or_else(|_| b"budlum/master/fields-failed".to_vec());
@@ -4712,7 +4710,6 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
         SettlementTx::ThreeNft(nft_tx) => {
             // Tag 21. A pin commits to the exact bytes it stores, so the
             // metadata and the recipe are hashed as one.
-            use crate::settlement::domains::ThreeNftTx;
             put_u8(out, 21);
             let bytes = postcard::to_allocvec(nft_tx)
                 .unwrap_or_else(|_| b"budlum/three-nft/fields-failed".to_vec());
@@ -4721,7 +4718,6 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
         SettlementTx::Dictionary(dict_tx) => {
             // Tag 20. Registering a dictionary fixes the bytes every bearer of
             // it will decode against, so its id and size are signed.
-            use crate::settlement::domains::DictionaryTx;
             put_u8(out, 20);
             let bytes = postcard::to_allocvec(dict_tx)
                 .unwrap_or_else(|_| b"budlum/dictionary/fields-failed".to_vec());
@@ -4731,7 +4727,6 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
             // Tag 19. A layering move changes who can read the bytes, so the
             // whole action - including the owner signature that authorises it -
             // is in the signed preimage.
-            use crate::settlement::domains::DataLayerTx;
             put_u8(out, 19);
             let bytes = postcard::to_allocvec(layer_tx.as_ref())
                 .unwrap_or_else(|_| b"budlum/data-layer/fields-failed".to_vec());
@@ -4741,7 +4736,6 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
             // Tag 18. A grant is a permission, so the grantee and the policy go
             // into the signed preimage: a permission whose audience could be
             // rewritten after signing is not a permission.
-            use crate::settlement::domains::ViewGrantTx;
             put_u8(out, 18);
             let bytes = postcard::to_allocvec(grant_tx.as_ref())
                 .unwrap_or_else(|_| b"budlum/view-grant/fields-failed".to_vec());
