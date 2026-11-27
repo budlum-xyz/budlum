@@ -187,9 +187,24 @@ impl UniversalPaymentIntent {
     }
 
     fn validate(&self, now_unix_secs: u64) -> Result<(), PaymentError> {
+        if self.payer_id == [0u8; 32] {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "payer_id must be non-zero",
+            )));
+        }
+        if self.merchant_id == [0u8; 32] {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "merchant_id must be non-zero",
+            )));
+        }
         if self.target_domain == 0 {
             return Err(PaymentError::InvalidIntent(String::from(
                 "target_domain must be non-zero",
+            )));
+        }
+        if self.target_asset_id == [0u8; 32] {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "target_asset_id must be non-zero",
             )));
         }
         if self.target_amount == 0 {
@@ -1265,6 +1280,16 @@ impl AssetEquivalenceClass {
 
         let mut seen = BTreeSet::new();
         for member in &members {
+            if member.domain_id == 0 {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "equivalence member domain_id must be non-zero",
+                )));
+            }
+            if member.asset_id == [0u8; 32] {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "equivalence member asset_id must be non-zero",
+                )));
+            }
             validate_safe_label("member.symbol", &member.symbol, 32)
                 .map_err(PaymentError::InvalidIntent)?;
             if member.fee_bps > MAX_SLIPPAGE_BPS {
@@ -1496,7 +1521,10 @@ impl PaymentStatusReport {
                     "delivered status requires prior finalized checkpoint proof",
                 )));
             }
-            if d.delivery_proof_root == [0u8; 32] || d.merchant_receipt_hash == [0u8; 32] {
+            if d.target_domain == 0
+                || d.delivery_proof_root == [0u8; 32]
+                || d.merchant_receipt_hash == [0u8; 32]
+            {
                 return Err(PaymentError::InvalidIntent(String::from(
                     "delivered proof requires non-zero delivery root and merchant receipt hash",
                 )));
@@ -1544,6 +1572,9 @@ const OFFLINE_VOUCHER_TAG: &[u8] = b"BDLM_OFFLINE_VOUCHER_V1";
 
 /// Maximum offline vouchers settled in a single batch call.
 const MAX_OFFLINE_VOUCHERS_PER_BATCH: usize = 256;
+
+/// Hard ceiling on replay-tracking nonces stored per pre-authorized spend account.
+const MAX_OFFLINE_USED_NONCES: usize = 65_536;
 
 /// Pre-authorized spend account backed by an on-chain escrow cap so an offline
 /// POS terminal can verify PQ-hybrid signed vouchers in sub-second latency and
@@ -1612,9 +1643,19 @@ impl SignedOfflineVoucher {
         account: &PreauthorizedSpendAccount,
         now_unix_secs: u64,
     ) -> Result<(), PaymentError> {
+        if account.account_id == [0u8; 32] || account.asset_id == [0u8; 32] {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "pre-authorized spend account requires non-zero account_id and asset_id",
+            )));
+        }
         if self.account_id != account.account_id {
             return Err(PaymentError::InvalidIntent(String::from(
                 "voucher account_id disagrees with pre-authorized spend account",
+            )));
+        }
+        if self.valid_until_unix_secs > account.valid_until_unix_secs {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "offline voucher valid_until_unix_secs cannot outlive its parent pre-authorized spend account",
             )));
         }
         if self.merchant_id == [0u8; 32] {
@@ -1718,6 +1759,9 @@ impl PreauthorizedSpendAccount {
                 shortfall: next_spent.saturating_sub(self.spend_cap_atoms),
             });
         }
+        if self.used_nonces.len().saturating_add(batch_nonces.len()) > MAX_OFFLINE_USED_NONCES {
+            return Err(PaymentError::InputLimitExceeded);
+        }
 
         // All checks passed: commit atomically.
         self.spent_atoms = next_spent;
@@ -1762,11 +1806,13 @@ impl UniversalPaymentRequestUri {
             )));
         }
         if self.recipient == [0u8; 32]
+            || self.target_domain == 0
             || self.target_asset_id == [0u8; 32]
             || self.target_amount == 0
+            || self.deadline_unix_secs == 0
         {
             return Err(PaymentError::InvalidIntent(String::from(
-                "payment request requires non-zero recipient, asset, and amount",
+                "payment request requires non-zero recipient, domain, asset, amount, and deadline",
             )));
         }
         let mut out = format!(
