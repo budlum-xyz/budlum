@@ -142,6 +142,36 @@ fn nonzero_hash(value: &Hash32) -> bool {
     *value != [0u8; 32]
 }
 
+/// The first four bytes of a root, for a refusal that names the row it found.
+fn hex8(value: &Hash32) -> String {
+    value.iter().take(4).fold(String::new(), |mut acc, byte| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "{byte:02x}");
+        acc
+    })
+}
+
+/// The union of `a` and `b` with every element of `a` kept at most once.
+///
+/// `query_evidence_by_domain` answers with a domain's rows and
+/// `query_evidence_by_height_range` with a height slice of them; a caller that
+/// wants both was concatenating the two answers and reading a row twice.
+#[must_use]
+pub fn merge_evidence_rows<'a>(
+    a: impl IntoIterator<Item = &'a EvidenceRecord>,
+    b: impl IntoIterator<Item = &'a EvidenceRecord>,
+) -> Vec<&'a EvidenceRecord> {
+    let mut out: Vec<&EvidenceRecord> = Vec::new();
+    let mut seen: std::collections::BTreeSet<(DomainId, u64, u32)> =
+        std::collections::BTreeSet::new();
+    for row in a.into_iter().chain(b) {
+        if seen.insert(row.identity()) {
+            out.push(row);
+        }
+    }
+    out
+}
+
 fn validate_label(field: &str, value: &str) -> Result<(), String> {
     let valid = !value.is_empty()
         && value.len() <= 128
@@ -177,6 +207,18 @@ pub struct EvidenceRecord {
 }
 
 impl EvidenceRecord {
+    /// The identity an evidence row is keyed by: one domain, one height, one
+    /// event index.
+    ///
+    /// Two rows carrying the same triple are one event described twice. The
+    /// engine appended both, so the ledger's length was a function of how
+    /// often a writer repeated itself, and one height could carry several
+    /// different roots.
+    #[must_use]
+    pub const fn identity(&self) -> (DomainId, u64, u32) {
+        (self.domain_id, self.domain_height, self.event_index)
+    }
+
     /// Performs the requested operation.
     ///
     /// # Errors
@@ -188,6 +230,13 @@ impl EvidenceRecord {
         }
         if self.domain_height == 0 {
             return Err("EvidenceRecord domain_height cannot be zero".into());
+        }
+        if self.event_root == self.block_hash {
+            return Err(
+                "EvidenceRecord event_root and block_hash are the same root: an event \
+                 commitment equal to the block that carried it is a copy, not evidence"
+                    .into(),
+            );
         }
         validate_label("EvidenceRecord event_kind", &self.event_kind)?;
         if !nonzero_hash(&self.event_root) {
@@ -442,11 +491,52 @@ impl AtlasQueryEngine {
     /// Returns an error if the operation fails.
     pub fn insert_evidence_record(&mut self, record: EvidenceRecord) -> Result<(), String> {
         record.validate()?;
+        // One triple, one row. Before this the ledger appended repeats, so a
+        // writer could make one event look like many and give the same height
+        // several roots.
+        if let Some(existing) = self
+            .evidence_records
+            .iter()
+            .find(|existing| existing.identity() == record.identity())
+        {
+            return Err(format!(
+                "evidence for domain {} height {} index {} is already recorded \
+                 (root {}); a repeat is not a second event",
+                existing.domain_id,
+                existing.domain_height,
+                existing.event_index,
+                hex8(&existing.event_root)
+            ));
+        }
+        // A full ledger refuses rather than silently dropping its oldest row:
+        // `remove(0)` lost an event the reader was never told about, so a
+        // truncated history read exactly like a complete one.
         if self.evidence_records.len() >= MAX_ATLAS_EVIDENCE_RECORDS {
-            self.evidence_records.remove(0);
+            return Err(format!(
+                "evidence ledger holds {MAX_ATLAS_EVIDENCE_RECORDS} rows; the oldest (domain {} \
+                 height {}) must be retired explicitly before domain {} height {} is recorded",
+                self.evidence_records[0].domain_id,
+                self.evidence_records[0].domain_height,
+                record.domain_id,
+                record.domain_height
+            ));
         }
         self.evidence_records.push(record);
         Ok(())
+    }
+
+    /// Retire the oldest evidence row, returning it.
+    ///
+    /// The explicit half of the ceiling: a caller that needs room says which
+    /// row it is giving up, so the loss is a decision instead of a side effect.
+    ///
+    /// exposed for: explorer evidence retention.
+    pub fn retire_oldest_evidence(&mut self) -> Option<EvidenceRecord> {
+        if self.evidence_records.is_empty() {
+            None
+        } else {
+            Some(self.evidence_records.remove(0))
+        }
     }
 
     /// exposed for: explorer evidence query engine.
@@ -791,5 +881,104 @@ mod query_engine_tests {
         }
         assert!(engine.get_domain_summary(1).is_some());
         assert!(engine.get_domain_summary(2).is_none());
+    }
+
+    fn row(domain: DomainId, height: u64, index: u32, root_byte: u8) -> EvidenceRecord {
+        EvidenceRecord {
+            domain_id: domain,
+            domain_height: height,
+            event_index: index,
+            event_kind: "transfer".into(),
+            event_root: [root_byte; 32],
+            block_hash: [root_byte.wrapping_add(1); 32],
+            verified_epoch: 50,
+            consensus_kind: ConsensusKind::PoS,
+        }
+    }
+
+    /// One triple is one event. The ledger appended repeats, so a writer could
+    /// make a single event look like many and give one height several roots.
+    #[test]
+    fn a_repeated_evidence_row_is_refused_not_counted_twice() {
+        let mut engine = AtlasQueryEngine::new();
+        engine.insert_evidence_record(row(7, 100, 0, 0xA1)).unwrap();
+        let err = engine
+            .insert_evidence_record(row(7, 100, 0, 0xB2))
+            .expect_err("a second row for one event must be refused");
+        assert!(err.contains("already recorded"), "got `{err}`");
+        assert_eq!(engine.evidence_records.len(), 1);
+        assert_eq!(engine.evidence_records[0].event_root, [0xA1; 32]);
+
+        // A different index at the same height is a different event.
+        engine.insert_evidence_record(row(7, 100, 1, 0xC3)).unwrap();
+        assert_eq!(engine.evidence_records.len(), 2);
+    }
+
+    /// A full ledger refuses instead of silently dropping its oldest row: a
+    /// truncated history used to read exactly like a complete one.
+    #[test]
+    fn a_full_evidence_ledger_refuses_and_names_what_it_would_evict() {
+        let mut engine = AtlasQueryEngine::new();
+        for i in 0..MAX_ATLAS_EVIDENCE_RECORDS {
+            let byte = u8::try_from(i % 251).unwrap_or(1).wrapping_add(2);
+            engine
+                .insert_evidence_record(row(9, u64::try_from(i).unwrap_or(1) + 1, 0, byte))
+                .unwrap();
+        }
+        assert_eq!(engine.evidence_records.len(), MAX_ATLAS_EVIDENCE_RECORDS);
+        let first_root = engine.evidence_records[0].event_root;
+        let err = engine
+            .insert_evidence_record(row(9, 99_999, 0, 0xEE))
+            .expect_err("a full ledger must refuse");
+        assert!(err.contains("must be retired explicitly"), "got `{err}`");
+        assert_eq!(engine.evidence_records.len(), MAX_ATLAS_EVIDENCE_RECORDS);
+        assert_eq!(
+            engine.evidence_records[0].event_root, first_root,
+            "the refused insert silently evicted the oldest row"
+        );
+
+        // The explicit half: the caller says which row it gives up.
+        let retired = engine.retire_oldest_evidence().expect("a row to retire");
+        assert_eq!(retired.event_root, first_root);
+        assert_eq!(
+            engine.evidence_records.len(),
+            MAX_ATLAS_EVIDENCE_RECORDS - 1
+        );
+        engine
+            .insert_evidence_record(row(9, 99_999, 0, 0xEE))
+            .unwrap();
+    }
+
+    /// An event commitment equal to the block that carried it is a copy of the
+    /// block hash, not an event root.
+    #[test]
+    fn an_event_root_equal_to_its_block_hash_is_refused() {
+        let mut copy = row(3, 10, 0, 0x11);
+        copy.event_root = copy.block_hash;
+        let err = copy
+            .validate()
+            .expect_err("a copied block hash is not an event root");
+        assert!(err.contains("same root"), "got `{err}`");
+    }
+
+    /// Merging two query answers must not read a row twice.
+    #[test]
+    fn merged_query_answers_hold_each_row_once() {
+        let mut engine = AtlasQueryEngine::new();
+        engine.insert_evidence_record(row(4, 10, 0, 0x21)).unwrap();
+        engine.insert_evidence_record(row(4, 20, 0, 0x22)).unwrap();
+        engine.insert_evidence_record(row(4, 30, 0, 0x23)).unwrap();
+        let by_domain = engine.query_evidence_by_domain(4);
+        let by_range = engine.query_evidence_by_height_range(4, 20, 30);
+        assert_eq!(by_domain.len(), 3);
+        assert_eq!(by_range.len(), 2);
+        let merged = merge_evidence_rows(by_domain, by_range);
+        assert_eq!(
+            merged.len(),
+            3,
+            "a row answered by both queries was read twice"
+        );
+        let heights: Vec<u64> = merged.iter().map(|r| r.domain_height).collect();
+        assert_eq!(heights, vec![10, 20, 30]);
     }
 }

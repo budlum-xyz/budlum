@@ -16,7 +16,7 @@ use crate::storage::bud3::content_id::ContentId;
 use crate::storage::bud3::content_ref::{ContentRef, ContentRefError};
 use crate::storage::bud3::pipeline::ObjectRecord;
 use crate::storage::bud3::placement::Share;
-use crate::storage::bud3::registry::{Bud3Registry, ObjectKey, RegistryError};
+use crate::storage::bud3::registry::{Bud3Registry, ObjectKey, Registered, RegistryError};
 use crate::storage::bud3::tx::{apply as apply_bud3_tx, Applied, StorageTxV3};
 
 /// Domain tag committing an Education Domain artifact record.
@@ -45,6 +45,28 @@ pub enum EducationVisibility {
     PeerOnly,
 }
 
+/// Publish the artifact only when the store actually took it.
+///
+/// [`register_artifact`](EducationDomainRegistry::register_artifact) inserted
+/// its record unconditionally, so an apply that deduplicated (or one that
+/// replaced an existing object) still left a domain entry behind: the domain
+/// listed a contribution the storage layer had not stored as new. The record
+/// is admitted only when the store reports a new object under the same key.
+///
+/// # Errors
+///
+/// [`EducationDomainError::ArtifactNotStored`] when the apply did not report a
+/// new object, or reported one under a different key than the artifact names.
+fn admit_registered(
+    artifact: &EducationArtifact,
+    applied: &Applied,
+) -> Result<(), EducationDomainError> {
+    match applied {
+        Applied::Registered(Registered::New(key)) if key == &artifact.object_commitment => Ok(()),
+        _ => Err(EducationDomainError::ArtifactNotStored),
+    }
+}
+
 /// Errors returned by B.U.D. 3.0 Education Domain registration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EducationDomainError {
@@ -52,6 +74,8 @@ pub enum EducationDomainError {
     ContentIdMismatch,
     InvalidContentRef(ContentRefError),
     Storage(RegistryError),
+    /// The store did not take the artifact as a new object under its key.
+    ArtifactNotStored,
 }
 
 /// Canonical B.U.D. 3.0 Education Domain artifact record.
@@ -93,6 +117,14 @@ impl EducationArtifact {
         if self.created_at == 0 {
             return Err(EducationDomainError::InvalidArtifact(
                 "created_at cannot be zero",
+            ));
+        }
+        // A commitment the object key does not match is another object's
+        // artifact: `artifact_id` folds both, and the domain would then serve a
+        // record whose own two halves disagree.
+        if self.content_ref.object_commitment != self.object_commitment {
+            return Err(EducationDomainError::InvalidArtifact(
+                "object_commitment disagrees with content_ref commitment",
             ));
         }
         Ok(())
@@ -207,8 +239,21 @@ impl EducationDomainRegistry {
         let tx = Self::build_register_tx(record, shares, lifetime_epochs);
         let applied = apply_bud3_tx(bud3, spec.contributor.0, tx, current_epoch)
             .map_err(EducationDomainError::Storage)?;
+        // The store decides whether the artifact exists; the domain only
+        // records what the store took.
+        admit_registered(&artifact, &applied)?;
 
         let id = artifact.artifact_id();
+        // One artifact id is one artifact. A second registration under the same
+        // id used to overwrite the first, so the domain's answer to "who
+        // contributed this" became whoever registered last.
+        if let Some(existing) = self.artifacts.get(&id) {
+            if existing != &artifact {
+                return Err(EducationDomainError::InvalidArtifact(
+                    "an artifact with this id is already registered",
+                ));
+            }
+        }
         self.artifacts.insert(id, artifact);
         Ok((id, applied))
     }
@@ -291,5 +336,273 @@ mod tests {
         let stored = domain.artifact(&artifact_id).expect("artifact");
         assert_eq!(stored.content_ref.content_id, cid);
         assert_eq!(stored.object_commitment, obj_key);
+    }
+
+    fn budget_spec(contributor: Address, cid: ContentId) -> ArtifactRegistrationSpec {
+        ArtifactRegistrationSpec {
+            contributor,
+            content_id: cid,
+            artifact_kind: EducationArtifactKind::Research,
+            visibility: EducationVisibility::Public,
+            metadata_hash: [0xCD; 32],
+            created_at: 1_700_000_001,
+        }
+    }
+
+    /// The domain may only list what the store took as a new object. The record
+    /// used to be inserted unconditionally, so a deduplicated apply still left a
+    /// contribution behind that the storage layer had not stored as new.
+    #[test]
+    fn an_artifact_is_recorded_only_when_the_store_took_it_as_new() {
+        let scholar = Address([0x41; 32]);
+        let mut bud3 = Bud3Registry::default();
+        let mut domain = EducationDomainRegistry::new();
+        let payload = b"lecture notes on lattice assumptions".repeat(5);
+        let up = prepare_public_upload(&payload, &P, &Bud3Limits::default(), 8).unwrap();
+        let cid = up.record.content_id;
+        let obj = up.record.commitment;
+        assert_ne!(obj, [0u8; 32], "the upload carries a commitment");
+
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: [5u8; 32],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: [6u8; 32],
+                    class: Class::Full,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+        ];
+
+        let (id, applied) = domain
+            .register_artifact(
+                &mut bud3,
+                budget_spec(scholar, cid),
+                up.record.clone(),
+                shares.clone(),
+                20,
+                1,
+            )
+            .expect("first registration");
+        assert!(matches!(applied, Applied::Registered(Registered::New(_))));
+        assert!(domain.artifact(&id).is_some());
+
+        // The gate itself: only a `New` under the artifact's own key admits.
+        let artifact = domain.artifact(&id).expect("artifact").clone();
+        let other_key: ObjectKey = [0x99; 32];
+        for refused in [
+            Applied::Registered(Registered::Deduplicated(obj)),
+            Applied::Registered(Registered::New(other_key)),
+            Applied::Acked(1),
+            Applied::Repaired,
+        ] {
+            assert_eq!(
+                admit_registered(&artifact, &refused),
+                Err(EducationDomainError::ArtifactNotStored),
+                "an apply that did not store a new object under this key was admitted"
+            );
+        }
+        assert_eq!(
+            admit_registered(&artifact, &Applied::Registered(Registered::New(obj))),
+            Ok(())
+        );
+    }
+
+    /// The refusal has to reach the caller, not just live in a helper.
+    ///
+    /// A sealed object is the reachable dedupe: the store answers `Deduplicated`
+    /// for a second registration of the same sealed content, and the domain must
+    /// then keep no entry. The first block also records a hard limit found while
+    /// writing this test: a *public* re-registration of unconfirmed custody is
+    /// refused by the store itself (`BadRecord("awaiting custody confirmation")`),
+    /// so the public path can never reach the seeded-contribution case.
+    #[test]
+    fn a_deduplicated_sealed_registration_leaves_no_domain_entry() {
+        use crate::storage::bud3::content_id::{ContentIdKind, ContentKey};
+        use crate::storage::bud3::pipeline::prepare_sealed_upload;
+        let scholar = Address([0x43; 32]);
+        let mut bud3 = Bud3Registry::default();
+        let mut domain = EducationDomainRegistry::new();
+        let payload = b"sealed dataset of post-quantum signature timings".repeat(5);
+        let key = ContentKey([0x7Au8; 32]);
+        let up = prepare_sealed_upload(&payload, &key, [3u8; 24], &P, &Bud3Limits::default(), 8)
+            .expect("sealed upload");
+        let up2 = prepare_sealed_upload(&payload, &key, [3u8; 24], &P, &Bud3Limits::default(), 8)
+            .expect("sealed upload again");
+        let cid = up.record.content_id;
+        assert_eq!(cid.kind, ContentIdKind::Sealed);
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: [5u8; 32],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: [6u8; 32],
+                    class: Class::Full,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+        ];
+        let (id, applied) = domain
+            .register_artifact(
+                &mut bud3,
+                budget_spec(scholar, cid),
+                up.record,
+                shares.clone(),
+                20,
+                1,
+            )
+            .expect("first sealed registration");
+        assert_eq!(
+            applied,
+            Applied::Registered(Registered::New(up2.record.commitment))
+        );
+        assert!(domain.artifact(&id).is_some());
+
+        let repeat = domain.register_artifact(
+            &mut bud3,
+            budget_spec(scholar, cid),
+            up2.record,
+            shares,
+            20,
+            2,
+        );
+        assert!(
+            repeat.is_err(),
+            "a repeat sealed registration was accepted as a contribution: {repeat:?}"
+        );
+        assert_eq!(
+            domain.artifacts.len(),
+            1,
+            "the refused registration wrote a second entry"
+        );
+    }
+
+    #[test]
+    fn rejected_scoped_registration_does_not_mutate_storage() {
+        use crate::storage::bud3::content_id::ContentKey;
+        use crate::storage::bud3::pipeline::prepare_sealed_upload;
+        let key = ContentKey([0x7a; 32]);
+        let payload = b"sealed dataset of post-quantum signature timings".repeat(5);
+        let first = prepare_sealed_upload(&payload, &key, [3u8; 24], &P, &Bud3Limits::default(), 8)
+            .unwrap();
+        let second =
+            prepare_sealed_upload(&payload, &key, [3u8; 24], &P, &Bud3Limits::default(), 8)
+                .unwrap();
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: [5; 32],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: [6; 32],
+                    class: Class::Full,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+        ];
+        let mut store = Bud3Registry::default();
+        let mut domain = EducationDomainRegistry::new();
+        let cid = first.record.content_id;
+        domain
+            .register_artifact(
+                &mut store,
+                budget_spec(Address([0x43; 32]), cid),
+                first.record,
+                shares.clone(),
+                20,
+                1,
+            )
+            .unwrap();
+        let before = store.clone();
+        let result = domain.register_artifact(
+            &mut store,
+            budget_spec(Address([0x44; 32]), cid),
+            second.record,
+            shares,
+            20,
+            2,
+        );
+        assert_eq!(result, Err(EducationDomainError::ArtifactNotStored));
+        assert_eq!(
+            store, before,
+            "a rejected scoped registration mutated the store"
+        );
+    }
+
+    /// An artifact whose commitment and content reference disagree is refused:
+    /// `artifact_id` folds both, so the domain would serve a record whose own
+    /// two halves name different objects.
+    #[test]
+    fn an_artifact_commitment_that_disagrees_with_its_reference_is_refused() {
+        use crate::storage::bud3::content_id::ContentIdKind;
+        let record = match ContentRef::new(
+            ContentId {
+                kind: ContentIdKind::Public,
+                digest: [0x11; 32],
+                len: 32,
+            },
+            [0x22; 32],
+            None,
+        ) {
+            Ok(record) => record,
+            Err(err) => panic!("content ref builds: {err:?}"),
+        };
+        let mismatch = EducationArtifact {
+            contributor: Address([0x42; 32]),
+            content_ref: record,
+            object_commitment: [0x23; 32],
+            artifact_kind: EducationArtifactKind::Dataset,
+            visibility: EducationVisibility::PeerOnly,
+            metadata_hash: [0xEE; 32],
+            created_at: 7,
+        };
+        assert_eq!(
+            mismatch.validate(),
+            Err(EducationDomainError::InvalidArtifact(
+                "object_commitment disagrees with content_ref commitment"
+            ))
+        );
+
+        let agreed = EducationArtifact {
+            object_commitment: [0x22; 32],
+            ..mismatch.clone()
+        };
+        assert_eq!(agreed.validate(), Ok(()));
+        assert_ne!(agreed.artifact_id(), [0u8; 32]);
+
+        // The two halves are inside the id, so swapping only the commitment
+        // changes it.
+        let swapped = EducationArtifact {
+            object_commitment: [0x24; 32],
+            ..agreed.clone()
+        };
+        assert_ne!(swapped.artifact_id(), agreed.artifact_id());
     }
 }
