@@ -99,7 +99,13 @@ val checkNativeValidatorRelease by tasks.registering {
         // missing, so what is looked for is a list with nothing left on
         // it - the condition, not the characters.
         val gate = file("src/main/java/network/budlum/validator/core/MobileCoreBridge.kt").readText()
-        val stillMissing = Regex("""fun missingPieces\(\): List<String> = listOf\(([^)]*)\)""")
+        // Spelled once, here, and escaped into the pattern. Written twice
+        // it drifts: the safety specification looks for this exact name in
+        // this file to prove the release check still consults the gate, and
+        // a pattern that spelled the name with escapes did not contain the
+        // name it was matching.
+        val gateFunction = "missingPieces()"
+        val stillMissing = Regex("fun " + Regex.escape(gateFunction) + """: List<String> = listOf\(([^)]*)\)""")
             .find(gate)
             ?.groupValues
             ?.get(1)
