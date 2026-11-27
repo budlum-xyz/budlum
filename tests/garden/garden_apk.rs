@@ -770,6 +770,15 @@ fn garden_apk_cleanup() -> Result<(), String> {
         sent.contains("accepted into the mempool, not yet in a block"),
         "the send did not say what its answer is: {sent}"
     );
+    // A one-shot command's mempool dies with it, so the success line has to
+    // come after a block, not after the mempool acceptance above. This is the
+    // durability half of the check: a send that stopped waiting would leave
+    // the transaction behind when the process exits, and the line would be
+    // missing here.
+    assert!(
+        sent.contains("committed in a final block"),
+        "the send reported success before a block carried the transaction: {sent}"
+    );
     let answered: Value = serde_json::from_str(
         sent.lines()
             .find(|line| line.trim_start().starts_with('{'))

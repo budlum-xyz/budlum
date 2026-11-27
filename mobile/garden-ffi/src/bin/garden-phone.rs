@@ -57,6 +57,16 @@ const STATUS_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const FEED_LIMIT_DEFAULT: u32 = 50;
 const FEED_LIMIT_MAX: u32 = 500;
 
+/// How many times `send` asks the Garden for the verdict before it gives up,
+/// and how long it waits between two asks.
+///
+/// The budget is a count and not a deadline: a deadline makes the refusal
+/// depend on how loaded the machine is, so the same transaction would be
+/// reported committed on an idle host and refused on a busy one. Six hundred
+/// asks a hundred milliseconds apart is a minute of consensus rounds.
+const FINALITY_ASKS: u32 = 600;
+const FINALITY_ASK_INTERVAL: Duration = Duration::from_millis(100);
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let command = args.get(1).map(String::as_str).unwrap_or("");
@@ -377,27 +387,55 @@ fn json_field_str(json: &str, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Hold the validator online until `tx_id` reaches a finalized Garden block.
-fn wait_until_final(phone: &Arc<GardenPhone>, tx_id: &str) -> Result<String, String> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+/// Ask for a verdict until the Garden says the transaction is final.
+///
+/// `trace` is a parameter, not the phone, so both halves of the contract can
+/// be run without a chain: a transaction that reaches a block answers with the
+/// final verdict, and one that never does is refused by name after the budget
+/// runs out. The refusal is the half that matters here. `send` reports success
+/// only because this function returned `Ok`, so a transaction that is still
+/// in the mempool has to end in an error that says so, never in a `sent`.
+fn final_within<F>(tx_id: &str, asks: u32, mut trace: F) -> Result<String, String>
+where
+    F: FnMut() -> Result<String, String>,
+{
     let mut last_reason = String::from("the transaction has not been traced yet");
-    while std::time::Instant::now() < deadline {
-        match phone.trace(tx_id.to_owned()) {
-            Ok(trace) => {
-                if json_field_str(&trace.json, "stage").as_deref() == Some("final") {
-                    return Ok(trace.json);
+    for asked in 1..=asks {
+        match trace() {
+            Ok(answer) => {
+                if json_field_str(&answer, "stage").as_deref() == Some("final") {
+                    return Ok(answer);
                 }
-                last_reason = trace.json;
+                last_reason = answer;
             }
-            Err(e) => {
-                last_reason = e.to_string();
+            Err(reason) => {
+                last_reason = reason;
             }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        if asked < asks {
+            std::thread::sleep(FINALITY_ASK_INTERVAL);
+        }
     }
     Err(format!(
-        "transaction {tx_id} did not reach a final block within 60s ({last_reason})"
+        "transaction {tx_id} did not reach a final block in {asks} asks \
+         ({last_reason}); it is not published"
     ))
+}
+
+/// Hold the validator online until `tx_id` reaches a finalized Garden block.
+///
+/// A CLI command is one process, and the mempool and the validator swarm stop
+/// with it, so returning while the transaction is still in the mempool drops
+/// it before any block carries it. Nothing is persisted to resume a pending
+/// publication: a later run starts a fresh mempool and a fresh service, which
+/// deletes the content tree it did not write. Waiting here is the whole
+/// durability contract, and the refusal above is the failure the caller sees
+/// instead of a success it cannot keep.
+fn wait_until_final(phone: &Arc<GardenPhone>, tx_id: &str) -> Result<String, String> {
+    final_within(tx_id, FINALITY_ASKS, || {
+        let answer = phone.trace(tx_id.to_owned()).map_err(|e| e.to_string())?;
+        Ok(answer.json)
+    })
 }
 
 /// Join, publish to finality, verify non-empty `garden/` on disk, and verify
@@ -746,5 +784,75 @@ mod status_door_tests {
         assert!(read_request_line(&b"GET / HTTP/1.1\r\n"[..]).is_some());
         assert!(read_request_line(&[b'A'; 4096][..]).is_none());
         assert!(read_request_line(&b""[..]).is_none());
+    }
+    /// The half that lets `send` say "committed": the verdict arrives on the
+    /// ask that carries it, and no earlier answer is treated as one.
+    #[test]
+    fn a_final_verdict_is_the_only_answer_that_ends_the_wait() {
+        let mut answers = [
+            r#"{"stage":"mempool","tx_id":"ab"}"#.to_string(),
+            r#"{"stage":"voted","tx_id":"ab"}"#.to_string(),
+            r#"{"stage":"final","tx_id":"ab","height":7}"#.to_string(),
+        ]
+        .into_iter();
+        let mut asks = 0;
+        let answer = final_within("ab", 10, || {
+            asks += 1;
+            Ok(answers.next().unwrap_or_default())
+        })
+        .unwrap();
+        assert_eq!(asks, 3, "the wait stopped before the final answer");
+        assert!(
+            answer.contains(r#""stage":"final""#),
+            "the wait returned a non-final answer: {answer}"
+        );
+    }
+
+    /// The case the review asked for: a transaction that stays in the mempool.
+    /// The command has to fail, name the handle it could not settle, and say
+    /// the bytes are not published, because the process is about to end and
+    /// nothing will carry the transaction into a block afterwards.
+    #[test]
+    fn a_transaction_that_never_reaches_a_block_is_refused_and_not_called_published() {
+        let reason = final_within("cd", 4, || {
+            Ok(r#"{"stage":"mempool","tx_id":"cd"}"#.to_string())
+        })
+        .unwrap_err();
+        assert!(
+            reason.contains("cd") && reason.contains("did not reach a final block"),
+            "the refusal does not name what it could not settle: {reason}"
+        );
+        assert!(
+            reason.contains("in 4 asks"),
+            "the refusal does not say how long it waited: {reason}"
+        );
+        assert!(
+            reason.contains("not published"),
+            "the refusal does not say the bytes are not published: {reason}"
+        );
+    }
+
+    /// A trace that itself refuses is not a finality, and a node that answers
+    /// errors for the whole budget must not be able to talk the wait into
+    /// returning a string that looks like a verdict.
+    #[test]
+    fn a_refusing_trace_is_carried_into_the_refusal() {
+        let reason =
+            final_within("ef", 2, || Err(String::from("the Garden is not running"))).unwrap_err();
+        assert!(
+            reason.contains("the Garden is not running"),
+            "the refusal lost the reason the trace gave: {reason}"
+        );
+        assert!(
+            !reason.contains(r#""stage""#),
+            "a refusal was dressed as a verdict: {reason}"
+        );
+    }
+
+    /// Zero asks is not a quiet success: a budget of nothing can settle
+    /// nothing, so the caller is told rather than handed an empty answer.
+    #[test]
+    fn an_empty_budget_settles_nothing() {
+        assert!(final_within("gh", 0, || Ok(String::from(r#"{"stage":"final"}"#))).is_err());
     }
 }

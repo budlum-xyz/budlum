@@ -933,6 +933,17 @@ mod tests {
         let files = files_under(dir.path());
         assert!(!files.is_empty());
         let root = dir.path().join("garden").join(&chain_id);
+        // The seat is enough to make the directory non-empty and would keep
+        // making it non-empty if the publish stored no bytes at all, and the
+        // loop below passes vacuously over an empty set. So the assertion the
+        // wipe at the end of this test rests on is made on the chain's own
+        // tree, where a published post is the only thing that can put a file.
+        let content = files.iter().filter(|file| file.starts_with(&root)).count();
+        assert!(
+            content > 0,
+            "the publish stored nothing under {root:?}, so the wipe below would \
+             pass without removing anything: {files:?}"
+        );
         // The seat is the one thing that sits at the top of the directory on
         // purpose: a process that dies with a seat still has to find it on
         // the way back, and the Garden's own content lives under its chain.
