@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -44,13 +45,13 @@ import androidx.compose.ui.unit.dp
  */
 
 /** The panel radius, 16 px in the file. */
-private val SHEET_RADIUS = 6.dp
+internal val SHEET_RADIUS = 6.dp
 
 /** The control radius the buttons and word boxes use, 12 px in the file. */
-private val CONTROL_RADIUS = 4.dp
+internal val CONTROL_RADIUS = 4.dp
 
 /** The portrait square beside a name, 100 px in the file. */
-val PORTRAIT = 34.dp
+internal val PORTRAIT = 34.dp
 
 /**
  * The panel the wallet sheets hang everything on.
