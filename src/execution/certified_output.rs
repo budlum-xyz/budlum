@@ -160,26 +160,29 @@ impl CertifiedExecutionOutput {
         ])
     }
 
-    /// Verifies the whole object without executing anything.
+    /// Checks everything that can be checked **without the program**: the two
+    /// halves agree, and the receipt is committed where the object says.
     ///
-    /// Checks run cheapest-first so a garbage object costs almost nothing:
-    /// agreement, then inclusion, then the STARK.
+    /// This is deliberately not called `verify`. A certified output's warrant
+    /// is the STARK, and a STARK is verified *against a program* - there is no
+    /// such thing as checking one without one. An earlier version of this
+    /// function passed an empty program to the verifier, which meant it could
+    /// only ever report a proof failure: it looked like a verification and was
+    /// in fact a structural check that always failed at the last step. The name
+    /// must say what it does.
+    ///
+    /// What a caller gets here is real but partial: a stapled object and a
+    /// misplaced receipt are both refused. What they do not get is a claim
+    /// about the computation. For that, [`Self::verify_with_program`].
     ///
     /// # Errors
     ///
     /// - [`CertifiedOutputError::ReceiptDisagrees`] - the halves describe
-    ///   different executions (the stapling attack).
+    ///   different executions.
     /// - [`CertifiedOutputError::NotCommitted`] - the receipt is not in the
-    ///   batch this object claims, or the inclusion proof's own receipt is a
-    ///   different one.
-    /// - [`CertifiedOutputError::ProofRefused`] - the STARK is invalid.
-    pub fn verify(&self) -> Result<VerifiedExecutionOutput, CertifiedOutputError> {
-        // 1. Do the halves describe the same execution?
+    ///   batch this object claims.
+    pub fn verify_structure(&self) -> Result<(), CertifiedOutputError> {
         check_receipt_agrees_with_inputs(&self.receipt, &self.public_inputs)?;
-
-        // 2. Is the receipt where this object says it is? The inclusion proof
-        //    carries its own copy of the receipt; if that copy is a different
-        //    one, verifying it would certify a receipt the caller never saw.
         if self.inclusion.receipt.receipt_id() != self.receipt.receipt_id() {
             return Err(CertifiedOutputError::NotCommitted(
                 "inclusion proof commits to a different receipt".into(),
@@ -188,29 +191,7 @@ impl CertifiedExecutionOutput {
         self.inclusion
             .verify(&self.batch_root)
             .map_err(|e| CertifiedOutputError::NotCommitted(e.to_string()))?;
-
-        // 3. Is the STARK valid for these inputs?
-        //
-        // The verifier signature takes the program and a gas budget. Both are
-        // the *caller's* matter: `program` is bound by `program_hash` and the
-        // gas budget is the verifier's policy. This function passes the gas
-        // the inputs declare and an empty program, which is why it is **not**
-        // the entry point an application should call - see
-        // `verify_with_program`.
-        ProofVerifier::verify(
-            &self.proof,
-            &self.public_inputs,
-            &[],
-            self.public_inputs.gas_limit,
-        )
-        .map_err(|e| CertifiedOutputError::ProofRefused(e.to_string()))?;
-
-        Ok(VerifiedExecutionOutput {
-            content_id: self.content_id(),
-            final_state_root: self.public_inputs.final_state_root,
-            exit_code: self.public_inputs.exit_code,
-            gas_used: self.public_inputs.gas_used,
-        })
+        Ok(())
     }
 
     /// Verifies against the program itself, and binds the result to it.
@@ -227,15 +208,7 @@ impl CertifiedExecutionOutput {
         &self,
         program: &[u64],
     ) -> Result<VerifiedExecutionOutput, CertifiedOutputError> {
-        check_receipt_agrees_with_inputs(&self.receipt, &self.public_inputs)?;
-        if self.inclusion.receipt.receipt_id() != self.receipt.receipt_id() {
-            return Err(CertifiedOutputError::NotCommitted(
-                "inclusion proof commits to a different receipt".into(),
-            ));
-        }
-        self.inclusion
-            .verify(&self.batch_root)
-            .map_err(|e| CertifiedOutputError::NotCommitted(e.to_string()))?;
+        self.verify_structure()?;
 
         ProofVerifier::verify(
             &self.proof,
@@ -253,25 +226,34 @@ impl CertifiedExecutionOutput {
         })
     }
 
-    /// Verifies the object and additionally requires the proof to be about
-    /// `expected_program_hash`.
+    /// Requires the proof to be about `expected_program_hash`, after the
+    /// structural checks pass.
+    ///
+    /// This does not verify the STARK - it cannot, without the program. It
+    /// reads the program hash the proof commits to and refuses early when the
+    /// caller wanted a different one, which saves a useless STARK run.
     ///
     /// # Errors
     ///
     /// [`CertifiedOutputError::WrongProgram`] when the hash disagrees, plus
-    /// everything [`Self::verify`] refuses.
+    /// everything [`Self::verify_structure`] refuses.
     pub fn verify_against_program_hash(
         &self,
         expected_program_hash: [u8; 32],
     ) -> Result<VerifiedExecutionOutput, CertifiedOutputError> {
-        let verified = self.verify()?;
+        self.verify_structure()?;
         if self.public_inputs.program_hash != expected_program_hash {
             return Err(CertifiedOutputError::WrongProgram {
                 got: hex32(&self.public_inputs.program_hash),
                 want: hex32(&expected_program_hash),
             });
         }
-        Ok(verified)
+        Ok(VerifiedExecutionOutput {
+            content_id: self.content_id(),
+            final_state_root: self.public_inputs.final_state_root,
+            exit_code: self.public_inputs.exit_code,
+            gas_used: self.public_inputs.gas_used,
+        })
     }
 }
 
@@ -480,7 +462,7 @@ mod tests {
         };
         assert!(
             matches!(
-                stapled.verify(),
+                stapled.verify_structure(),
                 Err(CertifiedOutputError::ReceiptDisagrees { .. })
             ),
             "verify accepted a stapled pair"
@@ -503,7 +485,7 @@ mod tests {
             inclusion: incl,
             batch_root: root,
         };
-        match out.verify() {
+        match out.verify_structure() {
             Err(CertifiedOutputError::ReceiptDisagrees { field, .. }) => {
                 assert_eq!(field, "exit_code");
             }
@@ -530,7 +512,10 @@ mod tests {
             batch_root: root,
         };
         assert!(
-            matches!(out.verify(), Err(CertifiedOutputError::NotCommitted(_))),
+            matches!(
+                out.verify_structure(),
+                Err(CertifiedOutputError::NotCommitted(_))
+            ),
             "an inclusion proof for another receipt certified this one"
         );
     }
