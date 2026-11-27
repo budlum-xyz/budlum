@@ -16,9 +16,13 @@ use budlum_core::registry::{IdentityRecord, IdentityTx, MethodKind, Verification
 
 fn scratch(name: &str, bytes: &[u8]) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("bud_bounded_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        panic!("temp dir: {err}");
+    }
     let path = dir.join(name);
-    std::fs::write(&path, bytes).expect("scratch file");
+    if let Err(err) = std::fs::write(&path, bytes) {
+        panic!("scratch file: {err}");
+    }
     path
 }
 
