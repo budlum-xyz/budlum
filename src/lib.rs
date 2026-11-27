@@ -16,7 +16,6 @@ pub mod account_abstraction;
 pub mod aggregation;
 pub mod ai;
 pub mod ai_inference;
-pub mod app_registry;
 pub mod bat3;
 pub mod bns;
 pub mod budlumxyz;
