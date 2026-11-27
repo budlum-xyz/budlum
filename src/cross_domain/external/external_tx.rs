@@ -940,6 +940,73 @@ mod tests {
         (state, key, poster)
     }
 
+    /// What the registration bond actually stops - and why it is not the
+    /// same gate `carrier-free admission` removed.
+    ///
+    /// The carrier bond on `SubmitCommitment` guarded *membership*: it decided
+    /// who may speak, not whether what they said was true, so removing it left
+    /// the proof as the only authority and cost nothing in safety. This bond
+    /// is the other kind. `ChallengeContradiction` pays a challenger out of it
+    /// whenever an accepted attestation is refuted, so a registration with no
+    /// bond would mean a lying adapter costs its author nothing and the
+    /// challenger who catches it goes unrewarded. Removing it would not open a
+    /// door - it would stop the lock on one that already exists.
+    ///
+    /// This test measures the order and the amount rather than the prose: the
+    /// bond is refused when unfunded, and exactly that amount leaves the
+    /// poster's balance when the registration stands.
+    #[test]
+    fn the_registration_bond_funds_the_challenge_not_a_membership() {
+        let mut state = AccountState::new();
+        let poster = addr(9);
+        let needed = bond();
+
+        // One atom short of bond + fee: refused, and nothing is locked.
+        state.add_balance(&poster, needed.saturating_sub(1));
+        let tx = ExternalDomainTx::Register(Box::new(request(poster)));
+        let err = execute_external_domain_tx(&mut state, &ctx(poster), &tx)
+            .expect_err("an unfunded bond registered");
+        assert!(
+            matches!(err, ExternalDomainTxError::BondUnfunded { .. }),
+            "an unfunded registration failed for another reason: {err:?}"
+        );
+        assert!(
+            state.settlement.external_intake.entries.is_empty(),
+            "a refused registration left an entry"
+        );
+        assert_eq!(
+            state.get_balance(&poster),
+            needed.saturating_sub(1),
+            "a refused registration moved the poster's balance"
+        );
+
+        // Funded: the entry appears and exactly the bond leaves the balance.
+        let mut funded = AccountState::new();
+        funded.add_balance(&poster, needed + 5_000);
+        if let AdapterSpec::EthereumSync {
+            network,
+            committee: Some(committee),
+        } = spec()
+        {
+            funded
+                .settlement
+                .external_intake
+                .pin_ethereum_committee(network, committee);
+        }
+        let before = funded.get_balance(&poster);
+        execute_external_domain_tx(&mut funded, &ctx(poster), &tx).expect("funded registers");
+        assert_eq!(
+            funded.settlement.external_intake.entries.len(),
+            1,
+            "a funded registration left no entry"
+        );
+        // The fee is charged too, so the balance drops by at least the bond.
+        assert!(
+            before - funded.get_balance(&poster) >= needed,
+            "the registration bond did not leave the poster's balance"
+        );
+    }
+
     #[test]
     fn the_poster_registers_in_block_and_the_bond_leaves_its_balance() {
         let (state, key, poster) = registered();
