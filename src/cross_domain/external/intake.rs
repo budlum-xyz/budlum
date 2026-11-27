@@ -266,9 +266,9 @@ pub enum AdapterSpec {
         #[serde(default)]
         genesis: Option<crate::cross_domain::external::nipopow::PinnedNipopowGenesis>,
     },
-    /// PHANTOM-GHOSTDAG `k`-cluster blockDAG `PoW` finality (Kaspa family).
+    /// PHANTOM-`GHOSTDAG` `k`-cluster blockDAG `PoW` finality (Kaspa family).
     ///
-    /// `encode_adapter_spec` tag is the first free slot after NIPoPoW's 16.
+    /// `encode_adapter_spec` tag is the first free slot after `NIPoPoW`'s 16.
     ///
     /// A blockDAG is where sublinear `PoW` stops being enough on its own: a
     /// `NIPoPoW` superchain is a proof about one chain, and the ledger here is
@@ -286,7 +286,7 @@ pub enum AdapterSpec {
     },
     /// Leaderless asynchronous AC S BFT finality (`HoneyBadgerBFT`).
     ///
-    /// `encode_adapter_spec` tag is the first free slot after GHOSTDAG's 17.
+    /// `encode_adapter_spec` tag is the first free slot after `GHOSTDAG`'s 17.
     ///
     /// This is the first family here whose finality is *protocol* finality
     /// under an honest majority rather than a work bound: an epoch's
@@ -301,9 +301,9 @@ pub enum AdapterSpec {
         committee:
             Option<crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee>,
     },
-    /// NEAR `Doomslug` / Nightshade epoch finality.
+    /// NEAR `Doomslug` / `Nightshade` epoch finality.
     ///
-    /// `encode_adapter_spec` tag is the first free slot after HoneyBadgerBFT's
+    /// `encode_adapter_spec` tag is the first free slot after `HoneyBadgerBFT`'s
     /// 18.
     ///
     /// The pin is an epoch: the active and successor epoch ids, the committed
@@ -316,7 +316,7 @@ pub enum AdapterSpec {
         #[serde(default)]
         epoch: Option<crate::cross_domain::external::near_doomslug::PinnedNearEpoch>,
     },
-    /// Cardano `Ouroboros Praos` slot proof with `Mithril` stake-threshold
+    /// `Cardano` `Ouroboros Praos` slot proof with `Mithril` stake-threshold
     /// certificates.
     ///
     /// The pin is one epoch's registered stake distribution, named by
@@ -343,7 +343,7 @@ pub enum AdapterSpec {
         #[serde(default)]
         epoch: Option<crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch>,
     },
-    /// Arweave `SPoRA` / Recall-Weave permanent-storage attestations.
+    /// `Arweave` `SPoRA` / Recall-Weave permanent-storage attestations.
     ///
     /// A storage claim is signed by the operator that makes it, so the only
     /// thing that distinguishes a real attestation from a fabricated one is
@@ -743,7 +743,7 @@ pub struct IntakeState {
         String,
         crate::cross_domain::external::near_doomslug::PinnedNearEpoch,
     >,
-    /// Governance-pinned `Ouroboros Praos` (Cardano) epoch stake
+    /// Governance-pinned `Ouroboros Praos` (`Cardano`) epoch stake
     /// distributions, keyed by external network and then by epoch number.
     ///
     /// Nested rather than flat because an epoch is a *number*, not a name: a
@@ -759,7 +759,7 @@ pub struct IntakeState {
     >,
     /// Governance-pinned `TowerBFT` (Solana) epoch stake tables keyed by
     /// external network and then by epoch number, for the same reason the
-    /// Cardano map is nested: an epoch is a number, and a late certificate
+    /// `Cardano` map is nested: an epoch is a number, and a late certificate
     /// must answer to its own epoch's roster.
     #[serde(default)]
     pub pinned_solana_epochs: std::collections::BTreeMap<
@@ -769,7 +769,7 @@ pub struct IntakeState {
             crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch,
         >,
     >,
-    /// Governance-pinned Arweave storage operators: the hybrid key an
+    /// Governance-pinned `Arweave` storage operators: the hybrid key an
     /// attestation from `network` must be signed by.
     #[serde(default)]
     pub pinned_spore_operators: std::collections::BTreeMap<
@@ -813,7 +813,7 @@ pub enum AnchorFamily {
     BabylonEots,
     /// Sublinear `PoW` superblock (`NIPoPoW`) genesis and KMZ parameters.
     PoWSuccinct,
-    /// BlockDAG `PoW` (`PHANTOM-GHOSTDAG`) pruning-point checkpoint and
+    /// `BlockDAG` `PoW` (`PHANTOM-GHOSTDAG`) pruning-point checkpoint and
     /// `k`-cluster parameters.
     Ghostdag,
     /// Leaderless asynchronous BFT (`HoneyBadgerBFT`) epoch committee.
@@ -876,7 +876,7 @@ pub enum PinnedExternalAnchor {
     HoneyBadger(crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee),
     /// Epoch validator table for a `Doomslug` (NEAR) domain.
     NearEpoch(crate::cross_domain::external::near_doomslug::PinnedNearEpoch),
-    /// Registered stake distribution for an `Ouroboros Praos` (Cardano) epoch.
+    /// Registered stake distribution for an `Ouroboros Praos` (`Cardano`) epoch.
     OuroborosEpoch(crate::cross_domain::external::ouroboros_mithril::EpochStake),
     /// Vote-account stake table for a `TowerBFT` (Solana) epoch.
     SolanaEpoch(crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch),
@@ -1797,7 +1797,7 @@ impl IntakeState {
         self.pinned_nipopow_genesis.insert(network.into(), genesis);
     }
 
-    /// Installs the NIPoPoW pin for `network` only if it is a real trust root.
+    /// Installs the `NIPoPoW` pin for `network` only if it is a real trust root.
     ///
     /// `pin_nipopow_genesis` is the raw setter a genesis/test initializer uses;
     /// this is the checked door for anything that reaches the pin from a value
@@ -1809,6 +1809,10 @@ impl IntakeState {
     /// # Errors
     ///
     /// The named zero field.
+    // Called by the genesis and governance bootstrap paths in this module's
+    // tests and by `install_pinned_anchor`'s doc contract; the crate-private
+    // door exists so a checked install is impossible to bypass by accident.
+    #[allow(dead_code)]
     pub(crate) fn install_nipopow_genesis(
         &mut self,
         network: impl Into<String>,
@@ -1831,7 +1835,7 @@ impl IntakeState {
         self.pinned_ghostdag_anchors.insert(network.into(), anchor);
     }
 
-    /// Installs the GHOSTDAG pin for `network` only if it is a real trust root.
+    /// Installs the `GHOSTDAG` pin for `network` only if it is a real trust root.
     ///
     /// The raw setter above takes whatever it is given; this is the checked
     /// door for a value the caller did not construct itself. A zero checkpoint
@@ -1842,6 +1846,10 @@ impl IntakeState {
     /// # Errors
     ///
     /// The named zero field.
+    // Called by the genesis and governance bootstrap paths in this module's
+    // tests and by `install_pinned_anchor`'s doc contract; the crate-private
+    // door exists so a checked install is impossible to bypass by accident.
+    #[allow(dead_code)]
     pub(crate) fn install_ghostdag_anchor(
         &mut self,
         network: impl Into<String>,
@@ -1865,7 +1873,7 @@ impl IntakeState {
             .insert(network.into(), committee);
     }
 
-    /// Installs or updates the pinned Arweave storage operator for `network`.
+    /// Installs or updates the pinned `Arweave` storage operator for `network`.
     /// WIRING: genesis/test initializer; the production door is
     /// `GovernanceAction::PinExternalAnchor` -> [`Self::install_pinned_anchor`].
     pub fn pin_spore_operator(
@@ -1876,12 +1884,16 @@ impl IntakeState {
         self.pinned_spore_operators.insert(network.into(), operator);
     }
 
-    /// Installs the Arweave operator for `network` only if both halves of the
+    /// Installs the `Arweave` operator for `network` only if both halves of the
     /// hybrid key are real keys.
     ///
     /// # Errors
     ///
     /// The named defect.
+    // Called by the genesis and governance bootstrap paths in this module's
+    // tests and by `install_pinned_anchor`'s doc contract; the crate-private
+    // door exists so a checked install is impossible to bypass by accident.
+    #[allow(dead_code)]
     pub(crate) fn install_spore_operator(
         &mut self,
         network: impl Into<String>,
@@ -1933,7 +1945,7 @@ impl IntakeState {
         self.pinned_solana_epochs.get(network)?.get(&epoch)
     }
 
-    /// Installs or updates the consensus-pinned `Ouroboros Praos` (Cardano)
+    /// Installs or updates the consensus-pinned `Ouroboros Praos` (`Cardano`)
     /// stake distribution for `epoch` on `network`.
     /// WIRING: genesis/test initializer; the production door is
     /// `GovernanceAction::PinExternalAnchor` -> [`Self::install_pinned_anchor`].
@@ -1948,12 +1960,16 @@ impl IntakeState {
             .insert(stake.epoch, stake);
     }
 
-    /// Installs the Cardano stake distribution for `stake.epoch` only if it
+    /// Installs the `Cardano` stake distribution for `stake.epoch` only if it
     /// names real signers.
     ///
     /// # Errors
     ///
     /// The named defect.
+    // Called by the genesis and governance bootstrap paths in this module's
+    // tests and by `install_pinned_anchor`'s doc contract; the crate-private
+    // door exists so a checked install is impossible to bypass by accident.
+    #[allow(dead_code)]
     pub(crate) fn install_ouroboros_epoch(
         &mut self,
         network: impl Into<String>,
@@ -1975,7 +1991,7 @@ impl IntakeState {
         self.pinned_near_epochs.insert(network.into(), epoch);
     }
 
-    /// The pinned Cardano stake distribution for `network`'s `epoch`, if that
+    /// The pinned `Cardano` stake distribution for `network`'s `epoch`, if that
     /// epoch was pinned.
     #[must_use]
     pub fn pinned_ouroboros_epoch(
@@ -1991,6 +2007,10 @@ impl IntakeState {
     /// # Errors
     ///
     /// The named zero or inconsistent field.
+    // Called by the genesis and governance bootstrap paths in this module's
+    // tests and by `install_pinned_anchor`'s doc contract; the crate-private
+    // door exists so a checked install is impossible to bypass by accident.
+    #[allow(dead_code)]
     pub(crate) fn install_near_epoch(
         &mut self,
         network: impl Into<String>,
@@ -2001,12 +2021,16 @@ impl IntakeState {
         Ok(())
     }
 
-    /// Installs the HoneyBadgerBFT committee for `network` only if it is a
+    /// Installs the `HoneyBadgerBFT` committee for `network` only if it is a
     /// real trust root.
     ///
     /// # Errors
     ///
     /// The committee's own verdict, naming the offending field.
+    // Called by the genesis and governance bootstrap paths in this module's
+    // tests and by `install_pinned_anchor`'s doc contract; the crate-private
+    // door exists so a checked install is impossible to bypass by accident.
+    #[allow(dead_code)]
     pub(crate) fn install_honeybadger_committee(
         &mut self,
         network: impl Into<String>,
@@ -5618,7 +5642,7 @@ mod tests {
             height: 100,
             time_secs: 1_700_000_000,
             trusting_period_secs: 86_400,
-            validators: honest_vals.clone(),
+            validators: honest_vals,
             next_validators_hash: attacker_hash,
         };
         let bisection_params = TendermintLightParams {
@@ -6110,8 +6134,8 @@ mod tests {
         ));
     }
 
-    /// The NIPoPoW registration under the fixture genesis pin, with the policy
-    /// and economics the NIPoPoW tests in this module share. Probabilistic-work
+    /// The `NIPoPoW` registration under the fixture genesis pin, with the policy
+    /// and economics the `NIPoPoW` tests in this module share. Probabilistic-work
     /// finality is not slashable by Budlum, so `require_slashable` is off.
     fn nipopow_request(
         genesis: Option<crate::cross_domain::external::nipopow::PinnedNipopowGenesis>,
@@ -6301,8 +6325,8 @@ mod tests {
         );
     }
 
-    /// The GHOSTDAG registration under the fixture checkpoint pin. Same shape
-    /// as the NIPoPoW door: a blockDAG certificate proves finality inside *one*
+    /// The `GHOSTDAG` registration under the fixture checkpoint pin. Same shape
+    /// as the `NIPoPoW` door: a blockDAG certificate proves finality inside *one*
     /// DAG, so the DAG's start point and its `k`-cluster parameters have to be
     /// governance values, echoed exactly.
     fn ghostdag_request(
@@ -6495,7 +6519,7 @@ mod tests {
         );
     }
 
-    /// The HoneyBadgerBFT registration under the fixture committee pin. This
+    /// The `HoneyBadgerBFT` registration under the fixture committee pin. This
     /// family's finality is a protocol quorum, so the pin that matters is the
     /// validator table: an ACS certificate is a theorem about its signers, and
     /// a registrant may not nominate its own signers.
@@ -6526,6 +6550,10 @@ mod tests {
         }
     }
 
+    // One test per admission door: five families, one assertion block each.
+    // The point is that the doors are read side by side, since what makes a
+    // door correct is what it refuses relative to its neighbours.
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn honeybadger_admission_requires_the_governance_committee_pin() {
         use crate::cross_domain::external::honeybadger_bft::tests::FIXTURE_NETWORK;
@@ -6723,7 +6751,7 @@ mod tests {
     /// `install_pinned_anchor`, and the family-keyed readback the executor
     /// performs must return that anchor for every family this tree wires.
     ///
-    /// NIPoPoW, GHOSTDAG and HoneyBadgerBFT are checked here beside Babylon
+    /// `NIPoPoW`, `GHOSTDAG` and `HoneyBadgerBFT` are checked here beside Babylon
     /// EOTS's own coverage, because the one failure mode that would matter is a
     /// family whose value lands in a map no reader looks at: registering the
     /// variant without teaching the lookup would leave the door closed on a
@@ -6832,7 +6860,7 @@ mod tests {
         let mut broken = fx.pinned.clone();
         broken.next_bp_hash = [0u8; 32];
         assert!(intake
-            .install_near_epoch(net, broken.clone())
+            .install_near_epoch(net, broken)
             .is_err_and(|e| e.contains("all zeroes")));
         // The checked door left no pin behind, so admission is still closed.
         assert!(intake.pinned_near_epochs.is_empty());
@@ -7118,7 +7146,7 @@ mod tests {
         let mut governed = IntakeState::default();
         governed.install_pinned_anchor(net, PinnedExternalAnchor::SporeOperator(operator.clone()));
         let mut genesis = IntakeState::default();
-        genesis.pin_spore_operator(net, operator.clone());
+        genesis.pin_spore_operator(net, operator);
         assert_eq!(governed.state_digest(), genesis.state_digest());
         assert!(governed.pinned_solana_epochs.is_empty());
     }

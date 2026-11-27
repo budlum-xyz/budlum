@@ -1035,6 +1035,7 @@ fn rule(reason: impl Into<String>) -> AdapterError {
 }
 
 #[cfg(test)]
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) mod tests {
     use super::*;
     use crate::cross_domain::external::selftest::{admit, ProbeOutcome};

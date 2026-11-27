@@ -295,14 +295,14 @@ pub enum GuardedExternalAdapter {
         /// Governance-pinned succinct genesis and ML-DSA-65 aggregator anchor.
         pinned: Box<PinnedSuccinctGenesis>,
     },
-    /// Leaderless asynchronous BFT Bracha RBC equivocation (HoneyBadgerBFT).
+    /// Leaderless asynchronous BFT Bracha RBC equivocation (`HoneyBadgerBFT`).
     HoneyBadgerBft {
         /// External network identifier.
         network: String,
         /// Governance-pinned epoch committee.
         pinned: Box<PinnedHoneyBadgerCommittee>,
     },
-    /// Epoch-based Doomslug approval equivocation (NEAR).
+    /// Epoch-based `Doomslug` approval equivocation (NEAR).
     NearDoomslug {
         /// External network identifier.
         network: String,
@@ -461,7 +461,7 @@ pub enum ContradictionEvidence {
         /// Cryptographic SCP ballot equivocation proof.
         proof: Box<StellarBallotEquivocationProof>,
     },
-    /// Verified HoneyBadgerBFT Bracha RBC double-erasure-root equivocation.
+    /// Verified `HoneyBadgerBFT` Bracha RBC double-erasure-root equivocation.
     HoneyBadgerFault {
         /// External network name.
         network: String,
@@ -470,7 +470,7 @@ pub enum ContradictionEvidence {
         /// Cryptographic RBC equivocation proof.
         proof: Box<RbcEquivocationProof>,
     },
-    /// Verified NEAR Doomslug double- or surround-approval equivocation.
+    /// Verified NEAR `Doomslug` double- or surround-approval equivocation.
     NearDoomslugFault {
         /// External network name.
         network: String,
@@ -1383,6 +1383,12 @@ impl BridgeEconomicGuard {
     ///
     /// Returns [`EconomicGuardError`] when the domain is unknown, the evidence
     /// was already replayed, or cryptographic verification fails.
+    // Each adapter family is one match arm here and the arms are the honest
+    // shape: the cryptographic verifier, the evidence digest and the offender
+    // replay key for a family have to be read together, because a digest that
+    // does not commit what the verifier proved is exactly the defect this
+    // function exists to prevent.
+    #[allow(clippy::too_many_lines)]
     pub fn submit_contradiction(
         &mut self,
         domain_id: DomainId,

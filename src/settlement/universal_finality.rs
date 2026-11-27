@@ -170,6 +170,11 @@ impl FinalityGuarantee {
     ///
     /// WIRING: proof-aware settlement route surface paired with `CommitmentAttestation::for_proof`.
     #[must_use]
+    // One row per adapter family is the point of this function: five families
+    // were added to it in one change, and splitting it would separate a
+    // family's guarantee from the proof shape that earns it - the coupling that
+    // is the whole reason the match lives here.
+    #[allow(clippy::too_many_lines)]
     pub fn for_proof(
         domain: &ConsensusDomain,
         proof: &crate::domain::FinalityProof,
@@ -660,13 +665,11 @@ impl FinalityGuarantee {
                     },
                     // Storage is a promise about availability, not a bond.
                     slashable_backing: false,
-                    fault_tolerance_bps: if valid {
-                        // A single operator is a 1-of-1 witness; the honest
-                        // claim is the one-operator tolerance it really has.
-                        0
-                    } else {
-                        0
-                    },
+                    // A single operator is a 1-of-1 witness: the honest claim
+                    // is the one-operator tolerance it really has, which is
+                    // none. Written as a plain zero so the row cannot be read
+                    // as "zero because invalid".
+                    fault_tolerance_bps: 0,
                 }
             }
             AdapterSpec::SolanaTower { epoch, .. } => {

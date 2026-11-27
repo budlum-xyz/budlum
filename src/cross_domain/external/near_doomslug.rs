@@ -822,7 +822,7 @@ pub fn near_pin_digest(pin: &PinnedNearEpoch) -> Hash32 {
         .chain(std::iter::once(pin.epoch_id.as_slice()))
         .chain(std::iter::once(pin.next_epoch_id.as_slice()))
         .chain(std::iter::once(pin.next_bp_hash.as_slice()))
-        .chain(producer_digests.iter().map(|d| d.as_slice()))
+        .chain(producer_digests.iter().map(<[u8; 32]>::as_slice))
         .collect();
     crate::core::hash::hash_fields_bytes(&refs)
 }
@@ -1066,6 +1066,11 @@ impl ExternalFinalityAdapter for NearDoomslugAdapter {
 }
 
 #[cfg(test)]
+// The fixture helpers here are shared with the intake tests, so they must be
+// visible outside this module: inside a private module `pub(crate)` is the
+// honest statement, and clippy's "redundant" reading is wrong for this one
+// module.
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) mod tests {
     use super::*;
     use crate::core::address::Address;
@@ -1450,7 +1455,7 @@ pub(crate) mod tests {
         assert_eq!(slash.kind, NearSlashKind::DoubleApproval);
         // The evidence digest is a function of the proven pair: a different
         // pair by the same producer is a different offence, not a replay.
-        let mut reordered = double_proof.clone();
+        let mut reordered = double_proof;
         core::mem::swap(&mut reordered.sig_a, &mut reordered.sig_b);
         let other = verify_near_approval_slash(NET, &fx.pinned, &reordered)
             .expect("the same fault, framed the other way round");

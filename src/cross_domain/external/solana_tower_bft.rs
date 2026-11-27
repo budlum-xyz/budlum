@@ -706,6 +706,7 @@ impl ExternalFinalityAdapter for SolanaTowerBftAdapter {
 }
 
 #[cfg(test)]
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) mod tests {
     use super::*;
     use crate::core::address::Address;
