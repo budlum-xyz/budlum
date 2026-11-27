@@ -49,8 +49,16 @@ impl BlsVerifier for ShapeOnlyBls {
     }
 }
 
-/// The unpinned (`None`) form of every variant, in baseline order.
+/// The unpinned (`None`) form of every variant, in baseline order. Split in
+/// two halves so neither function trips `clippy::too_many_lines`.
 fn unpinned() -> Vec<(&'static str, AdapterSpec)> {
+    let mut all = unpinned_first();
+    all.extend(unpinned_second());
+    all
+}
+
+/// Baseline rows 1-7.
+fn unpinned_first() -> Vec<(&'static str, AdapterSpec)> {
     vec![
         (
             "EthereumSync",
@@ -103,6 +111,12 @@ fn unpinned() -> Vec<(&'static str, AdapterSpec)> {
                 committee: None,
             },
         ),
+    ]
+}
+
+/// Baseline rows 8-14.
+fn unpinned_second() -> Vec<(&'static str, AdapterSpec)> {
+    vec![
         (
             "CasperFfg",
             AdapterSpec::CasperFfg {
