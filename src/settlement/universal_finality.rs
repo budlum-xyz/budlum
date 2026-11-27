@@ -1563,6 +1563,106 @@ mod tests {
         }
     }
 
+    /// An `AggregatedProg` proof is a different kind of thing from a quorum
+    /// proof, and the guarantee must say so.
+    ///
+    /// Every other proof shape in this module is backed by somebody's money:
+    /// a stake that can be slashed, an authority set that can be revoked, work
+    /// that can be outrun. `AggregatedProg` is backed by a validity proof - the
+    /// claim "program X ran on data D and produced Y" verified inside a block's
+    /// `ClaimFrame`. Nobody is trusted, so there is nothing to slash, and
+    /// `slashable_backing` must be `false` for a reason that is *not* the same
+    /// reason an unbonded authority set gives it `false`.
+    ///
+    /// This test measures that distinction rather than asserting the field:
+    /// the proof admits cross-domain value with **no** slashable stake, which
+    /// no other shape in this module does, and it does so only when the domain
+    /// pins the program that produced the claim.
+    #[test]
+    fn an_aggregated_program_proof_is_backed_by_validity_not_by_slashable_stake() {
+        let proof = crate::domain::FinalityProof::AggregatedProg {
+            program_hash: [0x77; 32],
+            prev_height: 41,
+            prev_state_root: [0x88; 32],
+            claim_digest: [0x99; 32],
+        };
+
+        // 1. No allowlisted program: the domain has not said which program's
+        //    output it accepts, so a claim about *some* program proves nothing
+        //    about *this* domain. Value must not move.
+        let mut unpinned = default_domain(11, ConsensusKind::Zk, 1011, "zk-proof-v1", 1);
+        unpinned.zk_program_allowlist.clear();
+        let g = FinalityGuarantee::for_proof(&unpinned, &proof, true);
+        assert!(
+            !g.slashable_backing,
+            "a validity proof claimed slashable backing"
+        );
+        assert_eq!(
+            g.reversibility,
+            FinalityReversibility::CryptographicValidity,
+            "a validity proof was classified as something reversible"
+        );
+        assert!(
+            !g.admits_cross_domain_value(),
+            "value moved on a proof against an unpinned program"
+        );
+
+        // 2. Pinned program: the domain named the program, the claim is about
+        //    that program, so the output is as good as computed here. Value
+        //    moves - and still without a satoshi of slashable stake, which is
+        //    exactly what makes this shape different from every quorum proof.
+        let mut pinned = default_domain(12, ConsensusKind::Zk, 1012, "zk-proof-v1", 1);
+        pinned.zk_program_allowlist = vec![[0x77; 32]];
+        let g = FinalityGuarantee::for_proof(&pinned, &proof, true);
+        assert!(
+            !g.slashable_backing,
+            "a validity proof claimed a slash risk"
+        );
+        assert_eq!(
+            g.reversibility,
+            FinalityReversibility::CryptographicValidity
+        );
+        assert_eq!(
+            g.quantum_posture,
+            QuantumClass::Hash,
+            "a hash-based claim was classified as something else"
+        );
+        assert!(
+            g.admits_cross_domain_value(),
+            "value was blocked on a proof the domain itself pinned"
+        );
+
+        // 3. The contrast that gives the two branches their meaning: a quorum
+        //    proof on a domain with no pinned validator set carries no
+        //    slashable backing either - but it is *also* refused value, and its
+        //    reversibility is a quorum, not cryptographic validity. If these
+        //    two ever collapse into the same answer, one of the branches is
+        //    lying.
+        let mut authority = default_domain(13, ConsensusKind::Dag, 1013, "dag-tip-vote-v1", 1);
+        authority.validator_set_hash = [0xAA; 32];
+        let authority_proof = crate::domain::FinalityProof::DagPq {
+            round: 1,
+            anchor: [0x11; 32],
+            parent_anchor: [0u8; 32],
+            authorities: Vec::new(),
+            signatures: Vec::new(),
+        };
+        let ga = FinalityGuarantee::for_proof(&authority, &authority_proof, true);
+        assert!(
+            !ga.slashable_backing,
+            "an authority proof claimed a slash risk"
+        );
+        assert_ne!(
+            ga.reversibility,
+            FinalityReversibility::CryptographicValidity,
+            "an authority proof was classified as cryptographic validity"
+        );
+        assert!(
+            !ga.admits_cross_domain_value(),
+            "value moved on an authority proof with no stake behind it"
+        );
+    }
+
     #[test]
     fn universal_finality_classifies_all_consensus_families_and_enforces_weakest_link() {
         let hub = hub_guarantee();
