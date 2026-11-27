@@ -630,3 +630,35 @@ pub trait ExternalFinalityAdapter: Send + Sync {
         false
     }
 }
+
+#[cfg(test)]
+mod zk_assumption_tests {
+    use super::{ProofSystem, SecurityBacking};
+    use crate::cross_domain::external::stark_validity_rollup::PinnedStarkRollupConfig;
+    use crate::crypto::facts::QuantumClass;
+    use crate::settlement::universal_finality::{AdapterSpec, FinalityGuarantee};
+
+    #[test]
+    fn pairing_based_zk_backing_downgrades_hash_rollup_quantum_posture() {
+        let stark_spec = AdapterSpec::StarkValidityRollup {
+            network: "starknet".into(),
+            pinned: Some(PinnedStarkRollupConfig {
+                network_id: "starknet".into(),
+                chain_id: 1,
+                pinned_program_hash: [0x55; 32],
+                trusted_batch_number: 10,
+                trusted_state_root: [0x66; 32],
+                expected_forced_queue_head: [0x77; 32],
+            }),
+        };
+        let obs = FinalityGuarantee::for_external_spec_with_backing(
+            &stark_spec,
+            Some(&SecurityBacking::Zk {
+                system: ProofSystem::Groth16,
+                public_inputs_digest: [0x33; 32],
+            }),
+        );
+        assert_eq!(obs.quantum_posture, QuantumClass::Classical);
+        assert!(!obs.slashable_backing);
+    }
+}

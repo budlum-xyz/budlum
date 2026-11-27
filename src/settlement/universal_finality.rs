@@ -656,7 +656,19 @@ impl FinalityGuarantee {
                     ..promised
                 }
             }
-            SecurityBacking::Zk { .. } => promised,
+            SecurityBacking::Zk { system, .. } => Self {
+                slashable_backing: false,
+                quantum_posture: quantum_meet(
+                    promised.quantum_posture,
+                    system.assumption_class().quantum_class(),
+                ),
+                fault_tolerance_bps: if promised.slashable_backing {
+                    0
+                } else {
+                    promised.fault_tolerance_bps
+                },
+                ..promised
+            },
         }
     }
 
@@ -2561,6 +2573,7 @@ mod external_backing_tests {
             observed.fault_tolerance_bps, promised.fault_tolerance_bps,
             "an observed backing stronger than the registration must not inflate the bound"
         );
+        assert!(!observed.slashable_backing);
     }
 
     /// A `PoW` domain whose accepted attestation reports a work claim below
