@@ -4,10 +4,28 @@
 //! tree and fails on any finding. `ZIZMOR_BIN` overrides the binary path;
 //! without it the pinned version is downloaded (version + sha256 enforced),
 //! mirroring the shell gate's pin policy.
+//!
+//! # Persona
+//!
+//! The audit runs as the `auditor` persona at `medium` severity and above.
+//! The default (`regular`) persona hides the audits zizmor considers
+//! opinionated, and one of them is `secrets-outside-env`: measured on this
+//! tree, `regular` reported nothing while `auditor` reported the release
+//! signing seed read in a job with no environment, at medium severity and
+//! high confidence, and 122 more findings below medium. A gate that reads
+//! the workflows with the lenient persona is a gate that cannot see that
+//! class. The severity floor keeps the informational and low tiers (action
+//! style, `matrix.*` expansions) out of the verdict; everything medium and
+//! above fails closed.
 
 use std::path::{Path, PathBuf};
 
 const VERSION: &str = "1.27.0";
+
+/// The persona and severity floor every invocation uses (see the module
+/// documentation): the canary asserts that a finding only the `auditor`
+/// persona reports fails the gate.
+const AUDIT_ARGS: &[&str] = &["--persona", "auditor", "--min-severity", "medium"];
 const SHA256: &str = "277f2bd8fd37cf60c42ab7afca6faa884e65440fa31e02b44bdaae60f62a358f";
 
 /// Resolve the zizmor binary, downloading the pinned release when needed.
@@ -153,11 +171,14 @@ fn findings_report(stdout: &[u8], stderr: &[u8]) -> String {
 pub fn run(root: &Path) -> Result<String, String> {
     let bin = bin_path()?;
     let out = std::process::Command::new(&bin.path)
+        .args(AUDIT_ARGS)
         .arg(".")
         .current_dir(root)
         .output();
     match out {
-        Ok(o) if o.status.success() => Ok(String::from("zizmor clean (0 findings).")),
+        Ok(o) if o.status.success() => Ok(String::from(
+            "zizmor clean (0 findings at persona auditor, severity medium and above).",
+        )),
         Ok(o) => Err(findings_report(&o.stdout, &o.stderr)),
         Err(e) => Err(format!("zizmor did not run ({}): {e}", bin.path.display())),
     }
@@ -187,10 +208,49 @@ pub fn self_test() -> Result<String, String> {
     .map_err(|e| e.to_string())?;
     let bin = bin_path()?;
     let out = std::process::Command::new(&bin.path)
+        .args(AUDIT_ARGS)
+        .arg(".")
+        .current_dir(&dir)
+        .output();
+    // The persona canary: a workflow that is clean under the `regular`
+    // persona (permissions pinned, no dangerous trigger, no expansion) and
+    // reads a secret in a job without an environment. Only the `auditor`
+    // persona reports `secrets-outside-env`, so this fixture failing is the
+    // proof that the persona argument reached the binary.
+    std::fs::remove_file(workflows.join("bad.yml")).map_err(|e| e.to_string())?;
+    std::fs::write(
+        workflows.join("secret.yml"),
+        "name: secret\non:\n  push:\n    branches: [main]\npermissions: {}\njobs:\n  x:\n    \
+         runs-on: ubuntu-latest\n    permissions:\n      contents: read\n    steps:\n      \
+         - run: echo ok\n        env:\n          K: ${{ secrets.K }}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let persona = std::process::Command::new(&bin.path)
+        .args(AUDIT_ARGS)
         .arg(".")
         .current_dir(&dir)
         .output();
     let _ = std::fs::remove_dir_all(&dir);
+    match &persona {
+        Ok(o) if o.status.success() => {
+            return Err(String::from(
+                "canary: zizmor passed a secret read outside an environment, so the auditor persona is not in effect",
+            ));
+        }
+        Ok(o) => {
+            let report = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            if !report.contains("secrets-outside-env") {
+                return Err(format!(
+                    "canary: zizmor exited non-zero without the secrets-outside-env finding:\n{report}"
+                ));
+            }
+        }
+        Err(e) => return Err(format!("zizmor did not run ({}): {e}", bin.path.display())),
+    }
     let bin_shown = bin.path.display().to_string();
     let work = bin.work.clone();
     drop(bin);
@@ -214,7 +274,7 @@ pub fn self_test() -> Result<String, String> {
             );
             if report.contains("template-injection") {
                 Ok(String::from(
-                    "canary OK: zizmor reported template-injection on the injected workflow.",
+                    "canary OK: zizmor reported template-injection on the injected workflow and secrets-outside-env under the auditor persona.",
                 ))
             } else {
                 Err(format!(

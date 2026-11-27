@@ -190,6 +190,7 @@ mod gates {
     pub mod rust_syntax_is_parseable;
     pub mod scheme_is_never_inferred;
     pub mod seals_move_with_their_tree;
+    pub mod secret_scopes_are_guarded;
     pub mod security_parameters;
     pub mod security_quality_wired;
     pub mod security_scans_can_fail;
@@ -227,7 +228,9 @@ mod gates {
     pub mod wallet_node_address_agree;
     pub mod wire_fields_are_signed;
     pub mod workflow_red_keeps_its_words;
+    pub mod workflow_secrets_need_an_environment;
     pub mod workflow_trigger_promises;
+    pub mod workflows_are_dispatchable;
     pub mod workflows_cover_every_workspace;
     pub mod workflows_produce_jobs;
     pub mod zero_address_sender_is_verified;
@@ -264,6 +267,14 @@ struct Gate {
 }
 
 const GATES: &[Gate] = &[
+    Gate {
+        name: "secret-scopes-are-guarded",
+        replaces: None,
+        run: gates::secret_scopes_are_guarded::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::secret_scopes_are_guarded::self_test,
+    },
     Gate {
         name: "zkvm-refuses-untrusted-proofs",
         replaces: None,
@@ -534,6 +545,22 @@ const GATES: &[Gate] = &[
         run: gates::workflows_produce_jobs::run,
         run_args: None,
         self_test: gates::workflows_produce_jobs::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "workflows-are-dispatchable",
+        replaces: None,
+        run: gates::workflows_are_dispatchable::run,
+        run_args: None,
+        self_test: gates::workflows_are_dispatchable::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "workflow-secrets-need-an-environment",
+        replaces: None,
+        run: gates::workflow_secrets_need_an_environment::run,
+        run_args: None,
+        self_test: gates::workflow_secrets_need_an_environment::self_test,
         run_log: None,
     },
     Gate {
