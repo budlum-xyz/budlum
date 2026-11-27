@@ -216,6 +216,13 @@ pub trait BudlumApi {
     #[method(name = "bud_unifiedSelftest")]
     async fn unified_selftest(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// The root that joins every admitted external domain's fact with this
+    /// chain's settlement anchor. A consumer outside this chain reads this
+    /// one digest instead of walking each domain's registry: the unifier's
+    /// answer is a single root, not a list of promises.
+    #[method(name = "bud_unifiedFinalityRoot")]
+    async fn unified_finality_root(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Lists every registered external domain's profile, each with the
     /// one-line summary the profile module renders.
     #[method(name = "bud_getExternalDomains")]

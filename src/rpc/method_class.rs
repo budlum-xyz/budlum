@@ -114,6 +114,7 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     // the operator listener.
     row("bud_unifiedNetworks", Operator, Read),
     row("bud_unifiedSelftest", Operator, Read),
+    row("bud_unifiedFinalityRoot", Operator, Read),
     row("bud_getExternalDomains", Public, Read),
     row("bud_getExternalIntakeDigest", Public, Read),
     // refused; the doors are `ExternalDomainTx::Readmit` and

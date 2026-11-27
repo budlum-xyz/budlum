@@ -2340,7 +2340,7 @@ impl IntakeState {
         use crate::settlement::aggregate_finality_roots;
 
         let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(self.entries.len() + 1);
-        for (key, entry) in &self.entries {
+        for key in self.entries.keys() {
             let Some(reg) = self.registry.domain(key) else {
                 // Registered in the intake but absent from the registry is a
                 // broken state, not an empty one; refuse rather than paper

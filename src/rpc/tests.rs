@@ -3963,6 +3963,49 @@ mod rpc_tests {
         assert!(problems.is_empty(), "the surface failed: {problems:?}");
     }
 
+    /// The unified finality root is one digest over every admitted domain
+    /// plus this chain's own anchor, and the door is the operator door: a
+    /// node that answers it to anyone lets a stranger time the chain's
+    /// admission bookkeeping.
+    #[tokio::test]
+    async fn unified_finality_root_is_one_digest_and_operator_only() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45270, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node = Node::new(chain.clone()).expect("node");
+        let operator = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node.get_client(),
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Operator,
+        );
+        let answered = operator
+            .unified_finality_root()
+            .await
+            .expect("an operator asks for the joined root");
+        let root = answered.get("root").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(root.len(), 66, "a 32-byte root renders as 0x and 64 hex");
+        assert!(root.starts_with("0x"));
+
+        // Public mode answers nothing: the method is behind the operator door,
+        // and the refusal names the method that was refused.
+        let public = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node.get_client(),
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Public,
+        );
+        let refused = public.unified_finality_root().await.unwrap_err();
+        assert!(
+            refused.message().contains("bud_unifiedFinalityRoot"),
+            "the refusal does not name the method: {}",
+            refused.message()
+        );
+    }
+
     /// `read_record` answers with the fields the invite carries: the phone
     /// shows who invited it before it acts. The refusing half lives in the
     /// operator-only listener test below. This walks the public RPC surface

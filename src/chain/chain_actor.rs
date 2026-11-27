@@ -332,6 +332,11 @@ pub enum ChainCommand {
         oneshot::Sender<Vec<(crate::cross_domain::external::DomainProfile, String)>>,
     ),
     GetExternalIntakeDigest(oneshot::Sender<Result<[u8; 32], String>>),
+    /// The root that joins every admitted external domain's own fact with
+    /// this chain's settlement anchor. Distinct from the intake digest:
+    /// that one commits to the intake's bookkeeping, this one to what a
+    /// consumer outside this chain reads as the joined finality root.
+    GetUnifiedFinalityRoot(oneshot::Sender<Result<[u8; 32], String>>),
     GetExternalQuorumRound(
         crate::cross_domain::external::DomainKey,
         u64,
@@ -2220,6 +2225,15 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    /// The joined finality root: every admitted external domain's fact
+    /// under one tree with this chain's settlement anchor as the last leaf.
+    pub async fn get_unified_finality_root(&self) -> Result<[u8; 32], String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetUnifiedFinalityRoot(tx)).await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
     /// The quorum round for one external height of one domain, if retained.
     pub async fn external_quorum_round(
         &self,
@@ -3886,6 +3900,16 @@ impl ChainActor {
                 }
                 ChainCommand::GetExternalIntakeDigest(res_tx) => {
                     let _ = res_tx.send(self.blockchain.state.settlement.external_intake_digest());
+                }
+                ChainCommand::GetUnifiedFinalityRoot(res_tx) => {
+                    let anchor = self.blockchain.state.settlement_root;
+                    let answer = self
+                        .blockchain
+                        .state
+                        .settlement
+                        .external_intake
+                        .unified_finality_root(anchor);
+                    let _ = res_tx.send(answer);
                 }
                 ChainCommand::GetExternalQuorumRound(key, height, res_tx) => {
                     let _ = res_tx.send(self.blockchain.external_quorum_round(&key, height));
