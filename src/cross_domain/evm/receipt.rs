@@ -88,7 +88,7 @@ pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
         return Err(ReceiptError::InvalidEnvelope);
     };
     // [status/postState, cumulativeGasUsed, logsBloom, logs [, accessList]]
-    if list.len() < 4 {
+    if list.len() < 4 || list.len() > 8 {
         return Err(ReceiptError::InvalidEnvelope);
     }
 
@@ -111,17 +111,22 @@ pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
 fn decode_status(b: &[u8], is_typed: bool) -> Result<bool, ReceiptError> {
     match b.len() {
         0 => Ok(false),
-        32 if !is_typed => Ok(true),
-        1 if b[0] == 1 => Ok(true),
+        32 if !is_typed && b != [0u8; 32] => Ok(true),
+        1 if b.first().copied() == Some(1) => Ok(true),
         _ => Err(ReceiptError::InvalidEnvelope),
     }
 }
 
 /// Decodes the `logs` RLP list. Each log = `[address(20), topics([32]*), data]`.
+const MAX_RECEIPT_LOGS: usize = 1_024;
+
 fn decode_logs(item: &Item) -> Result<Vec<EthLog>, ReceiptError> {
     let Item::List(logs) = item else {
         return Err(ReceiptError::InvalidLog);
     };
+    if logs.len() > MAX_RECEIPT_LOGS {
+        return Err(ReceiptError::InvalidLog);
+    }
     let mut out = Vec::with_capacity(logs.len());
     for log_item in logs {
         let Item::List(fields) = log_item else {
@@ -169,6 +174,9 @@ impl EthReceipt {
     /// is built on, pub with the rest of this receipt reader.
     #[must_use]
     pub fn find_log<'a>(&'a self, emitter: &[u8], topic0: &[u8; 32]) -> Option<&'a EthLog> {
+        if !self.status {
+            return None;
+        }
         self.logs
             .iter()
             .find(|log| log.address == emitter && log.topics.first().is_some_and(|t| t == topic0))
@@ -184,6 +192,9 @@ impl EthReceipt {
         emitter: &[u8],
         topic0: &[u8; 32],
     ) -> Option<(usize, &'a EthLog)> {
+        if !self.status {
+            return None;
+        }
         self.logs.iter().enumerate().find(|(_, log)| {
             log.address == emitter && log.topics.first().is_some_and(|t| t == topic0)
         })

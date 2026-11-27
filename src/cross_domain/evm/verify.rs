@@ -269,6 +269,21 @@ pub fn verify_evm_receipt(
     if proof.tx_hash.is_empty() {
         return Err(VerifyError::EmptyTransactionHash);
     }
+    if proof.receipt_key.is_empty() || proof.receipt_key.len() > 9 {
+        return Err(VerifyError::Receipt(ReceiptError::InvalidEnvelope));
+    }
+    let key_item =
+        crate::cross_domain::evm::rlp::decode(proof.receipt_key).map_err(ReceiptError::Rlp)?;
+    let _tx_index =
+        crate::cross_domain::evm::rlp::decode_uint(&key_item).map_err(ReceiptError::Rlp)?;
+    if proof.emitter_address.len() != 20 || proof.emitter_address == [0u8; 20] {
+        return Err(VerifyError::LogNotFound);
+    }
+    if proof.confirmation_headers.len() > 4_096 {
+        return Err(VerifyError::Header(
+            "confirmation_headers length exceeds 4096 ceiling".into(),
+        ));
+    }
 
     // 1. Header decode + N-confirmation finality.
     let target = decode_header_or_err(proof.target_header)?;
