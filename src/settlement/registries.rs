@@ -61,6 +61,18 @@ pub struct SettlementRegistries {
     /// declared a denomination, so its presence changes no root until used.
     #[serde(default)]
     pub denominations: crate::settlement::universal_asset::DenominationIndex,
+    /// The universal multi-token atomic payment router.
+    ///
+    /// This is the "settle in any mix of tokens, on any mix of chains, and
+    /// receive exactly the target token on the target chain" primitive - the
+    /// heart of the single-surface claim. It was 9,833 lines of complete,
+    /// tested logic behind no door and in no state: `settle_payment` mutated a
+    /// value the caller owned, so its replay table and its quote-liquidity
+    /// accounting were per-process. Two nodes would both settle the same intent.
+    ///
+    /// In the state root it can do the one thing it was written to do.
+    #[serde(default)]
+    pub payment_router: crate::unification::payment_router::UniversalPaymentRouter,
     /// B.U.D. 3.0 Education Domain: registered artifacts and their shares.
     ///
     /// Same shape of gap as the Data Market: a complete registry with a

@@ -163,6 +163,18 @@ pub enum SettlementTx {
     ///
     /// Appended to preserve existing bincode enum discriminants.
     Education(Box<EducationTx>),
+
+    /// Settle one payment in a mix of tokens across several chains, receiving
+    /// an exact target token on a target chain.
+    ///
+    /// The router behind this door (`crate::unification::payment_router`) was
+    /// complete and unreachable: `settle_payment` took `&mut self`, the router
+    /// lived in no `AccountState`, and no transaction called it. Its replay
+    /// table was therefore per-process, which is the one thing an atomic
+    /// payment cannot be.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    UniversalPayment(Box<UniversalPaymentTx>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -2083,7 +2095,62 @@ pub fn execute_settlement_tx(
         SettlementTx::DataMarket(market_tx) => execute_data_market_tx(state, ctx, market_tx),
         SettlementTx::AppRegistry(app_tx) => execute_app_registry_tx(state, ctx, app_tx),
         SettlementTx::Education(edu_tx) => execute_education_tx(state, ctx, edu_tx),
+        SettlementTx::UniversalPayment(payment_tx) => {
+            execute_universal_payment(state, ctx, payment_tx)
+        }
     }
+}
+
+/// A universal payment: one target, any mix of sources.
+///
+/// The router derives the debits itself from the intent and the quotes; this
+/// type only carries them, so a transaction cannot name a debit the router did
+/// not compute.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UniversalPaymentTx {
+    /// What the merchant asked for: a target amount of one token on one chain.
+    pub intent: crate::unification::payment_router::UniversalPaymentIntent,
+    /// The balances the payer is drawing from, one per (domain, token).
+    pub balances: Vec<crate::unification::payment_router::DomainTokenBalance>,
+    /// Liquidity quotes, each carrying its own rate and remaining depth.
+    pub quotes: Vec<crate::unification::payment_router::LiquidityQuote>,
+}
+
+/// Executes a universal payment through the router.
+///
+/// The chain-level rule on top of the router's own checks: **the intent's payer
+/// must be the sender**. The router verifies arithmetic and replay; it does not
+/// know who submitted, and letting a third party spend another account's
+/// balances would make the sender field a lie.
+fn execute_universal_payment(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &UniversalPaymentTx,
+) -> Result<(), SettlementTxError> {
+    use crate::unification::payment_router::PaymentError;
+
+    if tx.intent.payer_id != *ctx.sender.as_bytes() {
+        return Err(SettlementTxError::Refused(String::from(
+            "universal payment: the intent must be submitted by its payer",
+        )));
+    }
+
+    // The router records the payment in its replay table *and* draws down quote
+    // liquidity, so it needs exclusive access to that half of the settlement
+    // registry. Taking it out and putting it back keeps a borrow checker and a
+    // ledger on speaking terms.
+    let mut router = std::mem::take(&mut state.settlement.payment_router);
+    let mut balances = tx.balances.clone();
+    let result = router.settle_payment(
+        &tx.intent,
+        &mut balances,
+        &tx.quotes,
+        state.current_block_unix_secs,
+    );
+    state.settlement.payment_router = router;
+    result.map(|_| ()).map_err(|err: PaymentError| {
+        SettlementTxError::Refused(format!("universal payment: {err}"))
+    })
 }
 
 /// An app-registry action.

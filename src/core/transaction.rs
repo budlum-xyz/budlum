@@ -4682,6 +4682,22 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
                 }
             }
         }
+        SettlementTx::UniversalPayment(payment_tx) => {
+            // Tag 17. The intent is the whole claim - target, deadline,
+            // slippage - and is signed through its own canonical bytes; the
+            // quotes are hashed together because each carries a rate the
+            // payer saw.
+            use crate::settlement::domains::UniversalPaymentTx;
+            put_u8(out, 17);
+            let _: &UniversalPaymentTx = payment_tx.as_ref();
+            let bytes = postcard::to_allocvec(&(
+                &payment_tx.intent,
+                &payment_tx.balances,
+                &payment_tx.quotes,
+            ))
+            .unwrap_or_else(|_| b"budlum/universal-payment/fields-failed".to_vec());
+            put_bytes(out, &bytes);
+        }
         SettlementTx::AppRegistry(app_tx) => {
             // Tag 15. Every field is public metadata about a public listing.
             use crate::settlement::domains::AppRegistryTx;

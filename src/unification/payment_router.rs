@@ -314,9 +314,17 @@ pub enum PaymentError {
 
 /// Stateful router enforcing atomic split-tender settlement, cross-intent quote
 /// liquidity accounting, and anti-replay.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UniversalPaymentRouter {
+    /// Settled intent ids. This is the replay table, so it must be in the state
+    /// root: a router whose replay table lived in one process would let the
+    /// same payment settle twice on two nodes.
+    #[serde(default)]
     settled_intents: BTreeSet<Hash32>,
+    /// Liquidity already drawn from each quote, so two intents cannot both
+    /// consume the same depth.
+    #[serde(with = "crate::core::map_keys")]
+    #[serde(default)]
     consumed_quote_liquidity: BTreeMap<Hash32, u128>,
 }
 
