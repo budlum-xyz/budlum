@@ -84,6 +84,16 @@ pub fn fold_segment_tree(segments: &[SegmentBoundary]) -> Result<RecursiveAggreg
         if seg.row_count == 0 || seg.row_count > MAX_SEGMENT_ROWS {
             return Err("segment row_count outside 1..=2^20 bound");
         }
+        if seg.start_pc >= seg.next_pc {
+            return Err("segment start_pc must be strictly below next_pc");
+        }
+        if seg.program_hash == [0u8; 32]
+            || seg.pre_state_root == [0u8; 32]
+            || seg.post_state_root == [0u8; 32]
+            || seg.inner_proof_digest == [0u8; 32]
+        {
+            return Err("segment boundary contains zero hash");
+        }
         if usize::try_from(seg.segment_index).ok() != Some(pos) {
             return Err("non-contiguous segment_index");
         }
@@ -239,6 +249,9 @@ impl BlockBatchProof {
         {
             return Err("invalid BlockBatchProof height range or inner proof count");
         }
+        if inner_proof_digests.contains(&[0u8; 32]) {
+            return Err("BlockBatchProof inner proof digest must be non-zero");
+        }
         let proof_root = Self::compute_root(start_height, proven_height, &inner_proof_digests);
         Ok(Self {
             start_height,
@@ -305,13 +318,19 @@ pub fn evaluate_phase_a_dual(
     zkvm_result: Option<(bool, Hash32)>,
 ) -> PhaseAVerdict {
     let (native_ok, native_root) = native_result;
+    if native_ok && native_root == [0u8; 32] {
+        return PhaseAVerdict::FreezeAndAlarm { domain_id };
+    }
     let Some((zk_ok, zk_root)) = zkvm_result else {
         return PhaseAVerdict::AuthoritativeNativeOnly {
             accepted: native_ok,
             state_root: native_root,
         };
     };
-    if native_ok != zk_ok || (native_ok && native_root != zk_root) {
+    if native_ok != zk_ok
+        || (native_ok && native_root != zk_root)
+        || (zk_ok && zk_root == [0u8; 32])
+    {
         return PhaseAVerdict::FreezeAndAlarm { domain_id };
     }
     PhaseAVerdict::DualConfirmed {
@@ -438,5 +457,40 @@ mod tests {
         assert_eq!(odd_agg.last_segment, 2);
         assert_eq!(odd_agg.final_state_root, [0x04; 32]);
         assert_ne!(odd_agg.aggregate_digest, s2.commitment());
+    }
+
+    #[test]
+    fn zero_hashes_inverted_pc_and_zero_dual_root_fail_closed() {
+        let valid_single = SegmentBoundary {
+            program_hash: [0x11; 32],
+            segment_index: 0,
+            row_count: 16,
+            start_pc: 0,
+            next_pc: 10,
+            pre_state_root: [0x01; 32],
+            post_state_root: [0x02; 32],
+            inner_proof_digest: [0xA0; 32],
+        };
+        assert!(fold_segment_tree(&[SegmentBoundary {
+            start_pc: 10,
+            next_pc: 10,
+            ..valid_single
+        }])
+        .is_err());
+        assert!(fold_segment_tree(&[SegmentBoundary {
+            pre_state_root: [0u8; 32],
+            ..valid_single
+        }])
+        .is_err());
+        assert!(fold_segment_tree(&[SegmentBoundary {
+            inner_proof_digest: [0u8; 32],
+            ..valid_single
+        }])
+        .is_err());
+        assert!(BlockBatchProof::seal(10, 11, vec![[0u8; 32]]).is_err());
+        assert_eq!(
+            evaluate_phase_a_dual(7, (true, [0u8; 32]), Some((true, [0u8; 32]))),
+            PhaseAVerdict::FreezeAndAlarm { domain_id: 7 }
+        );
     }
 }

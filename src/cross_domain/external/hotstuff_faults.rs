@@ -165,6 +165,11 @@ pub fn verify_hotstuff_equivocation(
             rule: "HotStuff equivocation proof epoch mismatches pinned committee".into(),
         });
     }
+    if proof.view == 0 {
+        return Err(AdapterError::ConsensusRule {
+            rule: "HotStuff equivocation proof view must be non-zero".into(),
+        });
+    }
     if proof.block_hash_a == [0u8; 32] || proof.block_hash_b == [0u8; 32] {
         return Err(AdapterError::ConsensusRule {
             rule: "HotStuff equivocation proof contains zero block_hash".into(),
@@ -429,5 +434,39 @@ mod tests {
         assert!(
             verify_hotstuff_equivocation("aptos-jolteon-1", &bad_pq_committee, &blank_eq).is_err()
         );
+    }
+
+    #[test]
+    fn zero_view_equivocation_proof_is_rejected() {
+        let ed = KeyPair::from_seed(&[0x44; 32]).expect("ed");
+        let pq = PqKeyPair::generate();
+        let pub_ed = ed.public_key_bytes();
+        let pinned = PinnedHotStuffCommittee {
+            epoch: 7,
+            members: vec![HotStuffValidator {
+                ed25519_pubkey: pub_ed,
+                voting_weight: 100,
+                pq_pubkey: pq.public_key_bytes().to_vec(),
+            }],
+        };
+        let ma = hotstuff_vote_sign_bytes("aptos-jolteon-1", 7, 0, &[0xAA; 32]);
+        let mb = hotstuff_vote_sign_bytes("aptos-jolteon-1", 7, 0, &[0xBB; 32]);
+        let zero_view_eq = HotStuffEquivocationProof {
+            epoch: 7,
+            view: 0,
+            block_hash_a: [0xAA; 32],
+            block_hash_b: [0xBB; 32],
+            vote_a: HotStuffVoteSig {
+                signer_pubkey: pub_ed,
+                ed25519_sig: ed.sign(&ma).to_vec(),
+                pq_sig: pq.sign(ctx::CROSS_DOMAIN_V1, &ma).expect("pq"),
+            },
+            vote_b: HotStuffVoteSig {
+                signer_pubkey: pub_ed,
+                ed25519_sig: ed.sign(&mb).to_vec(),
+                pq_sig: pq.sign(ctx::CROSS_DOMAIN_V1, &mb).expect("pq"),
+            },
+        };
+        assert!(verify_hotstuff_equivocation("aptos-jolteon-1", &pinned, &zero_view_eq).is_err());
     }
 }

@@ -116,6 +116,9 @@ impl VersionPolicy {
     /// WIRING: wired - the domain status RPC reports the version live at the
     /// registry clock (`currentVersionAtClock`).
     pub fn current_version_at(&self, height: u64) -> Option<u32> {
+        if !self.is_consistent() {
+            return None;
+        }
         self.windows
             .iter()
             .filter(|w| w.is_active_at(height))
@@ -142,6 +145,9 @@ impl VersionPolicy {
         grace_heights: u64,
         accepted_evidence_versions: &[u32],
     ) -> Result<(), ForkError> {
+        if !self.is_consistent() {
+            return Err(ForkError::InconsistentPolicy);
+        }
         if old_version == new_version {
             return Err(ForkError::SameVersion {
                 version: new_version,
@@ -215,6 +221,12 @@ impl VersionPolicy {
     /// [`AdapterError::UnsupportedEvidenceVersion`] for a version this domain
     /// never scheduled, or one whose window does not cover the claimed height.
     pub fn gate(&self, evidence_version: u32, height: u64) -> Result<(), AdapterError> {
+        if !self.is_consistent() {
+            return Err(AdapterError::UnsupportedEvidenceVersion {
+                version: evidence_version,
+                accepted: format!("inconsistent version policy ({})", self.accepted_list()),
+            });
+        }
         let Some(window) = self.window(evidence_version) else {
             return Err(AdapterError::UnsupportedEvidenceVersion {
                 version: evidence_version,
@@ -310,6 +322,8 @@ pub enum ForkError {
         valid_from: u64,
         fork_height: u64,
     },
+    #[error("adapter version policy is inconsistent")]
+    InconsistentPolicy,
 }
 
 #[cfg(test)]
@@ -423,5 +437,19 @@ mod tests {
             .for_value(1u128 << 120),
             1u128 << 119
         );
+    }
+
+    #[test]
+    fn inconsistent_policy_refuses_gate_fork_and_current_version() {
+        let mut dup = policy();
+        dup.windows.push(VersionWindow {
+            version: 1,
+            valid_from_height: 0,
+            sunset_height: None,
+        });
+        assert!(!dup.is_consistent());
+        assert_eq!(dup.current_version_at(0), None);
+        assert!(dup.gate(1, 0).is_err());
+        assert!(dup.schedule_fork(1, 2, 10, 1, &[1, 2]).is_err());
     }
 }
