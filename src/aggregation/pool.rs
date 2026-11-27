@@ -270,6 +270,11 @@ impl ObjectPool {
         // Rule 3: the transaction is known, or the object waits for it.
         let Some(tx) = txs.tx_facts(&envelope.tx_hash) else {
             let bytes = envelope.encode().len();
+            let waiting_bytes: usize = self.waiting.values().map(|w| w.bytes).sum();
+            let waiting_budget = self.params.pool_max_bytes / 4;
+            if waiting_bytes.saturating_add(bytes) > waiting_budget {
+                return Err(Rejection::PoolFull);
+            }
             let victims = self.plan_room(0, bytes)?;
             self.evict(&victims);
             self.bytes = self.bytes.saturating_add(bytes);
@@ -411,7 +416,9 @@ impl ObjectPool {
     fn evict(&mut self, victims: &[Hash32]) {
         for object_id in victims {
             self.drop_object(object_id);
-            self.seen.remove(object_id);
+            if self.seen.remove(object_id) {
+                self.seen_order.retain(|id| id != object_id);
+            }
         }
     }
 
@@ -553,10 +560,14 @@ impl ObjectPool {
                     if let Some(ready) = self.ready.remove(&object_id) {
                         self.bytes = self.bytes.saturating_sub(ready.bytes);
                     }
-                    self.seen.remove(&object_id);
+                    if self.seen.remove(&object_id) {
+                        self.seen_order.retain(|id| *id != object_id);
+                    }
                 }
                 ClaimEntry::Proven(object_id) => {
-                    self.seen.remove(&object_id);
+                    if self.seen.remove(&object_id) {
+                        self.seen_order.retain(|id| *id != object_id);
+                    }
                 }
             }
         }

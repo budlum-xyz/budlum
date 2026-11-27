@@ -140,6 +140,9 @@ impl Envelope {
         if kind != ObjectKind::Signature && scheme.0 != 0 {
             return Err(EnvelopeError::SchemeOnNonSignature);
         }
+        if kind == ObjectKind::Signature && scheme.0 == 0 {
+            return Err(EnvelopeError::SchemeOnNonSignature);
+        }
         let len = usize::try_from(u32::from_be_bytes(*len)).unwrap_or(usize::MAX);
         if len > max_payload {
             return Err(EnvelopeError::PayloadTooLarge(len));
