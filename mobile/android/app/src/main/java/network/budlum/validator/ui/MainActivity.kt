@@ -55,8 +55,13 @@ class MainActivity : ComponentActivity() {
                                 .padding(horizontal = 8.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            TextButton(onClick = { finish() }) { Text("Back") }
-                            Text("TESTNET", style = MaterialTheme.typography.labelSmall)
+                            TextButton(onClick = { finish() }) {
+                                Text(stringResource(R.string.g_back))
+                            }
+                            Text(
+                                stringResource(R.string.g_testnet),
+                                style = MaterialTheme.typography.labelSmall,
+                            )
                         }
                         ValidatorDashboardScreen()
                     }
@@ -109,7 +114,10 @@ fun ValidatorDashboardScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(text = stringResource(R.string.app_name), style = MaterialTheme.typography.headlineSmall)
+        // The same wordmark that heads every sheet in the design file.
+        network.budlum.validator.garden.Wordmark(
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+        )
         Text(text = stringResource(R.string.onboarding_disclosure))
         Text(text = stringResource(R.string.validator_unavailable))
         Text(text = stringResource(R.string.faucet_explanation))

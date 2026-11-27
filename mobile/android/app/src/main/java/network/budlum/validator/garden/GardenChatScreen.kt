@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -30,7 +31,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
@@ -125,8 +125,8 @@ private fun Bubble(line: ChatLine, mine: Boolean) {
         Column(
             modifier = Modifier
                 .widthIn(max = 290.dp)
-                .background(if (mine) Sage else Page, RectangleShape)
-                .border(1.dp, if (mine) Sage else Faint, RectangleShape)
+                .background(if (mine) Sage else Page, RoundedCornerShape(SHEET_RADIUS))
+                .border(1.dp, if (mine) Sage else Faint, RoundedCornerShape(SHEET_RADIUS))
                 .padding(horizontal = 10.dp, vertical = 7.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
@@ -144,7 +144,7 @@ private fun Bubble(line: ChatLine, mine: Boolean) {
                 )
             } else if (line.isFile) {
                 Text(
-                    line.caption.ifBlank { "dosya" },
+                    line.caption.ifBlank { stringResource(R.string.g_a_file) },
                     style = MaterialTheme.typography.bodyMedium,
                     color = Ink,
                 )
@@ -208,7 +208,7 @@ private fun Composer(
             placeholder = { Label(stringResource(R.string.g_say)) },
             modifier = Modifier.weight(1f),
             maxLines = 4,
-            shape = RectangleShape,
+            shape = RoundedCornerShape(CONTROL_RADIUS),
         )
         Glyph(
             which = R.drawable.icon_send,

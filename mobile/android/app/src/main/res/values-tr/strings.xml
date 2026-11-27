@@ -8,7 +8,7 @@
     <string name="onboarding_disclosure">Bu s&#x00FC;r&#x00FC;m a&#x011F; i&#x00E7;eri&#x011F;i saklamaz veya denetlemez. Gelecekteki do&#x011F;rulay&#x0131;c&#x0131;lar silme kodlamal&#x0131; paylar&#x0131; saklayabilir; m&#x00FC;h&#x00FC;rl&#x00FC; i&#x00E7;erikler u&#x00E7;tan uca &#x015F;ifreli kalmal&#x0131;d&#x0131;r. Musluk isteklerinde blok madencili&#x011F;i de&#x011F;il, s&#x0131;n&#x0131;rland&#x0131;r&#x0131;lm&#x0131;&#x015F; bot kar&#x015F;&#x0131;t&#x0131; i&#x015F; kan&#x0131;t&#x0131; yap&#x0131;labilir.</string>
     <string name="security_tradeoff_note">Sahip harcaması, stake, anahtar döndürme ve çıkış bu sürümde kapalıdır. Bu telefon bir cüzdan tutar ve onunla imzalayabilir, ancak bu imzayı henüz Keystore destekli biyometrik veya PIN yetkisi korumaz. Görev anahtarlarının saklanması çalışan doğrulayıcı anlamına gelmez.</string>
     <string name="action_faucet_request">Musluk isteği gönder (100 BUD)</string>
-    <string name="validator_unavailable">Bu sürümde doğrulayıcı kaydı, imzalama ve saklama zincire bağlı değildir. Musluk isteği yerel bakiye veya stake oluşturmaz.</string>
+    <string name="validator_unavailable">Zincire stake kaydı bu ekrana henüz bağlı değil. Musluk yukarıdaki adrese test jetonu gönderir; stake oluşturmaz.</string>
     <string name="faucet_explanation">Testnet musluğunuzun HTTPS adresini ve kontrol ettiğiniz bir cüzdanın 0x ile başlayan 32 baytlık adresini girin. Bu telefon kendi cüzdanını oluşturur, dolayısıyla yukarıdaki adres kendi adresi olabilir. Yirmi dört kelimenizi ne burada ne başka bir yerde bir musluğa yazmayın. Gönderilen aktarım onaylanmış bakiye değildir. Adres ve IP başına istek sınırı uygulanabilir.</string>
     <string name="faucet_endpoint">Musluk HTTPS adresi (https://faucet.alan-adiniz)</string>
     <string name="faucet_wallet_address">Cüzdan adresiniz (0x…)</string>
@@ -142,4 +142,5 @@
     <string name="w_nft_none">0 NFT</string>
     <string name="w_bud_zero">0M $BUD</string>
     <string name="g_default_title">Bahçem</string>
+    <string name="g_a_file">dosya</string>
 </resources>

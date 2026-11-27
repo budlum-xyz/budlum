@@ -23,7 +23,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
@@ -57,14 +56,13 @@ fun PeopleScreen(model: GardenModel) {
             Rule()
         }
         if (state.waitingForHost) {
-            Slab(modifier = Modifier.fillMaxWidth(), rule = Color(0xFF98AE89)) {
+            Sheet(model.skin, modifier = Modifier.padding(14.dp)) {
                 Label(
                     stringResource(R.string.g_waiting_for_host),
                     modifier = Modifier.padding(14.dp),
-                    color = Color(0xFF060705),
+                    color = Ink,
                 )
             }
-            Rule()
         }
         if (state.people.isEmpty()) {
             Label(
@@ -105,7 +103,7 @@ private fun CodeRow(model: GardenModel) {
             Text(
                 text = state.code.ifBlank { "------" },
                 style = MaterialTheme.typography.headlineSmall,
-                color = Color(0xFF060705),
+                color = Ink,
             )
             Label(
                 if (state.code.isBlank()) {
@@ -158,13 +156,16 @@ private fun PersonRow(person: Person, canAnswer: Boolean, model: GardenModel) {
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        KeySquare(person.key)
+        // The file draws a person as a plain sage portrait, so the
+        // people here look like the people in the file rather than
+        // like a fingerprint readout.
+        Portrait()
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = if (person.isMe) stringResource(R.string.g_you) else person.name,
                 style = MaterialTheme.typography.bodyMedium,
-                color = Color(0xFF060705),
+                color = Ink,
             )
             Label(person.shortKey)
             if (person.waiting) {
@@ -174,7 +175,7 @@ private fun PersonRow(person: Person, canAnswer: Boolean, model: GardenModel) {
                     } else {
                         stringResource(R.string.g_waiting)
                     },
-                    color = Color(0xFF8C0000),
+                    color = Flow,
                 )
             }
         }
@@ -187,8 +188,8 @@ private fun PersonRow(person: Person, canAnswer: Boolean, model: GardenModel) {
                 RuleButton(
                     text = stringResource(R.string.g_turn_away),
                     onTap = { model.answerRequest(person.key, false) },
-                    rule = Color(0xFF8C0000),
-                    ink = Color(0xFF8C0000),
+                    rule = Flow,
+                    ink = Flow,
                 )
             }
         }
@@ -247,7 +248,7 @@ fun CodeJoinScreen(model: GardenModel) {
         }
 
         if (state.message.isNotEmpty()) {
-            Label(state.message, color = Color(0xFF8C0000))
+            Label(state.message, color = Flow)
         }
     }
 }

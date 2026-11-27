@@ -8,7 +8,7 @@
     <string name="onboarding_disclosure">This build does not store or audit network content. Future validators may store erasure-coded shares, and sealed content must remain end-to-end encrypted. Faucet requests may perform bounded anti-bot proof of work, not block mining.</string>
     <string name="security_tradeoff_note">Owner spend, staking, rotation and unbonding are unavailable. This phone holds a wallet and can sign with it, but no Keystore-backed biometric or PIN authorization guards that signature yet. Operator and BLS key wrapping alone does not make validator duties operational.</string>
     <string name="action_faucet_request">Submit faucet request (100 BUD)</string>
-    <string name="validator_unavailable">Validator registration, signing and custody are not connected to the chain in this build. A faucet request does not create a local balance or stake.</string>
+    <string name="validator_unavailable">Registering stake on the chain is not wired to this screen yet. The faucet sends test tokens to the address above; it does not create a stake.</string>
     <string name="faucet_explanation">Enter the HTTPS origin of your testnet faucet and the 0x-prefixed 32-byte address of a wallet you control. This phone makes its own wallet, so the address above can be its own. Never type your twenty-four words into a faucet, here or anywhere else. A submitted transfer is not a confirmed balance. The faucet may limit requests by address and IP.</string>
     <string name="faucet_endpoint">Faucet HTTPS origin (https://faucet.your-domain)</string>
     <string name="faucet_wallet_address">Your wallet address (0x…)</string>
@@ -142,4 +142,5 @@
     <string name="w_nft_none">0 NFT</string>
     <string name="w_bud_zero">0M $BUD</string>
     <string name="g_default_title">My Garden</string>
+    <string name="g_a_file">a file</string>
 </resources>
