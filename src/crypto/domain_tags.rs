@@ -449,6 +449,8 @@ pub const DOMAIN_TAGS: &[&str] = &[
     "BDLM_MULTISIG_LEAF_V1",
     "BDLM_MYSTICETI_ANCHOR_V1",
     "BDLM_MYSTICETI_VERTEX_V1",
+    "BDLM_NATIVE_BALANCE_LEAF_V1",
+    "BDLM_NATIVE_BALANCE_NODE_V1",
     "BDLM_NEAR_ALIAS_V1",
     "BDLM_NEG_LOCK",
     "BDLM_NFT_REGISTRY_V6",
@@ -635,6 +637,7 @@ pub const DOMAIN_TAGS: &[&str] = &[
     "BDLM_SIMPLEX_SLASH_V1",
     "BDLM_SLASH_OTHER_V1",
     "BDLM_SOCIAL_DELETE_V2",
+    "BDLM_SOLVER_QUOTE_V1",
     "BDLM_SOLVER_SLASH_V1",
     "BDLM_SOL_BANK_V1",
     "BDLM_SOL_NET_V1",
@@ -796,6 +799,7 @@ pub const DOMAIN_TAGS: &[&str] = &[
     "BDLM_VIEW_CLAIM_V1",
     "BDLM_VIEW_GRANT_REG_V1",
     "BDLM_VIEW_GRANT_V1",
+    "BDLM_WALLET_PAYMENT_INTENT_SIG_V1",
     "BDLM_WASM_MIGRATION_STORAGE_V1",
     "BDLM_WASM_MIGRATION_V2",
     "BDLM_WITNESS_LEAF_V1",
@@ -906,3 +910,6 @@ pub const BUDLUM_PREFIXED_NON_DOMAIN_LITERALS: &[&str] = &[
     "BUDLUM_VALIDATOR_KEY",
     "BUDLUM_VALIDATOR_PEERS",
 ];
+/// WIRING: wire header tag for [`crate::network::node::VOTE_MARK_INTERCHANGE_MAGIC`].
+/// Portable consensus vote-mark interchange envelope magic.
+pub const VOTE_MARK_INTERCHANGE_TAG: &[u8] = b"BDLM_VOTE_MARK_V1";

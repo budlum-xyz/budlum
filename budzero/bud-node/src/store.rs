@@ -245,6 +245,12 @@ impl ContentStore for MemoryContentStore {
                 tracing::debug!(%oldest, "evicted oldest chunk (capacity reached)");
             }
         }
+        if self.over_budget(&state, data.len()) {
+            return Err(StoreError::TooLarge {
+                len: data.len(),
+                max: self.max_bytes,
+            });
+        }
 
         state.bytes = state.bytes.saturating_add(data.len());
         state.order.push_back(id);

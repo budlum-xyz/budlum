@@ -1418,6 +1418,31 @@ impl BridgeEconomicGuard {
     ///
     /// WIRING: the production reader of [`DomainEconomicRecord::window_breach`].
     #[must_use]
+
+    /// WIRING: operator monitoring reader of [`DomainEconomicRecord::window_breach`].
+    /// Blocks elapsed since the domain's recorded window breach at
+    /// `now_height` -- the detection-delay number monitoring loops need
+    /// (detection delay, not the existence of a ceiling).
+    ///
+    /// Returns `None` when the domain has no breach on record, and
+    /// `Some(None)` is never produced: a recorded breach always yields
+    /// `Some(Some(lag))` with `lag = now_height - breach.height` (saturating).
+    #[must_use]
+    pub fn window_breach_block_lag(
+        &self,
+        domain: DomainId,
+        now_height: u64,
+    ) -> Option<Option<u64>> {
+        let breach = self
+            .window_breaches()
+            .into_iter()
+            .find(|(id, _)| *id == domain)?
+            .1;
+        Some(Some(now_height.saturating_sub(breach.height)))
+    }
+
+    /// WIRING: the production reader of [`DomainEconomicRecord::window_breach`].
+    #[must_use]
     pub fn window_breaches(&self) -> Vec<(DomainId, &WindowBreach)> {
         self.domains
             .iter()
@@ -4906,5 +4931,39 @@ mod tests {
         ));
         let claimed = guard.claim_queued_withdrawal(wd_id, 20).unwrap();
         assert_eq!(claimed.amount_atoms, 300);
+    }
+
+    /// Abnormal outflow hitting the window ceiling
+    /// must leave a measurable *block lag* for monitoring -- Ronin's lesson is
+    /// detection delay, not the existence of a ceiling.
+    #[test]
+    fn flow_breach_exposes_block_lag_for_monitoring() {
+        let mut guard = BridgeEconomicGuard::new();
+        let policy = DomainCeilingPolicy {
+            backing: SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
+                signers: 4,
+                required: 3,
+                total_weight: 1_000_000,
+                slashable: true,
+            },
+            window_blocks: 100,
+            ..DomainCeilingPolicy::default()
+        };
+        guard.configure_domain(77, policy, None).unwrap();
+        guard.check_and_record_flow(77, 900, 10).unwrap();
+        let err = guard
+            .check_and_record_flow(77, 900, 20)
+            .expect_err("second fill must hit the ceiling");
+        assert!(matches!(err, EconomicGuardError::CeilingExceeded { .. }));
+        let breaches = guard.window_breaches();
+        assert!(
+            breaches.iter().any(|(id, _)| *id == 77),
+            "breach readable: {breaches:?}"
+        );
+        let lag = guard.window_breach_block_lag(77, 25).expect(
+            "window_breach_block_lag must exist so detection delay is measurable in blocks",
+        );
+        assert_eq!(lag, Some(5), "breach at 20, now 25 => lag 5 blocks");
     }
 }
