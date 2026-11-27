@@ -61,6 +61,23 @@ pub struct SettlementRegistries {
     /// declared a denomination, so its presence changes no root until used.
     #[serde(default)]
     pub denominations: crate::settlement::universal_asset::DenominationIndex,
+    /// Unified output bundles: the one root a multi-VM, multi-language plan
+    /// composed down to.
+    ///
+    /// The composer behind this was a pure function (`OutputComposer::compose`)
+    /// with no caller anywhere in the tree, which made the "every VM runs
+    /// natively, one output comes out" claim unverifiable: a bundle existed
+    /// only for the process that built it, and nothing on chain could be
+    /// pointed at as the composition's result.
+    ///
+    /// Keyed by plan id. The value is the whole bundle rather than its root,
+    /// because a verifier has to be able to recompute the root from the parts;
+    /// storing only the root would move the trust back to whoever stated it.
+    #[serde(default)]
+    pub composed_outputs: std::collections::BTreeMap<
+        String,
+        crate::unification::output_composer::UnifiedOutputBundle,
+    >,
     /// Master objects and the derivations holding them up.
     ///
     /// `release_master` refuses while any derivation still exists and otherwise

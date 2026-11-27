@@ -4682,6 +4682,14 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
                 }
             }
         }
+        SettlementTx::ComposeOutputs(compose_tx) => {
+            // Tag 24. A bundle root is what downstream verification quotes, so
+            // the plan that produced it is signed.
+            put_u8(out, 24);
+            let bytes = postcard::to_allocvec(&compose_tx.plan)
+                .unwrap_or_else(|_| b"budlum/compose-outputs/fields-failed".to_vec());
+            put_bytes(out, &bytes);
+        }
         SettlementTx::SchemeTransition(scheme_tx) => {
             // Tag 23. Moving a scheme is a change to what the chain accepts as
             // a signature, so the whole action and its claimed authority are

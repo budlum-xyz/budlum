@@ -205,6 +205,11 @@ pub enum SettlementTx {
     ///
     /// Appended to preserve existing bincode enum discriminants.
     SchemeTransition(Box<SchemeTransitionTx>),
+
+    /// Compose several VMs' outputs into one verifiable bundle.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    ComposeOutputs(Box<ComposeOutputsTx>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -2136,7 +2141,46 @@ pub fn execute_settlement_tx(
         SettlementTx::SchemeTransition(scheme_tx) => {
             execute_scheme_transition(state, ctx, scheme_tx)
         }
+        SettlementTx::ComposeOutputs(compose_tx) => execute_compose_outputs(state, ctx, compose_tx),
     }
+}
+
+/// A multi-VM output composition.
+///
+/// The composer is deterministic and pure - it validates every step, checks
+/// the dependency graph is acyclic, resolves every cross-VM binding and
+/// commits one bundle - so the chain does not need to trust the submitter for
+/// any of it. It re-runs the composer and stores what came out.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ComposeOutputsTx {
+    /// The plan to compose.
+    pub plan: crate::unification::output_composer::OutputCompositionPlan,
+}
+
+/// Executes an output-composition transaction.
+fn execute_compose_outputs(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &ComposeOutputsTx,
+) -> Result<(), SettlementTxError> {
+    use crate::unification::output_composer::{CompositionError, OutputComposer};
+
+    let _ = ctx;
+    let bundle = OutputComposer::compose(&tx.plan).map_err(|err: CompositionError| {
+        SettlementTxError::Refused(format!("output composition: {err}"))
+    })?;
+    let plan_id = bundle.plan_id.clone();
+    if state
+        .settlement
+        .composed_outputs
+        .insert(plan_id.clone(), bundle)
+        .is_some()
+    {
+        return Err(SettlementTxError::Refused(format!(
+            "output composition: plan {plan_id:?} has already been composed"
+        )));
+    }
+    Ok(())
 }
 
 /// A cryptographic-scheme transition.
