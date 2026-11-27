@@ -512,7 +512,16 @@ fn execute_move_home_asset_op(
                     hex::encode(spender)
                 ),
             );
-            let _ = host.write(move_ns, &k, Some(&amount.to_le_bytes()));
+            if host
+                .write(move_ns, &k, Some(&amount.to_le_bytes()))
+                .is_err()
+            {
+                return EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"failed writing Move asset allowance".to_vec(),
+                    gas_used: base_bgu,
+                };
+            }
             EeOutcome {
                 status: OutcomeStatus::Success,
                 output: amount.to_le_bytes().to_vec(),
@@ -534,6 +543,13 @@ fn execute_move_home_asset_op(
                     gas_used: base_bgu,
                 };
             }
+            if src_k == dst_k {
+                return EeOutcome {
+                    status: OutcomeStatus::Success,
+                    output: amount.to_le_bytes().to_vec(),
+                    gas_used: base_bgu,
+                };
+            }
             let dst_bal = read_move_u128(host, move_ns, &dst_k);
             let Some(new_dst) = dst_bal.checked_add(*amount) else {
                 return EeOutcome {
@@ -542,8 +558,19 @@ fn execute_move_home_asset_op(
                     gas_used: base_bgu,
                 };
             };
-            let _ = host.write(move_ns, &src_k, Some(&(src_bal - *amount).to_le_bytes()));
-            let _ = host.write(move_ns, &dst_k, Some(&new_dst.to_le_bytes()));
+            if host
+                .write(move_ns, &src_k, Some(&(src_bal - *amount).to_le_bytes()))
+                .is_err()
+                || host
+                    .write(move_ns, &dst_k, Some(&new_dst.to_le_bytes()))
+                    .is_err()
+            {
+                return EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"failed writing Move asset transfer state".to_vec(),
+                    gas_used: base_bgu,
+                };
+            }
             EeOutcome {
                 status: OutcomeStatus::Success,
                 output: amount.to_le_bytes().to_vec(),
@@ -581,6 +608,23 @@ fn execute_move_home_asset_op(
                     gas_used: base_bgu,
                 };
             }
+            if src_k == dst_k {
+                if host
+                    .write(move_ns, &alw_k, Some(&(cur_alw - *amount).to_le_bytes()))
+                    .is_err()
+                {
+                    return EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"failed writing Move asset allowance".to_vec(),
+                        gas_used: base_bgu,
+                    };
+                }
+                return EeOutcome {
+                    status: OutcomeStatus::Success,
+                    output: amount.to_le_bytes().to_vec(),
+                    gas_used: base_bgu,
+                };
+            }
             let dst_bal = read_move_u128(host, move_ns, &dst_k);
             let Some(new_dst) = dst_bal.checked_add(*amount) else {
                 return EeOutcome {
@@ -589,9 +633,22 @@ fn execute_move_home_asset_op(
                     gas_used: base_bgu,
                 };
             };
-            let _ = host.write(move_ns, &alw_k, Some(&(cur_alw - *amount).to_le_bytes()));
-            let _ = host.write(move_ns, &src_k, Some(&(src_bal - *amount).to_le_bytes()));
-            let _ = host.write(move_ns, &dst_k, Some(&new_dst.to_le_bytes()));
+            if host
+                .write(move_ns, &alw_k, Some(&(cur_alw - *amount).to_le_bytes()))
+                .is_err()
+                || host
+                    .write(move_ns, &src_k, Some(&(src_bal - *amount).to_le_bytes()))
+                    .is_err()
+                || host
+                    .write(move_ns, &dst_k, Some(&new_dst.to_le_bytes()))
+                    .is_err()
+            {
+                return EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"failed writing Move asset transfer_from state".to_vec(),
+                    gas_used: base_bgu,
+                };
+            }
             EeOutcome {
                 status: OutcomeStatus::Success,
                 output: amount.to_le_bytes().to_vec(),
@@ -690,14 +747,15 @@ impl ExecutionEnvironment for MoveEe {
                         gas_used: base_bgu,
                     });
                 }
-                if host.write(&move_ns, &k, Some(&call.input)).is_err() {
+                if host.write(&move_ns, &k, Some(&call.input)).is_err()
+                    || host.write(&move_ns, &admin_k, Some(&signer32)).is_err()
+                {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
                         output: b"failed storing Move module".to_vec(),
                         gas_used: base_bgu,
                     });
                 }
-                let _ = host.write(&move_ns, &admin_k, Some(&signer32));
                 Ok(EeOutcome {
                     status: OutcomeStatus::Success,
                     output: target32.to_vec(),
@@ -776,10 +834,22 @@ impl ExecutionEnvironment for MoveEe {
                                 gas_used: base_bgu,
                             });
                         }
-                        let _ = host.write(&move_ns, &k, Some(&bytecode));
+                        if host.write(&move_ns, &k, Some(&bytecode)).is_err() {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"failed writing published Move module".to_vec(),
+                                gas_used: base_bgu,
+                            });
+                        }
                         let admin_k = state_key_resource(&signer32, "admin");
-                        if !matches!(host.read(&move_ns, &admin_k), Ok(Some(_))) {
-                            let _ = host.write(&move_ns, &admin_k, Some(&signer32));
+                        if !matches!(host.read(&move_ns, &admin_k), Ok(Some(_)))
+                            && host.write(&move_ns, &admin_k, Some(&signer32)).is_err()
+                        {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"failed writing Move module admin".to_vec(),
+                                gas_used: base_bgu,
+                            });
                         }
                         Ok(EeOutcome {
                             status: OutcomeStatus::Success,
@@ -889,8 +959,19 @@ impl ExecutionEnvironment for MoveEe {
                                     gas_used: base_bgu,
                                 });
                             };
-                            let _ = host.write(&move_ns, &sup_k, Some(&next_sup.to_le_bytes()));
-                            let _ = host.write(&move_ns, &bal_k, Some(&next.to_le_bytes()));
+                            if host
+                                .write(&move_ns, &sup_k, Some(&next_sup.to_le_bytes()))
+                                .is_err()
+                                || host
+                                    .write(&move_ns, &bal_k, Some(&next.to_le_bytes()))
+                                    .is_err()
+                            {
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: b"failed writing Move mint state".to_vec(),
+                                    gas_used: base_bgu,
+                                });
+                            }
                             return Ok(EeOutcome {
                                 status: OutcomeStatus::Success,
                                 output: next.to_le_bytes().to_vec(),
@@ -949,7 +1030,13 @@ impl ExecutionEnvironment for MoveEe {
                         let tag = format!("{module_id}::{function_name}");
                         let res_k = state_key_resource(&signer32, &tag);
                         let payload = args.join(",").into_bytes();
-                        let _ = host.write(&move_ns, &res_k, Some(&payload));
+                        if host.write(&move_ns, &res_k, Some(&payload)).is_err() {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"failed writing Move entry state".to_vec(),
+                                gas_used: base_bgu,
+                            });
+                        }
                         let topic_arr: [u8; 32] = Sha3_256::digest(module_id.as_bytes()).into();
                         let _ = host.emit_log(EeLog {
                             emitter: EeIdentity {
@@ -1031,5 +1118,380 @@ impl ExecutionEnvironment for MoveEe {
                 code: RefusalCode::Denied,
                 message: e.to_string(),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use budlum_uel_abi::{HostError, OutOfGas, UniversalResult};
+    use std::collections::BTreeMap;
+
+    struct MemHost {
+        kv: BTreeMap<(String, Vec<u8>), Vec<u8>>,
+        writes: usize,
+        fail_on_write: Option<usize>,
+    }
+
+    impl MemHost {
+        fn new() -> Self {
+            Self {
+                kv: BTreeMap::new(),
+                writes: 0,
+                fail_on_write: None,
+            }
+        }
+    }
+
+    impl HostRead for MemHost {
+        fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+            Ok(self
+                .kv
+                .get(&(ns.as_str().to_string(), key.to_vec()))
+                .cloned())
+        }
+
+        fn bud_balance(&self, _who: &EeIdentity) -> Result<BudAmount, HostError> {
+            Ok(BudAmount(0))
+        }
+    }
+
+    impl HostApi for MemHost {
+        fn write(
+            &mut self,
+            ns: &Namespace,
+            key: &[u8],
+            value: Option<&[u8]>,
+        ) -> Result<(), HostError> {
+            self.writes += 1;
+            if self.fail_on_write == Some(self.writes) {
+                return Err(HostError::Denied(String::from("injected write failure")));
+            }
+            let k = (ns.as_str().to_string(), key.to_vec());
+            match value {
+                Some(v) => {
+                    self.kv.insert(k, v.to_vec());
+                }
+                None => {
+                    self.kv.remove(&k);
+                }
+            }
+            Ok(())
+        }
+
+        fn universal_call(&mut self, _call: UniversalCall) -> Result<UniversalResult, HostError> {
+            Err(HostError::Denied(String::from("unexpected universal_call")))
+        }
+
+        fn emit_log(&mut self, _log: EeLog) -> Result<(), HostError> {
+            Ok(())
+        }
+
+        fn charge(&mut self, _bgu: u64) -> Result<(), OutOfGas> {
+            Ok(())
+        }
+
+        fn bud_transfer(
+            &mut self,
+            _from: &EeIdentity,
+            _to: &EeIdentity,
+            _attos: u128,
+        ) -> Result<(), HostError> {
+            Ok(())
+        }
+    }
+
+    fn test_ctx() -> BlockContext {
+        BlockContext {
+            height: 10,
+            timestamp_ms: 1_700_000_000_000,
+            chain_id: 1,
+        }
+    }
+
+    fn move_call(caller: [u8; 32], target: [u8; 32], input: Vec<u8>) -> EeCall {
+        EeCall {
+            kind: EeCallKind::Call,
+            caller: EeIdentity {
+                ee: EeId::MOVE,
+                id: caller.to_vec(),
+            },
+            target: EeIdentity {
+                ee: EeId::MOVE,
+                id: target.to_vec(),
+            },
+            value: BudAmount(0),
+            input,
+            gas_limit: 200_000,
+            depth: 0,
+            tx_hash: [0x11; 32],
+        }
+    }
+
+    fn read_u128_out(out: &EeOutcome) -> u128 {
+        assert_eq!(out.status, OutcomeStatus::Success);
+        let bytes: [u8; 16] = out.output.as_slice().try_into().expect("16-byte u128");
+        u128::from_le_bytes(bytes)
+    }
+
+    fn deploy_and_mint(
+        ee: &mut MoveEe,
+        host: &mut MemHost,
+        admin: [u8; 32],
+        home: [u8; 32],
+        to: [u8; 32],
+        amount: u128,
+    ) {
+        let mut mod_bytes = MOVE_BINARY_MAGIC.to_vec();
+        mod_bytes.extend_from_slice(&[1, 0, 0, 0]);
+        let deploy = EeCall {
+            kind: EeCallKind::Deploy,
+            caller: EeIdentity {
+                ee: EeId::MOVE,
+                id: admin.to_vec(),
+            },
+            target: EeIdentity {
+                ee: EeId::MOVE,
+                id: home.to_vec(),
+            },
+            value: BudAmount(0),
+            input: mod_bytes,
+            gas_limit: 200_000,
+            depth: 0,
+            tx_hash: [0x01; 32],
+        };
+        assert_eq!(
+            ee.execute(&test_ctx(), &deploy, host)
+                .expect("deploy")
+                .status,
+            OutcomeStatus::Success
+        );
+        let mint_payload = serde_json::to_vec(&MoveCallEnvelope::EntryFunction {
+            module_id: String::from("0x1::fungible_asset"),
+            function_name: String::from("mint"),
+            args: vec![hex::encode(to), amount.to_string()],
+        })
+        .expect("mint json");
+        let res = ee
+            .execute(&test_ctx(), &move_call(admin, home, mint_payload), host)
+            .expect("mint");
+        assert_eq!(res.status, OutcomeStatus::Success);
+    }
+
+    #[test]
+    fn move_home_self_transfer_preserves_balance_and_avoids_u128_overflow() {
+        let mut ee = MoveEe::new();
+        let mut host = MemHost::new();
+        let alice = [0xAA; 32];
+        let bob = [0xBB; 32];
+        let home = [0x44; 32];
+        deploy_and_mint(&mut ee, &mut host, alice, home, alice, 500);
+
+        let self_xfer = serde_json::to_vec(&MovePointerOp::Transfer {
+            flavor: MovePointerFlavor::FungibleAsset,
+            to: alice,
+            amount: 200,
+        })
+        .expect("json");
+        let r = ee
+            .execute(&test_ctx(), &move_call(alice, home, self_xfer), &mut host)
+            .expect("self transfer");
+        assert_eq!(r.status, OutcomeStatus::Success);
+
+        let bal_q = serde_json::to_vec(&MovePointerOp::Balance {
+            flavor: MovePointerFlavor::FungibleAsset,
+            owner: alice,
+        })
+        .expect("json");
+        let bal_out = ee
+            .execute(&test_ctx(), &move_call(alice, home, bal_q), &mut host)
+            .expect("balance");
+        assert_eq!(
+            read_u128_out(&bal_out),
+            500,
+            "self-transfer must not mint additional Move home assets"
+        );
+
+        // Self-transfer at u128::MAX must succeed rather than falsely overflowing.
+        let ns = Namespace::new(NS_MOVE_STATE).expect("ns");
+        let alice_k = state_key_resource(&home, &format!("fa:bal:{}", hex::encode(alice)));
+        host.write(&ns, &alice_k, Some(&u128::MAX.to_le_bytes()))
+            .expect("set max");
+        let max_self = serde_json::to_vec(&MovePointerOp::Transfer {
+            flavor: MovePointerFlavor::FungibleAsset,
+            to: alice,
+            amount: 1,
+        })
+        .expect("json");
+        let max_r = ee
+            .execute(&test_ctx(), &move_call(alice, home, max_self), &mut host)
+            .expect("max self transfer");
+        assert_eq!(max_r.status, OutcomeStatus::Success);
+        assert_eq!(read_move_u128(&host, &ns, &alice_k), u128::MAX);
+
+        // Distinct recipient transfer continues to debit and credit normally.
+        host.write(&ns, &alice_k, Some(&500u128.to_le_bytes()))
+            .expect("reset");
+        let xfer_bob = serde_json::to_vec(&MovePointerOp::Transfer {
+            flavor: MovePointerFlavor::FungibleAsset,
+            to: bob,
+            amount: 150,
+        })
+        .expect("json");
+        let r_bob = ee
+            .execute(&test_ctx(), &move_call(alice, home, xfer_bob), &mut host)
+            .expect("transfer bob");
+        assert_eq!(r_bob.status, OutcomeStatus::Success);
+        let bob_k = state_key_resource(&home, &format!("fa:bal:{}", hex::encode(bob)));
+        assert_eq!(read_move_u128(&host, &ns, &alice_k), 350);
+        assert_eq!(read_move_u128(&host, &ns, &bob_k), 150);
+    }
+
+    #[test]
+    fn move_home_self_transfer_from_preserves_balance_debits_allowance_and_avoids_overflow() {
+        let mut ee = MoveEe::new();
+        let mut host = MemHost::new();
+        let alice = [0xA1; 32];
+        let bob = [0xB2; 32];
+        let carol = [0xC3; 32];
+        let home = [0x55; 32];
+        deploy_and_mint(&mut ee, &mut host, alice, home, alice, 500);
+
+        let approve_bob = serde_json::to_vec(&MovePointerOp::Approve {
+            flavor: MovePointerFlavor::Coin,
+            spender: bob,
+            amount: 300,
+        })
+        .expect("json");
+        let coin_mint = serde_json::to_vec(&MoveCallEnvelope::EntryFunction {
+            module_id: String::from("0x1::coin"),
+            function_name: String::from("mint"),
+            args: vec![hex::encode(alice), String::from("500")],
+        })
+        .expect("json");
+        assert_eq!(
+            ee.execute(&test_ctx(), &move_call(alice, home, coin_mint), &mut host)
+                .expect("coin mint")
+                .status,
+            OutcomeStatus::Success
+        );
+        assert_eq!(
+            ee.execute(&test_ctx(), &move_call(alice, home, approve_bob), &mut host)
+                .expect("approve")
+                .status,
+            OutcomeStatus::Success
+        );
+
+        let self_from = serde_json::to_vec(&MovePointerOp::TransferFrom {
+            flavor: MovePointerFlavor::Coin,
+            owner: alice,
+            to: alice,
+            amount: 120,
+        })
+        .expect("json");
+        let r = ee
+            .execute(&test_ctx(), &move_call(bob, home, self_from), &mut host)
+            .expect("self transfer_from");
+        assert_eq!(r.status, OutcomeStatus::Success);
+
+        let ns = Namespace::new(NS_MOVE_STATE).expect("ns");
+        let alice_k = state_key_resource(&home, &format!("coin:bal:{}", hex::encode(alice)));
+        let alw_k = state_key_resource(
+            &home,
+            &format!("coin:alw:{}:{}", hex::encode(alice), hex::encode(bob)),
+        );
+        assert_eq!(
+            read_move_u128(&host, &ns, &alice_k),
+            500,
+            "TransferFrom to owner == to must not mint balance"
+        );
+        assert_eq!(read_move_u128(&host, &ns, &alw_k), 180);
+
+        // At u128::MAX balance, TransferFrom(owner -> owner) must succeed and decrement allowance.
+        host.write(&ns, &alice_k, Some(&u128::MAX.to_le_bytes()))
+            .expect("set max");
+        let max_self_from = serde_json::to_vec(&MovePointerOp::TransferFrom {
+            flavor: MovePointerFlavor::Coin,
+            owner: alice,
+            to: alice,
+            amount: 10,
+        })
+        .expect("json");
+        let max_r = ee
+            .execute(&test_ctx(), &move_call(bob, home, max_self_from), &mut host)
+            .expect("max self transfer_from");
+        assert_eq!(max_r.status, OutcomeStatus::Success);
+        assert_eq!(read_move_u128(&host, &ns, &alice_k), u128::MAX);
+        assert_eq!(read_move_u128(&host, &ns, &alw_k), 170);
+
+        // Normal TransferFrom to distinct recipient works as expected.
+        host.write(&ns, &alice_k, Some(&500u128.to_le_bytes()))
+            .expect("reset");
+        let to_carol = serde_json::to_vec(&MovePointerOp::TransferFrom {
+            flavor: MovePointerFlavor::Coin,
+            owner: alice,
+            to: carol,
+            amount: 70,
+        })
+        .expect("json");
+        assert_eq!(
+            ee.execute(&test_ctx(), &move_call(bob, home, to_carol), &mut host)
+                .expect("transfer_from carol")
+                .status,
+            OutcomeStatus::Success
+        );
+        let carol_k = state_key_resource(&home, &format!("coin:bal:{}", hex::encode(carol)));
+        assert_eq!(read_move_u128(&host, &ns, &alice_k), 430);
+        assert_eq!(read_move_u128(&host, &ns, &carol_k), 70);
+        assert_eq!(read_move_u128(&host, &ns, &alw_k), 100);
+    }
+
+    #[test]
+    fn move_home_ops_propagate_host_write_failures_without_reporting_success() {
+        let mut ee = MoveEe::new();
+        let mut host = MemHost::new();
+        let alice = [0xA2; 32];
+        let bob = [0xB3; 32];
+        let home = [0x66; 32];
+        deploy_and_mint(&mut ee, &mut host, alice, home, alice, 500);
+
+        // 1. Failing host write during Approve must revert, not claim Success.
+        host.fail_on_write = Some(host.writes + 1);
+        let approve = serde_json::to_vec(&MovePointerOp::Approve {
+            flavor: MovePointerFlavor::FungibleAsset,
+            spender: bob,
+            amount: 100,
+        })
+        .expect("json");
+        let r_apv = ee
+            .execute(&test_ctx(), &move_call(alice, home, approve), &mut host)
+            .expect("approve");
+        assert_eq!(r_apv.status, OutcomeStatus::Revert);
+
+        // 2. Failing second write (dst credit) during Transfer must revert, not claim Success.
+        host.fail_on_write = Some(host.writes + 2);
+        let xfer = serde_json::to_vec(&MovePointerOp::Transfer {
+            flavor: MovePointerFlavor::FungibleAsset,
+            to: bob,
+            amount: 50,
+        })
+        .expect("json");
+        let r_xfer = ee
+            .execute(&test_ctx(), &move_call(alice, home, xfer), &mut host)
+            .expect("transfer");
+        assert_eq!(r_xfer.status, OutcomeStatus::Revert);
+
+        // 3. Failing supply write during EntryFunction mint must revert, not claim Success.
+        host.fail_on_write = Some(host.writes + 1);
+        let mint = serde_json::to_vec(&MoveCallEnvelope::EntryFunction {
+            module_id: String::from("0x1::fungible_asset"),
+            function_name: String::from("mint"),
+            args: vec![hex::encode(bob), String::from("25")],
+        })
+        .expect("json");
+        let r_mint = ee
+            .execute(&test_ctx(), &move_call(alice, home, mint), &mut host)
+            .expect("mint");
+        assert_eq!(r_mint.status, OutcomeStatus::Revert);
     }
 }

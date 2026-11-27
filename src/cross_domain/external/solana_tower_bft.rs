@@ -367,7 +367,7 @@ impl SolanaTowerBftAdapter {
         &self,
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
-    ) -> Result<(FinalityAttestation, bool), AdapterError> {
+    ) -> Result<(FinalityAttestation, bool, Hash32), AdapterError> {
         if evidence.adapter != self.descriptor.id {
             return Err(AdapterError::WrongAdapter {
                 expected: self.descriptor.name.clone(),
@@ -410,11 +410,12 @@ impl SolanaTowerBftAdapter {
 
         if bank.slot == 0
             || bank.bank_hash == [0u8; 32]
+            || bank.parent_bank_hash == [0u8; 32]
             || bank.tx_root == [0u8; 32]
             || bank.parent_slot >= bank.slot
         {
             return Err(AdapterError::ConsensusRule {
-                rule: "Solana slot, bank_hash, tx_root must be non-zero and parent_slot < slot"
+                rule: "Solana slot, bank_hash, parent_bank_hash, tx_root must be non-zero and parent_slot < slot"
                     .into(),
             });
         }
@@ -577,7 +578,7 @@ impl SolanaTowerBftAdapter {
             domain: DomainKey::from_parts(&self.descriptor.id, &evidence.network),
             height: bank.slot,
             state_root: bank.bank_hash,
-            attested_block_hash: Some(bank.header_hash),
+            attested_block_hash: Some(bank.bank_hash),
             attested_event_root: None,
             attested_tx_root: Some(bank.tx_root),
             finalized_at: bank.slot,
@@ -593,7 +594,7 @@ impl SolanaTowerBftAdapter {
             adapter_version: self.descriptor.adapter_version,
             evidence_version: evidence.evidence_version,
         };
-        Ok((attestation, all_pq))
+        Ok((attestation, all_pq, bank.parent_bank_hash))
     }
 }
 
@@ -602,12 +603,31 @@ impl ExternalFinalityAdapter for SolanaTowerBftAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned
+            .as_ref()
+            .is_some_and(|p| Self::validate_pinned(p).is_ok())
+    }
+
+    fn attested_parent(&self, evidence: &RawConsensusEvidence) -> Option<[u8; 32]> {
+        let policy = VerificationPolicy {
+            min_depth: SOL_TOWER_DEPTH,
+            require_declared_match: false,
+            max_age: 0,
+            now: 0,
+            require_slashable: false,
+        };
+        self.verify_inner(evidence, &policy)
+            .ok()
+            .map(|(_, _, parent_bank_hash)| parent_bank_hash)
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, AdapterError> {
-        self.verify_inner(evidence, policy).map(|(att, _)| att)
+        self.verify_inner(evidence, policy).map(|(att, _, _)| att)
     }
 
     fn verify_observed(
@@ -616,7 +636,7 @@ impl ExternalFinalityAdapter for SolanaTowerBftAdapter {
         policy: &VerificationPolicy,
         observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityAttestation, AdapterError> {
-        let (att, all_pq) = self.verify_inner(evidence, policy)?;
+        let (att, all_pq, _) = self.verify_inner(evidence, policy)?;
         observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         if all_pq {
             observer.observe(ObservedScheme::Scheme(SchemeId::ML_DSA_65));
@@ -1114,6 +1134,221 @@ mod tests {
         assert!(matches!(
             blank_adapter.verify(&blank_ev, &policy),
             Err(AdapterError::ConsensusRule { .. })
+        ));
+    }
+
+    #[test]
+    fn tower_trust_anchor_gate_and_domain_bridge_integration() {
+        use crate::cross_domain::external::domain_bridge::{
+            encode_external_evidence, ExternalDomainFinalityBridge,
+            EXTERNAL_DOMAIN_FINALITY_ADAPTER,
+        };
+        use crate::domain::finality_adapter::{DomainFinalityAdapter, FinalityStatus};
+        use crate::domain::hash_finality_proof;
+        use crate::domain::types::{
+            ConsensusDomain, ConsensusKind, DomainCommitment, DomainStatus, RootScheme,
+        };
+
+        let (pinned, _, evidence, golden) = build_tower_fixture(false);
+        let unpinned = SolanaTowerBftAdapter::new(NETWORK, None);
+        assert!(!unpinned.has_pinned_trust_anchor());
+
+        let adapter = SolanaTowerBftAdapter::new(NETWORK, Some(pinned));
+        assert!(
+            adapter.has_pinned_trust_anchor(),
+            "pinned SolanaTowerBftAdapter must declare a pinned trust anchor"
+        );
+
+        let policy = VerificationPolicy {
+            min_depth: 1,
+            require_declared_match: true,
+            max_age: 1_000,
+            now: SLOT,
+            require_slashable: false,
+        };
+        let proof = encode_external_evidence(&golden).expect("encode proof");
+        let proof_hash = hash_finality_proof(&proof).expect("hash proof");
+        let domain = ConsensusDomain {
+            id: 25,
+            kind: ConsensusKind::Custom(String::from("solana-tower-bft")),
+            status: DomainStatus::Active,
+            domain_chain_id: 101,
+            operator: Some(Address::from([0x09; 32])),
+            operator_bond: 1_000_000,
+            config_hash: [0; 32],
+            validator_set_hash: [0; 32],
+            finality_adapter: EXTERNAL_DOMAIN_FINALITY_ADAPTER.to_string(),
+            min_confirmations: 1,
+            bridge_enabled: true,
+            block_hash_scheme: RootScheme::Sha256,
+            state_root_scheme: RootScheme::Sha256,
+            tx_root_scheme: RootScheme::Sha256,
+            last_committed_height: SLOT - 1,
+            last_committed_hash: evidence.bank.parent_bank_hash,
+            pow_parameters: None,
+            zk_program_allowlist: Vec::new(),
+            plugin_code_hash: None,
+            genesis_state_root: [0; 32],
+        };
+        let commitment = DomainCommitment {
+            domain_id: 25,
+            domain_height: SLOT,
+            domain_block_hash: evidence.bank.bank_hash,
+            parent_domain_block_hash: evidence.bank.parent_bank_hash,
+            state_root: evidence.bank.bank_hash,
+            tx_root: evidence.bank.tx_root,
+            event_root: [0; 32],
+            finality_proof_hash: proof_hash,
+            consensus_kind: domain.kind.clone(),
+            validator_set_hash: [0; 32],
+            timestamp_ms: 0,
+            sequence: 1,
+            producer: None,
+            state_updates: std::collections::BTreeMap::new(),
+        };
+        let bridge = ExternalDomainFinalityBridge::new(Box::new(adapter), policy);
+        let status = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .expect("bridge verify");
+        assert_eq!(status, FinalityStatus::Finalized);
+    }
+
+    #[test]
+    fn tower_rejects_zero_parent_bank_hash() {
+        let (pinned, nodes, mut bundle, mut ev) = build_tower_fixture(false);
+        let net_hash = compute_solana_network_id_hash(NETWORK, GENESIS_HASH);
+        bundle.bank.parent_bank_hash = [0u8; 32];
+        bundle.bank.header_hash = bundle.bank.compute_hash(&net_hash);
+        bundle.votes = nodes[0..3]
+            .iter()
+            .map(|n| n.sign_vote(&net_hash, SLOT, &bundle.bank.bank_hash, 32, SLOT - 32))
+            .collect();
+        ev.payload = encode_sol_evidence(&bundle).expect("encode");
+
+        let adapter = SolanaTowerBftAdapter::new(NETWORK, Some(pinned));
+        let policy = VerificationPolicy {
+            min_depth: 1,
+            require_declared_match: true,
+            max_age: 1_000,
+            now: SLOT,
+            require_slashable: false,
+        };
+        assert!(
+            matches!(
+                adapter.verify(&ev, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "zero parent_bank_hash must fail closed"
+        );
+    }
+
+    #[test]
+    fn tower_attested_parent_links_bank_hash_and_adjudicates_falsity() {
+        use crate::cross_domain::external::falsity::{
+            adjudicate, BookSlot, Refusal, Ruling, SuccessorView,
+        };
+        use std::collections::BTreeSet;
+
+        let (pinned, nodes, ev_s_bundle, ev_s) = build_tower_fixture(false);
+        let net_hash = compute_solana_network_id_hash(NETWORK, GENESIS_HASH);
+        let adapter = SolanaTowerBftAdapter::new(NETWORK, Some(pinned.clone()));
+        let policy = VerificationPolicy {
+            min_depth: 1,
+            require_declared_match: true,
+            max_age: 1_000,
+            now: SLOT + 1,
+            require_slashable: false,
+        };
+
+        let att_s = adapter.verify(&ev_s, &policy).expect("slot s verifies");
+        assert_eq!(att_s.attested_block_hash, Some(ev_s_bundle.bank.bank_hash));
+        assert_eq!(
+            adapter.attested_parent(&ev_s),
+            Some(ev_s_bundle.bank.parent_bank_hash)
+        );
+
+        // Unpinned or tampered evidence must return None from attested_parent.
+        let unpinned = SolanaTowerBftAdapter::new(NETWORK, None);
+        assert_eq!(unpinned.attested_parent(&ev_s), None);
+        let mut tampered = ev_s.clone();
+        if let Some(b) = tampered.payload.last_mut() {
+            *b ^= 0xFF;
+        }
+        assert_eq!(adapter.attested_parent(&tampered), None);
+
+        let build_successor =
+            |parent_bank_hash: [u8; 32], bank_hash: [u8; 32], submitter_byte: u8| {
+                let mut bank = SolBankHeader {
+                    epoch: EPOCH,
+                    slot: SLOT + 1,
+                    parent_slot: SLOT,
+                    bank_hash,
+                    parent_bank_hash,
+                    tx_root: [0xD4; 32],
+                    header_hash: [0; 32],
+                };
+                bank.header_hash = bank.compute_hash(&net_hash);
+                let votes = nodes[0..3]
+                    .iter()
+                    .map(|n| n.sign_vote(&net_hash, SLOT + 1, &bank.bank_hash, 32, SLOT - 31))
+                    .collect();
+                let ev_bundle = SolanaTowerEvidence { bank, votes };
+                RawConsensusEvidence {
+                    adapter: adapter.descriptor().id,
+                    evidence_version: EVIDENCE_VERSION,
+                    network: NETWORK.into(),
+                    payload: encode_sol_evidence(&ev_bundle).expect("encode successor"),
+                    declared_height: SLOT + 1,
+                    declared_root: bank_hash,
+                    submitter: Address::from([submitter_byte; 32]),
+                }
+            };
+
+        let book_slot = BookSlot {
+            domain: att_s.domain,
+            adapter: att_s.adapter,
+            height: att_s.height,
+            evidence_version: att_s.evidence_version,
+            evidence_digest: att_s.evidence_digest,
+            carrier: ev_s.submitter,
+            attested_block_hash: att_s.attested_block_hash,
+        };
+        let decided = BTreeSet::new();
+
+        // Honest adjacent successor pointing at predecessor's bank_hash must NOT be refuted.
+        let ev_honest = build_successor(ev_s_bundle.bank.bank_hash, [0xB2; 32], 0x55);
+        let att_honest = adapter
+            .verify(&ev_honest, &policy)
+            .expect("honest successor");
+        let view_honest = SuccessorView {
+            domain: att_honest.domain,
+            adapter: att_honest.adapter,
+            height: att_honest.height,
+            evidence_version: att_honest.evidence_version,
+            evidence_digest: att_honest.evidence_digest,
+            carrier: ev_honest.submitter,
+            attested_parent: adapter.attested_parent(&ev_honest),
+        };
+        assert_eq!(
+            adjudicate(&view_honest, &book_slot, ev_honest.submitter, &decided),
+            Ruling::Refused(Refusal::NoContradiction)
+        );
+
+        // Forked successor pointing at a different parent bank_hash must refute predecessor.
+        let ev_fork = build_successor([0xEF; 32], [0xB3; 32], 0x66);
+        let att_fork = adapter.verify(&ev_fork, &policy).expect("fork successor");
+        let view_fork = SuccessorView {
+            domain: att_fork.domain,
+            adapter: att_fork.adapter,
+            height: att_fork.height,
+            evidence_version: att_fork.evidence_version,
+            evidence_digest: att_fork.evidence_digest,
+            carrier: ev_fork.submitter,
+            attested_parent: adapter.attested_parent(&ev_fork),
+        };
+        assert!(matches!(
+            adjudicate(&view_fork, &book_slot, ev_fork.submitter, &decided),
+            Ruling::Refuted { .. }
         ));
     }
 }

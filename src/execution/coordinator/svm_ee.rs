@@ -958,11 +958,17 @@ impl ExecutionEnvironment for SvmEe {
                             obj.insert(String::from("supply"), serde_json::json!(new_supply));
                         }
                         mint_acc.data = serde_json::to_vec(&mint_meta).unwrap_or_default();
-                        let _ = write_svm_account(host, &mint, &mint_acc);
+                        write_svm_account(host, &mint, &mint_acc).map_err(|e| EeFault {
+                            ee: EeId::SVM,
+                            panic_digest: budlum_uel_abi::panic_digest(EeId::SVM, &e),
+                        })?;
                         acc.lamports = acc.lamports.max(1);
                         acc.owner = mint_acc.owner;
                         acc.data = new_bal.to_le_bytes().to_vec();
-                        let _ = write_svm_account(host, &ata, &acc);
+                        write_svm_account(host, &ata, &acc).map_err(|e| EeFault {
+                            ee: EeId::SVM,
+                            panic_digest: budlum_uel_abi::panic_digest(EeId::SVM, &e),
+                        })?;
                         Ok(EeOutcome {
                             status: OutcomeStatus::Success,
                             output: ata.to_vec(),
@@ -1043,6 +1049,14 @@ impl ExecutionEnvironment for SvmEe {
                                 gas_used: 7_000,
                             });
                         }
+                        if src_ata == dst_ata {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Success,
+                                output: dst_ata.to_vec(),
+                                gas_used: 10_000,
+                            });
+                        }
+
                         let dst_bal = dst_acc
                             .data
                             .get(..8)
@@ -1055,14 +1069,6 @@ impl ExecutionEnvironment for SvmEe {
                                 gas_used: 8_000,
                             });
                         };
-
-                        if src_ata == dst_ata {
-                            return Ok(EeOutcome {
-                                status: OutcomeStatus::Success,
-                                output: dst_ata.to_vec(),
-                                gas_used: 10_000,
-                            });
-                        }
 
                         src_acc.data = (src_bal - amount).to_le_bytes().to_vec();
                         write_svm_account(host, &src_ata, &src_acc).map_err(|e| EeFault {
@@ -1169,7 +1175,10 @@ impl ExecutionEnvironment for SvmEe {
                             });
                         }
                         let mut dst_acc = read_svm_account(host, &dst_ata).unwrap_or_default();
-                        if dst_acc.lamports == 0 && dst_acc.owner == SVM_SYSTEM_PROGRAM_ID {
+                        if dst_acc.lamports == 0
+                            && dst_acc.owner == SVM_SYSTEM_PROGRAM_ID
+                            && dst_acc.data.is_empty()
+                        {
                             dst_acc.lamports = 1;
                             dst_acc.owner = src_acc.owner;
                             dst_acc.data = 0u64.to_le_bytes().to_vec();
@@ -1180,6 +1189,18 @@ impl ExecutionEnvironment for SvmEe {
                                     b"uninitialized or mismatched destination SPL token account"
                                         .to_vec(),
                                 gas_used: 7_000,
+                            });
+                        }
+                        if src_ata == dst_ata {
+                            alw_acc.data = (cur_alw - amount).to_le_bytes().to_vec();
+                            write_svm_account(host, &alw_pda, &alw_acc).map_err(|e| EeFault {
+                                ee: EeId::SVM,
+                                panic_digest: budlum_uel_abi::panic_digest(EeId::SVM, &e),
+                            })?;
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Success,
+                                output: dst_ata.to_vec(),
+                                gas_used: 12_000,
                             });
                         }
                         let dst_bal = dst_acc
@@ -1195,11 +1216,20 @@ impl ExecutionEnvironment for SvmEe {
                             });
                         };
                         alw_acc.data = (cur_alw - amount).to_le_bytes().to_vec();
-                        let _ = write_svm_account(host, &alw_pda, &alw_acc);
+                        write_svm_account(host, &alw_pda, &alw_acc).map_err(|e| EeFault {
+                            ee: EeId::SVM,
+                            panic_digest: budlum_uel_abi::panic_digest(EeId::SVM, &e),
+                        })?;
                         src_acc.data = (src_bal - amount).to_le_bytes().to_vec();
-                        let _ = write_svm_account(host, &src_ata, &src_acc);
+                        write_svm_account(host, &src_ata, &src_acc).map_err(|e| EeFault {
+                            ee: EeId::SVM,
+                            panic_digest: budlum_uel_abi::panic_digest(EeId::SVM, &e),
+                        })?;
                         dst_acc.data = new_dst_bal.to_le_bytes().to_vec();
-                        let _ = write_svm_account(host, &dst_ata, &dst_acc);
+                        write_svm_account(host, &dst_ata, &dst_acc).map_err(|e| EeFault {
+                            ee: EeId::SVM,
+                            panic_digest: budlum_uel_abi::panic_digest(EeId::SVM, &e),
+                        })?;
                         Ok(EeOutcome {
                             status: OutcomeStatus::Success,
                             output: dst_ata.to_vec(),
@@ -1399,5 +1429,385 @@ impl ExecutionEnvironment for SvmEe {
             code: RefusalCode::InvalidCode,
             message: e.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use budlum_uel_abi::{HostError, OutOfGas, UniversalResult};
+    use std::collections::BTreeMap;
+
+    struct MemHost {
+        kv: BTreeMap<(String, Vec<u8>), Vec<u8>>,
+        writes: usize,
+        fail_on_write: Option<usize>,
+    }
+
+    impl MemHost {
+        fn new() -> Self {
+            Self {
+                kv: BTreeMap::new(),
+                writes: 0,
+                fail_on_write: None,
+            }
+        }
+    }
+
+    impl HostRead for MemHost {
+        fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+            Ok(self
+                .kv
+                .get(&(ns.as_str().to_string(), key.to_vec()))
+                .cloned())
+        }
+
+        fn bud_balance(&self, _who: &EeIdentity) -> Result<BudAmount, HostError> {
+            Ok(BudAmount(0))
+        }
+    }
+
+    impl HostApi for MemHost {
+        fn write(
+            &mut self,
+            ns: &Namespace,
+            key: &[u8],
+            value: Option<&[u8]>,
+        ) -> Result<(), HostError> {
+            self.writes += 1;
+            if self.fail_on_write == Some(self.writes) {
+                return Err(HostError::Denied(String::from("injected write failure")));
+            }
+            let k = (ns.as_str().to_string(), key.to_vec());
+            match value {
+                Some(v) => {
+                    self.kv.insert(k, v.to_vec());
+                }
+                None => {
+                    self.kv.remove(&k);
+                }
+            }
+            Ok(())
+        }
+
+        fn universal_call(&mut self, _call: UniversalCall) -> Result<UniversalResult, HostError> {
+            Err(HostError::Denied(String::from("unexpected universal_call")))
+        }
+
+        fn emit_log(&mut self, _log: EeLog) -> Result<(), HostError> {
+            Ok(())
+        }
+
+        fn charge(&mut self, _bgu: u64) -> Result<(), OutOfGas> {
+            Ok(())
+        }
+
+        fn bud_transfer(
+            &mut self,
+            _from: &EeIdentity,
+            _to: &EeIdentity,
+            _attos: u128,
+        ) -> Result<(), HostError> {
+            Ok(())
+        }
+    }
+
+    fn test_ctx() -> BlockContext {
+        BlockContext {
+            height: 20,
+            timestamp_ms: 1_700_000_000_000,
+            chain_id: 1,
+        }
+    }
+
+    fn spl_call(caller: [u8; 32], ix: &SvmInstructionEnvelope) -> EeCall {
+        EeCall {
+            kind: EeCallKind::Call,
+            caller: EeIdentity {
+                ee: EeId::SVM,
+                id: caller.to_vec(),
+            },
+            target: EeIdentity {
+                ee: EeId::SVM,
+                id: SVM_SPL_TOKEN_PROGRAM_ID.to_vec(),
+            },
+            value: BudAmount(0),
+            input: serde_json::to_vec(ix).expect("ix json"),
+            gas_limit: 200_000,
+            depth: 0,
+            tx_hash: [0x22; 32],
+        }
+    }
+
+    fn read_ata_bal(host: &MemHost, owner: &[u8; 32], mint: &[u8; 32]) -> u64 {
+        let ata = derive_associated_token_address(owner, mint).expect("ata");
+        let acc = read_svm_account(host, &ata).expect("read ata");
+        let bytes: [u8; 8] = acc.data.get(..8).expect("8 bytes").try_into().expect("u64");
+        u64::from_le_bytes(bytes)
+    }
+
+    fn read_alw(host: &MemHost, mint: &[u8; 32], owner: &[u8; 32], delegate: &[u8; 32]) -> u64 {
+        let pda = derive_spl_allowance_pda(mint, owner, delegate).expect("alw pda");
+        let acc = read_svm_account(host, &pda).expect("read alw");
+        let bytes: [u8; 8] = acc.data.get(..8).expect("8 bytes").try_into().expect("u64");
+        u64::from_le_bytes(bytes)
+    }
+
+    fn read_supply(host: &MemHost, mint: &[u8; 32]) -> u64 {
+        let acc = read_svm_account(host, mint).expect("mint");
+        let val: serde_json::Value = serde_json::from_slice(&acc.data).expect("meta");
+        val.get("supply")
+            .and_then(serde_json::Value::as_u64)
+            .expect("supply")
+    }
+
+    fn setup_mint_and_holder(
+        ee: &mut SvmEe,
+        host: &mut MemHost,
+        alice: [u8; 32],
+        seed: [u8; 32],
+        amount: u64,
+    ) -> [u8; 32] {
+        let mint = derive_spl_mint_address(&alice, &seed).expect("mint");
+        let init = SvmInstructionEnvelope::SplInitializeMint {
+            mint_seed: seed,
+            decimals: 6,
+            mint_authority: alice,
+            is_token_2022: false,
+        };
+        assert_eq!(
+            ee.execute(&test_ctx(), &spl_call(alice, &init), host)
+                .expect("init")
+                .status,
+            OutcomeStatus::Success
+        );
+        let mint_to = SvmInstructionEnvelope::SplMintTo {
+            mint,
+            dest_owner: alice,
+            amount,
+        };
+        assert_eq!(
+            ee.execute(&test_ctx(), &spl_call(alice, &mint_to), host)
+                .expect("mint_to")
+                .status,
+            OutcomeStatus::Success
+        );
+        mint
+    }
+
+    #[test]
+    fn spl_transfer_from_self_preserves_balance_and_supply_and_debits_allowance() {
+        let mut ee = SvmEe::new();
+        let mut host = MemHost::new();
+        let alice = [0x11; 32];
+        let bob = [0x22; 32];
+        let carol = [0x33; 32];
+        let mint = setup_mint_and_holder(&mut ee, &mut host, alice, [0x99; 32], 500);
+
+        let apv = SvmInstructionEnvelope::SplApprove {
+            mint,
+            delegate: bob,
+            amount: 300,
+        };
+        assert_eq!(
+            ee.execute(&test_ctx(), &spl_call(alice, &apv), &mut host)
+                .expect("approve")
+                .status,
+            OutcomeStatus::Success
+        );
+
+        let self_from = SvmInstructionEnvelope::SplTransferFrom {
+            mint,
+            owner: alice,
+            to_owner: alice,
+            amount: 120,
+        };
+        let res = ee
+            .execute(&test_ctx(), &spl_call(bob, &self_from), &mut host)
+            .expect("self transfer_from");
+        assert_eq!(res.status, OutcomeStatus::Success);
+        assert_eq!(
+            read_ata_bal(&host, &alice, &mint),
+            500,
+            "self SplTransferFrom must not mint tokens"
+        );
+        assert_eq!(read_supply(&host, &mint), 500);
+        assert_eq!(read_alw(&host, &mint, &alice, &bob), 180);
+
+        let normal_from = SvmInstructionEnvelope::SplTransferFrom {
+            mint,
+            owner: alice,
+            to_owner: carol,
+            amount: 50,
+        };
+        assert_eq!(
+            ee.execute(&test_ctx(), &spl_call(bob, &normal_from), &mut host)
+                .expect("normal transfer_from")
+                .status,
+            OutcomeStatus::Success
+        );
+        assert_eq!(read_ata_bal(&host, &alice, &mint), 450);
+        assert_eq!(read_ata_bal(&host, &carol, &mint), 50);
+        assert_eq!(read_alw(&host, &mint, &alice, &bob), 130);
+    }
+
+    #[test]
+    fn spl_self_transfer_and_transfer_from_at_u64_max_do_not_falsely_overflow() {
+        let mut ee = SvmEe::new();
+        let mut host = MemHost::new();
+        let alice = [0x12; 32];
+        let bob = [0x23; 32];
+        let mint = setup_mint_and_holder(&mut ee, &mut host, alice, [0x98; 32], u64::MAX);
+
+        let self_xfer = SvmInstructionEnvelope::SplTransfer {
+            mint,
+            to_owner: alice,
+            amount: 1,
+        };
+        let r_xfer = ee
+            .execute(&test_ctx(), &spl_call(alice, &self_xfer), &mut host)
+            .expect("self transfer at max");
+        assert_eq!(r_xfer.status, OutcomeStatus::Success);
+        assert_eq!(read_ata_bal(&host, &alice, &mint), u64::MAX);
+
+        let apv = SvmInstructionEnvelope::SplApprove {
+            mint,
+            delegate: bob,
+            amount: 10,
+        };
+        assert_eq!(
+            ee.execute(&test_ctx(), &spl_call(alice, &apv), &mut host)
+                .expect("approve")
+                .status,
+            OutcomeStatus::Success
+        );
+
+        let self_from = SvmInstructionEnvelope::SplTransferFrom {
+            mint,
+            owner: alice,
+            to_owner: alice,
+            amount: 1,
+        };
+        let r_from = ee
+            .execute(&test_ctx(), &spl_call(bob, &self_from), &mut host)
+            .expect("self transfer_from at max");
+        assert_eq!(r_from.status, OutcomeStatus::Success);
+        assert_eq!(read_ata_bal(&host, &alice, &mint), u64::MAX);
+        assert_eq!(read_alw(&host, &mint, &alice, &bob), 9);
+    }
+
+    #[test]
+    fn spl_transfer_from_refuses_nonempty_system_owned_destination_account() {
+        let mut ee = SvmEe::new();
+        let mut host = MemHost::new();
+        let alice = [0x14; 32];
+        let bob = [0x24; 32];
+        let carol = [0x34; 32];
+        let mint = setup_mint_and_holder(&mut ee, &mut host, alice, [0x97; 32], 500);
+
+        let apv = SvmInstructionEnvelope::SplApprove {
+            mint,
+            delegate: bob,
+            amount: 100,
+        };
+        assert_eq!(
+            ee.execute(&test_ctx(), &spl_call(alice, &apv), &mut host)
+                .expect("approve")
+                .status,
+            OutcomeStatus::Success
+        );
+
+        // Pre-populate Carol's ATA slot with lamports==0, system owner, and non-empty data.
+        let carol_ata = derive_associated_token_address(&carol, &mint).expect("carol ata");
+        write_svm_account(
+            &mut host,
+            &carol_ata,
+            &SvmAccountData {
+                lamports: 0,
+                owner: SVM_SYSTEM_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+                data: vec![0xAB; 16],
+            },
+        )
+        .expect("seed non-empty system account");
+
+        let from = SvmInstructionEnvelope::SplTransferFrom {
+            mint,
+            owner: alice,
+            to_owner: carol,
+            amount: 50,
+        };
+        let res = ee
+            .execute(&test_ctx(), &spl_call(bob, &from), &mut host)
+            .expect("transfer_from to non-empty system account");
+        assert_ne!(res.status, OutcomeStatus::Success);
+        assert_eq!(res.status, OutcomeStatus::Revert);
+        assert_eq!(read_ata_bal(&host, &alice, &mint), 500);
+        assert_eq!(read_alw(&host, &mint, &alice, &bob), 100);
+        let untouched = read_svm_account(&host, &carol_ata).expect("read carol ata");
+        assert_eq!(untouched.data, vec![0xAB; 16]);
+    }
+
+    #[test]
+    fn spl_mint_to_and_transfer_from_propagate_write_errors_as_fault() {
+        let mut ee = SvmEe::new();
+        let mut host = MemHost::new();
+        let alice = [0x15; 32];
+        let bob = [0x25; 32];
+        let carol = [0x35; 32];
+        let mint = setup_mint_and_holder(&mut ee, &mut host, alice, [0x96; 32], 500);
+
+        // 1. Fail ATA write inside SplMintTo (2nd write after mint supply write).
+        host.fail_on_write = Some(host.writes + 2);
+        let mint_to = SvmInstructionEnvelope::SplMintTo {
+            mint,
+            dest_owner: alice,
+            amount: 100,
+        };
+        let err_mint = ee
+            .execute(&test_ctx(), &spl_call(alice, &mint_to), &mut host)
+            .expect_err("SplMintTo must fault on write error");
+        assert_eq!(err_mint.ee, EeId::SVM);
+
+        // Reset fail trigger and approve Bob.
+        host.fail_on_write = None;
+        let apv = SvmInstructionEnvelope::SplApprove {
+            mint,
+            delegate: bob,
+            amount: 200,
+        };
+        assert_eq!(
+            ee.execute(&test_ctx(), &spl_call(alice, &apv), &mut host)
+                .expect("approve")
+                .status,
+            OutcomeStatus::Success
+        );
+
+        // 2. Fail destination write inside SplTransferFrom (3rd write).
+        host.fail_on_write = Some(host.writes + 3);
+        let xfer_from = SvmInstructionEnvelope::SplTransferFrom {
+            mint,
+            owner: alice,
+            to_owner: carol,
+            amount: 50,
+        };
+        let err_from = ee
+            .execute(&test_ctx(), &spl_call(bob, &xfer_from), &mut host)
+            .expect_err("SplTransferFrom must fault on write error");
+        assert_eq!(err_from.ee, EeId::SVM);
+
+        // 3. Fail allowance write inside self SplTransferFrom (1st write).
+        host.fail_on_write = Some(host.writes + 1);
+        let self_from = SvmInstructionEnvelope::SplTransferFrom {
+            mint,
+            owner: alice,
+            to_owner: alice,
+            amount: 25,
+        };
+        let err_self_from = ee
+            .execute(&test_ctx(), &spl_call(bob, &self_from), &mut host)
+            .expect_err("self SplTransferFrom must fault on allowance write error");
+        assert_eq!(err_self_from.ee, EeId::SVM);
     }
 }
