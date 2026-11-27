@@ -1493,11 +1493,7 @@ impl EthereumSyncAdapter {
         // The backing of this adapter is never slashable, whichever format
         // the evidence arrives in.
         if policy.require_slashable {
-            return Err(AdapterError::ConsensusRule {
-                rule:
-                    "the policy requires slashable backing; a sync committee set is not slashable"
-                        .to_string(),
-            });
+            return Err(AdapterError::UnslashableBacking);
         }
         let Some(pin) = self.ssz_pin.as_ref() else {
             return Err(AdapterError::ConsensusRule {
@@ -1804,11 +1800,7 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
         // slashable backing must be refused, not given an attestation that
         // says `slashable: false` after the fact.
         if policy.require_slashable {
-            return Err(AdapterError::ConsensusRule {
-                rule:
-                    "the policy requires slashable backing; a sync committee set is not slashable"
-                        .to_string(),
-            });
+            return Err(AdapterError::UnslashableBacking);
         }
 
         // Finalized must not be ahead of attested: the attested header is the
@@ -2224,8 +2216,8 @@ mod slashable_policy_tests {
         policy.require_slashable = true;
         let err = adapter.verify(&ev, &policy).unwrap_err();
         assert!(
-            matches!(err, AdapterError::ConsensusRule { .. }),
-            "got {err:?}"
+            matches!(err, AdapterError::UnslashableBacking),
+            "a sync committee set is not slashable; the refusal must name that class, got {err:?}"
         );
     }
 

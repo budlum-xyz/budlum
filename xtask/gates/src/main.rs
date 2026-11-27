@@ -224,6 +224,7 @@ mod gates {
     pub mod typos;
     pub mod udeps;
     pub mod uncheckable_proof;
+    pub mod unslashable_refusal_is_typed;
     pub mod untrusted_manifests;
     pub mod unwired_code_is_ratcheted;
     pub mod value_transfers;
@@ -676,6 +677,14 @@ const GATES: &[Gate] = &[
         run: gates::required_contexts_are_produced::run,
         run_args: None,
         self_test: gates::required_contexts_are_produced::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "unslashable-refusal-is-typed",
+        replaces: None,
+        run: gates::unslashable_refusal_is_typed::run,
+        run_args: None,
+        self_test: gates::unslashable_refusal_is_typed::self_test,
         run_log: None,
     },
     Gate {
