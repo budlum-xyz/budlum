@@ -195,6 +195,11 @@ pub enum SettlementTx {
     ///
     /// Appended to preserve existing bincode enum discriminants.
     ThreeNft(Box<ThreeNftTx>),
+
+    /// Record, derive from, or release a master object.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    Master(Box<MasterTx>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -2122,7 +2127,68 @@ pub fn execute_settlement_tx(
         SettlementTx::DataLayer(layer_tx) => execute_data_layer(state, ctx, layer_tx),
         SettlementTx::Dictionary(dict_tx) => execute_dictionary(state, ctx, dict_tx),
         SettlementTx::ThreeNft(nft_tx) => execute_three_nft(state, ctx, nft_tx),
+        SettlementTx::Master(master_tx) => execute_master(state, ctx, master_tx),
     }
+}
+
+/// A master-object action.
+///
+/// The derivation count is what stands between a live master and a zero
+/// multiplier, and it is the same arithmetic the dictionary ref count does, so
+/// it is the same kind of consensus fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MasterTx {
+    /// Announce that a master is held and may be derived from.
+    Hold {
+        /// The master's content id.
+        master_id: crate::storage::content_id::ContentId,
+    },
+    /// The sender derived one object from this master.
+    Acquire {
+        /// The master.
+        master_id: crate::storage::content_id::ContentId,
+    },
+    /// The sender's derivation is gone.
+    ReleaseDerivation {
+        /// The master.
+        master_id: crate::storage::content_id::ContentId,
+    },
+    /// Ask for the master itself to go, once nothing derives from it.
+    Release {
+        /// The master.
+        master_id: crate::storage::content_id::ContentId,
+    },
+}
+
+/// Executes a master-object transaction.
+fn execute_master(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &MasterTx,
+) -> Result<(), SettlementTxError> {
+    use crate::storage::derived::DerivedError;
+
+    let _ = ctx;
+    let now_epoch = state.epoch_index;
+    let result = match tx {
+        MasterTx::Hold { master_id } => {
+            state.settlement.masters.hold_master(*master_id);
+            Ok(())
+        }
+        MasterTx::Acquire { master_id } => state.settlement.masters.acquire_master(master_id),
+        MasterTx::ReleaseDerivation { master_id } => {
+            state
+                .settlement
+                .masters
+                .release_derivation(master_id, now_epoch);
+            Ok(())
+        }
+        MasterTx::Release { master_id } => state
+            .settlement
+            .masters
+            .release_master(master_id, now_epoch),
+    };
+    result.map_err(|err: DerivedError| SettlementTxError::Refused(format!("master: {err:?}")))
 }
 
 /// A Three NFT pin action.

@@ -61,6 +61,15 @@ pub struct SettlementRegistries {
     /// declared a denomination, so its presence changes no root until used.
     #[serde(default)]
     pub denominations: crate::settlement::universal_asset::DenominationIndex,
+    /// Master objects and the derivations holding them up.
+    ///
+    /// `release_master` refuses while any derivation still exists and otherwise
+    /// waits out a grace window - arithmetic that only means something if the
+    /// derivation count is the same on every node. Counted in one process's
+    /// memory, a master could be released on the node that happened to see no
+    /// derivations and kept on the node that saw some.
+    #[serde(default)]
+    pub masters: crate::storage::derived::MasterRegistry,
     /// Pinned Three objects: the recipe and the body, kept so the stream can
     /// be re-emitted by anyone rather than only by the validator that first
     /// held it.

@@ -4682,6 +4682,15 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
                 }
             }
         }
+        SettlementTx::Master(master_tx) => {
+            // Tag 22. Releasing a master is the removal of a content address
+            // from the chain, so the action and its id are signed.
+            use crate::settlement::domains::MasterTx;
+            put_u8(out, 22);
+            let bytes = postcard::to_allocvec(master_tx)
+                .unwrap_or_else(|_| b"budlum/master/fields-failed".to_vec());
+            put_bytes(out, &bytes);
+        }
         SettlementTx::ThreeNft(nft_tx) => {
             // Tag 21. A pin commits to the exact bytes it stores, so the
             // metadata and the recipe are hashed as one.

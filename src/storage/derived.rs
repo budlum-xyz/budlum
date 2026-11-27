@@ -660,7 +660,7 @@ pub const DERIVED_SPEC_BYTES: u64 = 32 + 1 + 24 + 1;
 pub const MASTER_GRACE_EPOCHS: u64 = 1024;
 
 /// What a master is holding up.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct MasterEntry {
     /// Derivations that name this master.
     derivations: u32,
@@ -697,8 +697,9 @@ struct MasterEntry {
 /// simply stops answering is a storage-proof and slashing question, handled
 /// elsewhere. What is closed here is the case where the chain's own
 /// accounting is what removes the master.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MasterRegistry {
+    #[serde(with = "crate::core::map_keys")]
     entries: BTreeMap<ContentId, MasterEntry>,
 }
 
