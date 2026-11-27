@@ -3625,7 +3625,11 @@ impl BudlumApiServer for RpcServer {
     async fn unified_finality_root(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_unifiedFinalityRoot")?;
         let root = self.chain.get_unified_finality_root().await.map_err(|e| {
-            ErrorObjectOwned::owned(-32603, format!("Unified finality root failed: {e}"), None::<()>)
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("Unified finality root failed: {e}"),
+                None::<()>,
+            )
         })?;
         Ok(serde_json::json!({
             "root": format!("0x{}", hex::encode(root)),

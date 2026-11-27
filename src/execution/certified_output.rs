@@ -1,3 +1,8 @@
+//! WIRING: unwired - the two verifiers are the external conformance entry
+//! point; no production line in this tree calls them yet, and the in-block
+//! path still uses `ProofVerifier::verify` directly. Wiring them into the
+//! settlement proof-claim path is a separate change with its own review.
+//!
 //! A certified execution output: the thing one node hands another so it can
 //! accept a computation's result **without running the computation**.
 //!
@@ -35,7 +40,7 @@
 //! }
 //! ```
 //!
-//! Verification is one function, [`CertifiedExecutionOutput::verify`], and it
+//! Verification is one function, [`CertifiedExecutionOutput::verify_with_program`], and it
 //! refuses unless the halves agree **with each other**:
 //!
 //! 1. the public inputs describe *this* receipt - block height, status, final
@@ -51,8 +56,8 @@
 //! # What this is not
 //!
 //! - It is not a claim that the *program* was the one the reader wanted; that
-//!   is `program_hash`, and [`Self::verify_against_program`] is how a reader
-//!   binds it.
+//!   is `program_hash`, and [`CertifiedExecutionOutput::verify_against_program_hash`]
+//!   is how a reader binds it.
 //! - It is not a proof that the batch root is canonical; that is a consensus
 //!   question belonging to the block header, and this type takes the root as
 //!   given rather than pretending to decide it.
@@ -204,6 +209,9 @@ impl CertifiedExecutionOutput {
     ///
     /// [`CertifiedOutputError::WrongProgram`] when the proof is about a
     /// different program, plus everything [`Self::verify`] refuses.
+    /// Convenience: exposed for external conformance verifiers and BudZero
+    /// worker hosts; the in-block path reaches [`Self::verify_structure`] and
+    /// the adapter's own check.
     pub fn verify_with_program(
         &self,
         program: &[u64],
@@ -237,6 +245,8 @@ impl CertifiedExecutionOutput {
     ///
     /// [`CertifiedOutputError::WrongProgram`] when the hash disagrees, plus
     /// everything [`Self::verify_structure`] refuses.
+    /// Convenience: exposed for external conformance verifiers that pin a
+    /// program hash and never hold the program itself.
     pub fn verify_against_program_hash(
         &self,
         expected_program_hash: [u8; 32],
