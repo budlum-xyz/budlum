@@ -242,13 +242,37 @@ class GardenModel(
             state = state.copy(message = app.getString(R.string.g_file_unreadable))
             return@background
         }
-        if (bytes.size > MAX_FILE_BYTES) {
-            state = state.copy(message = app.getString(R.string.g_file_too_big))
+        // The ceiling on one object is a chain parameter, not a number
+        // this app gets to pick. It was hardcoded here at four megabytes,
+        // which happens to match the founding default and stops being
+        // true the moment a Garden is founded with another one. The
+        // chain publishes the real figure in its status, so that is what
+        // is read; when there is no status to read, nothing is refused
+        // here and the core answers for it, with its own reason.
+        val ceiling = objectCeiling()
+        if (ceiling != null && bytes.size > ceiling) {
+            state = state.copy(
+                message = app.getString(R.string.g_file_too_big, ceiling / (1024 * 1024)),
+            )
             return@background
         }
         phone.sendFile(bytes.toHex(), mime, name)
         readChat()
     }
+
+    /**
+     * The largest single object this Garden takes, as the chain says.
+     *
+     * `null` when there is no status yet, which means this phone has no
+     * figure of its own to apply and should not invent one.
+     */
+    private fun objectCeiling(): Int? = runCatching {
+        JSONObject(state.status)
+            .optJSONObject("garden")
+            ?.optJSONObject("limits")
+            ?.optInt("max_object_bytes", 0)
+            ?.takeIf { it > 0 }
+    }.getOrNull()
 
     /** The name the picker knows the file by, for the caption. */
     private fun fileName(uri: android.net.Uri): String {
@@ -672,8 +696,6 @@ class GardenModel(
         /** Enough of the feed to see what the group has sent. */
         const val FEED_LIMIT = 100u
 
-        /** One Garden object, from the limits the chain was founded with. */
-        const val MAX_FILE_BYTES = 4 * 1024 * 1024
 
         const val APK_SOURCE = "https://github.com/budlum-xyz/budlum/releases"
     }

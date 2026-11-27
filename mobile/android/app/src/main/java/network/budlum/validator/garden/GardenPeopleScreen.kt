@@ -156,10 +156,10 @@ private fun PersonRow(person: Person, canAnswer: Boolean, model: GardenModel) {
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // The file draws a person as a plain sage portrait, so the
-        // people here look like the people in the file rather than
-        // like a fingerprint readout.
-        Portrait()
+        // The file draws a person as a round portrait 80 px across,
+        // which is 26.7 dp. This was a 34 dp square, which is neither
+        // the shape nor the size.
+        Portrait(round = true)
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(

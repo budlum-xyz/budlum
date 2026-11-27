@@ -101,7 +101,7 @@
     <string name="g_kept_here">burada tutuluyor</string>
     <string name="g_checked">denetlendi</string>
     <string name="g_sending">gidiyor</string>
-    <string name="g_file_too_big">bir dosya en çok 4 MB</string>
+    <string name="g_file_too_big">bir dosya en çok %1$d MB</string>
     <string name="g_parts_held">tutulan parça</string>
     <string name="g_stored">saklanan</string>
     <string name="g_coded">kodlanan nesne</string>

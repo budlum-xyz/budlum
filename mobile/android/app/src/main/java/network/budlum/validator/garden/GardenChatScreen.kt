@@ -125,13 +125,21 @@ private fun Bubble(line: ChatLine, mine: Boolean) {
         Column(
             modifier = Modifier
                 .widthIn(max = 290.dp)
-                .background(if (mine) Sage else Page, RoundedCornerShape(SHEET_RADIUS))
-                .border(1.dp, if (mine) Sage else Faint, RoundedCornerShape(SHEET_RADIUS))
+                // Both sides are white in the file with a soft 32 px
+                // corner, which on a 1080 px sheet is 10.7 dp. The sage
+                // fill on one side was this app's idea; the file does
+                // not tell the two apart by colour.
+                .background(Chalk, RoundedCornerShape(BUBBLE_RADIUS))
+                .border(1.dp, if (mine) Sage else Faint, RoundedCornerShape(BUBBLE_RADIUS))
                 .padding(horizontal = 10.dp, vertical = 7.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
             if (!mine) {
-                Label(line.who, color = Ink)
+                Text(
+                    line.who,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = Ink,
+                )
             }
             if (line.picture != null) {
                 Image(
@@ -155,7 +163,7 @@ private fun Bubble(line: ChatLine, mine: Boolean) {
                     color = Ink,
                 )
             }
-            Label(footer(line), color = if (mine) Ink else Mute)
+            Label(footer(line), color = Sage)
         }
     }
 }
@@ -208,7 +216,7 @@ private fun Composer(
             placeholder = { Label(stringResource(R.string.g_say)) },
             modifier = Modifier.weight(1f),
             maxLines = 4,
-            shape = RoundedCornerShape(CONTROL_RADIUS),
+            shape = RoundedCornerShape(CHAT_CONTROL_RADIUS),
         )
         Glyph(
             which = R.drawable.icon_send,
@@ -219,6 +227,18 @@ private fun Composer(
         )
     }
 }
+
+/**
+ * The chat corner, 32 px on the 1080 px sheet.
+ *
+ * The wallet sheets use 16 and 12 px and this app applied those two
+ * everywhere. The file carries two radius systems, one per section, and
+ * the chat is the larger of them.
+ */
+internal val BUBBLE_RADIUS = 10.7.dp
+
+/** The chat control corner, 16 px on the same sheet. */
+internal val CHAT_CONTROL_RADIUS = 5.3.dp
 
 /** How often the room is read back off the chain. */
 private const val REFRESH_MS = 3000L

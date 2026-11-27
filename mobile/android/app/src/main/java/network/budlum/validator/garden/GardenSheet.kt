@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
@@ -52,6 +53,9 @@ internal val CONTROL_RADIUS = 4.dp
 
 /** The portrait square beside a name, 100 px in the file. */
 internal val PORTRAIT = 34.dp
+
+/** The round portrait the chat sheets use, 80 px on the 1080 px sheet. */
+internal val PORTRAIT_ROUND = 26.7.dp
 
 /**
  * The panel the wallet sheets hang everything on.
@@ -94,11 +98,14 @@ private fun sheetFill(skin: Skin): Color = when (skin) {
  * corners, no picture in it.
  */
 @Composable
-fun Portrait(modifier: Modifier = Modifier) {
+fun Portrait(modifier: Modifier = Modifier, round: Boolean = false) {
     Box(
         modifier = modifier
-            .size(PORTRAIT)
-            .background(Sage, RoundedCornerShape(CONTROL_RADIUS)),
+            .size(if (round) PORTRAIT_ROUND else PORTRAIT)
+            .background(
+                Sage,
+                if (round) CircleShape else RoundedCornerShape(CONTROL_RADIUS),
+            ),
     )
 }
 
