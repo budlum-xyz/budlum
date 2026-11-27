@@ -1083,7 +1083,7 @@ impl RelayerWorker {
         // the whole observation, not a Merkle path cut out of it. For the EVM
         // adapter that is `verify_deposit` over the full deposit package
         // (header chain, MPT inclusion, receipt status, deposit log).
-        adapter.verify_observation(&result)?;
+        adapters.verify_observation_for_chain(&result)?;
 
         if result.chain != ext_tx.chain {
             return Err(AdapterError::ProofVerificationFailed(format!(
@@ -1098,6 +1098,81 @@ impl RelayerWorker {
         }
 
         Ok(result)
+    }
+
+    /// Evaluate multi-source RPC carrier observations before admitting an
+    /// external evidence submission.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when fewer than [`crate::cross_domain::carrier_quorum::MIN_CARRIER_QUORUM_ENDPOINTS`]
+    /// distinct endpoints agree with a strict majority.
+    pub fn admit_carrier_quorum(
+        policy: &crate::cross_domain::carrier_quorum::MultiSourceQuorumPolicy,
+        observations: &[crate::cross_domain::carrier_quorum::CarrierEndpointObservation],
+    ) -> Result<
+        crate::cross_domain::carrier_quorum::QuorumCarrierDecision,
+        crate::cross_domain::carrier_quorum::CarrierQuorumError,
+    > {
+        let min_eps = crate::cross_domain::carrier_quorum::MIN_CARRIER_QUORUM_ENDPOINTS;
+        if policy.min_independent_endpoints < min_eps {
+            return Err(
+                crate::cross_domain::carrier_quorum::CarrierQuorumError::InvalidPolicy(format!(
+                    "quorum requires at least {min_eps} independent endpoints"
+                )),
+            );
+        }
+        crate::cross_domain::carrier_quorum::evaluate_carrier_quorum(policy, observations)
+    }
+
+    /// Compute the deterministic integer carrier payout for an attestation outcome.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed if policy parameters are invalid or checked arithmetic overflows.
+    pub fn quote_carrier_payout(
+        policy: &crate::cross_domain::carrier_quorum::CarrierRewardPolicy,
+        outcome: crate::cross_domain::carrier_quorum::CarrierAttestationOutcome,
+    ) -> Result<
+        crate::cross_domain::carrier_quorum::CarrierPayout,
+        crate::cross_domain::carrier_quorum::CarrierRewardError,
+    > {
+        crate::cross_domain::carrier_quorum::compute_carrier_reward(policy, outcome)
+    }
+
+    /// Verify a family-specific receipt proof (Bitcoin SPV, Cosmos ICS-23, or Solana)
+    /// against this worker's configured [`AdapterRegistry`].
+    ///
+    /// # Errors
+    ///
+    /// Fails closed if the corresponding adapter is unregistered or proof verification fails.
+    pub fn verify_family_receipt(
+        adapters: &AdapterRegistry,
+        chain: crate::core::transaction::ExternalChain,
+        btc_proof: Option<(
+            &crate::cross_domain::multi_chain_adapters::BitcoinSpvReceiptProof,
+            crate::domain::types::Hash32,
+        )>,
+        cosmos_proof: Option<(
+            u32,
+            &crate::cross_domain::multi_chain_adapters::CosmosIcs23ReceiptProof,
+            crate::domain::types::Hash32,
+        )>,
+        solana_proof: Option<(
+            &crate::cross_domain::multi_chain_adapters::SolanaAccountReceiptProof,
+            crate::domain::types::Hash32,
+        )>,
+    ) -> Result<crate::core::transaction::RelayerExternalResult, AdapterError> {
+        if let Some((p, root)) = btc_proof {
+            return adapters.verify_bitcoin_spv_proof(p, root);
+        }
+        if let Some((dom, p, root)) = cosmos_proof {
+            return adapters.verify_cosmos_ics23_proof(dom, p, root);
+        }
+        if let Some((p, root)) = solana_proof {
+            return adapters.verify_solana_bank_proof(p, root);
+        }
+        Err(AdapterError::UnsupportedChain(chain))
     }
 
     /// Relay one request and say what became of it.

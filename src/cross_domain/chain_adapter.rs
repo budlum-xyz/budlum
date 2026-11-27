@@ -291,6 +291,190 @@ impl AdapterRegistry {
             .map(std::convert::AsRef::as_ref)
     }
 
+    /// Verify an external observation through the registered adapter for `result.chain`.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed with [`AdapterError::UnsupportedChain`] if no adapter is
+    /// registered for `result.chain`, or propagates the adapter's verification error.
+    pub fn verify_observation_for_chain(
+        &self,
+        result: &RelayerExternalResult,
+    ) -> Result<(), AdapterError> {
+        let adapter = self
+            .get(&result.chain)
+            .ok_or(AdapterError::UnsupportedChain(result.chain))?;
+        adapter.verify_observation(result)
+    }
+
+    /// Register an anchored Bitcoin SPV adapter (`min_confirmations >= 6`).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`AdapterRegistry::register`] and adapter fitness failures.
+    pub fn register_bitcoin_spv(
+        &mut self,
+        trusted_merkle_root: Hash32,
+        min_confirmations: u32,
+    ) -> Result<(), AdapterError> {
+        let min_conf = min_confirmations
+            .max(crate::cross_domain::multi_chain_adapters::MIN_BITCOIN_SPV_CONFIRMATIONS);
+        if min_confirmations < min_conf {
+            return Err(AdapterError::Other(format!(
+                "Bitcoin SPV min_confirmations {min_confirmations} below {min_conf}"
+            )));
+        }
+        let adapter = crate::cross_domain::multi_chain_adapters::BitcoinSpvChainAdapter::new(
+            Some(trusted_merkle_root),
+            min_confirmations,
+        );
+        self.register(Box::new(adapter))
+    }
+
+    /// Register an anchored Cosmos ICS-23 adapter bound to `store_prefix`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`AdapterRegistry::register`] and adapter fitness failures.
+    pub fn register_cosmos_ics23(
+        &mut self,
+        chain_domain_id: u32,
+        store_prefix: Vec<u8>,
+        trusted_app_hash: Hash32,
+    ) -> Result<(), AdapterError> {
+        let domain_id = if chain_domain_id == 0 {
+            crate::cross_domain::multi_chain_adapters::COSMOS_DEFAULT_CHAIN_DOMAIN_ID
+        } else {
+            chain_domain_id
+        };
+        let adapter = crate::cross_domain::multi_chain_adapters::CosmosIcs23ChainAdapter::new(
+            domain_id,
+            store_prefix,
+            Some(trusted_app_hash),
+        );
+        self.register(Box::new(adapter))
+    }
+
+    /// Register an anchored Solana bank-hash + account/tx inclusion adapter.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`AdapterRegistry::register`] and adapter fitness failures.
+    pub fn register_solana_bank(
+        &mut self,
+        trusted_bank_hash: Hash32,
+        trusted_accounts_delta_root: Hash32,
+        trusted_tx_root: Hash32,
+        min_confirmed_slot: u64,
+    ) -> Result<(), AdapterError> {
+        let adapter = crate::cross_domain::multi_chain_adapters::SolanaBankChainAdapter::new(
+            Some(trusted_bank_hash),
+            Some(trusted_accounts_delta_root),
+            Some(trusted_tx_root),
+            min_confirmed_slot,
+        );
+        self.register(Box::new(adapter))
+    }
+
+    /// Assemble and verify a Bitcoin SPV observation against the registered Bitcoin adapter.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on zero root, encoding errors, unregistered adapter, or proof failure.
+    pub fn verify_bitcoin_spv_proof(
+        &self,
+        proof: &crate::cross_domain::multi_chain_adapters::BitcoinSpvReceiptProof,
+        merkle_root: Hash32,
+    ) -> Result<RelayerExternalResult, AdapterError> {
+        let obs = crate::cross_domain::multi_chain_adapters::assemble_bitcoin_spv_observation(
+            proof,
+            merkle_root,
+        )?;
+        self.verify_observation_for_chain(&obs)?;
+        Ok(obs)
+    }
+
+    /// Assemble and verify a Cosmos ICS-23 existence observation against the registered adapter.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on zero root, prefix mismatch, ICS-23 mismatch, or unregistered adapter.
+    pub fn verify_cosmos_ics23_proof(
+        &self,
+        chain_domain_id: u32,
+        proof: &crate::cross_domain::multi_chain_adapters::CosmosIcs23ReceiptProof,
+        app_hash: Hash32,
+    ) -> Result<RelayerExternalResult, AdapterError> {
+        let _ops: &[crate::cross_domain::multi_chain_adapters::Ics23InnerOp] = &proof.inner_ops;
+        let computed =
+            crate::cross_domain::multi_chain_adapters::compute_ics23_existence_root(proof)?;
+        if computed != app_hash {
+            return Err(AdapterError::ProofVerificationFailed(
+                "Cosmos ICS-23 existence root mismatch".into(),
+            ));
+        }
+        let expected_digest =
+            crate::cross_domain::multi_chain_adapters::compute_cosmos_receipt_tx_hash(proof);
+        let obs = crate::cross_domain::multi_chain_adapters::assemble_cosmos_ics23_observation(
+            chain_domain_id,
+            proof,
+            app_hash,
+        )?;
+        if obs.tx_hash != hex::encode(expected_digest) {
+            return Err(AdapterError::ProofVerificationFailed(
+                "Cosmos observation tx_hash mismatch".into(),
+            ));
+        }
+        self.verify_observation_for_chain(&obs)?;
+        Ok(obs)
+    }
+
+    /// Assemble and verify a Solana bank-hash + account/tx observation against the registered adapter.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on bank-commitment mismatch, account/tx branch failure, or unregistered adapter.
+    pub fn verify_solana_bank_proof(
+        &self,
+        proof: &crate::cross_domain::multi_chain_adapters::SolanaAccountReceiptProof,
+        bank_hash: Hash32,
+    ) -> Result<RelayerExternalResult, AdapterError> {
+        let acct_leaf = crate::cross_domain::multi_chain_adapters::compute_solana_account_leaf(
+            &proof.account_pubkey,
+            &proof.account_data_hash,
+            proof.lamports,
+        );
+        let acct_root = crate::cross_domain::multi_chain_adapters::compute_solana_merkle_root(
+            &acct_leaf,
+            &proof.account_branch,
+        );
+        let tx_leaf = crate::cross_domain::multi_chain_adapters::compute_solana_tx_leaf(
+            &proof.tx_signature_hash,
+            proof.slot,
+        );
+        let tx_root = crate::cross_domain::multi_chain_adapters::compute_solana_merkle_root(
+            &tx_leaf,
+            &proof.tx_branch,
+        );
+        let expected_bank =
+            crate::cross_domain::multi_chain_adapters::compute_solana_bank_commitment(
+                &proof.parent_bank_hash,
+                &acct_root,
+                &tx_root,
+                proof.slot,
+            );
+        if expected_bank != bank_hash {
+            return Err(AdapterError::ProofVerificationFailed(
+                "Solana bank commitment mismatch".into(),
+            ));
+        }
+        let obs = crate::cross_domain::multi_chain_adapters::assemble_solana_bank_observation(
+            proof, bank_hash,
+        )?;
+        self.verify_observation_for_chain(&obs)?;
+        Ok(obs)
+    }
+
     /// Check if a chain is supported.
     #[must_use]
     pub fn supports(&self, chain: &ExternalChain) -> bool {
