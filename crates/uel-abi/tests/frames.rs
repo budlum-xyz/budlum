@@ -234,3 +234,49 @@ fn uel_abi_golden_messages() {
 
 const GOLDEN_EXECUTE_REQUEST: &str =
     "0000007d08011082026a760a0d08cde102100a1880d095ffbc3112650801121808011214aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1a1808011214bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb220210052a030102033088a4014220cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+#[test]
+fn uel_abi_rejects_traversal_namespaces_non_minimal_version_and_oversized_abi_tag() {
+    use budlum_uel_abi::types::MAX_NAMESPACE_BYTES;
+    use budlum_uel_abi::{CodeInfo, Namespace, WireError};
+
+    for bad_ns in [
+        "..",
+        ".",
+        "ee/evm/../../uel/alias",
+        "/ee/evm/storage",
+        "ee/evm/storage/",
+        "ee//evm",
+    ] {
+        assert_eq!(
+            Namespace::new(bad_ns),
+            Err(WireError::BadNamespace),
+            "namespace {bad_ns:?} must be refused"
+        );
+    }
+
+    // Overlong non-minimal varint for field 1 (0x08 0x81 0x00 == value 1 with redundant 0x00 group)
+    // must be refused by peek_version before protobuf decoding.
+    let non_minimal_body = vec![0x08, 0x81, 0x00, 0x10, 0x01, 0x1a, 0x02, 0x08, 0x01];
+    let mut wire = u32::try_from(non_minimal_body.len())
+        .unwrap()
+        .to_be_bytes()
+        .to_vec();
+    wire.extend_from_slice(&non_minimal_body);
+    assert!(
+        decode_frame(&wire).is_err(),
+        "non-minimal ABI version varint must be refused"
+    );
+
+    // Empty or oversized CodeInfo.abi_tag must be refused on the wire.
+    assert!(CodeInfo::try_from(pb::CodeInfo {
+        code_hash: vec![0x11; 32],
+        abi_tag: String::new(),
+    })
+    .is_err());
+    assert!(CodeInfo::try_from(pb::CodeInfo {
+        code_hash: vec![0x11; 32],
+        abi_tag: "a".repeat(MAX_NAMESPACE_BYTES + 1),
+    })
+    .is_err());
+}
