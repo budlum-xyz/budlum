@@ -297,8 +297,13 @@ impl BudBitswap {
         requested_cid: ContentId,
         response: BitswapResponse,
     ) -> Result<(), StoreError> {
-        if response.not_found || response.data.is_empty() {
-            return Ok(()); // Nothing to store.
+        if response.not_found {
+            if !response.data.is_empty() {
+                return Err(StoreError::Internal(
+                    "not_found bitswap response must not carry chunk data".into(),
+                ));
+            }
+            return Ok(());
         }
         // MEDIUM (CWE-345, 2026-08-17): the response must be for the REQUESTED
         // block. A payload that only hashes to its own cid would let a malicious
@@ -361,7 +366,7 @@ fn bounded_bincode() -> impl bincode::Options {
     use bincode::Options;
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
-        .allow_trailing_bytes()
+        .reject_trailing_bytes()
         .with_limit(MAX_MESSAGE_SIZE as u64)
 }
 
@@ -385,6 +390,11 @@ pub fn decode_request(bytes: &[u8]) -> Result<BitswapRequest, CodecError> {
 
 /// Encode a Bitswap response to bytes.
 pub fn encode_response(resp: &BitswapResponse) -> Result<Vec<u8>, CodecError> {
+    if resp.not_found && !resp.data.is_empty() {
+        return Err(CodecError::Serialize(
+            "not_found response cannot carry non-empty data".into(),
+        ));
+    }
     let bytes = bincode::serialize(resp).map_err(|e| CodecError::Serialize(e.to_string()))?;
     if bytes.len() > MAX_MESSAGE_SIZE {
         return Err(CodecError::TooLarge {
@@ -404,9 +414,15 @@ pub fn decode_response(bytes: &[u8]) -> Result<BitswapResponse, CodecError> {
             max: MAX_MESSAGE_SIZE,
         });
     }
-    bounded_bincode()
+    let resp: BitswapResponse = bounded_bincode()
         .deserialize(bytes)
-        .map_err(|e| CodecError::Deserialize(e.to_string()))
+        .map_err(|e| CodecError::Deserialize(e.to_string()))?;
+    if resp.not_found && !resp.data.is_empty() {
+        return Err(CodecError::Deserialize(
+            "not_found response carries non-empty data".into(),
+        ));
+    }
+    Ok(resp)
 }
 
 #[cfg(test)]
@@ -617,5 +633,72 @@ mod tests {
         .unwrap();
         assert_eq!(decoded.cid, cid);
         assert_eq!(counter.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn bitswap_rejects_trailing_bytes_contradictory_not_found_and_forged_empty_chunk()
+    {
+        let data = b"canonical response payload".to_vec();
+        let cid = ContentId::of(&data);
+        let mut wire = encode_response(&BitswapResponse {
+            cid,
+            data: data.clone(),
+            not_found: false,
+        })
+        .unwrap();
+        wire.push(0xFF);
+        assert!(
+            decode_response(&wire).is_err(),
+            "decode_response must reject trailing smuggled bytes"
+        );
+
+        // Contradictory `not_found = true` carrying non-empty data must be rejected on encode & decode.
+        let contradictory = BitswapResponse {
+            cid,
+            data: vec![1, 2, 3],
+            not_found: true,
+        };
+        let raw_contradictory = bincode::serialize(&contradictory).unwrap();
+        assert!(
+            encode_response(&contradictory).is_err(),
+            "encode_response must reject not_found=true with non-empty data"
+        );
+        assert!(
+            decode_response(&raw_contradictory).is_err(),
+            "decode_response must reject not_found=true with non-empty data"
+        );
+
+        // Forged `not_found = false` with empty `data` for a non-empty requested CID must error,
+        // while a genuine 0-byte chunk (`ContentId::of(b"")`) must be stored.
+        let store = Arc::new(MemoryContentStore::with_default_capacity());
+        let bitswap = BudBitswap::new(store.clone());
+        let forged_empty = BitswapResponse {
+            cid,
+            data: Vec::new(),
+            not_found: false,
+        };
+        assert!(
+            matches!(
+                bitswap.handle_response(cid, forged_empty),
+                Err(StoreError::IntegrityMismatch { .. })
+            ),
+            "handle_response must reject forged empty data when not_found=false"
+        );
+
+        let empty_cid = ContentId::of(b"");
+        bitswap
+            .handle_response(
+                empty_cid,
+                BitswapResponse {
+                    cid: empty_cid,
+                    data: Vec::new(),
+                    not_found: false,
+                },
+            )
+            .expect("genuine 0-byte chunk must be accepted");
+        assert!(
+            store.has(&empty_cid),
+            "genuine 0-byte chunk must be stored by handle_response"
+        );
     }
 }

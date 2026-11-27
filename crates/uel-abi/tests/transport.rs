@@ -704,3 +704,146 @@ fn uel_abi_rejects_cross_ee_namespace_access() {
     drop(client);
     std::fs::remove_file(path).expect("remove socket");
 }
+
+#[test]
+fn namespace_rejects_dot_dot_traversal_and_empty_segments() {
+    for bad in [
+        "..",
+        ".",
+        "/ee/evm/storage",
+        "ee/evm/storage/",
+        "ee//evm/storage",
+        "ee/evm/../wasm/store",
+        "ee/evm/./storage",
+    ] {
+        assert_eq!(
+            Namespace::new(bad),
+            Err(WireError::BadNamespace),
+            "Namespace::new must reject path-traversal or empty segment `{bad}`"
+        );
+    }
+    for good in [
+        "uel/alias",
+        "mock/state",
+        "ee/evm/storage",
+        "ee/budzero/prog_v1.bin",
+    ] {
+        assert!(
+            Namespace::new(good).is_ok(),
+            "legitimate namespace `{good}` must remain valid"
+        );
+    }
+}
+
+#[test]
+fn execute_rejects_spoofed_fault_ee_and_bad_hello_ee() {
+    // 1. Worker serving EVM attempts to return an ExecuteResponse::Fault blaming BUDZERO.
+    let path = socket_path();
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).expect("bind");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let hello = read_frame(&mut stream).expect("hello");
+        write_frame(
+            &mut stream,
+            &pb::Envelope {
+                abi_version: ABI_VERSION,
+                request_id: hello.request_id,
+                body: Some(pb::envelope::Body::Hello(pb::Hello {
+                    ee: u32::from(EeId::EVM.0),
+                })),
+            },
+        )
+        .expect("hello reply");
+        let req = read_frame(&mut stream).expect("execute req");
+        write_frame(
+            &mut stream,
+            &pb::Envelope {
+                abi_version: ABI_VERSION,
+                request_id: req.request_id,
+                body: Some(pb::envelope::Body::ExecuteResponse(pb::ExecuteResponse {
+                    result: Some(pb::execute_response::Result::Fault(pb::Fault {
+                        ee: u32::from(EeId::BUDZERO.0),
+                        panic_digest: vec![0xAA; 32],
+                    })),
+                })),
+            },
+        )
+        .expect("spoofed fault");
+    });
+
+    let mut client = EeClient::new(&path, EeId::EVM);
+    let mut host = MemoryHost::new(1_000);
+    let err = client
+        .execute(&ctx(), &call(vec![]), &mut host)
+        .expect_err("spoofed Fault.ee != expected must be rejected as TransportError");
+    assert_eq!(
+        err,
+        TransportError::WrongEnvironment {
+            expected: EeId::EVM,
+            got: EeId::BUDZERO,
+        }
+    );
+    assert!(!client.is_connected());
+    let _ = std::fs::remove_file(&path);
+
+    // 2. Worker `serve_connection` must reject out-of-range Hello { ee: 300 } as BadEeId.
+    let (mut coord, worker_sock) = UnixStream::pair().expect("pair");
+    let handle = thread::spawn(move || serve_connection(worker_sock, &mut MockEe::new(EeId::EVM)));
+    write_frame(
+        &mut coord,
+        &pb::Envelope {
+            abi_version: ABI_VERSION,
+            request_id: 1,
+            body: Some(pb::envelope::Body::Hello(pb::Hello { ee: 300 })),
+        },
+    )
+    .expect("write bad hello");
+    drop(coord);
+    let serve_res = handle.join().expect("worker join");
+    assert_eq!(serve_res, Err(TransportError::Wire(WireError::BadEeId)));
+}
+
+#[test]
+fn wire_bounds_code_info_refusal_and_non_minimal_version_varint() {
+    use budlum_uel_abi::frame::{decode_frame, FrameError};
+    use budlum_uel_abi::{CodeInfo, EeRefusal};
+
+    // 1. Overlong varint encoding `[0x08, 0x81, 0x00]` for abi_version=1 must be rejected.
+    let overlong_body = [0x08u8, 0x81, 0x00, 0x10, 0x01, 0x52, 0x02, 0x08, 0x01];
+    let mut overlong_frame = (overlong_body.len() as u32).to_be_bytes().to_vec();
+    overlong_frame.extend_from_slice(&overlong_body);
+    assert!(
+        matches!(decode_frame(&overlong_frame), Err(FrameError::Decode(_))),
+        "non-minimal overlong abi_version varint must be rejected"
+    );
+
+    // 2. CodeInfo must reject empty, oversized (>64), or control-byte abi_tag.
+    assert!(CodeInfo::try_from(pb::CodeInfo {
+        code_hash: vec![0x11; 32],
+        abi_tag: String::new(),
+    })
+    .is_err());
+    assert!(CodeInfo::try_from(pb::CodeInfo {
+        code_hash: vec![0x11; 32],
+        abi_tag: "a".repeat(65),
+    })
+    .is_err());
+    assert!(CodeInfo::try_from(pb::CodeInfo {
+        code_hash: vec![0x11; 32],
+        abi_tag: "evm/\0bad".into(),
+    })
+    .is_err());
+    assert!(CodeInfo::try_from(pb::CodeInfo {
+        code_hash: vec![0x11; 32],
+        abi_tag: "evm/1".into(),
+    })
+    .is_ok());
+
+    // 3. EeRefusal must reject oversized message (>1024 bytes).
+    assert!(EeRefusal::try_from(pb::Refusal {
+        code: pb::RefusalCode::Denied as i32,
+        message: "x".repeat(1025),
+    })
+    .is_err());
+}

@@ -434,6 +434,9 @@ impl EeClient {
     fn take_request_id(&mut self) -> u64 {
         let id = self.next_request;
         self.next_request = self.next_request.wrapping_add(1);
+        if self.next_request == 0 {
+            self.next_request = 1;
+        }
         id
     }
 
@@ -641,10 +644,16 @@ impl EeClient {
                         Ok(Ok(outcome.try_into()?))
                     }
                     Some(pb::execute_response::Result::Fault(fault)) => {
-                        let fault = fault.try_into()?;
+                        let fault: EeFault = fault.try_into()?;
                         // Convert before dropping: even a malformed fault is
                         // an untrustworthy connection, not a reusable stream.
                         self.stream = None;
+                        if fault.ee != self.expected {
+                            return Err(TransportError::WrongEnvironment {
+                                expected: self.expected,
+                                got: fault.ee,
+                            });
+                        }
                         Ok(Err(fault))
                     }
                     None => Err(TransportError::Protocol("empty execute response".into())),
@@ -923,7 +932,9 @@ pub fn serve_connection(
 ) -> Result<ServeEnd, TransportError> {
     let (hello, deadline) = read_worker_frame(&mut stream)?;
     match hello.body {
-        Some(pb::envelope::Body::Hello(_)) => {}
+        Some(pb::envelope::Body::Hello(h)) => {
+            u8::try_from(h.ee).map_err(|_| TransportError::Wire(WireError::BadEeId))?;
+        }
         _ => {
             return Err(TransportError::Protocol(
                 "first frame is not a hello".into(),
@@ -1013,7 +1024,10 @@ pub fn serve_connection(
                         pb::execute_response::Result::Outcome((&outcome).into()),
                         false,
                     ),
-                    Ok(Err(fault)) => (pb::execute_response::Result::Fault((&fault).into()), true),
+                    Ok(Err(mut fault)) => {
+                        fault.ee = ee_id;
+                        (pb::execute_response::Result::Fault((&fault).into()), true)
+                    }
                     Err(payload) => {
                         let fault = EeFault {
                             ee: ee_id,
