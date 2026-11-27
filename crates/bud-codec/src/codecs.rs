@@ -253,6 +253,9 @@ fn decode_lz77_tokens(tokens: &[u8], content_len: u64) -> Result<Vec<u8>, CodecE
         match tag {
             0x00 => {
                 let len = usize::from(read_u16_le(tokens, &mut pos)?);
+                if len == 0 {
+                    return Err(CodecError::Malformed(String::from("empty lz literal run")));
+                }
                 let end = pos
                     .checked_add(len)
                     .ok_or_else(|| CodecError::Malformed(String::from("lit offset overflow")))?;
@@ -542,7 +545,9 @@ fn columnar_lines_encode(content: &[u8], sep: u8) -> Vec<u8> {
 
 fn columnar_lines_decode(encoded: &[u8], sep: u8, content_len: u64) -> Result<Vec<u8>, CodecError> {
     if encoded.len() < 4 {
-        return Ok(encoded.to_vec());
+        return Err(CodecError::Malformed(String::from(
+            "truncated columnar header",
+        )));
     }
     let mut pos = 0usize;
     let count = usize::try_from(read_u32_le(encoded, &mut pos)?)
@@ -566,6 +571,12 @@ fn columnar_lines_decode(encoded: &[u8], sep: u8, content_len: u64) -> Result<Ve
         }
         lens.push(l);
     }
+    let final_len = total_chars
+        .checked_add(count.saturating_sub(1))
+        .ok_or(CodecError::TooLong { max: content_len })?;
+    if u64::try_from(final_len).unwrap_or(u64::MAX) > content_len {
+        return Err(CodecError::TooLong { max: content_len });
+    }
     let body = encoded.get(pos..).unwrap_or(&[]);
     if body.len() != total_chars {
         return Err(CodecError::Malformed(String::from(
@@ -573,20 +584,27 @@ fn columnar_lines_decode(encoded: &[u8], sep: u8, content_len: u64) -> Result<Ve
         )));
     }
     let mut lines: Vec<Vec<u8>> = lens.iter().map(|&l| Vec::with_capacity(l)).collect();
-    let max_cols = lens.iter().copied().max().unwrap_or(0);
+    // Linear O(total_chars) transpose: visit only lines still active at `col`
+    // so sparse inputs with many empty lines cannot trigger quadratic O(count * max_cols) work.
+    let mut active: Vec<usize> = lens
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &l)| (l > 0).then_some(idx))
+        .collect();
     let mut body_pos = 0usize;
-    for col in 0..max_cols {
-        for (idx, &l) in lens.iter().enumerate() {
-            if col < l {
-                let b = *body.get(body_pos).ok_or_else(|| {
-                    CodecError::Malformed(String::from("truncated columnar byte"))
-                })?;
-                if let Some(dst) = lines.get_mut(idx) {
-                    dst.push(b);
-                }
-                body_pos += 1;
+    let mut col = 0usize;
+    while !active.is_empty() {
+        for &idx in &active {
+            let b = *body
+                .get(body_pos)
+                .ok_or_else(|| CodecError::Malformed(String::from("truncated columnar byte")))?;
+            if let Some(dst) = lines.get_mut(idx) {
+                dst.push(b);
             }
+            body_pos += 1;
         }
+        col += 1;
+        active.retain(|&idx| col < lens[idx]);
     }
     let cap = usize::try_from(content_len).unwrap_or(0);
     let mut out = Vec::with_capacity(cap.min(1 << 20));
@@ -669,6 +687,11 @@ fn pack_genomic_decode(encoded: &[u8], content_len: u64) -> Result<Vec<u8>, Code
                 .ok_or_else(|| CodecError::Malformed(String::from("truncated genomic count")))?,
         );
         pos += 2;
+        if count == 0 {
+            return Err(CodecError::Malformed(String::from(
+                "empty genomic run token",
+            )));
+        }
         if out.len().saturating_add(count) > want {
             return Err(CodecError::TooLong { max: content_len });
         }
@@ -745,6 +768,11 @@ fn chunk_dedup_decode(encoded: &[u8], content_len: u64) -> Result<Vec<u8>, Codec
     for _ in 0..unique_count {
         let len = usize::try_from(read_u32_le(encoded, &mut pos)?)
             .map_err(|_| CodecError::Malformed(String::from("chunk len overflow")))?;
+        if len == 0 {
+            return Err(CodecError::Malformed(String::from(
+                "zero-length unique chunk is forbidden",
+            )));
+        }
         let end = pos
             .checked_add(len)
             .ok_or_else(|| CodecError::Malformed(String::from("chunk slice overflow")))?;
@@ -756,6 +784,9 @@ fn chunk_dedup_decode(encoded: &[u8], content_len: u64) -> Result<Vec<u8>, Codec
     }
     let seq_count = usize::try_from(read_u32_le(encoded, &mut pos)?)
         .map_err(|_| CodecError::Malformed(String::from("seq count overflow")))?;
+    if seq_count > want.saturating_add(1) {
+        return Err(CodecError::TooLong { max: content_len });
+    }
     let mut out = Vec::with_capacity(want.min(1 << 20));
     for _ in 0..seq_count {
         let idx = usize::try_from(read_u32_le(encoded, &mut pos)?)
@@ -767,6 +798,11 @@ fn chunk_dedup_decode(encoded: &[u8], content_len: u64) -> Result<Vec<u8>, Codec
             return Err(CodecError::TooLong { max: content_len });
         }
         out.extend_from_slice(chunk);
+    }
+    if pos != encoded.len() {
+        return Err(CodecError::Malformed(String::from(
+            "trailing bytes after chunk dedup stream",
+        )));
     }
     Ok(out)
 }
@@ -914,6 +950,16 @@ pub fn encode_codec(codec: CodecId, content: &[u8]) -> Result<Vec<u8>, CodecErro
 /// # Errors
 ///
 /// Returns [`CodecError`] on unknown codec id, malformed wire frame, or length mismatch.
+fn require_mode(mode: u8, expected: u8) -> Result<(), CodecError> {
+    if mode == expected {
+        Ok(())
+    } else {
+        Err(CodecError::Malformed(format!(
+            "unsupported codec mode {mode}"
+        )))
+    }
+}
+
 pub fn decode_codec(
     codec: CodecId,
     payload: &[u8],
@@ -926,44 +972,54 @@ pub fn decode_codec(
     }
     match codec {
         LZMA2 | PREFLATE | LZ_CONTEXT | PDF_SPLIT => {
-            let (_mode, tokens) = unwrap_tagged_zstd(codec, payload, content_len)?;
+            let (mode, tokens) = unwrap_tagged_zstd(codec, payload, content_len)?;
+            require_mode(mode, 1)?;
             decode_lz77_tokens(&tokens, content_len)
         }
         DICT_ZSTD => {
-            let (_mode, out) = unwrap_tagged_zstd(DICT_ZSTD, payload, content_len)?;
+            let (mode, out) = unwrap_tagged_zstd(DICT_ZSTD, payload, content_len)?;
+            require_mode(mode, 1)?;
             Ok(out)
         }
         COLUMNAR_JSON | WAL_COLUMNAR | MARKDOWN_SPLIT => {
             let (mode, inner) = unwrap_tagged_zstd(codec, payload, content_len)?;
-            if mode == 1 {
-                columnar_lines_decode(&inner, b'\n', content_len)
-            } else {
-                Ok(inner)
+            match mode {
+                0 => Ok(inner),
+                1 => columnar_lines_decode(&inner, b'\n', content_len),
+                _ => Err(CodecError::Malformed(format!(
+                    "unsupported columnar codec mode {mode}"
+                ))),
             }
         }
         LEPTON_JPEG | DERIVATION => {
-            let (_mode, inner) = unwrap_tagged_zstd(codec, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(codec, payload, content_len)?;
+            require_mode(mode, 1)?;
             Ok(xor_neighbor_decode(&inner))
         }
         LOSSLESS_AUDIO => {
-            let (_mode, inner) = unwrap_tagged_zstd(LOSSLESS_AUDIO, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(LOSSLESS_AUDIO, payload, content_len)?;
+            require_mode(mode, 1)?;
             Ok(stride_delta_decode(&inner, 2))
         }
         CONTEXT_MIX => range_coder::decode(payload, content_len),
         VERSION_DELTA | OFFICE_OPC => {
-            let (_mode, inner) = unwrap_tagged_zstd(codec, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(codec, payload, content_len)?;
+            require_mode(mode, 1)?;
             chunk_dedup_decode(&inner, content_len)
         }
         CONTEXT_MACHINE => {
-            let (_mode, inner) = unwrap_tagged_zstd(CONTEXT_MACHINE, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(CONTEXT_MACHINE, payload, content_len)?;
+            require_mode(mode, 1)?;
             Ok(stride_delta_decode(&inner, 1))
         }
         LOG_COLUMNAR => {
             let (mode, inner) = unwrap_tagged_zstd(LOG_COLUMNAR, payload, content_len)?;
-            if mode == 1 {
-                columnar_lines_decode(&inner, b' ', content_len)
-            } else {
-                Ok(inner)
+            match mode {
+                0 => Ok(inner),
+                1 => columnar_lines_decode(&inner, b' ', content_len),
+                _ => Err(CodecError::Malformed(format!(
+                    "unsupported log columnar codec mode {mode}"
+                ))),
             }
         }
         TIME_SERIES => {
@@ -978,21 +1034,30 @@ pub fn decode_codec(
                     "TIME_SERIES tag mismatch",
                 )));
             }
-            if mode == 1 {
-                let want = usize::try_from(content_len)
-                    .map_err(|_| CodecError::TooLong { max: content_len })?;
-                decode_timeseries_delta_xor(payload.get(2..).unwrap_or(&[]), want)
-            } else {
-                let (_m, inner) = unwrap_tagged_zstd(TIME_SERIES, payload, content_len)?;
-                Ok(stride_delta_decode(&inner, 8))
+            match mode {
+                1 => {
+                    let want = usize::try_from(content_len)
+                        .map_err(|_| CodecError::TooLong { max: content_len })?;
+                    decode_timeseries_delta_xor(payload.get(2..).unwrap_or(&[]), want)
+                }
+                0 => {
+                    let (m, inner) = unwrap_tagged_zstd(TIME_SERIES, payload, content_len)?;
+                    require_mode(m, 0)?;
+                    Ok(stride_delta_decode(&inner, 8))
+                }
+                _ => Err(CodecError::Malformed(format!(
+                    "unsupported TIME_SERIES mode {mode}"
+                ))),
             }
         }
         PCAP_COLUMNAR => {
-            let (_mode, inner) = unwrap_tagged_zstd(PCAP_COLUMNAR, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(PCAP_COLUMNAR, payload, content_len)?;
+            require_mode(mode, 1)?;
             Ok(stride_delta_decode(&inner, 16))
         }
         PAGE_XOR_DELTA => {
-            let (_mode, inner) = unwrap_tagged_zstd(PAGE_XOR_DELTA, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(PAGE_XOR_DELTA, payload, content_len)?;
+            require_mode(mode, 1)?;
             Ok(stride_delta_decode(&inner, 4096))
         }
         FLOAT_SPLIT => {
@@ -1007,29 +1072,40 @@ pub fn decode_codec(
                     "FLOAT_SPLIT tag mismatch",
                 )));
             }
-            if mode == 1 {
-                let want = usize::try_from(content_len)
-                    .map_err(|_| CodecError::TooLong { max: content_len })?;
-                decode_fp32_exponent_split(payload.get(2..).unwrap_or(&[]), want)
-            } else {
-                let (_m, inner) = unwrap_tagged_zstd(FLOAT_SPLIT, payload, content_len)?;
-                Ok(stride_delta_decode(&inner, 4))
+            match mode {
+                1 => {
+                    let want = usize::try_from(content_len)
+                        .map_err(|_| CodecError::TooLong { max: content_len })?;
+                    decode_fp32_exponent_split(payload.get(2..).unwrap_or(&[]), want)
+                }
+                0 => {
+                    let (m, inner) = unwrap_tagged_zstd(FLOAT_SPLIT, payload, content_len)?;
+                    require_mode(m, 0)?;
+                    Ok(stride_delta_decode(&inner, 4))
+                }
+                _ => Err(CodecError::Malformed(format!(
+                    "unsupported FLOAT_SPLIT mode {mode}"
+                ))),
             }
         }
         EXE_SPLIT => {
-            let (_mode, inner) = unwrap_tagged_zstd(EXE_SPLIT, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(EXE_SPLIT, payload, content_len)?;
+            require_mode(mode, 1)?;
             Ok(stride_delta_decode(&inner, 4))
         }
         GENOMIC => {
-            let (_mode, inner) = unwrap_tagged_zstd(GENOMIC, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(GENOMIC, payload, content_len)?;
+            require_mode(mode, 1)?;
             pack_genomic_decode(&inner, content_len)
         }
         POINT_CLOUD => {
-            let (_mode, inner) = unwrap_tagged_zstd(POINT_CLOUD, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(POINT_CLOUD, payload, content_len)?;
+            require_mode(mode, 1)?;
             Ok(stride_delta_decode(&inner, 24))
         }
         LOSSLESS_IMAGE => {
-            let (_mode, inner) = unwrap_tagged_zstd(LOSSLESS_IMAGE, payload, content_len)?;
+            let (mode, inner) = unwrap_tagged_zstd(LOSSLESS_IMAGE, payload, content_len)?;
+            require_mode(mode, 1)?;
             Ok(stride_delta_decode(&inner, 3))
         }
         other => Err(CodecError::Unknown(other)),
