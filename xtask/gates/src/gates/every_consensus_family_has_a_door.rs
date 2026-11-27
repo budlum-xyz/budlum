@@ -514,6 +514,90 @@ fn check_event_root_authority(root: &Path) -> Result<usize, String> {
     Ok(bearers.len())
 }
 
+/// The declared order of `AdapterSpec` must equal its signature wire tags.
+///
+/// # Two numbers for one variant
+///
+/// An `AdapterSpec` is written down twice. It is persisted with bincode,
+/// which identifies a variant by its **declaration index**, and it is hashed
+/// into the registration's signature preimage by `encode_adapter_spec`, which
+/// writes an **explicit tag byte**. Nothing in the language ties the two
+/// together.
+///
+/// While they agree, a stored registration and a signed registration mean the
+/// same thing. If they ever diverge - a variant inserted in the middle, or a
+/// tag renumbered - a spec read back from the database would be a different
+/// variant from the one whose signature was checked, and neither side would
+/// report an error. Both numbers are append-only for the same reason.
+///
+/// The check is deliberately strict: index `i` must carry tag `i`, with no
+/// gaps. A gap would mean a variant was deleted rather than retired, which
+/// silently shifts every bincode index after it.
+fn check_tag_order(root: &Path) -> Result<usize, String> {
+    const REL: &str = "src/core/transaction.rs";
+    let intake = parse(root, INTAKE)?;
+    let mut variants: Vec<String> = Vec::new();
+    for item in flat_items(&intake) {
+        if let Item::Enum(e) = item {
+            if e.ident == "AdapterSpec" {
+                variants = e.variants.iter().map(|v| v.ident.to_string()).collect();
+            }
+        }
+    }
+    if variants.is_empty() {
+        return Err(format!("{INTAKE}: enum AdapterSpec not found"));
+    }
+
+    let text = std::fs::read_to_string(root.join(REL))
+        .map_err(|e| format!("{REL} could not be read: {e}"))?;
+    let body = function_body(&text, "fn encode_adapter_spec(")
+        .ok_or_else(|| format!("{REL}: fn encode_adapter_spec( not found"))?;
+
+    // Per-variant segments, in source order; the tag is the first `put_u8`.
+    let marks: Vec<(usize, String)> = body
+        .match_indices("AdapterSpec::")
+        .map(|(i, _)| {
+            let rest = &body[i + "AdapterSpec::".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            (i, name)
+        })
+        .collect();
+
+    for (index, variant) in variants.iter().enumerate() {
+        let Some((pos, _)) = marks.iter().find(|(_, n)| n == variant) else {
+            return Err(format!(
+                "{REL}: AdapterSpec::{variant} has no arm in encode_adapter_spec, so it is                  persisted at bincode index {index} with no signed tag at all"
+            ));
+        };
+        let end = marks
+            .iter()
+            .find(|(p, _)| *p > *pos)
+            .map_or(body.len(), |(p, _)| *p);
+        let seg = &body[*pos..end];
+        let Some(at) = seg.find("put_u8(out, ") else {
+            return Err(format!(
+                "{REL}: AdapterSpec::{variant} writes no wire tag"
+            ));
+        };
+        let digits: String = seg[at + "put_u8(out, ".len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        let tag: usize = digits.parse().map_err(|_| {
+            format!("{REL}: AdapterSpec::{variant} writes a non-literal wire tag")
+        })?;
+        if tag != index {
+            return Err(format!(
+                "{REL}: AdapterSpec::{variant} is bincode index {index} but signs wire tag                  {tag}. The persisted variant and the signed variant must be the same number:                  a spec read back from storage would otherwise verify as a different consensus                  family. Append new variants at the end and never renumber a tag."
+            ));
+        }
+    }
+    Ok(variants.len())
+}
+
 /// # Errors
 ///
 /// A canonical consensus family that no `AdapterSpec` variant can admit, a
@@ -581,12 +665,14 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     let tables = check_exhaustive_tables(root)?;
     let bearers = check_event_root_authority(root)?;
+    let ordered = check_tag_order(root)?;
 
     Ok(format!(
         "every consensus family has a door: {} canonical families, {} AdapterSpec variants, {} \
          reachable consensus_kind(s); the model and the registration door agree, {tables} \
-         per-variant tables stay exhaustive by construction, and {bearers} declared families \
-         may bind an event root",
+         per-variant tables stay exhaustive by construction, {bearers} declared families \
+         may bind an event root, and {ordered} variants carry the same number as a bincode \
+         index and as a signed wire tag",
         families.len(),
         specs.len(),
         reachable.len()
@@ -630,9 +716,11 @@ pub fn self_test() -> Result<String, String> {
         std::fs::write(ext_dir.join("intake.rs"), intake(variants, build_arms))
             .map_err(|e| e.to_string())?;
         std::fs::write(ext_dir.join("adapters.rs"), adapters).map_err(|e| e.to_string())?;
+        // The canary tree's preimage table writes a real tag, so the
+        // index/tag agreement check has something to read in every canary.
         std::fs::write(
             core_dir.join("transaction.rs"),
-            "fn encode_adapter_spec(s: &AdapterSpec) {\n    match s {\n        AdapterSpec::AlphaSpec { .. } => 0,\n    }\n}\n",
+            "fn encode_adapter_spec(s: &AdapterSpec) {\n    match s {\n        AdapterSpec::AlphaSpec { .. } => { put_u8(out, 0); }\n    }\n}\n",
         )
         .map_err(|e| e.to_string())?;
         // The canary tree declares the same event-root bearers the real tree
@@ -856,11 +944,45 @@ pub fn self_test() -> Result<String, String> {
         Err(_) => {}
     }
 
+    // Canary 10 - the bincode index and the signed wire tag must be one
+    // number. A renumbered tag means a stored spec and a signed spec can be
+    // different variants with nobody reporting it.
+    let core_tx = core_dir.join("transaction.rs");
+    std::fs::write(
+        &core_tx,
+        "fn encode_adapter_spec(s: &AdapterSpec) {\n    match s {\n                 AdapterSpec::AlphaSpec { .. } => { put_u8(out, 7); }\n    }\n}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    match check_tag_order(&dir) {
+        Ok(_) => {
+            cleanup(&dir);
+            return Err(String::from(
+                "canary 10: index 0 signing wire tag 7 was accepted",
+            ));
+        }
+        Err(e) if !e.contains("wire tag") => {
+            cleanup(&dir);
+            return Err(format!("canary 10: failed for the wrong reason: {e}"));
+        }
+        Err(_) => {}
+    }
+    // The honest form of the same table must pass.
+    std::fs::write(
+        &core_tx,
+        "fn encode_adapter_spec(s: &AdapterSpec) {\n    match s {\n                 AdapterSpec::AlphaSpec { .. } => { put_u8(out, 0); }\n    }\n}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    if let Err(e) = check_tag_order(&dir) {
+        cleanup(&dir);
+        return Err(format!("canary 10: an honest tag order was rejected: {e}"));
+    }
+
     cleanup(&dir);
     Ok(String::from(
-        "every-consensus-family-has-a-door self-test OK: 9 canaries (honest tree, doorless \
+        "every-consensus-family-has-a-door self-test OK: 10 canaries (honest tree, doorless \
          family, name-only match, empty build arm, undeclared adapter kind, wildcard arm in a \
          per-variant table, underscore-prefixed binding is not a wildcard, undeclared \
-         event-root binding, stale event-root entry)",
+         event-root binding, stale event-root entry, wire tag that disagrees with the \
+         bincode index)",
     ))
 }
