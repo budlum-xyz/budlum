@@ -832,6 +832,300 @@ impl FinalityGuarantee {
                     },
                 }
             }
+            // The eleven families the registration door reached only after
+            // `AdapterSpec` was widened to the canonical family list. Each
+            // profile is read off that family's own verifier, and every one
+            // of them collapses to zero tolerance without its pin: an
+            // unpinned spec is refused at the door, and the declared ceiling
+            // must not promise more than the refusal allows.
+            AdapterSpec::AlgorandStateProof { pinned, .. } => {
+                // A state proof certifies an interval of rounds against a
+                // post-quantum voter commitment: the certified artefact is a
+                // state commitment, and the Falcon/Merkle voter set makes the
+                // posture post-quantum rather than classical.
+                let sealed = pinned.as_ref().is_some_and(|p| {
+                    p.voter_count > 0 && p.total_weight > 0 && p.threshold_bps > 0
+                });
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if sealed {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: false,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::ArweaveSpOra { pinned, .. } => {
+                // A weave recall proof is a storage claim signed by one
+                // pinned operator. One signer is not a quorum: the guarantee
+                // is the operator's bond, so the tolerance stays at zero even
+                // when pinned, and only the roots the claim covers are set.
+                let sealed = pinned
+                    .as_ref()
+                    .is_some_and(|p| p.ed25519_pubkey != [0u8; 32] && !p.pq_pubkey.is_empty());
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if sealed {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: false,
+                        event_root: false,
+                        parent: false,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: 0,
+                }
+            }
+            AdapterSpec::AuxPowPop { pinned, .. } => {
+                // Merged mining: the work is the parent chain's, so the
+                // reversibility is probabilistic and the depth is the pinned
+                // confirmation count. A proof-of-participation signer set
+                // raises nothing on its own; it is what the adapter upgrades
+                // its own trust model with, not a second quorum here.
+                let confirmations = pinned.as_ref().map_or(0, |p| p.min_confirmations);
+                let sealed = pinned
+                    .as_ref()
+                    .is_some_and(|p| p.min_confirmations > 0 && p.trusted_parent_hash != [0u8; 32]);
+                Self {
+                    reversibility: FinalityReversibility::ProbabilisticWork {
+                        confirmations: if sealed { confirmations } else { 0 },
+                    },
+                    quantum_posture: QuantumClass::Hash,
+                    attestation: CommitmentAttestation {
+                        state_root: false,
+                        tx_root: sealed,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { POW_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::BasedPreconf { pinned, .. } => {
+                // A preconfirmation is a promise backed by the proposer's
+                // bond, not a finalised block: economic, and slashable, which
+                // is the whole point of the FOCIL inclusion list.
+                let (valid, pq_all) = pinned.as_ref().map_or((false, false), |p| {
+                    let (ok, pq) = validate_pinned_committee_keys(
+                        p.members
+                            .iter()
+                            .map(|m| (&m.ed25519_pubkey, m.voting_weight, m.pq_pubkey.as_slice())),
+                    );
+                    (ok && p.require_focil, ok && pq)
+                });
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if valid && pq_all {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: false,
+                        tx_root: valid,
+                        event_root: false,
+                        parent: valid,
+                    },
+                    slashable_backing: valid,
+                    fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::MinaSuccinctRecursive { pinned, .. } => {
+                // A recursive STARK over Samasika: the proof carries its own
+                // validity, so the ceiling is the validity-proof bound and
+                // the posture is hash-based.
+                let sealed = pinned.as_ref().is_some_and(|p| {
+                    p.genesis_state_hash != [0u8; 32]
+                        && p.step_program_hash != [0u8; 32]
+                        && p.slots_per_epoch > 0
+                });
+                Self {
+                    reversibility: if sealed {
+                        FinalityReversibility::CryptographicValidity
+                    } else {
+                        FinalityReversibility::ProbabilisticWork { confirmations: 0 }
+                    },
+                    quantum_posture: if sealed {
+                        QuantumClass::Hash
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: false,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed {
+                        VALIDITY_PROOF_FAULT_TOLERANCE_BPS
+                    } else {
+                        0
+                    },
+                }
+            }
+            AdapterSpec::OuroborosMithril { pinned, .. } => {
+                // Praos decides the leader, Mithril certifies the stake
+                // distribution: the backing is stake, and Cardano slashes
+                // nothing, so the guarantee is a stake quorum without a bond.
+                let sealed = pinned
+                    .as_ref()
+                    .is_some_and(|p| p.epochs.iter().any(|e| !e.signers.is_empty()));
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: QuantumClass::Classical,
+                    attestation: CommitmentAttestation {
+                        state_root: sealed,
+                        tx_root: false,
+                        event_root: false,
+                        parent: sealed,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if sealed { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::RestakingAvs { pinned, .. } => {
+                // Restaked collateral is slashable by construction; that is
+                // the only reason an AVS attestation is worth anything. The
+                // pin must carry an effective stake floor, or there is no
+                // bond to lose.
+                let (valid, pq_all) = pinned.as_ref().map_or((false, false), |p| {
+                    let (ok, pq) = validate_pinned_committee_keys(
+                        p.native_validators
+                            .iter()
+                            .map(|m| (&m.ed25519_pubkey, m.stake_weight, m.pq_pubkey.as_slice())),
+                    );
+                    (ok && p.min_effective_restaked_stake > 0, ok && pq)
+                });
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if valid && pq_all {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: false,
+                        event_root: false,
+                        parent: valid,
+                    },
+                    slashable_backing: valid,
+                    fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::SimplexBft { pinned, .. } => {
+                let (valid, pq_all) = pinned.as_ref().map_or((false, false), |p| {
+                    validate_pinned_committee_keys(
+                        p.validators
+                            .iter()
+                            .map(|v| (&v.ed25519_pubkey, v.stake_weight, v.pq_pubkey.as_slice())),
+                    )
+                });
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if valid && pq_all {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        event_root: false,
+                        parent: valid,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::StellarScp { pinned, .. } => {
+                // Federated agreement has no global stake: safety comes from
+                // overlapping quorum slices. A bonded slash escrow is the one
+                // thing that makes an SCP tier economically backed, and the
+                // adapter reads exactly that flag for its finality kind.
+                let valid = pinned.as_ref().is_some_and(|p| {
+                    !p.nodes.is_empty() && !p.network_passphrase.trim().is_empty()
+                });
+                let bonded = pinned.as_ref().is_some_and(|p| p.has_bonded_slash_escrow);
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: QuantumClass::Classical,
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: false,
+                        event_root: false,
+                        parent: valid,
+                    },
+                    slashable_backing: valid && bonded,
+                    fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::SymbioticVault { pinned, .. } => {
+                // Curated-vault collateral is slashable, and the pin is two
+                // key sets rather than a weighted table: both halves have to
+                // be present for the committee to mean anything.
+                let valid = pinned
+                    .as_ref()
+                    .is_some_and(|p| !p.classical_keys.is_empty() && !p.pq_keys.is_empty());
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if valid {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: false,
+                        event_root: false,
+                        parent: valid,
+                    },
+                    slashable_backing: valid,
+                    fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
+            AdapterSpec::TonCatchainBft { pinned, .. } => {
+                // A masterchain key block pins the validator set for a window
+                // of unix time; outside that window the set is not the one
+                // that signed, so an inverted or empty window is not a pin.
+                let (valid, pq_all) = pinned.as_ref().map_or((false, false), |p| {
+                    let (ok, pq) = validate_pinned_committee_keys(
+                        p.validators
+                            .iter()
+                            .map(|v| (&v.ed25519_pubkey, v.weight, v.pq_pubkey.as_slice())),
+                    );
+                    (ok && p.utime_until > p.utime_since, ok && pq)
+                });
+                Self {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: if valid && pq_all {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        event_root: false,
+                        parent: valid,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
         }
     }
 
