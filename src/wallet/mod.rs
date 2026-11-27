@@ -254,40 +254,25 @@ pub fn open_key_file(
 ) -> Result<SigningKey, String> {
     let password = match password_file {
         Some(path) => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = std::fs::metadata(path)
-                    .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?
-                    .permissions()
-                    .mode();
-                if mode & 0o077 != 0 {
-                    return Err(format!(
-                        "{} has mode {:03o}; use chmod 600",
-                        path.display(),
-                        mode & 0o777
-                    ));
-                }
-            }
-            std::fs::read_to_string(path)
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))?
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .to_string()
+            let raw_pw =
+                crate::crypto::key_file::read_owner_only_bounded(path, 16 * 1024, "password file")
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let text = std::str::from_utf8(&raw_pw)
+                .map_err(|e| format!("cannot decode {}: {e}", path.display()))?;
+            zeroize::Zeroizing::new(text.lines().next().unwrap_or_default().to_string())
         }
-        None => std::env::var("BUD_WALLET_PASSWORD").map_err(|_| {
+        None => zeroize::Zeroizing::new(std::env::var("BUD_WALLET_PASSWORD").map_err(|_| {
             String::from(
                 "no wallet password: pass --password-file <path> or set BUD_WALLET_PASSWORD",
             )
-        })?,
+        })?),
     };
     if password.chars().count() < 8 {
         return Err("the wallet password must have at least 8 characters".into());
     }
-    let raw = std::fs::read_to_string(key_file)
+    let raw = crate::crypto::key_file::read_regular_bounded(key_file, 1_048_576, "wallet key file")
         .map_err(|e| format!("cannot read {}: {e}", key_file.display()))?;
-    let file: KeyFile = serde_json::from_str(&raw)
+    let file: KeyFile = serde_json::from_slice(&raw)
         .map_err(|e| format!("{} is not a wallet key file: {e}", key_file.display()))?;
     let entropy = file.open(&password).map_err(|e| e.to_string())?;
     SigningKey::from_entropy(&entropy, file.is_legacy()).map_err(|e| e.to_string())

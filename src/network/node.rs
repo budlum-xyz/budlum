@@ -1130,18 +1130,16 @@ fn write_identity_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<
 pub fn load_or_generate_identity_key(path: Option<&str>) -> identity::Keypair {
     if let Some(p) = path {
         let file_path = std::path::Path::new(p);
-        if file_path.exists() {
+        if std::fs::symlink_metadata(file_path).is_ok() {
             // the identity file is a key file, so the reader holds the
-            // same rule as the writer. A wide one is refused loudly and a fresh
-            // identity is generated rather than read, because reading it would
-            // be using a secret that anyone on the host can already copy.
-            let narrow = crate::crypto::key_file::require_owner_only(file_path);
-            if let Err(e) = &narrow {
-                warn!("Identity file {p} is not owner-only, not using it: {e}");
-            }
-            let read = narrow
-                .map_err(|e| e.to_string())
-                .and_then(|()| std::fs::read(file_path).map_err(|e| e.to_string()));
+            // same rule as the writer. A wide or symlinked path is refused
+            // loudly and a fresh identity is generated rather than read,
+            // because reading it would trust an exposed or redirected secret.
+            let read = crate::crypto::key_file::read_owner_only_bounded(
+                file_path,
+                64 * 1024,
+                "identity file",
+            );
             match read {
                 Ok(bytes) => {
                     if let Ok(keypair) = identity::Keypair::from_protobuf_encoding(&bytes) {
@@ -1150,7 +1148,7 @@ pub fn load_or_generate_identity_key(path: Option<&str>) -> identity::Keypair {
                     }
                     warn!("Failed to decode identity file {p}, generating new key");
                 }
-                Err(e) => warn!("Cannot read identity file {p}: {e}, generating new key"),
+                Err(e) => warn!("Identity file {p} refused ({e}), generating new key"),
             }
         }
         let key = identity::Keypair::generate_ed25519();

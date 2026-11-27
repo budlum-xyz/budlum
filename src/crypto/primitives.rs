@@ -635,11 +635,12 @@ impl ValidatorKeys {
         // that is not. Without this the narrow mode only protects keys this
         // build wrote; a key copied in with `cp` kept the umask's `0o644` and
         // the node loaded it without a word.
-        super::key_file::require_owner_only(path.as_ref())
-            .map_err(|e| CryptoError::Io(e.to_string()))?;
-        let bytes = Zeroizing::new(
-            std::fs::read(path.as_ref()).map_err(|e| CryptoError::Io(e.to_string()))?,
-        );
+        let bytes = super::key_file::read_owner_only_bounded(
+            path.as_ref(),
+            16 * 1024,
+            "validator key file",
+        )
+        .map_err(|e| CryptoError::Io(e.to_string()))?;
         if bytes.len() < 128 {
             return Err(CryptoError::InvalidKey("Key file too short".into()));
         }
@@ -753,10 +754,8 @@ impl KeyPair {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, CryptoError> {
         // , the same rule as `ValidatorKeys::load`: the read side and
         // the write side agree on what a key file may look like.
-        super::key_file::require_owner_only(path.as_ref())
+        let file = super::key_file::open_owner_only_pinned(path.as_ref())
             .map_err(|e| CryptoError::Io(e.to_string()))?;
-        let file =
-            std::fs::File::open(path.as_ref()).map_err(|e| CryptoError::Io(e.to_string()))?;
         let mut bytes = Zeroizing::new(Vec::with_capacity(SECRET_KEY_LENGTH + 1));
         file.take((SECRET_KEY_LENGTH + 1) as u64)
             .read_to_end(&mut bytes)

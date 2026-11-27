@@ -1,52 +1,49 @@
-//! Atomic, owner-only key-file writes.
+//! Atomic, owner-only key-file writes and symlink-free, FD-pinned reads.
 //!
 //! A key file is secret material on disk. Two properties are not optional:
 //!
 //! * **Atomic.** A crash midway through a write must not leave a short, empty
-//!   or half-old file behind. The bytes go to a sibling temporary file, are
-//!   flushed to disk, and then replace the target with one `rename`. On the
-//!   same filesystem a rename is a single directory entry swap, so a reader
-//!   sees either the old file or the new one, never a mixture.
-//! * **Narrow.** The file is owner-read/write only (`0o600`). A file that
-//!   already existed with wider bits must not keep them: the temporary file is
-//!   created with `0o600` and the rename makes it the target, so the mode is
-//!   decided by the new file and never inherited from the old one.
+//!   or half-old file behind. The bytes go to a uniquely named sibling
+//!   temporary file (`<name>.<pid>.<seq>.tmp`) created with `create_new`,
+//!   are flushed to disk, and then replace the target with one `rename`. On
+//!   the same filesystem a rename is a single directory entry swap, so a
+//!   reader sees either the old file or the new one, never a mixture.
+//! * **Narrow and pinned.** Writes set mode `0o600` at creation time. Reads
+//!   inspect `symlink_metadata`, refuse symbolic links and non-regular files,
+//!   open the descriptor with `O_NOFOLLOW` where available, verify `(dev, ino)`
+//!   and regular-file status via `fstat` on the open descriptor, check mode
+//!   `0o077 == 0` on the same descriptor for owner-only files, and read with
+//!   a hard byte cap.
 //!
-//! The previous shape lived as a private helper in `primitives.rs` and was
-//! correct there, but it was the only writer: every other key-shaped file in
-//! the tree either wrote itself with `std::fs::write` (mode decided by the
-//! process umask, atomicity not addressed) or chmod'ed after the fact, where a
-//! window exists in which the bytes are on disk and the mode is still wide.
-//! One definition, called by every writer, is the rule this module exists to
-//! hold (one shared definition of a primitive).
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
-use std::io::Write;
+use std::ffi::OsString;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use zeroize::Zeroizing;
+
+static TMP_FILE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Write `bytes` to `path` atomically and with mode `0o600`.
 ///
-/// A stale `<name>.tmp` left by an interrupted earlier write is removed first:
-/// `create_new` refuses to reuse it, and refusing the write over a leftover
-/// would make one crash permanent.
+/// Each attempt chooses a unique sibling temporary name
+/// `<name>.<pid>.<seq>.tmp` opened with `create_new(true)` rather than
+/// unlinking a fixed `.tmp` path beforehand, so concurrent callers or
+/// pre-existing `.tmp` entries cannot collide or race a symlink swap.
 ///
 /// # Errors
 ///
-/// An I/O error from removing the stale temporary, creating or writing the new
-/// one, syncing it, or renaming it over the target. A failure never leaves the
-/// temporary file behind and never partially overwrites the target.
+/// An I/O error from creating or writing the temporary file, syncing it, or
+/// renaming it over the target. A failure never leaves the temporary file
+/// behind and never partially overwrites the target.
 ///
 /// # Security
 ///
 /// `bytes` holds secret material. The caller owns the buffer and must wipe it
 /// after this call returns; this module does not retain a copy.
 pub fn write_atomic_owner_only(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
-    let tmp_path = sibling_temp_path(path)?;
-    match std::fs::remove_file(&tmp_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
+    let tmp_path = unique_temp_path(path)?;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     // Wide bits cannot appear even for an instant: the mode is set at
@@ -75,69 +72,179 @@ pub const KEY_FILE_MODE: u32 = 0o600;
 /// access for a group member or for any other user on the host.
 pub const KEY_FILE_FORBIDDEN_MASK: u32 = 0o077;
 
-/// Refuse to read a key file that is readable or writable by anyone but its
-/// owner.
+/// Open `path` as a regular file without following symlinks and pin the open
+/// descriptor to the inspected directory entry.
 ///
-/// # The asymmetry this closes
-///
-/// The write side has been owner-only since the first hardening pass, and the
-/// wallet has refused a wide key file since its own review
-/// (`wallet::open_key_file`). The validator readers did not: `ValidatorKeys::load`
-/// and `KeyPair::load` opened whatever path they were given, so a key generated
-/// by an older build - or copied in with `cp` and the process umask - was read
-/// with its `0o644` intact and the node ran happily on a world-readable secret.
-/// Checking on load is not enough on its own (a secret read once has already
-/// leaked if an attacker had the read), but it is the only place that can tell
-/// an operator "this file was exposed" instead of staying silent about it.
+/// Rejects symlinks (`symlink_metadata` + `O_NOFOLLOW` on Linux/BSD),
+/// non-regular files (directories, FIFOs, sockets, device nodes), and
+/// `(dev, ino)` swaps between `lstat` and `fstat` on the open descriptor.
 ///
 /// # Errors
 ///
-/// An I/O error from `metadata`, or [`std::io::ErrorKind::PermissionDenied`]
-/// naming the file, its mode and the required one. The message is the operator's
-/// whole remedy: a refusal that does not say `chmod 600` is a refusal an
-/// operator cannot act on.
-#[cfg(unix)]
-pub fn require_owner_only(path: &Path) -> Result<(), std::io::Error> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(path)?.permissions().mode();
-    if mode & KEY_FILE_FORBIDDEN_MASK != 0 {
+/// An I/O error when the file cannot be opened or violates the regular-file
+/// and non-symlink invariants.
+pub fn open_regular_pinned(path: &Path) -> Result<std::fs::File, std::io::Error> {
+    let lmeta = std::fs::symlink_metadata(path)?;
+    if lmeta.file_type().is_symlink() {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!(
-                "{} has mode {:03o}; group and others must have no access (chmod 600)",
-                path.display(),
-                mode & 0o777
-            ),
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is a symbolic link; refusing to follow", path.display()),
         ));
     }
-    Ok(())
+    if !lmeta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        #[cfg(target_os = "linux")]
+        options.custom_flags(0o400_000);
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly"))]
+        options.custom_flags(0x0100);
+    }
+
+    let file = options.open(path)?;
+    let fmeta = file.metadata()?;
+    if !fmeta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (fmeta.dev(), fmeta.ino()) != (lmeta.dev(), lmeta.ino()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} changed between inspection and open", path.display()),
+            ));
+        }
+    }
+    Ok(file)
 }
 
-/// Not a Unix host: file modes do not exist, so there is nothing to refuse.
+/// Open `path` pinned as a regular file and verify on the open descriptor
+/// that group and others have no permissions (`mode & 0o077 == 0`).
+///
+/// Checking permissions via `fstat` on the already-opened descriptor closes the
+/// TOCTOU race between path-based `stat` checks and subsequent reads.
 ///
 /// # Errors
 ///
-/// Never. The signature matches the Unix version so callers need no `cfg`.
-#[cfg(not(unix))]
-pub fn require_owner_only(_path: &Path) -> Result<(), std::io::Error> {
-    Ok(())
+/// [`std::io::ErrorKind::InvalidInput`] on symlinks or non-regular files,
+/// [`std::io::ErrorKind::PermissionDenied`] when `mode & 0o077 != 0`, or the
+/// underlying I/O error.
+pub fn open_owner_only_pinned(path: &Path) -> Result<std::fs::File, std::io::Error> {
+    let file = open_regular_pinned(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = file.metadata()?.permissions().mode();
+        if mode & KEY_FILE_FORBIDDEN_MASK != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} has mode {:03o}; group and others must have no access (chmod 600)",
+                    path.display(),
+                    mode & 0o777
+                ),
+            ));
+        }
+    }
+    Ok(file)
 }
 
-/// The sibling temporary path a write of `path` goes through.
+fn read_pinned_bounded(
+    file: std::fs::File,
+    path: &Path,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>, std::io::Error> {
+    let max_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    let meta = file.metadata()?;
+    if meta.len() > max_u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{label} {} exceeds {max_bytes}-byte limit", path.display()),
+        ));
+    }
+    let mut buf = Vec::new();
+    file.take(max_u64.saturating_add(1)).read_to_end(&mut buf)?;
+    if buf.len() > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{label} {} exceeds {max_bytes}-byte limit", path.display()),
+        ));
+    }
+    Ok(buf)
+}
+
+/// Open `path` pinned without following symlinks and read at most `max_bytes`.
+///
+/// # Errors
+///
+/// Returns an error if `path` is missing, a symlink, non-regular, or larger
+/// than `max_bytes`.
+pub fn read_regular_bounded(
+    path: &Path,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>, std::io::Error> {
+    let file = open_regular_pinned(path)?;
+    read_pinned_bounded(file, path, max_bytes, label)
+}
+
+/// Open `path` pinned as owner-only regular file and read at most `max_bytes`
+/// into a zeroizing buffer.
+///
+/// # Errors
+///
+/// Returns an error if `path` is missing, a symlink, non-regular, readable or
+/// writable by group/others, or larger than `max_bytes`.
+pub fn read_owner_only_bounded(
+    path: &Path,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Zeroizing<Vec<u8>>, std::io::Error> {
+    let file = open_owner_only_pinned(path)?;
+    read_pinned_bounded(file, path, max_bytes, label).map(Zeroizing::new)
+}
+
+/// Refuse to read a key file that is readable or writable by anyone but its
+/// owner, or that is a symlink or non-regular file.
+///
+/// # Errors
+///
+/// An I/O error from inspecting/opening `path`, or
+/// [`std::io::ErrorKind::PermissionDenied`] naming the file, its mode and
+/// `chmod 600`.
+pub fn require_owner_only(path: &Path) -> Result<(), std::io::Error> {
+    open_owner_only_pinned(path).map(|_| ())
+}
+
+/// A unique sibling temporary path `<name>.<pid>.<seq>.tmp` for `path`.
 ///
 /// # Errors
 ///
 /// [`std::io::ErrorKind::InvalidInput`] when `path` has no file name (the root
 /// directory, or a path ending in `..`).
-fn sibling_temp_path(path: &Path) -> Result<PathBuf, std::io::Error> {
+fn unique_temp_path(path: &Path) -> Result<PathBuf, std::io::Error> {
     let file_name = path.file_name().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "key path has no file name",
         )
     })?;
-    let mut tmp_name = file_name.to_os_string();
-    tmp_name.push(".tmp");
+    let seq = TMP_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut tmp_name = OsString::from(file_name);
+    tmp_name.push(format!(".{}.{seq}.tmp", std::process::id()));
     Ok(path.with_file_name(tmp_name))
 }
 
@@ -148,8 +255,8 @@ mod tests {
     #[cfg(unix)]
     fn mode_of(path: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path)
-            .expect("metadata")
+        std::fs::symlink_metadata(path)
+            .expect("symlink_metadata")
             .permissions()
             .mode()
             & 0o777
@@ -168,8 +275,7 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).expect("read_dir").count(), 1);
     }
 
-    /// rewriting a key file narrows an existing wide mode. Invariant:
-    /// a rewrite must strictly enforce private permissions `0o600`.
+    /// Rewriting a key file narrows an existing wide mode.
     #[cfg(unix)]
     #[test]
     fn a_rewrite_narrows_a_wide_mode() {
@@ -185,8 +291,8 @@ mod tests {
         assert_eq!(std::fs::read(&path).expect("read"), b"new");
     }
 
-    /// The read side: a key file that group or others can read is
-    /// refused by name, with the mode and the remedy in the message.
+    /// A key file that group or others can read is refused by name, with the
+    /// mode and the remedy in the message.
     #[cfg(unix)]
     #[test]
     fn a_wide_mode_key_file_is_not_read() {
@@ -217,8 +323,7 @@ mod tests {
         }
     }
 
-    /// A key file this build wrote always passes its own read check: the two
-    /// halves have to agree, or every saved key becomes unloadable.
+    /// A key file this build wrote always passes its own read check.
     #[cfg(unix)]
     #[test]
     fn what_the_writer_produces_the_reader_accepts() {
@@ -226,10 +331,11 @@ mod tests {
         let path = dir.path().join("k.bin");
         write_atomic_owner_only(&path, b"secret").expect("write");
         require_owner_only(&path).expect("a file this writer made must pass the reader");
+        let read_back = read_owner_only_bounded(&path, 64, "key").expect("bounded read");
+        assert_eq!(read_back.as_slice(), b"secret");
     }
 
-    /// The reader refuses a path that is not there with the I/O error rather
-    /// than a permission verdict, so a missing key is not reported as a wide one.
+    /// The reader refuses a path that is not there with NotFound.
     #[test]
     fn a_missing_key_file_is_an_io_error_not_a_mode_verdict() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -237,7 +343,7 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 
-    /// A stale temporary from an interrupted write does not block the next one.
+    /// A stale temporary from an earlier write never blocks the next unique write.
     #[test]
     fn a_stale_temporary_does_not_block_a_write() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -245,7 +351,10 @@ mod tests {
         std::fs::write(dir.path().join("k.bin.tmp"), b"stale").expect("seed temp");
         write_atomic_owner_only(&path, b"fresh").expect("write");
         assert_eq!(std::fs::read(&path).expect("read"), b"fresh");
-        assert!(!dir.path().join("k.bin.tmp").exists());
+        assert!(!dir
+            .path()
+            .join(format!("k.bin.{}.0.tmp", std::process::id()))
+            .exists());
     }
 
     /// A path with no file name is refused, not silently written elsewhere.
@@ -259,18 +368,69 @@ mod tests {
     #[test]
     fn a_failed_write_leaves_the_target_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("k.bin");
-        std::fs::write(&path, b"keep-me").expect("seed");
-        // A directory squatting on the temporary name cannot be removed as a
-        // file, so the write stops before it creates anything: the refusal
-        // path is exercised and the target is never opened for writing.
-        let blocker = dir.path().join("k.bin.tmp");
-        std::fs::create_dir(&blocker).expect("blocker dir");
-        let result = write_atomic_owner_only(&path, b"new");
-        assert!(result.is_err(), "a squatting directory must stop the write");
-        assert_eq!(std::fs::read(&path).expect("read"), b"keep-me");
-        // The blocker is the caller's directory; the writer removed its own
-        // temporary only, so the target is intact and no file remains.
-        assert!(blocker.is_dir());
+        let blocker_dir = dir.path().join("k.bin");
+        std::fs::create_dir(&blocker_dir).expect("target directory");
+        let inner = blocker_dir.join("keep");
+        std::fs::write(&inner, b"keep-me").expect("seed");
+        // Renaming a temporary file over an existing directory fails cleanly and
+        // unlinks the temporary without altering the directory or its contents.
+        let result = write_atomic_owner_only(&blocker_dir, b"new");
+        assert!(result.is_err(), "cannot replace a directory with a file");
+        assert_eq!(std::fs::read(&inner).expect("read"), b"keep-me");
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(entries.len(), 1, "no temporary file may remain");
+    }
+
+    /// Pinned readers reject symlinks, directories, and oversized regular files.
+    #[cfg(unix)]
+    #[test]
+    fn pinned_readers_reject_symlinks_directories_and_oversized_files() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("real.bin");
+        let link = dir.path().join("link.bin");
+        let subdir = dir.path().join("subdir");
+        std::fs::create_dir(&subdir).expect("mkdir");
+        std::fs::write(&target, b"0123456789").expect("write");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        symlink(&target, &link).expect("symlink");
+
+        assert_eq!(
+            open_regular_pinned(&link)
+                .expect_err("symlink regular")
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            open_owner_only_pinned(&link)
+                .expect_err("symlink owner")
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            open_regular_pinned(&subdir)
+                .expect_err("dir regular")
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            read_regular_bounded(&target, 5, "test file")
+                .expect_err("oversized regular")
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            read_owner_only_bounded(&target, 5, "test key")
+                .expect_err("oversized owner")
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            read_regular_bounded(&target, 10, "test file").expect("exact bound"),
+            b"0123456789"
+        );
     }
 }

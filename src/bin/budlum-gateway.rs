@@ -585,23 +585,51 @@ impl FollowedCheckpoints {
     /// heights it used to name are unknown again, which is a 502 and never a
     /// stale root.
     fn at(&self, height: u64) -> Option<([u8; 32], u64)> {
-        let modified = std::fs::metadata(&self.path)
-            .and_then(|meta| meta.modified())
-            .ok();
+        use std::io::Read as _;
+        const MAX_CHECKPOINT_TOML_BYTES: usize = 1_048_576;
+        let Ok(file) = budlum_core::crypto::key_file::open_regular_pinned(&self.path) else {
+            let mut seen = match self.seen.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            // Missing or symlinked checkpoint file: nothing is followed, and nothing cached is kept.
+            *seen = (None, RootTable::new());
+            return None;
+        };
+        let meta = file.metadata().ok();
+        let modified = meta.as_ref().and_then(|m| m.modified().ok());
         let mut seen = match self.seen.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         if modified.is_none() {
-            // No file: nothing is followed, and nothing read earlier is kept.
             *seen = (None, RootTable::new());
             return None;
         }
         if seen.0 != modified {
-            let table = std::fs::read_to_string(&self.path)
-                .map_err(|e| e.to_string())
-                .and_then(|raw| toml::from_str::<CheckpointFile>(&raw).map_err(|e| e.to_string()))
-                .and_then(|file| checkpoint_table(&file.checkpoints));
+            let table = (|| -> Result<RootTable, String> {
+                let len = meta.map_or(0, |m| m.len());
+                let max_u64 = u64::try_from(MAX_CHECKPOINT_TOML_BYTES).unwrap_or(u64::MAX);
+                if len > max_u64 {
+                    return Err(format!(
+                        "{} exceeds {MAX_CHECKPOINT_TOML_BYTES}-byte limit",
+                        self.path.display()
+                    ));
+                }
+                let mut raw = Vec::new();
+                file.take(max_u64.saturating_add(1))
+                    .read_to_end(&mut raw)
+                    .map_err(|e| e.to_string())?;
+                if raw.len() > MAX_CHECKPOINT_TOML_BYTES {
+                    return Err(format!(
+                        "{} exceeds {MAX_CHECKPOINT_TOML_BYTES}-byte limit",
+                        self.path.display()
+                    ));
+                }
+                let text = std::str::from_utf8(&raw).map_err(|e| e.to_string())?;
+                let parsed: CheckpointFile = toml::from_str(text).map_err(|e| e.to_string())?;
+                checkpoint_table(&parsed.checkpoints)
+            })();
             *seen = match table {
                 Ok(table) => (modified, table),
                 Err(reason) => {
@@ -661,13 +689,20 @@ impl ContentSource for DirectorySource {
             ));
         }
         let path = self.root.join(hex::encode(content.content_id.digest));
-        // The rehearsal source serves the same objects the production source
-        // does, so it applies the same ceiling, and refuses an object above it
-        // before the bytes are read rather than after they are hashed.
-        if std::fs::metadata(&path).map_or(0, |meta| meta.len()) > ceiling {
-            return Err(format!("{} exceeds the gateway ceiling", path.display()));
-        }
-        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        // Pin the open regular file without following symlinks and enforce the
+        // gateway ceiling on the same descriptor before full allocation.
+        let bytes = budlum_core::crypto::key_file::read_regular_bounded(
+            &path,
+            budlum_core::storage::content_gateway::MAX_GATEWAY_CONTENT_BYTES,
+            "gateway content",
+        )
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::InvalidData {
+                format!("{} exceeds the gateway ceiling ({e})", path.display())
+            } else {
+                format!("{}: {e}", path.display())
+            }
+        })?;
         // This read also backs fetch_manifest: parse no unverified site rules
         // and serve no body unless both digest and length match the public
         // identifier proved by BNS. A sealed object has no public site route.
@@ -902,11 +937,12 @@ impl Bud3RpcSource {
         content: &budlum_core::storage::bud3::content_ref::ContentRef,
     ) -> Option<Vec<u8>> {
         let path = self.cache_path(&content.content_id.digest);
-        let ceiling = budlum_core::storage::content_gateway::MAX_GATEWAY_CONTENT_BYTES as u64;
-        if std::fs::metadata(&path).ok()?.len() > ceiling {
-            return None;
-        }
-        let bytes = std::fs::read(&path).ok()?;
+        let bytes = budlum_core::crypto::key_file::read_regular_bounded(
+            &path,
+            budlum_core::storage::content_gateway::MAX_GATEWAY_CONTENT_BYTES,
+            "gateway cache entry",
+        )
+        .ok()?;
         if bytes.len() <= budlum_core::storage::content_gateway::MAX_GATEWAY_CONTENT_BYTES
             && content.content_id.matches_public(&bytes)
         {
@@ -921,11 +957,18 @@ impl Bud3RpcSource {
     /// An object that does not fit within `cache_max_bytes` is still served to
     /// the caller, just not persisted to disk.
     fn write_verified_cache(&self, digest: &[u8; 32], bytes: &[u8]) {
+        use std::io::Write as _;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CACHE_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
         if std::fs::create_dir_all(&self.cache_dir).is_err() {
             return;
         }
         let target = self.cache_path(digest);
-        let replaced = std::fs::metadata(&target).map_or(0, |meta| meta.len());
+        let replaced = std::fs::symlink_metadata(&target)
+            .ok()
+            .filter(std::fs::Metadata::is_file)
+            .map_or(0, |meta| meta.len());
         let len = bytes.len() as u64;
         if len > self.cache_max_bytes {
             return;
@@ -942,13 +985,21 @@ impl Bud3RpcSource {
                 return;
             }
         }
+        let seq = CACHE_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp = self.cache_dir.join(format!(
-            "{}.{}.tmp",
+            "{}.{}.{seq}.tmp",
             hex::encode(digest),
             std::process::id()
         ));
-        if std::fs::write(&tmp, bytes).is_ok() {
-            if std::fs::rename(&tmp, &target).is_ok() {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        if let Ok(mut file) = options.open(&tmp) {
+            if file.write_all(bytes).is_ok() && std::fs::rename(&tmp, &target).is_ok() {
                 *held = projected;
             } else {
                 let _ = std::fs::remove_file(&tmp);
@@ -1372,9 +1423,10 @@ fn resolve_name(
 }
 
 fn load_config(path: &std::path::Path) -> Result<GatewayConfig, String> {
-    let raw =
-        std::fs::read_to_string(path).map_err(|e| format!("config {}: {e}", path.display()))?;
-    toml::from_str(&raw).map_err(|e| format!("config {}: {e}", path.display()))
+    let raw = budlum_core::crypto::key_file::read_regular_bounded(path, 1_048_576, "config")
+        .map_err(|e| format!("config {}: {e}", path.display()))?;
+    let text = std::str::from_utf8(&raw).map_err(|e| format!("config {}: {e}", path.display()))?;
+    toml::from_str(text).map_err(|e| format!("config {}: {e}", path.display()))
 }
 
 fn build_state(config: GatewayConfig) -> Result<GatewayState, String> {
@@ -1398,9 +1450,15 @@ fn build_state(config: GatewayConfig) -> Result<GatewayState, String> {
     }
     let blocklist = match &config.blocklist_file {
         Some(path) => {
-            let raw = std::fs::read_to_string(path)
+            let raw = budlum_core::crypto::key_file::read_regular_bounded(
+                path,
+                16 * 1024 * 1024,
+                "blocklist",
+            )
+            .map_err(|e| format!("blocklist {}: {e}", path.display()))?;
+            let text = std::str::from_utf8(&raw)
                 .map_err(|e| format!("blocklist {}: {e}", path.display()))?;
-            BlockList::from_names(raw.lines().map(str::to_string))
+            BlockList::from_names(text.lines().map(str::to_string))
         }
         None => BlockList::default(),
     };
@@ -2371,6 +2429,75 @@ mod tests {
         assert!(
             dir.path().join(hex::encode([0x02; 32])).exists(),
             "fresh entry must fit after reaping expired entry"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gateway_file_readers_refuse_symlinks() {
+        use budlum_core::storage::bud3::content_id::{ContentId, ContentIdKind};
+        use budlum_core::storage::bud3::content_ref::ContentRef;
+        use std::os::unix::fs::symlink;
+
+        budlum_core::crypto::tls::install_default_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let real_cp = dir.path().join("real.toml");
+        let link_cp = dir.path().join("link.toml");
+        let root_hex = hex::encode([0x11; 32]);
+        std::fs::write(
+            &real_cp,
+            format!("[[checkpoints]]\nheight = 1\nroot = \"{root_hex}\"\nepoch = 1\n"),
+        )
+        .unwrap();
+        symlink(&real_cp, &link_cp).unwrap();
+
+        let follower = FollowedCheckpoints::new(link_cp);
+        assert!(
+            follower.at(1).is_none(),
+            "FollowedCheckpoints must refuse symlink"
+        );
+
+        let outside = dir.path().join("outside");
+        let content = b"symlink-gateway-payload";
+        std::fs::write(&outside, content).unwrap();
+        let digest = budlum_core::storage::ContentId::of(content).0;
+        let dir_root = dir.path().join("content");
+        std::fs::create_dir(&dir_root).unwrap();
+        symlink(&outside, dir_root.join(hex::encode(digest))).unwrap();
+        let cref = ContentRef::new(
+            ContentId {
+                kind: ContentIdKind::Public,
+                digest,
+                len: content.len() as u64,
+            },
+            [0x22; 32],
+            None,
+        )
+        .unwrap();
+        let source = DirectorySource { root: dir_root };
+        assert!(
+            source.fetch(&cref).is_err(),
+            "DirectorySource must refuse symlink"
+        );
+
+        let cache_dir = dir.path().join("cache");
+        std::fs::create_dir(&cache_dir).unwrap();
+        symlink(&outside, cache_dir.join(hex::encode(digest))).unwrap();
+        let cfg = Bud3SourceConfig {
+            payer: hex::encode([0x11; 32]),
+            receipt_id: hex::encode([0x22; 32]),
+            fee_paid_atoms: budlum_core::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS,
+        };
+        let rpc_source = Bud3RpcSource::new(
+            vec!["http://127.0.0.1:9".to_string()],
+            &cfg,
+            cache_dir,
+            4096,
+        )
+        .unwrap();
+        assert!(
+            rpc_source.read_verified_cache(&cref).is_none(),
+            "Bud3RpcSource::read_verified_cache must refuse symlink"
         );
     }
 }

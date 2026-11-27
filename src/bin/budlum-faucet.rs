@@ -311,7 +311,11 @@ impl StoredState {
         faucet_address: Address,
         chain_nonce: u64,
     ) -> Result<Self, String> {
-        match std::fs::read(path) {
+        match budlum_core::crypto::key_file::read_regular_bounded(
+            path,
+            16 * 1024 * 1024,
+            "faucet state",
+        ) {
             Ok(bytes) => {
                 let state: Self = serde_json::from_slice(&bytes)
                     .map_err(|e| format!("invalid faucet state {}: {e}", path.display()))?;
@@ -867,27 +871,16 @@ async fn handle(
 }
 
 fn read_seed(path: &str) -> Result<[u8; 32], String> {
-    use std::io::Read as _;
-    // Check and read the SAME descriptor: replacing a pathname between a
-    // permission check and read must not swap in a different signing seed.
-    let file = std::fs::File::open(path).map_err(|e| format!("cannot open {path}: {e}"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|e| format!("cannot stat {path}: {e}"))?;
-    if !metadata.is_file() || metadata.len() > 128 {
-        return Err("faucet seed must be a regular file of at most 128 bytes".into());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err("faucet seed must be an owner-only file (mode 0600)".into());
-        }
-    }
-    let mut text = zeroize::Zeroizing::new(String::new());
-    file.take(129)
-        .read_to_string(&mut text)
-        .map_err(|e| format!("cannot read {path}: {e}"))?;
+    // Pin the regular file descriptor via symlink_metadata + O_NOFOLLOW + fstat
+    // and check 0o077 + <= 128 bytes on that same descriptor.
+    let raw =
+        budlum_core::crypto::key_file::read_owner_only_bounded(Path::new(path), 128, "faucet seed")
+            .map_err(|e| format!("cannot read faucet seed {path}: {e}"))?;
+    let text = zeroize::Zeroizing::new(
+        std::str::from_utf8(&raw)
+            .map_err(|e| format!("cannot decode {path}: {e}"))?
+            .to_string(),
+    );
     let bytes = zeroize::Zeroizing::new(
         hex::decode(text.trim()).map_err(|e| format!("{path} is not hex: {e}"))?,
     );

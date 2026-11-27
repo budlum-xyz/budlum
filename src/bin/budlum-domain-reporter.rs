@@ -149,11 +149,15 @@ fn http_client() -> Result<reqwest::Client, String> {
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
-    let payload: budlum_core::domain::VerifiedDomainCommitment = serde_json::from_slice(
-        &std::fs::read(&cli.payload)
-            .map_err(|e| format!("cannot read payload {}: {e}", cli.payload.display()))?,
+    let raw_payload = budlum_core::crypto::key_file::read_regular_bounded(
+        &cli.payload,
+        16 * 1024 * 1024,
+        "domain commitment payload",
     )
-    .map_err(|e| format!("payload is not a VerifiedDomainCommitment: {e}"))?;
+    .map_err(|e| format!("cannot read payload {}: {e}", cli.payload.display()))?;
+    let payload: budlum_core::domain::VerifiedDomainCommitment =
+        serde_json::from_slice(&raw_payload)
+            .map_err(|e| format!("payload is not a VerifiedDomainCommitment: {e}"))?;
     let key = budlum_core::wallet::open_key_file(&cli.key_file, cli.password_file.as_deref())?;
     let client = http_client()?;
     let chain_id = bind_signing_chain_id(

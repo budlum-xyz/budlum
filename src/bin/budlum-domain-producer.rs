@@ -254,11 +254,13 @@ struct QuorumKeys {
     composite: Vec<[String; 2]>,
 }
 
-fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf, what: &str) -> Result<T, String> {
-    serde_json::from_slice(
-        &std::fs::read(path).map_err(|e| format!("cannot read {what} {}: {e}", path.display()))?,
-    )
-    .map_err(|e| format!("{} is not a {what}: {e}", path.display()))
+fn read_json<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+    what: &str,
+) -> Result<T, String> {
+    let raw = budlum_core::crypto::key_file::read_regular_bounded(path, 16 * 1024 * 1024, what)
+        .map_err(|e| format!("cannot read {what} {}: {e}", path.display()))?;
+    serde_json::from_slice(&raw).map_err(|e| format!("{} is not a {what}: {e}", path.display()))
 }
 
 fn seed<const N: usize>(text: &str, what: &str) -> Result<[u8; N], String> {
@@ -269,40 +271,17 @@ fn seed<const N: usize>(text: &str, what: &str) -> Result<[u8; N], String> {
 }
 
 fn read_keys(cli: &Cli) -> Result<QuorumKeys, String> {
-    use std::io::Read;
-    const MAX_QUORUM_KEYS_BYTES: u64 = 1_048_576;
+    const MAX_QUORUM_KEYS_BYTES: usize = 1_048_576;
     let path = cli
         .quorum_keys
         .as_ref()
         .ok_or_else(|| "--quorum-keys is required".to_string())?;
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("cannot open QuorumKeys {}: {e}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = file
-            .metadata()
-            .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?
-            .permissions()
-            .mode();
-        if mode & 0o077 != 0 {
-            return Err(format!(
-                "{} has mode {:03o}; use chmod 600",
-                path.display(),
-                mode & 0o777
-            ));
-        }
-    }
-    let mut raw = Vec::new();
-    file.take(MAX_QUORUM_KEYS_BYTES.saturating_add(1))
-        .read_to_end(&mut raw)
-        .map_err(|e| format!("cannot read QuorumKeys {}: {e}", path.display()))?;
-    if raw.len() as u64 > MAX_QUORUM_KEYS_BYTES {
-        return Err(format!(
-            "QuorumKeys {} exceeds {MAX_QUORUM_KEYS_BYTES}-byte limit",
-            path.display()
-        ));
-    }
+    let raw = budlum_core::crypto::key_file::read_owner_only_bounded(
+        path,
+        MAX_QUORUM_KEYS_BYTES,
+        "QuorumKeys",
+    )
+    .map_err(|e| format!("cannot read QuorumKeys {}: {e}", path.display()))?;
     serde_json::from_slice(&raw).map_err(|e| format!("{} is not a QuorumKeys: {e}", path.display()))
 }
 
@@ -343,7 +322,7 @@ fn bft_members(
 
 fn build_bft(
     cli: &Cli,
-    path: &PathBuf,
+    path: &std::path::Path,
 ) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
     let job: BftJob = read_json(path, "BftJob")?;
     let members = bft_members(cli, job.members)?;
@@ -377,7 +356,7 @@ fn load_composite_signers(
 
 fn build_poa(
     cli: &Cli,
-    path: &PathBuf,
+    path: &std::path::Path,
 ) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
     let job: PoaJob = read_json(path, "PoaJob")?;
     let signers = load_composite_signers(cli)?;
@@ -386,7 +365,7 @@ fn build_poa(
 
 fn build_dag(
     cli: &Cli,
-    path: &PathBuf,
+    path: &std::path::Path,
 ) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
     let job: DagJob = read_json(path, "DagJob")?;
     let signers = load_composite_signers(cli)?;
@@ -400,7 +379,7 @@ fn build_dag(
 
 fn build_poh(
     cli: &Cli,
-    path: &PathBuf,
+    path: &std::path::Path,
 ) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
     let job: PohJob = read_json(path, "PohJob")?;
     let signers = load_composite_signers(cli)?;
@@ -415,7 +394,7 @@ fn build_poh(
 
 fn build_pospace(
     cli: &Cli,
-    path: &PathBuf,
+    path: &std::path::Path,
 ) -> Result<budlum_core::domain::VerifiedDomainCommitment, String> {
     let mut job: PospaceJob = read_json(path, "PospaceJob")?;
     let signers = load_composite_signers(cli)?;
@@ -456,19 +435,12 @@ fn load_payload(cli: &Cli) -> Result<budlum_core::domain::VerifiedDomainCommitme
         return build_pospace(cli, path);
     }
     if let Some(path) = &cli.pow_spec {
-        let spec: budlum_core::domain::producer::PowChainSpec = serde_json::from_slice(
-            &std::fs::read(path)
-                .map_err(|e| format!("cannot read PoW spec {}: {e}", path.display()))?,
-        )
-        .map_err(|e| format!("{} is not a PowChainSpec: {e}", path.display()))?;
+        let spec: budlum_core::domain::producer::PowChainSpec = read_json(path, "PowChainSpec")?;
         return budlum_core::domain::producer::build_pow_commitment(&spec);
     }
     if let Some(path) = &cli.bitcoin_spec {
-        let spec: budlum_core::domain::producer::BitcoinSpvChainSpec = serde_json::from_slice(
-            &std::fs::read(path)
-                .map_err(|e| format!("cannot read Bitcoin spec {}: {e}", path.display()))?,
-        )
-        .map_err(|e| format!("{} is not a BitcoinSpvChainSpec: {e}", path.display()))?;
+        let spec: budlum_core::domain::producer::BitcoinSpvChainSpec =
+            read_json(path, "BitcoinSpvChainSpec")?;
         if spec
             .blocks
             .iter()
@@ -485,10 +457,7 @@ fn load_payload(cli: &Cli) -> Result<budlum_core::domain::VerifiedDomainCommitme
         .payload
         .as_ref()
         .ok_or_else(|| "--payload, --pow-spec, or --bitcoin-spec is required".to_string())?;
-    serde_json::from_slice(
-        &std::fs::read(path).map_err(|e| format!("cannot read payload {}: {e}", path.display()))?,
-    )
-    .map_err(|e| format!("payload is not a VerifiedDomainCommitment: {e}"))
+    read_json(path, "VerifiedDomainCommitment")
 }
 
 /// A client whose TLS stack is ready to use.

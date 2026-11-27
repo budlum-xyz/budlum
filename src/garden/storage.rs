@@ -224,7 +224,7 @@ impl GardenContentStore {
         let len = charged_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         match self.path_of(&content_id) {
             Some(path) => {
-                if !path.is_file() {
+                if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
                     if !self.can_fit(len) {
                         return Err(format!(
                             "garden local storage limit of {} bytes reached",
@@ -234,7 +234,10 @@ impl GardenContentStore {
                     let seq = TEMP_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
                     let tmp = path.with_extension(format!("tmp.{}.{seq}", std::process::id()));
                     let write_res = (|| -> std::io::Result<()> {
-                        let mut file = fs::File::create(&tmp)?;
+                        let mut file = fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&tmp)?;
                         file.write_all(bytes)?;
                         file.sync_all()?;
                         fs::rename(&tmp, &path)?;
@@ -345,7 +348,10 @@ impl GardenContentStore {
         let seq = TEMP_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp = path.with_extension(format!("tmp.{}.{seq}", std::process::id()));
         let write_res = (|| -> std::io::Result<bool> {
-            let mut file = fs::File::create(&tmp)?;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
             drop(file);
@@ -504,7 +510,12 @@ impl GardenContentStore {
     /// Read an object and check it against its content id.
     pub fn get(&self, content_id: &Hash32) -> Option<Vec<u8>> {
         let bytes = match self.path_of(content_id) {
-            Some(path) => fs::read(path).ok()?,
+            Some(path) => crate::crypto::key_file::read_regular_bounded(
+                &path,
+                self.max_object_bytes,
+                "garden object",
+            )
+            .ok()?,
             None => self.memory.get(content_id)?.clone(),
         };
         (ContentId::of(&bytes).0 == *content_id).then_some(bytes)
@@ -513,7 +524,7 @@ impl GardenContentStore {
     pub fn contains(&self, content_id: &Hash32) -> bool {
         self.path_of(content_id).map_or_else(
             || self.memory.contains_key(content_id),
-            |path| path.is_file(),
+            |path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file()),
         )
     }
 
@@ -526,7 +537,7 @@ impl GardenContentStore {
                     .and_then(|bytes| u64::try_from(bytes.len()).ok())
             },
             |path| {
-                fs::metadata(path)
+                fs::symlink_metadata(path)
                     .ok()
                     .filter(fs::Metadata::is_file)
                     .map(|meta| meta.len())
@@ -542,10 +553,13 @@ impl GardenContentStore {
         self.drop_coding(content_id);
         match self.path_of(content_id) {
             Some(path) => {
-                let len = fs::metadata(&path)
-                    .ok()
-                    .filter(fs::Metadata::is_file)
-                    .map_or(0, |meta| charged_bytes(meta.len()));
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    return;
+                };
+                if !meta.is_file() {
+                    return;
+                }
+                let len = charged_bytes(meta.len());
                 if fs::remove_file(path).is_ok() {
                     self.total_bytes = self.total_bytes.saturating_sub(len);
                 }
@@ -581,7 +595,7 @@ impl GardenContentStore {
             if let Ok(entries) = fs::read_dir(root) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if !path.is_file() {
+                    if !entry.metadata().is_ok_and(|meta| meta.is_file()) {
                         continue;
                     }
                     let known = path
@@ -822,5 +836,35 @@ mod tests {
             1,
             "counters record work done, so removal must not rewind them"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn garden_store_refuses_symlinks_across_all_disk_operations() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("garden");
+        let outside = dir.path().join("outside-secret.txt");
+        let payload = b"garden-object-payload";
+        fs::write(&outside, payload).unwrap();
+
+        let mut store =
+            GardenContentStore::open_with_limit(Some(&root), 1024, 1024 * 1024).unwrap();
+        let id = ContentId::of(payload).0;
+        let slot = root.join(hex::encode(id));
+        symlink(&outside, &slot).unwrap();
+
+        assert!(!store.contains(&id), "contains must refuse symlinks");
+        assert!(
+            store.stored_len(&id).is_none(),
+            "stored_len must refuse symlinks"
+        );
+        assert!(store.get(&id).is_none(), "get must refuse symlinks");
+        store.remove(&id);
+        assert!(
+            slot.symlink_metadata().is_ok(),
+            "remove must not unlink symlinks"
+        );
+        assert!(outside.exists(), "remove must never touch symlink target");
     }
 }

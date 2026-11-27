@@ -1368,10 +1368,16 @@ fn parse_address(s: &str) -> Result<Address, String> {
 /// `BUD_PRIV_KEY` environment variable, in that order, never from `argv`.
 fn load_priv_key(path: Option<&std::path::Path>) -> Result<String, String> {
     if let Some(path) = path {
-        check_key_file_mode(path)?;
-        return std::fs::read_to_string(path)
-            .map(|s| s.trim().to_string())
-            .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()));
+        let raw =
+            budlum_core::crypto::key_file::read_owner_only_bounded(path, 256, "priv key file")
+                .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()))?;
+        let text = zeroize::Zeroizing::new(
+            std::str::from_utf8(&raw)
+                .map_err(|e| format!("cannot decode priv key file {}: {e}", path.display()))?
+                .trim()
+                .to_string(),
+        );
+        return Ok(text.to_string());
     }
     std::env::var("BUD_PRIV_KEY").map_err(|_| {
         String::from(
@@ -1381,29 +1387,10 @@ fn load_priv_key(path: Option<&std::path::Path>) -> Result<String, String> {
     })
 }
 
-/// Refuse a seed file that group or others can read (Unix only).
-///
-/// A world-readable seed file is a leaked key; the user must `chmod 600` it.
-#[cfg(unix)]
+/// Refuse a seed file that group or others can read, or that is a symlink/non-regular file.
 fn check_key_file_mode(path: &std::path::Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    let meta = std::fs::metadata(path)
-        .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()))?;
-    let mode = meta.permissions().mode();
-    if mode & 0o077 != 0 {
-        return Err(format!(
-            "priv key file {} has mode {:03o}; group and others must have no access \
-             (chmod 600)",
-            path.display(),
-            mode & 0o777
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn check_key_file_mode(_path: &std::path::Path) -> Result<(), String> {
-    Ok(())
+    budlum_core::crypto::key_file::require_owner_only(path)
+        .map_err(|e| format!("priv key file {e}"))
 }
 
 fn parse_seed(hex_str: &str) -> Result<[u8; 32], String> {
@@ -1748,9 +1735,10 @@ fn run_query_status(rpc_url: &str) -> Result<(), String> {
 /// of each member in execution order, and with nothing at all if it refused
 /// the bundle - admission is all or none on both sides of the door.
 fn run_tx_bundle(rpc_url: &str, file: &std::path::Path) -> Result<(), String> {
-    let text = std::fs::read_to_string(file)
-        .map_err(|e| format!("cannot read bundle file {}: {e}", file.display()))?;
-    let bundle: serde_json::Value = serde_json::from_str(&text)
+    let raw =
+        budlum_core::crypto::key_file::read_regular_bounded(file, 16 * 1024 * 1024, "bundle file")
+            .map_err(|e| format!("cannot read bundle file {}: {e}", file.display()))?;
+    let bundle: serde_json::Value = serde_json::from_slice(&raw)
         .map_err(|e| format!("bundle file {} is not JSON: {e}", file.display()))?;
     let r = rpc_call(rpc_url, "bud_sendTxBundle", serde_json::json!([bundle]))?;
     println!(
@@ -1766,11 +1754,17 @@ fn run_validator(config: Option<&str>) -> Result<(), String> {
     // Real node startup with `RpcServer::run` + `NodeConfig` is future work.
     match config {
         Some(path) => {
-            let content = std::fs::read_to_string(path)
+            let raw = budlum_core::crypto::key_file::read_regular_bounded(
+                std::path::Path::new(path),
+                1_048_576,
+                "validator config",
+            )
+            .map_err(|e| format!("configuration read error ({path}): {e}"))?;
+            let content = std::str::from_utf8(&raw)
                 .map_err(|e| format!("configuration read error ({path}): {e}"))?;
             // Basic TOML parse validation.
             let _doc: toml::Value =
-                toml::from_str(&content).map_err(|e| format!("invalid TOML configuration: {e}"))?;
+                toml::from_str(content).map_err(|e| format!("invalid TOML configuration: {e}"))?;
             println!("configuration valid (TOML): {path}");
         }
         None => {
@@ -1871,7 +1865,7 @@ fn run_validator_init(
                 .into(),
         );
     }
-    if key_file.exists() {
+    if std::fs::symlink_metadata(key_file).is_ok() {
         return Err(format!(
             "{} exists; a key file is never overwritten",
             key_file.display()
@@ -2231,7 +2225,12 @@ fn hex_bytes(text: &str, what: &str) -> Result<Vec<u8>, String> {
 fn evidence_file(
     path: &std::path::Path,
 ) -> Result<Box<budlum_core::core::transaction::RelayerExternalResult>, String> {
-    let raw = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let raw = budlum_core::crypto::key_file::read_regular_bounded(
+        path,
+        16 * 1024 * 1024,
+        "external result",
+    )
+    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     serde_json::from_slice(&raw)
         .map(Box::new)
         .map_err(|e| format!("{} is not an external result: {e}", path.display()))
@@ -2347,10 +2346,14 @@ fn run_domain_selftest(args: DomainSelftestArgs<'_>) -> Result<(), String> {
         admit, RawConsensusEvidence, TendermintFinalityAdapter, VerificationPolicy,
         ZkVmFinalityAdapter,
     };
-    let text = std::fs::read_to_string(golden)
-        .map_err(|e| format!("cannot read {}: {e}", golden.display()))?;
+    let raw_sample = budlum_core::crypto::key_file::read_regular_bounded(
+        golden,
+        16 * 1024 * 1024,
+        "golden sample",
+    )
+    .map_err(|e| format!("cannot read {}: {e}", golden.display()))?;
     let sample: RawConsensusEvidence =
-        serde_json::from_str(&text).map_err(|e| format!("golden sample: {e}"))?;
+        serde_json::from_slice(&raw_sample).map_err(|e| format!("golden sample: {e}"))?;
     let report = match adapter {
         "zkvm" => {
             let program_hash = match program_hash {
@@ -2584,7 +2587,7 @@ fn run_dev(rpc_url: &str, action: &DevAction) -> Result<(), String> {
     use budlum_core::sdk::BudlumToml;
     match action {
         DevAction::Init { name, path } => {
-            if path.exists() {
+            if std::fs::symlink_metadata(path).is_ok() {
                 return Err(format!("{} exists; not overwriting it", path.display()));
             }
             let mut project = BudlumToml::default_template(name);
@@ -2662,10 +2665,11 @@ fn run_genesis_assemble(
     paths.sort();
     let mut records = Vec::with_capacity(paths.len());
     for path in &paths {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let raw =
+            budlum_core::crypto::key_file::read_regular_bounded(path, 1_048_576, "operator record")
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         records.push(
-            serde_json::from_str(&raw)
+            serde_json::from_slice(&raw)
                 .map_err(|e| format!("{} is not an operator record: {e}", path.display()))?,
         );
     }
@@ -2710,13 +2714,18 @@ fn run_genesis_assemble(
 fn wallet_password(file: Option<&std::path::Path>) -> Result<String, String> {
     let password = match file {
         Some(path) => {
-            check_key_file_mode(path)?;
-            std::fs::read_to_string(path)
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))?
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .to_string()
+            let raw = budlum_core::crypto::key_file::read_owner_only_bounded(
+                path,
+                16 * 1024,
+                "password file",
+            )
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let text = zeroize::Zeroizing::new(
+                std::str::from_utf8(&raw)
+                    .map_err(|e| format!("cannot decode {}: {e}", path.display()))?
+                    .to_string(),
+            );
+            text.lines().next().unwrap_or_default().to_string()
         }
         None => std::env::var("BUD_WALLET_PASSWORD").map_err(|_| {
             String::from(
@@ -2757,9 +2766,10 @@ fn write_new_key_file(
 }
 
 fn read_key_file(path: &std::path::Path) -> Result<budlum_core::wallet::KeyFile, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    serde_json::from_str(&raw)
+    let raw =
+        budlum_core::crypto::key_file::read_regular_bounded(path, 1_048_576, "wallet key file")
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    serde_json::from_slice(&raw)
         .map_err(|e| format!("{} is not a wallet key file: {e}", path.display()))
 }
 
@@ -2987,9 +2997,11 @@ fn run_bns_sell(
     default_duration: u64,
     expires_at_epoch: u64,
 ) -> Result<(), String> {
-    let contents = std::fs::read_to_string(file)
+    let raw = budlum_core::crypto::key_file::read_regular_bounded(file, 1_048_576, "BNS sell list")
         .map_err(|e| format!("could not read {}: {e}", file.display()))?;
-    let rows = parse_bns_sell_list(&contents, default_duration)?;
+    let contents =
+        std::str::from_utf8(&raw).map_err(|e| format!("could not read {}: {e}", file.display()))?;
+    let rows = parse_bns_sell_list(contents, default_duration)?;
     let key = open_wallet(signer)?;
     let nonce_value = rpc_call(
         rpc_url,
@@ -4151,8 +4163,12 @@ fn collect_site_dir_files(
             if rel.is_empty() || rel.contains("..") {
                 return Err(format!("invalid relative site path `{rel}`"));
             }
-            let bytes =
-                std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let bytes = budlum_core::crypto::key_file::read_regular_bounded(
+                &path,
+                16 * 1024 * 1024,
+                "site asset",
+            )
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             out.insert(rel, (infer_site_mime(&path).to_string(), bytes));
         }
     }
@@ -4168,8 +4184,12 @@ fn bundle_site_payload(path: &std::path::Path) -> Result<(Vec<u8>, String), Stri
         return Err(format!("refusing symlink site path: {}", path.display()));
     }
     if meta.is_file() {
-        let bytes =
-            std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let bytes = budlum_core::crypto::key_file::read_regular_bounded(
+            path,
+            16 * 1024 * 1024,
+            "site file",
+        )
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         if bytes.is_empty() {
             return Err("site file cannot be empty".into());
         }
@@ -4443,7 +4463,8 @@ fn run_deal_consent_digest(
     shard: &std::path::Path,
 ) -> Result<(), String> {
     let read = |path: &std::path::Path| {
-        std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+        budlum_core::crypto::key_file::read_regular_bounded(path, 16 * 1024 * 1024, "deal asset")
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))
     };
     let payer = parse_address(payer.strip_prefix("0x").unwrap_or(payer))?;
     let digest = budlum_core::domain::operator_open_deal_consent_digest(
@@ -4875,8 +4896,12 @@ fn run_quote_check(
     use budlum_core::settlement::liquidation_proof::{
         evaluate_quote_against_proven_twap, AmmReserveSnapshot,
     };
-    let raw = std::fs::read(observations_path)
-        .map_err(|e| format!("failed to read observations `{observations_path}`: {e}"))?;
+    let raw = budlum_core::crypto::key_file::read_regular_bounded(
+        std::path::Path::new(observations_path),
+        16 * 1024 * 1024,
+        "observations",
+    )
+    .map_err(|e| format!("failed to read observations `{observations_path}`: {e}"))?;
     let snapshots: Vec<AmmReserveSnapshot> = serde_json::from_slice(&raw)
         .map_err(|e| format!("invalid AmmReserveSnapshot JSON: {e}"))?;
     let advisory = evaluate_quote_against_proven_twap(&snapshots, quoted_price_scaled, warn_bps)
@@ -5034,10 +5059,14 @@ fn run_notary(action: &NotaryAction) -> Result<(), String> {
             key_epoch,
             key_index,
         } => {
-            let raw = std::fs::read_to_string(proof_path)
-                .map_err(|e| format!("read {}: {e}", proof_path.display()))?;
+            let raw = budlum_core::crypto::key_file::read_regular_bounded(
+                proof_path,
+                1_048_576,
+                "notary proof",
+            )
+            .map_err(|e| format!("read {}: {e}", proof_path.display()))?;
             let proof: NotaryTimestampProof =
-                serde_json::from_str(&raw).map_err(|e| format!("parse notary proof: {e}"))?;
+                serde_json::from_slice(&raw).map_err(|e| format!("parse notary proof: {e}"))?;
             let pk_trimmed = seal_pubkey
                 .trim()
                 .strip_prefix("0x")
@@ -6511,5 +6540,38 @@ mod finality_anchor_tests {
         ]);
         run_finality_route(&url, 1, 2, Some(&digest_hex(&honest)), Some(CHECKPOINT))
             .expect("an anchored honest route with no alarm on the node is admitted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_key_and_config_readers_refuse_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.bin");
+        let link = dir.path().join("link.bin");
+        std::fs::write(
+            &target,
+            b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&target, &link).unwrap();
+
+        assert!(
+            check_key_file_mode(&link).is_err(),
+            "check_key_file_mode must reject symlink"
+        );
+        assert!(
+            load_priv_key(Some(&link)).is_err(),
+            "load_priv_key must reject symlink"
+        );
+        assert!(
+            read_key_file(&link).is_err(),
+            "read_key_file must reject symlink"
+        );
+        assert!(
+            bundle_site_payload(&link).is_err(),
+            "bundle_site_payload must reject symlink"
+        );
     }
 }

@@ -499,10 +499,14 @@ pub const FILIZ_SEED_FILE_ENV: &str = "BUDLUM_FILIZ_SEED_FILE";
 /// An unreadable file or anything that is not 32 hex-encoded bytes. The
 /// message never carries the file's content.
 pub fn read_seed_file(path: &std::path::Path) -> Result<Link, String> {
-    let text = std::fs::read_to_string(path)
+    let raw = crate::crypto::key_file::read_owner_only_bounded(path, 256, "consensus seed file")
         .map_err(|e| format!("cannot read the Filiz seed file {}: {e}", path.display()))?;
-    let bytes = hex::decode(text.trim())
-        .map_err(|_| format!("the Filiz seed file {} is not hex", path.display()))?;
+    let text = std::str::from_utf8(&raw)
+        .map_err(|_| format!("the consensus seed file {} is not UTF-8", path.display()))?;
+    let bytes = zeroize::Zeroizing::new(
+        hex::decode(text.trim())
+            .map_err(|_| format!("the Filiz seed file {} is not hex", path.display()))?,
+    );
     <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
         format!(
             "the Filiz seed file {} does not hold 32 bytes",
