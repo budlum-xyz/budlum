@@ -834,7 +834,7 @@ impl AptosCompatGateway {
                     "epoch": "1",
                     "ledger_version": self.block_height.to_string(),
                     "block_height": self.block_height.to_string(),
-                    "ledger_timestamp": (self.now_secs * 1_000_000).to_string(),
+                    "ledger_timestamp": self.now_secs.saturating_mul(1_000_000).to_string(),
                     "node_role": "full_node",
                 }),
             },
@@ -853,6 +853,12 @@ impl AptosCompatGateway {
                         body: serde_json::json!({ "message": "missing BCS transaction body" }),
                     };
                 };
+                if raw.len() > crate::rpc::compat::ethereum::MAX_COMPAT_REQUEST_BYTES {
+                    return AptosRestResponse {
+                        status: 413,
+                        body: serde_json::json!({ "message": "payload too large" }),
+                    };
+                }
                 let env = ForeignTx::Aptos {
                     raw_bcs: raw.to_vec(),
                     direct_native_pq_recipient: None,
@@ -876,13 +882,36 @@ impl AptosCompatGateway {
                 }
             }
             ("POST", "/v1/transactions/simulate" | "/v1/view") => AptosRestResponse {
-                status: 200,
-                body: serde_json::json!([]),
+                status: 503,
+                body: serde_json::json!({
+                    "message": "Move VM execution environment is not available on this REST surface; use bud_txPrecheck",
+                    "door": "bud_txPrecheck"
+                }),
             },
             ("GET", p) if p.starts_with("/v1/accounts/") => {
-                let rest = p.trim_start_matches("/v1/accounts/");
-                let addr_seg = rest.split('/').next().unwrap_or("");
-                let Ok(bytes) = hex::decode(addr_seg.trim_start_matches("0x")) else {
+                let Some(rest) = p.strip_prefix("/v1/accounts/") else {
+                    return AptosRestResponse {
+                        status: 404,
+                        body: serde_json::json!({ "message": "route not found" }),
+                    };
+                };
+                let mut segs = rest.split('/');
+                let addr_seg = segs.next().unwrap_or("");
+                let sub = segs.next();
+                if segs.next().is_some() || !matches!(sub, None | Some("resources")) {
+                    return AptosRestResponse {
+                        status: 404,
+                        body: serde_json::json!({ "message": "route not found" }),
+                    };
+                }
+                let hex_part = addr_seg.strip_prefix("0x").unwrap_or(addr_seg);
+                if hex_part.len() != 64 {
+                    return AptosRestResponse {
+                        status: 400,
+                        body: serde_json::json!({ "message": "expected 32-byte auth key" }),
+                    };
+                }
+                let Ok(bytes) = hex::decode(hex_part) else {
                     return AptosRestResponse {
                         status: 400,
                         body: serde_json::json!({ "message": "bad account hex" }),
@@ -902,7 +931,7 @@ impl AptosCompatGateway {
                     .get(&bud_addr)
                     .map_or(0u64, |r| r.next_nonce);
                 let octas = state.get_attos_balance(&bud_addr) / ATTOS_PER_OCTA;
-                if rest.ends_with("/resources") {
+                if sub == Some("resources") {
                     return AptosRestResponse {
                         status: 200,
                         body: serde_json::json!([{
@@ -983,5 +1012,38 @@ mod upstream_tests {
                 parsed.path()
             );
         }
+    }
+
+    #[test]
+    fn rest_gateway_bounds_timestamp_body_subroutes_hex_and_simulation() {
+        let state = AccountState::new();
+        let mut gw = AptosCompatGateway::new(AptosCompatConfig::default(), 50, u64::MAX);
+        let root = gw.handle_rest("GET", "/v1", None, &state);
+        assert_eq!(root.status, 200);
+
+        let oversized = vec![0u8; crate::rpc::compat::ethereum::MAX_COMPAT_REQUEST_BYTES + 1];
+        let tx_resp = gw.handle_rest("POST", "/v1/transactions", Some(&oversized), &state);
+        assert_eq!(tx_resp.status, 413);
+
+        let sim = gw.handle_rest("POST", "/v1/transactions/simulate", None, &state);
+        assert_eq!(sim.status, 503);
+        let view = gw.handle_rest("POST", "/v1/view", None, &state);
+        assert_eq!(view.status, 503);
+
+        let extra = gw.handle_rest(
+            "GET",
+            &format!("/v1/accounts/0x{}/extra/foo", "11".repeat(32)),
+            None,
+            &state,
+        );
+        assert_eq!(extra.status, 404);
+
+        let dbl_prefix = gw.handle_rest(
+            "GET",
+            &format!("/v1/accounts/0x0x{}", "11".repeat(32)),
+            None,
+            &state,
+        );
+        assert_eq!(dbl_prefix.status, 400);
     }
 }

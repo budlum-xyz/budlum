@@ -127,6 +127,21 @@ fn parse_felt_hex(raw: &str) -> Option<[u8; 32]> {
     Some(arr)
 }
 
+fn is_valid_block_id(block_id: &Value) -> bool {
+    match block_id {
+        Value::String(s) => s == "latest" || s == "pending" || parse_felt_hex(s).is_some(),
+        Value::Object(obj) => {
+            obj.len() == 1
+                && (obj.get("block_number").is_some_and(Value::is_u64)
+                    || obj
+                        .get("block_hash")
+                        .and_then(Value::as_str)
+                        .is_some_and(|h| parse_felt_hex(h).is_some()))
+        }
+        _ => false,
+    }
+}
+
 /// Handle a read-only Starknet JSON-RPC v0.7 request.
 ///
 /// Convenience: entry point for the Starknet compatibility gateway.
@@ -164,16 +179,7 @@ pub fn handle_starknet_rpc(
         "starknet_getNonce" => {
             // block_id validation: must be present and valid.
             if let Some(block_id) = req.params.first() {
-                let valid = match block_id {
-                    Value::String(s) => {
-                        s == "latest" || s == "pending" || parse_felt_hex(s).is_some()
-                    }
-                    Value::Object(obj) => {
-                        obj.contains_key("block_number") || obj.contains_key("block_hash")
-                    }
-                    _ => false,
-                };
-                if !valid {
+                if !is_valid_block_id(block_id) {
                     return StarknetRpcResponse::err(req.id, -32602, "invalid block_id");
                 }
             }
@@ -195,9 +201,19 @@ pub fn handle_starknet_rpc(
             if parse_felt_hex(addr_str).is_none() || parse_felt_hex(key_str).is_none() {
                 return StarknetRpcResponse::err(req.id, -32602, "invalid Starknet felt252");
             }
+            if let Some(block_id) = req.params.get(2) {
+                if !is_valid_block_id(block_id) {
+                    return StarknetRpcResponse::err(req.id, -32602, "invalid block_id");
+                }
+            }
             StarknetRpcResponse::ok(req.id, json!("0x0"))
         }
         "starknet_getClassHashAt" => {
+            if let Some(block_id) = req.params.first() {
+                if !is_valid_block_id(block_id) {
+                    return StarknetRpcResponse::err(req.id, -32602, "invalid block_id");
+                }
+            }
             let Some(addr_str) = req.params.get(1).and_then(Value::as_str) else {
                 return StarknetRpcResponse::err(req.id, -32602, "missing contract_address");
             };
@@ -311,5 +327,51 @@ mod tests {
     #[test]
     fn max_starknet_rpc_request_bytes_is_bounded() {
         assert_eq!(MAX_STARKNET_RPC_REQUEST_BYTES, 1 << 20);
+    }
+
+    #[test]
+    fn starknet_rejects_malformed_block_id_object_values_and_class_hash_block_id() {
+        let state = AccountState::new();
+        let policy = StarknetActivationPolicy {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: 100,
+            activation_height: Some(100),
+        };
+        for bad_block_id in [
+            json!({ "block_number": "not-a-number" }),
+            json!({ "block_hash": "0xzzzz" }),
+            json!({ "block_number": 10, "extra": true }),
+        ] {
+            let resp = handle_starknet_rpc(
+                &state,
+                policy,
+                StarknetRpcRequest {
+                    jsonrpc: "2.0".into(),
+                    id: json!(1),
+                    method: "starknet_getNonce".into(),
+                    params: vec![bad_block_id, json!("0x1234")],
+                },
+            );
+            assert!(resp.result.is_none());
+            assert_eq!(
+                resp.error.as_ref().and_then(|e| e["code"].as_i64()),
+                Some(-32602)
+            );
+        }
+        let class_resp = handle_starknet_rpc(
+            &state,
+            policy,
+            StarknetRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: json!(2),
+                method: "starknet_getClassHashAt".into(),
+                params: vec![json!(42), json!("0x1234")],
+            },
+        );
+        assert!(class_resp.result.is_none());
+        assert_eq!(
+            class_resp.error.as_ref().and_then(|e| e["code"].as_i64()),
+            Some(-32602)
+        );
     }
 }

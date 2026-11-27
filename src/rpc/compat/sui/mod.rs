@@ -68,6 +68,9 @@ impl SuiRpcResponse {
 
 fn parse_sui_hex32(raw: &str) -> Option<[u8; 32]> {
     let trimmed = raw.strip_prefix("0x").unwrap_or(raw);
+    if trimmed.len() != 64 {
+        return None;
+    }
     let bytes = hex::decode(trimmed).ok()?;
     bytes.as_slice().try_into().ok()
 }
@@ -167,9 +170,24 @@ pub fn handle_sui_rpc(
             let Some(hex_env) = req.params.first().and_then(Value::as_str) else {
                 return SuiRpcResponse::err(req.id, -32602, "missing hex envelope");
             };
-            let Ok(raw) = hex::decode(hex_env.strip_prefix("0x").unwrap_or(hex_env)) else {
+            let hex_clean = hex_env.strip_prefix("0x").unwrap_or(hex_env);
+            if hex_clean.is_empty() || hex_clean.len() > MAX_SUI_RPC_REQUEST_BYTES * 2 {
+                return SuiRpcResponse::err(
+                    req.id,
+                    -32602,
+                    "hex envelope exceeds MAX_SUI_RPC_REQUEST_BYTES",
+                );
+            }
+            let Ok(raw) = hex::decode(hex_clean) else {
                 return SuiRpcResponse::err(req.id, -32602, "invalid hex envelope");
             };
+            if raw.len() > MAX_SUI_RPC_REQUEST_BYTES {
+                return SuiRpcResponse::err(
+                    req.id,
+                    -32602,
+                    "decoded transaction envelope exceeds MAX_SUI_RPC_REQUEST_BYTES",
+                );
+            }
             match decode_and_recover_sui_tx(&raw, policy) {
                 Ok(dec) => SuiRpcResponse::ok(
                     req.id,
@@ -274,5 +292,29 @@ mod tests {
     #[test]
     fn max_sui_rpc_request_bytes_is_bounded() {
         assert_eq!(MAX_SUI_RPC_REQUEST_BYTES, 1 << 20);
+    }
+
+    #[test]
+    fn sui_rejects_oversized_hex_envelope_with_invalid_params() {
+        let state = AccountState::new();
+        let policy = SuiActivationPolicy {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: 100,
+            activation_height: Some(100),
+        };
+        let oversized = format!("0x{}", "aa".repeat(MAX_SUI_RPC_REQUEST_BYTES + 1));
+        let resp = handle_sui_rpc(
+            &state,
+            policy,
+            SuiRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: json!(1),
+                method: "sui_executeTransactionBlock".into(),
+                params: vec![json!(oversized)],
+            },
+        );
+        assert!(resp.result.is_none());
+        let err = resp.error.expect("oversized tx rejected");
+        assert_eq!(err["code"].as_i64(), Some(-32602));
     }
 }
