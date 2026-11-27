@@ -1319,6 +1319,38 @@ impl LightClient {
         )
     }
 
+    /// Evaluates a cross-domain value gate against both the universal finality
+    /// certificate and the header's `proven_height` lag rule.
+    ///
+    /// Convenience: exposed for light-client and value-gate liveness callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `ValueGateRefusal` when the certificate rejects the route or
+    /// when `ProofRequirement::ProvenRequired` waits for `proven_height`.
+    pub fn check_value_gate_liveness(
+        cert: &crate::settlement::universal_finality::GlobalFinalityCertificate,
+        gate: crate::settlement::finality_gate::ValueGate,
+        source_domain: u32,
+        target_domain: Option<u32>,
+        block_height: u64,
+        proven_height: u64,
+        requirement: crate::settlement::finality_gate::ProofRequirement,
+    ) -> Result<
+        crate::settlement::finality_gate::ValueGateVerdict,
+        crate::settlement::finality_gate::ValueGateRefusal,
+    > {
+        crate::settlement::finality_gate::check_certificate_value_gate_with_proof_level(
+            cert,
+            gate,
+            source_domain,
+            target_domain,
+            block_height,
+            proven_height,
+            requirement,
+        )
+    }
+
     /// The wire requests a transport must issue from this anchor: a
     /// `GetHeaders` locator rooted at the trusted hash, and the next
     /// checkpoint height a certificate is needed for.
