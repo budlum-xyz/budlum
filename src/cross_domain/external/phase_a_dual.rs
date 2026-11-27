@@ -84,6 +84,13 @@ pub fn fold_segment_tree(segments: &[SegmentBoundary]) -> Result<RecursiveAggreg
         if seg.row_count == 0 || seg.row_count > MAX_SEGMENT_ROWS {
             return Err("segment row_count outside 1..=2^20 bound");
         }
+        if is_zero_hash32(&seg.program_hash)
+            || is_zero_hash32(&seg.pre_state_root)
+            || is_zero_hash32(&seg.post_state_root)
+            || is_zero_hash32(&seg.inner_proof_digest)
+        {
+            return Err("segment carries an unset zero hash or inner proof digest");
+        }
         if usize::try_from(seg.segment_index).ok() != Some(pos) {
             return Err("non-contiguous segment_index");
         }
@@ -104,7 +111,7 @@ pub fn fold_segment_tree(segments: &[SegmentBoundary]) -> Result<RecursiveAggreg
         let mut iter = layer.into_iter();
         while let Some(left) = iter.next() {
             if let Some(right) = iter.next() {
-                if left.program_hash != right.program_hash {
+                if !ct_eq_hash32(&left.program_hash, &right.program_hash) {
                     return Err("segment program_hash mismatch across boundary (TS9)");
                 }
                 if left.last_segment.checked_add(1) != Some(right.first_segment) {
@@ -113,7 +120,7 @@ pub fn fold_segment_tree(segments: &[SegmentBoundary]) -> Result<RecursiveAggreg
                 if left.end_pc != right.start_pc {
                     return Err("segment PC boundary mismatch (TS9)");
                 }
-                if left.final_state_root != right.initial_state_root {
+                if !ct_eq_hash32(&left.final_state_root, &right.initial_state_root) {
                     return Err("segment state_root boundary mismatch (TS9)");
                 }
                 let first_seg = left.first_segment.to_le_bytes();
@@ -221,12 +228,16 @@ fn ct_eq_hash32(a: &Hash32, b: &Hash32) -> bool {
         == 0
 }
 
+fn is_zero_hash32(h: &Hash32) -> bool {
+    ct_eq_hash32(h, &[0u8; 32])
+}
+
 impl BlockBatchProof {
     /// Assemble a `BlockBatchProof` over `[start_height..=proven_height]` (`TA4`).
     ///
     /// # Errors
     ///
-    /// Refuses empty or oversized inner digest lists or `proven_height < start_height`.
+    /// Refuses empty, zero-digest, or oversized inner digest lists or `proven_height < start_height`.
     /// WIRING: staged for block proof-market batch sealing ( Step 6).
     pub fn seal(
         start_height: u64,
@@ -236,6 +247,7 @@ impl BlockBatchProof {
         if inner_proof_digests.is_empty()
             || inner_proof_digests.len() > MAX_BATCH_INNER_PROOFS
             || proven_height < start_height
+            || inner_proof_digests.iter().any(is_zero_hash32)
         {
             return Err("invalid BlockBatchProof height range or inner proof count");
         }
@@ -272,6 +284,7 @@ impl BlockBatchProof {
         !self.inner_proof_digests.is_empty()
             && self.inner_proof_digests.len() <= MAX_BATCH_INNER_PROOFS
             && self.proven_height >= self.start_height
+            && !self.inner_proof_digests.iter().any(is_zero_hash32)
             && ct_eq_hash32(
                 &Self::compute_root(
                     self.start_height,
@@ -305,13 +318,19 @@ pub fn evaluate_phase_a_dual(
     zkvm_result: Option<(bool, Hash32)>,
 ) -> PhaseAVerdict {
     let (native_ok, native_root) = native_result;
+    if native_ok && is_zero_hash32(&native_root) {
+        return PhaseAVerdict::FreezeAndAlarm { domain_id };
+    }
     let Some((zk_ok, zk_root)) = zkvm_result else {
         return PhaseAVerdict::AuthoritativeNativeOnly {
             accepted: native_ok,
             state_root: native_root,
         };
     };
-    if native_ok != zk_ok || (native_ok && native_root != zk_root) {
+    if (zk_ok && is_zero_hash32(&zk_root))
+        || native_ok != zk_ok
+        || (native_ok && !ct_eq_hash32(&native_root, &zk_root))
+    {
         return PhaseAVerdict::FreezeAndAlarm { domain_id };
     }
     PhaseAVerdict::DualConfirmed {
@@ -438,5 +457,73 @@ mod tests {
         assert_eq!(odd_agg.last_segment, 2);
         assert_eq!(odd_agg.final_state_root, [0x04; 32]);
         assert_ne!(odd_agg.aggregate_digest, s2.commitment());
+    }
+
+    #[test]
+    fn phase_a_dual_refuses_zero_state_root_on_accepted_verdicts() {
+        let zero = [0u8; 32];
+        assert_eq!(
+            evaluate_phase_a_dual(9, (true, zero), None),
+            PhaseAVerdict::FreezeAndAlarm { domain_id: 9 }
+        );
+        assert_eq!(
+            evaluate_phase_a_dual(9, (true, zero), Some((true, zero))),
+            PhaseAVerdict::FreezeAndAlarm { domain_id: 9 }
+        );
+        // Rejected evaluations (`accepted == false`) remain valid rejections even with zero dummy roots.
+        assert_eq!(
+            evaluate_phase_a_dual(9, (false, zero), None),
+            PhaseAVerdict::AuthoritativeNativeOnly {
+                accepted: false,
+                state_root: zero
+            }
+        );
+        assert_eq!(
+            evaluate_phase_a_dual(9, (false, zero), Some((false, zero))),
+            PhaseAVerdict::DualConfirmed {
+                accepted: false,
+                state_root: zero
+            }
+        );
+    }
+
+    #[test]
+    fn segment_tree_and_batch_proof_refuse_zero_hashes_and_digests() {
+        let valid = SegmentBoundary {
+            program_hash: [0x44; 32],
+            segment_index: 0,
+            row_count: 32,
+            start_pc: 0,
+            next_pc: 16,
+            pre_state_root: [0x01; 32],
+            post_state_root: [0x02; 32],
+            inner_proof_digest: [0xE1; 32],
+        };
+        assert!(fold_segment_tree(&[SegmentBoundary {
+            program_hash: [0u8; 32],
+            ..valid
+        }])
+        .is_err());
+        assert!(fold_segment_tree(&[SegmentBoundary {
+            pre_state_root: [0u8; 32],
+            ..valid
+        }])
+        .is_err());
+        assert!(fold_segment_tree(&[SegmentBoundary {
+            post_state_root: [0u8; 32],
+            ..valid
+        }])
+        .is_err());
+        assert!(fold_segment_tree(&[SegmentBoundary {
+            inner_proof_digest: [0u8; 32],
+            ..valid
+        }])
+        .is_err());
+
+        assert!(BlockBatchProof::seal(100, 107, vec![[0x21; 32], [0u8; 32]]).is_err());
+        let mut forged = BlockBatchProof::seal(100, 107, vec![[0x21; 32], [0x22; 32]]).unwrap();
+        forged.inner_proof_digests[1] = [0u8; 32];
+        forged.proof_root = BlockBatchProof::compute_root(100, 107, &forged.inner_proof_digests);
+        assert!(!forged.matches_root());
     }
 }

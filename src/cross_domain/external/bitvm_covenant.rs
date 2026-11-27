@@ -674,7 +674,7 @@ fn verify_spv_merkle_inclusion(
                 rule: "BitVM2 SPV Merkle sibling is zero".to_string(),
             });
         }
-        if step.sibling == current && step.sibling_is_left {
+        if step.sibling == current {
             return Err(AdapterError::ConsensusRule {
                 rule: "BitVM2 SPV Merkle branch hits CVE-2012-2459 equal-sibling malleability"
                     .to_string(),
@@ -699,6 +699,14 @@ fn verify_spv_merkle_inclusion(
     Ok(())
 }
 
+const fn expected_trace_merkle_depth(chunk_count: u32) -> usize {
+    if chunk_count <= 1 {
+        0
+    } else {
+        ((chunk_count - 1).ilog2() + 1) as usize
+    }
+}
+
 /// Verify a `1-of-N` [`DisproveScriptProof`] against a [`PinnedBitVmAnchor`].
 ///
 /// Returns `(chunk_index, expected_post_state, claimed_post_state)` when fraud holds.
@@ -715,21 +723,37 @@ pub fn verify_disprove_script(
     let validated = anchor.validate()?;
     let _ = verify_operator_claim_signature(network, &validated, &proof.claim)?;
 
+    if proof.claim.claim_pow_height <= validated.height {
+        return Err(AdapterError::ConsensusRule {
+            rule: "DisproveScript claim_pow_height is not strictly above pinned anchor height"
+                .to_string(),
+        });
+    }
     if proof.disputed_chunk.chunk_index >= proof.claim.trace_chunk_count {
         return Err(AdapterError::ConsensusRule {
             rule: "DisproveScript chunk_index >= claim.trace_chunk_count".to_string(),
         });
     }
-    if proof.trace_merkle_proof.len() > MAX_TRACE_MERKLE_DEPTH {
+    let expected_depth = expected_trace_merkle_depth(proof.claim.trace_chunk_count);
+    if expected_depth > MAX_TRACE_MERKLE_DEPTH || proof.trace_merkle_proof.len() != expected_depth {
         return Err(AdapterError::ConsensusRule {
-            rule: "DisproveScript trace Merkle branch exceeds max depth".to_string(),
+            rule: "DisproveScript trace Merkle branch depth does not match canonical trace_chunk_count depth".to_string(),
         });
     }
     let mut current = proof.disputed_chunk.leaf_digest();
-    for step in &proof.trace_merkle_proof {
-        if step.sibling == [0u8; 32] {
+    for (level, step) in proof.trace_merkle_proof.iter().enumerate() {
+        if step.sibling == [0u8; 32] || step.sibling == current {
             return Err(AdapterError::ConsensusRule {
-                rule: "DisproveScript trace Merkle sibling is zero".to_string(),
+                rule: "DisproveScript trace Merkle sibling is zero or duplicates current node"
+                    .to_string(),
+            });
+        }
+        let shift = u32::try_from(level).unwrap_or(u32::BITS - 1);
+        let expected_sibling_is_left = ((proof.disputed_chunk.chunk_index >> shift) & 1) == 1;
+        if step.sibling_is_left != expected_sibling_is_left {
+            return Err(AdapterError::ConsensusRule {
+                rule: "DisproveScript trace Merkle direction bit disagrees with chunk_index"
+                    .to_string(),
             });
         }
         current = if step.sibling_is_left {
@@ -870,6 +894,11 @@ impl BitVmCovenantAdapter {
                 });
             }
             let ts = header_timestamp(hdr);
+            if ts == 0 {
+                return Err(AdapterError::ConsensusRule {
+                    rule: format!("BitVM2 PoW header {idx} has zero timestamp"),
+                });
+            }
             if idx > 0 && ts < prev_time {
                 return Err(AdapterError::ConsensusRule {
                     rule: format!("BitVM2 PoW header {idx} timestamp regresses"),
@@ -1442,5 +1471,233 @@ mod tests {
             blank_adapter.verify(&blank_raw, &pow_policy()),
             Err(AdapterError::ConsensusRule { .. })
         ));
+    }
+
+    #[test]
+    fn bitvm_spv_refuses_right_side_cve_2012_2459_and_zero_first_timestamp() {
+        let (_op_ed, _op_pq, anchor, _chunk0, mut bundle, raw) = fixture();
+        let adapter = BitVmCovenantAdapter::new(NET, Some(anchor.clone()));
+        let policy = pow_policy();
+
+        // Right-side equal-sibling duplication (`sha256d(txid || txid)`, `sibling_is_left == false`)
+        // is the exact Bitcoin odd-leaf CVE-2012-2459 malleability vector and must fail closed.
+        let txid = sha256d(&bundle.claim.covenant_tx_bytes(NET));
+        let mut dup_pair = [0u8; 64];
+        dup_pair[..32].copy_from_slice(&txid);
+        dup_pair[32..].copy_from_slice(&txid);
+        let dup_merkle_root = sha256d(&dup_pair);
+
+        let mut dup_headers = Vec::with_capacity(6);
+        let mut prev_block = anchor.block_hash;
+        for idx in 0u32..6 {
+            let mr = if idx == 0 {
+                dup_merkle_root
+            } else {
+                [u8::try_from(idx + 0x30).unwrap_or(0x30); 32]
+            };
+            let hdr = mine_header(prev_block, mr, 1_700_000_000 + idx * 600, REGTEST_BITS);
+            prev_block = sha256d(&hdr);
+            dup_headers.push(hdr);
+        }
+        bundle.headers = dup_headers;
+        bundle.spv_merkle_proof = vec![MerkleStep {
+            sibling: txid,
+            sibling_is_left: false,
+        }];
+        let mut dup_raw = raw.clone();
+        dup_raw.payload = encode_bitvm_evidence(&bundle);
+        assert!(
+            matches!(
+                adapter.verify(&dup_raw, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "right-side CVE-2012-2459 equal-sibling SPV branch must be refused"
+        );
+
+        // First header carrying timestamp == 0 must also be refused fail-closed.
+        let (_op_ed2, _op_pq2, anchor2, _c, mut zero_ts_bundle, zero_ts_raw_base) = fixture();
+        let valid_mr = header_merkle_root(zero_ts_bundle.headers.first().expect("hdr0"));
+        let mut zero_ts_headers = Vec::with_capacity(6);
+        let mut prev2 = anchor2.block_hash;
+        for idx in 0u32..6 {
+            let mr = if idx == 0 {
+                valid_mr
+            } else {
+                [u8::try_from(idx + 0x40).unwrap_or(0x40); 32]
+            };
+            let ts = if idx == 0 { 0 } else { idx * 600 };
+            let hdr = mine_header(prev2, mr, ts, REGTEST_BITS);
+            prev2 = sha256d(&hdr);
+            zero_ts_headers.push(hdr);
+        }
+        zero_ts_bundle.headers = zero_ts_headers;
+        let mut zero_ts_raw = zero_ts_raw_base;
+        zero_ts_raw.payload = encode_bitvm_evidence(&zero_ts_bundle);
+        assert!(
+            matches!(
+                adapter.verify(&zero_ts_raw, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "PoW header chain starting at timestamp 0 must be refused"
+        );
+    }
+
+    #[test]
+    fn disprove_script_enforces_canonical_depth_direction_bits_and_post_anchor_height() {
+        let (op_ed, op_pq, anchor, honest_chunk, bundle, _raw) = fixture();
+        let bad_post = [0xEE; 32];
+        let fraud_chunk = TraceChunkStep {
+            claimed_post_state: bad_post,
+            ..honest_chunk
+        };
+        let leaf = fraud_chunk.leaf_digest();
+
+        // 1. Empty Merkle proof when trace_chunk_count == 2 (depth must be 1, not 0).
+        let mut zero_depth_claim = BitVmPegClaim {
+            state_root: bad_post,
+            trace_merkle_root: leaf,
+            trace_chunk_count: 2,
+            ..bundle.claim.clone()
+        };
+        let d0 = zero_depth_claim.signing_digest(NET);
+        zero_depth_claim.operator_ed25519_sig = op_ed.sign(&d0).to_vec();
+        zero_depth_claim.operator_pq_sig = op_pq.sign(ctx::CROSS_DOMAIN_V1, &d0).expect("pq sign");
+        assert!(
+            verify_disprove_script(
+                NET,
+                &anchor,
+                &DisproveScriptProof {
+                    claim: zero_depth_claim,
+                    disputed_chunk: fraud_chunk.clone(),
+                    trace_merkle_proof: Vec::new(),
+                },
+            )
+            .is_err(),
+            "trace_chunk_count=2 with empty Merkle branch must be refused"
+        );
+
+        // 2. Wrong direction bit: chunk_index=0 is a left child (bit 0 == 0 => sibling_is_left=false),
+        // so opening with sibling_is_left=true must be refused.
+        let swapped_root = hash_trace_merkle_node(&[0x77; 32], &leaf);
+        let mut swapped_claim = BitVmPegClaim {
+            state_root: bad_post,
+            trace_merkle_root: swapped_root,
+            trace_chunk_count: 2,
+            ..bundle.claim.clone()
+        };
+        let d1 = swapped_claim.signing_digest(NET);
+        swapped_claim.operator_ed25519_sig = op_ed.sign(&d1).to_vec();
+        swapped_claim.operator_pq_sig = op_pq.sign(ctx::CROSS_DOMAIN_V1, &d1).expect("pq sign");
+        assert!(
+            verify_disprove_script(
+                NET,
+                &anchor,
+                &DisproveScriptProof {
+                    claim: swapped_claim,
+                    disputed_chunk: fraud_chunk.clone(),
+                    trace_merkle_proof: vec![MerkleStep {
+                        sibling: [0x77; 32],
+                        sibling_is_left: true,
+                    }],
+                },
+            )
+            .is_err(),
+            "chunk_index=0 opened as right child (sibling_is_left=true) must be refused"
+        );
+
+        // 3. Equal-sibling collision in trace Merkle proof (`sibling == current`) must be refused.
+        let dup_trace_root = hash_trace_merkle_node(&leaf, &leaf);
+        let mut dup_trace_claim = BitVmPegClaim {
+            state_root: bad_post,
+            trace_merkle_root: dup_trace_root,
+            trace_chunk_count: 2,
+            ..bundle.claim.clone()
+        };
+        let d2 = dup_trace_claim.signing_digest(NET);
+        dup_trace_claim.operator_ed25519_sig = op_ed.sign(&d2).to_vec();
+        dup_trace_claim.operator_pq_sig = op_pq.sign(ctx::CROSS_DOMAIN_V1, &d2).expect("pq sign");
+        assert!(
+            verify_disprove_script(
+                NET,
+                &anchor,
+                &DisproveScriptProof {
+                    claim: dup_trace_claim,
+                    disputed_chunk: fraud_chunk.clone(),
+                    trace_merkle_proof: vec![MerkleStep {
+                        sibling: leaf,
+                        sibling_is_left: false,
+                    }],
+                },
+            )
+            .is_err(),
+            "equal-sibling trace Merkle proof must be refused"
+        );
+
+        // 4. Stale pre-anchor claim (`claim_pow_height <= anchor.height`) must not freeze domain.
+        let valid_fraud_root = hash_trace_merkle_node(&leaf, &[0x77; 32]);
+        let mut stale_claim = BitVmPegClaim {
+            state_root: bad_post,
+            trace_merkle_root: valid_fraud_root,
+            claim_pow_height: anchor.height,
+            ..bundle.claim.clone()
+        };
+        let d3 = stale_claim.signing_digest(NET);
+        stale_claim.operator_ed25519_sig = op_ed.sign(&d3).to_vec();
+        stale_claim.operator_pq_sig = op_pq.sign(ctx::CROSS_DOMAIN_V1, &d3).expect("pq sign");
+        assert!(
+            verify_disprove_script(
+                NET,
+                &anchor,
+                &DisproveScriptProof {
+                    claim: stale_claim,
+                    disputed_chunk: fraud_chunk.clone(),
+                    trace_merkle_proof: vec![MerkleStep {
+                        sibling: [0x77; 32],
+                        sibling_is_left: false,
+                    }],
+                },
+            )
+            .is_err(),
+            "pre-anchor or at-anchor claim_pow_height must be refused in DisproveScript"
+        );
+
+        // 5. Positive control for non-power-of-two trace_chunk_count=3 (depth=2) at chunk_index=2
+        // (`bit 0 = 0 => sibling_is_left: false`, `bit 1 = 1 => sibling_is_left: true`).
+        let chunk2 = TraceChunkStep {
+            chunk_index: 2,
+            claimed_post_state: bad_post,
+            ..fraud_chunk
+        };
+        let lvl0 = hash_trace_merkle_node(&chunk2.leaf_digest(), &[0x61; 32]);
+        let lvl1 = hash_trace_merkle_node(&[0x62; 32], &lvl0);
+        let mut claim3 = BitVmPegClaim {
+            state_root: bad_post,
+            trace_merkle_root: lvl1,
+            trace_chunk_count: 3,
+            ..bundle.claim
+        };
+        let d4 = claim3.signing_digest(NET);
+        claim3.operator_ed25519_sig = op_ed.sign(&d4).to_vec();
+        claim3.operator_pq_sig = op_pq.sign(ctx::CROSS_DOMAIN_V1, &d4).expect("pq sign");
+        let (proved_idx, _, _) = verify_disprove_script(
+            NET,
+            &anchor,
+            &DisproveScriptProof {
+                claim: claim3,
+                disputed_chunk: chunk2,
+                trace_merkle_proof: vec![
+                    MerkleStep {
+                        sibling: [0x61; 32],
+                        sibling_is_left: false,
+                    },
+                    MerkleStep {
+                        sibling: [0x62; 32],
+                        sibling_is_left: true,
+                    },
+                ],
+            },
+        )
+        .expect("canonical 3-chunk depth=2 proof at index 2 must succeed");
+        assert_eq!(proved_idx, 2);
     }
 }
