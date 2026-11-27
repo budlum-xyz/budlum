@@ -474,6 +474,46 @@ impl ExternalDomainRegistry {
         moved
     }
 
+    /// Adjudicates an Avalanche Warp Messaging double-signature contradiction
+    /// proof for `network` under `pinned` and faults the registered domain so
+    /// no further attestations are served until explicit readmission.
+    ///
+    /// WIRING: external domain contradiction challenge door (`ChallengeEquivocation`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::UnknownDomain`] if the domain is not registered,
+    /// or [`RegistryError::Adapter`] if `proof` fails Warp contradiction rules.
+    pub fn fault_on_avalanche_warp_contradiction(
+        &mut self,
+        network: &str,
+        pinned: &crate::cross_domain::external::avalanche_warp::PinnedAvalancheSubnet,
+        proof: &crate::cross_domain::external::avalanche_warp::AvalancheWarpContradictionProof,
+    ) -> Result<
+        crate::cross_domain::external::avalanche_warp::AvalancheContradictedValidator,
+        RegistryError,
+    > {
+        let adapter = crate::cross_domain::external::avalanche_warp::AvalancheWarpAdapter::new(
+            network,
+            Some(pinned.clone()),
+        );
+        let domain = DomainKey::from_parts(&adapter.descriptor().id, network);
+        if !self.domains.contains_key(&domain) {
+            return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
+        }
+        let offender =
+            crate::cross_domain::external::avalanche_warp::adjudicate_avalanche_warp_contradiction(
+                network, pinned, proof,
+            )
+            .map_err(RegistryError::Adapter)?;
+        let reason = format!(
+            "Avalanche Warp contradiction at height={} weight={}",
+            offender.height, offender.offending_weight
+        );
+        self.mark_faulted(&domain, &reason)?;
+        Ok(offender)
+    }
+
     /// The intake path. Runs the version gate, the adapter, the policy, the
     /// prover's bond and the duplicate check - in that order, because the
     /// cheapest and most structural refusals come first.
