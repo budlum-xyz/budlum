@@ -197,6 +197,13 @@ fn plan<R: NameResolver>(resolver: &R, raw: &str) -> Result<Plan, String> {
 /// looked for.
 fn plan_bud<R: NameResolver>(resolver: &R, raw: &str, name: &str) -> Result<Plan, String> {
     let (record, proof) = resolver.resolve_bud(name)?;
+    if record.name != name {
+        return Ok(Plan::stop(refusal(
+            raw,
+            "bns-resolution",
+            "the resolver returned a record for a different .bud name than requested",
+        )));
+    }
     let mut evidence = bns_proof::evaluate(
         &record,
         &proof,
@@ -212,6 +219,25 @@ fn plan_bud<R: NameResolver>(resolver: &R, raw: &str, name: &str) -> Result<Plan
         }));
     }
     let id = if let Some(cid) = record.content_id {
+        if matches!(proof, BnsInclusionProof::PerName { .. }) {
+            if record.content_binding.is_none() {
+                return Ok(Plan::stop(refusal(
+                    raw,
+                    "bns-content-binding",
+                    "the per-name leaf commits to no content_binding, so the returned \
+                     content_id contradicts on-chain state",
+                )));
+            }
+            // `BDLM_BNS_LEAF_V1` commits to `content_binding`, not `content_id`
+            // directly. Until the binding preimage is opened against `cid`, the
+            // fetched target is an RPC claim rather than a proven commitment.
+            evidence.push(Claim::new(
+                "bns-content-binding",
+                Strength::RpcClaimOnly,
+                "per-name leaf commits to content_binding; content_id was not opened \
+                 against that binding",
+            ));
+        }
         cid
     } else if let Some(sr) = record.storage_root {
         evidence.push(Claim::new(

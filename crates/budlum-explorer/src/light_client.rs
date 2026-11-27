@@ -125,6 +125,11 @@ impl HeaderStore {
     /// or a different hash at an index already held. The last is a sign of a
     /// fork, and is never quietly overwritten.
     pub fn accept(&mut self, header: TrackedHeader) -> Result<(), String> {
+        if header.hash.is_empty() || header.state_root.is_empty() {
+            return Err(String::from(
+                "header hash and state_root must both be non-empty",
+            ));
+        }
         if !header.is_epoch_boundary() {
             return Err(format!(
                 "header {} is not an epoch boundary (EPOCH_LENGTH={EPOCH_LENGTH}); \
