@@ -60,9 +60,18 @@ fn payout(params: &AggParams, frame: &ClaimFrame, paid: &[u64]) -> FeePayout {
         let (own, tail) = rest.split_at(count.min(rest.len()));
         rest = tail;
         let total = own.iter().fold(0u64, |acc, fee| acc.saturating_add(*fee));
-        let (aggregator, producer) = split_segment_fees(params, total);
-        out.aggregators.push((segment.aggregator, aggregator));
-        out.producer = out.producer.saturating_add(producer);
+        if segment.aggregator == Address::zero() {
+            out.aggregators.push((Address::zero(), 0));
+            out.producer = out.producer.saturating_add(total);
+        } else {
+            let (aggregator, producer) = split_segment_fees(params, total);
+            out.aggregators.push((segment.aggregator, aggregator));
+            out.producer = out.producer.saturating_add(producer);
+        }
+    }
+    if !rest.is_empty() {
+        let tail_total = rest.iter().fold(0u64, |acc, fee| acc.saturating_add(*fee));
+        out.producer = out.producer.saturating_add(tail_total);
     }
     out
 }
