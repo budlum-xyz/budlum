@@ -1,0 +1,321 @@
+name: Proof metric contract diagnostic
+'on':
+  push:
+    tags:
+    - snapshot/**
+  workflow_dispatch: null
+permissions:
+  contents: read
+concurrency:
+  group: proof-metric-contract-${{ github.sha }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+    - name: Read candidate sources and fixture tests
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        path: candidate
+        persist-credentials: false
+        sparse-checkout: |-
+          .github/workflows/benchmark.yml
+          xtask/gates/src/main.rs
+          xtask/gates/src/gates/benchmark_proof_metrics.rs
+          xtask/gates/src/gates/exact_named_tests.rs
+          .github/scripts/proof_metric_workflow_contract.py
+        sparse-checkout-cone-mode: false
+    - name: Read immutable integration base
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        repository: budlum-xyz/budlum
+        ref: 70ae828be0103a38750f0a351490b7719f8195dc
+        path: baseline
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Install pinned Rust
+      id: rust
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+      with:
+        toolchain: 1.97.1
+        components: clippy,rustfmt
+    - name: Bind source identities and add tests only
+      id: prepare
+      working-directory: baseline
+      env:
+        BASE_SHA: 70ae828be0103a38750f0a351490b7719f8195dc
+        CANDIDATE_FILES_JSON: '{".github/scripts/proof_metric_workflow_contract.py":"c6260eca8aaa8246579d30b1643cf2bdd832c974644d021727917b61689d99a1",".github/workflows/benchmark.yml":"4a26358d07ed3403b808262e80face5d9bb1fabea9df81453e1a086835e06b85","xtask/gates/src/gates/benchmark_proof_metrics.rs":"a8c4a8e6f7602698bd09182c957f079338660f0ad0437c9fe040dccb8c64fb23","xtask/gates/src/gates/exact_named_tests.rs":"2dc34cc496b3c757d354153a89d180059aaab725e1925136e54e165492b8280c","xtask/gates/src/main.rs":"57f27d4650a6c5715dfe363fb75fc0de626d4e2ac44ab07fb60099a8d7d47ee4"}'
+      run: |
+        python3 - <<'PYCODE'
+        from pathlib import Path
+        import hashlib, json, os, subprocess
+        actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        assert actual == os.environ["BASE_SHA"], "checkout SHA mismatch"
+        identities = json.loads(os.environ["CANDIDATE_FILES_JSON"])
+        for relative, expected in identities.items():
+            content = (Path("../candidate") / relative).read_bytes()
+            assert hashlib.sha256(content).hexdigest() == expected, relative + " source drift"
+        path = Path("xtask/gates/src/gates/exact_named_tests.rs")
+        old = path.read_bytes()
+        blob = hashlib.sha1(b"blob " + str(len(old)).encode() + b"\0" + old).hexdigest()
+        assert blob == '24b76983459a06c2621b56b409837a759a21c50d', "baseline checker drift"
+        fixed = (Path("../candidate") / path).read_bytes()
+        marker = b"\n#[cfg(test)]\nmod tests {"
+        assert fixed.count(marker) == 1 and marker not in old, "unexpected test layout"
+        path.write_bytes(old + b"\n" + marker + fixed.split(marker, 1)[1])
+        Path(os.environ["RUNNER_TEMP"], "candidate-source-identities.json").write_text(
+            json.dumps({"checkout": actual, "sources": identities}, indent=2) + "\n"
+        )
+        print("Pinned source identities verified; only named-test regression tests appended")
+        PYCODE
+    - name: Require actual workflow schema failures
+      id: benchmark_red
+      if: always() && steps.prepare.outcome == 'success'
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        set +e
+        python3 ../candidate/.github/scripts/proof_metric_workflow_contract.py --workflow .github/workflows/benchmark.yml --phase red --report "$RUNNER_TEMP/benchmark-red.json" 2>&1 | tee "$RUNNER_TEMP/benchmark-red.log"
+        status=${PIPESTATUS[0]}
+        set -e
+        test "$status" -eq 1
+        python3 - <<'PYCODE'
+        import json, os
+        from pathlib import Path
+        report = json.loads(Path(os.environ["RUNNER_TEMP"], "benchmark-red.json").read_text())
+        expected = json.loads(os.environ["EXPECTED_METRIC_CASES_JSON"])
+        assert len(report["cases"]) == len(expected), "missing or extra observations"
+        assert {row["case"] for row in report["cases"]} == set(expected), "case-name coverage differs"
+        assert all(row["expected_exit"] == expected[row["case"]] for row in report["cases"]), "fixture expectations differ"
+        assert (report["tests_run"], report["failures"], report["errors"], report["successful"]) == (4, 3, 0, False), report
+        assert all(case["exit"] == 0 for case in report["cases"]), report
+        print("RED is three actual assertions against nonempty-only acceptance, not a tool failure")
+        PYCODE
+      env:
+        EXPECTED_METRIC_CASES_JSON: '{"compiler_only_baseline":1,"compiler_only_canonical":1,"malformed_canonical":1,"valid_control":0}'
+    - name: Require actual failing assertions
+      id: red
+      if: always() && steps.prepare.outcome == 'success' && steps.rust.outcome == 'success'
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        set +e
+        cargo test --locked --manifest-path xtask/gates/Cargo.toml gates::exact_named_tests::tests:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/exact-red.log"
+        status=${PIPESTATUS[0]}
+        set -e
+        test "$status" -eq 101
+        grep -Fq 'test result: FAILED. 5 passed; 3 failed;' "$RUNNER_TEMP/exact-red.log"
+        for name in refuses_success_followed_by_failure refuses_failure_followed_by_success refuses_success_followed_by_ignored; do
+          grep -Fq "test gates::exact_named_tests::tests::$name ... FAILED" "$RUNNER_TEMP/exact-red.log"
+        done
+    - name: Apply the two candidate evidence contracts
+      id: fixed
+      if: always() && steps.prepare.outcome == 'success'
+      working-directory: baseline
+      run: |
+        python3 - <<'PYCODE'
+        from pathlib import Path
+        for relative in ['.github/workflows/benchmark.yml', 'xtask/gates/src/main.rs', 'xtask/gates/src/gates/benchmark_proof_metrics.rs', 'xtask/gates/src/gates/exact_named_tests.rs']:
+            target = Path(relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((Path('../candidate') / relative).read_bytes())
+        PYCODE
+        git diff --check
+    - name: Require targeted GREEN
+      id: targeted
+      if: always() && steps.fixed.outcome == 'success' && steps.rust.outcome == 'success'
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo test --locked --manifest-path xtask/gates/Cargo.toml gates::exact_named_tests::tests:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/exact-green.log"
+        grep -Fq 'test result: ok. 8 passed; 0 failed;' "$RUNNER_TEMP/exact-green.log"
+    - name: Run complete gates unit tests
+      id: unit
+      if: always() && steps.fixed.outcome == 'success' && steps.rust.outcome == 'success'
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo test --locked --manifest-path xtask/gates/Cargo.toml 2>&1 | tee "$RUNNER_TEMP/gates-unit.log"
+    - name: Build and measure the provenance pin
+      id: pin
+      if: always() && steps.fixed.outcome == 'success' && steps.rust.outcome == 'success'
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo build --locked --release --manifest-path xtask/gates/Cargo.toml 2>&1 | tee "$RUNNER_TEMP/gates-build.log"
+        xtask/gates/target/release/budlum-gates gate-source-provenance --print-baseline > "$RUNNER_TEMP/measured-pin.txt"
+        cp "$RUNNER_TEMP/measured-pin.txt" .github/gate-source-provenance-baseline.txt
+        cargo build --locked --release --manifest-path xtask/gates/Cargo.toml 2>&1 | tee "$RUNNER_TEMP/gates-rebuild.log"
+        xtask/gates/target/release/budlum-gates gate-source-provenance 2>&1 | tee "$RUNNER_TEMP/gates-provenance.log"
+    - name: Exercise the registered metric gate through the workflow
+      id: benchmark_green
+      if: always() && steps.pin.outcome == 'success'
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 ../candidate/.github/scripts/proof_metric_workflow_contract.py --workflow .github/workflows/benchmark.yml --phase green --gate "$(pwd)/xtask/gates/target/release/budlum-gates" --report "$RUNNER_TEMP/benchmark-green.json" 2>&1 | tee "$RUNNER_TEMP/benchmark-green.log"
+        python3 - <<'PYCODE'
+        import json, os
+        from pathlib import Path
+        report = json.loads(Path(os.environ["RUNNER_TEMP"], "benchmark-green.json").read_text())
+        expected = json.loads(os.environ["EXPECTED_METRIC_CASES_JSON"])
+        assert len(report["cases"]) == len(expected), "missing or extra observations"
+        assert {row["case"] for row in report["cases"]} == set(expected), "case-name coverage differs"
+        assert all(row["expected_exit"] == expected[row["case"]] for row in report["cases"]), "fixture expectations differ"
+        assert all(row["exit"] == expected[row["case"]] for row in report["cases"]), "observed exit differs"
+        assert (report["tests_run"], report["failures"], report["errors"], report["successful"]) == (20, 0, 0, True), report
+        print("All twenty workflow/schema observations matched their required outcomes")
+        PYCODE
+      env:
+        EXPECTED_METRIC_CASES_JSON: '{"compiler_only_baseline":1,"compiler_only_canonical":1,"duplicate_program":1,"empty_canonical":1,"fractional_samples":1,"malformed_canonical":1,"missing_baseline":1,"missing_micro_metric":1,"missing_program":1,"missing_single_metric":1,"negative_rows":1,"null_verify_time":1,"text_proof_bytes":1,"text_verify_time":1,"trailing_malformed":1,"unknown_program":1,"valid_control":0,"wrong_file":1,"zero_prove_time":1,"zero_samples":1}'
+    - name: Measure native metric-canary mutation sensitivity
+      id: metric_mutations
+      if: always() && steps.pin.outcome == 'success'
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 - <<'PYCODE'
+        from pathlib import Path
+        import hashlib, json, os, subprocess, tempfile
+        source = Path("xtask/gates/src/gates/benchmark_proof_metrics.rs").read_text()
+        deps = Path("xtask/gates/target/release/deps")
+        libraries = list(deps.glob("libserde_json-*.rlib"))
+        assert len(libraries) == 1, "serde_json build identity is ambiguous"
+        wrapper = r"""
+        fn main() {
+            let args: Vec<String> = std::env::args().collect();
+            let outcome = if let Some(path) = args.get(1) {
+                gate::run(std::path::Path::new("."), std::path::Path::new(path))
+            } else {
+                gate::self_test()
+            };
+            match outcome {
+                Ok(message) => println!("{message}"),
+                Err(message) => {
+                    eprintln!("{message}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        """
+        mutations = [
+            ("unknown_name", "if !expected.contains(&name) {", "if false {", "canary accepted unexpected trailing benchmark"),
+            ("duplicate_name", "if !seen.insert(name.to_owned()) {", "if seen.insert(name.to_owned()) && false {", "canary accepted duplicate benchmark"),
+            ("missing_name", "if expected.iter().any(|name| !seen.contains(*name)) {", "if false {", "canary accepted compiler-only output"),
+            ("zero_integer", ".is_none_or(|n| n == 0)", ".is_none_or(|_n| false)", "canary accepted invalid integer field samples"),
+            ("nonpositive_time", ".is_none_or(|n| !n.is_finite() || n <= 0.0)", ".is_none_or(|_n| false)", "canary accepted invalid time field prove_seconds_mean"),
+            ("malformed_report", 'let value: Value = serde_json::from_str(line)\n            .map_err(|error| format!("invalid proof-metric JSON in {label}: {error}"))?;', 'let value: Value = match serde_json::from_str(line) { Ok(value) => value, Err(_) => continue };', "canary accepted malformed trailing report"),
+        ]
+        def observe(text, label):
+            with tempfile.TemporaryDirectory(prefix="metric-sensitivity-") as temporary:
+                output = Path(temporary) / "probe"
+                compiled = subprocess.run([
+                    "rustc", "--edition=2021", "--crate-name", "metric_sensitivity",
+                    "-C", "panic=abort", "-C", "overflow-checks=yes", "-O",
+                    "-L", "dependency=" + str(deps),
+                    "--extern", "serde_json=" + str(libraries[0]), "-o", str(output), "-",
+                ], input="mod gate {\n" + text + "\n}\n" + wrapper, capture_output=True, text=True, timeout=180)
+                row = {"case": label, "module_sha256": hashlib.sha256(text.encode()).hexdigest(), "compile_exit": compiled.returncode, "compile_stdout": compiled.stdout, "compile_stderr": compiled.stderr, "run_exit": None}
+                if compiled.returncode != 0:
+                    row["classification"] = "UNMEASURED_COMPILE_FAILURE"
+                    return row
+                observed = subprocess.run([str(output)], capture_output=True, text=True, timeout=30)
+                row.update(run_exit=observed.returncode, stdout=observed.stdout, stderr=observed.stderr)
+                return row
+        control = observe(source, "baseline")
+        rows = []
+        control_ok = control["compile_exit"] == 0 and control["run_exit"] == 0 and "25 invalid observations refused" in control.get("stdout", "")
+        if control_ok:
+            for label, old, new, expected in mutations:
+                assert source.count(old) == 1, label + " mutation target drift"
+                row = observe(source.replace(old, new, 1), label)
+                row["expected_failure"] = expected
+                detected = row["compile_exit"] == 0 and row["run_exit"] == 1 and expected in row.get("stderr", "")
+                row["detected_by_canary"] = detected
+                rows.append(row)
+        report = {"scope": "Actual module and six one-condition variants compiled from stdin against the freshly built serde_json dependency. Behavioral canary refusals, not a full mutant cargo test suite. The checked-out source and registered gate binary are never modified.", "baseline": control, "variants": rows, "expected_variants": len(mutations), "all_detected": control_ok and len(rows) == len(mutations) and all(row["detected_by_canary"] for row in rows)}
+        Path(os.environ["RUNNER_TEMP"], "benchmark-mutations.json").write_text(json.dumps(report, indent=2) + "\n")
+        print(json.dumps({"baseline_ok": control_ok, "variants": len(rows), "detected": sum(row["detected_by_canary"] for row in rows)}))
+        assert report["all_detected"], "mutation observation is surviving or unmeasured"
+        PYCODE
+    - name: Install the pinned gate tools
+      id: tools
+      if: always() && steps.rust.outcome == 'success'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/gate-bin"
+        curl -sSfL --retry 3 -o "$RUNNER_TEMP/actionlint.tar.gz" https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+        printf '%s  %s\n' 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+        tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP/gate-bin" actionlint
+        curl -sSfL --retry 3 -o "$RUNNER_TEMP/typos.tar.gz" https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-x86_64-unknown-linux-musl.tar.gz
+        printf '%s  %s\n' 72a930c9a94fc3914aa56835c5b859c892a797d40c1c42638b98d93f16ff519c "$RUNNER_TEMP/typos.tar.gz" | sha256sum -c -
+        tar -xzf "$RUNNER_TEMP/typos.tar.gz" -C "$RUNNER_TEMP/gate-bin" ./typos
+        printf '%s\n' "$RUNNER_TEMP/gate-bin" >> "$GITHUB_PATH"
+        cargo install --locked --version 0.10.2 cargo-vet
+    - name: Run every gate canary
+      id: canaries
+      if: always() && steps.pin.outcome == 'success' && steps.tools.outcome == 'success'
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        xtask/gates/target/release/budlum-gates --all --self-test 2>&1 | tee "$RUNNER_TEMP/gates-canaries.log"
+    - name: Run every architecture gate
+      id: gates
+      if: always() && steps.pin.outcome == 'success' && steps.tools.outcome == 'success'
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        xtask/gates/target/release/budlum-gates --all 2>&1 | tee "$RUNNER_TEMP/gates-all.log"
+    - name: Clippy
+      id: clippy
+      if: always() && steps.fixed.outcome == 'success' && steps.rust.outcome == 'success'
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo clippy --locked --manifest-path xtask/gates/Cargo.toml --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/gates-clippy.log"
+    - name: Format
+      id: format
+      if: always() && steps.fixed.outcome == 'success' && steps.rust.outcome == 'success'
+      working-directory: baseline
+      run: |
+        cargo fmt --manifest-path xtask/gates/Cargo.toml --all -- --check
+    - name: Preserve the measured candidate tree
+      id: tree
+      if: always() && steps.pin.outcome == 'success'
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        git add -- .github/workflows/benchmark.yml xtask/gates/src/main.rs xtask/gates/src/gates/benchmark_proof_metrics.rs xtask/gates/src/gates/exact_named_tests.rs .github/gate-source-provenance-baseline.txt
+        git write-tree > "$RUNNER_TEMP/candidate-tree.txt"
+        git diff --cached --binary > "$RUNNER_TEMP/candidate-with-measured-pin.patch"
+        git rev-parse HEAD > "$RUNNER_TEMP/checkout-sha.txt"
+    - name: Preserve all outcomes
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: proof-metric-contract-evidence
+        path: |-
+          ${{ runner.temp }}/exact-*.log
+          ${{ runner.temp }}/benchmark-*.log
+          ${{ runner.temp }}/benchmark-*.json
+          ${{ runner.temp }}/gates-*.log
+          ${{ runner.temp }}/measured-pin.txt
+          ${{ runner.temp }}/candidate-tree.txt
+          ${{ runner.temp }}/candidate-with-measured-pin.patch
+          ${{ runner.temp }}/candidate-source-identities.json
+          ${{ runner.temp }}/checkout-sha.txt
+        if-no-files-found: error
+        retention-days: 30

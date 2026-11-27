@@ -52,6 +52,7 @@ mod gates {
     pub mod app_binding_guard;
     pub mod ast_security_gates;
     pub mod badges_current;
+    pub mod benchmark_proof_metrics;
     pub mod binding_claims;
     pub mod bit_decompositions;
     pub mod bns_gate;
@@ -1829,6 +1830,18 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::launch_matrix_tests_exist::self_test,
+    },
+    Gate {
+        name: "benchmark-proof-metrics",
+        replaces: None,
+        run: |_| {
+            Err(String::from(
+                "benchmark-proof-metrics reads an artifact directory; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::benchmark_proof_metrics::run),
+        run_args: None,
+        self_test: gates::benchmark_proof_metrics::self_test,
     },
     Gate {
         name: "garden-scenario",
