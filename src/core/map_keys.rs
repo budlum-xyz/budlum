@@ -203,6 +203,16 @@ impl MapKey for (DomainId, u64, u64) {
     }
 }
 
+impl MapKey for (u32, u64) {
+    fn to_key_string(&self) -> String {
+        format!("{}:{}", self.0, self.1)
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        let [domain, epoch] = parts::<2>(s)?;
+        Ok((parse_uint(domain, "domain")?, parse_uint(epoch, "epoch")?))
+    }
+}
+
 impl MapKey for (u64, u32) {
     fn to_key_string(&self) -> String {
         format!("{}:{}", self.0, self.1)
@@ -492,7 +502,8 @@ mod tests {
         check(ContentId([8u8; 32]));
         check((3u32, Address([1u8; 32])));
         check((3u32, 4u32, Address([2u8; 32])));
-        check((3u32, u64::MAX, 0u64));
+        check((3u32, 4u64, 0u64));
+        check((3u32, u64::MAX));
         check((AiRequestId([9u8; 32]), [10u8; 32]));
         check((ContentId([11u8; 32]), ContentId([12u8; 32])));
         check(ProofClaimKey {

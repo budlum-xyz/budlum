@@ -167,7 +167,11 @@ pub struct SettlementRegistries {
     /// A bundle binds legs that already exist as ordinary intents; it never
     /// opens one. Written only by `SettlementTx::Bundle`, and empty on a chain
     /// that never opened one, so its presence changes no root until used.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty",
+        with = "crate::core::map_keys"
+    )]
     pub bundles: std::collections::BTreeMap<[u8; 32], crate::relayer::bundle::IntentBundle>,
     /// The finality checkpoint headers: built by the transition of
     /// every checkpoint block from the state at its end.

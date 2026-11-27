@@ -75,6 +75,7 @@ dependencies = [
  "hex",
  "libcrux-ml-dsa",
  "ml-dsa",
+ "serde",
  "serde_json",
  "sha2",
  "sha3 0.10.9",
