@@ -130,4 +130,8 @@
     <string name="w_locked">locked</string>
     <string name="w_unlocked">unlocked</string>
     <string name="w_unlock">Unlock</string>
+    <string name="w_verify">check your words</string>
+    <string name="w_verify_why">Type three of them back. This is the only moment a mistake can still be caught: the words cannot be shown again.</string>
+    <string name="w_word_number">word %1$d</string>
+    <string name="w_not_those_words">That is not what was written on the last screen. Check your paper.</string>
 </resources>

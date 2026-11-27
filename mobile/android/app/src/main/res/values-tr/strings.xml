@@ -130,4 +130,8 @@
     <string name="w_locked">kilitli</string>
     <string name="w_unlocked">açık</string>
     <string name="w_unlock">Kilidi aç</string>
+    <string name="w_verify">kelimelerinizi doğrulayın</string>
+    <string name="w_verify_why">Üçünü geri yazın. Bir hatanın hâlâ yakalanabileceği tek an budur: kelimeler bir daha gösterilemez.</string>
+    <string name="w_word_number">%1$d. kelime</string>
+    <string name="w_not_those_words">Bu, önceki ekranda yazan değil. Kâğıdınızı denetleyin.</string>
 </resources>

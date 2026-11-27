@@ -39,6 +39,14 @@ enum class Step {
 
     /** The twenty-four words, shown once, before anything else happens. */
     Seed,
+
+    /**
+     * Three of those words, asked back.
+     *
+     * Without it the previous screen is a button that says a thing was
+     * done rather than a check that it was.
+     */
+    SeedVerify,
 }
 
 /**

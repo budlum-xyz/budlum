@@ -43,6 +43,9 @@ import network.budlum.validator.core.MobileConstants
  *  button can be dark before the call is made rather than after it. */
 private const val MIN_PASSWORD = 8
 
+/** How many of the twenty-four are asked back before the wallet is let go. */
+private const val CHECKED_WORDS = 3
+
 /**
  * No wallet yet: make one, or put back one the person already has.
  *
@@ -198,12 +201,80 @@ fun SeedPhraseScreen(model: GardenModel, onWritten: () -> Unit) {
             )
             RuleButton(
                 text = stringResource(R.string.w_done),
-                onTap = {
-                    model.forgetMnemonic()
-                    onWritten()
-                },
+                onTap = onWritten,
                 enabled = confirmed,
             )
+        }
+    }
+}
+
+/**
+ * Three of the words, asked back.
+ *
+ * A person who taps past the phrase screen without writing anything
+ * down has a wallet they will lose, and they will not find that out
+ * until the day it matters. Asking for three positions at random is
+ * the cheapest way to make the claim true at the moment it is made.
+ *
+ * The positions are drawn once and remembered, so they do not shuffle
+ * underneath somebody who is part way through typing.
+ */
+@Composable
+fun SeedVerifyScreen(model: GardenModel, onVerified: () -> Unit) {
+    val words = model.state.mnemonic
+    val asked = remember(words.size) {
+        if (words.size < CHECKED_WORDS) {
+            words.indices.toList()
+        } else {
+            words.indices.shuffled().take(CHECKED_WORDS).sorted()
+        }
+    }
+    var typed by remember { mutableStateOf(List(asked.size) { "" }) }
+    val right = asked.indices.all { slot ->
+        typed[slot].trim().equals(words.getOrNull(asked[slot]) ?: "", ignoreCase = true)
+    }
+
+    CubeFloor(model.skin) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Label(stringResource(R.string.w_verify))
+            Text(
+                stringResource(R.string.w_verify_why),
+                style = MaterialTheme.typography.bodySmall,
+                color = Ink,
+                modifier = Modifier.padding(bottom = 10.dp),
+            )
+
+            asked.forEachIndexed { slot, position ->
+                OutlinedTextField(
+                    value = typed[slot],
+                    onValueChange = { fresh ->
+                        typed = typed.toMutableList().also { it[slot] = fresh }
+                    },
+                    label = { Label(stringResource(R.string.w_word_number, position + 1)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
+            Rule()
+
+            RuleButton(
+                text = stringResource(R.string.w_done),
+                onTap = {
+                    model.forgetMnemonic()
+                    onVerified()
+                },
+                enabled = right,
+            )
+            if (!right && typed.any { it.isNotEmpty() }) {
+                Label(stringResource(R.string.w_not_those_words), color = Flow)
+            }
         }
     }
 }

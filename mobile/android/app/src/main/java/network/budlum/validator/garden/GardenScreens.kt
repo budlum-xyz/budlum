@@ -64,6 +64,10 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
             // wallet by pressing a system button, so that door stays
             // shut and the screen's own button is the only way on.
             Step.Seed -> Step.Seed
+            // Same reason: backing out of the check would leave a
+            // wallet whose words were never confirmed, and the words
+            // are gone from this screen onward.
+            Step.SeedVerify -> Step.SeedVerify
             else -> Step.Choose
         }
     }
@@ -103,7 +107,8 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
                 }
             }
         }
-        Step.Seed -> SeedPhraseScreen(model) { step = Step.Choose }
+        Step.Seed -> SeedPhraseScreen(model) { step = Step.SeedVerify }
+        Step.SeedVerify -> SeedVerifyScreen(model) { step = Step.Choose }
         Step.Choose -> ChooseScreen(
             model = model,
             onStartOwn = { step = Step.Garden; tab = 0 },
