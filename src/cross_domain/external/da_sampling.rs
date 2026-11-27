@@ -429,17 +429,7 @@ impl DataAvailabilityAdapter {
                 rule: "no pinned DA committee/namespace; DA admission is closed".into(),
             });
         };
-        if pinned.namespace_id == [0u8; 32]
-            || pinned.min_samples == 0
-            || usize::from(pinned.min_samples) > MAX_DA_SAMPLES
-            || pinned.min_square_size < 2
-            || !pinned.min_square_size.is_power_of_two()
-        {
-            return Err(AdapterError::ConsensusRule {
-                rule: "pinned DA policy carries invalid namespace, min_samples, or min_square_size"
-                    .into(),
-            });
-        }
+        validate_pinned_da_policy(pinned)?;
         if pinned.members.is_empty() || pinned.members.len() > MAX_DA_COMMITTEE {
             return Err(AdapterError::ConsensusRule {
                 rule: "pinned DA committee size outside valid bounds".into(),
@@ -1334,9 +1324,26 @@ pub struct DaFraudVerdict {
     pub quorum_safety_breached: bool,
 }
 
+fn validate_pinned_da_policy(pinned: &PinnedDaCommittee) -> Result<(), AdapterError> {
+    if pinned.namespace_id == [0u8; 32]
+        || pinned.min_samples == 0
+        || usize::from(pinned.min_samples) > MAX_DA_SAMPLES
+        || pinned.min_square_size < 2
+        || !pinned.min_square_size.is_power_of_two()
+        || pinned.min_square_size > MAX_DA_SQUARE_SIZE
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule: "pinned DA policy carries invalid namespace, min_samples, or min_square_size"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
 fn verify_da_committee_map(
     pinned: &PinnedDaCommittee,
 ) -> Result<(BTreeMap<[u8; 32], &DaCommitteeMember>, u128), AdapterError> {
+    validate_pinned_da_policy(pinned)?;
     if pinned.members.is_empty() || pinned.members.len() > MAX_DA_COMMITTEE {
         return Err(AdapterError::ConsensusRule {
             rule: format!(
@@ -1459,11 +1466,15 @@ pub fn verify_da_fraud_proof(
     }
     let (member_map, total_stake) = verify_da_committee_map(pinned)?;
     let header = &proof.header;
-    if !(2..=MAX_DA_SQUARE_SIZE).contains(&header.square_size)
+    if header.square_size < pinned.min_square_size
+        || header.square_size > MAX_DA_SQUARE_SIZE
         || !header.square_size.is_power_of_two()
     {
         return Err(AdapterError::ConsensusRule {
-            rule: format!("DA fraud proof square_size {} invalid", header.square_size),
+            rule: format!(
+                "DA fraud proof square_size {} invalid or below minimum {}",
+                header.square_size, pinned.min_square_size
+            ),
         });
     }
     let primary_signers = verify_da_header_signatures(
@@ -1661,20 +1672,20 @@ pub fn verify_da_fraud_proof(
                     rule: "DA header equivocation requires identical height".into(),
                 });
             }
-            if !(2..=MAX_DA_SQUARE_SIZE).contains(&conflicting_header.square_size)
+            if conflicting_header.square_size < pinned.min_square_size
+                || conflicting_header.square_size > MAX_DA_SQUARE_SIZE
                 || !conflicting_header.square_size.is_power_of_two()
             {
                 return Err(AdapterError::ConsensusRule {
-                    rule: "DA conflicting header square_size invalid".into(),
+                    rule: "DA conflicting header square_size invalid or below minimum".into(),
                 });
             }
             if bool::from(subtle::ConstantTimeEq::ct_eq(
                 conflicting_header.data_root.as_slice(),
                 header.data_root.as_slice(),
-            )) && conflicting_header.time_secs == header.time_secs
-            {
+            )) {
                 return Err(AdapterError::ConsensusRule {
-                    rule: "DA equivocation headers are identical (no fraud)".into(),
+                    rule: "DA equivocation headers commit to the same data_root (no fraud)".into(),
                 });
             }
             let secondary_signers = verify_da_header_signatures(
@@ -2249,5 +2260,127 @@ mod tests {
             ),
             "future DA header height above policy.now must fail closed with AdapterError::Stale"
         );
+    }
+
+    #[test]
+    fn da_fraud_proof_refuses_same_data_root_reproposal_and_invalid_pinned_policy() {
+        let network = "celestia-mainnet";
+        let namespace_id = [0x42; 32];
+        let keys: Vec<(KeyPair, PqKeyPair)> = (0..3)
+            .map(|_| (KeyPair::generate().expect("ek"), PqKeyPair::generate()))
+            .collect();
+        let members: Vec<DaCommitteeMember> = keys
+            .iter()
+            .map(|(ek, pk)| DaCommitteeMember {
+                ed25519_pubkey: ek.public_key_bytes(),
+                voting_weight: 100,
+                pq_pubkey: pk.public_key_bytes().to_vec(),
+            })
+            .collect();
+        let pinned = PinnedDaCommittee {
+            namespace_id,
+            min_samples: 2,
+            min_square_size: 4,
+            members,
+        };
+        let sign_for_ns = |hdr: &DaHeader, ns: &Hash32, idxs: &[usize]| -> Vec<DaAttestationSig> {
+            let vote = da_header_sign_bytes(network, hdr, ns);
+            idxs.iter()
+                .map(|&i| DaAttestationSig {
+                    signer_pubkey: keys[i].0.public_key_bytes(),
+                    ed25519_sig: keys[i].0.sign(&vote).to_vec(),
+                    pq_sig: keys[i]
+                        .1
+                        .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &vote)
+                        .expect("pq sign"),
+                })
+                .collect()
+        };
+
+        let nmt_root = [0x61; 32];
+        let rr = [0x62; 32];
+        let cr = [0x63; 32];
+        let round0_hdr = DaHeader {
+            height: 900,
+            time_secs: 1_750_000_000,
+            square_size: 4,
+            nmt_roots_root: nmt_root,
+            row_roots_root: rr,
+            col_roots_root: cr,
+            data_root: compute_da_data_root(4, &nmt_root, &rr, &cr),
+        };
+        // Honest BFT round-1 timeout re-proposal of the exact same data_root at a newer timestamp
+        // commits to the exact same 2D square and MUST NOT slash honest committee signers.
+        let round1_hdr = DaHeader {
+            time_secs: round0_hdr.time_secs + 6,
+            ..round0_hdr.clone()
+        };
+        let non_conflicting = DaFraudProof {
+            header: round0_hdr.clone(),
+            signatures: sign_for_ns(&round0_hdr, &namespace_id, &[0, 1, 2]),
+            kind: DaFraudKind::HeaderEquivocation {
+                conflicting_header: round1_hdr.clone(),
+                conflicting_signatures: sign_for_ns(&round1_hdr, &namespace_id, &[0, 1, 2]),
+            },
+        };
+        let reproposal_err = verify_da_fraud_proof(network, &pinned, &non_conflicting)
+            .expect_err("honest round re-proposal with identical data_root must not slash");
+        assert!(matches!(reproposal_err, AdapterError::ConsensusRule { .. }));
+
+        // Zero namespace_id in PinnedDaCommittee must be refused just like DataAvailabilityAdapter::verify.
+        let mut zero_ns_pinned = pinned.clone();
+        zero_ns_pinned.namespace_id = [0u8; 32];
+        let alt_cr = [0x64; 32];
+        let forked_hdr = DaHeader {
+            col_roots_root: alt_cr,
+            data_root: compute_da_data_root(4, &nmt_root, &rr, &alt_cr),
+            ..round0_hdr.clone()
+        };
+        let zero_ns_proof = DaFraudProof {
+            header: round0_hdr.clone(),
+            signatures: sign_for_ns(&round0_hdr, &[0u8; 32], &[0, 1]),
+            kind: DaFraudKind::HeaderEquivocation {
+                conflicting_header: forked_hdr,
+                conflicting_signatures: sign_for_ns(
+                    &DaHeader {
+                        col_roots_root: alt_cr,
+                        data_root: compute_da_data_root(4, &nmt_root, &rr, &alt_cr),
+                        ..round0_hdr
+                    },
+                    &[0u8; 32],
+                    &[0, 1],
+                ),
+            },
+        };
+        let zero_ns_err = verify_da_fraud_proof(network, &zero_ns_pinned, &zero_ns_proof)
+            .expect_err("zero namespace_id in pinned DA committee must fail closed");
+        assert!(matches!(zero_ns_err, AdapterError::ConsensusRule { .. }));
+
+        // Header square_size below pinned.min_square_size must also fail closed.
+        let sub_square_hdr = DaHeader {
+            height: 901,
+            time_secs: 1_750_000_010,
+            square_size: 2,
+            nmt_roots_root: nmt_root,
+            row_roots_root: rr,
+            col_roots_root: cr,
+            data_root: compute_da_data_root(2, &nmt_root, &rr, &cr),
+        };
+        let sub_square_fork = DaHeader {
+            col_roots_root: alt_cr,
+            data_root: compute_da_data_root(2, &nmt_root, &rr, &alt_cr),
+            ..sub_square_hdr.clone()
+        };
+        let sub_square_proof = DaFraudProof {
+            header: sub_square_hdr.clone(),
+            signatures: sign_for_ns(&sub_square_hdr, &namespace_id, &[0, 1]),
+            kind: DaFraudKind::HeaderEquivocation {
+                conflicting_header: sub_square_fork.clone(),
+                conflicting_signatures: sign_for_ns(&sub_square_fork, &namespace_id, &[0, 1]),
+            },
+        };
+        let sub_square_err = verify_da_fraud_proof(network, &pinned, &sub_square_proof)
+            .expect_err("DA fraud proof square_size below pinned.min_square_size must fail closed");
+        assert!(matches!(sub_square_err, AdapterError::ConsensusRule { .. }));
     }
 }
