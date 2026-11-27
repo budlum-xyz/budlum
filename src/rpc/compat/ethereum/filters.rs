@@ -194,6 +194,9 @@ impl FilterPool {
         spec: &str,
         now: u64,
     ) -> Result<String, FilterError> {
+        if peer.trim().is_empty() {
+            return Err(FilterError::ConnectionIdentityUnavailable);
+        }
         self.expire(now);
         if spec.len() > MAX_FILTER_SPEC_BYTES {
             return Err(FilterError::SpecTooLarge);
@@ -252,6 +255,9 @@ impl FilterPool {
         id: &str,
         now: u64,
     ) -> Result<Vec<serde_json::Value>, FilterError> {
+        if peer.trim().is_empty() {
+            return Err(FilterError::ConnectionIdentityUnavailable);
+        }
         let key = self.resolve(peer, id, now).map_err(|error| match error {
             FilterError::ForeignFilter | FilterError::Expired => FilterError::UnknownFilter,
             other => other,
@@ -268,6 +274,9 @@ impl FilterPool {
     ///
     /// Returns an error if the operation fails.
     pub fn uninstall(&mut self, peer: &str, id: &str, now: u64) -> Result<bool, FilterError> {
+        if peer.trim().is_empty() {
+            return Err(FilterError::ConnectionIdentityUnavailable);
+        }
         let key = self.resolve(peer, id, now)?;
         Ok(self.entries.remove(&key).is_some())
     }
@@ -468,5 +477,15 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.starts_with("0x") && second.starts_with("0x"));
         assert_eq!(pool.kind(&second), Some(FilterKind::Block));
+    }
+
+    #[test]
+    fn blank_peer_is_refused_without_mutating_pool() {
+        let mut pool = FilterPool::new();
+        assert_eq!(
+            pool.create("   ", FilterKind::Log, "{}", 1),
+            Err(FilterError::ConnectionIdentityUnavailable)
+        );
+        assert!(pool.is_empty());
     }
 }
