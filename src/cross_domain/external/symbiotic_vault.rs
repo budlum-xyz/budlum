@@ -553,6 +553,17 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
                 ),
             });
         }
+        // Fail-closed: an adapter bound to an empty (or whitespace-only)
+        // network label is a configuration error. Without this guard the
+        // `evidence.network != self.network` comparison below would treat
+        // `"" == ""` as a match and accept any payload that also carries an
+        // empty network, silently turning the adapter into an
+        // accept-everything end. Reject every payload instead.
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "SymbioticVault network identifier must not be empty".into(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -844,6 +855,32 @@ mod tests {
             .observed()
             .iter()
             .any(|c| c.scheme == ObservedScheme::Scheme(SchemeId::ML_DSA_65)));
+    }
+
+    #[test]
+    fn empty_network_adapter_refuses_evidence_fail_closed() {
+        // An adapter constructed with an empty network label is a
+        // configuration error. It must refuse every evidence payload
+        // fail-closed instead of accepting payloads that also carry an
+        // empty network (where `"" == ""` would otherwise match). The
+        // evidence here is validly signed for the empty-network domain,
+        // so acceptance would be a real fail-open, not a malformed input.
+        let adapter = SymbioticVaultAdapter::new("");
+        let (ev, _committee) = sample_evidence_with_committee("");
+        let raw = RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            evidence_version: EVIDENCE_VERSION,
+            network: "".to_string(),
+            payload: encode_symbiotic_evidence(&ev),
+            declared_height: 1,
+            declared_root: [0; 32],
+            submitter: crate::core::address::Address([0; 32]),
+        };
+        let err = adapter.verify(&raw, &default_policy()).unwrap_err();
+        assert!(
+            matches!(err, AdapterError::ConsensusRule { rule } if rule.contains("empty")),
+            "empty-network adapter must refuse fail-closed, got {err:?}"
+        );
     }
 
     #[test]
