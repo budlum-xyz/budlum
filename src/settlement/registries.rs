@@ -52,6 +52,22 @@ pub struct SettlementRegistries {
     /// solver-intent bindings. Every write enters through `SettlementTx::AppBinding`.
     #[serde(default)]
     pub app_binding: crate::settlement::app_binding::AppBindingRegistry,
+    /// Which chain-native assets have been declared to be the same asset.
+    ///
+    /// A unified balance is only as complete as this set: an asset nobody
+    /// denominated cannot be summed (see
+    /// [`crate::settlement::unified_balance`]), and an empty set means every
+    /// balance stays per-asset and per-chain. Empty on a chain that never
+    /// declared a denomination, so its presence changes no root until used.
+    #[serde(default)]
+    pub denominations: crate::settlement::universal_asset::DenominationIndex,
+    /// Open all-or-nothing intent bundles, keyed by bundle id.
+    ///
+    /// A bundle binds legs that already exist as ordinary intents; it never
+    /// opens one. Written only by `SettlementTx::Bundle`, and empty on a chain
+    /// that never opened one, so its presence changes no root until used.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bundles: std::collections::BTreeMap<[u8; 32], crate::relayer::bundle::IntentBundle>,
     /// The finality checkpoint headers: built by the transition of
     /// every checkpoint block from the state at its end.
     pub global_headers: GlobalHeaderWindow,

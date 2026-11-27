@@ -169,6 +169,17 @@ pub struct Denomination {
     pub label: String,
     /// The block at which the declaration was anchored on the source chain.
     pub anchored_at_block: u64,
+    /// The finality root the declaration event was proven against.
+    ///
+    /// A denomination with no root is a claim nobody proved. `validate_shape`
+    /// refuses it as [`AssetError::Unanchored`], which is why this field exists
+    /// at all: a set of members is not a fact about a chain until an anchored
+    /// event says so.
+    #[serde(default)]
+    pub anchor_root: Hash32,
+    /// The height of `anchor_root`.
+    #[serde(default)]
+    pub anchor_height: u64,
     /// The id, a function of issuer and members.
     pub denomination_id: Hash32,
 }
@@ -186,9 +197,35 @@ impl Denomination {
             members,
             label: label.to_string(),
             anchored_at_block: 0,
+            anchor_root: [0u8; 32],
+            anchor_height: 0,
             denomination_id: [0u8; 32],
         };
         d.denomination_id = d.calculate_id();
+        d
+    }
+
+    /// Declares a denomination together with the finality root of the event
+    /// that declared it.
+    ///
+    /// This is the only constructor that can produce a denomination
+    /// [`Denomination::validate_shape`] accepts: [`Denomination::declare`]
+    /// leaves the root zero, which the `Unanchored` rule refuses. The split is
+    /// deliberate - a test can build an unanchored claim to prove it is
+    /// refused, and the chain cannot admit one by accident.
+    #[must_use]
+    pub fn declare_anchored(
+        issuer: Address,
+        members: Vec<AssetMember>,
+        label: &str,
+        anchored_at_block: u64,
+        anchor_root: Hash32,
+        anchor_height: u64,
+    ) -> Self {
+        let mut d = Self::declare(issuer, members, label);
+        d.anchored_at_block = anchored_at_block;
+        d.anchor_root = anchor_root;
+        d.anchor_height = anchor_height;
         d
     }
 
@@ -245,6 +282,11 @@ impl Denomination {
         if !self.verify_id() {
             return Err(AssetError::IdMismatch);
         }
+        // The claim must be anchored: a members-only denomination is a
+        // statement about nothing.
+        if self.anchor_root == [0u8; 32] {
+            return Err(AssetError::Unanchored);
+        }
         for (i, member) in self.members.iter().enumerate() {
             if !has_claim_domain(member.domain) {
                 return Err(AssetError::UnverifiedDomain {
@@ -288,13 +330,22 @@ impl Denomination {
 /// The index is the only place that turns a chain-native asset into a universal
 /// one, which is what makes "did this asset get summed, and as what" a question
 /// with one answer.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DenominationIndex {
     /// Admitted denominations, keyed by id.
+    ///
+    /// `serde(default)` matters: a snapshot written before this field existed
+    /// must decode as an empty index, not fail to decode. A missing field that
+    /// broke decoding would make every old snapshot unloadable, which is the
+    /// one way a consensus field can be worse than no field.
+    #[serde(default)]
     entries: Vec<Denomination>,
-    /// Most denominations the index holds.
-    #[serde(skip)]
-    ceiling: usize,
+}
+
+impl Default for DenominationIndex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Default ceiling on admitted denominations.
@@ -306,7 +357,6 @@ impl DenominationIndex {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
-            ceiling: MAX_DENOMINATIONS,
         }
     }
 
@@ -354,7 +404,7 @@ impl DenominationIndex {
         {
             return Ok(());
         }
-        if self.entries.len() >= self.ceiling {
+        if self.entries.len() >= MAX_DENOMINATIONS {
             return Err(AssetError::IndexFull);
         }
 
@@ -417,8 +467,22 @@ mod tests {
     /// "B and A are one asset" are the same denomination.
     #[test]
     fn the_same_members_in_any_order_are_one_denomination() {
-        let a = Denomination::declare(issuer(), vec![eth(1), sol(1)], "USDC");
-        let b = Denomination::declare(issuer(), vec![sol(1), eth(1)], "USDC");
+        let a = Denomination::declare_anchored(
+            issuer(),
+            vec![eth(1), sol(1)],
+            "USDC",
+            1,
+            [0xE1; 32],
+            1,
+        );
+        let b = Denomination::declare_anchored(
+            issuer(),
+            vec![sol(1), eth(1)],
+            "USDC",
+            1,
+            [0xE1; 32],
+            1,
+        );
         assert_eq!(
             a.denomination_id, b.denomination_id,
             "member order changed the denomination id"
@@ -429,8 +493,22 @@ mod tests {
     /// cannot be mistaken for the old denomination.
     #[test]
     fn adding_a_member_is_a_different_denomination_not_a_wider_one() {
-        let narrow = Denomination::declare(issuer(), vec![eth(1), sol(1)], "USDC");
-        let wide = Denomination::declare(issuer(), vec![eth(1), sol(1), eth(2)], "USDC");
+        let narrow = Denomination::declare_anchored(
+            issuer(),
+            vec![eth(1), sol(1)],
+            "USDC",
+            1,
+            [0xE1; 32],
+            1,
+        );
+        let wide = Denomination::declare_anchored(
+            issuer(),
+            vec![eth(1), sol(1), eth(2)],
+            "USDC",
+            1,
+            [0xE1; 32],
+            1,
+        );
         assert_ne!(
             narrow.denomination_id, wide.denomination_id,
             "a denomination absorbed a second asset under its old id"
@@ -444,8 +522,22 @@ mod tests {
     /// The label is display only: two spellings do not split one asset.
     #[test]
     fn the_label_does_not_enter_the_id() {
-        let a = Denomination::declare(issuer(), vec![eth(1), sol(1)], "USDC");
-        let b = Denomination::declare(issuer(), vec![eth(1), sol(1)], "usd coin");
+        let a = Denomination::declare_anchored(
+            issuer(),
+            vec![eth(1), sol(1)],
+            "USDC",
+            1,
+            [0xE1; 32],
+            1,
+        );
+        let b = Denomination::declare_anchored(
+            issuer(),
+            vec![eth(1), sol(1)],
+            "usd coin",
+            1,
+            [0xE1; 32],
+            1,
+        );
         assert_eq!(
             a.denomination_id, b.denomination_id,
             "a display label split one asset in two"
@@ -457,12 +549,26 @@ mod tests {
     #[test]
     fn one_native_asset_cannot_be_summed_into_two_denominations() {
         let mut index = DenominationIndex::new();
-        let first = Denomination::declare(issuer(), vec![eth(1), sol(1)], "USDC");
+        let first = Denomination::declare_anchored(
+            issuer(),
+            vec![eth(1), sol(1)],
+            "USDC",
+            1,
+            [0xE1; 32],
+            1,
+        );
         index.admit(first, any_verified).expect("first admit");
 
         // A second denomination reusing Ethereum's asset 0x01 for a different
         // universal asset.
-        let second = Denomination::declare(issuer(), vec![eth(1), sol(2)], "NOT-USDC");
+        let second = Denomination::declare_anchored(
+            issuer(),
+            vec![eth(1), sol(2)],
+            "NOT-USDC",
+            1,
+            [0xE1; 32],
+            1,
+        );
         assert!(
             index.admit(second, any_verified).is_err(),
             "the same chain asset was admitted into two universal assets"
@@ -487,7 +593,7 @@ mod tests {
         let mut index = DenominationIndex::new();
         index
             .admit(
-                Denomination::declare(issuer(), vec![eth(1)], "DAI"),
+                Denomination::declare_anchored(issuer(), vec![eth(1)], "DAI", 1, [0xE1; 32], 1),
                 any_verified,
             )
             .expect("admit");
@@ -499,7 +605,11 @@ mod tests {
     /// balance could never be proven, so it would be a permanent hole in a sum.
     #[test]
     fn a_member_on_an_unverifiable_domain_is_refused() {
-        let d = Denomination::declare(issuer(), vec![eth(1), AssetMember::new(99, [5u8; 32])], "X");
+        let d = Denomination::declare_anchored(
+            issuer(),
+            vec![eth(1), AssetMember::new(99, [5u8; 32])],
+            "X",
+        );
         let has_claim = |domain: u32| domain != 99;
         assert_eq!(
             d.validate_shape(has_claim),
@@ -514,10 +624,23 @@ mod tests {
     /// because one domain contributes one amount to the sum.
     #[test]
     fn two_members_on_one_domain_are_refused() {
-        let d = Denomination::declare(issuer(), vec![eth(1), eth(2)], "X");
+        let d =
+            Denomination::declare_anchored(issuer(), vec![eth(1), eth(2)], "X", 1, [0xE1; 32], 1);
         assert_eq!(
             d.validate_shape(any_verified),
             Err(AssetError::SameDomainTwice { a: 0, b: 1 })
+        );
+    }
+
+    /// A denomination with no anchor root is a claim nobody proved.
+    #[test]
+    fn an_unanchored_denomination_is_refused() {
+        let d = Denomination::declare(issuer(), vec![eth(1), sol(1)], "USDC");
+        assert_eq!(d.anchor_root, [0u8; 32]);
+        assert_eq!(
+            d.validate_shape(any_verified),
+            Err(AssetError::Unanchored),
+            "a members-only claim was admitted"
         );
     }
 
@@ -525,7 +648,14 @@ mod tests {
     #[test]
     fn redeclaring_the_same_asset_is_idempotent() {
         let mut index = DenominationIndex::new();
-        let d = Denomination::declare(issuer(), vec![eth(1), sol(1)], "USDC");
+        let d = Denomination::declare_anchored(
+            issuer(),
+            vec![eth(1), sol(1)],
+            "USDC",
+            1,
+            [0xE1; 32],
+            1,
+        );
         index.admit(d.clone(), any_verified).expect("first");
         index
             .admit(d, any_verified)

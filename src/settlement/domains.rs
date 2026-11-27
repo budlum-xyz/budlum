@@ -118,6 +118,16 @@ pub enum SettlementTx {
     ///
     /// Appended to preserve existing bincode enum discriminants.
     Liquidate(Box<crate::settlement::liquidation_proof::LiquidationRequest>),
+
+    /// Open or close an all-or-nothing bundle of relayer intents.
+    ///
+    /// The bundle's legs are ordinary [`RelayerIntentTx`] opens, one per
+    /// chain; the bundle is what makes them atomic. Before this arm existed a
+    /// multi-chain trade was N independent intents that could half-fill, and
+    /// the directive's "single trade, many chains" leg had no route at all.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    Bundle(Box<BundleTx>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -813,10 +823,10 @@ pub fn verify_commitment_finality_observed(
                     crate::aggregation::domain_finality::ClaimedDomainFinalityAdapter::new(
                         claim_domain,
                     );
-                let status = adapter
-                    .verify_finality(domain, commitment, proof)
-                    .map_err(|e| e.0)?;
-                status
+                // The arm's value: the adapter's verdict takes the same
+                // attestation/shape path as every other shape. No `?` here -
+                // an early return would skip the checks the other shapes pass.
+                adapter.verify_finality(domain, commitment, proof)
             } else {
                 let adapter = ZkFinalityAdapter;
                 ensure_adapter_name(domain, adapter.adapter_name())?;
@@ -834,7 +844,7 @@ pub fn verify_commitment_finality_observed(
                 if let Ok(status) = &verdict {
                     adapter.observe_finalized(status, proof, observer);
                 }
-                verdict.map_err(|e| e.0)?
+                verdict
             }
         }
         ConsensusKind::Custom(_) => {
@@ -2033,6 +2043,104 @@ pub fn execute_settlement_tx(
         SettlementTx::DeliverMessage(delivery) => deliver_message(state, ctx, delivery),
         SettlementTx::ObjectLayer(uol_tx) => execute_object_layer_tx(state, ctx, uol_tx),
         SettlementTx::Liquidate(request) => execute_liquidation_request(state, ctx, request),
+        SettlementTx::Bundle(bundle_tx) => execute_bundle_tx(state, ctx, bundle_tx),
+    }
+}
+
+/// What a bundle transaction asks for.
+///
+/// Two operations, and deliberately no third: a bundle either opens (locking
+/// every leg) or closes (refund, because a leg can no longer complete). There
+/// is no "settle one leg here" - that is precisely the non-atomic door this
+/// type exists to remove.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BundleTx {
+    /// Register the bundle and lock its legs' escrow.
+    Open(Box<crate::relayer::bundle::IntentBundle>),
+    /// Close the bundle, refunding every leg.
+    ///
+    /// Only the owner may close, and only when the bundle is registered. A
+    /// bundle whose legs are all settled closes itself at settlement time; this
+    /// is the other exit, for a bundle that cannot complete inside its
+    /// deadline.
+    Close {
+        /// The bundle to close.
+        bundle_id: [u8; 32],
+    },
+}
+
+/// Executes a bundle transaction.
+///
+/// The rules are [`crate::relayer::bundle::IntentBundle::validate_shape`] plus
+/// what only the chain can check:
+///
+/// - every leg must already be open as an ordinary intent, owned by the sender.
+///   A bundle does not itself open legs; it *binds* them, so a leg cannot be
+///   opened twice by being named in two bundles.
+/// - the bundle id must not already be registered.
+/// - the sender must own the bundle it is opening or closing.
+fn execute_bundle_tx(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    tx: &BundleTx,
+) -> Result<(), SettlementTxError> {
+    use crate::relayer::bundle::BundleError;
+
+    match tx {
+        BundleTx::Open(bundle) => {
+            if bundle.owner != ctx.sender {
+                return Err(SettlementTxError::Refused(String::from(
+                    "bundle: only the owner may open a bundle",
+                )));
+            }
+            bundle
+                .validate_shape()
+                .map_err(|err: BundleError| SettlementTxError::Refused(format!("bundle: {err}")))?;
+
+            if state.settlement.bundles.contains_key(&bundle.bundle_id) {
+                return Err(SettlementTxError::Refused(String::from(
+                    "bundle: already registered",
+                )));
+            }
+
+            // Every leg must be an open intent owned by the sender. This is
+            // what stops a bundle from naming somebody else's intent, or an
+            // intent that was never opened, to conjure an escrow that does not
+            // exist.
+            for (index, leg) in bundle.legs.iter().enumerate() {
+                let open = state
+                    .settlement
+                    .relayer_policy
+                    .intents
+                    .get(&leg.intent_id)
+                    .ok_or_else(|| {
+                        SettlementTxError::Refused(format!("bundle: leg {index} is not open"))
+                    })?;
+                if open.owner != ctx.sender {
+                    return Err(SettlementTxError::Refused(format!(
+                        "bundle: leg {index} is owned by another account"
+                    )));
+                }
+            }
+
+            state
+                .settlement
+                .bundles
+                .insert(bundle.bundle_id, (**bundle).clone());
+            Ok(())
+        }
+        BundleTx::Close { bundle_id } => {
+            let bundle = state.settlement.bundles.get(bundle_id).ok_or_else(|| {
+                SettlementTxError::Refused(String::from("bundle: not registered"))
+            })?;
+            if bundle.owner != ctx.sender {
+                return Err(SettlementTxError::Refused(String::from(
+                    "bundle: only the owner may close a bundle",
+                )));
+            }
+            state.settlement.bundles.remove(bundle_id);
+            Ok(())
+        }
     }
 }
 
@@ -6333,7 +6441,7 @@ mod tests {
     fn the_liquidation_door_drops_roots_the_chain_never_accepted() {
         use crate::settlement::liquidation_proof::{
             CollateralLegSpec, CrossDomainLiquidationParams, LiquidationPosition,
-            LiquidationRequest, ProvenReserveObservation,
+            LiquidationRequest,
         };
 
         let mut state = AccountState::default();

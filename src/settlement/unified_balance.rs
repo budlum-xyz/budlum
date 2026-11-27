@@ -286,13 +286,16 @@ mod tests {
 
     fn usdc_index() -> (DenominationIndex, Hash32) {
         let mut index = DenominationIndex::new();
-        let d = Denomination::declare(
+        let d = Denomination::declare_anchored(
             Address::from([1u8; 32]),
             vec![
                 AssetMember::new(1, [0x11; 32]),
                 AssetMember::new(9, [0x22; 32]),
             ],
             "USDC",
+            1,
+            [0xE1; 32],
+            1,
         );
         let id = d.denomination_id;
         index.admit(d, |_| true).expect("admit");
@@ -320,15 +323,21 @@ mod tests {
     #[test]
     fn different_assets_never_add_together() {
         let mut index = DenominationIndex::new();
-        let a = Denomination::declare(
+        let a = Denomination::declare_anchored(
             Address::from([2u8; 32]),
             vec![AssetMember::new(1, [0x11; 32])],
             "USDC",
+            1,
+            [0xE1; 32],
+            1,
         );
-        let b = Denomination::declare(
+        let b = Denomination::declare_anchored(
             Address::from([2u8; 32]),
             vec![AssetMember::new(1, [0x33; 32])],
             "DAI",
+            1,
+            [0xE2; 32],
+            1,
         );
         let (a_id, b_id) = (a.denomination_id, b.denomination_id);
         index.admit(a, |_| true).expect("a");

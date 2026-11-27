@@ -4615,16 +4615,72 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
             put_bytes(out, &bytes);
         }
         SettlementTx::Liquidate(request) => {
-            // Tag 11: the next free one after ObjectLayer (10). The request is
-            // five inputs verbatim - the position, the roots the sender
-            // claims, the proven reserve observations, the collateral legs and
-            // the caps - so the whole carried struct is what gets signed. A
-            // liquidation whose evidence were left out of the preimage could be
-            // rewritten after the signature was taken.
+            // Tag 11. Every field of the request is written explicitly
+            // because a liquidation moves money: a field that is not in the
+            // preimage is a field a relayer can rewrite between signature and
+            // execution. In particular the claimed roots are written one by
+            // one, so a root cannot be swapped for another without breaking the
+            // sender's signature.
             put_u8(out, 11);
-            let bytes = postcard::to_allocvec(request.as_ref())
-                .unwrap_or_else(|_| b"budlum/liquidate/serialize-failed".to_vec());
-            put_bytes(out, &bytes);
+            put_u64(out, request.position.position_id);
+            put_u128(out, request.position.debt_x);
+            put_u128(out, request.position.collateral_y);
+            put_u64(out, request.position.maintenance_threshold_bps);
+
+            put_u32(out, request.params.debt_domain_id);
+            put_u128(out, request.params.repay_debt_x);
+            put_u64(out, request.params.bonus_bps);
+            put_fixed(out, &request.params.delivery_proof_root);
+
+            put_u64(out, request.certified_roots.len() as u64);
+            for ((domain, epoch), root) in &request.certified_roots {
+                put_u32(out, *domain);
+                put_u64(out, *epoch);
+                put_fixed(out, root);
+            }
+
+            put_u64(out, request.observations.len() as u64);
+            for observation in &request.observations {
+                // The observation is hashed through its own canonical encoding:
+                // it carries a Merkle path whose length varies, and rewriting
+                // the leaves here would duplicate the proof-type's own rules.
+                let bytes = postcard::to_allocvec(observation)
+                    .unwrap_or_else(|_| b"budlum/liquidation/observation-failed".to_vec());
+                put_bytes(out, &bytes);
+            }
+
+            put_u64(out, request.collateral_legs.len() as u64);
+            for leg in &request.collateral_legs {
+                put_u32(out, leg.domain_id);
+                put_fixed(out, &leg.asset_id);
+                put_fixed(out, &leg.custody_or_remote_root);
+                put_u128(out, leg.available_y);
+            }
+        }
+        SettlementTx::Bundle(bundle_tx) => {
+            // Tag 12. A bundle writes what makes a multi-chain trade atomic, so
+            // every field is in the preimage: the owner, the budget, the
+            // deadline and every leg id. The legs' own contents are committed
+            // by their intent ids, which already hash their fields.
+            use crate::settlement::domains::BundleTx;
+            put_u8(out, 12);
+            match bundle_tx.as_ref() {
+                BundleTx::Open(bundle) => {
+                    put_u8(out, 0);
+                    put_fixed(out, bundle.owner.as_bytes());
+                    put_u64(out, bundle.deadline_block);
+                    put_u64(out, bundle.max_total_fee);
+                    put_fixed(out, &bundle.bundle_id);
+                    put_u64(out, bundle.legs.len() as u64);
+                    for leg in &bundle.legs {
+                        put_fixed(out, &leg.intent_id);
+                    }
+                }
+                BundleTx::Close { bundle_id } => {
+                    put_u8(out, 1);
+                    put_fixed(out, bundle_id);
+                }
+            }
         }
     }
 }
