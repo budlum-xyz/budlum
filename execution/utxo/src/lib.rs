@@ -114,11 +114,36 @@ pub fn decode_utxo_script(bytes: &[u8]) -> Result<UtxoLockScript, EeRefusal> {
         code: RefusalCode::InvalidCode,
         message: format!("invalid UTXO script: {e}"),
     })?;
-    if parsed.lock_ops.is_empty() {
+    if parsed.lock_ops.is_empty()
+        || parsed.lock_ops.len() > MAX_UTXO_STACK_ITEMS
+        || parsed.witness_ops.len() > MAX_UTXO_STACK_ITEMS
+    {
         return Err(EeRefusal {
             code: RefusalCode::InvalidCode,
-            message: String::from("UTXO locking script cannot be empty"),
+            message: String::from("UTXO locking script empty or exceeds op bound"),
         });
+    }
+    for op in parsed.witness_ops.iter().chain(parsed.lock_ops.iter()) {
+        match op {
+            ScriptOp::PushBytes(b) if b.len() > MAX_UTXO_ELEMENT_BYTES => {
+                return Err(EeRefusal {
+                    code: RefusalCode::InvalidCode,
+                    message: String::from("UTXO PushBytes exceeds 520-byte element limit"),
+                });
+            }
+            ScriptOp::OpCheckMultiSigHash { threshold, pubkeys }
+                if *threshold == 0
+                    || *threshold > pubkeys.len()
+                    || pubkeys.len() > MAX_MULTISIG_PUBKEYS
+                    || pubkeys.iter().any(|pk| pk.is_empty() || pk.len() > 65) =>
+            {
+                return Err(EeRefusal {
+                    code: RefusalCode::InvalidCode,
+                    message: String::from("invalid UTXO multisig threshold or pubkeys"),
+                });
+            }
+            _ => {}
+        }
     }
     Ok(parsed)
 }
@@ -1255,5 +1280,33 @@ mod tests {
         };
         assert_eq!(ok.status, OutcomeStatus::Success);
         assert_eq!(ok.gas_used, expected_gas);
+    }
+
+    #[test]
+    fn utxo_script_rejects_invalid_multisig_bounds_and_oversized_push_at_decode() {
+        let bad_multisig = encode_utxo_script(&UtxoLockScript {
+            witness_ops: Vec::new(),
+            lock_ops: vec![ScriptOp::OpCheckMultiSigHash {
+                threshold: 0,
+                pubkeys: Vec::new(),
+            }],
+            value_atoms: 100,
+        })
+        .unwrap();
+        assert!(
+            decode_utxo_script(&bad_multisig).is_err(),
+            "zero-threshold multisig locking script must be refused at decode"
+        );
+
+        let big_push = encode_utxo_script(&UtxoLockScript {
+            witness_ops: Vec::new(),
+            lock_ops: vec![ScriptOp::PushBytes(vec![0xAA; 521])],
+            value_atoms: 100,
+        })
+        .unwrap();
+        assert!(
+            decode_utxo_script(&big_push).is_err(),
+            "PushBytes above 520-byte consensus element limit must be refused at decode"
+        );
     }
 }

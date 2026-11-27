@@ -117,6 +117,42 @@ pub fn encode_plutus_blob(prog: &PlutusValidatorProgram) -> Result<Vec<u8>, EeRe
 /// # Errors
 ///
 /// Returns [`EeRefusal`] on header, size, or AST encoding violation.
+fn validate_uplc_term(term: &UplcTerm, depth: usize, nodes: &mut usize) -> bool {
+    if depth > MAX_UPLC_DEPTH {
+        return false;
+    }
+    *nodes = nodes.saturating_add(1);
+    if *nodes > MAX_UPLC_STEPS {
+        return false;
+    }
+    match term {
+        UplcTerm::ConstInt(_)
+        | UplcTerm::DatumInt
+        | UplcTerm::RedeemerInt
+        | UplcTerm::RedeemerBytes
+        | UplcTerm::CtxHeight
+        | UplcTerm::Signatory
+        | UplcTerm::Owner
+        | UplcTerm::Error => true,
+        UplcTerm::ConstBytes(b) => b.len() <= MAX_PLUTUS_SCRIPT_BYTES,
+        UplcTerm::Sha256(inner) | UplcTerm::TraceUnit(inner) => {
+            validate_uplc_term(inner, depth + 1, nodes)
+        }
+        UplcTerm::Add(a, b) | UplcTerm::EqualsInt(a, b) | UplcTerm::EqualsBytes(a, b) => {
+            validate_uplc_term(a, depth + 1, nodes) && validate_uplc_term(b, depth + 1, nodes)
+        }
+        UplcTerm::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            validate_uplc_term(cond, depth + 1, nodes)
+                && validate_uplc_term(then_branch, depth + 1, nodes)
+                && validate_uplc_term(else_branch, depth + 1, nodes)
+        }
+    }
+}
+
 pub fn decode_plutus_blob(bytes: &[u8]) -> Result<PlutusValidatorProgram, EeRefusal> {
     if bytes.len() > MAX_PLUTUS_SCRIPT_BYTES {
         return Err(EeRefusal {
@@ -130,10 +166,18 @@ pub fn decode_plutus_blob(bytes: &[u8]) -> Result<PlutusValidatorProgram, EeRefu
             message: String::from("UPLC validator missing UPLC header"),
         });
     };
-    serde_json::from_slice(rest).map_err(|e| EeRefusal {
+    let prog: PlutusValidatorProgram = serde_json::from_slice(rest).map_err(|e| EeRefusal {
         code: RefusalCode::InvalidCode,
         message: format!("invalid UPLC validator: {e}"),
-    })
+    })?;
+    let mut nodes = 0usize;
+    if prog.uplc_version.is_empty() || !validate_uplc_term(&prog.validator, 0, &mut nodes) {
+        return Err(EeRefusal {
+            code: RefusalCode::InvalidCode,
+            message: String::from("invalid UPLC version or AST depth/size"),
+        });
+    }
+    Ok(prog)
 }
 
 fn script_key(hash32: &[u8; 32]) -> Vec<u8> {
@@ -1212,5 +1256,34 @@ mod tests {
         };
         assert_eq!(ok.status, OutcomeStatus::Success);
         assert_eq!(ok.gas_used, expected_gas);
+    }
+
+    #[test]
+    fn plutus_blob_rejects_empty_version_and_excessive_ast_depth() {
+        let empty_ver = encode_plutus_blob(&PlutusValidatorProgram {
+            uplc_version: String::new(),
+            initial_datum_int: 0,
+            validator: UplcTerm::ConstInt(1),
+        })
+        .unwrap();
+        assert!(
+            decode_plutus_blob(&empty_ver).is_err(),
+            "empty uplc_version must be refused"
+        );
+
+        let mut deep = UplcTerm::ConstBytes(vec![1]);
+        for _ in 0..80 {
+            deep = UplcTerm::Sha256(Box::new(deep));
+        }
+        let deep_blob = encode_plutus_blob(&PlutusValidatorProgram {
+            uplc_version: "1.1.0".into(),
+            initial_datum_int: 0,
+            validator: deep,
+        })
+        .unwrap();
+        assert!(
+            decode_plutus_blob(&deep_blob).is_err(),
+            "UPLC AST deeper than MAX_UPLC_DEPTH must be refused"
+        );
     }
 }

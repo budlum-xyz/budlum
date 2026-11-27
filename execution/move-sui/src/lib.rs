@@ -202,12 +202,31 @@ pub fn decode_sui_package_bundle(raw: &[u8]) -> Result<Vec<SuiCompiledModule>, E
     let body = raw.get(4..).unwrap_or_default();
     let mods: Vec<SuiCompiledModule> = serde_json::from_slice(body)
         .map_err(|e| ee_bad_code(format!("bad Sui module bundle: {e}")))?;
-    if mods.is_empty() {
-        return Err(ee_bad_code("empty Sui package".into()));
+    if mods.is_empty() || mods.len() > 256 {
+        return Err(ee_bad_code("invalid Sui package module count".into()));
     }
-    for m in &mods {
-        if m.name.is_empty() || m.exported_functions.is_empty() {
-            return Err(ee_bad_code("empty module or function table".into()));
+    for (idx, m) in mods.iter().enumerate() {
+        if m.name.is_empty()
+            || m.exported_functions.is_empty()
+            || m.exported_functions.len() > 1_024
+        {
+            return Err(ee_bad_code(
+                "empty or oversized module/function table".into(),
+            ));
+        }
+        if mods[(idx + 1)..].iter().any(|other| other.name == m.name) {
+            return Err(ee_bad_code("duplicate Sui module name in package".into()));
+        }
+        for (f_idx, fn_name) in m.exported_functions.iter().enumerate() {
+            if fn_name.is_empty()
+                || m.exported_functions[(f_idx + 1)..]
+                    .iter()
+                    .any(|other| other == fn_name)
+            {
+                return Err(ee_bad_code(
+                    "empty or duplicate Sui exported function".into(),
+                ));
+            }
         }
     }
     Ok(mods)
@@ -1734,6 +1753,38 @@ mod tests {
         assert_eq!(
             last_log.emitter.id, owner.id,
             "MoveCall log emitter must be the calling sender, not the caller-named package"
+        );
+    }
+
+    #[test]
+    fn sui_package_rejects_duplicate_modules_and_duplicate_or_empty_exports() {
+        let dup_mod = encode_sui_package_bundle(&[
+            SuiCompiledModule {
+                name: "counter".into(),
+                exported_functions: vec!["inc".into()],
+                bytecode: vec![1],
+            },
+            SuiCompiledModule {
+                name: "counter".into(),
+                exported_functions: vec!["dec".into()],
+                bytecode: vec![2],
+            },
+        ])
+        .unwrap();
+        assert!(
+            decode_sui_package_bundle(&dup_mod).is_err(),
+            "duplicate Sui module names in one package must be refused"
+        );
+
+        let dup_fn = encode_sui_package_bundle(&[SuiCompiledModule {
+            name: "counter".into(),
+            exported_functions: vec!["inc".into(), "inc".into()],
+            bytecode: vec![1],
+        }])
+        .unwrap();
+        assert!(
+            decode_sui_package_bundle(&dup_fn).is_err(),
+            "duplicate exported function names in Sui module must be refused"
         );
     }
 }
