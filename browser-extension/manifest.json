@@ -39,6 +39,7 @@
         "resolver.html",
         "resolver.js",
         "bns_host.js",
+        "payment_uri.js",
         "wasm/*"
       ],
       "matches": [
