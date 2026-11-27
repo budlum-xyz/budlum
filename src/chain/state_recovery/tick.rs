@@ -195,6 +195,15 @@ impl StateRecoveryTick {
         if view.live == 0 {
             return TickOutcome::Idle;
         }
+        if view.previous.is_some_and(|p| p > view.live)
+            || view.polyp.is_some_and(|p| p > view.live)
+            || matches!((view.previous, view.polyp), (Some(e), Some(p)) if p > e)
+        {
+            return TickOutcome::Alarm {
+                reason: AlarmReason::NoCanonicalSource { height: view.live },
+                stress: None,
+            };
+        }
         let canonical = |stage: Stage, height: u64| view.canonical(stage, height);
         let stage_height = |stage: Stage| view.stage_height(stage);
 
@@ -226,10 +235,11 @@ impl StateRecoveryTick {
         }
 
         let repair_cost = self.ledger.height;
-        let regrowth_cost = self
-            .ledger
-            .height
-            .saturating_sub(view.previous.or(view.polyp).unwrap_or(0));
+        let sealed_anchor = view
+            .stage_height(Stage::Ephyra)
+            .or_else(|| view.stage_height(Stage::Polyp))
+            .unwrap_or(0);
+        let regrowth_cost = self.ledger.height.saturating_sub(sealed_anchor);
         let verdict = assess(
             &self.ledger,
             &self.policy,
@@ -604,5 +614,41 @@ mod tests {
         assert_eq!(hash32(&"ab".repeat(32)), Some([0xAB; 32]));
         assert_eq!(hash32("ab"), None);
         assert_eq!(hash32("zz"), None);
+    }
+
+    #[test]
+    fn tick_rejects_non_monotonic_view_and_ignores_unsealed_regrowth() {
+        let mut tick = StateRecoveryTick::default();
+        let non_mono = CheckpointView {
+            live: 1000,
+            previous: Some(1100),
+            polyp: None,
+            checkpoints: vec![diverged(1000), honest_at(Stage::Ephyra, 1100)],
+        };
+        assert!(matches!(tick.observe(&non_mono), TickOutcome::Alarm { .. }));
+
+        let mut tick2 = StateRecoveryTick::default();
+        let unsealed_ephyra = Checkpoint {
+            canonical: None,
+            seal: None,
+            ..honest_at(Stage::Ephyra, 1950)
+        };
+        let view_unsealed = CheckpointView {
+            live: 2000,
+            previous: Some(1950),
+            polyp: Some(1500),
+            checkpoints: vec![
+                diverged(2000),
+                unsealed_ephyra,
+                honest_at(Stage::Polyp, 1500),
+            ],
+        };
+        assert!(matches!(
+            tick2.observe(&view_unsealed),
+            TickOutcome::Repair {
+                regrowth_cost: 500,
+                ..
+            }
+        ));
     }
 }

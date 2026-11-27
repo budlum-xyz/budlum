@@ -95,14 +95,16 @@ pub fn next_base_fee(parent_base_fee: u64, parent_gas_used: u64, params: FeeMark
         .target_gas
         .saturating_mul(params.elasticity_multiplier.max(1));
     let parent_gas_used = parent_gas_used.min(gas_limit);
-    let parent = i128::from(parent_base_fee);
-    let gas_delta = i128::from(parent_gas_used) - i128::from(params.target_gas);
-    let denom = i128::from(params.target_gas) * i128::from(params.base_fee_max_change_denominator);
-    let adjustment = parent.saturating_mul(gas_delta) / denom.max(1);
-    let next = parent
-        .saturating_add(adjustment)
-        .max(i128::from(params.min_base_fee));
-    next.min(i128::from(u64::MAX)) as u64
+    let abs_delta = u128::from(parent_gas_used.abs_diff(params.target_gas));
+    let denom = u128::from(params.target_gas) * u128::from(params.base_fee_max_change_denominator);
+    let step = u128::from(parent_base_fee).saturating_mul(abs_delta) / denom.max(1);
+    let next = if parent_gas_used >= params.target_gas {
+        u128::from(parent_base_fee).saturating_add(step)
+    } else {
+        u128::from(parent_base_fee).saturating_sub(step)
+    };
+    let next_u64 = u64::try_from(next).unwrap_or(u64::MAX);
+    next_u64.max(params.min_base_fee)
 }
 
 /// Split a fee bid into burned base fee and proposer priority fee.
@@ -178,9 +180,9 @@ pub fn distribute_fee(
         });
     }
 
-    let treasury_fee = total_priority
-        .saturating_mul(treasury_rate_ppm)
-        .saturating_div(PPM_DENOMINATOR);
+    let treasury_fee_u128 =
+        (u128::from(total_priority) * u128::from(treasury_rate_ppm)) / u128::from(PPM_DENOMINATOR);
+    let treasury_fee = u64::try_from(treasury_fee_u128).unwrap_or(total_priority);
 
     let priority_fee_to_proposer = total_priority.saturating_sub(treasury_fee);
 
@@ -426,5 +428,33 @@ mod tests {
             total_priority, 50_000,
             "the split must not lose or invent value"
         );
+    }
+
+    #[test]
+    fn extreme_values_do_not_panic_or_saturate_treasury_prematurely() {
+        let params = FeeMarketParams {
+            target_gas: u64::MAX,
+            elasticity_multiplier: 1,
+            base_fee_max_change_denominator: u64::MAX,
+            min_base_fee: 1,
+        };
+        assert_eq!(next_base_fee(1_000, u64::MAX, params), 1_000);
+
+        let high_tip = u64::MAX / 100;
+        let dist = distribute_fee(
+            FeeBid {
+                max_fee: u64::MAX,
+                priority_fee: high_tip,
+            },
+            0,
+            1,
+            10_000,
+        )
+        .expect("exact 128-bit treasury split");
+        let expected_treasury =
+            u64::try_from(u128::from(high_tip) * 10_000u128 / u128::from(PPM_DENOMINATOR))
+                .expect("fits in u64");
+        assert_eq!(dist.treasury_fee, expected_treasury);
+        assert_eq!(dist.priority_fee_to_proposer + dist.treasury_fee, high_tip);
     }
 }

@@ -203,6 +203,24 @@ pub fn assess(
     repair_cost: u64,
     regrowth_cost: u64,
 ) -> HealthVerdict {
+    if policy.reversion.max_stages_per_event == 0 {
+        return HealthVerdict::Alarm {
+            reason: AlarmReason::AuditTrailCorrupt {
+                rule: "max-stages-per-event-zero".to_string(),
+            },
+            stress: None,
+        };
+    }
+    if policy.reversion.max_events_per_lifetime
+        > crate::chain::state_recovery::stage::MAX_REVERSION_EVENTS
+    {
+        return HealthVerdict::Alarm {
+            reason: AlarmReason::AuditTrailCorrupt {
+                rule: "max-events-per-lifetime-too-large".to_string(),
+            },
+            stress: None,
+        };
+    }
     // 1. Audit-trail integrity. A corrupted ledger can only be trusted to
     //    revert as far as recovery admits: damage provenance is unknown, so
     //    the damage window is everything.
@@ -659,5 +677,22 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn assess_rejects_invalid_reversion_policy_thresholds() {
+        let ledger = healthy_ledger();
+        let mut over_budget = HealthPolicy::default();
+        over_budget.reversion.max_events_per_lifetime =
+            crate::chain::state_recovery::stage::MAX_REVERSION_EVENTS + 1;
+        let over_verdict = assess(&ledger, &over_budget, &canonical, &stage_height, 1000, 10);
+        assert!(!matches!(over_verdict, HealthVerdict::Healthy));
+        assert!(matches!(over_verdict, HealthVerdict::Alarm { .. }));
+
+        let mut zero_stages = HealthPolicy::default();
+        zero_stages.reversion.max_stages_per_event = 0;
+        let zero_verdict = assess(&ledger, &zero_stages, &canonical, &stage_height, 1000, 10);
+        assert!(!matches!(zero_verdict, HealthVerdict::Healthy));
+        assert!(matches!(zero_verdict, HealthVerdict::Alarm { .. }));
     }
 }
