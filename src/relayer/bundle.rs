@@ -268,9 +268,18 @@ impl IntentBundle {
     }
 
     /// Whether the legs' fees fit inside the bundle's budget.
+    ///
+    /// The sum is compared without saturating first. A saturated total clamps
+    /// at `u64::MAX`, and `u64::MAX <= u64::MAX` is true - so a bundle whose
+    /// legs overflow the budget would read as fitting, which is the one answer
+    /// this check must never give. A sum that cannot be represented is not
+    /// covered by any budget it could be given.
     #[must_use]
     pub fn budget_covers_fees(&self) -> bool {
-        self.total_max_fee() <= self.max_total_fee
+        self.legs
+            .iter()
+            .try_fold(0u64, |acc, leg| acc.checked_add(leg.max_fee))
+            .is_some_and(|total| total <= self.max_total_fee)
     }
 
     /// The domains this bundle touches, deduplicated and ordered.

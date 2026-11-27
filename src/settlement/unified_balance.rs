@@ -351,13 +351,18 @@ where
 
     // Fold the per-domain exclusions into the asset they belong to, so a caller
     // reading a total also sees exactly which chains it is missing.
+    // The `unattributed` list is read once, up front: it is what tells the fold
+    // below whether an asset with no surviving term still deserves a row. An
+    // asset that never produced a term cannot appear in `unattributed` either,
+    // yet it is exactly the one the caller must see - so the answer is kept
+    // rather than recomputed per iteration.
+    let has_unattributed = unattributed
+        .iter()
+        .any(|e| matches!(e, BalanceError::Unattributed));
     for (asset, domain, error) in excluded {
         if let Some(total) = totals.iter_mut().find(|t| t.universal_asset == asset) {
             total.excluded.push((domain, error));
-        } else if unattributed
-            .iter()
-            .any(|e| matches!(e, BalanceError::Unattributed))
-        {
+        } else if has_unattributed || matches!(error, BalanceError::Unattributed) {
             // An asset whose every term was excluded still deserves an entry,
             // so the caller sees "this asset, nothing, and here is why".
             totals.push(AssetTotal {
