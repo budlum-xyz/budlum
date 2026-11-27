@@ -89,15 +89,21 @@ impl DagEngine {
     ///
     /// Returns an error if the parent list is invalid or the internal lock is poisoned.
     pub fn add_block(&self, block: &Block) -> Result<(), ConsensusError> {
+        if block.hash.is_empty() || block.hash != block.calculate_hash() {
+            return Err(ConsensusError(
+                "Invalid or empty DAG block hash in add_block".into(),
+            ));
+        }
         let parent_hashes = self.validate_parent_list(block)?;
         let mut graph = self
             .graph
             .write()
             .map_err(|_| ConsensusError("DAG state lock poisoned".into()))?;
 
-        if !graph.parents.contains_key(&block.hash) {
-            graph.order.push_back(block.hash.clone());
+        if graph.parents.contains_key(&block.hash) {
+            return Ok(());
         }
+        graph.order.push_back(block.hash.clone());
         graph
             .parents
             .insert(block.hash.clone(), parent_hashes.clone());
@@ -128,7 +134,15 @@ impl DagEngine {
 
     fn validate_parent_list(&self, block: &Block) -> Result<Vec<String>, ConsensusError> {
         let parent_hashes = parse_parent_hashes(&block.previous_hash);
-        if block.index > 0 && parent_hashes.is_empty() {
+        if block.index == 0 {
+            if !parent_hashes.is_empty() && parent_hashes.as_slice() != [GENESIS_ZERO_HASH] {
+                return Err(ConsensusError(
+                    "Genesis DAG block cannot reference non-zero parents".into(),
+                ));
+            }
+            return Ok(parent_hashes);
+        }
+        if parent_hashes.is_empty() {
             return Err(ConsensusError(
                 "Non-genesis DAG block must reference at least one parent".into(),
             ));
@@ -312,8 +326,31 @@ impl ConsensusEngine for DagEngine {
                         return 0;
                     }
                 }
-            } else if block.index > 1 && parents.iter().any(|p| p == GENESIS_ZERO_HASH) {
-                return 0;
+            } else if block.index > 0 {
+                let Ok(graph) = self.graph.read() else {
+                    return 0;
+                };
+                for parent in &parents {
+                    if parent == GENESIS_ZERO_HASH {
+                        if block.index != 1 {
+                            return 0;
+                        }
+                        continue;
+                    }
+                    let known_height = graph.heights.get(parent.as_str()).copied().or_else(|| {
+                        graph
+                            .tips
+                            .iter()
+                            .find(|t| t.hash == *parent)
+                            .map(|t| t.height)
+                    });
+                    let Some(parent_height) = known_height else {
+                        return 0;
+                    };
+                    if parent_height >= block.index {
+                        return 0;
+                    }
+                }
             }
             seen_heights.insert(block.hash.as_str(), block.index);
             max_valid_height = max_valid_height.max(u128::from(block.index));
@@ -487,5 +524,37 @@ mod tests {
         let candidate = vec![b1.clone(), unlinked_high];
         assert_eq!(engine.fork_choice_score(&candidate), 0);
         assert!(!engine.is_better_chain(&[b1, b2], &candidate));
+    }
+
+    #[test]
+    fn dag_refuses_single_block_orphan_fork_score_hijack_and_ancestor_tip_resurrection() {
+        let engine = DagEngine::new(DAGConfig::default());
+        let b1 = make_block(1, GENESIS_ZERO_HASH);
+        let b2 = make_block(2, &b1.hash);
+        engine.add_block(&b1).expect("add b1");
+        engine.add_block(&b2).expect("add b2");
+
+        // Single-element candidate chain at height 50_000 citing an unknown non-zero parent
+        // (`idx == 0`) must score 0 and never hijack `is_better_chain` over a genesis-anchored DAG.
+        let orphan_hijack = make_block(50_000, &"cd".repeat(32));
+        assert_eq!(
+            engine.fork_choice_score(std::slice::from_ref(&orphan_hijack)),
+            0,
+            "unanchored single-block orphan must not earn positive fork-choice score"
+        );
+        assert!(!engine.is_better_chain(&[b1.clone(), b2.clone()], &[orphan_hijack]));
+
+        // Replaying `add_block(&b1)` after `b2` already spent `b1` as a parent must NOT
+        // resurrect `b1` back into `tips`.
+        engine.add_block(&b1).expect("idempotent add b1");
+        let tips = engine.tips();
+        assert_eq!(tips.len(), 1, "replayed ancestor must not resurrect as tip");
+        assert_eq!(tips[0].hash, b2.hash);
+
+        // Genesis block (`index == 0`) declaring non-empty fake parents must be refused.
+        let bad_genesis = make_block(0, "aa,bb");
+        assert!(engine
+            .validate_block(&bad_genesis, &[], &AccountState::new())
+            .is_err());
     }
 }
