@@ -512,14 +512,18 @@ impl GardenContentStore {
     /// written, so a peer cannot deposit rubbish under a name it chose.
     pub fn rebuild_coded(
         &mut self,
+        expected: &Hash32,
         record: &ObjectRecord,
         symbols: Vec<Symbol>,
     ) -> Result<Vec<u8>, String> {
-        let expected = record.content_id.0;
+        // The record carries a B.U.D. 3.0 content id, which is a digest
+        // over the object the pipeline built. The Garden names content by
+        // its own rule, so the id to satisfy is the Garden's, taken from
+        // the rebuilt bytes.
         let used = count_of(symbols.len());
         let bytes = view_public(record, symbols)
             .map_err(|e| format!("these B.U.D. 3.0 parts do not rebuild an object: {e:?}"))?;
-        if ContentId::of(&bytes).0 != expected {
+        if ContentId::of(&bytes).0 != *expected {
             return Err("rebuilt object does not match the content id it was sent under".into());
         }
         self.parts.objects_viewed = self.parts.objects_viewed.saturating_add(1);
@@ -530,10 +534,11 @@ impl GardenContentStore {
     /// Take an object as B.U.D. 3.0 parts and keep it if it rebuilds.
     pub fn put_coded(
         &mut self,
+        expected: &Hash32,
         record: &ObjectRecord,
         symbols: Vec<Symbol>,
     ) -> Result<Hash32, String> {
-        let bytes = self.rebuild_coded(record, symbols)?;
+        let bytes = self.rebuild_coded(expected, record, symbols)?;
         self.put(&bytes)
     }
 
