@@ -11,6 +11,9 @@
 //! * **Chain headers**: knowing which state root is valid means following a
 //!   header chain. That is this module.
 //!
+//! WIRING: Consumed by browser/extension light-client callers verifying
+//! checkpointed multi-RPC quorum headers (`PinnedCheckpoint`, `select_quorum_header`).
+//!
 //! # Measured: following every header is expensive
 //!
 //! Adding up the `BlockHeader` fields in `src/core/block.rs` gives roughly 603
@@ -299,6 +302,95 @@ impl MerkleProof {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Multi-RPC 2-of-3 quorum & pinned checkpoint header acceptance
+// ---------------------------------------------------------------------------
+
+/// A pinned checkpoint header anchor that mobile/browser light clients refuse
+/// to contradict regardless of what an untrusted RPC reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedCheckpoint {
+    /// Pinned header index/height.
+    pub index: u64,
+    /// Pinned header hash.
+    pub hash: String,
+    /// Pinned state root hash.
+    pub state_root: String,
+}
+
+/// Verified multi-RPC header selection policy (default: at least 2 matching RPCs).
+///
+/// Prevents a single compromised or Eclipse-isolated RPC from feeding false
+/// headers or state roots to a mobile/browser light client.
+///
+/// # Errors
+///
+/// Returns an error string when fewer than `min_quorum` responses exist, when
+/// RPC nodes fail to reach quorum agreement, or when the quorum winner disagrees
+/// with `pinned_checkpoint`.
+pub fn select_quorum_header(
+    responses: &[TrackedHeader],
+    min_quorum: usize,
+    pinned_checkpoint: Option<&PinnedCheckpoint>,
+) -> Result<TrackedHeader, String> {
+    if min_quorum == 0 {
+        return Err("min_quorum must be at least 1".to_string());
+    }
+    if responses.len() < min_quorum {
+        return Err(format!(
+            "only {} RPC responses provided; quorum requires {}",
+            responses.len(),
+            min_quorum
+        ));
+    }
+
+    let mut counts: std::collections::BTreeMap<(u64, u64, &str, &str), (usize, &TrackedHeader)> =
+        std::collections::BTreeMap::new();
+    for hdr in responses {
+        let key = (
+            hdr.index,
+            hdr.epoch,
+            hdr.state_root.as_str(),
+            hdr.hash.as_str(),
+        );
+        counts
+            .entry(key)
+            .and_modify(|(n, _)| *n += 1)
+            .or_insert((1, hdr));
+    }
+
+    let winner = counts
+        .into_values()
+        .filter(|(n, _)| *n >= min_quorum)
+        .max_by_key(|(n, _)| *n)
+        .map(|(_, hdr)| hdr.clone())
+        .ok_or_else(|| {
+            format!(
+                "RPC quorum disagreement: no header reached {min_quorum}-of-{} agreement",
+                responses.len()
+            )
+        })?;
+
+    if let Some(pin) = pinned_checkpoint {
+        if winner.index == pin.index
+            && (winner.hash != pin.hash || winner.state_root != pin.state_root)
+        {
+            return Err(format!(
+                "quorum header at checkpoint {} disagrees with pinned checkpoint hash/root",
+                pin.index
+            ));
+        }
+        if winner.index < pin.index {
+            return Err(format!(
+                "quorum header index {} regresses below pinned checkpoint {}",
+                winner.index, pin.index
+            ));
+        }
+    }
+
+    Ok(winner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +550,48 @@ mod tests {
             leaf_hash: [2u8; 32],
         };
         assert!(!proof.verify(&[0u8; 32]));
+    }
+
+    #[test]
+    fn multi_rpc_two_of_three_quorum_rejects_lying_rpc_and_pin_mismatch() {
+        let honest_a = header(20);
+        let honest_b = header(20);
+        let lying_c = TrackedHeader {
+            index: 20,
+            epoch: 2,
+            state_root: "evil_root".to_string(),
+            hash: "evil_hash".to_string(),
+        };
+        let pin = PinnedCheckpoint {
+            index: 20,
+            hash: "hash20".to_string(),
+            state_root: "root20".to_string(),
+        };
+        let picked = select_quorum_header(
+            &[honest_a.clone(), lying_c.clone(), honest_b],
+            2,
+            Some(&pin),
+        )
+        .expect("2-of-3 quorum wins over single lying RPC");
+        assert_eq!(picked.state_root, "root20");
+
+        let split = [
+            honest_a.clone(),
+            lying_c.clone(),
+            TrackedHeader {
+                index: 20,
+                epoch: 2,
+                state_root: "third_root".to_string(),
+                hash: "third_hash".to_string(),
+            },
+        ];
+        assert!(select_quorum_header(&split, 2, Some(&pin)).is_err());
+
+        let bad_pin = PinnedCheckpoint {
+            index: 20,
+            hash: "pinned_different_hash".to_string(),
+            state_root: "root20".to_string(),
+        };
+        assert!(select_quorum_header(&[honest_a.clone(), honest_a], 2, Some(&bad_pin)).is_err());
     }
 }

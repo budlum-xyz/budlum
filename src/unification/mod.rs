@@ -378,6 +378,44 @@ pub struct AtomicStorageDeal<'a> {
     pub now_unix_secs: u64,
 }
 
+/// Single write-authority role permitted to lock or consume cross-domain
+/// escrowed balances inside [`UnificationLedger`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CrossDomainWriteAuthority {
+    /// Source-chain escrow authority (canonical owner lock before finality).
+    SourceEscrow,
+    /// Target-chain relayer authority (never permitted to initiate direct spend locks).
+    TargetRelay,
+}
+
+/// Parameters for acquiring an exclusive source-escrowed cross-domain spend lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpendReservationRequest {
+    pub domain_id: crate::domain::types::DomainId,
+    pub asset_id: Hash32,
+    pub owner_id: Hash32,
+    pub amount_atoms: u128,
+    pub write_authority: CrossDomainWriteAuthority,
+    pub current_height: u64,
+    pub ttl_blocks: u64,
+}
+
+/// Exclusive in-flight cross-domain spend reservation preventing concurrent
+/// double-spends on `(domain_id, asset_id, owner_id)` until either finalized
+/// or refunded after expiry.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CrossDomainSpendReservation {
+    pub reservation_id: Hash32,
+    pub domain_id: crate::domain::types::DomainId,
+    pub asset_id: Hash32,
+    pub owner_id: Hash32,
+    pub amount_atoms: u128,
+    pub write_authority: CrossDomainWriteAuthority,
+    pub initiated_height: u64,
+    pub expires_at_height: u64,
+    pub confirmed: bool,
+}
+
 /// Errors returned by [`UnificationLedger`] atomic in-block transitions.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UnificationExecutionError {
@@ -395,6 +433,12 @@ pub enum UnificationExecutionError {
     #[error("domain {domain} exceeds economic outflow conservation ceiling")]
     EconomicCeilingExceeded {
         domain: crate::domain::types::DomainId,
+    },
+    #[error("concurrent cross-domain spend lock active for domain {domain_id}")]
+    ConcurrentSpendReservationConflict {
+        domain_id: crate::domain::types::DomainId,
+        asset_id: Hash32,
+        owner_id: Hash32,
     },
     #[error("solver is unbonded, quarantined, or under-collateralized")]
     SolverBondInsufficient,
@@ -428,6 +472,10 @@ pub struct UnificationLedger {
     merchant_credits:
         std::collections::BTreeMap<(Hash32, crate::domain::types::DomainId, Hash32), u128>,
     committed_bundles: std::collections::BTreeMap<Hash32, Hash32>,
+    spend_reservations: std::collections::BTreeMap<
+        (crate::domain::types::DomainId, Hash32, Hash32),
+        CrossDomainSpendReservation,
+    >,
     router: UniversalPaymentRouter,
     storage: UnifiedStorageFabric,
 }
@@ -447,6 +495,7 @@ impl UnificationLedger {
             slash_hashes: Vec::new(),
             merchant_credits: std::collections::BTreeMap::new(),
             committed_bundles: std::collections::BTreeMap::new(),
+            spend_reservations: std::collections::BTreeMap::new(),
             router: UniversalPaymentRouter::new(),
             storage: UnifiedStorageFabric::new(),
         }
@@ -612,6 +661,19 @@ impl UnificationLedger {
         let mut staged_obligations: Vec<((Hash32, Hash32), (Hash32, u128))> = Vec::new();
 
         for leg in &receipt.legs {
+            if self
+                .spend_reservations
+                .get(&(leg.source_domain, leg.source_asset_id, intent.payer_id))
+                .is_some_and(|r| !r.confirmed)
+            {
+                return Err(
+                    UnificationExecutionError::ConcurrentSpendReservationConflict {
+                        domain_id: leg.source_domain,
+                        asset_id: leg.source_asset_id,
+                        owner_id: intent.payer_id,
+                    },
+                );
+            }
             let src = self.domains.get(&leg.source_domain).ok_or(
                 UnificationExecutionError::UnanchoredDomain(leg.source_domain),
             )?;
@@ -696,6 +758,237 @@ impl UnificationLedger {
         }
         self.merchant_credits.insert(credit_key, next_credit);
         Ok(receipt)
+    }
+
+    /// Execute an atomic cross-domain payment while validating live domain
+    /// active/freeze status directly against core [`crate::core::account::AccountState`].
+    ///
+    /// WIRING: In-block split-tender settlement door wired to core `AccountState`
+    /// domain freeze and status verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnificationExecutionError`] with zero state mutation when any
+    /// registered target or leg source domain is non-active, or any route/balance
+    /// check fails.
+    pub fn execute_finality_gated_payment_with_account(
+        &mut self,
+        account_state: &crate::core::account::AccountState,
+        intent: &UniversalPaymentIntent,
+        balances: &mut [DomainTokenBalance],
+        bonded_quotes: &[BondedLiquidityQuote],
+        now_unix_secs: u64,
+    ) -> Result<UniversalPaymentReceipt, UnificationExecutionError> {
+        if let Some(target_dom) = account_state.settlement.domains.get(intent.target_domain) {
+            if !target_dom.is_active() {
+                return Err(UnificationExecutionError::InvalidArgument(format!(
+                    "target domain {} is {:?}, not Active in AccountState",
+                    intent.target_domain, target_dom.status
+                )));
+            }
+        }
+        let mut snapshot = self.clone();
+        let mut staged_balances = balances.to_vec();
+        let receipt = snapshot.execute_finality_gated_payment(
+            intent,
+            &mut staged_balances,
+            bonded_quotes,
+            now_unix_secs,
+        )?;
+        for leg in &receipt.legs {
+            if let Some(src_dom) = account_state.settlement.domains.get(leg.source_domain) {
+                if !src_dom.is_active() {
+                    return Err(UnificationExecutionError::InvalidArgument(format!(
+                        "source domain {} is {:?}, not Active in AccountState",
+                        leg.source_domain, src_dom.status
+                    )));
+                }
+            }
+        }
+        *self = snapshot;
+        balances.clone_from_slice(&staged_balances);
+        Ok(receipt)
+    }
+
+    /// Acquire an exclusive cross-domain spend lock on `(domain_id, asset_id, owner_id)`
+    /// under strict [`CrossDomainWriteAuthority::SourceEscrow`] ownership.
+    ///
+    /// WIRING: Source-escrowed double-spend lock enforced across [`Self::execute_finality_gated_payment`],
+    /// [`Self::confirm_cross_domain_spend`], and [`Self::release_expired_spend_reservation`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnificationExecutionError`] without mutating state if the write
+    /// authority is not `SourceEscrow`, `amount_atoms == 0`, the domain is
+    /// unanchored or safety-breached, an active reservation already exists, or
+    /// `balances` has insufficient available funds.
+    pub fn reserve_exclusive_cross_domain_spend(
+        &mut self,
+        req: &SpendReservationRequest,
+        balances: &mut [DomainTokenBalance],
+    ) -> Result<Hash32, UnificationExecutionError> {
+        let SpendReservationRequest {
+            domain_id,
+            asset_id,
+            owner_id,
+            amount_atoms,
+            write_authority,
+            current_height,
+            ttl_blocks,
+        } = *req;
+        if write_authority != CrossDomainWriteAuthority::SourceEscrow {
+            return Err(UnificationExecutionError::InvalidArgument(String::from(
+                "cross-domain spend reservations require SourceEscrow write authority",
+            )));
+        }
+        if amount_atoms == 0 || owner_id == [0u8; 32] || ttl_blocks == 0 {
+            return Err(UnificationExecutionError::InvalidArgument(String::from(
+                "spend reservation requires non-zero amount, owner_id, and ttl_blocks",
+            )));
+        }
+        let anchor = self
+            .domains
+            .get(&domain_id)
+            .ok_or(UnificationExecutionError::UnanchoredDomain(domain_id))?;
+        if anchor.guarantee.fault_tolerance_bps == 0 {
+            return Err(UnificationExecutionError::RouteFinalityInsufficient {
+                source_domain: domain_id,
+                target_domain: domain_id,
+            });
+        }
+        let key = (domain_id, asset_id, owner_id);
+        if self.spend_reservations.contains_key(&key) {
+            return Err(
+                UnificationExecutionError::ConcurrentSpendReservationConflict {
+                    domain_id,
+                    asset_id,
+                    owner_id,
+                },
+            );
+        }
+        let bal_slot = balances
+            .iter_mut()
+            .find(|b| {
+                b.domain_id == domain_id
+                    && b.asset_id == asset_id
+                    && b.available_amount >= amount_atoms
+            })
+            .ok_or(UnificationExecutionError::Payment(
+                PaymentError::InsufficientMultiDomainLiquidity {
+                    shortfall: amount_atoms,
+                },
+            ))?;
+        bal_slot.available_amount -= amount_atoms;
+        let reservation_id = hash_domain_fields(
+            b"BDLM_ULEDGER_SPEND_LOCK_V1",
+            &[
+                &domain_id.to_le_bytes(),
+                &asset_id,
+                &owner_id,
+                &amount_atoms.to_le_bytes(),
+                &current_height.to_le_bytes(),
+            ],
+        );
+        self.spend_reservations.insert(
+            key,
+            CrossDomainSpendReservation {
+                reservation_id,
+                domain_id,
+                asset_id,
+                owner_id,
+                amount_atoms,
+                write_authority,
+                initiated_height: current_height,
+                expires_at_height: current_height.saturating_add(ttl_blocks),
+                confirmed: false,
+            },
+        );
+        Ok(reservation_id)
+    }
+
+    /// Finalize an exclusive spend reservation once `domain_id`'s anchored
+    /// finalized height reaches or passes `proof_height`.
+    ///
+    /// WIRING: Finality settlement confirmation paired with [`Self::reserve_exclusive_cross_domain_spend`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnificationExecutionError`] if no unconfirmed reservation exists
+    /// or `domain_id` has not finalized up to `proof_height`.
+    pub fn confirm_cross_domain_spend(
+        &mut self,
+        domain_id: crate::domain::types::DomainId,
+        asset_id: Hash32,
+        owner_id: Hash32,
+        proof_height: u64,
+    ) -> Result<(), UnificationExecutionError> {
+        let anchor = self
+            .domains
+            .get(&domain_id)
+            .ok_or(UnificationExecutionError::UnanchoredDomain(domain_id))?;
+        if anchor.guarantee.fault_tolerance_bps == 0 || anchor.finalized_height < proof_height {
+            return Err(UnificationExecutionError::InvalidArgument(format!(
+                "domain {domain_id} finalized height {} lags proof height {proof_height}",
+                anchor.finalized_height
+            )));
+        }
+        let key = (domain_id, asset_id, owner_id);
+        let Some(res) = self.spend_reservations.get_mut(&key) else {
+            return Err(UnificationExecutionError::InvalidArgument(String::from(
+                "spend reservation not found",
+            )));
+        };
+        if res.confirmed {
+            return Err(UnificationExecutionError::InvalidArgument(String::from(
+                "spend reservation already finalized",
+            )));
+        }
+        res.confirmed = true;
+        Ok(())
+    }
+
+    /// Release an unconfirmed spend reservation back to `balances` once
+    /// `current_height >= expires_at_height`.
+    ///
+    /// WIRING: Deterministic TTL expiry refund paired with [`Self::reserve_exclusive_cross_domain_spend`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnificationExecutionError`] if missing, already finalized, or
+    /// before expiry.
+    pub fn release_expired_spend_reservation(
+        &mut self,
+        domain_id: crate::domain::types::DomainId,
+        asset_id: Hash32,
+        owner_id: Hash32,
+        current_height: u64,
+        balances: &mut [DomainTokenBalance],
+    ) -> Result<u128, UnificationExecutionError> {
+        let key = (domain_id, asset_id, owner_id);
+        let res = self.spend_reservations.get(&key).ok_or_else(|| {
+            UnificationExecutionError::InvalidArgument(String::from("spend reservation not found"))
+        })?;
+        if res.confirmed {
+            return Err(UnificationExecutionError::InvalidArgument(String::from(
+                "cannot refund an already finalized spend reservation",
+            )));
+        }
+        if current_height < res.expires_at_height {
+            return Err(UnificationExecutionError::InvalidArgument(format!(
+                "spend reservation active until height {} (current={current_height})",
+                res.expires_at_height
+            )));
+        }
+        let bal_slot = balances
+            .iter_mut()
+            .find(|b| b.domain_id == domain_id && b.asset_id == asset_id)
+            .ok_or(UnificationExecutionError::InvalidArgument(String::from(
+                "target DomainTokenBalance missing for reservation refund",
+            )))?;
+        let amount = res.amount_atoms;
+        bal_slot.available_amount = bal_slot.available_amount.saturating_add(amount);
+        self.spend_reservations.remove(&key);
+        Ok(amount)
     }
 
     /// Slash and quarantine the bonded solver responsible for an unfulfilled
@@ -1143,18 +1436,60 @@ impl UnificationLedger {
         let bundles_root = unification_merkle_root(b"BDLM_ULEDGER_BUNDLES_V1", &bundle_leaves);
         let router_root = self.router.state_commitment();
         let storage_root = self.storage.state_root();
-        hash_domain_fields(
-            b"BDLM_UNIFICATION_STATE_ROOT_V1",
-            &[
-                &domains_root,
-                &solvers_root,
-                &slashes_root,
-                &credits_root,
-                &bundles_root,
-                &router_root,
-                &storage_root,
-            ],
-        )
+        let reservation_leaves: Vec<Hash32> = self
+            .spend_reservations
+            .values()
+            .map(|r| {
+                let auth_tag: [u8; 1] = [match r.write_authority {
+                    CrossDomainWriteAuthority::SourceEscrow => 1,
+                    CrossDomainWriteAuthority::TargetRelay => 2,
+                }];
+                hash_domain_fields(
+                    b"BDLM_ULEDGER_SPEND_RES_V1",
+                    &[
+                        &r.reservation_id,
+                        &r.domain_id.to_le_bytes(),
+                        &r.asset_id,
+                        &r.owner_id,
+                        &r.amount_atoms.to_le_bytes(),
+                        &auth_tag,
+                        &r.initiated_height.to_le_bytes(),
+                        &r.expires_at_height.to_le_bytes(),
+                        &[u8::from(r.confirmed)],
+                    ],
+                )
+            })
+            .collect();
+        let reservations_root =
+            unification_merkle_root(b"BDLM_ULEDGER_SPEND_LOCKS_V1", &reservation_leaves);
+        if self.spend_reservations.is_empty() {
+            hash_domain_fields(
+                b"BDLM_UNIFICATION_STATE_ROOT_V1",
+                &[
+                    &domains_root,
+                    &solvers_root,
+                    &slashes_root,
+                    &credits_root,
+                    &bundles_root,
+                    &router_root,
+                    &storage_root,
+                ],
+            )
+        } else {
+            hash_domain_fields(
+                b"BDLM_UNIFICATION_STATE_ROOT_V1",
+                &[
+                    &domains_root,
+                    &solvers_root,
+                    &slashes_root,
+                    &credits_root,
+                    &bundles_root,
+                    &router_root,
+                    &storage_root,
+                    &reservations_root,
+                ],
+            )
+        }
     }
 }
 
@@ -1921,5 +2256,151 @@ mod tests {
             resolved.primary.verification,
             VerificationStrength::MerkleRoot
         );
+    }
+
+    #[test]
+    fn exclusive_spend_lock_and_account_state_freeze_prevent_double_spend_and_bypass() {
+        use crate::crypto::facts::QuantumClass;
+        use crate::domain::types::ConsensusKind;
+        use crate::settlement::domains::CommitmentAttestation;
+        use crate::settlement::universal_finality::{FinalityGuarantee, FinalityReversibility};
+
+        let bft = FinalityGuarantee {
+            reversibility: FinalityReversibility::DeterministicQuorum,
+            quantum_posture: QuantumClass::Lattice,
+            attestation: CommitmentAttestation {
+                state_root: true,
+                tx_root: true,
+                event_root: true,
+                parent: true,
+            },
+            slashable_backing: true,
+            fault_tolerance_bps: 3_333,
+        };
+        let mut ledger = UnificationLedger::new(FinalityGuarantee::settlement_hub());
+        ledger
+            .anchor_domain_finality(1, bft, 50_000, 10_000, 10, [0x11; 32])
+            .unwrap();
+        ledger
+            .anchor_domain_finality(2, bft, 50_000, 10_000, 10, [0x22; 32])
+            .unwrap();
+
+        let payer = [0xAA; 32];
+        let merchant = [0xBB; 32];
+        let asset = [0x01; 32];
+        let mut bals = [
+            DomainTokenBalance {
+                domain_id: 1,
+                asset_id: asset,
+                symbol: String::from("BUD"),
+                available_amount: 1_000,
+            },
+            DomainTokenBalance {
+                domain_id: 2,
+                asset_id: asset,
+                symbol: String::from("BUD"),
+                available_amount: 0,
+            },
+        ];
+
+        // TargetRelay cannot acquire spend lock.
+        assert!(matches!(
+            ledger.reserve_exclusive_cross_domain_spend(
+                &SpendReservationRequest {
+                    domain_id: 1,
+                    asset_id: asset,
+                    owner_id: payer,
+                    amount_atoms: 400,
+                    write_authority: CrossDomainWriteAuthority::TargetRelay,
+                    current_height: 10,
+                    ttl_blocks: 20,
+                },
+                &mut bals,
+            ),
+            Err(UnificationExecutionError::InvalidArgument(_))
+        ));
+
+        // SourceEscrow locks 400 -> concurrent spend lock or direct payment fails.
+        ledger
+            .reserve_exclusive_cross_domain_spend(
+                &SpendReservationRequest {
+                    domain_id: 1,
+                    asset_id: asset,
+                    owner_id: payer,
+                    amount_atoms: 400,
+                    write_authority: CrossDomainWriteAuthority::SourceEscrow,
+                    current_height: 10,
+                    ttl_blocks: 20,
+                },
+                &mut bals,
+            )
+            .unwrap();
+        assert_eq!(bals[0].available_amount, 600);
+        assert!(matches!(
+            ledger.reserve_exclusive_cross_domain_spend(
+                &SpendReservationRequest {
+                    domain_id: 1,
+                    asset_id: asset,
+                    owner_id: payer,
+                    amount_atoms: 100,
+                    write_authority: CrossDomainWriteAuthority::SourceEscrow,
+                    current_height: 11,
+                    ttl_blocks: 20,
+                },
+                &mut bals,
+            ),
+            Err(UnificationExecutionError::ConcurrentSpendReservationConflict { .. })
+        ));
+
+        // Finalizing before proof height 15 fails; advancing anchor to 15 confirms,
+        // after which refund is permanently blocked.
+        assert!(ledger
+            .confirm_cross_domain_spend(1, asset, payer, 15)
+            .is_err());
+        ledger
+            .anchor_domain_finality(1, bft, 50_000, 10_000, 15, [0x15; 32])
+            .unwrap();
+        ledger
+            .confirm_cross_domain_spend(1, asset, payer, 15)
+            .unwrap();
+        assert!(ledger
+            .release_expired_spend_reservation(1, asset, payer, 100, &mut bals)
+            .is_err());
+
+        // AccountState integration refuses frozen domain even when UnificationLedger is anchored.
+        let mut acct_state = crate::core::account::AccountState::new();
+        let dom_2 = crate::domain::plugin::default_domain(2, ConsensusKind::Bft, 200, "bft-v1", 0);
+        acct_state
+            .settlement
+            .domains
+            .register(dom_2)
+            .expect("register");
+        acct_state
+            .settlement
+            .domains
+            .set_status(2, crate::domain::types::DomainStatus::Frozen)
+            .expect("freeze");
+        let intent = UniversalPaymentIntent {
+            payer_id: payer,
+            merchant_id: merchant,
+            nonce: 7,
+            target_domain: 2,
+            target_asset_id: asset,
+            target_amount: 100,
+            max_slippage_bps: 500,
+            deadline_unix_secs: 2_000,
+            invoice_hash: [0x55; 32],
+            rail: PaymentRail::OnChain,
+        };
+        assert!(matches!(
+            ledger.execute_finality_gated_payment_with_account(
+                &acct_state,
+                &intent,
+                &mut bals,
+                &[],
+                1_000,
+            ),
+            Err(UnificationExecutionError::InvalidArgument(_))
+        ));
     }
 }

@@ -208,6 +208,73 @@ impl Default for DomainCeilingPolicy {
     }
 }
 
+/// Direction of a guarded cross-domain bridge transfer.
+///
+/// WIRING: Dispatched by [`BridgeEconomicGuard::check_and_record_directional_flow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BridgeFlowDirection {
+    /// Inbound mint / lock onto Budlum.
+    Deposit,
+    /// Outbound burn / unlock leaving Budlum.
+    Withdraw,
+}
+
+/// Default timelock delay (in Budlum blocks) for oversized single withdrawals
+/// when `large_withdraw_delay_blocks` is omitted (`0`).
+///
+/// WIRING: Consumed by [`BridgeEconomicGuard::queue_large_withdrawal`].
+pub const DEFAULT_LARGE_WITHDRAW_DELAY_BLOCKS: u64 = 16;
+
+/// Default timed circuit-breaker pause duration (in Budlum blocks) when
+/// `circuit_pause_duration_blocks` is omitted (`0`).
+///
+/// WIRING: Consumed by [`BridgeEconomicGuard::observe_reorg_depth`].
+pub const DEFAULT_CIRCUIT_PAUSE_DURATION_BLOCKS: u64 = 64;
+
+/// Per-domain asymmetric deposit/withdraw controls, single-transaction
+/// withdrawal caps, and deterministic reorg auto-pause thresholds.
+///
+/// WIRING: Stored per domain inside [`BridgeEconomicGuard::flow_controls`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DomainFlowControls {
+    /// Optional rolling-window ceiling for inbound deposits (`0` uses the
+    /// domain's general `effective_ceiling_atoms`).
+    pub deposit_window_cap_atoms: u128,
+    /// Single-transaction withdrawal threshold (`0` disables timelock queueing).
+    pub max_single_tx_withdraw_atoms: u128,
+    /// Timelock delay in blocks for withdrawals exceeding `max_single_tx_withdraw_atoms`.
+    pub large_withdraw_delay_blocks: u64,
+    /// Reorg depth threshold (`>= threshold`) that triggers automatic circuit
+    /// pause (`0` disables automatic reorg pauses).
+    pub auto_pause_reorg_depth_threshold: u64,
+    /// Duration in Budlum blocks of an automatic reorg-triggered pause.
+    pub circuit_pause_duration_blocks: u64,
+}
+
+/// Active timed circuit-breaker pause triggered by an observed foreign-domain
+/// reorg above the domain's configured depth threshold.
+///
+/// WIRING: Stored per domain inside [`BridgeEconomicGuard::domain_pauses`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CircuitBreakerPause {
+    pub paused_at_height: u64,
+    pub pause_expires_at_height: u64,
+    pub reorg_depth: u64,
+}
+
+/// Queued oversized single withdrawal waiting for its timelock expiry.
+///
+/// WIRING: Returned and settled by [`BridgeEconomicGuard::claim_queued_withdrawal`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedBridgeWithdrawal {
+    pub withdrawal_id: Hash32,
+    pub domain_id: DomainId,
+    pub recipient: Address,
+    pub amount_atoms: u128,
+    pub queued_at_height: u64,
+    pub ready_at_height: u64,
+}
+
 /// Mutable consensus state tracked per guarded external domain.
 ///
 /// WIRING: stored per domain inside [`BridgeEconomicGuard`] and exposed via
@@ -498,6 +565,35 @@ pub enum EconomicGuardError {
         /// Maximum entries permitted without governance snapshot pruning.
         capacity: usize,
     },
+    /// Domain circuit breaker is temporarily paused following a deep reorg.
+    DomainPaused {
+        /// Guarded domain identifier.
+        domain_id: DomainId,
+        /// Height at or after which timed pause recovery may resume flows.
+        pause_expires_at_height: u64,
+        /// Observed reorg depth that triggered the pause.
+        reorg_depth: u64,
+    },
+    /// Withdrawal exceeds `max_single_tx_withdraw_atoms` and must use the timelock queue.
+    LargeWithdrawalRequiresTimelock {
+        /// Guarded domain identifier.
+        domain_id: DomainId,
+        /// Requested withdrawal amount in atoms.
+        amount_atoms: u128,
+        /// Maximum instant single-tx withdrawal cap.
+        max_single_tx_withdraw_atoms: u128,
+    },
+    /// Queued withdrawal has not yet reached `ready_at_height`.
+    WithdrawalTimelockActive {
+        /// Queued withdrawal identifier.
+        withdrawal_id: Hash32,
+        /// Target claim height.
+        ready_at_height: u64,
+        /// Current Budlum block height.
+        current_height: u64,
+    },
+    /// Queued withdrawal identifier was not found (never queued or already claimed).
+    UnknownQueuedWithdrawal(Hash32),
     /// Contradiction or external adapter proof failed verification.
     InvalidEvidence(String),
 }
@@ -537,6 +633,38 @@ impl std::fmt::Display for EconomicGuardError {
             Self::ReplayLedgerFull { capacity } => write!(
                 f,
                 "economic guard replay ledger reached fail-closed capacity {capacity}"
+            ),
+            Self::DomainPaused {
+                domain_id,
+                pause_expires_at_height,
+                reorg_depth,
+            } => write!(
+                f,
+                "domain {domain_id} circuit breaker paused after reorg depth {reorg_depth} \
+                 until height {pause_expires_at_height}"
+            ),
+            Self::LargeWithdrawalRequiresTimelock {
+                domain_id,
+                amount_atoms,
+                max_single_tx_withdraw_atoms,
+            } => write!(
+                f,
+                "domain {domain_id} withdrawal {amount_atoms} exceeds single-tx limit \
+                 {max_single_tx_withdraw_atoms} and requires timelock queue"
+            ),
+            Self::WithdrawalTimelockActive {
+                withdrawal_id,
+                ready_at_height,
+                current_height,
+            } => write!(
+                f,
+                "queued withdrawal {} locked until height {ready_at_height} (current={current_height})",
+                hex::encode(withdrawal_id)
+            ),
+            Self::UnknownQueuedWithdrawal(id) => write!(
+                f,
+                "queued withdrawal {} does not exist",
+                hex::encode(id)
             ),
             Self::InvalidEvidence(msg) => write!(f, "invalid contradiction evidence: {msg}"),
         }
@@ -914,6 +1042,16 @@ pub struct BridgeEconomicGuard {
     replay_pruned_before_epoch: u64,
     #[serde(default)]
     require_configured_domains: bool,
+    #[serde(default)]
+    flow_controls: BTreeMap<DomainId, DomainFlowControls>,
+    #[serde(default)]
+    domain_pauses: BTreeMap<DomainId, CircuitBreakerPause>,
+    #[serde(default)]
+    deposit_window_usage: BTreeMap<DomainId, (u64, u128)>,
+    #[serde(default, with = "crate::core::map_keys")]
+    queued_withdrawals: BTreeMap<Hash32, QueuedBridgeWithdrawal>,
+    #[serde(default)]
+    next_withdrawal_nonce: u64,
 }
 
 impl BridgeEconomicGuard {
@@ -990,6 +1128,134 @@ impl BridgeEconomicGuard {
             && self.slashed_offender_epochs.is_empty()
             && self.replay_pruned_before_epoch == 0
             && !self.require_configured_domains
+            && self.flow_controls.is_empty()
+            && self.domain_pauses.is_empty()
+            && self.deposit_window_usage.is_empty()
+            && self.queued_withdrawals.is_empty()
+            && self.next_withdrawal_nonce == 0
+    }
+
+    /// Configure asymmetric deposit/withdraw controls and reorg auto-pause
+    /// parameters for `domain_id`.
+    ///
+    /// WIRING: Governance/bridge domain configuration door paired with
+    /// [`crate::cross_domain::bridge::BridgeState`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EconomicGuardError::UnknownDomain`] if `domain_id` is absent.
+    pub fn configure_domain_flow_controls(
+        &mut self,
+        domain_id: DomainId,
+        controls: DomainFlowControls,
+    ) -> Result<(), EconomicGuardError> {
+        if !self.domains.contains_key(&domain_id) {
+            return Err(EconomicGuardError::UnknownDomain(domain_id));
+        }
+        self.flow_controls.insert(domain_id, controls);
+        Ok(())
+    }
+
+    /// Inspect any active circuit-breaker pause on `domain_id`.
+    ///
+    /// WIRING: Read-only telemetry accessor for bridge operators and gates.
+    #[must_use]
+    pub fn domain_pause(&self, domain_id: DomainId) -> Option<&CircuitBreakerPause> {
+        self.domain_pauses.get(&domain_id)
+    }
+
+    fn ensure_not_paused(&self, domain_id: DomainId) -> Result<(), EconomicGuardError> {
+        if let Some(pause) = self.domain_pauses.get(&domain_id) {
+            return Err(EconomicGuardError::DomainPaused {
+                domain_id,
+                pause_expires_at_height: pause.pause_expires_at_height,
+                reorg_depth: pause.reorg_depth,
+            });
+        }
+        Ok(())
+    }
+
+    /// Trigger a timed circuit-breaker pause on `domain_id` if an observed
+    /// foreign-domain reorg depth meets or exceeds its configured threshold.
+    ///
+    /// WIRING: Consensus reorg watcher entry point enforcing timed bridge pause.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EconomicGuardError::UnknownDomain`] if `domain_id` is absent
+    /// or [`EconomicGuardError::DomainFrozen`] if the domain is permanently
+    /// frozen by contradiction.
+    pub fn observe_reorg_depth(
+        &mut self,
+        domain_id: DomainId,
+        reorg_depth: u64,
+        current_height: u64,
+    ) -> Result<bool, EconomicGuardError> {
+        self.ensure_domain_not_frozen(domain_id)?;
+        if !self.domains.contains_key(&domain_id) {
+            return Err(EconomicGuardError::UnknownDomain(domain_id));
+        }
+        let Some(controls) = self.flow_controls.get(&domain_id) else {
+            return Ok(false);
+        };
+        if controls.auto_pause_reorg_depth_threshold == 0
+            || reorg_depth < controls.auto_pause_reorg_depth_threshold
+        {
+            return Ok(false);
+        }
+        let duration = if controls.circuit_pause_duration_blocks == 0 {
+            DEFAULT_CIRCUIT_PAUSE_DURATION_BLOCKS
+        } else {
+            controls.circuit_pause_duration_blocks
+        };
+        let expires = current_height.saturating_add(duration);
+        self.domain_pauses.insert(
+            domain_id,
+            CircuitBreakerPause {
+                paused_at_height: current_height,
+                pause_expires_at_height: expires,
+                reorg_depth,
+            },
+        );
+        Ok(true)
+    }
+
+    /// Clear a timed reorg circuit-breaker pause once `current_height` reaches
+    /// or passes `pause_expires_at_height`.
+    ///
+    /// Never clears `FrozenByContradiction`: contradiction freezes are permanent
+    /// and fail closed with [`EconomicGuardError::DomainFrozen`].
+    ///
+    /// WIRING: Block-height recovery door for timed reorg pauses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EconomicGuardError::DomainFrozen`] when permanently frozen by
+    /// contradiction.
+    pub fn resume_if_pause_expired(
+        &mut self,
+        domain_id: DomainId,
+        current_height: u64,
+    ) -> Result<bool, EconomicGuardError> {
+        if let Some(rec) = self.domains.get(&domain_id) {
+            if let DomainGuardStatus::FrozenByContradiction {
+                evidence_digest, ..
+            } = rec.status
+            {
+                return Err(EconomicGuardError::DomainFrozen {
+                    domain_id,
+                    evidence_digest,
+                });
+            }
+        }
+        let should_resume = self
+            .domain_pauses
+            .get(&domain_id)
+            .is_some_and(|p| current_height >= p.pause_expires_at_height);
+        if should_resume {
+            self.domain_pauses.remove(&domain_id);
+        }
+        Ok(should_resume)
     }
 
     /// Inspect the guard record for `domain_id`, if configured.
@@ -1151,6 +1417,7 @@ impl BridgeEconomicGuard {
         amount_atoms: u128,
         current_height: u64,
     ) -> Result<(), EconomicGuardError> {
+        self.ensure_not_paused(domain_id)?;
         let Some(rec) = self.domains.get(&domain_id) else {
             if self.require_configured_domains {
                 return Err(EconomicGuardError::UnknownDomain(domain_id));
@@ -1218,6 +1485,7 @@ impl BridgeEconomicGuard {
         current_height: u64,
         certificate: &crate::settlement::universal_finality::GlobalFinalityCertificate,
     ) -> Result<(), EconomicGuardError> {
+        self.ensure_not_paused(domain_id)?;
         let Some(rec) = self.domains.get(&domain_id) else {
             if self.require_configured_domains {
                 return Err(EconomicGuardError::UnknownDomain(domain_id));
@@ -1265,6 +1533,192 @@ impl BridgeEconomicGuard {
             rec_mut.window_used_atoms = next_used;
         }
         Ok(())
+    }
+
+    /// Verify and record an asymmetric directional bridge transfer.
+    ///
+    /// WIRING: Directional bridge guard entry point enforcing asymmetric deposit
+    /// caps and per-tx withdrawal timelock queueing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EconomicGuardError`] before mutating state if the domain is
+    /// missing (strict mode), frozen, paused, exceeds its single-tx withdrawal
+    /// threshold, or breaches the directional window ceiling.
+    pub fn check_and_record_directional_flow(
+        &mut self,
+        domain_id: DomainId,
+        direction: BridgeFlowDirection,
+        amount_atoms: u128,
+        current_height: u64,
+    ) -> Result<(), EconomicGuardError> {
+        match direction {
+            BridgeFlowDirection::Withdraw => {
+                self.ensure_not_paused(domain_id)?;
+                self.ensure_domain_not_frozen(domain_id)?;
+                if let Some(controls) = self.flow_controls.get(&domain_id) {
+                    if controls.max_single_tx_withdraw_atoms > 0
+                        && amount_atoms > controls.max_single_tx_withdraw_atoms
+                    {
+                        return Err(EconomicGuardError::LargeWithdrawalRequiresTimelock {
+                            domain_id,
+                            amount_atoms,
+                            max_single_tx_withdraw_atoms: controls.max_single_tx_withdraw_atoms,
+                        });
+                    }
+                }
+                self.check_and_record_flow(domain_id, amount_atoms, current_height)
+            }
+            BridgeFlowDirection::Deposit => {
+                self.ensure_not_paused(domain_id)?;
+                if !self
+                    .flow_controls
+                    .get(&domain_id)
+                    .is_some_and(|c| c.deposit_window_cap_atoms > 0)
+                {
+                    return self.check_and_record_flow(domain_id, amount_atoms, current_height);
+                }
+                let Some(rec) = self.domains.get(&domain_id) else {
+                    if self.require_configured_domains {
+                        return Err(EconomicGuardError::UnknownDomain(domain_id));
+                    }
+                    return Ok(());
+                };
+                if let DomainGuardStatus::FrozenByContradiction {
+                    evidence_digest, ..
+                } = rec.status
+                {
+                    return Err(EconomicGuardError::DomainFrozen {
+                        domain_id,
+                        evidence_digest,
+                    });
+                }
+                let win_len = rec.policy.window_blocks.max(1);
+                let window_idx = current_height / win_len;
+                let (prev_win, prev_used) = self
+                    .deposit_window_usage
+                    .get(&domain_id)
+                    .copied()
+                    .unwrap_or((0, 0));
+                let used = if prev_win == window_idx { prev_used } else { 0 };
+                let base_ceiling = effective_ceiling_atoms(rec);
+                let ceiling = self
+                    .flow_controls
+                    .get(&domain_id)
+                    .filter(|c| c.deposit_window_cap_atoms > 0)
+                    .map_or(base_ceiling, |c| {
+                        base_ceiling.min(c.deposit_window_cap_atoms)
+                    });
+                let Some(next_used) = used.checked_add(amount_atoms) else {
+                    return Err(EconomicGuardError::CeilingExceeded {
+                        domain_id,
+                        requested_atoms: amount_atoms,
+                        window_used_atoms: used,
+                        ceiling_atoms: ceiling,
+                    });
+                };
+                if next_used > ceiling || (amount_atoms == 0 && ceiling == 0) {
+                    return Err(EconomicGuardError::CeilingExceeded {
+                        domain_id,
+                        requested_atoms: amount_atoms,
+                        window_used_atoms: used,
+                        ceiling_atoms: ceiling,
+                    });
+                }
+                self.deposit_window_usage
+                    .insert(domain_id, (window_idx, next_used));
+                Ok(())
+            }
+        }
+    }
+
+    /// Queue a large single withdrawal behind its configured block timelock.
+    ///
+    /// WIRING: Oversized withdrawal staging door paired with [`Self::claim_queued_withdrawal`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EconomicGuardError`] when the domain is unknown (or zero
+    /// amount), frozen, or paused.
+    pub fn queue_large_withdrawal(
+        &mut self,
+        domain_id: DomainId,
+        recipient: Address,
+        amount_atoms: u128,
+        current_height: u64,
+    ) -> Result<Hash32, EconomicGuardError> {
+        if amount_atoms == 0 {
+            return Err(EconomicGuardError::InvalidPolicy(
+                "queued withdrawal amount must be positive".into(),
+            ));
+        }
+        if !self.domains.contains_key(&domain_id) {
+            return Err(EconomicGuardError::UnknownDomain(domain_id));
+        }
+        self.ensure_domain_not_frozen(domain_id)?;
+        self.ensure_not_paused(domain_id)?;
+        let delay =
+            self.flow_controls
+                .get(&domain_id)
+                .map_or(DEFAULT_LARGE_WITHDRAW_DELAY_BLOCKS, |c| {
+                    if c.large_withdraw_delay_blocks == 0 {
+                        DEFAULT_LARGE_WITHDRAW_DELAY_BLOCKS
+                    } else {
+                        c.large_withdraw_delay_blocks
+                    }
+                });
+        let nonce = self.next_withdrawal_nonce;
+        self.next_withdrawal_nonce = self.next_withdrawal_nonce.saturating_add(1);
+        let withdrawal_id = hash_fields_bytes(&[
+            b"BDLM_ECON_GUARD_TIMELOCK_WD_V1",
+            &domain_id.to_le_bytes(),
+            recipient.as_bytes(),
+            &amount_atoms.to_le_bytes(),
+            &current_height.to_le_bytes(),
+            &nonce.to_le_bytes(),
+        ]);
+        let queued = QueuedBridgeWithdrawal {
+            withdrawal_id,
+            domain_id,
+            recipient,
+            amount_atoms,
+            queued_at_height: current_height,
+            ready_at_height: current_height.saturating_add(delay),
+        };
+        self.queued_withdrawals.insert(withdrawal_id, queued);
+        Ok(withdrawal_id)
+    }
+
+    /// Claim a timelocked withdrawal once `current_height >= ready_at_height`
+    /// and the domain remains neither frozen nor paused and has available
+    /// rolling-window ceiling.
+    ///
+    /// WIRING: Timelock release path enforcing [`Self::check_and_record_flow`] at claim height.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EconomicGuardError`] if the ID is unknown, timelock has not
+    /// elapsed, or the domain is frozen, paused, or over ceiling.
+    pub fn claim_queued_withdrawal(
+        &mut self,
+        withdrawal_id: Hash32,
+        current_height: u64,
+    ) -> Result<QueuedBridgeWithdrawal, EconomicGuardError> {
+        let entry = self
+            .queued_withdrawals
+            .get(&withdrawal_id)
+            .cloned()
+            .ok_or(EconomicGuardError::UnknownQueuedWithdrawal(withdrawal_id))?;
+        if current_height < entry.ready_at_height {
+            return Err(EconomicGuardError::WithdrawalTimelockActive {
+                withdrawal_id,
+                ready_at_height: entry.ready_at_height,
+                current_height,
+            });
+        }
+        self.check_and_record_flow(entry.domain_id, entry.amount_atoms, current_height)?;
+        self.queued_withdrawals.remove(&withdrawal_id);
+        Ok(entry)
     }
 
     /// Deterministically prune replay-ledger entries from epochs older than
@@ -1919,6 +2373,53 @@ impl BridgeEconomicGuard {
         let pruned_epoch_le = self.replay_pruned_before_epoch.to_le_bytes();
         if self.replay_pruned_before_epoch > 0 {
             fields.push(&pruned_epoch_le);
+        }
+        let mut extra_control_leaves: Vec<Hash32> = Vec::new();
+        for (domain_id, ctrl) in &self.flow_controls {
+            extra_control_leaves.push(hash_fields_bytes(&[
+                b"BDLM_ECON_GUARD_CTRL_V1",
+                &domain_id.to_le_bytes(),
+                &ctrl.deposit_window_cap_atoms.to_le_bytes(),
+                &ctrl.max_single_tx_withdraw_atoms.to_le_bytes(),
+                &ctrl.large_withdraw_delay_blocks.to_le_bytes(),
+                &ctrl.auto_pause_reorg_depth_threshold.to_le_bytes(),
+                &ctrl.circuit_pause_duration_blocks.to_le_bytes(),
+            ]));
+        }
+        for (domain_id, pause) in &self.domain_pauses {
+            extra_control_leaves.push(hash_fields_bytes(&[
+                b"BDLM_ECON_GUARD_PAUSE_V1",
+                &domain_id.to_le_bytes(),
+                &pause.paused_at_height.to_le_bytes(),
+                &pause.pause_expires_at_height.to_le_bytes(),
+                &pause.reorg_depth.to_le_bytes(),
+            ]));
+        }
+        for (domain_id, (win_idx, used)) in &self.deposit_window_usage {
+            extra_control_leaves.push(hash_fields_bytes(&[
+                b"BDLM_ECON_GUARD_DEPOSIT_V1",
+                &domain_id.to_le_bytes(),
+                &win_idx.to_le_bytes(),
+                &used.to_le_bytes(),
+            ]));
+        }
+        for (wd_id, wd) in &self.queued_withdrawals {
+            extra_control_leaves.push(hash_fields_bytes(&[
+                b"BDLM_ECON_GUARD_QUEUE_WD_V1",
+                wd_id,
+                &wd.domain_id.to_le_bytes(),
+                wd.recipient.as_bytes(),
+                &wd.amount_atoms.to_le_bytes(),
+                &wd.queued_at_height.to_le_bytes(),
+                &wd.ready_at_height.to_le_bytes(),
+            ]));
+        }
+        for leaf in &extra_control_leaves {
+            fields.push(leaf);
+        }
+        let nonce_le = self.next_withdrawal_nonce.to_le_bytes();
+        if self.next_withdrawal_nonce > 0 {
+            fields.push(&nonce_le);
         }
         hash_fields_bytes(&fields)
     }
@@ -3643,5 +4144,83 @@ mod tests {
             matches!(stale_err, EconomicGuardError::InvalidEvidence(_)),
             "pre-horizon epoch must be refused: {stale_err:?}"
         );
+    }
+
+    #[test]
+    fn directional_flow_timelock_and_reorg_circuit_pause_enforce_invariants() {
+        let mut guard = BridgeEconomicGuard::new();
+        let policy = DomainCeilingPolicy {
+            backing: SecurityBacking::Work {
+                difficulty_bits: 16,
+            },
+            work_window_cap_atoms: 1_000,
+            min_work_difficulty_bits: 10,
+            window_blocks: 100,
+            ..DomainCeilingPolicy::default()
+        };
+        guard.configure_domain(88, policy, None).unwrap();
+        guard
+            .configure_domain_flow_controls(
+                88,
+                DomainFlowControls {
+                    deposit_window_cap_atoms: 400,
+                    max_single_tx_withdraw_atoms: 250,
+                    large_withdraw_delay_blocks: 10,
+                    auto_pause_reorg_depth_threshold: 4,
+                    circuit_pause_duration_blocks: 20,
+                },
+            )
+            .unwrap();
+
+        // Asymmetric deposit cap (400) independent of withdrawal cap (1000).
+        guard
+            .check_and_record_directional_flow(88, BridgeFlowDirection::Deposit, 350, 10)
+            .unwrap();
+        assert!(matches!(
+            guard.check_and_record_directional_flow(88, BridgeFlowDirection::Deposit, 60, 10),
+            Err(EconomicGuardError::CeilingExceeded {
+                ceiling_atoms: 400,
+                ..
+            })
+        ));
+
+        // Oversized single withdrawal (> 250) requires timelock queueing.
+        assert!(matches!(
+            guard.check_and_record_directional_flow(88, BridgeFlowDirection::Withdraw, 300, 11),
+            Err(EconomicGuardError::LargeWithdrawalRequiresTimelock { .. })
+        ));
+        let recipient = Address::from([0x91; 32]);
+        let wd_id = guard
+            .queue_large_withdrawal(88, recipient, 300, 11)
+            .unwrap();
+        assert!(matches!(
+            guard.claim_queued_withdrawal(wd_id, 20),
+            Err(EconomicGuardError::WithdrawalTimelockActive {
+                ready_at_height: 21,
+                ..
+            })
+        ));
+
+        // Reorg depth >= 4 trips timed pause and blocks both direct flows and timelock claims.
+        assert!(guard.observe_reorg_depth(88, 5, 21).unwrap());
+        assert!(matches!(
+            guard.check_and_record_flow(88, 10, 22),
+            Err(EconomicGuardError::DomainPaused { .. })
+        ));
+        assert!(matches!(
+            guard.claim_queued_withdrawal(wd_id, 25),
+            Err(EconomicGuardError::DomainPaused { .. })
+        ));
+
+        // After pause expires at height 41, resume unlocks the domain and claim succeeds.
+        assert!(!guard.resume_if_pause_expired(88, 40).unwrap());
+        assert!(guard.resume_if_pause_expired(88, 41).unwrap());
+        let claimed = guard.claim_queued_withdrawal(wd_id, 41).unwrap();
+        assert_eq!(claimed.amount_atoms, 300);
+
+        // JSON serialization must remain valid (all map keys strings/integers).
+        let json = serde_json::to_string(&guard).expect("serialize JSON");
+        let parsed: BridgeEconomicGuard = serde_json::from_str(&json).expect("roundtrip JSON");
+        assert_eq!(parsed.root(), guard.root());
     }
 }
