@@ -1557,6 +1557,13 @@ jobs:
           workspaces: |
             mobile/ffi
             mobile/garden-ffi
+      # `budlum-core` is a path dependency of the Garden crate, so its build
+      # script runs here and needs protoc. `mobile/ffi` does not depend on the
+      # core and never needed it, which is why this job had no installer; the
+      # pinned one is shared with every other job.
+      - name: Install protoc
+        if: always() && steps.rust.outcome == 'success'
+        run: python3 .github/scripts/install_protoc.py
       - name: Format
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path mobile/ffi/Cargo.toml --all -- --check
