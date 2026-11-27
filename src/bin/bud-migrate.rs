@@ -110,7 +110,15 @@ fn run_analyze(args: &[String]) -> Result<String, String> {
             other => return Err(format!("unknown analyze option `{other}`")),
         }
     }
+    const MAX_MIGRATION_FILE_BYTES: u64 = 16 * 1024 * 1024;
     let path = code_file.ok_or_else(|| String::from("--code-file is required"))?;
+    let meta = fs::metadata(&path).map_err(|e| format!("stat {path}: {e}"))?;
+    if meta.len() > MAX_MIGRATION_FILE_BYTES {
+        return Err(format!(
+            "{path} is {} bytes, exceeding {MAX_MIGRATION_FILE_BYTES}-byte limit",
+            meta.len()
+        ));
+    }
     let raw = fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
     let code = parse_hex_bytes(raw.trim())?;
     let scanned_bytes = code.len();
@@ -150,7 +158,18 @@ fn run_verify(args: &[String]) -> Result<String, String> {
     if flag != "--chain-id" {
         return Err(String::from(usage));
     }
+    const MAX_BUNDLE_FILE_BYTES: u64 = 16 * 1024 * 1024;
     let chain_id = parse_u64(value, "--chain-id")?;
+    if chain_id == 0 {
+        return Err(String::from("--chain-id must be non-zero"));
+    }
+    let bundle_meta = fs::metadata(path).map_err(|e| format!("stat {path}: {e}"))?;
+    if bundle_meta.len() > MAX_BUNDLE_FILE_BYTES {
+        return Err(format!(
+            "{path} is {} bytes, exceeding {MAX_BUNDLE_FILE_BYTES}-byte limit",
+            bundle_meta.len()
+        ));
+    }
     let raw = fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
     let bundle: MigrationBundleFile =
         serde_json::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))?;
