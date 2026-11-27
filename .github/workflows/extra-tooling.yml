@@ -74,7 +74,7 @@ jobs:
       # network into a binary the rest of the build trusts, and it ships its own
       # adversarial harness (`.github/scripts/probe_install_protoc.py`). Measured
       # 2026-11-24: no workflow ran that harness, so every probe could have gone
-      # red — or stopped compiling against a changed `fetch_pinned` signature —
+      # red - or stopped compiling against a changed `fetch_pinned` signature -
       # without a single check noticing. 14 probes, ~3 s, python3 only: cheap
       # enough to run beside the install it inspects, and it fails closed, so a
       # fetch path that starts reading a local file stops this job here.
