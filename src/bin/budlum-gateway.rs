@@ -662,9 +662,14 @@ impl ContentSource for DirectorySource {
         }
         let path = self.root.join(hex::encode(content.content_id.digest));
         // The rehearsal source serves the same objects the production source
-        // does, so it applies the same ceiling, and refuses an object above it
-        // before the bytes are read rather than after they are hashed.
-        if std::fs::metadata(&path).map_or(0, |meta| meta.len()) > ceiling {
+        // does, so it applies the same ceiling, refuses symlinks, and refuses
+        // an object above the ceiling before the bytes are read.
+        let meta =
+            std::fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !meta.file_type().is_file() {
+            return Err(format!("{} is not a regular file", path.display()));
+        }
+        if meta.len() > ceiling {
             return Err(format!("{} exceeds the gateway ceiling", path.display()));
         }
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -903,7 +908,8 @@ impl Bud3RpcSource {
     ) -> Option<Vec<u8>> {
         let path = self.cache_path(&content.content_id.digest);
         let ceiling = budlum_core::storage::content_gateway::MAX_GATEWAY_CONTENT_BYTES as u64;
-        if std::fs::metadata(&path).ok()?.len() > ceiling {
+        let meta = std::fs::symlink_metadata(&path).ok()?;
+        if !meta.file_type().is_file() || meta.len() > ceiling {
             return None;
         }
         let bytes = std::fs::read(&path).ok()?;
@@ -921,11 +927,17 @@ impl Bud3RpcSource {
     /// An object that does not fit within `cache_max_bytes` is still served to
     /// the caller, just not persisted to disk.
     fn write_verified_cache(&self, digest: &[u8; 32], bytes: &[u8]) {
+        static DISK_CACHE_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
         if std::fs::create_dir_all(&self.cache_dir).is_err() {
             return;
         }
         let target = self.cache_path(digest);
-        let replaced = std::fs::metadata(&target).map_or(0, |meta| meta.len());
+        let replaced = match std::fs::symlink_metadata(&target) {
+            Ok(meta) if !meta.file_type().is_file() => return,
+            Ok(meta) => meta.len(),
+            Err(_) => 0,
+        };
         let len = bytes.len() as u64;
         if len > self.cache_max_bytes {
             return;
@@ -942,10 +954,11 @@ impl Bud3RpcSource {
                 return;
             }
         }
+        let seq = DISK_CACHE_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp = self.cache_dir.join(format!(
-            "{}.{}.tmp",
+            "{}.{}.{seq}.tmp",
             hex::encode(digest),
-            std::process::id()
+            std::process::id(),
         ));
         if std::fs::write(&tmp, bytes).is_ok() {
             if std::fs::rename(&tmp, &target).is_ok() {
@@ -1222,7 +1235,16 @@ fn answer(
         }
     };
 
-    let headers = content_headers_with_csp(&route.mime, IMMUTABLE_CACHE, manifest.csp.as_deref());
+    let content_digest_hex = hex::encode(route.content.content_id.digest);
+    let cache_control = if path
+        .strip_prefix("/bud3/")
+        .is_some_and(|rest| rest.starts_with(&content_digest_hex))
+    {
+        IMMUTABLE_CACHE
+    } else {
+        RESOLUTION_CACHE
+    };
+    let headers = content_headers_with_csp(&route.mime, cache_control, manifest.csp.as_deref());
     let mut response = Response::new(BoxBody::from(Bytes::from(bytes)));
     *response.status_mut() = StatusCode::OK;
     apply_headers(&mut response, headers);
@@ -2371,6 +2393,147 @@ mod tests {
         assert!(
             dir.path().join(hex::encode([0x02; 32])).exists(),
             "fresh entry must fit after reaping expired entry"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn name_addressed_gateway_responses_use_short_resolution_cache_not_one_year_immutable() {
+        use budlum_core::storage::bud3::content_id::ContentId;
+        use budlum_core::storage::bud3::content_ref::ContentRef;
+        use budlum_core::web_gateway::manifest::Route;
+
+        budlum_core::crypto::tls::install_default_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let body = b"<h1>mutable bud site v1</h1>";
+        let body_ref = ContentRef::new(ContentId::public(body), [0x11; 32], None).unwrap();
+        std::fs::write(
+            dir.path().join(hex::encode(body_ref.content_id.digest)),
+            body,
+        )
+        .unwrap();
+
+        let mut routes = std::collections::BTreeMap::new();
+        routes.insert(
+            "/index.html".to_string(),
+            Route {
+                content: body_ref,
+                mime: "text/html".to_string(),
+            },
+        );
+        let manifest = SiteManifest {
+            index: "/index.html".to_string(),
+            routes,
+            csp: None,
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let manifest_ref =
+            ContentRef::new(ContentId::public(&manifest_bytes), [0x22; 32], None).unwrap();
+        std::fs::write(
+            dir.path().join(hex::encode(manifest_ref.content_id.digest)),
+            &manifest_bytes,
+        )
+        .unwrap();
+
+        let mut cfg = serving_config(true, Vec::new());
+        cfg.content_dir = Some(dir.path().to_path_buf());
+        let state = Arc::new(build_state(cfg).unwrap());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        state.resolved.lock().unwrap().insert(
+            "alice.bud|None".to_string(),
+            (
+                now.saturating_add(60),
+                CachedResolution {
+                    content: manifest_ref,
+                    height: 1,
+                },
+            ),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_state = Arc::clone(&state);
+        let server = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            let svc = service_fn(move |req| {
+                let st = Arc::clone(&server_state);
+                async move { handle(req, st, peer).await }
+            });
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), svc)
+                .await;
+        });
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/"))
+            .header("host", "alice.budlum.xyz")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cc = resp
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        server.abort();
+        assert_eq!(
+            cc, RESOLUTION_CACHE,
+            "mutable name resolution must not be pinned as 1-year immutable; got {cc:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_cache_and_directory_source_refuse_symlinks() {
+        use budlum_core::storage::bud3::content_id::ContentId;
+        use budlum_core::storage::bud3::content_ref::ContentRef;
+
+        budlum_core::crypto::tls::install_default_provider();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = b"outside-target-bytes";
+        let cid = ContentId::public(secret);
+        let outside_file = outside.path().join("outside");
+        std::fs::write(&outside_file, secret).unwrap();
+
+        let content_dir = tempfile::tempdir().unwrap();
+        let dir_link = content_dir.path().join(hex::encode(cid.digest));
+        std::os::unix::fs::symlink(&outside_file, &dir_link).unwrap();
+        let dsrc = DirectorySource {
+            root: content_dir.path().to_path_buf(),
+        };
+        let cref = ContentRef::new(cid, [0x44; 32], None).unwrap();
+        assert!(
+            dsrc.fetch(&cref).is_err(),
+            "DirectorySource must refuse symlinks inside content_dir"
+        );
+
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache_link = cache_dir.path().join(hex::encode(cid.digest));
+        std::os::unix::fs::symlink(&outside_file, &cache_link).unwrap();
+        let cfg = Bud3SourceConfig {
+            payer: hex::encode([0x11; 32]),
+            receipt_id: hex::encode([0x22; 32]),
+            fee_paid_atoms: budlum_core::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS,
+        };
+        let rsrc = Bud3RpcSource::new(
+            vec!["http://127.0.0.1:9".to_string()],
+            &cfg,
+            cache_dir.path().to_path_buf(),
+            1024,
+        )
+        .unwrap();
+        assert!(
+            rsrc.read_verified_cache(&cref).is_none(),
+            "Bud3RpcSource::read_verified_cache must refuse symlink targets"
+        );
+        rsrc.write_verified_cache(&cid.digest, b"replacement");
+        assert_eq!(
+            std::fs::read(&outside_file).unwrap(),
+            secret,
+            "write_verified_cache must never clobber outside file via symlink"
         );
     }
 }
