@@ -312,11 +312,98 @@ fn kind_literals(tokens: &str) -> Vec<String> {
     out
 }
 
+/// The three tables that must name every `AdapterSpec` variant one by one.
+///
+/// Each is `(file, function, what a default arm would cost)`. They are not
+/// checked for completeness here: `rustc` already refuses a non-exhaustive
+/// match, and re-implementing that would be a second mechanism beside the
+/// compiler. What the compiler cannot defend is the *condition* that makes
+/// its check meaningful - a single `_ =>` arm silently restores
+/// exhaustiveness and turns "the tree will not build until you handle the new
+/// family" into "the new family quietly gets a default".
+///
+/// That is exactly how a family can end up admitted by the door with no
+/// signed preimage of its pin, or with a finality ceiling it never earned.
+const EXHAUSTIVE_TABLES: &[(&str, &str, &str)] = &[
+    (
+        "src/cross_domain/external/intake.rs",
+        "pub fn build(",
+        "a new family would build no adapter",
+    ),
+    (
+        "src/core/transaction.rs",
+        "fn encode_adapter_spec(",
+        "a new family's pin would stay outside the signature preimage",
+    ),
+    (
+        "src/settlement/universal_finality.rs",
+        "fn for_external_spec_declared(",
+        "a new family would inherit a finality ceiling it never earned",
+    ),
+];
+
+/// The balanced body of the first item whose header matches `header`.
+fn function_body(text: &str, header: &str) -> Option<String> {
+    let start = text.find(header)?;
+    let open = text[start..].find('{')? + start;
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(text[open..=i].to_string());
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Is `line` a wildcard match arm (`_ =>`), ignoring comments?
+fn is_wildcard_arm(line: &str) -> bool {
+    let code = line.split("//").next().unwrap_or("");
+    let trimmed = code.trim_start();
+    let Some(rest) = trimmed.strip_prefix('_') else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    // `_ =>` is a wildcard; `_name =>` and `_ if cond =>` are not the same
+    // thing, but a guarded wildcard still leaves an unguarded fall-through
+    // only when a later bare `_` exists, which this same check would catch.
+    rest.starts_with("=>")
+}
+
+fn check_exhaustive_tables(root: &Path) -> Result<usize, String> {
+    let mut checked = 0usize;
+    for (rel, header, cost) in EXHAUSTIVE_TABLES {
+        let text = std::fs::read_to_string(root.join(rel))
+            .map_err(|e| format!("{rel} could not be read: {e}"))?;
+        let body = function_body(&text, header).ok_or_else(|| {
+            format!("{rel}: `{header}` not found; the exhaustive-table list is stale")
+        })?;
+        if let Some(line) = body.lines().find(|l| is_wildcard_arm(l)) {
+            return Err(format!(
+                "{rel}: `{header}` carries a wildcard arm (`{}`). Remove it and name every                  AdapterSpec variant: with a default arm, {cost}, and the compiler stops                  reporting the omission.",
+                line.trim()
+            ));
+        }
+        checked += 1;
+    }
+    Ok(checked)
+}
+
 /// # Errors
 ///
 /// A canonical consensus family that no `AdapterSpec` variant can admit, a
-/// build arm whose adapter type cannot be resolved, or an adapter type whose
-/// `consensus_kind` is not declared in its own module.
+/// build arm whose adapter type cannot be resolved, an adapter type whose
+/// `consensus_kind` is not declared in its own module, or one of the three
+/// per-variant tables growing a wildcard arm.
 pub fn run(root: &Path) -> Result<String, String> {
     let families = canonical_families(root)?;
     let specs = spec_arms(root)?;
@@ -376,9 +463,12 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(msg);
     }
 
+    let tables = check_exhaustive_tables(root)?;
+
     Ok(format!(
         "every consensus family has a door: {} canonical families, {} AdapterSpec variants, {} \
-         reachable consensus_kind(s); the model and the registration door agree",
+         reachable consensus_kind(s); the model and the registration door agree, and {tables} \
+         per-variant tables stay exhaustive by construction",
         families.len(),
         specs.len(),
         reachable.len()
@@ -408,12 +498,30 @@ pub fn self_test() -> Result<String, String> {
         )
     };
 
+    // The canary tree carries the other two per-variant tables too, so the
+    // exhaustive-table check runs against real files in every canary rather
+    // than being skipped when a file is absent.
+    let core_dir = dir.join("src/core");
+    let settlement_dir = dir.join("src/settlement");
+    std::fs::create_dir_all(&core_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&settlement_dir).map_err(|e| e.to_string())?;
+
     let write = |families: &str, kind_arms: &str, variants: &str, build_arms: &str, adapters: &str| -> Result<(), String> {
         std::fs::write(model_dir.join("finality_proof_model.rs"), model(families, kind_arms))
             .map_err(|e| e.to_string())?;
         std::fs::write(ext_dir.join("intake.rs"), intake(variants, build_arms))
             .map_err(|e| e.to_string())?;
-        std::fs::write(ext_dir.join("adapters.rs"), adapters).map_err(|e| e.to_string())
+        std::fs::write(ext_dir.join("adapters.rs"), adapters).map_err(|e| e.to_string())?;
+        std::fs::write(
+            core_dir.join("transaction.rs"),
+            "fn encode_adapter_spec(s: &AdapterSpec) {\n    match s {\n        AdapterSpec::AlphaSpec { .. } => 0,\n    }\n}\n",
+        )
+        .map_err(|e| e.to_string())?;
+        std::fs::write(
+            settlement_dir.join("universal_finality.rs"),
+            "fn for_external_spec_declared(s: &AdapterSpec) {\n    match s {\n        AdapterSpec::AlphaSpec { .. } => 0,\n    }\n}\n",
+        )
+        .map_err(|e| e.to_string())
     };
 
     let cleanup = |dir: &Path| {
@@ -517,9 +625,64 @@ pub fn self_test() -> Result<String, String> {
         Err(_) => {}
     }
 
+    // Canary 6a - a wildcard arm in one of the real tables must fail the run.
+    write(
+        "    Alpha,\n",
+        "            Self::Alpha => \"alpha-bft\",\n",
+        "    AlphaSpec { network: String },\n",
+        "            Self::AlphaSpec { .. } => AlphaAdapter::new(1),\n",
+        "impl AlphaAdapter {\n    fn d(&self) -> D {\n        D { consensus_kind: \"alpha-bft\".to_string() }\n    }\n}\n",
+    )?;
+    std::fs::write(
+        core_dir.join("transaction.rs"),
+        "fn encode_adapter_spec(s: &AdapterSpec) {\n    match s {\n        AdapterSpec::AlphaSpec { .. } => 0,\n        _ => 1,\n    }\n}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    match run(&dir) {
+        Ok(_) => {
+            cleanup(&dir);
+            return Err(String::from(
+                "canary 6a: a wildcard arm in the signature-preimage table was accepted",
+            ));
+        }
+        Err(e) if !e.contains("wildcard") => {
+            cleanup(&dir);
+            return Err(format!("canary 6a: failed for the wrong reason: {e}"));
+        }
+        Err(_) => {}
+    }
+
+    // Canary 6 - the wildcard check itself. A table that grows `_ =>` must
+    // fail, and a line that merely starts with an underscore must not.
+    let probe = dir.join("probe.rs");
+    std::fs::write(
+        &probe,
+        "fn build() {\n    match s {\n        Self::A => 1,\n        _ => 0,\n    }\n}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let text = std::fs::read_to_string(&probe).map_err(|e| e.to_string())?;
+    let body = function_body(&text, "fn build(")
+        .ok_or_else(|| String::from("canary 6: the probe body was not found"))?;
+    if !body.lines().any(|l| is_wildcard_arm(l)) {
+        cleanup(&dir);
+        return Err(String::from("canary 6: a real `_ =>` arm was not detected"));
+    }
+    for honest in [
+        "        _name => 0,",
+        "        // _ => 0,",
+        "        Self::B => 0,",
+        "        _unused => 0,",
+    ] {
+        if is_wildcard_arm(honest) {
+            cleanup(&dir);
+            return Err(format!("canary 6: `{honest}` was misread as a wildcard arm"));
+        }
+    }
+
     cleanup(&dir);
     Ok(String::from(
-        "every-consensus-family-has-a-door self-test OK: 5 canaries (honest tree, doorless \
-         family, name-only match, empty build arm, undeclared adapter kind)",
+        "every-consensus-family-has-a-door self-test OK: 7 canaries (honest tree, doorless \
+         family, name-only match, empty build arm, undeclared adapter kind, wildcard arm in a \
+         per-variant table, underscore-prefixed binding is not a wildcard)",
     ))
 }
