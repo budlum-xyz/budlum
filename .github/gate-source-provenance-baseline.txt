@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: 133f50a1c9f130effc575691c710da84f0fe0a57fad878e66ddfca7086f2a3a7
+digest: 6f1e43dec51c8d58a0f8f14e31dd06a634b101c29d874ad842834b2978d998ca
 files: 196
 Cargo.lock	7e8ca4b31fc0795bb139134686126f1d552e1e75e9ffbc2089fbc52944a48a1f
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
@@ -117,7 +117,7 @@ src/gates/no_internal_ids.rs	ea4d45bde4856765f63e6b489f3a4ea3a1ec3501dda02ce15af
 src/gates/no_legacy_storage.rs	d00604dd594207f443870935125b1bbf4126cfcfc6daa27b27e8c1ad65271455
 src/gates/no_new_shell_gates.rs	a35bae10dd7cdbb5b19529a0d9657f96be572f602977eb08cabf9938c2a349d5
 src/gates/no_orphan_source_files.rs	0f8fb447d5d17d8e14915ec6ecdc2f819b3fc66a2c244730f4d9a9fa235f203c
-src/gates/no_out_of_block_consensus_writes.rs	41eed601b1fad659268ecaece25bde44723e68dbe28899799015eb035d5880f6
+src/gates/no_out_of_block_consensus_writes.rs	e9de5d009fb68742bfa6a3c5c58184ba62dc506afa47a638454b93e4278a5fc6
 src/gates/no_pairing_snark_in_verification_path.rs	5e7e8423c359a5a65f44eb1eb235f17445afd314e82f97ffd2998c20672a29f3
 src/gates/no_unicode_dashes.rs	2ee66725b1d28b4b6bbe1c9e1a88fda2a4f27ce48d1d3521628db840f421f33b
 src/gates/no_upstream_brands.rs	2dabb472e3ba94268a5191431c652835b28229d0c47bd4a0a9df958a22171da1
@@ -200,4 +200,3 @@ src/gates/zkvm_refuses_untrusted_proofs.rs	dfca412c7a6bbc72aba195ebaffcd9f759406
 src/main.rs	dada10254764f2c5b21f72b2ac0b8c7de27ec18b94f07b6a858724b2c696df85
 src/sha256.rs	b43ece6c2d4936308d742266930a3d598dfd3175722856b7e4924f5439d35eb5
 tests/repository_locks.rs	6407d19d002bbc52a8bbf186bec015129fb12c609a507ca88534dc3b4fdca721
-
