@@ -551,6 +551,22 @@ impl PoSpaceVdfAdapter {
         self
     }
 
+    /// Validates a governance pin outside this adapter.
+    ///
+    /// The intake's `PinExternalAnchor` door has to refuse a pin before it is
+    /// installed, and the rules for what a usable pin is live here, beside the
+    /// verifier that depends on them. Exposing the same function rather than
+    /// restating the bounds at the door is what keeps one answer to "is this
+    /// pin usable".
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::ConsensusRule`] naming the first field that cannot
+    /// certify an epoch.
+    pub fn validate_pin_public(pinned: &PinnedPoSpaceAnchor) -> Result<(), AdapterError> {
+        Self::validate_pin(pinned)
+    }
+
     fn validate_pin(pinned: &PinnedPoSpaceAnchor) -> Result<(), AdapterError> {
         if pinned.genesis_challenge == [0u8; 32] {
             return Err(AdapterError::ConsensusRule {
@@ -1016,7 +1032,7 @@ impl ExternalFinalityAdapter for PoSpaceVdfAdapter {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::core::address::Address;
     use crate::cross_domain::external::selftest::{admit, admit_observed};
@@ -1082,6 +1098,20 @@ mod tests {
         };
         block.infusion_block_hash = block.compute_infusion_hash(network);
         block
+    }
+
+    /// Known-good Proof-of-Space + hash-VDF sample, shared with the intake
+    /// tests.
+    ///
+    /// The intake registers a domain end to end and needs the same sample
+    /// `selftest::admit` will verify against; exposing it here keeps one
+    /// fixture rather than two that could drift.
+    pub(crate) fn pospace_fixture(
+        network: &str,
+        require_pq: bool,
+    ) -> (PinnedPoSpaceAnchor, RawConsensusEvidence) {
+        let (_adapter, pinned, _ev, raw, _kp) = build_fixture(network, 5, 1, require_pq);
+        (pinned, raw)
     }
 
     fn build_fixture(

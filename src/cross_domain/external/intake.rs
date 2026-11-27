@@ -356,6 +356,18 @@ pub enum AdapterSpec {
         #[serde(default)]
         operator: Option<crate::cross_domain::external::arweave_spora::PinnedSpore>,
     },
+    /// Proof-of-Space coupled with a sequential hash-VDF (Chia lineage).
+    ///
+    /// The pin is the whole trust story: the genesis challenge, the minimum
+    /// plot size and the VDF iteration window decide what counts as real
+    /// elapsed space-time, so a registrant that could choose them would be
+    /// certifying its own finality. `IntakeState` therefore admits the spec
+    /// only when it equals the governance pin for `network`.
+    PoSpaceVdf {
+        network: String,
+        #[serde(default)]
+        anchor: Option<crate::cross_domain::external::pospace_vdf::PinnedPoSpaceAnchor>,
+    },
 }
 
 impl AdapterSpec {
@@ -381,7 +393,8 @@ impl AdapterSpec {
             | Self::NearDoomslug { network, .. }
             | Self::OuroborosMithril { network, .. }
             | Self::SolanaTower { network, .. }
-            | Self::ArweaveSpore { network, .. } => network,
+            | Self::ArweaveSpore { network, .. }
+            | Self::PoSpaceVdf { network, .. } => network,
         }
     }
 
@@ -566,6 +579,16 @@ impl AdapterSpec {
                 },
                 golden,
                 crate::cross_domain::external::arweave_spora::ArweaveSpOraAdapter::with_golden,
+            ),
+            Self::PoSpaceVdf { network, anchor } => box_with_golden(
+                || {
+                    crate::cross_domain::external::pospace_vdf::PoSpaceVdfAdapter::new(
+                        network,
+                        anchor.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::pospace_vdf::PoSpaceVdfAdapter::with_golden,
             ),
         }
     }
@@ -786,6 +809,18 @@ pub struct IntakeState {
         String,
         crate::cross_domain::external::honeybadger_bft::PinnedHoneyBadgerCommittee,
     >,
+    /// Governance-pinned Proof-of-Space + hash-VDF parameters keyed by
+    /// external network.
+    ///
+    /// Inside [`Self::state_digest`] like every other pin map: only a block may
+    /// write it. The parameters it holds are what makes a segment's elapsed
+    /// space-time real, so a registrant that could supply its own would be
+    /// certifying its own finality.
+    #[serde(default)]
+    pub pinned_pospace_anchors: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::pospace_vdf::PinnedPoSpaceAnchor,
+    >,
     /// Deterministic, admin-keyless intake circuit breaker and contradiction
     /// tombstone ledger, folded into [`Self::state_digest`].
     #[serde(default)]
@@ -826,6 +861,8 @@ pub enum AnchorFamily {
     SolanaEpoch,
     /// One operator's hybrid signing key (`Arweave` storage attestations).
     SporeOperator,
+    /// `Proof-of-Space` + sequential hash-VDF parameters (`Chia` lineage).
+    PoSpaceVdf,
 }
 
 impl AnchorFamily {
@@ -845,6 +882,7 @@ impl AnchorFamily {
             Self::OuroborosEpoch => "ouroboros-epoch",
             Self::SolanaEpoch => "solana-epoch",
             Self::SporeOperator => "spore-operator",
+            Self::PoSpaceVdf => "pospace-vdf",
         }
     }
 }
@@ -882,6 +920,9 @@ pub enum PinnedExternalAnchor {
     SolanaEpoch(crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch),
     /// The hybrid operator key a storage attestation must be signed by.
     SporeOperator(crate::cross_domain::external::arweave_spora::PinnedSpore),
+    /// `Proof-of-Space` + sequential hash-VDF parameters for a `Chia`-lineage
+    /// domain.
+    PoSpaceVdf(crate::cross_domain::external::pospace_vdf::PinnedPoSpaceAnchor),
 }
 
 impl PinnedExternalAnchor {
@@ -901,6 +942,7 @@ impl PinnedExternalAnchor {
             Self::OuroborosEpoch(_) => AnchorFamily::OuroborosEpoch,
             Self::SolanaEpoch(_) => AnchorFamily::SolanaEpoch,
             Self::SporeOperator(_) => AnchorFamily::SporeOperator,
+            Self::PoSpaceVdf(_) => AnchorFamily::PoSpaceVdf,
         }
     }
 
@@ -1025,6 +1067,17 @@ impl PinnedExternalAnchor {
                 .map_err(|_| {
                     "the pinned Arweave operator's ML-DSA-65 half is not a public key".to_string()
                 })?;
+            }
+            Self::PoSpaceVdf(anchor) => {
+                // The adapter's own pin validator is the check, because every
+                // field it reads is one that decides whether a segment proves
+                // real elapsed space-time: a zero genesis challenge, a plot `k`
+                // outside the allowed window, an inverted VDF iteration range,
+                // or a required PQ attestation with no key to check it against.
+                crate::cross_domain::external::pospace_vdf::PoSpaceVdfAdapter::validate_pin_public(
+                    anchor,
+                )
+                .map_err(|e| e.to_string())?;
             }
             Self::SolanaEpoch(epoch) => {
                 // Solana admission needs a real epoch: a genesis hash to bind
@@ -1873,6 +1926,19 @@ impl IntakeState {
             .insert(network.into(), committee);
     }
 
+    /// Installs or updates the pinned `Proof-of-Space` + hash-VDF parameters
+    /// for `network`.
+    ///
+    /// WIRING: genesis/test initializer; the production door is
+    /// `GovernanceAction::PinExternalAnchor` -> [`Self::install_pinned_anchor`].
+    pub fn pin_pospace_anchor(
+        &mut self,
+        network: impl Into<String>,
+        anchor: crate::cross_domain::external::pospace_vdf::PinnedPoSpaceAnchor,
+    ) {
+        self.pinned_pospace_anchors.insert(network.into(), anchor);
+    }
+
     /// Installs or updates the pinned `Arweave` storage operator for `network`.
     /// WIRING: genesis/test initializer; the production door is
     /// `GovernanceAction::PinExternalAnchor` -> [`Self::install_pinned_anchor`].
@@ -2097,6 +2163,9 @@ impl IntakeState {
             PinnedExternalAnchor::SporeOperator(operator) => {
                 self.pin_spore_operator(network.to_string(), operator);
             }
+            PinnedExternalAnchor::PoSpaceVdf(anchor) => {
+                self.pin_pospace_anchor(network.to_string(), anchor);
+            }
         }
     }
 
@@ -2183,6 +2252,11 @@ impl IntakeState {
                 .get(network)
                 .cloned()
                 .map(PinnedExternalAnchor::SporeOperator),
+            AnchorFamily::PoSpaceVdf => self
+                .pinned_pospace_anchors
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::PoSpaceVdf),
         }
     }
 
@@ -2437,6 +2511,18 @@ impl IntakeState {
                 return Err(IntakeError::CommitteeNotPinned);
             };
             if operator.as_ref() != Some(installed) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        if let AdapterSpec::PoSpaceVdf { network, anchor } = &spec {
+            // Proof-of-Space finality is a statement about elapsed space-time,
+            // and the genesis challenge plus the plot and VDF windows are what
+            // define it. Without the governance pin for `network` the
+            // registrant chooses the parameters its own segment has to clear.
+            let Some(installed) = self.pinned_pospace_anchors.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if anchor.as_ref() != Some(installed) {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
@@ -7082,6 +7168,83 @@ mod tests {
             .pinned_solana_epoch(net, pinned.epoch + 1)
             .is_none());
         assert!(governed.pinned_ouroboros_epochs.is_empty());
+    }
+
+    #[test]
+    fn a_pospace_registration_is_bound_to_the_parameters_the_state_pinned() {
+        use crate::cross_domain::external::pospace_vdf::tests::pospace_fixture;
+
+        let (pinned, golden) = pospace_fixture("chia-pq-mainnet", true);
+        let net = "chia-pq-mainnet";
+        let spec = |pin: Option<_>| AdapterSpec::PoSpaceVdf {
+            network: net.to_string(),
+            anchor: pin,
+        };
+        let mut intake = IntakeState::default();
+
+        // Nothing pinned means closed, and so does a spec that carries no
+        // anchor of its own: a Proof-of-Space segment is only a statement about
+        // elapsed space-time relative to the parameters somebody pinned.
+        assert_eq!(
+            admit_near(&mut intake, spec(None), golden.clone()),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+        assert_eq!(
+            admit_near(&mut intake, spec(Some(pinned.clone())), golden.clone()),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+
+        // A pin the governor cannot use is refused before it reaches state,
+        // and each refusal names the field it is about.
+        let mut zero_genesis = pinned.clone();
+        zero_genesis.genesis_challenge = [0u8; 32];
+        assert!(PinnedExternalAnchor::PoSpaceVdf(zero_genesis)
+            .validate()
+            .is_err_and(|e| e.contains("genesis_challenge")));
+
+        let mut tiny_plot = pinned.clone();
+        tiny_plot.min_plot_k = 8;
+        assert!(PinnedExternalAnchor::PoSpaceVdf(tiny_plot)
+            .validate()
+            .is_err_and(|e| e.contains("min_plot_k")));
+
+        let mut inverted = pinned.clone();
+        inverted.max_iterations_per_block = inverted.min_iterations_per_block - 1;
+        assert!(PinnedExternalAnchor::PoSpaceVdf(inverted)
+            .validate()
+            .is_err_and(|e| e.contains("VDF iteration")));
+
+        assert!(intake.pinned_pospace_anchors.is_empty());
+
+        intake.install_pinned_anchor(net, PinnedExternalAnchor::PoSpaceVdf(pinned.clone()));
+
+        // Shortening the required depth would let a segment certify itself with
+        // less work than the pinned rule asks for, and widening the plot floor
+        // would do the same from the other side.
+        let mut shallow = pinned.clone();
+        shallow.required_depth = 1;
+        assert_eq!(
+            admit_near(&mut intake, spec(Some(shallow)), golden.clone()),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+        let mut higher_k = pinned.clone();
+        higher_k.min_plot_k = pinned.min_plot_k + 1;
+        assert_eq!(
+            admit_near(&mut intake, spec(Some(higher_k)), golden.clone()),
+            Err(IntakeError::CommitteeNotPinned)
+        );
+
+        admit_near(&mut intake, spec(Some(pinned.clone())), golden)
+            .expect("the pinned parameters admit");
+
+        // The governance and genesis doors write the same state.
+        let mut governed = IntakeState::default();
+        governed.install_pinned_anchor(net, PinnedExternalAnchor::PoSpaceVdf(pinned.clone()));
+        let mut genesis = IntakeState::default();
+        genesis.pin_pospace_anchor(net, pinned.clone());
+        assert_eq!(governed.state_digest(), genesis.state_digest());
+        assert_eq!(governed.pinned_pospace_anchors.get(net), Some(&pinned));
+        assert!(governed.pinned_spore_operators.is_empty());
     }
 
     #[test]

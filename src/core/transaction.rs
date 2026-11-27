@@ -5692,6 +5692,32 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
+        // Tag 23: Proof-of-Space + sequential hash-VDF adapter, appended last.
+        //
+        // The whole pin reaches the preimage. Its genesis challenge is the
+        // anchor every later signage challenge extends, and the plot `k`,
+        // iteration window, required depth and cumulative-weight floor are the
+        // parameters a segment has to clear - re-encoding a registration while
+        // moving any of them would be choosing how much real elapsed
+        // space-time the domain had to prove.
+        AdapterSpec::PoSpaceVdf { network, anchor } => {
+            put_u8(out, 23);
+            put_string(out, network);
+            match anchor {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.genesis_challenge);
+                    put_u8(out, pin.min_plot_k);
+                    put_u64(out, pin.min_iterations_per_block);
+                    put_u64(out, pin.max_iterations_per_block);
+                    put_u32(out, pin.required_depth);
+                    put_fixed(out, &pin.min_cumulative_weight.to_le_bytes());
+                    put_u8(out, u8::from(pin.require_pq_attestation));
+                    put_bytes(out, pin.pq_attestor_pubkey.as_deref().unwrap_or(&[]));
+                }
+                None => put_u8(out, 0),
+            }
+        }
         // Tag 22: Arweave SPoRA operator adapter, appended last.
         //
         // Both halves of the operator key reach the preimage. A relay that

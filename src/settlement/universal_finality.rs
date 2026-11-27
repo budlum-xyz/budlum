@@ -777,6 +777,54 @@ impl FinalityGuarantee {
                     fault_tolerance_bps: if valid { BFT_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
+            // Proof-of-Space finality is probabilistic work over real elapsed
+            // space-time, not a quorum: a segment proves a farmer held a plot
+            // and that time passed, so a majority of space can still reorganise
+            // it and the honest class is work bounded by confirmations. The
+            // pin earns the row only when it names a genesis challenge, a plot
+            // `k` and a VDF window the segment actually had to clear; a pinned
+            // PQ attestor key is what makes the posture lattice-grade, and a
+            // plot holding is not a bond, so there is nothing Budlum can slash.
+            AdapterSpec::PoSpaceVdf { anchor, .. } => {
+                let valid = anchor.as_ref().is_some_and(|pin| {
+                    pin.genesis_challenge != [0u8; 32]
+                        && pin.min_plot_k >= 16
+                        && pin.min_iterations_per_block >= 1
+                        && pin.min_iterations_per_block <= pin.max_iterations_per_block
+                        && pin.required_depth >= 1
+                        && pin.min_cumulative_weight > 0
+                });
+                let pq_attested = valid
+                    && anchor.as_ref().is_some_and(|pin| {
+                        pin.pq_attestor_pubkey
+                            .as_ref()
+                            .is_some_and(|k| !k.is_empty())
+                    });
+                Self {
+                    reversibility: FinalityReversibility::ProbabilisticWork {
+                        confirmations: if valid {
+                            anchor
+                                .as_ref()
+                                .map_or(0, |pin| u64::from(pin.required_depth))
+                        } else {
+                            0
+                        },
+                    },
+                    quantum_posture: if pq_attested {
+                        QuantumClass::Lattice
+                    } else {
+                        QuantumClass::Classical
+                    },
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        event_root: valid,
+                        parent: valid,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: 0,
+                }
+            }
             AdapterSpec::HoneyBadgerBft { committee, .. } => {
                 // Asynchronous ACS finality is protocol finality under an
                 // honest supermajority: one decided epoch is final, and the
