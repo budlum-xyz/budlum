@@ -76,6 +76,18 @@ jobs:
             --manifest-path mobile/garden-ffi/Cargo.toml --bin garden-phone
           ls -la mobile/garden-ffi/target/release/garden-phone
 
+      # The wallet is the one part of the phone that needs no network and
+      # no second phone, so it is proved here rather than claimed: a wallet
+      # is made, its address is read back without the password, the same
+      # words are restored in another directory to the same address, and a
+      # wrong password, a twelve word phrase and a short password are each
+      # refused.
+      - name: Check the phone's wallet
+        run: |
+          mkdir -p /tmp/wallet-a /tmp/wallet-b
+          mobile/garden-ffi/target/release/garden-phone \
+            wallet-check /tmp/wallet-a /tmp/wallet-b
+
       - name: Upload the node
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

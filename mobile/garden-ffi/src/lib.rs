@@ -21,6 +21,7 @@
 
 
 pub mod rendezvous;
+pub mod wallet;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -39,6 +40,19 @@ uniffi::setup_scaffolding!();
 pub struct GardenAnswer {
     /// The JSON body, verbatim from the core.
     pub json: String,
+}
+
+/// What a freshly made wallet hands back, once.
+///
+/// The words are shown and then forgotten by the app: nothing on this
+/// phone keeps them in the clear, so a person who does not write them
+/// down has no second chance at them.
+#[derive(uniffi::Record)]
+pub struct WalletSeed {
+    /// The twenty-four BIP39 words, single-spaced.
+    pub mnemonic: String,
+    /// The Address V3 the words derive.
+    pub address: String,
 }
 
 /// Six digits a person can read out, and how long they last.
@@ -367,6 +381,47 @@ impl GardenPhone {
                 .try_into()
                 .unwrap_or(u64::MAX),
         }
+    }
+
+    /// Whether this phone already holds a wallet.
+    ///
+    /// One phone, one wallet. There is no account list to add to.
+    pub fn wallet_exists(&self) -> bool {
+        wallet::exists(&self.data_dir)
+    }
+
+    /// The address of this phone's wallet, without asking for a password.
+    pub fn wallet_address(&self) -> Result<String, GardenError> {
+        wallet::address(&self.data_dir).map_err(GardenError::of)
+    }
+
+    /// Make this phone's wallet and seal it under `password`.
+    ///
+    /// The twenty-four words come back once, for the screen that asks the
+    /// person to write them down. Nothing keeps them afterwards.
+    pub fn wallet_create(&self, password: String) -> Result<WalletSeed, GardenError> {
+        wallet::create(&self.data_dir, &password)
+            .map(|(mnemonic, address)| WalletSeed { mnemonic, address })
+            .map_err(GardenError::of)
+    }
+
+    /// Put back a wallet from its twenty-four words.
+    pub fn wallet_restore(
+        &self,
+        mnemonic: String,
+        password: String,
+    ) -> Result<String, GardenError> {
+        wallet::restore(&self.data_dir, &mnemonic, &password).map_err(GardenError::of)
+    }
+
+    /// Prove the password opens this phone's wallet.
+    pub fn wallet_open(&self, password: String) -> Result<String, GardenError> {
+        wallet::open(&self.data_dir, &password).map_err(GardenError::of)
+    }
+
+    /// How many words a mnemonic has, read from the core.
+    pub fn wallet_word_count(&self) -> u32 {
+        wallet::word_count()
     }
 }
 

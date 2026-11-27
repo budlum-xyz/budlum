@@ -37,7 +37,7 @@ fn main() -> ExitCode {
     if command.is_empty() || dir.is_empty() {
         eprintln!(
             "usage: garden-phone \
-<self-test|read|create|join|serve|return-check|status|send|send-file|file-check|room-check|join-check|feed|fetch|leave> \
+<self-test|read|create|join|serve|return-check|status|send|send-file|file-check|room-check|join-check|wallet-check|feed|fetch|leave> \
 <dir> [...]"
         );
         return ExitCode::from(2);
@@ -256,6 +256,30 @@ fn main() -> ExitCode {
                 }
                 Err(reason) => {
                     eprintln!("the invite is broken: {reason}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        // The wallet story end to end, with no phone and no network: make
+        // one, read its address back without the password, put it back from
+        // its own words in a second directory and get the same address, and
+        // watch the wrong password and a twelve word phrase both get
+        // refused. Section A of the request list stands on this.
+        "wallet-check" => {
+            let second = args.get(3).cloned().unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join("garden-wallet-check")
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            let first = args.get(2).cloned().unwrap_or_default();
+            match wallet_round_trip(&phone, &first, &second) {
+                Ok(()) => {
+                    println!("the wallet was made, read back and restored to the same address");
+                    ExitCode::SUCCESS
+                }
+                Err(reason) => {
+                    eprintln!("the wallet path is broken: {reason}");
                     ExitCode::FAILURE
                 }
             }
@@ -556,6 +580,103 @@ fn deadline_loop<T>(mut attempt: impl FnMut() -> Option<T>) -> Option<T> {
 /// This is the Room screen's whole job written out: publish, wait for
 /// the block the group agreed on, read the feed, and fetch the words
 /// back rather than trusting what this phone remembers typing.
+/// Make a wallet, read it back, restore it elsewhere, and check that the
+/// two refusals that matter are actually refusals.
+///
+/// Nothing here touches the network or a Garden: a wallet is the person's
+/// own key, and it has to work before any of the rest is worth starting.
+fn wallet_round_trip(phone: &Arc<GardenPhone>, first: &str, second: &str) -> Result<(), String> {
+    const PASSWORD: &str = "a phone that holds a key";
+
+    // A check has to be runnable twice. Both directories here are the
+    // caller's scratch ones, so a wallet left by the last run is cleared
+    // rather than being a reason to stop.
+    for dir in [first.to_owned(), second.to_owned()] {
+        let file = std::path::Path::new(&dir).join("wallet.json");
+        if file.is_file() {
+            std::fs::remove_file(&file)
+                .map_err(|e| format!("the last run's wallet is in the way: {e}"))?;
+            println!("cleared the wallet left by an earlier run in {dir}");
+        }
+    }
+
+    let seed = phone
+        .wallet_create(PASSWORD.to_owned())
+        .map_err(|e| format!("the wallet would not be made: {e}"))?;
+
+    let words: Vec<&str> = seed.mnemonic.split_whitespace().collect();
+    let wanted = usize::try_from(phone.wallet_word_count()).unwrap_or(24);
+    if words.len() != wanted {
+        return Err(format!(
+            "the mnemonic has {} words, not {wanted}",
+            words.len()
+        ));
+    }
+    if seed.address.is_empty() {
+        return Err("the wallet came back with no address".to_owned());
+    }
+    println!("made: {} words, address {}", words.len(), seed.address);
+
+    if !phone.wallet_exists() {
+        return Err("the wallet was made but the file is not there".to_owned());
+    }
+
+    let read_back = phone
+        .wallet_address()
+        .map_err(|e| format!("the address would not be read without a password: {e}"))?;
+    if read_back != seed.address {
+        return Err(format!(
+            "the file names {read_back}, the wallet derived {}",
+            seed.address
+        ));
+    }
+    println!("read back without a password: {read_back}");
+
+    let opened = phone
+        .wallet_open(PASSWORD.to_owned())
+        .map_err(|e| format!("the password did not open the wallet it sealed: {e}"))?;
+    if opened != seed.address {
+        return Err(format!("opening gave {opened}, not {}", seed.address));
+    }
+
+    match phone.wallet_open("not the password".to_owned()) {
+        Err(_) => println!("a wrong password is refused"),
+        Ok(_) => return Err("a wrong password opened the wallet".to_owned()),
+    }
+
+    // A second directory stands in for a second phone.
+    let other = GardenPhone::new(second.to_owned())
+        .map_err(|e| format!("the second directory would not open: {e}"))?;
+    let restored = other
+        .wallet_restore(seed.mnemonic.clone(), PASSWORD.to_owned())
+        .map_err(|e| format!("the words would not restore the wallet: {e}"))?;
+    if restored != seed.address {
+        return Err(format!(
+            "the same words gave {restored} on the second phone, not {}",
+            seed.address
+        ));
+    }
+    println!("restored on a second phone to the same address: {restored}");
+
+    let twelve: String = words
+        .iter()
+        .take(12)
+        .copied()
+        .collect::<Vec<&str>>()
+        .join(" ");
+    match other.wallet_restore(twelve, PASSWORD.to_owned()) {
+        Err(_) => println!("a twelve word phrase is refused"),
+        Ok(_) => return Err("a twelve word phrase was accepted".to_owned()),
+    }
+
+    match other.wallet_restore(seed.mnemonic.clone(), "short".to_owned()) {
+        Err(_) => println!("a short password is refused"),
+        Ok(_) => return Err("a short password was accepted".to_owned()),
+    }
+
+    Ok(())
+}
+
 fn room_round_trip(
     phone: &Arc<GardenPhone>,
     file: Option<String>,

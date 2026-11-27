@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Budlum Testnet (Disconnected)</string>
+    <string name="app_name">Budlum</string>
     <string name="notif_channel_name">Budlum status (no validator duties)</string>
     <string name="notif_status_template">Stored: %1$s | Last audit: %2$s | Net: %3$s</string>
     <string name="notif_boot_resume_title">Budlum Validator Duties Unavailable</string>

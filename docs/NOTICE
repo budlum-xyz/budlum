@@ -72,6 +72,26 @@ redistributed and no single upstream repository is named here).
 
 --------------------------------------------------------------------------------
 
+FONTS CARRIED IN THE TREE
+
+Unlike Cargo dependencies, these files are in the repository and ship inside
+the APK, so their licences are reproduced here.
+
+Bricolage Grotesque
+    https://github.com/ateliertriay/bricolage
+    Copyright 2022 The Bricolage Grotesque Project Authors
+    Licensed under the SIL Open Font License, Version 1.1
+    Licence text: mobile/android/licenses/bricolage-OFL.txt
+
+    The upstream release is a single variable font. The four files in
+    mobile/android/app/src/main/res/font/ are static instances cut from it
+    at opsz=14, wdth=100 and wght 400/500/600/700, because Android's
+    resource fonts are loaded by weight rather than by axis. Instancing is
+    a permitted modification under the OFL; the Reserved Font Name clause
+    is not engaged, as the upstream family carries no reserved name.
+
+--------------------------------------------------------------------------------
+
 Dependencies obtained through Cargo are not vendored into this repository and
 are governed by their own licences. The permitted set is enforced in CI by the
 "License Compliance" job against the allow-list in .quality/deny.toml; a full

@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import network.budlum.validator.R
@@ -65,31 +66,51 @@ private val budlumShapes = Shapes(
     extraLarge = RoundedCornerShape(12.dp),
 )
 
+/**
+ * Two families, each kept to its own job.
+ *
+ * `budlum_regular` is the house display face. It carries 79 glyphs: enough
+ * for a heading, nowhere near enough for running text, which is why it is
+ * fenced off to the display, headline and title ramps and never reaches a
+ * paragraph.
+ *
+ * Bricolage Grotesque is the text face. The four weights are static
+ * instances cut from the upstream variable font at wght 400/500/600/700
+ * with opsz 14 and wdth 100, so no caller has to ask for a variation axis
+ * at run time. Both faces cover the Turkish set.
+ */
 private val budlum = FontFamily(Font(R.font.budlum_regular))
 
+private val bricolage = FontFamily(
+    Font(R.font.bricolage_grotesque_regular, FontWeight.Normal),
+    Font(R.font.bricolage_grotesque_medium, FontWeight.Medium),
+    Font(R.font.bricolage_grotesque_semibold, FontWeight.SemiBold),
+    Font(R.font.bricolage_grotesque_bold, FontWeight.Bold),
+)
+
 /**
- * One family throughout, as the design file has it. The label style is
- * the small uppercase one at .08em of tracking that the site uses over
- * every panel.
+ * Headings in the house face, everything else in Bricolage Grotesque. The
+ * label style stays the small tracked one the site sets over every panel.
  */
 private val budlumType = Typography().run {
-    val body = TextStyle(fontFamily = budlum)
+    val heading = TextStyle(fontFamily = budlum)
+    val text = TextStyle(fontFamily = bricolage)
     copy(
-        displayLarge = displayLarge.merge(body),
-        displayMedium = displayMedium.merge(body),
-        displaySmall = displaySmall.merge(body),
-        headlineLarge = headlineLarge.merge(body),
-        headlineMedium = headlineMedium.merge(body),
-        headlineSmall = headlineSmall.merge(body),
-        titleLarge = titleLarge.merge(body),
-        titleMedium = titleMedium.merge(body),
-        titleSmall = titleSmall.merge(body),
-        bodyLarge = bodyLarge.merge(body),
-        bodyMedium = bodyMedium.merge(body),
-        bodySmall = bodySmall.merge(body),
-        labelLarge = labelLarge.merge(body),
-        labelMedium = labelMedium.merge(body),
-        labelSmall = labelSmall.merge(body).copy(
+        displayLarge = displayLarge.merge(heading),
+        displayMedium = displayMedium.merge(heading),
+        displaySmall = displaySmall.merge(heading),
+        headlineLarge = headlineLarge.merge(heading),
+        headlineMedium = headlineMedium.merge(heading),
+        headlineSmall = headlineSmall.merge(heading),
+        titleLarge = titleLarge.merge(heading),
+        titleMedium = titleMedium.merge(heading),
+        titleSmall = titleSmall.merge(heading),
+        bodyLarge = bodyLarge.merge(text),
+        bodyMedium = bodyMedium.merge(text),
+        bodySmall = bodySmall.merge(text),
+        labelLarge = labelLarge.merge(text),
+        labelMedium = labelMedium.merge(text),
+        labelSmall = labelSmall.merge(text).copy(
             letterSpacing = 1.1.sp,
             fontSize = 11.sp,
         ),

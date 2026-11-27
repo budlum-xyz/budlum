@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Budlum Testnet (Bağlantısız)</string>
+    <string name="app_name">Budlum</string>
     <string name="notif_channel_name">Budlum durumu (doğrulayıcı görevi yok)</string>
     <string name="notif_status_template">&#x0053;&#x0061;&#x006B;&#x006C;&#x0061;&#x006E;&#x0061;&#x006E;: %1$s | &#x0044;&#x0065;&#x006E;&#x0065;&#x0074;&#x0069;&#x006D;: %2$s | &#x0041;&#x011F;: %3$s</string>
     <string name="notif_boot_resume_title">Budlum Do&#x011F;rulay&#x0131;c&#x0131; G&#x00F6;revleri Kullan&#x0131;lam&#x0131;y&#x006F;r</string>
