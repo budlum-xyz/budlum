@@ -298,30 +298,28 @@ impl RelayerWorker {
     ///
     /// # Off unless the operator says what to point at
     ///
-    /// This had no caller for a long time, and the reason was configuration:
-    /// `EvmChainAdapter::new` needs the bridge contract address and the
-    /// `Deposit` topic0, and the node carried a field for neither. The
-    /// registry was therefore empty on every deployed node, and
-    /// `build_verified_result` answered `AdapterError::UnsupportedChain` for
-    /// all eight `ExternalChain` variants, Ethereum included.
+    /// This has no production caller, and that is a decision rather than a
+    /// gap. An earlier draft of this comment said the opposite - that
+    /// `--evm-bridge-address` and `--evm-deposit-topic0` existed and that
+    /// `main.rs` passed a `NodeConfig::evm_adapter` in here. Neither was true:
+    /// no such flag, no such field, no such call. The flags were deliberately
+    /// removed, and `main.rs` logs why on startup - the EVM bridge leg has no
+    /// live end-to-end route, because its off-chain half refuses at broadcast,
+    /// so registering an adapter would advertise a chain the node cannot
+    /// actually settle.
     ///
-    /// `--evm-bridge-address` and `--evm-deposit-topic0` now exist, and
-    /// `main.rs` calls this with whatever `NodeConfig::evm_adapter` assembles
-    /// from them. A node that supplies neither still registers nothing and
-    /// still refuses every chain, which is deliberate: there is nothing safe
-    /// to default to. `test_default()` supplies a zero address, and every
-    /// receipt leaf binds to `bridge_address`, so a node defaulting to it
-    /// would advertise Ethereum support while pointing at no contract.
-    ///
-    /// `AdapterRegistry::register` asks each adapter whether it is fit to
-    /// relay before accepting it, so the zero-address and zero-confirmation
-    /// cases are refused at startup rather than discovered as a mint against
-    /// a transaction that never happened.
+    /// A comment that claims a seam exists is worse than no comment: it is a
+    /// reason for the next reader to stop looking. The accurate statement is
+    /// that `AdapterRegistry::register` is exercised and correct, that
+    /// `RpcBackedEvmAdapter` supplies the three network calls
+    /// `EvmChainAdapter` was missing, and that the whole chain stays
+    /// unreachable from a running node until the off-chain broadcast half
+    /// lands. Wiring it before then would mint against a transaction that
+    /// never happened.
     #[must_use]
     ///
-    /// WIRING: the startup seam that hands the worker its adapter
-    /// registry; the relayer binary still starts without adapters, so
-    /// this waits for the operator configuration that builds one.
+    /// WIRING: unwired - no production caller, deliberately. The call site is
+    /// `main.rs`, which builds no adapter registry and logs that it does not.
     pub fn with_adapters(mut self, adapters: Arc<AdapterRegistry>) -> Self {
         self.adapters = adapters;
         self
