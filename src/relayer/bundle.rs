@@ -447,3 +447,48 @@ mod tests {
         ));
     }
 }
+
+/// What a bundle looks like from the chain's point of view, given its legs.
+///
+/// A bundle is not a new ledger: its state is a *function of* the legs it binds,
+/// which is why this is derived rather than stored. Storing a status would mean
+/// two places to disagree - the bundle says "settled" while a leg says "open" -
+/// and one of them would eventually be wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleStatus {
+    /// At least one leg is still open and none has expired: the bundle is live.
+    Open,
+    /// Every leg is settled: the bundle completed and its escrow is paid out.
+    Complete,
+    /// A leg expired before the bundle completed: every leg must refund.
+    ///
+    /// All-or-nothing means this is not "the settled ones stay settled". If one
+    /// leg cannot happen, none of them happened as far as the owner is
+    /// concerned, and the bundle is refunded as a unit.
+    Refund,
+}
+
+/// Decides a bundle's state from the states of its legs.
+///
+/// `is_settled` and `is_expired` are supplied by the caller because settlement
+/// state lives in the relayer policy registry and expiry is a function of the
+/// current block; this function is the *rule*, not the lookup.
+///
+/// The order of the two checks is the whole semantics: **expiry wins**. A bundle
+/// with two settled legs and one expired leg refunds, it does not pay out the
+/// two. Checking "all settled" first would let a solver fill the easy legs and
+/// let the hard one expire - the exact risk the bundle exists to remove.
+#[must_use]
+pub fn bundle_status<F, G>(bundle: &IntentBundle, is_settled: F, is_expired: G) -> BundleStatus
+where
+    F: Fn(&[u8; 32]) -> bool,
+    G: Fn(&[u8; 32]) -> bool,
+{
+    if bundle.legs.iter().any(|leg| is_expired(&leg.intent_id)) {
+        return BundleStatus::Refund;
+    }
+    if bundle.legs.iter().all(|leg| is_settled(&leg.intent_id)) {
+        return BundleStatus::Complete;
+    }
+    BundleStatus::Open
+}

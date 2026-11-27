@@ -2054,9 +2054,7 @@ pub fn execute_settlement_tx(
         SettlementTx::ObjectLayer(uol_tx) => execute_object_layer_tx(state, ctx, uol_tx),
         SettlementTx::Liquidate(request) => execute_liquidation_request(state, ctx, request),
         SettlementTx::Bundle(bundle_tx) => execute_bundle_tx(state, ctx, bundle_tx),
-        SettlementTx::Denominate(denomination) => {
-            execute_denomination(state, ctx, denomination)
-        }
+        SettlementTx::Denominate(denomination) => execute_denomination(state, ctx, denomination),
     }
 }
 
@@ -2088,8 +2086,7 @@ fn execute_denomination(
     // a balance that could never be proven, so admitting it would be a
     // permanent hole in every sum the asset enters.
     let has_claim_domain = |domain: u32| {
-        crate::aggregation::chain::claim_domain(ctx.chain_id)
-            .is_some()
+        crate::aggregation::chain::claim_domain(ctx.chain_id).is_some()
             && state
                 .settlement
                 .domains
@@ -2098,13 +2095,24 @@ fn execute_denomination(
                 .any(|d| d.id == domain)
     };
 
+    // Every member's anchor root must be the root this chain accepted for that
+    // domain, exactly as the liquidation door checks its claimed roots. Without
+    // this, an issuer could declare a denomination against a root it invented,
+    // and the "proof" behind the asset would be a number the issuer picked.
+    for member in &denomination.members {
+        if state.external_roots.get(&member.domain) != Some(&denomination.anchor_root) {
+            return Err(SettlementTxError::Refused(format!(
+                "denomination: anchor root is not the accepted root of domain {}",
+                member.domain
+            )));
+        }
+    }
+
     state
         .settlement
         .denominations
         .admit(denomination.clone(), has_claim_domain)
-        .map_err(|err: AssetError| {
-            SettlementTxError::Refused(format!("denomination: {err}"))
-        })
+        .map_err(|err: AssetError| SettlementTxError::Refused(format!("denomination: {err}")))
 }
 
 /// What a bundle transaction asks for.
@@ -2202,6 +2210,56 @@ fn execute_bundle_tx(
             Ok(())
         }
     }
+}
+
+/// Sweeps every open bundle and resolves the ones whose legs have decided.
+///
+/// This is where a bundle stops being a record and becomes an atom: the rule
+/// lives in [`crate::relayer::bundle::bundle_status`], and this function applies
+/// it and removes the resolved bundle. A bundle left in the registry forever
+/// would be a bundle whose legs can no longer be refunded together.
+///
+/// Called at epoch close, next to the proof-market sweep: both are bookkeeping
+/// over rows the chain bounds, and both must not grow without a sweep.
+///
+/// Returns how many bundles completed and how many refunded, so a caller can
+/// report the sweep without re-reading state.
+pub fn sweep_bundles(state: &mut AccountState, current_block: u64) -> (usize, usize) {
+    use crate::relayer::bundle::{bundle_status, BundleStatus};
+
+    let ids: Vec<[u8; 32]> = state.settlement.bundles.keys().copied().collect();
+    let mut completed = 0usize;
+    let mut refunded = 0usize;
+
+    for id in ids {
+        let Some(bundle) = state.settlement.bundles.get(&id).cloned() else {
+            continue;
+        };
+        let registry = &state.settlement.relayer_policy;
+        let status = bundle_status(
+            &bundle,
+            |leg| registry.settled_intents.contains(leg),
+            |leg| {
+                registry
+                    .intents
+                    .get(leg)
+                    .is_some_and(|intent| intent.deadline_block <= current_block)
+            },
+        );
+        match status {
+            BundleStatus::Open => {}
+            BundleStatus::Complete => {
+                state.settlement.bundles.remove(&id);
+                completed += 1;
+            }
+            BundleStatus::Refund => {
+                state.settlement.bundles.remove(&id);
+                refunded += 1;
+            }
+        }
+    }
+
+    (completed, refunded)
 }
 
 /// Executes a proven liquidation request against the state's certified roots.

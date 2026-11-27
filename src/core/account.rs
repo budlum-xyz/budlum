@@ -4263,6 +4263,20 @@ impl AccountState {
         // tasks and burns reserve leaves the market consistent with the root
         // taken at the end of this function.
         let (expired, receipts_pruned) = self.proof_market.close_epoch(self.epoch_index);
+        // Bundles decide at the same boundary: a bundle whose legs are all
+        // settled completes, one with an expired leg refunds, and either way
+        // the row leaves the registry. Sweeping next to the proof market keeps
+        // every bounded queue on one clock.
+        let (bundles_completed, bundles_refunded) =
+            crate::settlement::domains::sweep_bundles(self, self.current_block_height);
+        if bundles_completed > 0 || bundles_refunded > 0 {
+            tracing::info!(
+                epoch = self.epoch_index,
+                bundles_completed,
+                bundles_refunded,
+                "intent bundles resolved"
+            );
+        }
         self.execution_state
             .prune_expired_pending_evm_migrations(self.epoch_index);
         if expired > 0 || receipts_pruned > 0 {
