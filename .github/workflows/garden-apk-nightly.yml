@@ -11,6 +11,16 @@ name: Garden APK acceptance
 # `budlum-gates garden-apk` rather than by the pass count.
 on:
   workflow_dispatch:
+  # A `schedule` only fires for a workflow that sits on the default branch, and
+  # this file does not: it lives on the branch that carries the Garden work, so
+  # the cron below has never fired. Measured 2026-11-27: the workflow appears in
+  # none of the last 500 runs of the repository. The trigger that does exist is
+  # a push to the branch kept for cutting the APK, which runs these checks
+  # against exactly the tree the artifact was built from.
+  push:
+    branches: [garden-apk-build]
+  # Kept for the day this file lands on the default branch; until then the cron
+  # is inert and the push above is what measures the suite.
   schedule:
     - cron: '15 3 * * *'
 
