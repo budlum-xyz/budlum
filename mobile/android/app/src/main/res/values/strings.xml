@@ -141,4 +141,5 @@
     <string name="w_tokens_none">0 tokens (0M BUD)</string>
     <string name="w_nft_none">0 NFT</string>
     <string name="w_bud_zero">0M $BUD</string>
+    <string name="g_default_title">My Garden</string>
 </resources>

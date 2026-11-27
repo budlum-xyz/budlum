@@ -71,18 +71,24 @@ fun ChooseScreen(
 ) {
     val state = model.state
     val seated = state.status.contains("\"chain_id\"")
-    CubeFloor(model.skin) {
+    BudlumPage(
+        skin = model.skin,
+        menu = listOf(
+            stringResource(R.string.w_menu_ao),
+            stringResource(R.string.w_menu_market),
+            stringResource(R.string.w_menu_ecosystem),
+            stringResource(R.string.w_menu_participation),
+        ),
+        searchHint = stringResource(R.string.w_search_hint),
+    ) {
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(20.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            Label(stringResource(R.string.g_what_this_is))
             Text(
                 stringResource(R.string.g_data_not_money),
                 style = MaterialTheme.typography.bodySmall,
-                color = Ink,
+                color = model.skin.ink,
                 modifier = Modifier.padding(bottom = 22.dp),
             )
 
@@ -108,8 +114,8 @@ fun ChooseScreen(
 private fun MenuLine(text: String, onTap: () -> Unit) {
     Text(
         text = text.lowercase(),
-        style = MaterialTheme.typography.bodyLarge,
-        color = Ink,
+        style = MaterialTheme.typography.titleMedium,
+        color = Sage,
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onTap)

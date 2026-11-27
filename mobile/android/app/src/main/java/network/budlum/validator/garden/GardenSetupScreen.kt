@@ -36,20 +36,33 @@ fun SetupScreen(model: GardenModel, onReady: () -> Unit) {
     val checksDone = state.selfTest.isNotEmpty()
     val checksPassed = checksDone && state.selfTest.all { it.passed }
 
-    CubeFloor(model.skin) {
+    BudlumPage(
+        skin = model.skin,
+        menu = listOf(
+            stringResource(R.string.w_menu_ao),
+            stringResource(R.string.w_menu_market),
+            stringResource(R.string.w_menu_ecosystem),
+            stringResource(R.string.w_menu_participation),
+        ),
+        searchHint = stringResource(R.string.w_search_hint),
+    ) {
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            Label(stringResource(R.string.g_what_this_is))
+            // The ask itself, in the size the file gives a heading, so
+            // that the first thing read is what the app wants of this
+            // phone rather than a permissions audit.
+            Text(
+                stringResource(R.string.g_become_validator),
+                style = MaterialTheme.typography.headlineSmall,
+                color = model.skin.ink,
+            )
             Text(
                 stringResource(R.string.g_becomes_validator),
                 style = MaterialTheme.typography.bodySmall,
-                color = Ink,
-                modifier = Modifier.padding(bottom = 20.dp),
+                color = model.skin.ink,
+                modifier = Modifier.padding(top = 6.dp, bottom = 20.dp),
             )
 
             Slab(modifier = Modifier.fillMaxWidth()) {

@@ -81,7 +81,15 @@ data class GardenState(
     val recordQr: String = "",
     val expiry: String = "",
     val uses: Int = 0,
-    val status: String = "This phone is in no Garden.",
+    /**
+     * The core's own status JSON, or empty before there is any.
+     *
+     * It used to default to the sentence "This phone is in no Garden.",
+     * which is not status and reads as a fault on a phone that has
+     * simply not started one yet. Nothing displays it; everything that
+     * reads it looks for a chain id, and empty answers that correctly.
+     */
+    val status: String = "",
     val preview: String = "",
     val message: String = "",
     val busy: Boolean = false,
@@ -174,8 +182,19 @@ class GardenModel(
         )
     }
 
+    /**
+     * Start a Garden, which is how this phone becomes a validator of one.
+     *
+     * This used to return without a word when the self test had not
+     * passed, so the one tap that makes somebody a validator could do
+     * nothing at all and say nothing about it. The check still stands,
+     * but it now says so.
+     */
     fun create(title: String) = background {
-        if (!selfTestPassed()) return@background
+        if (!selfTestPassed()) {
+            state = state.copy(message = app.getString(R.string.g_self_test_failed_why))
+            return@background
+        }
         val answer = phone.create(title, name, null)
         readInvite(phone.invite())
         state = state.copy(status = answer.json)

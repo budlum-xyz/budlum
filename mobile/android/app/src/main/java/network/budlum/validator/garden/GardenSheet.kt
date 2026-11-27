@@ -7,14 +7,18 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -299,6 +303,72 @@ fun SearchBar(hint: String, skin: Skin, modifier: Modifier = Modifier) {
             color = skin.ink.copy(alpha = 0.45f),
             textAlign = TextAlign.Center,
         )
+    }
+}
+
+/**
+ * The wordmark, which is the first thing the file puts on every sheet
+ * and the first thing this app was missing.
+ *
+ * It is the house face at a size you can see, in sage, centred. The
+ * face carries 79 glyphs, which is not enough for a sentence and is
+ * exactly enough for this word.
+ */
+@Composable
+fun Wordmark(modifier: Modifier = Modifier) {
+    Text(
+        text = "budlum",
+        style = MaterialTheme.typography.displaySmall,
+        color = Sage,
+        modifier = modifier,
+    )
+}
+
+/**
+ * Every sheet in the file, from the outside in: the tiled floor, the
+ * wordmark, the faint search bar, whatever the screen is about, and
+ * the lowercase menu down in the corner.
+ *
+ * Screens used to each build their own column and their own padding,
+ * which is how they drifted into looking like different applications.
+ * The frame belongs here now and a screen only says what goes in the
+ * middle of it.
+ */
+@Composable
+fun BudlumPage(
+    skin: Skin,
+    menu: List<String>,
+    searchHint: String,
+    modifier: Modifier = Modifier,
+    scroll: Boolean = true,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    CubeFloor(skin) {
+        Column(
+            modifier = modifier
+                .fillMaxSize()
+                .then(
+                    if (scroll) {
+                        Modifier.verticalScroll(rememberScrollState())
+                    } else {
+                        Modifier
+                    },
+                )
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Wordmark()
+            Spacer(modifier = Modifier.height(10.dp))
+            SearchBar(searchHint, skin)
+            Spacer(modifier = Modifier.height(22.dp))
+
+            content()
+
+            Spacer(modifier = Modifier.height(28.dp))
+            Box(modifier = Modifier.fillMaxWidth()) {
+                CornerMenu(menu, skin, modifier = Modifier.align(Alignment.CenterStart))
+            }
+        }
     }
 }
 

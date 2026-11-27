@@ -51,6 +51,7 @@ import org.json.JSONObject
 @Composable
 fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
     var step by remember { mutableStateOf(Step.Setup) }
+    val gardenTitle = stringResource(R.string.g_default_title)
     // Whether this phone holds a wallet, and which address it is, asked
     // once when the app opens rather than on every draw.
     LaunchedEffect(Unit) { model.readWallet() }
@@ -111,7 +112,18 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
         Step.SeedVerify -> SeedVerifyScreen(model) { step = Step.Choose }
         Step.Choose -> ChooseScreen(
             model = model,
-            onStartOwn = { step = Step.Garden; tab = 0 },
+            // This used to only change the tab. `create` existed on
+            // the model and nothing anywhere called it, so tapping the
+            // line that is supposed to make this phone a validator
+            // moved to an empty screen and left the person reading
+            // that they were in no Garden. It now starts one.
+            onStartOwn = {
+                if (!model.state.status.contains("\"chain_id\"")) {
+                    model.create(gardenTitle)
+                }
+                step = Step.Garden
+                tab = 0
+            },
             onHaveInvite = { step = Step.Join },
             onTestnet = onTestnet,
             onWallet = { step = Step.Wallet },
@@ -120,6 +132,7 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
         Step.Join -> CubeFloor(model.skin) {
             Column(modifier = Modifier.fillMaxSize()) {
                 TopBar(stringResource(R.string.g_join_network)) { step = Step.Choose }
+                Wordmark(modifier = Modifier.align(Alignment.CenterHorizontally))
                 CodeJoinScreen(model)
                 // Asking got this phone into the waiting row, so the
                 // join screen has done its job and the people screen
@@ -139,6 +152,10 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
         Step.Garden -> CubeFloor(model.skin) {
             Column(modifier = Modifier.fillMaxSize()) {
                 TopBar(stringResource(R.string.g_my_network), model) { step = Step.Choose }
+                // The wordmark heads every sheet in the design file.
+                // It was on none of them here, which is the first
+                // thing anyone opening the app would notice missing.
+                Wordmark(modifier = Modifier.align(Alignment.CenterHorizontally))
                 val titles = listOf(
                     stringResource(R.string.g_room),
                     stringResource(R.string.g_people),
@@ -147,13 +164,18 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
                 TabRow(
                     selectedTabIndex = tab,
                     containerColor = Color.Transparent,
-                    contentColor = Ink,
+                    contentColor = model.skin.ink,
                 ) {
                     titles.forEachIndexed { index, title ->
                         Tab(
                             selected = tab == index,
                             onClick = { tab = index },
-                            text = { Label(title, color = if (tab == index) Ink else Mute) },
+                            text = {
+                                Label(
+                                    title,
+                                    color = if (tab == index) model.skin.ink else Mute,
+                                )
+                            },
                         )
                     }
                 }
@@ -251,7 +273,7 @@ private fun WorkScreen(model: GardenModel) {
             .fillMaxSize()
             .verticalScroll(rememberScrollState()),
     ) {
-        Slab(modifier = Modifier.fillMaxWidth()) {
+        Sheet(model.skin, modifier = Modifier.padding(14.dp)) {
             Column {
                 Fact(
                     stringResource(R.string.g_parts_held),

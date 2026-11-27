@@ -5,13 +5,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -50,49 +47,27 @@ private const val MIN_PASSWORD = 8
 /** How many of the words are asked back before the wallet is let go. */
 private const val CHECKED_WORDS = 3
 
-/**
- * The floor every wallet sheet stands on: tiled background, wordmark,
- * search bar, corner menu, and the panel in the middle of it.
- */
+/** The corner menu the file prints on every sheet. */
+@Composable
+private fun pageMenu(): List<String> = listOf(
+    stringResource(R.string.w_menu_ao),
+    stringResource(R.string.w_menu_market),
+    stringResource(R.string.w_menu_ecosystem),
+    stringResource(R.string.w_menu_participation),
+)
+
+/** The wallet sheets all stand on the same page as everything else. */
 @Composable
 private fun WalletFloor(
     model: GardenModel,
     panel: @Composable () -> Unit,
 ) {
-    val skin = model.skin
-    CubeFloor(skin) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                stringResource(R.string.g_what_this_is),
-                style = MaterialTheme.typography.headlineSmall,
-                color = Sage,
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            SearchBar(stringResource(R.string.w_search_hint), skin)
-            Spacer(modifier = Modifier.height(22.dp))
-
-            panel()
-
-            Spacer(modifier = Modifier.height(30.dp))
-            Box(modifier = Modifier.fillMaxWidth()) {
-                CornerMenu(
-                    listOf(
-                        stringResource(R.string.w_menu_ao),
-                        stringResource(R.string.w_menu_market),
-                        stringResource(R.string.w_menu_ecosystem),
-                        stringResource(R.string.w_menu_participation),
-                    ),
-                    skin,
-                    modifier = Modifier.align(Alignment.CenterStart),
-                )
-            }
-        }
+    BudlumPage(
+        skin = model.skin,
+        menu = pageMenu(),
+        searchHint = stringResource(R.string.w_search_hint),
+    ) {
+        panel()
     }
 }
 
