@@ -63,6 +63,19 @@ pub enum ValueGate {
 }
 
 impl ValueGate {
+    /// Binding floor owned by the value-moving operation, not by its caller.
+    /// Additional caller demands may strengthen this floor, never lower it.
+    const fn required_binds(self) -> FinalityBinds {
+        match self {
+            Self::BridgeMint
+            | Self::BridgeUnlock
+            | Self::RelayerIntentSettle
+            | Self::AppBindingClaim
+            | Self::ObjectLayerArrive
+            | Self::UniversalPayment => FinalityBinds::EVENT_ROOT,
+        }
+    }
+
     const fn as_str(self) -> &'static str {
         match self {
             Self::BridgeMint => "bridge-mint",
@@ -80,7 +93,7 @@ impl ValueGate {
 pub enum ValueGateRefusal {
     /// No consensus domains are registered, so no finality certificate exists.
     CertificateUnavailable,
-    /// The caller required commitments the move's rows do not carry.
+    /// The value move requires commitments its rows do not carry.
     ///
     /// `compose` fixes a floor: an `Established` row binds `FINALITY_BINDS_ALL`.
     /// That floor is about *entering* a certificate. A value move has its own
@@ -282,6 +295,9 @@ pub fn evaluate_route_guarantee(
 /// Fails closed if either domain is missing, `Pending`, or `Refuted`, or if
 /// [`evaluate_route_guarantee`] rejects the weakest-link composed guarantee.
 ///
+/// The caller may request additional bindings, but cannot lower the minimum
+/// required by the value-moving operation.
+///
 /// # Errors
 ///
 /// Returns [`ValueGateRefusal`] describing the exact certificate or route
@@ -328,6 +344,7 @@ pub fn check_certificate_value_gate(
     // What this move requires, checked against what the row carries. Placed
     // after the verdict reads so a pending or refuted domain is refused with
     // the more precise reason rather than with a binding complaint.
+    let required_binds = gate.required_binds().union(required_binds);
     enforce_required_binds(cert, source_domain, required_binds)?;
     if let Some(dst) = target_domain {
         enforce_required_binds(cert, dst, required_binds)?;
@@ -1224,5 +1241,38 @@ mod tests {
         // set comparison, not "all or nothing".
         enforce_required_binds(&cert, 25, FinalityBinds::EVENT_ROOT)
             .expect("the demanded binding is present");
+    }
+}
+
+#[cfg(test)]
+mod binding_policy_tests {
+    use super::{FinalityBinds, ValueGate};
+
+    #[test]
+    fn the_binding_floor_is_preserved_for_every_requested_set() {
+        assert_eq!(FinalityBinds::ALL.bits(), 0b1111);
+        for gate in [
+            ValueGate::BridgeMint,
+            ValueGate::BridgeUnlock,
+            ValueGate::RelayerIntentSettle,
+            ValueGate::AppBindingClaim,
+            ValueGate::ObjectLayerArrive,
+            ValueGate::UniversalPayment,
+        ] {
+            let minimum = gate.required_binds();
+            assert!(!minimum.is_empty(), "{gate:?} has no binding floor");
+            assert_eq!(minimum, FinalityBinds::EVENT_ROOT);
+            for bits in 0_u8..16 {
+                let requested = FinalityBinds::from_bits(bits);
+                let effective = minimum.union(requested);
+                assert!(effective.covers(minimum));
+                assert!(effective.covers(requested));
+                assert_eq!(
+                    effective.bits(),
+                    FinalityBinds::EVENT_ROOT.bits() | requested.bits(),
+                    "{gate:?} changed request {bits} beyond its event-root floor"
+                );
+            }
+        }
     }
 }

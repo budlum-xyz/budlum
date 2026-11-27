@@ -1,0 +1,315 @@
+name: Native value binding contract diagnostic
+'on':
+  push:
+    tags:
+    - snapshot/**
+permissions:
+  contents: read
+concurrency:
+  group: native-value-binding-${{ github.sha }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TERM_COLOR: never
+      BASE_SHA: 07201f781cfd36da0688993680c3496375586aaa
+      BASE_TREE: c505f41904d82e2cad9b031b35e691f19b6f136c
+      VERIFIER_SHA: 5cab143afd515d463aef098e698d81870fdd9e2f
+      CANDIDATE_FILES_JSON: '{"src/settlement/finality_gate.rs":"8d772a44373b0aed0ccdff6b04a1d2cd772d0cc6549f8f1d1629c6a799359528","xtask/gates/tests/value_gate_binding_policy.rs":"88db02ae6a0602fd11700e2ef3a1dc8b68d773bc69b38710e5b75ac8f2cc79e7"}'
+      EXACT_CHECKER_SHA256: 2dc34cc496b3c757d354153a89d180059aaab725e1925136e54e165492b8280c
+      CONTROLLER_SHA256: 22ffa15e3f33e582372b32521e454412d151d9fd0ecfc765950e22fede6fd21e
+      POLICY_TEST: settlement::finality_gate::binding_policy_tests::the_binding_floor_is_preserved_for_every_requested_set
+    steps:
+    - name: Read the two candidate source files
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        path: candidate
+        persist-credentials: false
+        sparse-checkout: |-
+          src/settlement/finality_gate.rs
+          xtask/gates/tests/value_gate_binding_policy.rs
+        sparse-checkout-cone-mode: false
+    - name: Read the immutable core fixture
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        repository: budlum-xyz/budlum
+        ref: 07201f781cfd36da0688993680c3496375586aaa
+        path: baseline
+        persist-credentials: false
+    - name: Read the previously verified exact-result checker
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        repository: budlum-xyz/budlum
+        ref: 5cab143afd515d463aef098e698d81870fdd9e2f
+        path: verifier
+        persist-credentials: false
+        sparse-checkout: xtask/gates/src/gates/exact_named_tests.rs
+        sparse-checkout-cone-mode: false
+    - name: Bind source identities and add tests only
+      id: prepare
+      working-directory: baseline
+      run: |
+        python3 - <<'PYCODE'
+        from pathlib import Path
+        import hashlib, json, os, shutil, subprocess
+        out = Path(os.environ["RUNNER_TEMP"]) / "value-binding-contract"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "started.json").write_text(json.dumps({"event_sha": os.environ["GITHUB_SHA"], "base": os.environ["BASE_SHA"]}) + "\n")
+        def git(*args, cwd="."):
+            return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
+        assert git("rev-parse", "HEAD") == os.environ["BASE_SHA"], "fixture checkout mismatch"
+        assert git("rev-parse", "HEAD^{tree}") == os.environ["BASE_TREE"], "fixture tree mismatch"
+        assert not git("status", "--porcelain"), "fixture is not initially clean"
+        assert git("rev-parse", "HEAD", cwd="../candidate") == os.environ["GITHUB_SHA"], "candidate checkout mismatch"
+        assert git("rev-parse", "HEAD", cwd="../verifier") == os.environ["VERIFIER_SHA"], "verifier checkout mismatch"
+        expected = json.loads(os.environ["CANDIDATE_FILES_JSON"])
+        for relative, sha in expected.items():
+            assert hashlib.sha256((Path("../candidate") / relative).read_bytes()).hexdigest() == sha, relative
+        path = Path("src/settlement/finality_gate.rs")
+        old = path.read_bytes()
+        assert hashlib.sha1(b"blob " + str(len(old)).encode() + b"\0" + old).hexdigest() == "60af541ab14bea74629a71c66394749f4f02591d", "baseline policy drift"
+        checker = Path("../verifier/xtask/gates/src/gates/exact_named_tests.rs").read_text()
+        assert hashlib.sha256(checker.encode()).hexdigest() == os.environ["EXACT_CHECKER_SHA256"], "checker drift"
+        marker = "\n/// The shell gates' canary:"
+        assert checker.count(marker) == 1
+        wrapper = r"""
+        fn main() {
+            let mut args = std::env::args().skip(1);
+            let Some(log) = args.next() else { std::process::exit(2) };
+            let names: Vec<String> = args.collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            match exact::check_exact_log(std::path::Path::new(&log), &names, "native value binding") {
+                Ok(message) => println!("{message}"),
+                Err(error) => { eprintln!("{error}"); std::process::exit(1); }
+            }
+        }
+        """
+        (out / "exact-checker.rs").write_text("mod exact {\n" + checker.split(marker, 1)[0] + "\n}\n" + wrapper)
+        controller = r"""import json
+        from pathlib import Path
+        import re
+        import subprocess
+        import sys
+
+        SOURCE_NAMES = ['a_conditional_or_mutable_floor_is_refused', 'a_floor_after_the_source_check_is_refused', 'a_guarded_arm_is_not_an_unconditional_minimum', 'a_raw_caller_mask_or_only_an_empty_check_is_not_a_floor', 'an_early_success_or_opaque_return_is_not_certified', 'an_empty_or_incomplete_minimum_is_refused', 'comments_cannot_supply_a_missing_policy', 'explicit_earlier_refusals_do_not_mask_the_policy', 'feature_gated_decision_functions_are_not_certified', 'feature_gated_minimum_declarations_are_not_certified', 'live_certificate_gate_applies_the_floor_to_both_domains', 'live_value_gates_declare_their_binding_floor', 'similarly_named_methods_on_different_parameter_types_do_not_count', 'the_declared_and_consumed_policy_is_recognized', 'the_destination_cannot_drop_the_derived_requirement', 'the_gate_and_requested_mask_cannot_be_shadowed_before_the_floor']
+        SOURCE_RED = ['live_certificate_gate_applies_the_floor_to_both_domains', 'live_value_gates_declare_their_binding_floor']
+        CORE_NAME = 'settlement::finality_gate::binding_policy_tests::the_binding_floor_is_preserved_for_every_requested_set'
+        MAX_LOG_BYTES = 16 * 1024 * 1024
+        SUMMARY = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out; finished in .+$", re.MULTILINE)
+        OUTCOME = re.compile(r"^test (\S+) \.\.\. (ok|FAILED|ignored[^\n]*)$", re.MULTILINE)
+
+
+        def validate_observation(stage, content, exit_code):
+            if stage not in {"source-red", "source-green", "core-test"}:
+                raise ValueError("unknown diagnostic stage")
+            summaries = SUMMARY.findall(content)
+            if len(summaries) != 1:
+                raise ValueError("one executed-test summary is required")
+            status, passed, failed, ignored, measured, filtered = summaries[0]
+            numbers = tuple(map(int, (passed, failed, ignored, measured)))
+            expected = (14, 2, 0, 0) if stage == "source-red" else ((16, 0, 0, 0) if stage == "source-green" else (1, 0, 0, 0))
+            expected_exit = 101 if stage == "source-red" else 0
+            if exit_code != expected_exit or numbers != expected or status != ("FAILED" if stage == "source-red" else "ok"):
+                raise ValueError("process outcome or executed-test counts differ")
+            if stage != "core-test" and int(filtered) != 0:
+                raise ValueError("source contracts must not be filtered out")
+            expected_names = SOURCE_NAMES if stage != "core-test" else [CORE_NAME]
+            observations = OUTCOME.findall(content)
+            if len(observations) != len(expected_names) or {name for name, _ in observations} != set(expected_names):
+                raise ValueError("test-name observation coverage differs")
+            for name, outcome in observations:
+                expected_outcome = "FAILED" if stage == "source-red" and name in SOURCE_RED else "ok"
+                if outcome != expected_outcome:
+                    raise ValueError("a named test outcome differs")
+            return {"stage": stage, "exit": exit_code, "passed": int(passed), "failed": int(failed), "ignored": int(ignored), "filtered_out": int(filtered), "observations": [{"test": name, "outcome": outcome} for name, outcome in observations]}
+
+
+        def main(argv):
+            stage, log_name, status_name, checker_name, output_name = argv
+            output = Path(output_name)
+            try:
+                log = Path(log_name)
+                if not log.is_file() or log.stat().st_size > MAX_LOG_BYTES:
+                    raise ValueError("missing or oversized test log")
+                content = log.read_text(encoding="utf-8")
+                status = int(Path(status_name).read_text(encoding="ascii").strip())
+                result = validate_observation(stage, content, status)
+                if stage != "source-red":
+                    names = SOURCE_NAMES if stage == "source-green" else [CORE_NAME]
+                    checked = subprocess.run([checker_name, str(log), *names], capture_output=True, text=True, check=False)
+                    result["existing_exact_checker"] = {"exit": checked.returncode, "stdout": checked.stdout, "stderr": checked.stderr}
+                    if checked.returncode != 0:
+                        raise ValueError("the existing exact-named checker refused the observation")
+                output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+                print(json.dumps(result, sort_keys=True))
+                return 0
+            except (OSError, UnicodeError, ValueError) as error:
+                output.write_text(json.dumps({"stage": stage, "observation_accepted": False, "reason": str(error)}, indent=2) + "\n", encoding="utf-8")
+                raise
+
+
+        if __name__ == "__main__":
+            raise SystemExit(main(sys.argv[1:]))
+        """
+        assert hashlib.sha256(controller.encode()).hexdigest() == os.environ["CONTROLLER_SHA256"]
+        (out / "check-results.py").write_text(controller)
+        test_path = Path("xtask/gates/tests/value_gate_binding_policy.rs")
+        assert not test_path.exists(), "unexpected baseline policy-test file"
+        test_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(Path("../candidate") / test_path, test_path)
+        (out / "source-identities.json").write_text(json.dumps({"event_sha": os.environ["GITHUB_SHA"], "actual_fixture_checkout": git("rev-parse", "HEAD"), "base_tree": git("rev-parse", "HEAD^{tree}"), "candidate_files": expected, "exact_checker_sha256": os.environ["EXACT_CHECKER_SHA256"], "root_lock_sha256": hashlib.sha256(Path("Cargo.lock").read_bytes()).hexdigest(), "gates_lock_sha256": hashlib.sha256(Path("xtask/gates/Cargo.lock").read_bytes()).hexdigest(), "scope": "source/core-policy diagnostic only; no current-tip integration or delivery-metadata preflight"}, indent=2) + "\n")
+        print("Pinned sources verified; only source-contract tests added to the immutable baseline")
+        PYCODE
+    - name: Install pinned Rust
+      id: rust
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+      with:
+        toolchain: 1.97.1
+        components: rustfmt
+    - name: Reuse normal Cargo dependency cache
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      with:
+        shared-key: budlum-core
+        workspaces: baseline -> target
+        cache-on-failure: false
+    - name: Build the existing exact-result checker
+      id: checker
+      working-directory: baseline
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/value-binding-contract"
+        rustc --edition=2021 --crate-name exact_policy_checker -F unsafe_code "$out/exact-checker.rs" -o "$out/exact-checker"
+        rustc --version | tee "$out/rustc-version.txt"
+        cargo --version | tee "$out/cargo-version.txt"
+    - name: Require actual source-contract RED
+      id: source_red
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/value-binding-contract"
+        set +e
+        cargo test --locked --manifest-path xtask/gates/Cargo.toml --test value_gate_binding_policy -- --test-threads=1 2>&1 | tee "$out/source-red.log"
+        status=${PIPESTATUS[0]}
+        set -e
+        printf '%s\n' "$status" > "$out/source-red.exit"
+        python3 "$out/check-results.py" source-red "$out/source-red.log" "$out/source-red.exit" "$out/exact-checker" "$out/source-red.json"
+    - name: Apply only the production policy change
+      id: apply
+      working-directory: baseline
+      run: |
+        python3 - <<'PYCODE'
+        from pathlib import Path
+        import hashlib, os, shutil
+        path = Path("src/settlement/finality_gate.rs")
+        old = path.read_bytes()
+        assert hashlib.sha1(b"blob " + str(len(old)).encode() + b"\0" + old).hexdigest() == "60af541ab14bea74629a71c66394749f4f02591d"
+        shutil.copyfile(Path("../candidate") / path, path)
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == "8d772a44373b0aed0ccdff6b04a1d2cd772d0cc6549f8f1d1629c6a799359528"
+        print("Applied the verified gate-owned binding floor without changing callers, wire fields or unrelated files")
+        PYCODE
+    - name: Require the complete source-contract GREEN
+      id: source_green
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/value-binding-contract"
+        set +e
+        cargo test --locked --manifest-path xtask/gates/Cargo.toml --test value_gate_binding_policy -- --test-threads=1 2>&1 | tee "$out/source-green.log"
+        status=${PIPESTATUS[0]}
+        set -e
+        printf '%s\n' "$status" > "$out/source-green.exit"
+        python3 "$out/check-results.py" source-green "$out/source-green.log" "$out/source-green.exit" "$out/exact-checker" "$out/source-green.json"
+    - name: Install the fixture protoc dependency
+      id: protoc
+      working-directory: baseline
+      run: python3 .github/scripts/install_protoc.py
+    - name: Check formatting of the two changed files
+      id: format
+      working-directory: baseline
+      run: rustfmt --edition 2021 --check src/settlement/finality_gate.rs xtask/gates/tests/value_gate_binding_policy.rs
+    - name: Type-check the actual core library
+      id: core_check
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/value-binding-contract"
+        set +e
+        cargo check --locked --lib 2>&1 | tee "$out/core-check.log"
+        status=${PIPESTATUS[0]}
+        set -e
+        printf '%s\n' "$status" > "$out/core-check.exit"
+        test "$status" -eq 0
+    - name: Run the exact policy test in the real core crate
+      id: core_test
+      working-directory: baseline
+      shell: bash
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/value-binding-contract"
+        set +e
+        cargo test --locked --lib "$POLICY_TEST" -- --exact --test-threads=1 2>&1 | tee "$out/core-test.log"
+        status=${PIPESTATUS[0]}
+        set -e
+        printf '%s\n' "$status" > "$out/core-test.exit"
+        python3 "$out/check-results.py" core-test "$out/core-test.log" "$out/core-test.exit" "$out/exact-checker" "$out/core-test.json"
+    - name: Preserve the actual code-only fixture tree
+      id: capture
+      if: always() && steps.apply.outcome == 'success'
+      working-directory: baseline
+      run: |
+        python3 - <<'PYCODE'
+        from pathlib import Path
+        import hashlib, json, os, subprocess
+        out = Path(os.environ["RUNNER_TEMP"]) / "value-binding-contract"
+        paths = ["src/settlement/finality_gate.rs", "xtask/gates/tests/value_gate_binding_policy.rs"]
+        expected = json.loads(os.environ["CANDIDATE_FILES_JSON"])
+        for path in paths:
+            assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == expected[path]
+        subprocess.run(["git", "add", "--", *paths], check=True)
+        changed = subprocess.check_output(["git", "diff", "--name-only", "HEAD"], text=True).splitlines()
+        assert set(changed) == set(paths), changed
+        status = subprocess.check_output(["git", "status", "--porcelain"], text=True)
+        assert all(line[3:] in paths for line in status.splitlines()), status
+        (out / "candidate-tree.txt").write_text(subprocess.check_output(["git", "write-tree"], text=True))
+        (out / "actual-checkout.txt").write_text(subprocess.check_output(["git", "rev-parse", "HEAD"], text=True))
+        (out / "code-only.patch").write_bytes(subprocess.check_output(["git", "diff", "--cached", "--binary", "HEAD", "--", *paths]))
+        (out / "fixture-status.txt").write_text(status)
+        print("Recorded the actual two-file candidate tree; no provenance pin or delivery metadata is certified")
+        PYCODE
+    - name: Require every evidence stage and preserve outcomes
+      id: tally
+      if: always()
+      env:
+        STEP_OUTCOMES_JSON: ${{ toJSON(steps) }}
+      run: |
+        python3 - <<'PYCODE'
+        from pathlib import Path
+        import json, os
+        out = Path(os.environ["RUNNER_TEMP"]) / "value-binding-contract"
+        out.mkdir(parents=True, exist_ok=True)
+        steps = json.loads(os.environ["STEP_OUTCOMES_JSON"])
+        (out / "step-outcomes.json").write_text(json.dumps(steps, indent=2) + "\n")
+        required = ['prepare', 'rust', 'checker', 'source_red', 'apply', 'source_green', 'protoc', 'format', 'core_check', 'core_test', 'capture']
+        missing_or_failed = [name for name in required if steps.get(name, {}).get("outcome") != "success"]
+        assert not missing_or_failed, "required diagnostic steps were not successful: " + repr(missing_or_failed)
+        print("All required diagnostic stages executed successfully; integration and final metadata remain separate")
+        PYCODE
+    - name: Preserve successful and failed diagnostic evidence
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: value-binding-contract-evidence
+        path: |-
+          ${{ runner.temp }}/value-binding-contract/*.log
+          ${{ runner.temp }}/value-binding-contract/*.json
+          ${{ runner.temp }}/value-binding-contract/*.txt
+          ${{ runner.temp }}/value-binding-contract/*.patch
+          ${{ runner.temp }}/value-binding-contract/*.exit
+        if-no-files-found: error
+        retention-days: 30
