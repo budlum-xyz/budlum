@@ -90,3 +90,37 @@ fn verifier_registry_caps_unbounded_params_and_zero_malice_slash() {
     };
     assert!(zero_malice.validate().is_err());
 }
+
+#[test]
+fn address_from_hex_requires_canonical_64_hex_and_accepts_uppercase_prefix() {
+    assert!(
+        Address::from_hex("0").is_err(),
+        "shorthand 0 must be refused"
+    );
+    assert!(
+        Address::from_hex("0x0").is_err(),
+        "shorthand 0x0 must be refused"
+    );
+    assert!(
+        Address::from_hex("0X0").is_err(),
+        "shorthand 0X0 must be refused"
+    );
+    let upper = format!("0X{}", "0A".repeat(32));
+    assert_eq!(Address::from_hex(&upper), Ok(Address([0x0a; 32])));
+}
+
+#[test]
+fn deserializing_registry_or_params_refuses_invalid_economic_bounds() {
+    use verifier_registry::registry::VerifierRegistry;
+    let zero_stake_json = r#"{"min_stake":0,"unbonding_epochs":7,"double_sign_slash_ratio_fixed":500000,"liveness_slash_ratio_fixed":10000,"malicious_slash_ratio_fixed":1000000}"#;
+    assert!(
+        serde_json::from_str::<RegistryParams>(zero_stake_json).is_err(),
+        "RegistryParams::deserialize must refuse min_stake=0"
+    );
+
+    let zero_malice_reg_json = r#"{"registrations":[],"params":{"min_stake":1000,"unbonding_epochs":7,"double_sign_slash_ratio_fixed":500000,"liveness_slash_ratio_fixed":10000,"malicious_slash_ratio_fixed":0}}"#;
+    assert!(
+        serde_json::from_str::<VerifierRegistry>(zero_malice_reg_json).is_err(),
+        "VerifierRegistry::deserialize must refuse malicious_slash_ratio_fixed=0"
+    );
+}

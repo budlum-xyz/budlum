@@ -905,14 +905,31 @@ fn canonical_payment_request_uri_roundtrips_and_refund_registry_blocks_double_re
         invoice_hash: [0x34; 32],
         rail: PaymentRail::OnChain,
     };
-    let balances = vec![DomainTokenBalance {
+    let mut balances = vec![DomainTokenBalance {
         domain_id: 1,
         asset_id: intent.target_asset_id,
         symbol: String::from("USDC"),
         available_amount: intent.target_amount,
     }];
-    let receipt = UniversalPaymentRouter::quote_payment(&intent, &balances, &[], 1_700_000_000)
-        .expect("canonical receipt");
+    let quote_only = UniversalPaymentRouter::quote_payment(&intent, &balances, &[], 1_700_000_000)
+        .expect("canonical quote receipt");
+    let mut router = UniversalPaymentRouter::new();
+    let mut registry = RefundRegistry::default();
+    let quote_refund = RefundIntent {
+        original_intent_id: quote_only.intent_id,
+        original_receipt_hash: quote_only.receipt_hash,
+        merchant_id: [0x12; 32],
+        refund_recipient: [0x88; 32],
+        refund_amount: 25_000_000,
+        reason_code: 1,
+    };
+    assert!(registry
+        .record_refund(&router, &quote_only, &quote_refund)
+        .is_err());
+
+    let receipt = router
+        .settle_payment(&intent, &mut balances, &[], 1_700_000_000)
+        .expect("canonical settled receipt");
     let refund = RefundIntent {
         original_intent_id: receipt.intent_id,
         original_receipt_hash: receipt.receipt_hash,
@@ -922,18 +939,19 @@ fn canonical_payment_request_uri_roundtrips_and_refund_registry_blocks_double_re
         reason_code: 1,
     };
 
-    let mut registry = RefundRegistry::default();
     let mut over_refund = refund.clone();
     over_refund.refund_amount = 25_000_001;
-    assert!(registry.record_refund(&receipt, &over_refund).is_err());
+    assert!(registry
+        .record_refund(&router, &receipt, &over_refund)
+        .is_err());
 
     let rid = registry
-        .record_refund(&receipt, &refund)
+        .record_refund(&router, &receipt, &refund)
         .expect("first refund accepted");
     assert_eq!(rid, refund.refund_id());
 
     // Second refund against the same settled payment receipt must be rejected.
-    assert!(registry.record_refund(&receipt, &refund).is_err());
+    assert!(registry.record_refund(&router, &receipt, &refund).is_err());
 }
 
 #[test]

@@ -1609,6 +1609,11 @@ mod tests {
             .verify(&evidence, &policy())
             .expect("golden verifies");
         assert_eq!(attestation.height, HEIGHT);
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &attestation,
+        )
+        .expect("Babylon EOTS shape");
         assert_eq!(attestation.state_root, [0x91; 32]);
         assert_eq!(attestation.finalized_at, EPOCH);
         assert_eq!(

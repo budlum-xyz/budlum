@@ -52,6 +52,7 @@ mod gates {
     pub mod app_binding_guard;
     pub mod ast_security_gates;
     pub mod badges_current;
+    pub mod benchmark_proof_metrics;
     pub mod binding_claims;
     pub mod bit_decompositions;
     pub mod bns_gate;
@@ -1858,6 +1859,18 @@ const GATES: &[Gate] = &[
         self_test: gates::launch_matrix_tests_exist::self_test,
     },
     Gate {
+        name: "benchmark-proof-metrics",
+        replaces: None,
+        run: |_| {
+            Err(String::from(
+                "benchmark-proof-metrics reads an artifact directory; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::benchmark_proof_metrics::run),
+        run_args: None,
+        self_test: gates::benchmark_proof_metrics::self_test,
+    },
+    Gate {
         name: "garden-scenario",
         replaces: None,
         run: |_| {
@@ -2057,6 +2070,23 @@ mod all_selection_tests {
         assert_eq!(canaries.len(), GATES.len(), "every canary runs");
     }
 
+    /// Recognize literal calls to the already-built gate executable.
+    /// This is a registration check, not a complete shell control-flow analysis.
+    fn built_gate_is_invoked(workflow_text: &str, name: &str) -> bool {
+        workflow_text.lines().any(|line| {
+            let line = line.trim_start();
+            let command = line
+                .strip_prefix("run: ")
+                .or_else(|| line.strip_prefix("- run: "))
+                .unwrap_or(line);
+            let mut words = command.split_whitespace();
+            let Some(executable) = words.next() else {
+                return false;
+            };
+            executable.rsplit('/').next() == Some("budlum-gates") && words.next() == Some(name)
+        })
+    }
+
     /// Names the gates that neither `--all` runs nor any workflow step calls.
     ///
     /// Kept apart from the assertions so the judgement can be canaried with a
@@ -2067,10 +2097,10 @@ mod all_selection_tests {
             .iter()
             .copied()
             .filter(|g| {
-                if all.contains(g) {
+                if all.contains(g) || built_gate_is_invoked(workflow_text, g) {
                     return false;
                 }
-                // A workflow step calls a gate as `-- <name>`; require the
+                // Cargo calls a gate as `-- <name>`; require the
                 // name to end there, so `bns-names` does not satisfy a step
                 // that only mentions `bns-names-are-safe-in-an-address-bar`.
                 let mut hit = false;
@@ -2105,6 +2135,60 @@ mod all_selection_tests {
         assert_eq!(prefix, vec!["bns-names"]);
         // Every gate selected by `--all` is covered whatever the text says.
         assert!(orphans(&["x"], &["x"], "").is_empty());
+    }
+
+    #[test]
+    fn compiled_gate_invocations_are_reached() {
+        for command in [
+            "run: ./xtask/gates/target/release/budlum-gates proof-metrics /tmp",
+            "  xtask/gates/target/release/budlum-gates proof-metrics --self-test",
+            "run: budlum-gates proof-metrics /tmp",
+        ] {
+            assert!(
+                orphans(&["proof-metrics"], &[], command).is_empty(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn compiled_gate_names_are_exact_arguments() {
+        for command in [
+            "run: ./xtask/gates/target/release/budlum-gates proof-metrics-extra /tmp",
+            "run: budlum-gates proof-metrics_extra /tmp",
+        ] {
+            assert_eq!(
+                orphans(&["proof-metrics"], &[], command),
+                vec!["proof-metrics"]
+            );
+        }
+    }
+
+    #[test]
+    fn compiled_gate_mentions_are_not_executable_calls() {
+        for command in [
+            "# ./xtask/gates/target/release/budlum-gates proof-metrics /tmp",
+            "run: echo './xtask/gates/target/release/budlum-gates proof-metrics /tmp'",
+            "name: budlum-gates proof-metrics",
+        ] {
+            assert_eq!(
+                orphans(&["proof-metrics"], &[], command),
+                vec!["proof-metrics"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_similarly_named_binary_does_not_reach_the_gate() {
+        for command in [
+            "run: ./target/release/not-budlum-gates proof-metrics /tmp",
+            "run: budlum-gates-helper proof-metrics /tmp",
+        ] {
+            assert_eq!(
+                orphans(&["proof-metrics"], &[], command),
+                vec!["proof-metrics"]
+            );
+        }
     }
 
     /// Every registered gate is reached: `--all` selects it, or a workflow
