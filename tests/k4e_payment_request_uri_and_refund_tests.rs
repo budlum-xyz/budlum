@@ -91,16 +91,45 @@ fn k4e_oe4_merchant_mldsa87_signed_refund_succeeds_once_and_refuses_impersonatio
         deadline_unix_secs: 2_000,
         nonce: 7,
     };
-    let balances = vec![DomainTokenBalance {
+    let mut balances = vec![DomainTokenBalance {
         domain_id: 1,
         asset_id: [0x01; 32],
         symbol: String::from("BUD"),
         available_amount: 5_000,
     }];
-    let receipt = must(
+    let quote_only_receipt = must(
         UniversalPaymentRouter::quote_payment(&intent, &balances, &[], 1_500),
         "quote honest POS receipt",
     );
+    let mut router = UniversalPaymentRouter::new();
+    let mut registry = RefundRegistry::default();
+
+    let quote_refund = RefundIntent {
+        original_intent_id: quote_only_receipt.intent_id,
+        original_receipt_hash: quote_only_receipt.receipt_hash,
+        merchant_id,
+        refund_recipient: payer_id,
+        refund_amount: 1_000,
+        reason_code: 42,
+    };
+    let quote_sig = merchant_kp.sign(REFUND_SIGNATURE_CONTEXT, &quote_refund.refund_id());
+    // 0. Quote-only receipt that was never settled on `router` MUST fail closed.
+    assert!(registry
+        .record_signed_refund(
+            &router,
+            &quote_only_receipt,
+            &intent,
+            &quote_refund,
+            &merchant_kp.public_key_bytes(),
+            &quote_sig,
+        )
+        .is_err());
+
+    let receipt = must(
+        router.settle_payment(&intent, &mut balances, &[], 1_500),
+        "settle honest POS receipt",
+    );
+    assert!(router.is_settled_receipt(&receipt.intent_id, &receipt.receipt_hash));
 
     let refund = RefundIntent {
         original_intent_id: receipt.intent_id,
@@ -115,11 +144,27 @@ fn k4e_oe4_merchant_mldsa87_signed_refund_succeeds_once_and_refuses_impersonatio
     let imposter_sig = imposter_kp.sign(REFUND_SIGNATURE_CONTEXT, &refund_id);
     let wrong_ctx_sig = merchant_kp.sign(budlum_core::crypto::ctx::OFFLINE_VOUCHER_V1, &refund_id);
 
-    let mut registry = RefundRegistry::default();
+    // 0b. Rehashed receipt with altered receipt_hash (even for settled intent_id) MUST fail.
+    let mut different_receipt = receipt.clone();
+    different_receipt.target_amount_delivered = 999;
+    let mut different_refund = refund.clone();
+    different_refund.refund_amount = 999;
+    let different_sig = merchant_kp.sign(REFUND_SIGNATURE_CONTEXT, &different_refund.refund_id());
+    assert!(registry
+        .record_signed_refund(
+            &router,
+            &different_receipt,
+            &intent,
+            &different_refund,
+            &merchant_kp.public_key_bytes(),
+            &different_sig,
+        )
+        .is_err());
 
     // 1. Imposter key attempting to claim original merchant's refund MUST fail closed.
     assert!(registry
         .record_signed_refund(
+            &router,
             &receipt,
             &intent,
             &refund,
@@ -131,6 +176,7 @@ fn k4e_oe4_merchant_mldsa87_signed_refund_succeeds_once_and_refuses_impersonatio
     // 2. Signature under wrong domain context MUST fail closed.
     assert!(registry
         .record_signed_refund(
+            &router,
             &receipt,
             &intent,
             &refund,
@@ -147,6 +193,7 @@ fn k4e_oe4_merchant_mldsa87_signed_refund_succeeds_once_and_refuses_impersonatio
     let over_sig = merchant_kp.sign(REFUND_SIGNATURE_CONTEXT, &over_refund.refund_id());
     assert!(registry
         .record_signed_refund(
+            &router,
             &receipt,
             &intent,
             &over_refund,
@@ -158,6 +205,7 @@ fn k4e_oe4_merchant_mldsa87_signed_refund_succeeds_once_and_refuses_impersonatio
     // 4. Genuine ML-DSA-87 merchant-signed refund succeeds on first submission.
     let recorded_id = must(
         registry.record_signed_refund(
+            &router,
             &receipt,
             &intent,
             &refund,
@@ -171,6 +219,7 @@ fn k4e_oe4_merchant_mldsa87_signed_refund_succeeds_once_and_refuses_impersonatio
     // 5. Second refund against the SAME settled payment MUST fail with ReplayDetected!
     assert_eq!(
         registry.record_signed_refund(
+            &router,
             &receipt,
             &intent,
             &refund,

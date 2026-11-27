@@ -74,14 +74,12 @@ jobs:
           (cd budzero && cargo bench --bench canonical_programs --features "" 2>&1) | tee /tmp/bench-budzero-canonical.txt
           (cd budzero && cargo bench --bench proof_baseline 2>&1) | tee /tmp/bench-budzero-baseline.txt
           echo "BudZero bench runs completed."
-      # The job is named "Benchmark
-      # Regression" but had no baseline and no threshold - it could not fail
-      # on a regression. The interim gate makes a vacuous run fail: every
-      # micro bench must emit its throughput line and every BudZero bench its
-      # metric, or the job goes red. A numeric regression gate (the A part)
-      # needs recorded baseline history and lands when there is a baseline to
-      # compare against; until then a run that produces no numbers is itself a
-      # failure, never a silent green.
+      # Preserve the micro/single output-presence check. Proof logs also need
+      # all four named reports with valid numeric fields. Report completeness
+      # does not establish activation, producer authenticity, or a performance
+      # regression budget; those require their own evidence.
+      - name: Build the proof-metric checker
+        run: cargo build --locked --release --manifest-path xtask/gates/Cargo.toml
       - name: Fail on a vacuous benchmark run
         run: |
           set -euo pipefail
@@ -91,12 +89,8 @@ jobs:
               exit 1
             fi
           done
-          for f in /tmp/bench-budzero-canonical.txt /tmp/bench-budzero-baseline.txt; do
-            if [ ! -s "$f" ]; then
-              echo "::error file=$f::empty BudZero bench output - a vacuous run must fail"
-              exit 1
-            fi
-          done
+          ./xtask/gates/target/release/budlum-gates benchmark-proof-metrics --self-test
+          ./xtask/gates/target/release/budlum-gates benchmark-proof-metrics /tmp
           echo "all benchmark runs produced metrics"
 
       - name: Store the results as an artifact

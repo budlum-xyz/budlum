@@ -245,6 +245,12 @@ impl ContentStore for MemoryContentStore {
                 tracing::debug!(%oldest, "evicted oldest chunk (capacity reached)");
             }
         }
+        if self.over_budget(&state, data.len()) {
+            return Err(StoreError::TooLarge {
+                len: data.len(),
+                max: self.max_bytes,
+            });
+        }
 
         state.bytes = state.bytes.saturating_add(data.len());
         state.order.push_back(id);
@@ -873,5 +879,16 @@ mod tests {
         reopened.delete(&entries[1].0).unwrap();
         reopened.put(entries[2].0, entries[2].1.clone()).unwrap();
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn memory_content_store_zero_capacity_refuses_all_inserts() {
+        let store = MemoryContentStore::new(0);
+        let empty_cid = ContentId::of(b"");
+        assert!(
+            store.put(empty_cid, Vec::new()).is_err(),
+            "zero-capacity MemoryContentStore must refuse even the empty chunk"
+        );
+        assert_eq!(store.len(), 0);
     }
 }

@@ -744,6 +744,11 @@ mod tests {
             .verify_observed(&raw, &VerificationPolicy::strict(0), &mut facts)
             .expect("full verify");
         assert_eq!(att.state_root, ev.weave_root);
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("Arweave SPoRA shape");
         assert_eq!(att.height, 1_200_000);
         assert!(facts
             .observed()

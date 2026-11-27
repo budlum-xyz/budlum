@@ -6543,6 +6543,166 @@ mod tests {
         );
     }
 
+    /// Order sensitivity, measured instead of asserted: for two commitments that
+    /// land in the same domain height, does the order they arrive in change the
+    /// verdict? The doc comment on `accept_commitment` names "idempotence,
+    /// equivocation, ordering" in that order, and a relayer chooses which
+    /// arrives first, so the property has to be measured from both sides.
+    ///
+    /// Three shapes, each run in both orders:
+    ///   * two DIFFERENT blocks at one height -> `Frozen` both ways;
+    ///   * the SAME commitment twice -> `Idempotent` both ways;
+    ///   * a height the domain has already passed with no record -> `Err` both ways.
+    ///
+    /// A shape that answered differently depending on arrival order would be a
+    /// relayer-selectable outcome, which is the thing this test exists to rule
+    /// out.
+    #[test]
+    fn accept_commitment_answers_the_same_in_both_arrival_orders() {
+        #[derive(Debug, PartialEq)]
+        enum Verdict {
+            Frozen(String),
+            Idempotent,
+            Advanced,
+            Refused(String),
+        }
+
+        fn verdict(outcome: Result<CommitmentOutcome, String>) -> Verdict {
+            match outcome {
+                Ok(CommitmentOutcome::Frozen(reason)) => Verdict::Frozen(reason),
+                Ok(CommitmentOutcome::Idempotent) => Verdict::Idempotent,
+                Ok(CommitmentOutcome::Advanced) => Verdict::Advanced,
+                // A new outcome variant is not a pass: the test names it and
+                // fails until somebody decides what it means for ordering.
+                Ok(other) => Verdict::Frozen(format!("unclassified outcome: {other:?}")),
+                Err(err) => Verdict::Refused(err),
+            }
+        }
+
+        // Run `first` then `second` on one fresh domain and report both verdicts.
+        fn both(first: DomainCommitment, second: DomainCommitment) -> (Verdict, Verdict) {
+            let mut state = AccountState::new();
+            let dom = pow(79);
+            register_domain(&mut state, dom.clone()).unwrap();
+            let a = verdict(accept_commitment(&mut state, first));
+            let b = verdict(accept_commitment(&mut state, second));
+            (a, b)
+        }
+
+        let dom = pow(79);
+        let height_one = block(1, &"00".repeat(32), 0x81);
+        let competing = block(1, &"00".repeat(32), 0x82);
+        assert_ne!(
+            height_one.hash, competing.hash,
+            "the two blocks must differ"
+        );
+
+        // Shape 1: the first commitment of a height is accepted; a DIFFERENT
+        // block submitted at the SAME height afterwards is equivocation and
+        // freezes the domain in both arrival orders, with the same reason.
+        let left = commitment(&dom, &height_one, 0);
+        let right = commitment(&dom, &competing, 0);
+        let (first_outcome, second_outcome) = both(left.clone(), right.clone());
+        assert_eq!(
+            first_outcome,
+            Verdict::Advanced,
+            "the first commitment of a height advances the domain"
+        );
+        match &second_outcome {
+            Verdict::Frozen(reason) => assert!(
+                reason.contains("equivocation"),
+                "a same-height different block must be named equivocation, got {reason}"
+            ),
+            other => panic!("a competing block must freeze the domain, got {other:?}"),
+        }
+        // Swapping which block arrives first gives the same pair of verdicts:
+        // the second caller is frozen either way, so a relayer's ordering
+        // choice does not decide whether the domain stops.
+        let (swapped_first, swapped_second) = both(right, left);
+        assert_eq!(swapped_first, Verdict::Advanced);
+        assert!(
+            matches!(swapped_second, Verdict::Frozen(_)),
+            "the order of arrival must not decide whether the domain freezes"
+        );
+
+        // Shape 2: the same commitment twice. The second is not an equivocation.
+        let (again_first, again_second) = both(
+            commitment(&dom, &height_one, 0),
+            commitment(&dom, &height_one, 0),
+        );
+        assert_eq!(again_first, Verdict::Advanced);
+        assert_eq!(
+            again_second,
+            Verdict::Idempotent,
+            "a resubmitted identical commitment is idempotent, not a freeze"
+        );
+
+        // Shape 3, first half: a height the domain has already passed, with the
+        // record still in the registry, and a DIFFERENT block for it. The past
+        // is not rewritable: this is equivocation and freezes the domain, which
+        // is what the code does - and it means a relayer cannot "undo" a
+        // finalized height by resubmitting it.
+        let mut state = AccountState::new();
+        let domain = pow(80);
+        register_domain(&mut state, domain.clone()).unwrap();
+        let mut parent = "00".repeat(32);
+        for (tag, height) in [(0x91u8, 1u64), (0x92, 2), (0x93, 3)] {
+            let blk = block(height, &parent, tag);
+            parent = blk.hash.clone();
+            let outcome = accept_commitment(&mut state, commitment(&domain, &blk, 0));
+            assert!(
+                outcome.is_ok(),
+                "contiguous commitment {height} must accept: {outcome:?}"
+            );
+        }
+        let rewrite = commitment(&domain, &block(1, &"00".repeat(32), 0x95), 0);
+        match verdict(accept_commitment(&mut state, rewrite)) {
+            Verdict::Frozen(reason) => assert!(
+                reason.contains("equivocation"),
+                "rewriting a finalized height must be named equivocation, got {reason}"
+            ),
+            other => panic!("rewriting a finalized height must freeze, got {other:?}"),
+        }
+
+        // Shape 3, second half: the same past height AFTER the record is gone
+        // (what a snapshot restore without the commitment registry looks like)
+        // is not equivocation - there is nothing to disagree with - and must be
+        // refused, not accepted, and must not move the domain's height.
+        let mut restored = AccountState::new();
+        let restored_domain = pow(81);
+        register_domain(&mut restored, restored_domain.clone()).unwrap();
+        let mut parent = "00".repeat(32);
+        for (tag, height) in [(0xa1u8, 1u64), (0xa2, 2), (0xa3, 3)] {
+            let blk = block(height, &parent, tag);
+            parent = blk.hash.clone();
+            accept_commitment(&mut restored, commitment(&restored_domain, &blk, 0))
+                .expect("contiguous commitments accept");
+        }
+        for height in 1..=3u64 {
+            restored
+                .settlement
+                .commitments
+                .remove(restored_domain.id, height, 0);
+        }
+        let orphan = commitment(&restored_domain, &block(1, &"00".repeat(32), 0xa4), 0);
+        match verdict(accept_commitment(&mut restored, orphan)) {
+            Verdict::Refused(reason) => assert!(
+                reason.contains("Stale or conflicting"),
+                "a passed height with no record must be refused as stale, got {reason}"
+            ),
+            other => panic!("a passed height with no record must be refused, got {other:?}"),
+        }
+        assert_eq!(
+            restored
+                .settlement
+                .domains
+                .get(restored_domain.id)
+                .map(|d| d.last_committed_height),
+            Some(3),
+            "a refused stale commitment must not advance the domain"
+        );
+    }
+
     #[test]
     fn accept_commitment_refuses_quarantined_unavailable_commitment() {
         let mut state = AccountState::new();

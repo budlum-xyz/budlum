@@ -692,6 +692,14 @@ mod tests {
     #[test]
     fn chain_key_nidkg_adapter_passes_full_selftest_admission() {
         let (adapter, ev) = sample_adapter_with_golden();
+        let att = adapter
+            .verify(&ev, &VerificationPolicy::strict(0))
+            .expect("golden verifies");
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("Chain-Key NiDKG shape");
         let report = admit(&adapter, &VerificationPolicy::strict(0));
         assert!(report.admitted, "selftest failed: {report:?}");
         assert_eq!(report.probes.len(), 8);

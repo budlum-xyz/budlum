@@ -434,6 +434,7 @@ pub enum PaymentError {
 #[derive(Debug, Clone, Default)]
 pub struct UniversalPaymentRouter {
     settled_intents: BTreeSet<Hash32>,
+    settled_receipts: BTreeMap<Hash32, Hash32>,
     consumed_quote_liquidity: BTreeMap<Hash32, u128>,
 }
 
@@ -784,6 +785,7 @@ impl UniversalPaymentRouter {
             self.consumed_quote_liquidity.insert(qid, used);
         }
         self.settled_intents.insert(id);
+        self.settled_receipts.insert(id, receipt.receipt_hash);
         Ok(receipt)
     }
 
@@ -796,7 +798,8 @@ impl UniversalPaymentRouter {
             .unwrap_or(0)
     }
 
-    /// Deterministic Merkle commitment over settled intent IDs and quote fills.
+    /// Deterministic Merkle commitment over settled intent IDs, quote fills,
+    /// and settled receipt commitments.
     #[must_use]
     pub(crate) fn state_commitment(&self) -> Hash32 {
         let intent_leaves: Vec<Hash32> = self.settled_intents.iter().copied().collect();
@@ -807,11 +810,22 @@ impl UniversalPaymentRouter {
                 hash_domain_fields(b"BDLM_ROUTER_QUOTE_FILL_V1", &[qid, &used.to_le_bytes()])
             })
             .collect();
+        let receipt_leaves: Vec<Hash32> = self
+            .settled_receipts
+            .iter()
+            .map(|(intent_id, receipt_hash)| {
+                hash_domain_fields(
+                    b"BDLM_ROUTER_SETTLED_RECEIPT_V1",
+                    &[intent_id, receipt_hash],
+                )
+            })
+            .collect();
         let intents_root = unification_merkle_root(b"BDLM_ROUTER_INTENTS_V1", &intent_leaves);
         let quotes_root = unification_merkle_root(b"BDLM_ROUTER_QUOTES_V1", &quote_leaves);
+        let receipts_root = unification_merkle_root(b"BDLM_ROUTER_RECEIPTS_V1", &receipt_leaves);
         hash_domain_fields(
             b"BDLM_PAYMENT_ROUTER_ROOT_V1",
-            &[&intents_root, &quotes_root],
+            &[&intents_root, &quotes_root, &receipts_root],
         )
     }
 
@@ -819,6 +833,34 @@ impl UniversalPaymentRouter {
     #[must_use]
     pub fn is_settled(&self, intent_id: &Hash32) -> bool {
         self.settled_intents.contains(intent_id)
+    }
+
+    /// Returns whether `intent_id` settled with exact `receipt_hash` on this router.
+    #[must_use]
+    pub fn is_settled_receipt(&self, intent_id: &Hash32, receipt_hash: &Hash32) -> bool {
+        self.settled_intents.contains(intent_id)
+            && self
+                .settled_receipts
+                .get(intent_id)
+                .is_some_and(|recorded| recorded == receipt_hash)
+    }
+
+    /// Verifies that `receipt` matches a settled intent recorded on this router.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::InvalidIntent`] if `receipt.intent_id` has not
+    /// been settled on this router or its recorded receipt hash differs.
+    pub fn verify_settled_receipt(
+        &self,
+        receipt: &UniversalPaymentReceipt,
+    ) -> Result<(), PaymentError> {
+        if !self.is_settled_receipt(&receipt.intent_id, &receipt.receipt_hash) {
+            return Err(PaymentError::InvalidIntent(String::from(
+                "refund requires a settled payment receipt committed on this router",
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -2092,21 +2134,23 @@ pub struct RefundRegistry {
 }
 
 impl RefundRegistry {
-    /// Validate and record `refund` against `original` receipt fail-closed.
+    /// Validate and record `refund` against `original` receipt committed on `router` fail-closed.
     ///
-    /// Convenience: prevents duplicate or over-amount refunds against settled receipts.
+    /// Convenience: prevents duplicate, unsettled quote-only, or over-amount refunds.
     ///
     /// # Errors
     ///
     /// Returns [`PaymentError::ReplayDetected`] if `original.receipt_hash` was
-    /// already refunded, or [`PaymentError::InvalidIntent`] if bindings or amount
-    /// bounds disagree.
+    /// already refunded, or [`PaymentError::InvalidIntent`] if `original` is not
+    /// settled on `router`, bindings disagree, or amount bounds are violated.
     pub fn record_refund(
         &mut self,
+        router: &UniversalPaymentRouter,
         original: &UniversalPaymentReceipt,
         refund: &RefundIntent,
     ) -> Result<Hash32, PaymentError> {
         original.verify_self_consistent(None)?;
+        router.verify_settled_receipt(original)?;
         if refund.original_intent_id != original.intent_id
             || refund.original_receipt_hash != original.receipt_hash
         {
@@ -2150,6 +2194,7 @@ impl RefundRegistry {
     /// if the refund registry reached [`MAX_REFUND_RECORDS`].
     pub fn record_signed_refund(
         &mut self,
+        router: &UniversalPaymentRouter,
         original: &UniversalPaymentReceipt,
         original_intent: &UniversalPaymentIntent,
         refund: &RefundIntent,
@@ -2157,6 +2202,7 @@ impl RefundRegistry {
         merchant_signature: &[u8],
     ) -> Result<Hash32, PaymentError> {
         verify_receipt_settles_intent(original, original_intent)?;
+        router.verify_settled_receipt(original)?;
         if refund.merchant_id != original_intent.merchant_id {
             return Err(PaymentError::InvalidIntent(String::from(
                 "refund merchant_id does not match original payment intent merchant",
@@ -2183,7 +2229,7 @@ impl RefundRegistry {
         .map_err(|e| {
             PaymentError::InvalidIntent(format!("invalid merchant ML-DSA-87 refund signature: {e}"))
         })?;
-        self.record_refund(original, refund)
+        self.record_refund(router, original, refund)
     }
 }
 
@@ -2878,13 +2924,24 @@ mod tests {
             reason_code: 1,
         };
         let mut registry = RefundRegistry::default();
+        let empty_router = UniversalPaymentRouter::new();
+        assert!(registry
+            .record_refund(&empty_router, &honest, &refund_for(&honest))
+            .is_err());
+
+        let mut mut_balances = balances;
+        let mut router = UniversalPaymentRouter::new();
+        let settled = router
+            .settle_payment(&intent, &mut mut_balances, &[], 1_500)
+            .expect("settled receipt");
+        assert!(router.is_settled_receipt(&settled.intent_id, &settled.receipt_hash));
         registry
-            .record_refund(&honest, &refund_for(&honest))
+            .record_refund(&router, &settled, &refund_for(&settled))
             .expect("first refund");
-        let mut relabeled = honest.clone();
+        let mut relabeled = settled.clone();
         relabeled.receipt_hash[0] ^= 0x80;
         assert!(registry
-            .record_refund(&relabeled, &refund_for(&relabeled))
+            .record_refund(&router, &relabeled, &refund_for(&relabeled))
             .is_err());
     }
 

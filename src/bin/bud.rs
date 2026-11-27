@@ -4907,7 +4907,8 @@ fn run_payment_uri(uri: &str, now_unix_secs: u64) -> Result<(), String> {
 
 fn run_refund_verify(bundle_path: &str) -> Result<(), String> {
     use budlum_core::unification::{
-        RefundIntent, RefundRegistry, UniversalPaymentIntent, UniversalPaymentReceipt,
+        DomainTokenBalance, LiquidityQuote, RefundIntent, RefundRegistry, UniversalPaymentIntent,
+        UniversalPaymentReceipt, UniversalPaymentRouter,
     };
     #[derive(serde::Deserialize)]
     struct RefundBundle {
@@ -4916,6 +4917,12 @@ fn run_refund_verify(bundle_path: &str) -> Result<(), String> {
         refund: RefundIntent,
         merchant_pubkey_hex: String,
         merchant_sig_hex: String,
+        #[serde(default)]
+        balances: Vec<DomainTokenBalance>,
+        #[serde(default)]
+        quotes: Vec<LiquidityQuote>,
+        #[serde(default)]
+        settled_at_unix_secs: Option<u64>,
     }
     let raw = std::fs::read(bundle_path)
         .map_err(|e| format!("failed to read refund bundle `{bundle_path}`: {e}"))?;
@@ -4935,9 +4942,32 @@ fn run_refund_verify(bundle_path: &str) -> Result<(), String> {
             .unwrap_or(&parsed.merchant_sig_hex),
     )
     .map_err(|e| format!("invalid merchant_sig_hex: {e}"))?;
+    let mut router = UniversalPaymentRouter::new();
+    let mut balances = parsed.balances;
+    let settled_at = parsed
+        .settled_at_unix_secs
+        .unwrap_or(parsed.original_intent.deadline_unix_secs);
+    let settled_receipt = router
+        .settle_payment(
+            &parsed.original_intent,
+            &mut balances,
+            &parsed.quotes,
+            settled_at,
+        )
+        .map_err(|e| format!("settlement witness replay refused: {e:?}"))?;
+    if !router.is_settled_receipt(
+        &parsed.original_receipt.intent_id,
+        &parsed.original_receipt.receipt_hash,
+    ) || settled_receipt.receipt_hash != parsed.original_receipt.receipt_hash
+    {
+        return Err(String::from(
+            "refund bundle original_receipt does not match replayed settlement witness",
+        ));
+    }
     let mut registry = RefundRegistry::default();
     let refund_id = registry
         .record_signed_refund(
+            &router,
             &parsed.original_receipt,
             &parsed.original_intent,
             &parsed.refund,

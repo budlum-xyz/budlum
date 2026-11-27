@@ -76,6 +76,20 @@ admitted.
 5. A new evidence format is introduced with `ScheduleFork`; a multi-prover
    rule with `SetQuorumPolicy`. Only the registrant changes the rules.
 
+While a domain is frozen:
+
+- It takes no evidence.
+- `bud_getExternalDomainProfile` keeps the record of the last accepted
+  backing but derives the guarantee it reports from none: a frozen,
+  isolated or retired domain reads with no fault tolerance and a closed
+  value outflow, because the attestation that backing came from may be the
+  one the freeze withdrew.
+- Value already in flight is not stranded by the freeze. A bridge lock
+  always names an expiry height inside the protocol window, and the block
+  sweep returns an unminted lock to its owner at that height. The sweep
+  does not ask about the target domain, so no state of the domain can hold
+  the refund.
+
 External-domain writes are refused on mainnet until the mainnet readiness
 gates are met (`docs/MAINNET_READINESS.md`).
 

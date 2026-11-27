@@ -297,13 +297,8 @@ impl BudBitswap {
         requested_cid: ContentId,
         response: BitswapResponse,
     ) -> Result<(), StoreError> {
-        if response.not_found || response.data.is_empty() {
-            return Ok(()); // Nothing to store.
-        }
-        // MEDIUM (CWE-345, 2026-08-17): the response must be for the REQUESTED
-        // block. A payload that only hashes to its own cid would let a malicious
-        // peer hand over a different block (cache poisoning + eviction). If the
-        // requested cid does not match, refuse.
+        // The response must match the requested CID even on a miss so a peer
+        // cannot spoof or confuse request-response correlation.
         if response.cid != requested_cid {
             tracing::warn!(
                 wanted = %requested_cid,
@@ -315,8 +310,17 @@ impl BudBitswap {
                 got: response.cid,
             });
         }
+        if response.not_found {
+            if !response.data.is_empty() {
+                return Err(StoreError::Internal(
+                    "not_found bitswap response carried unsolicited payload bytes".into(),
+                ));
+            }
+            return Ok(());
+        }
 
-        // Integrity check: verify the data matches the claimed CID.
+        // Integrity check: verify the data matches the claimed CID (including
+        // rejecting empty data when `requested_cid` is not the empty chunk).
         let computed = ContentId::of(&response.data);
         if computed != response.cid {
             tracing::warn!(
@@ -661,5 +665,75 @@ mod tests {
             .is_err(),
             "all-zero want_cid BitswapRequest must be refused"
         );
+    }
+
+    #[test]
+    fn decode_response_refuses_trailing_bytes_and_not_found_with_data() {
+        let payload = b"canonical-chunk".to_vec();
+        let cid = ContentId::of(&payload);
+        let ok_resp = BitswapResponse {
+            cid,
+            data: payload,
+            not_found: false,
+        };
+        let mut wire = encode_response(&ok_resp).unwrap();
+        assert!(decode_response(&wire).is_ok());
+
+        wire.extend_from_slice(b"TRAILING_GARBAGE");
+        assert!(
+            decode_response(&wire).is_err(),
+            "Bitswap decode_response must refuse trailing bytes"
+        );
+
+        let contradictory = BitswapResponse {
+            cid,
+            data: b"unsolicited-bytes".to_vec(),
+            not_found: true,
+        };
+        assert!(
+            encode_response(&contradictory).is_err(),
+            "encode_response must refuse not_found=true with non-empty data"
+        );
+        let wire_bad = bincode::serialize(&contradictory).unwrap();
+        assert!(
+            decode_response(&wire_bad).is_err(),
+            "not_found=true with non-empty data must fail closed"
+        );
+    }
+
+    #[test]
+    fn handle_response_refuses_empty_data_for_non_empty_cid_and_mismatched_not_found() {
+        use crate::store::StoreError;
+        use std::sync::Arc;
+
+        let store = Arc::new(MemoryContentStore::new(16));
+        let bitswap = BudBitswap::new(store.clone());
+        let real_cid = ContentId::of(b"non-empty-chunk");
+
+        let fake_empty = BitswapResponse {
+            cid: real_cid,
+            data: Vec::new(),
+            not_found: false,
+        };
+        let err = bitswap.handle_response(real_cid, fake_empty).unwrap_err();
+        assert!(matches!(err, StoreError::IntegrityMismatch { .. }));
+
+        let wrong_not_found = BitswapResponse {
+            cid: ContentId::of(b"other"),
+            data: Vec::new(),
+            not_found: true,
+        };
+        let err2 = bitswap
+            .handle_response(real_cid, wrong_not_found)
+            .unwrap_err();
+        assert!(matches!(err2, StoreError::UnexpectedCid { .. }));
+
+        let honest_miss = BitswapResponse {
+            cid: real_cid,
+            data: Vec::new(),
+            not_found: true,
+        };
+        assert!(bitswap.handle_response(real_cid, honest_miss).is_ok());
+        assert!(!store.has(&real_cid));
     }
 }

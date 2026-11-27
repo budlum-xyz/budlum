@@ -107,6 +107,168 @@ pub fn parse_recipient_input(raw: &str) -> Result<RecipientTarget, String> {
     Ok(RecipientTarget::Direct(addr))
 }
 
+/// Reason why a candidate `.bud` recipient looks dangerously similar to a
+/// known contact or trusted `.bud` name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfusableReason {
+    /// Distinct `.bud` names collapse to the exact same visual skeleton
+    /// (for example `1`/`l`/`i`, `0`/`o`, `rn`/`m`, `vv`/`w`, `cl`/`d`, or
+    /// hyphen insertion/removal).
+    VisualSkeletonMatch,
+    /// Two labels of length >= 4 differ by a single edit (typosquat risk).
+    NearEditDistance,
+}
+
+/// Warning raised by the wallet when paying a `.bud` name that visually
+/// mimics a known contact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfusableWarning {
+    pub candidate: String,
+    pub similar_to: String,
+    pub reason: ConfusableReason,
+}
+
+/// Fold a lowercase ASCII `.bud` label into its visual lookalike skeleton so
+/// homoglyph-style ASCII substitutions (`paypa1` vs `paypal`, `rnarket` vs
+/// `market`, `g00gle` vs `google`, `pay-pal` vs `paypal`) map to one form.
+#[must_use]
+pub fn bns_visual_skeleton(label: &str) -> String {
+    let bytes = label.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() {
+            match (bytes[i], bytes[i + 1]) {
+                (b'r', b'n') => {
+                    out.push('m');
+                    i += 2;
+                    continue;
+                }
+                (b'v', b'v') => {
+                    out.push('w');
+                    i += 2;
+                    continue;
+                }
+                (b'c', b'l') => {
+                    out.push('d');
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        match bytes[i] {
+            b'-' => {}
+            b'0' => out.push('o'),
+            b'1' | b'i' => out.push('l'),
+            b'3' => out.push('e'),
+            b'5' => out.push('s'),
+            b'8' => out.push('b'),
+            b => out.push(char::from(b)),
+        }
+        i += 1;
+    }
+    out
+}
+
+fn edit_distance_is_one(a: &str, b: &str) -> bool {
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    let len_diff = ab.len().abs_diff(bb.len());
+    if len_diff > 1 {
+        return false;
+    }
+    if ab.len() == bb.len() {
+        let mut diffs = 0usize;
+        for (x, y) in ab.iter().zip(bb.iter()) {
+            if x != y {
+                diffs += 1;
+                if diffs > 1 {
+                    return false;
+                }
+            }
+        }
+        return diffs == 1;
+    }
+    let (short, long) = if ab.len() < bb.len() {
+        (ab, bb)
+    } else {
+        (bb, ab)
+    };
+    let mut si = 0usize;
+    let mut li = 0usize;
+    let mut skipped = false;
+    while si < short.len() && li < long.len() {
+        if short[si] == long[li] {
+            si += 1;
+            li += 1;
+        } else if !skipped {
+            skipped = true;
+            li += 1;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// Inspect `candidate` against `known_names` and warn if `candidate` is a
+/// distinct valid `.bud` name that visually mimics one of `known_names`.
+///
+/// Returns `None` when `candidate` is invalid or matches a known name exactly.
+#[must_use]
+pub fn detect_confusable_bud_name(
+    candidate: &str,
+    known_names: &[&str],
+) -> Option<ConfusableWarning> {
+    if !is_valid_resolvable_bud_name(candidate) {
+        return None;
+    }
+    for &known in known_names {
+        if known == candidate {
+            return None;
+        }
+    }
+    let cand_stem = candidate.strip_suffix(".bud")?;
+    let cand_skel = bns_visual_skeleton(cand_stem);
+
+    for &known in known_names {
+        if !is_valid_resolvable_bud_name(known) {
+            continue;
+        }
+        let Some(known_stem) = known.strip_suffix(".bud") else {
+            continue;
+        };
+        if cand_skel == bns_visual_skeleton(known_stem) {
+            return Some(ConfusableWarning {
+                candidate: candidate.to_string(),
+                similar_to: known.to_string(),
+                reason: ConfusableReason::VisualSkeletonMatch,
+            });
+        }
+    }
+
+    if cand_stem.len() >= 4 {
+        for &known in known_names {
+            if !is_valid_resolvable_bud_name(known) {
+                continue;
+            }
+            let Some(known_stem) = known.strip_suffix(".bud") else {
+                continue;
+            };
+            if known_stem.len() >= 4 && edit_distance_is_one(cand_stem, known_stem) {
+                return Some(ConfusableWarning {
+                    candidate: candidate.to_string(),
+                    similar_to: known.to_string(),
+                    reason: ConfusableReason::NearEditDistance,
+                });
+            }
+        }
+    }
+
+    None
+}
+
 /// Compact per-name Merkle proof for wallet-side `.bud` recipient verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalletBnsProof {

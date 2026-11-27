@@ -916,6 +916,11 @@ mod tests {
                 adapter.verify_observed(&evidence, &VerificationPolicy::proven(10), &mut facts);
             if canonical {
                 let attestation = got.unwrap_or_else(|e| panic!("row `{name}`: {e:?}"));
+                crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+                    &adapter.descriptor(),
+                    &attestation,
+                )
+                .expect("BudZkVm shape");
                 assert_eq!(attestation.height, 1, "row `{name}`");
                 assert_eq!(
                     attestation.attested_event_root, None,
