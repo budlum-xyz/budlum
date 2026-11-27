@@ -165,7 +165,7 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
                 domain.id
             )));
         }
-        let evidence = decode_external_evidence(proof)?;
+        // Descriptor-only refusals do not need to inspect peer-supplied bytes.
         let descriptor = self.adapter.descriptor();
         let anchor_pinned = self.adapter.has_pinned_trust_anchor();
         if let Some(family) =
@@ -196,6 +196,24 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
                 ));
             }
         }
+        // These commitment-only fields are not carried by external evidence;
+        // a commitment that claims them is claiming data nobody
+        // looked at. `parent_domain_block_hash` is the exception - it is
+        // chain-linked to the previous ATTACHED hash at the blockchain seam
+        // (blockchain.rs), and `sequence` keys the registry rather than
+        // attesting anything.
+        if commitment.validator_set_hash != [0u8; 32]
+            || commitment.timestamp_ms != 0
+            || commitment.producer.is_some()
+            || !commitment.state_updates.is_empty()
+        {
+            return Ok(FinalityStatus::Rejected(
+                "the commitment claims validator set, timestamp, producer or state updates                  that no external evidence attests"
+                    .to_string(),
+            ));
+        }
+
+        let evidence = decode_external_evidence(proof)?;
         let mut seen = CryptoFacts::new();
         let attestation = self
             .adapter
@@ -312,23 +330,6 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
                 }
             }
         }
-        // The remaining free fields: no external evidence carries
-        // them, so a commitment that claims them is claiming data nobody
-        // looked at. `parent_domain_block_hash` is the exception - it is
-        // chain-linked to the previous ATTACHED hash at the blockchain seam
-        // (blockchain.rs), and `sequence` keys the registry rather than
-        // attesting anything.
-        if commitment.validator_set_hash != [0u8; 32]
-            || commitment.timestamp_ms != 0
-            || commitment.producer.is_some()
-            || !commitment.state_updates.is_empty()
-        {
-            return Ok(FinalityStatus::Rejected(
-                "the commitment claims validator set, timestamp, producer or state updates                  that no external evidence attests"
-                    .to_string(),
-            ));
-        }
-
         // The commitment hash is checked here as well as by the surrounding
         // blockchain path. Keeping this invariant at the translation seam
         // prevents a future direct caller from finalizing with a proof whose
@@ -357,11 +358,14 @@ mod tests {
         AdapterDescriptor, FinalityAttestation, FinalityKind, SecurityBacking, TimeUnit, TrustModel,
     };
     use crate::domain::types::{ConsensusKind, DomainStatus, RootScheme};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     struct FixtureAdapter {
         descriptor: AdapterDescriptor,
         evidence: RawConsensusEvidence,
         wrong_domain: bool,
+        verification_calls: Arc<AtomicUsize>,
     }
 
     impl ExternalFinalityAdapter for FixtureAdapter {
@@ -379,6 +383,7 @@ mod tests {
             _policy: &VerificationPolicy,
         ) -> Result<FinalityAttestation, crate::cross_domain::external::spec::AdapterError>
         {
+            self.verification_calls.fetch_add(1, Ordering::Relaxed);
             if evidence != &self.evidence {
                 return Err(
                     crate::cross_domain::external::spec::AdapterError::Malformed {
@@ -515,10 +520,192 @@ mod tests {
                 descriptor,
                 evidence,
                 wrong_domain: false,
+                verification_calls: Arc::new(AtomicUsize::new(0)),
             },
             domain,
             commitment,
         )
+    }
+
+    fn assert_refused_before_carrier_decode(
+        adapter: Box<dyn ExternalFinalityAdapter>,
+        expected_reason: &str,
+    ) -> FinalityStatus {
+        let (_, domain, mut commitment) = fixture();
+        let proof = FinalityProof::Raw(vec![0xde, 0xad, 0xbe, 0xef]);
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+        let bridge = ExternalDomainFinalityBridge::new(adapter, VerificationPolicy::proven(100));
+        let mut observed = CryptoFacts::new();
+        let result = bridge.verify_finality_observed(&domain, &commitment, &proof, &mut observed);
+        assert!(
+            matches!(&result, Ok(FinalityStatus::Rejected(reason)) if reason.contains(expected_reason)),
+            "a descriptor-only refusal must precede carrier decoding: {result:?}"
+        );
+        assert!(
+            observed.is_empty(),
+            "refused evidence must not publish crypto facts"
+        );
+        result.expect("descriptor-only refusal")
+    }
+
+    #[test]
+    fn unpinned_custom_adapter_is_rejected_before_carrier_decode() {
+        let (adapter, _, _) = fixture();
+        let status = assert_refused_before_carrier_decode(
+            Box::new(ImplicitAnchorAdapter(adapter)),
+            "no pinned trust anchor",
+        );
+        assert!(matches!(status, FinalityStatus::Rejected(_)));
+    }
+
+    #[test]
+    fn unpinned_builtin_adapter_is_rejected_before_carrier_decode() {
+        let adapter =
+            crate::cross_domain::external::tendermint::TendermintFinalityAdapter::new_pinned(
+                "mainnet",
+                "cosmoshub-4",
+                None,
+            );
+        let status = assert_refused_before_carrier_decode(
+            Box::new(adapter),
+            "requires a pinned trust anchor",
+        );
+        assert!(matches!(status, FinalityStatus::Rejected(_)));
+    }
+
+    #[test]
+    fn trusted_party_adapter_is_rejected_before_carrier_decode() {
+        let (mut adapter, _, _) = fixture();
+        adapter.descriptor.trust_model = TrustModel::TrustedParty;
+        let status =
+            assert_refused_before_carrier_decode(Box::new(adapter), "TrustModel::TrustedParty");
+        assert!(matches!(status, FinalityStatus::Rejected(_)));
+    }
+
+    #[test]
+    fn invalid_builtin_profile_is_rejected_before_carrier_decode() {
+        let (mut adapter, _, _) = fixture();
+        adapter.descriptor.consensus_kind = "stark-state-diff-validity-rollup".to_string();
+        let status = assert_refused_before_carrier_decode(
+            Box::new(adapter),
+            "external family profile refused",
+        );
+        assert!(matches!(status, FinalityStatus::Rejected(_)));
+    }
+
+    fn assert_metadata_refused_before_verification(
+        mutate: fn(&mut DomainCommitment),
+    ) -> [FinalityStatus; 2] {
+        [true, false].map(|malformed| {
+            let (adapter, domain, mut commitment) = fixture();
+            let calls = Arc::clone(&adapter.verification_calls);
+            let proof = if malformed {
+                FinalityProof::Raw(vec![0xde, 0xad, 0xbe, 0xef])
+            } else {
+                encode_external_evidence(&adapter.evidence).expect("encode")
+            };
+            commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+            mutate(&mut commitment);
+            let bridge = ExternalDomainFinalityBridge::new(
+                Box::new(adapter),
+                VerificationPolicy::proven(100),
+            );
+            let mut observed = CryptoFacts::new();
+            let result =
+                bridge.verify_finality_observed(&domain, &commitment, &proof, &mut observed);
+            assert!(
+                matches!(&result, Ok(FinalityStatus::Rejected(reason)) if reason.contains("no external evidence attests")),
+                "unattested metadata must be refused before carrier decoding: {result:?}"
+            );
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                0,
+                "a metadata refusal must not invoke the adapter"
+            );
+            assert!(
+                observed.is_empty(),
+                "refused metadata must not publish crypto facts"
+            );
+            result.expect("metadata-only refusal")
+        })
+    }
+
+    #[test]
+    fn validator_set_metadata_is_rejected_before_carrier_decode() {
+        let statuses =
+            assert_metadata_refused_before_verification(|c| c.validator_set_hash = [9; 32]);
+        assert!(statuses
+            .iter()
+            .all(|status| matches!(status, FinalityStatus::Rejected(_))));
+    }
+
+    #[test]
+    fn timestamp_metadata_is_rejected_before_carrier_decode() {
+        let statuses = assert_metadata_refused_before_verification(|c| c.timestamp_ms = 1);
+        assert!(statuses
+            .iter()
+            .all(|status| matches!(status, FinalityStatus::Rejected(_))));
+    }
+
+    #[test]
+    fn producer_metadata_is_rejected_before_carrier_decode() {
+        let statuses = assert_metadata_refused_before_verification(|c| {
+            c.producer = Some(Address::from([9; 32]))
+        });
+        assert!(statuses
+            .iter()
+            .all(|status| matches!(status, FinalityStatus::Rejected(_))));
+    }
+
+    #[test]
+    fn state_updates_metadata_is_rejected_before_carrier_decode() {
+        let statuses = assert_metadata_refused_before_verification(|c| {
+            c.state_updates.insert(Address::from([9; 32]), 1);
+        });
+        assert!(statuses
+            .iter()
+            .all(|status| matches!(status, FinalityStatus::Rejected(_))));
+    }
+
+    #[test]
+    fn verified_crypto_facts_are_published_only_after_complete_acceptance() {
+        use crate::crypto::facts::ObservedScheme;
+        use crate::crypto::scheme::SchemeId;
+
+        for wrong_height in [false, true] {
+            let (adapter, domain, mut commitment) = fixture();
+            let calls = Arc::clone(&adapter.verification_calls);
+            let proof = encode_external_evidence(&adapter.evidence).expect("encode");
+            commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+            if wrong_height {
+                commitment.domain_height += 1;
+            }
+            let bridge = ExternalDomainFinalityBridge::new(
+                Box::new(adapter),
+                VerificationPolicy::proven(100),
+            );
+            let mut observed = CryptoFacts::new();
+            observed.record(ObservedScheme::Secp256k1);
+            let before = observed.clone();
+            let status = bridge
+                .verify_finality_observed(&domain, &commitment, &proof, &mut observed)
+                .expect("verify");
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            if wrong_height {
+                assert!(
+                    matches!(status, FinalityStatus::Rejected(reason) if reason.contains("height"))
+                );
+                assert_eq!(
+                    observed, before,
+                    "a late refusal must leave the caller's facts unchanged"
+                );
+            } else {
+                assert_eq!(status, FinalityStatus::Finalized);
+                let mut expected = before;
+                expected.record(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG));
+                assert_eq!(observed, expected);
+            }
+        }
     }
 
     #[test]
