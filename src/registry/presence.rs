@@ -43,6 +43,9 @@ pub const DUPLICATE_SIGNAL_PEER_PENALTY: i32 = -25;
 /// Epochs after `ResumeValidator` before a suspended validator becomes active again.
 pub const RESUME_ACTIVATION_DELAY_EPOCHS: u64 = 1;
 
+/// Maximum deduplicated presence signals retained in [`PresenceGossipInbox`].
+pub const MAX_PRESENCE_INBOX_ENTRIES: usize = 65_536;
+
 /// The one validator-class definition shared by the node and phone (K-4).
 /// The alias keeps existing node call sites source-compatible.
 pub use budlum_types::ValidatorClass as PresenceClass;
@@ -149,6 +152,11 @@ impl PresenceGossipInbox {
         bls_public_key: &[u8],
         chain_id: u64,
     ) -> Result<GossipIngestOutcome, PresenceError> {
+        if signal.validator == Address::zero() {
+            return Err(PresenceError::InvalidSignature(
+                "zero validator address".to_owned(),
+            ));
+        }
         verify_presence_signal(&signal, bls_public_key, chain_id)?;
         let key = (signal.validator, signal.window);
         if let Some(existing) = self.seen.get(&key) {
@@ -163,6 +171,17 @@ impl PresenceGossipInbox {
             return Ok(GossipIngestOutcome::DroppedDuplicate {
                 peer_score_delta: DUPLICATE_SIGNAL_PEER_PENALTY,
             });
+        }
+        while self.seen.len() >= MAX_PRESENCE_INBOX_ENTRIES {
+            let Some(oldest_key) = self
+                .seen
+                .iter()
+                .min_by_key(|((_, w), _)| *w)
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            self.seen.remove(&oldest_key);
         }
         self.seen.insert(key, signal);
         Ok(GossipIngestOutcome::Accepted)
@@ -208,6 +227,17 @@ impl PresenceAggregate {
         if roster.is_empty() {
             return Err(PresenceError::EmptyAggregate);
         }
+        let mut seen_roster = BTreeSet::new();
+        for (addr, _) in roster {
+            if *addr == Address::zero() {
+                return Err(PresenceError::InvalidSignature(
+                    "zero validator address in roster".to_owned(),
+                ));
+            }
+            if !seen_roster.insert(*addr) {
+                return Err(PresenceError::DuplicateRosterValidator);
+            }
+        }
         let mut by_addr: BTreeMap<Address, &PresenceSignal> = BTreeMap::new();
         for sig in signals {
             if sig.window == window && sig.class == class {
@@ -238,12 +268,18 @@ impl PresenceAggregate {
         if count == 0 {
             return Err(PresenceError::EmptyAggregate);
         }
+        let agg_sig = G1Affine::from(sum_sig);
+        if bool::from(agg_sig.is_identity()) {
+            return Err(PresenceError::InvalidSignature(
+                "aggregate signature is identity".to_owned(),
+            ));
+        }
 
         Ok(Self {
             window,
             class,
             bitmap,
-            aggregate_sig: G1Affine::from(sum_sig).to_compressed().to_vec(),
+            aggregate_sig: agg_sig.to_compressed().to_vec(),
         })
     }
 
@@ -274,6 +310,23 @@ impl PresenceAggregate {
             }
         }
 
+        // Reject duplicate or zero addresses across the roster so rogue keys
+        // cannot cancel each other or double-count signers.
+        let mut seen_roster = BTreeSet::new();
+        for (addr, _) in roster {
+            if *addr == Address::zero() {
+                return Err(PresenceError::InvalidSignature(
+                    "zero validator address in roster".to_owned(),
+                ));
+            }
+            if !seen_roster.insert(*addr) {
+                return Err(PresenceError::DuplicateRosterValidator);
+            }
+        }
+
+        // Reject identity or non-subgroup aggregate signatures before pairing.
+        let _ = decode_g1(&self.aggregate_sig)?;
+
         let mut sum_pk = G2Projective::identity();
         let mut present = Vec::new();
         for (idx, (addr, pk_bytes)) in roster.iter().enumerate() {
@@ -295,7 +348,13 @@ impl PresenceAggregate {
             return Err(PresenceError::EmptyAggregate);
         }
 
-        let agg_pk_bytes = G2Affine::from(sum_pk).to_compressed();
+        let agg_pk = G2Affine::from(sum_pk);
+        if bool::from(agg_pk.is_identity()) {
+            return Err(PresenceError::InvalidSignature(
+                "aggregate public key is identity".to_owned(),
+            ));
+        }
+        let agg_pk_bytes = agg_pk.to_compressed();
         let digest = presence_signing_digest(chain_id, self.window, self.class);
         verify_bls_sig(&agg_pk_bytes, &digest, &self.aggregate_sig)
             .map_err(PresenceError::InvalidSignature)?;
@@ -338,6 +397,9 @@ impl PresenceTracker {
     }
 
     /// Convenience: exposed for validator registration hook.
+    ///
+    /// Ignores the zero address and preserves any existing validator record so
+    /// re-registration cannot wipe double-sign slash, suspension, or key state.
     pub fn register_validator(
         &mut self,
         validator: Address,
@@ -345,9 +407,12 @@ impl PresenceTracker {
         stake_atoms: u64,
         registered_epoch: u64,
     ) {
-        self.validators.insert(
-            validator,
-            ValidatorPresenceState {
+        if validator == Address::zero() {
+            return;
+        }
+        self.validators
+            .entry(validator)
+            .or_insert(ValidatorPresenceState {
                 class,
                 bls_public_key: Vec::new(),
                 stake_atoms,
@@ -357,8 +422,7 @@ impl PresenceTracker {
                 suspended: false,
                 resume_effective_epoch: None,
                 slashed_double_sign: false,
-            },
-        );
+            });
     }
 
     /// Bind the registered BLS public key a validator signs presence signals with,
@@ -366,6 +430,9 @@ impl PresenceTracker {
     /// never against a caller-supplied key travelling with the evidence.
     /// Convenience: exposed for validator key registration and consensus hooks.
     pub fn register_validator_bls_key(&mut self, validator: &Address, bls_public_key: &[u8]) {
+        if decode_g2(bls_public_key).is_err() {
+            return;
+        }
         if let Some(st) = self.validators.get_mut(validator) {
             st.bls_public_key = bls_public_key.to_vec();
         }
@@ -396,9 +463,29 @@ impl PresenceTracker {
             return Err(PresenceError::StaleAggregate);
         }
         let present = aggregate.verify_single_pairing(roster, chain_id)?;
+        let roster_keys: BTreeMap<Address, &[u8]> = roster
+            .iter()
+            .map(|(addr, pk)| (*addr, pk.as_slice()))
+            .collect();
+        // Validate every selected signer's roster key against its registered BLS
+        // key before mutating any state so a refusal leaves state untouched.
+        for addr in &present {
+            if let Some(st) = self.validators.get(addr) {
+                if !st.bls_public_key.is_empty()
+                    && roster_keys.get(addr).copied() != Some(st.bls_public_key.as_slice())
+                {
+                    return Err(PresenceError::InvalidSignature(
+                        "aggregate roster BLS key does not match registered validator key"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
         for addr in &present {
             if let Some(st) = self.validators.get_mut(addr) {
-                if st.class == aggregate.class
+                if !st.suspended
+                    && !st.slashed_double_sign
+                    && st.class == aggregate.class
                     && st
                         .last_seen_window
                         .is_none_or(|prev| prev < aggregate.window)
@@ -416,7 +503,11 @@ impl PresenceTracker {
     /// Convenience: exposed for finalized checkpoint participation hook.
     pub fn record_full_seat_participation(&mut self, validator: &Address, current_epoch: u64) {
         if let Some(st) = self.validators.get_mut(validator) {
-            if st.class == PresenceClass::Full && st.last_seen_epoch < current_epoch {
+            if !st.suspended
+                && !st.slashed_double_sign
+                && st.class == PresenceClass::Full
+                && st.last_seen_epoch < current_epoch
+            {
                 st.last_seen_epoch = current_epoch;
                 if st.last_seen_window != Some(current_epoch) {
                     st.last_seen_window = Some(current_epoch);
@@ -466,6 +557,11 @@ impl PresenceTracker {
         let epoch_len = self.epoch_len_blocks;
 
         for (addr, st) in &mut self.validators {
+            if st.slashed_double_sign {
+                st.suspended = true;
+                st.resume_effective_epoch = None;
+                continue;
+            }
             if let Some(activate_at) = st.resume_effective_epoch {
                 if current_epoch >= activate_at {
                     st.suspended = false;
@@ -502,12 +598,20 @@ impl PresenceTracker {
             .validators
             .get_mut(validator)
             .ok_or(PresenceError::UnknownValidator)?;
+        if st.slashed_double_sign {
+            return Err(PresenceError::ValidatorSlashed);
+        }
         if !st.suspended {
             return Err(PresenceError::ValidatorNotSuspended);
         }
-        let effective = current_epoch.saturating_add(RESUME_ACTIVATION_DELAY_EPOCHS);
-        st.resume_effective_epoch = Some(effective);
-        Ok(effective)
+        let effective = current_epoch
+            .checked_add(RESUME_ACTIVATION_DELAY_EPOCHS)
+            .ok_or(PresenceError::EpochOverflow)?;
+        let chosen = st
+            .resume_effective_epoch
+            .map_or(effective, |prev| prev.min(effective));
+        st.resume_effective_epoch = Some(chosen);
+        Ok(chosen)
     }
 
     /// Verify and apply a 1% stake slash for signing two different [`PresenceClass`]
@@ -551,6 +655,8 @@ impl PresenceTracker {
             .get_mut(&evidence.first.validator)
             .ok_or(PresenceError::UnknownValidator)?;
         if st.slashed_double_sign {
+            st.suspended = true;
+            st.resume_effective_epoch = None;
             return Ok(0);
         }
         let slash_atoms = u64::try_from(
@@ -561,6 +667,7 @@ impl PresenceTracker {
         st.stake_atoms = st.stake_atoms.saturating_sub(slash_atoms);
         st.slashed_double_sign = true;
         st.suspended = true;
+        st.resume_effective_epoch = None;
         Ok(slash_atoms)
     }
 
@@ -632,8 +739,10 @@ pub enum PresenceError {
     InvalidBitmapTrailingBits,
     InvalidSignature(String),
     InvalidDoubleSignEvidence,
+    DuplicateRosterValidator,
     UnknownValidator,
     ValidatorNotSuspended,
+    ValidatorSlashed,
 }
 
 #[cfg(test)]
@@ -828,5 +937,231 @@ mod tests {
         assert_eq!(notices[0].validator, v);
         assert_eq!(notices[0].missed_epochs, 3);
         assert_eq!(notices[0].stake_slashed_atoms, 0);
+    }
+
+    #[test]
+    fn wave3_presence_rejects_resume_and_epoch_unsuspension_for_slashed_double_signer() {
+        // Case A: double-sign slash followed by apply_resume_validator MUST fail.
+        let mut tracker = PresenceTracker::new(3, 50);
+        let (val, sk, pk) = keypair_for(10);
+        tracker.register_validator(val, PresenceClass::Mobile, 100_000, 0);
+        tracker.register_validator_bls_key(&val, &pk);
+
+        let ev = PresenceDoubleSignEvidence {
+            first: sign_presence_signal(val, CHAIN_ID, 7, PresenceClass::Mobile, [1; 32], &sk),
+            second: sign_presence_signal(val, CHAIN_ID, 7, PresenceClass::Full, [2; 32], &sk),
+        };
+        assert_eq!(
+            tracker.slash_double_sign(&ev, &pk, CHAIN_ID).unwrap(),
+            1_000
+        );
+        assert!(
+            tracker.apply_resume_validator(&val, 10).is_err(),
+            "equivocation-slashed validator must not be allowed to schedule resume"
+        );
+        tracker.advance_epoch(11).unwrap();
+        assert!(
+            tracker.state_of(&val).unwrap().suspended,
+            "slashed validator must remain suspended across epoch rollover"
+        );
+
+        // Case B: pre-scheduled resume before double-sign slash MUST be cleared
+        // on slash so advance_epoch cannot auto-reactivate the slashed validator.
+        let mut tracker2 = PresenceTracker::new(3, 50);
+        let (val2, sk2, pk2) = keypair_for(11);
+        tracker2.register_validator(val2, PresenceClass::Full, 100_000, 0);
+        tracker2.register_validator_bls_key(&val2, &pk2);
+        tracker2.advance_epoch(576).unwrap();
+        assert!(tracker2.state_of(&val2).unwrap().suspended);
+        assert_eq!(tracker2.apply_resume_validator(&val2, 600).unwrap(), 601);
+
+        let ev2 = PresenceDoubleSignEvidence {
+            first: sign_presence_signal(val2, CHAIN_ID, 8, PresenceClass::Mobile, [3; 32], &sk2),
+            second: sign_presence_signal(val2, CHAIN_ID, 8, PresenceClass::Full, [4; 32], &sk2),
+        };
+        assert_eq!(
+            tracker2.slash_double_sign(&ev2, &pk2, CHAIN_ID).unwrap(),
+            1_000
+        );
+        tracker2.advance_epoch(601).unwrap();
+        assert!(
+            tracker2.state_of(&val2).unwrap().suspended,
+            "pre-existing resume_effective_epoch must not un-suspend a slashed double-signer"
+        );
+    }
+
+    #[test]
+    fn wave3_presence_rejects_duplicate_roster_identity_sum_unregistered_key_and_suspended_rewards()
+    {
+        let (v1, sk1, pk1) = keypair_for(20);
+        let (v2, _sk2, _pk2) = keypair_for(21);
+        let (_attacker, attacker_sk, attacker_pk) = keypair_for(22);
+
+        // 1. Duplicate address in roster MUST be rejected by verify_single_pairing.
+        let sig1 = sign_presence_signal(v1, CHAIN_ID, 0, PresenceClass::Full, [1; 32], &sk1);
+        let dup_roster = vec![(v1, pk1.clone()), (v1, pk1.clone())];
+        let dup_agg = PresenceAggregate {
+            window: 0,
+            class: PresenceClass::Full,
+            bitmap: vec![0b0000_0001],
+            aggregate_sig: sig1.sig_bls.clone(),
+        };
+        assert!(
+            dup_agg
+                .verify_single_pairing(&dup_roster, CHAIN_ID)
+                .is_err(),
+            "duplicate validator address in roster must be rejected"
+        );
+
+        // 2. Rogue-key cancellation (pk + (-pk) == identity) MUST be rejected.
+        let neg_pk1 = G2Affine::from(-G2Projective::from(decode_g2(&pk1).unwrap()))
+            .to_compressed()
+            .to_vec();
+        let rogue_roster = vec![(v1, pk1.clone()), (v2, neg_pk1)];
+        let id_sig = G1Affine::identity().to_compressed().to_vec();
+        let rogue_agg = PresenceAggregate {
+            window: 0,
+            class: PresenceClass::Full,
+            bitmap: vec![0b0000_0011],
+            aggregate_sig: id_sig,
+        };
+        assert!(
+            rogue_agg
+                .verify_single_pairing(&rogue_roster, CHAIN_ID)
+                .is_err(),
+            "identity aggregate public key / signature must be rejected"
+        );
+
+        // 3. apply_aggregate MUST bind roster key to registered st.bls_public_key.
+        let mut tracker = PresenceTracker::new(3, 50);
+        tracker.register_validator(v1, PresenceClass::Full, 100_000, 0);
+        tracker.register_validator_bls_key(&v1, &pk1);
+        let forged_sig =
+            sign_presence_signal(v1, CHAIN_ID, 0, PresenceClass::Full, [2; 32], &attacker_sk);
+        let forged_roster = vec![(v1, attacker_pk)];
+        let forged_agg = PresenceAggregate::build(
+            0,
+            PresenceClass::Full,
+            &forged_roster,
+            &[forged_sig],
+            CHAIN_ID,
+        )
+        .unwrap();
+        assert!(
+            tracker
+                .apply_aggregate(&forged_agg, &forged_roster, CHAIN_ID, 0)
+                .is_err(),
+            "apply_aggregate must reject roster key mismatching registered BLS key"
+        );
+
+        // 4. Suspended validator must NOT accrue custody reward windows via
+        //    apply_aggregate or record_full_seat_participation.
+        tracker.advance_epoch(576).unwrap();
+        assert!(tracker.state_of(&v1).unwrap().suspended);
+        let honest_roster = vec![(v1, pk1)];
+        let sig_576 = sign_presence_signal(v1, CHAIN_ID, 576, PresenceClass::Full, [3; 32], &sk1);
+        let agg_576 = PresenceAggregate::build(
+            576,
+            PresenceClass::Full,
+            &honest_roster,
+            &[sig_576],
+            CHAIN_ID,
+        )
+        .unwrap();
+        let _ = tracker.apply_aggregate(&agg_576, &honest_roster, CHAIN_ID, 576);
+        tracker.record_full_seat_participation(&v1, 577);
+        assert_eq!(
+            tracker.state_of(&v1).unwrap().seen_windows_in_period,
+            0,
+            "suspended validator must not earn custody presence windows"
+        );
+        assert_eq!(tracker.reward_multiplier_ppm(&v1, 10), 0);
+    }
+
+    #[test]
+    fn wave3_presence_rejects_zero_address_and_overwrite_of_slashed_validator_on_reregister() {
+        let mut tracker = PresenceTracker::new(3, 50);
+        tracker.register_validator(Address::zero(), PresenceClass::Full, 50_000, 0);
+        assert!(
+            tracker.state_of(&Address::zero()).is_none(),
+            "zero address must not be registered in PresenceTracker"
+        );
+
+        let (val, sk, pk) = keypair_for(30);
+        tracker.register_validator(val, PresenceClass::Mobile, 100_000, 0);
+        tracker.register_validator_bls_key(&val, &pk);
+        let ev = PresenceDoubleSignEvidence {
+            first: sign_presence_signal(val, CHAIN_ID, 12, PresenceClass::Mobile, [1; 32], &sk),
+            second: sign_presence_signal(val, CHAIN_ID, 12, PresenceClass::Full, [2; 32], &sk),
+        };
+        assert_eq!(
+            tracker.slash_double_sign(&ev, &pk, CHAIN_ID).unwrap(),
+            1_000
+        );
+
+        // Re-registering an existing validator must NOT wipe its slash/suspension record.
+        tracker.register_validator(val, PresenceClass::Mobile, 100_000, 50);
+        let st = tracker.state_of(&val).unwrap();
+        assert!(
+            st.slashed_double_sign,
+            "slash flag must survive re-register"
+        );
+        assert!(st.suspended, "suspension must survive re-register");
+        assert_eq!(st.stake_atoms, 99_000, "slashed stake must not be restored");
+        assert_eq!(
+            st.bls_public_key, pk,
+            "registered BLS key must not be wiped"
+        );
+    }
+
+    #[test]
+    fn wave3_presence_rejects_u64_max_zero_delay_resume_and_bounds_gossip_inbox() {
+        let mut tracker = PresenceTracker::new(3, 50);
+        let (val, sk, pk) = keypair_for(40);
+        tracker.register_validator(val, PresenceClass::Full, 50_000, 0);
+        tracker.advance_epoch(576).unwrap();
+
+        // u64::MAX must fail with EpochOverflow instead of 0-epoch same-epoch activation.
+        assert_eq!(
+            tracker.apply_resume_validator(&val, u64::MAX),
+            Err(PresenceError::EpochOverflow)
+        );
+        // Repeated apply_resume_validator must not postpone an earlier scheduled resume.
+        assert_eq!(tracker.apply_resume_validator(&val, 600).unwrap(), 601);
+        assert_eq!(tracker.apply_resume_validator(&val, 700).unwrap(), 601);
+
+        // PresenceGossipInbox must reject zero validator address.
+        let mut inbox = PresenceGossipInbox::default();
+        let zero_sig = sign_presence_signal(
+            Address::zero(),
+            CHAIN_ID,
+            1,
+            PresenceClass::Mobile,
+            [9; 32],
+            &sk,
+        );
+        assert!(
+            inbox.ingest(zero_sig, &pk, CHAIN_ID).is_err(),
+            "zero validator address must be rejected by PresenceGossipInbox"
+        );
+
+        // PresenceGossipInbox must stay bounded at <= 65_536 entries under flood.
+        let template = sign_presence_signal(val, CHAIN_ID, 0, PresenceClass::Mobile, [5; 32], &sk);
+        for w in 0..65_536u64 {
+            let mut s = template.clone();
+            s.window = w;
+            inbox.seen.insert((val, w), s);
+        }
+        let fresh =
+            sign_presence_signal(val, CHAIN_ID, 70_000, PresenceClass::Mobile, [6; 32], &sk);
+        assert_eq!(
+            inbox.ingest(fresh, &pk, CHAIN_ID).unwrap(),
+            GossipIngestOutcome::Accepted
+        );
+        assert!(
+            inbox.seen.len() <= 65_536,
+            "PresenceGossipInbox::seen must not grow past its cap (got {})",
+            inbox.seen.len()
+        );
     }
 }

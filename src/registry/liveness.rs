@@ -75,8 +75,24 @@ impl LivenessTracker {
 
     /// `ResumeValidator`: lift the suspension one epoch later (section
     /// 7.8.7). The mobile app sends this by itself.
+    ///
+    /// Only an already-suspended non-zero validator may schedule a resume.
+    /// Repeated calls preserve the earliest scheduled activation epoch, and
+    /// `u64::MAX` is ignored so it cannot collide with the unscheduled sentinel.
     pub fn request_resume(&mut self, validator: &Address, epoch: u64) {
-        self.reported.insert(*validator, epoch.saturating_add(1));
+        if *validator == Address::zero() {
+            return;
+        }
+        let Some(slot) = self.reported.get_mut(validator) else {
+            return;
+        };
+        let Some(effective) = epoch.checked_add(1) else {
+            return;
+        };
+        if effective == u64::MAX {
+            return;
+        }
+        *slot = (*slot).min(effective);
     }
 
     /// Apply resumes whose epoch has come; returns the reactivated
@@ -87,7 +103,7 @@ impl LivenessTracker {
         let due: Vec<Address> = self
             .reported
             .iter()
-            .filter(|(_, resume)| **resume <= epoch)
+            .filter(|(_, resume)| **resume != u64::MAX && **resume <= epoch)
             .map(|(addr, _)| *addr)
             .collect();
         for addr in &due {
@@ -129,6 +145,9 @@ impl LivenessTracker {
         let expected_set: std::collections::BTreeSet<Address> = expected.iter().copied().collect();
 
         for validator in &expected_set {
+            if *validator == Address::zero() {
+                continue;
+            }
             if participated(validator) {
                 // Reset on participation (consecutive, not cumulative).
                 self.missed.remove(validator);
@@ -171,6 +190,9 @@ impl LivenessTracker {
         let expected_set: BTreeSet<Address> = expected.iter().copied().collect();
 
         for validator in &expected_set {
+            if *validator == Address::zero() {
+                continue;
+            }
             if participated(validator) {
                 self.missed.remove(validator);
                 self.streak_start_epoch.remove(validator);
@@ -375,5 +397,77 @@ mod tests {
         for e in 1..=20 {
             assert!(t.record_epoch(e, &[v], |_| false, &p).is_empty());
         }
+    }
+
+    #[test]
+    fn wave3_liveness_rejects_request_resume_for_unsuspended_zero_and_sentinel_overflow() {
+        let mut t = LivenessTracker::new();
+        let active = addr(1);
+        let empty_root = t.root();
+
+        // Calling request_resume for an active (unsuspended) validator or zero
+        // address must NOT insert them into `reported` or alter consensus root.
+        t.request_resume(&active, 10);
+        t.request_resume(&Address::zero(), 10);
+        assert!(
+            !t.is_suspended(&active),
+            "unsuspended validator must not become suspended via request_resume"
+        );
+        assert!(
+            !t.is_suspended(&Address::zero()),
+            "zero address must not enter reported map"
+        );
+        assert_eq!(t.root(), empty_root);
+        assert!(t.activate_due_resumes(11).is_empty());
+
+        // For an actually suspended validator, repeating request_resume later
+        // or at u64::MAX must not postpone or cancel an earlier scheduled resume.
+        let p = params(1);
+        assert_eq!(t.record_epoch(1, &[active], |_| false, &p), vec![active]);
+        t.request_resume(&active, 5); // scheduled for epoch 6
+        t.request_resume(&active, 100); // must not postpone past 6
+        t.request_resume(&active, u64::MAX); // must not overwrite with sentinel
+        assert!(t.activate_due_resumes(5).is_empty());
+        assert_eq!(t.activate_due_resumes(6), vec![active]);
+    }
+
+    #[test]
+    fn wave3_liveness_rejects_u64_max_sentinel_reactivation_in_activate_due_resumes() {
+        let mut t = LivenessTracker::new();
+        let p = params(1);
+        let v = addr(2);
+
+        // Suspend `v` without ever calling `request_resume`.
+        assert_eq!(t.record_epoch(1, &[v], |_| false, &p), vec![v]);
+        assert!(t.is_suspended(&v));
+
+        // Even at epoch u64::MAX, a validator that never requested a resume
+        // (stored with u64::MAX sentinel) must NOT be reactivated.
+        let due = t.activate_due_resumes(u64::MAX);
+        assert!(
+            due.is_empty(),
+            "never-resumed validator must not activate at u64::MAX sentinel"
+        );
+        assert!(t.is_suspended(&v));
+    }
+
+    #[test]
+    fn wave3_liveness_rejects_zero_address_in_record_epoch_and_suspension_epoch() {
+        let mut t = LivenessTracker::new();
+        let p = params(1);
+        let zero = Address::zero();
+
+        let suspended = t.record_epoch(1, &[zero], |_| false, &p);
+        assert!(suspended.is_empty(), "zero address must not be suspended");
+        assert_eq!(t.missed_count(&zero), 0);
+        assert!(!t.is_suspended(&zero));
+        assert!(t.is_empty());
+
+        let notices = t.record_suspension_epoch(2, &[zero], |_| false, 1);
+        assert!(
+            notices.is_empty(),
+            "zero address must not emit a SuspensionNotice"
+        );
+        assert!(t.is_empty());
     }
 }
