@@ -80,9 +80,14 @@ impl EducationArtifact {
                 "contributor cannot be zero",
             ));
         }
-        if self.content_ref.content_id.digest == [0u8; 32] {
+        if self.content_ref.content_id.digest == [0u8; 32] || self.content_ref.content_id.len == 0 {
             return Err(EducationDomainError::InvalidArtifact(
-                "content_id cannot be zero",
+                "content_id cannot be zero or empty",
+            ));
+        }
+        if self.object_commitment == [0u8; 32] {
+            return Err(EducationDomainError::InvalidArtifact(
+                "object_commitment cannot be zero",
             ));
         }
         if self.metadata_hash == [0u8; 32] {
@@ -114,9 +119,14 @@ impl EducationArtifact {
             EducationVisibility::EducatorOnly => 2,
             EducationVisibility::PeerOnly => 3,
         };
+        let cid_kind_tag: u8 = match self.content_ref.content_id.kind {
+            crate::storage::bud3::content_id::ContentIdKind::Public => 1,
+            crate::storage::bud3::content_id::ContentIdKind::Sealed => 2,
+        };
         hash_fields_bytes(&[
             DOMAIN_EDUCATION_ARTIFACT,
             self.contributor.as_bytes(),
+            &[cid_kind_tag],
             &self.content_ref.content_id.digest,
             &self.content_ref.content_id.len.to_le_bytes(),
             &self.object_commitment,

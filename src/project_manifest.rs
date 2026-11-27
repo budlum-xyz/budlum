@@ -296,14 +296,28 @@ impl ProjectManifest {
             return Err(ProjectManifestError::ExternalNetworkAccessNotAllowed);
         }
         self.budl_package.validate()?;
+        let mut seen_proof_names = std::collections::BTreeSet::new();
         for fixture in &self.proof_fixtures {
             fixture.validate()?;
+            if !seen_proof_names.insert(fixture.name.as_str()) {
+                return Err(ProjectManifestError::InvalidLabel {
+                    field: "proof_fixture.name",
+                    value: fixture.name.clone(),
+                });
+            }
         }
         for fixture in &self.pollen_fixtures {
             fixture.validate()?;
         }
+        let mut seen_intents = std::collections::BTreeSet::new();
         for fixture in &self.relayer_policy_fixtures {
             fixture.validate()?;
+            if !seen_intents.insert(fixture.intent_kind.as_str()) {
+                return Err(ProjectManifestError::InvalidLabel {
+                    field: "relayer_policy_fixture.intent_kind",
+                    value: fixture.intent_kind.clone(),
+                });
+            }
         }
         if self.sdk_features.is_empty() {
             return Err(ProjectManifestError::NoSdkFeatures);
