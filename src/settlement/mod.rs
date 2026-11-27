@@ -8,6 +8,7 @@ pub mod domains;
 pub mod finality_gate;
 pub mod global_block;
 pub mod liquidation_proof;
+pub mod notary;
 pub mod pq_anchor;
 pub mod pq_anchor_verify;
 pub mod proof_market;
@@ -55,6 +56,11 @@ pub use liquidation_proof::{
     ProvenLiquidationResult, ProvenReserveObservation, LIQUIDATION_PENALTY_BPS, LIQ_BONUS_MAX_BPS,
     LIQ_CLOSE_FACTOR_MAX_BPS, LIQ_RESERVE_LEAF_TAG, MAX_BATCH_SIZE, MAX_OBSERVATIONS,
     MAX_TWAP_EPOCHS, MIN_TWAP_EPOCHS,
+};
+pub use notary::{
+    anchor_notary_entries, verify_notary_proof_offline, NotaryAnchorRequest, NotaryEntry,
+    NotaryError, NotaryInclusionProof, NotaryTimestampProof, SealAnchorInclusionProof,
+    StaticSealKeySet, VerifiedNotaryTimestamp,
 };
 pub use pq_anchor::{
     aggregate_finality_roots, anchor_due, anchor_leaf_digest, anchor_payload_for, assemble_anchor,

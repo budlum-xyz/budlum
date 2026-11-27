@@ -84,6 +84,12 @@ impl NoteRegistry {
     /// Add a newly created note commitment. A duplicate commitment or an already
     /// spent nullifier is refused.
     pub fn insert(&mut self, note: &PrivacyNote) -> Result<(), String> {
+        if note.commitment == [0u8; 32] || note.nullifier == [0u8; 32] {
+            return Err("note commitment and nullifier must be non-zero".into());
+        }
+        if note.commitment == note.nullifier {
+            return Err("note commitment and nullifier must be distinct".into());
+        }
         if self.notes.contains_key(&note.commitment) {
             return Err("note commitment already exists".into());
         }
@@ -216,6 +222,29 @@ mod tests {
             .insert(&PrivacyNote {
                 commitment: h(9),
                 nullifier: h(2)
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn zero_or_self_aliasing_privacy_note_is_refused() {
+        let mut r = NoteRegistry::new();
+        assert!(r
+            .insert(&PrivacyNote {
+                commitment: [0u8; 32],
+                nullifier: h(2),
+            })
+            .is_err());
+        assert!(r
+            .insert(&PrivacyNote {
+                commitment: h(1),
+                nullifier: [0u8; 32],
+            })
+            .is_err());
+        assert!(r
+            .insert(&PrivacyNote {
+                commitment: h(5),
+                nullifier: h(5),
             })
             .is_err());
     }

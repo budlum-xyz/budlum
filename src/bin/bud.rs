@@ -297,6 +297,63 @@ enum Command {
         #[arg(long)]
         epoch: u64,
     },
+    /// Quantum-safe hash-only notary timestamps chained to SLH-DSA Root Seals.
+    Notary {
+        #[command(subcommand)]
+        action: NotaryAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum NotaryAction {
+    /// Anchor a 32-byte digest into an offline-verifiable SLH-DSA-SHAKE-256s Root Seal proof
+    /// (devnet/testnet software seal key mode).
+    Anchor {
+        /// 32-byte digest to notarize (hex, optional `0x` prefix).
+        digest: String,
+        /// Optional human-readable label (<= 256 bytes, no control bytes).
+        #[arg(long, default_value = "")]
+        label: String,
+        /// Chain identifier committed into the anchor and Root Seal.
+        #[arg(long, default_value_t = 45261)]
+        chain_id: u64,
+        /// Block height of the notarized entry (must be positive).
+        #[arg(long, default_value_t = 360)]
+        height: u64,
+        /// Key epoch stamped on the Root Seal.
+        #[arg(long, default_value_t = 1)]
+        key_epoch: u32,
+        /// Key slot index stamped on the Root Seal.
+        #[arg(long, default_value_t = 0)]
+        key_index: u8,
+        /// Optional 96-byte SLH-DSA-SHAKE-256s seed hex for deterministic devnet/test sealing;
+        /// omits to generate a fresh OS-RNG key.
+        #[arg(long)]
+        seed_hex: Option<String>,
+        /// Output JSON file path for the self-contained proof bundle (prints to stdout if omitted).
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+    /// Verify a notary timestamp proof completely offline using only SHA3-256 and SLH-DSA-SHAKE-256s.
+    Verify {
+        /// Path to the JSON `NotaryTimestampProof` bundle.
+        proof: std::path::PathBuf,
+        /// Pinned 64-byte SLH-DSA-SHAKE-256s public key hex (optional `0x` prefix).
+        #[arg(long, required = true)]
+        seal_pubkey: String,
+        /// Optional expected 32-byte document digest hex (optional `0x` prefix).
+        #[arg(long)]
+        digest: Option<String>,
+        /// Expected chain identifier.
+        #[arg(long, default_value_t = 45261)]
+        chain_id: u64,
+        /// Expected seal key epoch.
+        #[arg(long, default_value_t = 1)]
+        key_epoch: u32,
+        /// Expected seal key slot index.
+        #[arg(long, default_value_t = 0)]
+        key_index: u8,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4711,10 +4768,141 @@ fn main() {
             shard,
         } => run_deal_consent_digest(*chain_id, payer, *nonce, deal, manifest, shard),
         Command::RewardPool { epoch } => run_reward_pool(*epoch),
+        Command::Notary { action } => run_notary(action),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
+    }
+}
+
+fn run_notary(action: &NotaryAction) -> Result<(), String> {
+    use budlum_core::settlement::notary::{
+        anchor_notary_entries, verify_notary_proof_offline, NotaryAnchorRequest, NotaryEntry,
+        NotaryError, NotaryInclusionProof, NotaryTimestampProof, SealAnchorInclusionProof,
+        StaticSealKeySet, VerifiedNotaryTimestamp,
+    };
+    use budlum_core::settlement::pq_anchor::AnchorMode;
+    use budlum_core::settlement::root_seal::{SealSigner, SoftwareSealSigner, ROOT_SEAL_INTERVAL};
+
+    let format_notary_err = |err: NotaryError| format!("notary error: {err}");
+
+    match action {
+        NotaryAction::Anchor {
+            digest,
+            label,
+            chain_id,
+            height,
+            key_epoch,
+            key_index,
+            seed_hex,
+            out,
+        } => {
+            let document_digest = parse_hex32_str(digest, "digest")?;
+            if *height == 0 {
+                return Err("height must be positive".to_string());
+            }
+            let seal_height = height
+                .div_ceil(ROOT_SEAL_INTERVAL)
+                .saturating_mul(ROOT_SEAL_INTERVAL);
+            let signer = match seed_hex {
+                Some(raw) => {
+                    let trimmed = raw.trim().strip_prefix("0x").unwrap_or(raw.trim());
+                    let seed =
+                        hex::decode(trimmed).map_err(|e| format!("invalid --seed-hex: {e}"))?;
+                    SoftwareSealSigner::from_seed(&seed)
+                        .map_err(|e| format!("invalid SLH-DSA seed: {e}"))?
+                }
+                None => SoftwareSealSigner::generate()
+                    .map_err(|e| format!("failed to generate SLH-DSA key: {e}"))?,
+            };
+            let entry = NotaryEntry {
+                document_digest,
+                height: *height,
+                label: label.clone(),
+            };
+            let req = NotaryAnchorRequest {
+                mode: AnchorMode::Devnet,
+                chain_id: *chain_id,
+                anchor_height: *height,
+                seal_height,
+                key_epoch: *key_epoch,
+                key_index: *key_index,
+                previous_seal: None,
+                extra_anchor_leaves: &[],
+                extra_period_anchors: &[],
+            };
+            let proof =
+                anchor_notary_entries(&req, &[entry], 0, &signer).map_err(format_notary_err)?;
+            let notary_part: &NotaryInclusionProof = &proof.notary_proof;
+            let seal_part: &SealAnchorInclusionProof = &proof.seal_proof;
+            let _ = (notary_part.leaf_count, seal_part.anchor_count);
+            let json = serde_json::to_string_pretty(&proof)
+                .map_err(|e| format!("serialize notary proof: {e}"))?;
+            let pubkey_hex = hex::encode(signer.public_key());
+            let seal_digest_hex = hex::encode(proof.seal.digest());
+            if let Some(path) = out {
+                std::fs::write(path, &json)
+                    .map_err(|e| format!("write {}: {e}", path.display()))?;
+                println!(
+                    "{{\"status\":\"anchored\",\"mode\":\"devnet\",\"digest\":\"0x{}\",\"height\":{},\"seal_height\":{},\"seal_digest\":\"0x{}\",\"seal_pubkey\":\"0x{}\",\"proof_path\":\"{}\"}}",
+                    hex::encode(document_digest),
+                    height,
+                    seal_height,
+                    seal_digest_hex,
+                    pubkey_hex,
+                    path.display()
+                );
+            } else {
+                eprintln!(
+                    "anchored digest=0x{} seal_height={} seal_digest=0x{} seal_pubkey=0x{}",
+                    hex::encode(document_digest),
+                    seal_height,
+                    seal_digest_hex,
+                    pubkey_hex
+                );
+                println!("{json}");
+            }
+            Ok(())
+        }
+        NotaryAction::Verify {
+            proof: proof_path,
+            seal_pubkey,
+            digest,
+            chain_id,
+            key_epoch,
+            key_index,
+        } => {
+            let raw = std::fs::read_to_string(proof_path)
+                .map_err(|e| format!("read {}: {e}", proof_path.display()))?;
+            let proof: NotaryTimestampProof =
+                serde_json::from_str(&raw).map_err(|e| format!("parse notary proof: {e}"))?;
+            let pk_trimmed = seal_pubkey
+                .trim()
+                .strip_prefix("0x")
+                .unwrap_or(seal_pubkey.trim());
+            let pk_bytes =
+                hex::decode(pk_trimmed).map_err(|e| format!("invalid --seal-pubkey hex: {e}"))?;
+            let keys = StaticSealKeySet::new(*key_index, pk_bytes).map_err(format_notary_err)?;
+            let expected_digest = match digest {
+                Some(raw_digest) => Some(parse_hex32_str(raw_digest, "digest")?),
+                None => None,
+            };
+            let verified: VerifiedNotaryTimestamp =
+                verify_notary_proof_offline(&proof, expected_digest, *chain_id, &keys, *key_epoch)
+                    .map_err(format_notary_err)?;
+            println!(
+                "{{\"status\":\"valid\",\"assumption\":\"hash-only-slh-dsa-shake256s\",\"digest\":\"0x{}\",\"entry_height\":{},\"anchor_height\":{},\"seal_height\":{},\"latest_seal_height\":{},\"latest_seal_digest\":\"0x{}\",\"label\":{}}}",
+                hex::encode(verified.document_digest),
+                verified.entry_height,
+                verified.anchor_height,
+                verified.seal_height,
+                verified.latest_seal_height,
+                hex::encode(verified.latest_seal_digest),
+                serde_json::to_string(&verified.label).unwrap_or_else(|_| "\"\"".to_string())
+            );
+            Ok(())
+        }
     }
 }
 
