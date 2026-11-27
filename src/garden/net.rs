@@ -109,6 +109,21 @@ pub enum GardenRequest {
     /// Ask whether this caller's own key is pending, waiting, seated, or
     /// turned away in `HostApproval` mode, without exposing blocks or captions.
     AdmissionStatus,
+    /// An object as B.U.D. 3.0 parts: the record the coder produced and
+    /// its symbols. The peer rebuilds the object from these and keeps it
+    /// only when the result hashes to the record's content id.
+    ///
+    /// This is how a validator hands an object to the validators that will
+    /// hold it. Raw `PutObject` stays for a peer that holds bytes it never
+    /// coded, but nothing this node publishes leaves it uncoded.
+    ///
+    /// Last in the enum on purpose: bincode numbers variants by position,
+    /// so appending leaves every existing request tag where a running node
+    /// already expects it.
+    PutCodedObject {
+        record: Box<crate::storage::bud3::pipeline::ObjectRecord>,
+        symbols: Vec<crate::storage::bud3::fountain::Symbol>,
+    },
 }
 
 /// A response on the Garden protocol.
@@ -472,7 +487,9 @@ impl request_response::Codec for GardenCodec {
             0 => MAX_UNADMITTED_REQUEST_BYTES, // Hello
             2 | 5 => 64,                       // GetCommits | AdmissionStatus
             3 => 128,                          // GetObject
-            1 | 4 => MAX_REQUEST_BYTES,        // Gossip | PutObject
+            // Gossip | PutObject | PutCodedObject. Coded parts carry repair
+            // symbols, so the frame is larger than the object it rebuilds.
+            1 | 4 | 6 => MAX_REQUEST_BYTES,
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -1274,6 +1291,45 @@ where
 mod tests {
     use super::*;
     use crate::crypto::primitives::KeyPair;
+
+    /// The frame reader decides how many bytes a request may occupy from
+    /// the bincode variant tag alone, before it has read the request. That
+    /// mapping is positional, so inserting a variant anywhere but the end
+    /// silently gives one request another request's size limit. This nails
+    /// the numbering down so the next insertion fails here instead of in
+    /// the field.
+    #[test]
+    fn garden_request_variant_tags_are_where_the_frame_reader_expects() {
+        let tag_of = |request: &GardenRequest| -> u32 {
+            let bytes = bincode::serialize(request).unwrap();
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        };
+        assert_eq!(
+            tag_of(&GardenRequest::Hello {
+                chain_id: 1,
+                key: [0u8; 32],
+                invite_signature: Vec::new(),
+            }),
+            0
+        );
+        assert_eq!(tag_of(&GardenRequest::Gossip(Vec::new())), 1);
+        assert_eq!(
+            tag_of(&GardenRequest::GetCommits {
+                from_height: 0,
+                max: 1
+            }),
+            2
+        );
+        assert_eq!(
+            tag_of(&GardenRequest::GetObject {
+                content_id: [0u8; 32],
+                relay: false,
+            }),
+            3
+        );
+        assert_eq!(tag_of(&GardenRequest::PutObject { bytes: vec![1] }), 4);
+        assert_eq!(tag_of(&GardenRequest::AdmissionStatus), 5);
+    }
 
     #[test]
     fn garden_announced_address_must_name_the_announcing_validator() {
