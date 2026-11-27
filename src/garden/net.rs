@@ -121,6 +121,11 @@ pub enum GardenRequest {
     /// so appending leaves every existing request tag where a running node
     /// already expects it.
     PutCodedObject {
+        /// The Garden's name for the content. The record carries a
+        /// B.U.D. 3.0 digest, which is a different rule over a different
+        /// object, so the id the Garden will file this under travels with
+        /// it and the rebuild has to match it.
+        content_id: Hash32,
         record: Box<crate::storage::bud3::pipeline::ObjectRecord>,
         symbols: Vec<crate::storage::bud3::fountain::Symbol>,
     },

@@ -2076,11 +2076,15 @@ impl Node {
             GardenRequest::PutObject { bytes } => {
                 self.take_deposit(peer, bytes, channel, frame_budget).await;
             }
-            GardenRequest::PutCodedObject { record, symbols } => {
+            GardenRequest::PutCodedObject {
+                content_id,
+                record,
+                symbols,
+            } => {
                 // The decode is the admission test. Parts that do not
                 // rebuild, or rebuild into something else, never reach the
                 // disk and never touch a quota.
-                match self.store.rebuild_coded(&record, symbols) {
+                match self.store.rebuild_coded(&content_id, &record, symbols) {
                     Ok(bytes) => {
                         self.take_deposit(peer, bytes, channel, frame_budget).await;
                     }
@@ -3948,6 +3952,7 @@ impl Node {
             self.parts_served = self.parts_served.saturating_add(1);
             let request = match coded.clone() {
                 Some((record, symbols)) => GardenRequest::PutCodedObject {
+                    content_id,
                     record: Box::new(record),
                     symbols,
                 },
