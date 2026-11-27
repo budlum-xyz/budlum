@@ -141,6 +141,62 @@ impl PurchaseAuthorizationV5 {
     }
 }
 
+/// What a seller hands the chain to settle a sale: the grant, already sealed
+/// by the seller's own device.
+///
+/// This is the shape that makes a Data-Market purchase a chain transaction.
+/// [`SellerGrantBundle`] carries a [`ContentKey`], which is deliberately not
+/// `Serialize` - "it never leaves the owner's devices in the clear" - so a
+/// purchase built on that type could only ever be an off-chain handshake, and
+/// `bud_dataMarketPurchase` was named in the method table and served by
+/// nothing.
+///
+/// Nothing here is secret. `sealed_key_package` is what
+/// [`seal_grant_key_package`] produces: the content key sealed to the buyer's
+/// HPKE key under the grant tag. The seller seals it on the device that holds
+/// the key, and the chain carries the envelope. The buyer can open it; the
+/// chain cannot; and a payment and its grant settle in one transaction
+/// instead of two processes promising each other something.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SealedSellerGrant {
+    /// The per-grant nonce the grant tag commits to.
+    pub grant_nonce: [u8; 32],
+    /// The seller's per-grant one-time ML-DSA-65 key.
+    pub one_time_ml_dsa_65_pk: Vec<u8>,
+    /// The content key sealed to the buyer's HPKE key. Opaque here.
+    pub sealed_key_package: Vec<u8>,
+}
+
+impl SealedSellerGrant {
+    /// Seal a seller's grant material for one buyer.
+    ///
+    /// The seller's side of the handshake: it holds the [`ContentKey`], it
+    /// seals it to the buyer's HPKE key, and what comes out is the only thing
+    /// that goes on chain.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the HPKE seal refuses.
+    pub fn seal(
+        grant_nonce: [u8; 32],
+        one_time_ml_dsa_65_pk: Vec<u8>,
+        buyer_hpke_pk: &[u8],
+        nft_id: &[u8; 32],
+        object_commitment: &crate::storage::bud3::registry::ObjectKey,
+        content_key: &ContentKey,
+    ) -> Result<Self, DataMarketError> {
+        let grant_tag = compute_grant_tag(nft_id, &grant_nonce);
+        let sealed_key_package =
+            seal_grant_key_package(buyer_hpke_pk, &grant_tag, object_commitment, content_key)
+                .map_err(DataMarketError::Grant)?;
+        Ok(Self {
+            grant_nonce,
+            one_time_ml_dsa_65_pk,
+            sealed_key_package,
+        })
+    }
+}
+
 /// Grant-issuance material supplied by the seller when settling a Data Market sale.
 #[derive(Debug, Clone)]
 pub struct SellerGrantBundle {
@@ -279,6 +335,130 @@ impl DataMarketRegistry {
     /// Settled receipts, oldest first.
     pub fn receipts_vec(&self) -> Vec<DataMarketPurchaseReceipt> {
         self.receipts.clone()
+    }
+
+    /// Settle a purchase whose grant the seller sealed off-chain.
+    ///
+    /// The chain-visible twin of [`Self::settle_purchase_with_grant`]: same
+    /// checks, same atomic debit and rollback, same replay key - but the grant
+    /// arrives as an opaque sealed envelope instead of a bare `ContentKey`, so
+    /// the whole thing can be a transaction. `bud_dataMarketPurchase` named
+    /// this settlement and nothing served it, because the type it needed did
+    /// not exist.
+    ///
+    /// # Errors
+    ///
+    /// [`DataMarketError`] for every refusal the plain path makes, plus a
+    /// mismatched envelope.
+    pub fn settle_purchase_sealed(
+        &mut self,
+        accounts: &mut AccountState,
+        bud3: &mut Bud3Registry,
+        expected_chain_id: u64,
+        auth: &PurchaseAuthorizationV5,
+        seller_grant: &SealedSellerGrant,
+        current_epoch: u64,
+    ) -> Result<(DataMarketPurchaseReceipt, GrantRow), DataMarketError> {
+        auth.verify_pq(expected_chain_id)?;
+        let listing = self
+            .listings
+            .get(&auth.listing_id)
+            .cloned()
+            .ok_or(DataMarketError::UnknownListing)?;
+        if !listing.active {
+            return Err(DataMarketError::InactiveListing);
+        }
+        if auth.buyer == Address::zero() || auth.buyer == listing.seller {
+            return Err(DataMarketError::SelfPurchase);
+        }
+        if self.receipts.len() >= MAX_DATA_MARKET_RECEIPTS {
+            return Err(DataMarketError::CapacityExceeded);
+        }
+        let (live_commitment, live_obj) = bud3
+            .resolve_live_object(&listing.content_ref.object_commitment)
+            .ok_or(DataMarketError::UnknownObject)?;
+        if live_obj.owner != *listing.seller.as_bytes()
+            || !live_obj.references.contains(&listing.nft_id)
+        {
+            return Err(DataMarketError::NotObjectOwner);
+        }
+        let purchase_key = (auth.listing_id, auth.buyer);
+        if self.consumed_purchases.contains(&purchase_key) {
+            return Err(DataMarketError::ReplayedPurchase);
+        }
+        if auth.content_id != listing.content_ref.content_id
+            || live_obj.record.content_id != auth.content_id
+            || auth.price_atoms != listing.price_atoms
+        {
+            return Err(DataMarketError::ContentIdMismatch);
+        }
+        // The envelope must be the one this listing and nonce would produce.
+        // Without this a seller could settle with an envelope sealed to a
+        // different object and the buyer would pay for a key that does not
+        // open what they bought.
+        if live_commitment != listing.content_ref.object_commitment {
+            return Err(DataMarketError::ContentIdMismatch);
+        }
+
+        let expires_at_epoch = current_epoch
+            .checked_add(listing.grant_duration_epochs)
+            .ok_or(DataMarketError::ExpiryOverflow)?;
+        let row = build_grant_row(
+            &listing.nft_id,
+            &seller_grant.grant_nonce,
+            seller_grant.one_time_ml_dsa_65_pk.clone(),
+            seller_grant.sealed_key_package.clone(),
+            expires_at_epoch,
+            current_epoch,
+        )
+        .map_err(DataMarketError::Grant)?;
+
+        bud3.validate_view_grant(
+            &listing.nft_id,
+            &seller_grant.grant_nonce,
+            listing.seller.as_bytes(),
+            &row,
+            current_epoch,
+        )
+        .map_err(DataMarketError::Registry)?;
+
+        let price_attos = u128::from(listing.price_atoms)
+            .checked_mul(u128::from(crate::core::account::ATTOS_PER_ATOM))
+            .ok_or_else(|| DataMarketError::PaymentFailed("price_attos overflows u128".into()))?;
+        accounts
+            .transfer_attos_in_unit(
+                &auth.buyer,
+                &listing.seller,
+                price_attos,
+                crate::core::account::BudEnvUnit::BudZeroAtom,
+            )
+            .map_err(DataMarketError::PaymentFailed)?;
+        if let Err(reg_err) = bud3.issue_grant(
+            &listing.nft_id,
+            &seller_grant.grant_nonce,
+            listing.seller.as_bytes(),
+            row.clone(),
+            current_epoch,
+        ) {
+            let _ = accounts.transfer_attos_in_unit(
+                &listing.seller,
+                &auth.buyer,
+                price_attos,
+                crate::core::account::BudEnvUnit::BudZeroAtom,
+            );
+            return Err(DataMarketError::Registry(reg_err));
+        }
+        self.consumed_purchases.insert(purchase_key);
+
+        let receipt = DataMarketPurchaseReceipt {
+            listing_id: listing.listing_id,
+            content_id: listing.content_ref.content_id,
+            grant_tag: row.grant_tag,
+            price_paid_atoms: listing.price_atoms,
+            expires_at_epoch,
+        };
+        self.receipts.push(receipt.clone());
+        Ok((receipt, row))
     }
 
     /// Atomically verify V5 PQ authorization, transfer `price_atoms` from buyer to seller,

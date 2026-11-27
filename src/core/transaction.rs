@@ -4836,6 +4836,22 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
                     put_u64(out, *price_atoms);
                     put_u64(out, *grant_duration_epochs);
                 }
+                DataMarketTx::Purchase { auth, seller_grant } => {
+                    // The buyer's own signature is in the preimage, and so is
+                    // the sealed envelope: a seller who swapped the envelope
+                    // after the buyer signed would hand over a key that opens
+                    // a different object.
+                    put_u8(out, 1);
+                    put_fixed(out, &auth.listing_id);
+                    put_fixed(out, auth.buyer.as_bytes());
+                    put_fixed(out, &auth.content_id.digest);
+                    put_u64(out, auth.content_id.len);
+                    put_u64(out, auth.price_atoms);
+                    put_bytes(out, &auth.buyer_signature);
+                    put_fixed(out, &seller_grant.grant_nonce);
+                    put_bytes(out, &seller_grant.one_time_ml_dsa_65_pk);
+                    put_bytes(out, &seller_grant.sealed_key_package);
+                }
             }
         }
         SettlementTx::Denominate(denomination) => {

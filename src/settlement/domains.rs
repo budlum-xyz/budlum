@@ -2838,6 +2838,21 @@ pub enum DataMarketTx {
         /// How many epochs an access grant lasts.
         grant_duration_epochs: u64,
     },
+    /// Buy a listed object.
+    ///
+    /// The grant arrives sealed by the seller's own device
+    /// ([`crate::data_market::SealedSellerGrant`]): the content key is
+    /// HPKE-sealed to the buyer under the grant tag, so the chain carries an
+    /// envelope it cannot open and the buyer can. This is what makes the
+    /// purchase a transaction at all - `SellerGrantBundle` holds a bare
+    /// `ContentKey` that is deliberately not serializable, which confined
+    /// settlement to an off-chain handshake no door could reach.
+    Purchase {
+        /// The buyer's signed ML-DSA-87 authorisation.
+        auth: crate::data_market::PurchaseAuthorizationV5,
+        /// The seller's sealed grant envelope.
+        seller_grant: crate::data_market::SealedSellerGrant,
+    },
 }
 
 /// Executes a Data Market transaction.
@@ -2876,6 +2891,31 @@ fn execute_data_market_tx(
                     SettlementTxError::Refused(format!("data market listing: {err:?}"))
                 })?;
             Ok(())
+        }
+        DataMarketTx::Purchase { auth, seller_grant } => {
+            // The buyer signed with their own key; the sender must be that
+            // buyer, or a relayer could submit a signature the buyer made for
+            // a different purpose and call it a purchase.
+            if auth.buyer != ctx.sender {
+                return Err(SettlementTxError::Refused(String::from(
+                    "data market purchase: the authorisation must be the sender's",
+                )));
+            }
+            let mut market = std::mem::take(&mut state.settlement.data_market);
+            let mut bud3 = std::mem::take(&mut state.bud3_registry);
+            let result = market.settle_purchase_sealed(
+                state,
+                &mut bud3,
+                ctx.chain_id,
+                auth,
+                seller_grant,
+                state.epoch_index,
+            );
+            state.settlement.data_market = market;
+            state.bud3_registry = bud3;
+            result.map(|_| ()).map_err(|err: DataMarketError| {
+                SettlementTxError::Refused(format!("data market purchase: {err:?}"))
+            })
         }
     }
 }
