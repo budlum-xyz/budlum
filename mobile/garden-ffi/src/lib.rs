@@ -209,10 +209,19 @@ impl GardenPhone {
 
     /// Open a six digit code that stands for this Garden's invite.
     ///
-    /// The code is answered on the local network for an hour. It is a
-    /// meeting point, not the invite itself: six digits cannot carry a
+    /// The code is answered for an hour and is written down, so closing
+    /// the app does not cancel a number somebody else is holding. It is
+    /// a meeting point, not the invite itself: six digits cannot carry a
     /// chain id, a genesis hash, a token and an address.
+    ///
+    /// A code already open and still good is handed back as it is rather
+    /// than replaced. Opening the screen twice used to mint a second
+    /// code and kill the first, which is how a person ends up reading
+    /// out digits that stopped working while they were speaking.
     pub fn open_code(&self) -> Result<GardenCode, GardenError> {
+        if let Some(live) = self.code_now() {
+            return Ok(live);
+        }
         let record = self
             .runtime
             .block_on(self.service.invite())
@@ -228,20 +237,34 @@ impl GardenPhone {
                 reason: "this Garden gave out no invite to stand behind a code".into(),
             })?;
         let code = rendezvous::fresh_code().map_err(|e| GardenError::Refused { reason: e })?;
-        let desk = rendezvous::Desk::open(code.clone(), record.clone())
+        let mut guard = self.desk.lock().unwrap_or_else(|e| e.into_inner());
+        // Drop and join any active desk first so the shared UDP port is freed
+        // before opening a fresh code.
+        *guard = None;
+        let desk = rendezvous::Desk::open_noted(&self.data_dir, code, record.clone())
             .map_err(|e| GardenError::Refused { reason: e })?;
         let answer = GardenCode {
             code: desk.code().to_owned(),
             seconds_left: desk.seconds_left(),
             record,
         };
-        *self.desk.lock().unwrap_or_else(|e| e.into_inner()) = Some(desk);
+        *guard = Some(desk);
         Ok(answer)
     }
 
     /// The code this phone is currently answering, if any is still good.
+    ///
+    /// Picks a written-down code back up on the first call after a
+    /// restart, so the hour continues where it was rather than starting
+    /// again from nothing.
     pub fn code_now(&self) -> Option<GardenCode> {
-        let desk = self.desk.lock().unwrap_or_else(|e| e.into_inner());
+        let mut desk = self.desk.lock().unwrap_or_else(|e| e.into_inner());
+        if desk.as_ref().is_some_and(rendezvous::Desk::expired) {
+            *desk = None;
+        }
+        if desk.is_none() {
+            *desk = rendezvous::Desk::resume(&self.data_dir);
+        }
         desk.as_ref().filter(|d| !d.expired()).map(|d| GardenCode {
             code: d.code().to_owned(),
             seconds_left: d.seconds_left(),
@@ -260,6 +283,16 @@ impl GardenPhone {
             Some(rendezvous::loopback_desk()),
         )
         .map_err(|reason| GardenError::Refused { reason })?;
+        // A phone can redeem its own code against its own desk while
+        // testing. Burn it here too, so the single-use rule holds on
+        // this side of the exchange as well as the answering side.
+        let guard = self.desk.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(desk) = guard.as_ref() {
+            if desk.code() == code.trim() {
+                desk.burn();
+            }
+        }
+        drop(guard);
         self.join(record, name)
     }
 
@@ -296,6 +329,7 @@ impl GardenPhone {
 
     /// Leave, and wipe the Garden from this phone.
     pub fn leave(&self) -> Result<GardenAnswer, GardenError> {
+        *self.desk.lock().unwrap_or_else(|e| e.into_inner()) = None;
         answer(self.runtime.block_on(self.service.leave()))
     }
 
@@ -362,7 +396,8 @@ impl GardenPhone {
     /// It tries the four things the phone has to be able to do, and it
     /// tries them for real: a file is written and read back, a key is made
     /// and used to sign, a socket is bound, and an object goes down the
-    /// B.U.D. 3.0 path and comes back. None of it touches the network.
+    /// B.U.D. 3.0 path and comes back after an eighth of its symbols have
+    /// been thrown away. None of it touches the network.
     pub fn self_test(&self) -> SelfTestReport {
         let started = std::time::Instant::now();
         let steps = vec![
@@ -543,7 +578,7 @@ fn check_network_listen() -> SelfTestStep {
 }
 
 fn check_object_round_trip() -> SelfTestStep {
-    let name = "code and rebuild a small object";
+    let name = "rebuild an object with symbols missing";
     match budlum_core::garden::self_test_object_round_trip() {
         Ok(()) => step(name, true, String::new()),
         Err(e) => step(name, false, e),
