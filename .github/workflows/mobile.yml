@@ -9,6 +9,18 @@ on:
       - "src/registry/mobile_runtime.rs"
       - "xtask/gates/src/gates/mobile_validator_apps.rs"
       - ".github/workflows/mobile.yml"
+  # A change under mobile/android used to be compiled on main only, so a pull
+  # request could rewrite the Garden screens without a compiler ever seeing
+  # them. No branch filter here on purpose: a stacked base (testnet-50 and
+  # whatever follows) must not silently drop the job the way a base allowlist
+  # drops a whole workflow.
+  pull_request:
+    paths:
+      - "mobile/android/**"
+      - "mobile/tools/**"
+      - "src/registry/mobile_runtime.rs"
+      - "xtask/gates/src/gates/mobile_validator_apps.rs"
+      - ".github/workflows/mobile.yml"
   workflow_dispatch:
 
 permissions:

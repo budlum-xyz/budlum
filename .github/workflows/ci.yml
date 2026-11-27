@@ -9,7 +9,7 @@ on:
     branches: [main]
   pull_request:
     # Run on the normal protected bases and on stacked continuation bases.
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, agg/phase-5-pcs-claims, agg-phase-2, agg/phase-2-sig-claims, agg/phase-3-recursion-stark, agg/phase-4-program-claims, audit-2026-11-16, audit-testnet-2026-11, budlum, budlum-4-you, budlum-osv-coverage-agent, budlum-unification, budlum-universal, diag-rehearsal-a, diag-rehearsal-b, ortak-teslim]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, testnet-50, garden, budlum-stack, agg/phase-5-pcs-claims, agg-phase-2, agg/phase-2-sig-claims, agg/phase-3-recursion-stark, agg/phase-4-program-claims, audit-2026-11-16, audit-testnet-2026-11, budlum, budlum-4-you, budlum-osv-coverage-agent, budlum-unification, budlum-universal, diag-rehearsal-a, diag-rehearsal-b, ortak-teslim]
   # A manual run on a snapshot ref (a branch or a tag that names one commit).
   # Its concurrency group is the snapshot ref, so a push to a stacked branch
   # cannot cancel it, and a head gets one complete result.

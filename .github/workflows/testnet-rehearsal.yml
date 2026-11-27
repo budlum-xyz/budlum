@@ -27,7 +27,7 @@ on:
   # because the list swap replaces one base branch with another instead of
   # adding a trigger.
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet]
+    branches: [main, consensus-of-consensuses, testnet, testnet-50]
   schedule:
     - cron: "17 8 * * *" # daily 08:17 UTC, outside the long heavy windows
   workflow_dispatch:

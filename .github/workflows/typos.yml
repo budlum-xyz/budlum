@@ -17,7 +17,7 @@ name: Typos
 
 on:
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, agg/phase-5-pcs-claims]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, testnet-50, garden, budlum-stack, agg/phase-5-pcs-claims]
   push:
     branches: [main]
   workflow_dispatch:

@@ -24,6 +24,10 @@ data class GardenState(
     val uses: Int = 0,
     val status: String = "This phone is in no Garden.",
     val preview: String = "",
+    /** The invite the preview is about; the Join screen joins THIS one. */
+    val previewRecord: String = "",
+    /** Why a preview could not be shown; the Join screen says it out loud. */
+    val previewRefusal: String = "",
     val message: String = "",
     val busy: Boolean = false,
     val selfTest: List<SelfTestStep> = emptyList(),
@@ -95,29 +99,49 @@ class GardenModel(
         readInvite(phone.invite())
     }
 
-    /** Show who is inviting before anybody agrees to anything. */
+    /**
+     * Show who is inviting before anybody agrees to anything.
+     *
+     * The card names the host as well as the validator, because the record
+     * also carries the addresses this phone would dial once it joins: a
+     * Garden is a set of peers, and the person is entitled to see which host
+     * and how many peers before the join, not after it. The core returns both
+     * as hex and as a count, so this file composes text and holds no rule.
+     *
+     * A record that cannot be read used to leave the screen silent: the
+     * preview stayed empty, the Join button never appeared, and a person who
+     * tapped an invite got no answer at all. It now says why.
+     */
     fun preview(record: String) {
         if (record.isBlank()) {
-            state = state.copy(preview = "")
+            state = state.copy(preview = "", previewRecord = "", previewRefusal = "")
             return
         }
         scope.launch {
-            val shown = withContext(Dispatchers.IO) {
+            val (shown, refusal) = withContext(Dispatchers.IO) {
                 runCatching {
                     val json = JSONObject(phone.readRecord(record.trim()).json)
+                    val host = json.optString("host").take(16)
                     val owner = json.optString("owner").take(16)
                     val until = stamp(json.optLong("expires_at_ms"))
-                    "validator " + owner + ", good until " + until
-                }.getOrElse { "" }
+                    val peers = json.optInt("peers", 0)
+                    Pair(
+                        "host " + host + ", validator " + owner + ", good until " + until +
+                            (if (peers > 0) ", " + peers + " peers" else ""),
+                        "",
+                    )
+                }.getOrElse {
+                    Pair("", "That invite could not be read. It may be expired or not for this phone.")
+                }
             }
-            state = state.copy(preview = shown)
+            state = state.copy(preview = shown, previewRecord = record.trim(), previewRefusal = refusal)
         }
     }
 
     fun join(record: String) = background {
         if (!selfTestPassed()) return@background
         val answer = phone.join(record.trim(), name)
-        state = state.copy(status = answer.json, preview = "")
+        state = state.copy(status = answer.json, preview = "", previewRecord = "", previewRefusal = "")
         readInvite(phone.invite())
         startValidating()
     }

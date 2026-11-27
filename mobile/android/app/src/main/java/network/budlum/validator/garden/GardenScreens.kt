@@ -242,12 +242,21 @@ private fun JoinScreen(model: GardenModel) {
                 }
             }
             // Section 5.12: an invite that arrived by a deliberate act is
-            // confirmed with one tap, and nothing happens without it.
+            // confirmed with one tap, and nothing happens without it. The
+            // invite may have arrived as a link rather than through this
+            // field, so the previewed record is the fallback: before this,
+            // tapping an invite link showed the card and then joined an
+            // empty string.
             Button(
-                onClick = { model.join(pasted) },
+                onClick = { model.join(pasted.ifBlank { state.previewRecord }) },
                 enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Join this Garden") }
+        }
+        // A refusal is not silence: an invite that cannot be read says so in
+        // the place the preview card would have been.
+        if (state.preview.isEmpty() && state.previewRefusal.isNotEmpty()) {
+            Text(state.previewRefusal, style = MaterialTheme.typography.bodySmall)
         }
         if (state.message.isNotEmpty()) {
             Text(state.message, style = MaterialTheme.typography.bodySmall)

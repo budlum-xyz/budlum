@@ -38,6 +38,9 @@ on:
   # of the pull-request path on purpose: one push was queueing more work than
   # the shared runner pool could finish, and the budget gate
   # `ci-pull-request-fanout-is-budgeted` pins that path's size.
+  # DELIBERATE-PR-EXCLUSION: two full cross compiler builds (120 min each)
+  # on the pull request path starve the shared runner pool; the weekly run
+  # measures the same source with a second compiler.
   schedule:
     # Once a week: two full builds are expensive, and backdoor classes do not
     # change on every commit.

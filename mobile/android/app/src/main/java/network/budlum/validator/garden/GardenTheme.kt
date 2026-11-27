@@ -18,9 +18,16 @@ import network.budlum.validator.R
  * Budlum's own surface, not Material's default one.
  *
  * Every colour here is a measured token from the design file
- * (Figma 7tASYNmfotWyIrXpJ4ktrW, by way of budlum.xyz `src/tokens.json`),
- * carried over by value. Nothing was picked by eye and nothing was
- * invented: a colour that is not in the tokens is not in this file.
+ * (Figma 7tASYNmfotWyIrXpJ4ktrW): 19 frames, 13 interface colours, counted
+ * by the canonical design token specification. Nothing
+ * was picked by eye and nothing was invented: a colour that is not in the
+ * tokens is not in this file, and the gate
+ * `workspace/scripts/garden_apk_kapi.py` fails the tree if one appears.
+ *
+ * There is no error hue in the design - the measured palette has no red at
+ * all. Error is therefore said with ink on paper plus a word, never with a
+ * colour alone (WCAG 1.4.1 also asks for that). A hue can only be added
+ * here after it is drawn in Figma and measured, never before.
  *
  * The radii come from the same place, and they matter more than they
  * look: panels and rows are square because the grid is the interface,
@@ -31,9 +38,18 @@ private val Ground = Color(0xFF060705)
 private val Sage = Color(0xFF98AE89)
 private val Ink = Color(0xFF060705)
 private val Chalk = Color(0xFFFFFFFF)
-private val Flow = Color(0xFF8C0000)
 private val Mute = Color(0xFFBDBDBD)
 private val Faint = Color(0xFFE6E6E6)
+
+/**
+ * Panel and field boundaries.
+ *
+ * This used to be [Mute], which is 1.83:1 on [Page]: a boundary that a
+ * person with low vision cannot see at all. The design's own panel stroke
+ * is this value, so the token was already there - the wrong one was being
+ * used for the job.
+ */
+private val Line = Color(0xFF333333)
 
 private val budlumColors = lightColorScheme(
     primary = Ground,
@@ -50,19 +66,23 @@ private val budlumColors = lightColorScheme(
     onSurface = Ink,
     surfaceVariant = Faint,
     onSurfaceVariant = Ink,
-    outline = Mute,
+    outline = Line,
     outlineVariant = Faint,
-    error = Flow,
+    error = Ground,
     onError = Chalk,
 )
 
 /** Panel and row square, control and chip 8, shell 12 - the token radii. */
+// Radii come from the measurement, like the colours do: 32 dp and 16 dp are
+// the two the file uses most (88 and 87 samples). 8 dp and 12 dp appeared
+// nowhere in it, so a shape that used them was drawing something the design
+// never showed. The flat corner stays for the status chips.
 private val budlumShapes = Shapes(
     extraSmall = RoundedCornerShape(0.dp),
-    small = RoundedCornerShape(8.dp),
-    medium = RoundedCornerShape(8.dp),
-    large = RoundedCornerShape(12.dp),
-    extraLarge = RoundedCornerShape(12.dp),
+    small = RoundedCornerShape(16.dp),
+    medium = RoundedCornerShape(16.dp),
+    large = RoundedCornerShape(32.dp),
+    extraLarge = RoundedCornerShape(32.dp),
 )
 
 private val budlum = FontFamily(Font(R.font.budlum_regular))
