@@ -1158,6 +1158,11 @@ mod tests {
             .verify(&evidence, &policy())
             .expect("golden verifies");
         assert_eq!(attestation.height, HEIGHT);
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &attestation,
+        )
+        .expect("Ouroboros Mithril shape");
         assert_eq!(attestation.state_root, STATE_ROOT);
         assert_eq!(attestation.finalized_at, EPOCH);
         assert_eq!(attestation.time_unit, TimeUnit::Epoch);
