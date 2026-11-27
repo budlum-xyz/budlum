@@ -4324,7 +4324,7 @@ mod tests {
     }
 
     #[test]
-    fn a_commitment_carrier_must_hold_a_relayer_bond() {
+    fn a_bondless_carrier_is_refused_by_the_proof_off_mainnet_and_by_the_door_on_it() {
         let mut state = AccountState::new();
         let domain = pow(1);
         register_domain(&mut state, domain.clone()).unwrap();
@@ -4341,7 +4341,37 @@ mod tests {
             &SettlementTx::SubmitCommitment(Box::new(payload)),
         )
         .unwrap_err();
-        assert_eq!(err, SettlementTxError::CarrierNotBonded);
+        // Off mainnet the bond is no longer the door: a bond-less carrier
+        // reaches the proof check, and it is the proof that refuses it. The
+        // mainnet half of the same rule is measured below, because that is
+        // the one chain where the bond still bounds who may carry at all.
+        assert_ne!(
+            err,
+            SettlementTxError::CarrierNotBonded,
+            "off mainnet a bond-less carrier was refused for membership, not for its proof"
+        );
+        let mut mainnet = AccountState::new();
+        register_domain(&mut mainnet, domain.clone()).unwrap();
+        mainnet.add_balance(&carrier, 1_000_000);
+        let mut mainnet_ctx = ctx(carrier);
+        mainnet_ctx.chain_id = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let mainnet_payload = VerifiedDomainCommitment {
+            commitment: commitment(&domain, &block(1, &genesis, 1), 1),
+            proof: FinalityProof::PoWHeaderChain { headers: vec![] },
+        };
+        let mainnet_err = execute_settlement_tx(
+            &mut mainnet,
+            &mainnet_ctx,
+            &SettlementTx::SubmitCommitment(Box::new(mainnet_payload)),
+        )
+        .unwrap_err();
+        assert_eq!(
+            mainnet_err,
+            SettlementTxError::CarrierNotBonded,
+            "mainnet admitted a bond-less carrier"
+        );
         assert_eq!(
             state
                 .settlement
@@ -4431,16 +4461,13 @@ mod tests {
 
     /// What the carrier bond actually stops.
     ///
-    /// `SubmitCommitment` refuses a carrier with no RELAYER bond before it
-    /// looks at the proof at all. If a bond-less carrier with a *bad* proof
-    /// is refused by the proof check as well, then the bond is not the thing
-    /// keeping bad proofs out - it is only keeping non-members out. That
-    /// distinction is the whole difference between a security gate and a
-    /// membership gate, and it is what a carrier-free admission mode would
-    /// remove.
+    /// Off mainnet a carrier with no RELAYER bond now reaches the proof
+    /// check, and it is the proof that refuses a bad one. That is the
+    /// distinction between a security gate and a membership gate, and it is
+    /// what `carrier_may_submit_without_bond` decided deliberately.
     ///
-    /// This test does not change the door. It measures what the door is
-    /// doing, so the answer is on the record rather than in an argument.
+    /// Mainnet is measured in the same test: there the door still refuses the
+    /// carrier for membership, because on mainnet spam has no one to bill.
     #[test]
     fn the_carrier_bond_guards_membership_not_correctness() {
         let mut state = AccountState::new();
@@ -4466,9 +4493,32 @@ mod tests {
         )
         .unwrap_err();
 
-        // The refusal is the carrier check, and it comes first. Recorded as a
-        // measurement: the door says "not bonded", not "proof is wrong".
-        assert_eq!(err, SettlementTxError::CarrierNotBonded);
+        // Off mainnet the carrier check no longer comes first, so the refusal
+        // is the proof check itself: the bond was never what kept bad proofs
+        // out, and this measurement now says so in the door's own words.
+        assert_ne!(
+            err,
+            SettlementTxError::CarrierNotBonded,
+            "off mainnet the bond is not the door; the proof is"
+        );
+        let mut mainnet = AccountState::new();
+        register_domain(&mut mainnet, domain.clone()).unwrap();
+        mainnet.add_balance(&carrier, 1_000_000);
+        let mut mainnet_ctx = ctx(carrier);
+        mainnet_ctx.chain_id = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let mainnet_payload = VerifiedDomainCommitment {
+            commitment: commitment(&domain, &block(1, &genesis, 1), 1),
+            proof: FinalityProof::PoWHeaderChain { headers: vec![] },
+        };
+        let mainnet_err = execute_settlement_tx(
+            &mut mainnet,
+            &mainnet_ctx,
+            &SettlementTx::SubmitCommitment(Box::new(mainnet_payload)),
+        )
+        .unwrap_err();
+        assert_eq!(mainnet_err, SettlementTxError::CarrierNotBonded);
         assert_eq!(
             state
                 .settlement
