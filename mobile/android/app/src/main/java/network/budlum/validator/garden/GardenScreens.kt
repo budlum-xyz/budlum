@@ -425,9 +425,12 @@ private fun JoinScreen(model: GardenModel) {
             if (state.preview.isNotEmpty()) {
                 // Section 5.12: an invite that arrived by a deliberate act
                 // is confirmed with one tap, and nothing happens without it.
+                // The tap joins the record the preview describes - the pasted
+                // text when it was pasted, and the link's record when the
+                // invite walked in through a link and the box is empty.
                 Button(
-                    onClick = { model.join(pasted) },
-                    enabled = !state.busy,
+                    onClick = { model.join(state.previewRecord) },
+                    enabled = !state.busy && state.previewRecord.isNotEmpty(),
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Join this Garden") }
             }

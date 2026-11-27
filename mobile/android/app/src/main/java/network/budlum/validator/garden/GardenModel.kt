@@ -24,6 +24,8 @@ data class GardenState(
     val uses: Int = 0,
     val status: String = "This phone is in no Garden.",
     val preview: String = "",
+    /** The record the preview describes, so confirming joins that record. */
+    val previewRecord: String = "",
     val message: String = "",
     val busy: Boolean = false,
     val selfTest: List<SelfTestStep> = emptyList(),
@@ -95,10 +97,18 @@ class GardenModel(
         readInvite(phone.invite())
     }
 
-    /** Show who is inviting before anybody agrees to anything. */
+    /**
+     * Show who is inviting before anybody agrees to anything.
+     *
+     * The record that produced the preview is kept next to it, because
+     * the confirming tap joins what was previewed. An invite can arrive
+     * pasted into the box or carried by a link straight into the app;
+     * the second one never touches the box, and joining whatever the
+     * box holds would join an empty string.
+     */
     fun preview(record: String) {
         if (record.isBlank()) {
-            state = state.copy(preview = "")
+            state = state.copy(preview = "", previewRecord = "")
             return
         }
         scope.launch {
@@ -110,14 +120,17 @@ class GardenModel(
                     "validator " + owner + ", good until " + until
                 }.getOrElse { "" }
             }
-            state = state.copy(preview = shown)
+            state = state.copy(
+                preview = shown,
+                previewRecord = if (shown.isEmpty()) "" else record.trim(),
+            )
         }
     }
 
     fun join(record: String) = background {
         if (!selfTestPassed()) return@background
         val answer = phone.join(record.trim(), name)
-        state = state.copy(status = answer.json, preview = "")
+        state = state.copy(status = answer.json, preview = "", previewRecord = "")
         readInvite(phone.invite())
         startValidating()
     }
@@ -135,7 +148,7 @@ class GardenModel(
      */
     fun returnToGarden() = background {
         val answer = phone.rejoin()
-        state = state.copy(status = answer.json, preview = "")
+        state = state.copy(status = answer.json, preview = "", previewRecord = "")
         readInvite(phone.invite())
         startValidating()
     }
