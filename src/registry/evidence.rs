@@ -594,7 +594,12 @@ impl SlashingReport {
                         .unwrap_or(trimmed);
                     body.to_ascii_lowercase()
                 };
-                if norm(block_hash_1) == norm(block_hash_2) {
+                let norm_1 = norm(block_hash_1);
+                let norm_2 = norm(block_hash_2);
+                if norm_1.is_empty() || norm_2.is_empty() {
+                    return Err(EvidenceError::MalformedBlockHash);
+                }
+                if norm_1 == norm_2 {
                     return Err(EvidenceError::NonConflictingHashes);
                 }
                 if signature_1.is_empty() || signature_2.is_empty() {
@@ -616,7 +621,7 @@ impl SlashingReport {
                 }
             }
             SlashingProof::Other { tag, data } => {
-                if tag.is_empty() {
+                if tag.trim().is_empty() {
                     return Err(EvidenceError::EmptyProofTag);
                 }
                 if tag.len() > MAX_EVIDENCE_TAG_LEN {
@@ -635,12 +640,71 @@ impl SlashingReport {
                 }
             }
             SlashingProof::InvalidSignatureSpam {
-                count, threshold, ..
+                count,
+                threshold,
+                samples,
+                ..
             } => {
                 // A spam proof must actually cross its own threshold, and the
                 // Threshold must be meaningful (non-zero).
                 if *threshold == 0 || *count < *threshold {
                     return Err(EvidenceError::InsufficientInvalidVoteCount);
+                }
+                let max_samples = crate::registry::invalid_vote::MAX_SPAM_REPORT_SAMPLES;
+                if samples.len() > max_samples {
+                    return Err(EvidenceError::FieldTooLarge {
+                        field: "samples",
+                        len: samples.len(),
+                        max: max_samples,
+                    });
+                }
+                let max_vote_preimage = crate::registry::invalid_vote::MAX_VOTE_PREIMAGE_BYTES;
+                let max_vote_sig = crate::registry::invalid_vote::MAX_VOTE_SIGNATURE_BYTES;
+                let max_auth_msg = max_vote_preimage + max_vote_sig + 64;
+                let max_total_bytes =
+                    crate::registry::invalid_vote::MAX_SAMPLES_BYTES_PER_VALIDATOR;
+                let mut total_bytes = 0usize;
+                for (auth_msg, auth_sig, vote_msg, bad_sig) in samples {
+                    if auth_msg.len() > max_auth_msg {
+                        return Err(EvidenceError::FieldTooLarge {
+                            field: "sample.auth_msg",
+                            len: auth_msg.len(),
+                            max: max_auth_msg,
+                        });
+                    }
+                    if auth_sig.len() > max_vote_sig {
+                        return Err(EvidenceError::FieldTooLarge {
+                            field: "sample.auth_sig",
+                            len: auth_sig.len(),
+                            max: max_vote_sig,
+                        });
+                    }
+                    if vote_msg.len() > max_vote_preimage {
+                        return Err(EvidenceError::FieldTooLarge {
+                            field: "sample.vote_msg",
+                            len: vote_msg.len(),
+                            max: max_vote_preimage,
+                        });
+                    }
+                    if bad_sig.len() > max_vote_sig {
+                        return Err(EvidenceError::FieldTooLarge {
+                            field: "sample.bad_sig",
+                            len: bad_sig.len(),
+                            max: max_vote_sig,
+                        });
+                    }
+                    total_bytes = total_bytes
+                        .saturating_add(auth_msg.len())
+                        .saturating_add(auth_sig.len())
+                        .saturating_add(vote_msg.len())
+                        .saturating_add(bad_sig.len());
+                    if total_bytes > max_total_bytes {
+                        return Err(EvidenceError::FieldTooLarge {
+                            field: "samples_bytes",
+                            len: total_bytes,
+                            max: max_total_bytes,
+                        });
+                    }
                 }
             }
         }
@@ -751,7 +815,12 @@ impl SlashingReport {
 /// signed. Used by `verify_double_sign`, which opens the signatures again
 /// since.
 fn decode_block_hash(hex_hash: &str) -> Result<[u8; 32], EvidenceError> {
-    let raw = hex::decode(hex_hash).map_err(|_| EvidenceError::MalformedBlockHash)?;
+    let trimmed = hex_hash.trim();
+    let body = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    let raw = hex::decode(body).map_err(|_| EvidenceError::MalformedBlockHash)?;
     raw.try_into()
         .map_err(|_| EvidenceError::MalformedBlockHash)
 }
@@ -1254,5 +1323,137 @@ mod tests {
                 Err(EvidenceError::ImpossibleLivenessWindow)
             );
         }
+    }
+
+    #[test]
+    fn wave3_evidence_rejects_unbounded_invalid_signature_spam_samples_in_validate_shape() {
+        // Too many samples (> MAX_SPAM_REPORT_SAMPLES = 24) MUST be rejected.
+        let tiny_sample = (vec![1u8; 8], vec![2u8; 8], vec![3u8; 8], vec![4u8; 8]);
+        let too_many = SlashingReport::new(
+            addr(1),
+            roles::VALIDATOR,
+            SlashingProof::InvalidSignatureSpam {
+                epoch: 5,
+                count: 30,
+                threshold: 3,
+                samples: vec![tiny_sample; 25],
+            },
+            None,
+        );
+        assert!(
+            matches!(
+                too_many.validate_shape(),
+                Err(EvidenceError::FieldTooLarge { .. })
+            ),
+            "validate_shape must reject sample count over MAX_SPAM_REPORT_SAMPLES"
+        );
+
+        // Single oversized sample field MUST be rejected.
+        let huge_field = SlashingReport::new(
+            addr(1),
+            roles::VALIDATOR,
+            SlashingProof::InvalidSignatureSpam {
+                epoch: 5,
+                count: 3,
+                threshold: 3,
+                samples: vec![(vec![1u8; 8], vec![2u8; 20_000], vec![3u8; 8], vec![4u8; 8])],
+            },
+            None,
+        );
+        assert!(
+            matches!(
+                huge_field.validate_shape(),
+                Err(EvidenceError::FieldTooLarge { .. })
+            ),
+            "validate_shape must reject oversized sample element"
+        );
+
+        // Total sample bytes exceeding MAX_SAMPLES_BYTES_PER_VALIDATOR (16_384) MUST be rejected.
+        let medium_sample = (
+            vec![1u8; 400],
+            vec![2u8; 128],
+            vec![3u8; 200],
+            vec![4u8; 128],
+        );
+        let over_budget = SlashingReport::new(
+            addr(1),
+            roles::VALIDATOR,
+            SlashingProof::InvalidSignatureSpam {
+                epoch: 5,
+                count: 24,
+                threshold: 3,
+                samples: vec![medium_sample; 24], // 24 * 856 = 20_544 > 16_384
+            },
+            None,
+        );
+        assert!(
+            matches!(
+                over_budget.validate_shape(),
+                Err(EvidenceError::FieldTooLarge { .. })
+            ),
+            "validate_shape must reject total sample bytes over MAX_SAMPLES_BYTES_PER_VALIDATOR"
+        );
+    }
+
+    #[test]
+    fn wave3_evidence_rejects_empty_double_sign_hash_and_whitespace_other_tag_and_decodes_prefixed_hex(
+    ) {
+        // Empty or whitespace-only block_hash_1 must be rejected.
+        let empty_hash = SlashingReport::new(
+            addr(1),
+            roles::VALIDATOR,
+            SlashingProof::DoubleSign {
+                height: 10,
+                kind: DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: "   ".into(),
+                block_hash_2: "bb".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            None,
+        );
+        assert_eq!(
+            empty_hash.validate_shape(),
+            Err(EvidenceError::MalformedBlockHash)
+        );
+
+        // Whitespace-only Other::tag must be rejected.
+        let blank_tag = SlashingReport::new(
+            addr(1),
+            roles::RELAYER,
+            SlashingProof::Other {
+                tag: "   \t  ".into(),
+                data: vec![1, 2, 3],
+            },
+            None,
+        );
+        assert_eq!(
+            blank_tag.validate_shape(),
+            Err(EvidenceError::EmptyProofTag)
+        );
+
+        // 0x-prefixed 32-byte hex accepted by validate_shape must also decode in verify_double_sign.
+        let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let h1 = [0x11u8; 32];
+        let h2 = [0x22u8; 32];
+        let prefixed = SlashingReport::new(
+            Address::from(keys.public_key_bytes()),
+            roles::VALIDATOR,
+            SlashingProof::DoubleSign {
+                height: 7,
+                kind: DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: format!("0x{}", hex::encode(h1)),
+                block_hash_2: format!("0X{}", hex::encode(h2)),
+                signature_1: keys.sign(&h1).to_vec(),
+                signature_2: keys.sign(&h2).to_vec(),
+            },
+            None,
+        );
+        assert!(
+            prefixed.verify_double_sign().is_ok(),
+            "0x-prefixed canonical 32-byte hashes accepted by validate_shape must verify"
+        );
     }
 }

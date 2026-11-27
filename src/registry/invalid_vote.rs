@@ -63,9 +63,9 @@ pub(crate) const MAX_SPAM_REPORT_JSON_BYTES: usize = 65_536;
 
 /// Samples come only from BLS finality votes, not the PQ signature table. The
 /// ingress refuses larger signatures before authentication or pairing.
-const MAX_VOTE_PREIMAGE_BYTES: usize = crate::chain::finality::MAX_VOTE_PREIMAGE_BYTES;
-const MAX_VOTE_SIGNATURE_BYTES: usize = crate::chain::finality::BLS_VOTE_SIGNATURE_BYTES;
-const MAX_SAMPLES_BYTES_PER_VALIDATOR: usize = 16 * 1_024;
+pub(crate) const MAX_VOTE_PREIMAGE_BYTES: usize = crate::chain::finality::MAX_VOTE_PREIMAGE_BYTES;
+pub(crate) const MAX_VOTE_SIGNATURE_BYTES: usize = crate::chain::finality::BLS_VOTE_SIGNATURE_BYTES;
+pub(crate) const MAX_SAMPLES_BYTES_PER_VALIDATOR: usize = 16 * 1_024;
 
 /// Per-validator, per-epoch invalid-signature-vote counter.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -137,6 +137,9 @@ impl InvalidVoteTracker {
         params: &RegistryParams,
         require_samples: bool,
     ) -> Option<SlashingReport> {
+        if validator == Address::zero() || params.max_invalid_votes_per_epoch == 0 {
+            return None;
+        }
         // A stale epoch must not move the tracker: recording under it
         // would reset the current epoch's counters and reported set, and a
         // spammer could dodge the threshold forever by interleaving old
@@ -194,7 +197,9 @@ impl InvalidVoteTracker {
         sample: (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>),
         params: &RegistryParams,
     ) -> Option<SlashingReport> {
-        if epoch < self.current_epoch
+        if validator == Address::zero()
+            || params.max_invalid_votes_per_epoch == 0
+            || epoch < self.current_epoch
             || sample.2.len() > MAX_VOTE_PREIMAGE_BYTES
             || sample.3.len() > MAX_VOTE_SIGNATURE_BYTES
             || sample.1.len() > MAX_VOTE_SIGNATURE_BYTES
@@ -224,29 +229,36 @@ impl InvalidVoteTracker {
         // held the counter at one for an unbounded flood, so the threshold the
         // whole mechanism exists for was never reached and garbage-signature
         // spam carried no cost.
-        let duplicate = self.samples.get(&validator).is_some_and(|entry| {
-            entry
-                .iter()
-                .any(|existing| existing.2 == sample.2 && existing.3 == sample.3)
-        });
-        let sample_cap = params
-            .max_invalid_votes_per_epoch
-            .min(MAX_SPAM_REPORT_SAMPLES as u64) as usize;
-        if !duplicate {
-            let entry = self.samples.entry(validator).or_default();
-            if entry.len() < sample_cap {
-                let retained: usize = entry
+        //
+        // Once a validator has already been reported this epoch, no second
+        // report can be emitted, so skip storing further samples that would
+        // never be drained.
+        if !self.reported.contains_key(&validator) {
+            let duplicate = self.samples.get(&validator).is_some_and(|entry| {
+                entry
                     .iter()
-                    .map(|(auth_msg, auth_sig, vote_msg, bad_sig)| {
-                        auth_msg.len() + auth_sig.len() + vote_msg.len() + bad_sig.len()
-                    })
-                    .fold(0usize, usize::saturating_add);
-                let incoming = sample.0.len() + sample.1.len() + sample.2.len() + sample.3.len();
-                // An over-sized sample is not retained, but it is still
-                // counted: the invalid vote is the fact the threshold follows,
-                // and padding one must never buy immunity from it.
-                if retained.saturating_add(incoming) <= MAX_SAMPLES_BYTES_PER_VALIDATOR {
-                    entry.push(sample);
+                    .any(|existing| existing.2 == sample.2 && existing.3 == sample.3)
+            });
+            let sample_cap = params
+                .max_invalid_votes_per_epoch
+                .min(MAX_SPAM_REPORT_SAMPLES as u64) as usize;
+            if !duplicate {
+                let entry = self.samples.entry(validator).or_default();
+                if entry.len() < sample_cap {
+                    let retained: usize = entry
+                        .iter()
+                        .map(|(auth_msg, auth_sig, vote_msg, bad_sig)| {
+                            auth_msg.len() + auth_sig.len() + vote_msg.len() + bad_sig.len()
+                        })
+                        .fold(0usize, usize::saturating_add);
+                    let incoming =
+                        sample.0.len() + sample.1.len() + sample.2.len() + sample.3.len();
+                    // An over-sized sample is not retained, but it is still
+                    // counted: the invalid vote is the fact the threshold follows,
+                    // and padding one must never buy immunity from it.
+                    if retained.saturating_add(incoming) <= MAX_SAMPLES_BYTES_PER_VALIDATOR {
+                        entry.push(sample);
+                    }
                 }
             }
         }
@@ -544,5 +556,70 @@ mod tests {
         // Each needs its own threshold.
         assert!(t.record_invalid_vote(1, a, &p).is_some());
         assert!(t.record_invalid_vote(1, b, &p).is_some());
+    }
+
+    #[test]
+    fn wave3_invalid_vote_rejects_zero_address_threshold_zero_mutation_and_post_report_samples() {
+        let mut t = InvalidVoteTracker::new();
+        let p = params(1);
+        let zero = Address::zero();
+        let vote = crate::chain::finality::checkpoint_signing_message(45261, 7, 10, "hash");
+        let sig = vec![2u8; 48];
+        let auth = crate::chain::finality::vote_auth_signing_message(&vote, &sig);
+
+        // 1. Zero address must never be counted or reported.
+        assert!(t.record_invalid_vote(7, zero, &p).is_none());
+        assert!(t
+            .record_invalid_vote_with_sample(
+                7,
+                zero,
+                (auth.clone(), vec![3; 48], vote.clone(), sig.clone()),
+                &p
+            )
+            .is_none());
+        assert_eq!(t.invalid_count(&zero), 0);
+        assert!(t.is_empty(), "zero address must not mutate tracker state");
+
+        // 2. threshold == 0 disables spam slashing completely: must not wipe an
+        //    active epoch's accumulated counts or mutate state.
+        let v = addr(9);
+        let p2 = params(2);
+        assert!(t.record_invalid_vote(7, v, &p2).is_none());
+        assert_eq!(t.invalid_count(&v), 1);
+        let disabled = params(0);
+        let vote8 = crate::chain::finality::checkpoint_signing_message(45261, 8, 10, "hash");
+        let auth8 = crate::chain::finality::vote_auth_signing_message(&vote8, &sig);
+        assert!(t
+            .record_invalid_vote_with_sample(
+                8,
+                v,
+                (auth8, vec![3; 48], vote8, sig.clone()),
+                &disabled
+            )
+            .is_none());
+        assert_eq!(
+            t.current_epoch(),
+            7,
+            "threshold == 0 must not advance epoch or wipe active counts"
+        );
+        assert_eq!(t.invalid_count(&v), 1);
+
+        // 3. Once a validator is already reported in this epoch, further
+        //    samples must NOT re-populate dead bytes in `self.samples`.
+        let mut t2 = InvalidVoteTracker::new();
+        let p1 = params(1);
+        let s1 = (auth, vec![3; 48], vote.clone(), sig);
+        assert!(t2.record_invalid_vote_with_sample(7, v, s1, &p1).is_some());
+        assert!(!t2.samples.contains_key(&v));
+
+        let sig2 = vec![7u8; 48];
+        let auth2 = crate::chain::finality::vote_auth_signing_message(&vote, &sig2);
+        assert!(t2
+            .record_invalid_vote_with_sample(7, v, (auth2, vec![3; 48], vote, sig2), &p1)
+            .is_none());
+        assert!(
+            !t2.samples.contains_key(&v),
+            "already-reported validator must not re-accumulate dead samples"
+        );
     }
 }
