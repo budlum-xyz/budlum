@@ -7443,6 +7443,352 @@ mod v8_tests {
         let per_entry = 3 + 2592 + 32 + 3 + 4627 + 64;
         assert!(MAX_V8_SIGNERS * per_entry < 160 * 1024);
     }
+
+    /// Chain-level proof that every pinned family's pin bytes are inside the
+    /// Register transaction's SIGNING preimage - the exact bytes `sign()`
+    /// covers - not merely inside `encode_adapter_spec`'s own output.
+    /// `assert_nipopow_preimages` and its siblings pin down the spec encoding;
+    /// this test pins down the chain from that encoding into the signed
+    /// registration. Without it, a Register path that silently dropped
+    /// `encode_adapter_spec` would keep every spec-level test green while
+    /// registrants signed a registration that names no trust anchor at all.
+    ///
+    /// The signer is a FIXED seed. `KeyPair::generate()` per call puts a fresh
+    /// `from` in the preimage, so every `assert_ne` on signing hashes would
+    /// pass no matter what is mutated (measured: the NIPoPoW slice shipped
+    /// three vacuous-green runs before the signer was pinned down). The
+    /// payload-byte assertions below are signer-independent and catch a
+    /// dropped or swapped pin even before hashing.
+    #[test]
+    fn pinned_family_registers_commit_the_pin_in_the_signed_register_payload() {
+        use crate::cross_domain::external::babylon_eots::test_support;
+        use crate::cross_domain::external::{
+            aptos_jolteon_bft::{JolteonValidator, PinnedJolteonEpochState},
+            chain_key_ni_dkg::PinnedChainKeyRoot,
+            ghostdag::PinnedGhostdagAnchor,
+            heterogeneous_multiprover::{
+                MultiProverCommitteeMember, PinnedFaultProposer, PinnedMultiProverConfig,
+            },
+            honeybadger_bft::{HoneyBadgerValidator, PinnedHoneyBadgerCommittee},
+            near_doomslug::{NearBlockProducer, PinnedNearEpoch},
+            nipopow::PinnedNipopowGenesis,
+            pospace_vdf::PinnedPoSpaceAnchor,
+            solana_tower_bft::{PinnedSolEpoch, SolanaValidator},
+            stark_validity_rollup::PinnedStarkRollupConfig,
+            AdapterId, AdapterSpec, ExternalDomainTx, IntakeState, RawConsensusEvidence,
+            RegistrationRequest, VerificationPolicy, VersionPolicy,
+        };
+
+        let h = |b: u8| [b; 32];
+        let mut specs = vec![
+            AdapterSpec::SolanaTowerBft {
+                network: "solana-mainnet".to_string(),
+                pinned: Some(PinnedSolEpoch {
+                    genesis_hash_hex: "4w4".repeat(20),
+                    epoch: 1,
+                    first_slot: 0,
+                    last_slot: 432_000,
+                    has_bonded_slash_escrow: true,
+                    validators: vec![SolanaValidator {
+                        vote_account: h(1),
+                        stake_lamports: 10,
+                        ed25519_pubkey: h(2),
+                        pq_pubkey: vec![0x01],
+                    }],
+                }),
+            },
+            AdapterSpec::PoSpaceVdf {
+                network: "chia-mainnet".to_string(),
+                pinned: Some(PinnedPoSpaceAnchor {
+                    genesis_challenge: h(3),
+                    min_plot_k: 20,
+                    min_iterations_per_block: 1,
+                    max_iterations_per_block: 1_000_000,
+                    required_depth: 2000,
+                    min_cumulative_weight: 2_000,
+                    require_pq_attestation: false,
+                    pq_attestor_pubkey: None,
+                }),
+            },
+            AdapterSpec::AptosJolteonBft {
+                network: "aptos-mainnet".to_string(),
+                pinned: Some(PinnedJolteonEpochState {
+                    epoch: 5,
+                    validators: vec![JolteonValidator {
+                        ed25519_pubkey: h(4),
+                        voting_power: 1,
+                        pq_pubkey: vec![0x02],
+                    }],
+                }),
+            },
+            AdapterSpec::NearDoomslugBft {
+                network: "near-mainnet".to_string(),
+                pinned: Some(PinnedNearEpoch {
+                    epoch_id: h(5),
+                    next_epoch_id: h(6),
+                    next_bp_hash: h(7),
+                    block_producers: vec![NearBlockProducer {
+                        account_id: "prod.near".to_string(),
+                        ed25519_pubkey: h(8),
+                        stake: 100,
+                        pq_pubkey: Vec::new(),
+                    }],
+                }),
+            },
+            AdapterSpec::ChainKeyNiDkg {
+                network: "cas-mainnet".to_string(),
+                pinned: Some(PinnedChainKeyRoot {
+                    subnet_id: h(9),
+                    root_bls_pubkey: vec![0x0a],
+                    root_pq_pubkey: vec![0x0b],
+                    dkg_interval_length: 100,
+                    min_registry_version: 1,
+                }),
+            },
+            AdapterSpec::NipopowSuperblock {
+                network: "ergo-mainnet".to_string(),
+                genesis: Some(PinnedNipopowGenesis {
+                    genesis_id: [0x11; 32],
+                    genesis_height: 7,
+                    pow_target: [0x7F; 32],
+                    min_superblocks_m: 3,
+                    min_superblock_level: 3,
+                    min_suffix_k: 4,
+                }),
+            },
+            AdapterSpec::Ghostdag {
+                network: "kaspa-mainnet".to_string(),
+                anchor: Some(PinnedGhostdagAnchor {
+                    anchor_hash: h(0x0c),
+                    anchor_daa_score: 1000,
+                    anchor_blue_score: 900,
+                    anchor_blue_work: [1, 2, 3, 4],
+                    anchor_timestamp_secs: 1_700_000_000,
+                    k: 10,
+                    max_parents: 10,
+                    merge_depth_bound: 100,
+                    max_target_bits: 32,
+                    required_blue_depth: 50,
+                    max_future_drift_secs: 60,
+                }),
+            },
+            AdapterSpec::HeterogeneousMultiProver {
+                network: "mev-mainnet".to_string(),
+                pinned: Some(PinnedMultiProverConfig {
+                    stark_program_hash: h(0x0d),
+                    chain_id: 1,
+                    challenge_window_secs: 3600,
+                    min_fault_bond_atoms: 100,
+                    fault_proposers: vec![PinnedFaultProposer {
+                        ed25519_pk: h(0x0e),
+                        pq_pk: vec![0x0f],
+                    }],
+                    expected_measurement: h(0x10),
+                    committee: vec![MultiProverCommitteeMember {
+                        ed25519_pk: h(0x11),
+                        pq_pk: vec![0x12],
+                        weight: 1,
+                    }],
+                    require_canonical_stark_set: true,
+                    require_pq_leg: false,
+                }),
+            },
+            AdapterSpec::HoneyBadgerBft {
+                network: "mev-rollup".to_string(),
+                committee: Some(PinnedHoneyBadgerCommittee {
+                    network_id: "mev-rollup".to_string(),
+                    genesis_hash: h(0x13),
+                    committee_epoch: 1,
+                    min_acs_epoch: 0,
+                    validators: vec![HoneyBadgerValidator {
+                        validator_id: h(0x14),
+                        mldsa65_pubkey: vec![0x15],
+                        weight: 1,
+                    }],
+                }),
+            },
+            AdapterSpec::StarkValidityRollup {
+                network: "starknet-mainnet".to_string(),
+                pinned: Some(PinnedStarkRollupConfig {
+                    network_id: "starknet-mainnet".to_string(),
+                    chain_id: 534_352,
+                    pinned_program_hash: h(0x16),
+                    trusted_batch_number: 100,
+                    trusted_state_root: h(0x17),
+                    expected_forced_queue_head: h(0x18),
+                    max_forced_inclusion_lag_batches: 128,
+                    require_canonical_program: true,
+                }),
+            },
+            AdapterSpec::BabylonEots {
+                network: test_support::NETWORK.to_string(),
+                pinned: Some(test_support::pinned()),
+            },
+        ];
+        // `assert_babylon_preimages` already walks Babylon's own fields; keep
+        // the loop order stable so a failure names the family by network.
+        specs.sort_by(|a, b| a.network().cmp(b.network()));
+
+        for spec in specs {
+            let network = spec.network().to_string();
+            let body_of = |s: &AdapterSpec| -> serde_json::Value {
+                serde_json::to_value(s).expect("spec serializes")
+            };
+            // Each pinned family carries exactly one pin field besides
+            // `network`; its serde name differs per family (`pinned`,
+            // `genesis`, `anchor`, `committee`), so find it instead of
+            // hard-coding one name.
+            let pin_key = {
+                let value = body_of(&spec);
+                let body = value
+                    .as_object()
+                    .expect("externally tagged")
+                    .values()
+                    .next()
+                    .expect("one variant")
+                    .as_object()
+                    .expect("variant body");
+                let keys: Vec<&String> = body.keys().filter(|k| *k != "network").collect();
+                assert_eq!(
+                    keys.len(),
+                    1,
+                    "each pinned family carries exactly one pin field: {network}"
+                );
+                keys[0].clone()
+            };
+            let with_pin = |pin: serde_json::Value| -> AdapterSpec {
+                let mut value = body_of(&spec);
+                let body = value
+                    .as_object_mut()
+                    .expect("externally tagged")
+                    .values_mut()
+                    .next()
+                    .expect("one variant")
+                    .as_object_mut()
+                    .expect("variant body");
+                body.insert(pin_key.clone(), pin);
+                serde_json::from_value(value).expect("spec deserializes")
+            };
+            let mutated_pin = || -> serde_json::Value {
+                fn flip_first_scalar(value: &mut serde_json::Value) -> bool {
+                    match value {
+                        serde_json::Value::Number(n) => {
+                            *value = serde_json::Value::Number(serde_json::Number::from(
+                                n.as_u64().unwrap_or(0) ^ 1,
+                            ));
+                            true
+                        }
+                        serde_json::Value::String(s) => {
+                            *value = serde_json::Value::String(format!("{s}x"));
+                            true
+                        }
+                        serde_json::Value::Bool(b) => {
+                            *value = serde_json::Value::Bool(!*b);
+                            true
+                        }
+                        serde_json::Value::Array(items) => items.iter_mut().any(flip_first_scalar),
+                        serde_json::Value::Object(map) => map.values_mut().any(flip_first_scalar),
+                        serde_json::Value::Null => false,
+                    }
+                }
+                let mut value = body_of(&spec);
+                let pin = value
+                    .as_object_mut()
+                    .expect("externally tagged")
+                    .values_mut()
+                    .next()
+                    .expect("one variant")
+                    .get_mut(&pin_key)
+                    .expect("pin field");
+                assert!(
+                    flip_first_scalar(pin),
+                    "every governance pin carries at least one scalar to change"
+                );
+                value
+                    .as_object()
+                    .expect("externally tagged")
+                    .values()
+                    .next()
+                    .expect("one variant")
+                    .get(&pin_key)
+                    .expect("pin field")
+                    .clone()
+            };
+
+            let request = |s: AdapterSpec| {
+                let golden = RawConsensusEvidence {
+                    adapter: AdapterId::from_name("chain-pin-v1"),
+                    evidence_version: 1,
+                    network: network.clone(),
+                    payload: vec![1, 2, 3],
+                    declared_height: 0,
+                    declared_root: [9u8; 32],
+                    submitter: test_addr_from_byte(1u8),
+                };
+                let mut policy = VerificationPolicy::strict(0);
+                policy.require_slashable = false;
+                let economics = IntakeState::conservative_economics(1_000_000);
+                RegistrationRequest {
+                    versions: VersionPolicy::single(golden.adapter, golden.evidence_version, 0),
+                    spec: s,
+                    policy,
+                    economics,
+                    bond_atoms: economics.required_bond_atoms(),
+                    poster: test_addr_from_byte(1u8),
+                    golden,
+                }
+            };
+            let register = |s: AdapterSpec| {
+                TransactionType::ExternalDomain(ExternalDomainTx::Register(Box::new(request(s))))
+            };
+            // The Register encoding itself, before hashing: the exact external
+            // tx bytes whose digest the signature covers.
+            let payload = |s: AdapterSpec| {
+                let mut out = Vec::new();
+                encode_external_domain_tx(
+                    &ExternalDomainTx::Register(Box::new(request(s))),
+                    &mut out,
+                );
+                out
+            };
+            // Fixed signer: a fresh `KeyPair::generate()` per call would change
+            // `from` inside the preimage and make every hash comparison pass.
+            let sign = |s: AdapterSpec| {
+                let keypair = KeyPair::from_seed(&[0x5A; 32]).expect("fixed seed keypair");
+                let from = Address::from(keypair.public_key_bytes());
+                let mut tx =
+                    Transaction::new_with_fee(from, test_addr_from_byte(7u8), 0, 1, 0, vec![]);
+                tx.tx_type = register(s);
+                tx.sign(&keypair);
+                assert!(tx.verify());
+                tx.signing_hash()
+            };
+
+            let pinned_bytes = payload(spec.clone());
+            assert_ne!(
+                pinned_bytes,
+                payload(with_pin(serde_json::Value::Null)),
+                "the pin bytes are not in the Register payload: {network}"
+            );
+            assert_ne!(
+                pinned_bytes,
+                payload(with_pin(mutated_pin())),
+                "a changed pin leaves the Register payload unchanged: {network}"
+            );
+
+            let pinned = sign(spec.clone());
+            assert_ne!(
+                pinned,
+                sign(with_pin(serde_json::Value::Null)),
+                "an unpinned spec must not sign like a pinned one: {network}"
+            );
+            assert_ne!(
+                pinned,
+                sign(with_pin(mutated_pin())),
+                "a changed pin must not sign like the original: {network}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
