@@ -79,7 +79,7 @@ static EMPTY_HASHES: LazyLock<[[u8; 32]; 65]> = LazyLock::new(|| {
 });
 
 pub fn get_empty_hash(depth: usize) -> Hash {
-    EMPTY_HASHES[depth]
+    EMPTY_HASHES.get(depth).copied().unwrap_or([0u8; 32])
 }
 
 fn compute_subtree_root(leaves: &[(u64, Hash)], depth: usize, prefix: u64) -> Hash {
@@ -272,6 +272,9 @@ impl StateBackend for State {
     }
 
     fn commit(&mut self) -> Result<(), String> {
+        if self.backup_stack.is_empty() {
+            return Err(String::from("commit called without an active transaction"));
+        }
         // Drop the innermost snapshot; parent frames stay intact. Only the
         // outermost commit reaches the disk: an inner commit that saved
         // would leave values on disk that an outer rollback then discards in
@@ -628,5 +631,22 @@ mod tests {
         assert_ne!(leaf, node);
         assert_ne!(leaf, get_empty_hash(1));
         assert_eq!(node, get_empty_hash(1));
+    }
+
+    #[test]
+    fn get_empty_hash_never_panics_out_of_bounds_and_unmatched_commit_fails_closed() {
+        // Out-of-range depth must never panic at runtime.
+        assert_eq!(get_empty_hash(65), [0u8; 32]);
+        assert_eq!(get_empty_hash(usize::MAX), [0u8; 32]);
+
+        let path = std::env::temp_dir().join("bud_state_unmatched_commit.json");
+        let path_str = path.to_string_lossy().to_string();
+        let _ = fs::remove_file(&path);
+        let mut state = State::load(&path_str).unwrap();
+        assert!(
+            state.commit().is_err(),
+            "commit without an active begin_transaction must fail closed instead of silently skipping persistence"
+        );
+        let _ = fs::remove_file(&path);
     }
 }
