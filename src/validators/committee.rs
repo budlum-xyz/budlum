@@ -274,8 +274,9 @@ impl CommitteeTable {
         // result is independent of the input order.
         let mut by_address: BTreeMap<[u8; 32], u64> = BTreeMap::new();
         for (address, weight) in eligible {
-            if *weight > 0 {
-                by_address.entry(address.0).or_insert(*weight);
+            if *weight > 0 && *address != Address::zero() {
+                let entry = by_address.entry(address.0).or_insert(0);
+                *entry = entry.saturating_add(*weight);
             }
         }
         let members: Vec<(Address, u64)> = by_address
@@ -364,7 +365,11 @@ impl CommitteeTable {
     /// it can never finalize.
     #[must_use]
     pub fn quorum(active: usize) -> usize {
-        2 * active / 3 + 1
+        let q = active / 3;
+        let r = active % 3;
+        q.saturating_mul(2)
+            .saturating_add(usize::from(r == 2))
+            .saturating_add(1)
     }
 
     /// The seat quorum of this table.
