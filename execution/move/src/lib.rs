@@ -428,6 +428,13 @@ impl MoveWorker {
                     resource_tag,
                     value,
                 } => {
+                    if value.len() > 65_536 {
+                        return Err(StepErr::Revert("Move resource exceeds 64 KiB limit".into()));
+                    }
+                    let byte_cost = u64::try_from(value.len())
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(25);
+                    charge_bgu(host, gas_used, byte_cost, cap)?;
                     let key = resource_state_key(&signer, resource_tag);
                     journal.write(host, ns, &key, value).map_err(map_host_err)?;
                 }
@@ -438,6 +445,13 @@ impl MoveWorker {
                     let val = args.get(*arg_index).ok_or_else(|| {
                         StepErr::Revert(format!("missing Move argument at index {arg_index}"))
                     })?;
+                    if val.len() > 65_536 {
+                        return Err(StepErr::Revert("Move resource exceeds 64 KiB limit".into()));
+                    }
+                    let byte_cost = u64::try_from(val.len())
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(25);
+                    charge_bgu(host, gas_used, byte_cost, cap)?;
                     let key = resource_state_key(&signer, resource_tag);
                     journal.write(host, ns, &key, val).map_err(map_host_err)?;
                 }
@@ -453,6 +467,11 @@ impl MoveWorker {
                         .unwrap_or_default();
                 }
                 MoveOp::TransferOctas { recipient, octas } => {
+                    if *recipient == [0u8; 32] {
+                        return Err(StepErr::Revert(
+                            "Move transfer recipient cannot be zero".into(),
+                        ));
+                    }
                     if *octas > 0 {
                         let attos = u128::from(*octas).saturating_mul(ATTO_PER_OCTA);
                         host.bud_transfer(
