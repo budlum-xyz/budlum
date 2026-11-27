@@ -18,8 +18,12 @@
 //!   garden-phone fetch <dir> <content id>
 //!   garden-phone leave <dir>
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Read;
+use std::io::Write;
+use std::net::TcpListener;
+use std::net::TcpStream;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
