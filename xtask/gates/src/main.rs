@@ -98,6 +98,7 @@ mod gates {
     pub mod economy_invariants;
     pub mod ee_workers_build_with_unwind;
     pub mod every_consensus_family_has_a_door;
+    pub mod finality_acceptance_surface_has_one_path;
     pub mod every_fuzz_target_is_run;
     pub mod every_opcode_forgery;
     pub mod evidence_provenance;
@@ -583,6 +584,14 @@ const GATES: &[Gate] = &[
         run: gates::every_fuzz_target_is_run::run,
         run_args: None,
         self_test: gates::every_fuzz_target_is_run::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "finality-acceptance-surface-has-one-path",
+        replaces: None,
+        run: gates::finality_acceptance_surface_has_one_path::run,
+        run_args: None,
+        self_test: gates::finality_acceptance_surface_has_one_path::self_test,
         run_log: None,
     },
     Gate {
