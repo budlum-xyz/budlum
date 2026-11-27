@@ -34,6 +34,9 @@ pub const PLUTUS_BLOB_MAGIC: &[u8; 4] = b"UPLC";
 /// Maximum serialized UPLC validator script size (`512 KiB`).
 pub const MAX_PLUTUS_SCRIPT_BYTES: usize = 524_288;
 
+/// Maximum serialized `PlutusSpendInput` call payload (`64 KiB`).
+const MAX_PLUTUS_INPUT_BYTES: usize = 65_536;
+
 /// Maximum CEK reduction steps per call (protects deterministic ExUnits budget).
 const MAX_UPLC_STEPS: usize = 4_096;
 
@@ -117,6 +120,41 @@ pub fn encode_plutus_blob(prog: &PlutusValidatorProgram) -> Result<Vec<u8>, EeRe
 /// # Errors
 ///
 /// Returns [`EeRefusal`] on header, size, or AST encoding violation.
+fn check_uplc_depth(term: &UplcTerm, depth: usize) -> Result<(), EeRefusal> {
+    if depth > MAX_UPLC_DEPTH {
+        return Err(EeRefusal {
+            code: RefusalCode::InvalidCode,
+            message: String::from("UPLC validator exceeds maximum AST nesting depth"),
+        });
+    }
+    let next = depth + 1;
+    match term {
+        UplcTerm::Add(a, b) | UplcTerm::EqualsInt(a, b) | UplcTerm::EqualsBytes(a, b) => {
+            check_uplc_depth(a, next)?;
+            check_uplc_depth(b, next)
+        }
+        UplcTerm::Sha256(inner) | UplcTerm::TraceUnit(inner) => check_uplc_depth(inner, next),
+        UplcTerm::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            check_uplc_depth(cond, next)?;
+            check_uplc_depth(then_branch, next)?;
+            check_uplc_depth(else_branch, next)
+        }
+        UplcTerm::ConstInt(_)
+        | UplcTerm::ConstBytes(_)
+        | UplcTerm::DatumInt
+        | UplcTerm::RedeemerInt
+        | UplcTerm::RedeemerBytes
+        | UplcTerm::CtxHeight
+        | UplcTerm::Signatory
+        | UplcTerm::Owner
+        | UplcTerm::Error => Ok(()),
+    }
+}
+
 pub fn decode_plutus_blob(bytes: &[u8]) -> Result<PlutusValidatorProgram, EeRefusal> {
     if bytes.len() > MAX_PLUTUS_SCRIPT_BYTES {
         return Err(EeRefusal {
@@ -130,10 +168,19 @@ pub fn decode_plutus_blob(bytes: &[u8]) -> Result<PlutusValidatorProgram, EeRefu
             message: String::from("UPLC validator missing UPLC header"),
         });
     };
-    serde_json::from_slice(rest).map_err(|e| EeRefusal {
+    let prog: PlutusValidatorProgram = serde_json::from_slice(rest).map_err(|e| EeRefusal {
         code: RefusalCode::InvalidCode,
         message: format!("invalid UPLC validator: {e}"),
-    })
+    })?;
+    if prog.uplc_version.is_empty() || prog.uplc_version.len() > 32 || !prog.uplc_version.is_ascii()
+    {
+        return Err(EeRefusal {
+            code: RefusalCode::InvalidCode,
+            message: String::from("UPLC validator requires a valid ASCII uplc_version"),
+        });
+    }
+    check_uplc_depth(&prog.validator, 0)?;
+    Ok(prog)
 }
 
 fn script_key(hash32: &[u8; 32]) -> Vec<u8> {
@@ -243,11 +290,31 @@ fn eval_uplc(
             eval_uplc(a, ev, host, next_depth)?,
             eval_uplc(b, ev, host, next_depth)?,
         ) {
-            (UplcVal::Bytes(x), UplcVal::Bytes(y)) => Ok(UplcVal::Bool(x == y)),
+            (UplcVal::Bytes(x), UplcVal::Bytes(y)) => {
+                let blocks = u64::try_from(x.len().min(y.len()).div_ceil(64)).unwrap_or(u64::MAX);
+                let extra = blocks.saturating_mul(4);
+                let Some(next) = ev.gas_used.checked_add(extra) else {
+                    return Err(b"OUT_OF_GAS".to_vec());
+                };
+                if next > ev.gas_limit || host.charge(extra).is_err() {
+                    return Err(b"OUT_OF_GAS".to_vec());
+                }
+                ev.gas_used = next;
+                Ok(UplcVal::Bool(x == y))
+            }
             _ => Err(b"UPLC EqualsBytes type error".to_vec()),
         },
         UplcTerm::Sha256(inner) => match eval_uplc(inner, ev, host, next_depth)? {
             UplcVal::Bytes(b) => {
+                let blocks = u64::try_from(b.len().div_ceil(64)).unwrap_or(u64::MAX);
+                let extra = blocks.saturating_mul(12);
+                let Some(next) = ev.gas_used.checked_add(extra) else {
+                    return Err(b"OUT_OF_GAS".to_vec());
+                };
+                if next > ev.gas_limit || host.charge(extra).is_err() {
+                    return Err(b"OUT_OF_GAS".to_vec());
+                }
+                ev.gas_used = next;
                 let d: [u8; 32] = Sha256::digest(&b).into();
                 Ok(UplcVal::Bytes(d.to_vec()))
             }
@@ -454,6 +521,13 @@ impl ExecutionEnvironment for PlutusWorker {
                 gas_used,
             });
         };
+        if call.input.len() > MAX_PLUTUS_INPUT_BYTES {
+            return Ok(EeOutcome {
+                status: OutcomeStatus::Revert,
+                output: b"PlutusSpendInput exceeds 64 KiB limit".to_vec(),
+                gas_used,
+            });
+        }
         let Ok(spend) = serde_json::from_slice::<PlutusSpendInput>(&call.input) else {
             return Ok(EeOutcome {
                 status: OutcomeStatus::Revert,
