@@ -200,6 +200,7 @@ mod gates {
     pub mod serialize_map_keys_are_strings;
     pub mod shard_placement;
     pub mod slash_expression;
+    pub mod slashable_is_not_quietly_a_scheme_claim;
     pub mod source_reading;
     pub mod sources_are_whole;
     pub mod state_recovery_door;
@@ -640,6 +641,14 @@ const GATES: &[Gate] = &[
         run: gates::ci_full_battery_parity::run,
         run_args: None,
         self_test: gates::ci_full_battery_parity::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "slashable-is-not-quietly-a-scheme-claim",
+        replaces: None,
+        run: gates::slashable_is_not_quietly_a_scheme_claim::run,
+        run_args: None,
+        self_test: gates::slashable_is_not_quietly_a_scheme_claim::self_test,
         run_log: None,
     },
     Gate {

@@ -182,7 +182,18 @@ pub enum SecurityBacking {
     /// `slashable` is carried because it is the difference between "the
     /// signers lose money if they lie" and "the signers lose nothing": an
     /// Ethereum sync committee is the second, and a reader is entitled to know
-    /// that without having to read the Altair spec. `scheme` names what the
+    /// that without having to read the Altair spec.
+    ///
+    /// It answers an economic question, and it has to answer the same question
+    /// in every domain or a consumer comparing two routes is comparing two
+    /// different things. One domain legitimately needs more: where the slashing
+    /// evidence works by extracting the signing key, the guarantee is only as
+    /// strong as that signature, so a breakable scheme makes the stake
+    /// unreachable in practice. An adapter that reads the field off the
+    /// observed scheme for that reason says so at the site with a
+    /// `SLASHABLE-DEPENDS-ON-SCHEME:` note, and the gate
+    /// `slashable-is-not-quietly-a-scheme-claim` fails when one does it
+    /// silently. `grep SLASHABLE-DEPENDS-ON-SCHEME` is the list. `scheme` names what the
     /// signers signed with: BLS12-381 for a sync committee, secp256k1
     /// for an EVM validator set, an ML-DSA scheme for a post-quantum one.
     SignatureSet {
