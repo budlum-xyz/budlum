@@ -202,14 +202,20 @@ fn decode_addr32(bytes: &[u8], label: &str) -> Result<[u8; 32], String> {
 
 fn decode_bcs_bytes(bytes: &[u8], label: &str) -> Result<Vec<u8>, String> {
     let mut idx = 0usize;
-    let mut len = 0usize;
+    let mut len_u32 = 0u32;
     let mut shift = 0u32;
     loop {
         let Some(&b) = bytes.get(idx) else {
             return Err(format!("{label}: truncated BCS length"));
         };
         idx += 1;
-        len |= usize::from(b & 0x7F) << shift;
+        if shift > 0 && b == 0 {
+            return Err(format!("{label}: non-canonical BCS ULEB128 trailing zero"));
+        }
+        if shift == 28 && (b & 0xF0) != 0 {
+            return Err(format!("{label}: BCS ULEB128 exceeds u32"));
+        }
+        len_u32 |= u32::from(b & 0x7F) << shift;
         if (b & 0x80) == 0 {
             break;
         }
@@ -218,10 +224,14 @@ fn decode_bcs_bytes(bytes: &[u8], label: &str) -> Result<Vec<u8>, String> {
             return Err(format!("{label}: BCS ULEB128 overflow"));
         }
     }
-    let Some(slice) = bytes.get(idx..idx.saturating_add(len)) else {
+    let len = usize::try_from(len_u32).map_err(|_| format!("{label}: BCS length overflow"))?;
+    let end = idx
+        .checked_add(len)
+        .ok_or_else(|| format!("{label}: BCS slice overflow"))?;
+    let Some(slice) = bytes.get(idx..end) else {
         return Err(format!("{label}: truncated BCS vector payload"));
     };
-    if idx + len != bytes.len() {
+    if end != bytes.len() {
         return Err(format!("{label}: trailing bytes after BCS vector"));
     }
     Ok(slice.to_vec())
@@ -318,9 +328,28 @@ impl MoveWorker {
                 // call(caller: &signer, ee: u8, target: vector<u8>, input: vector<u8>,
                 //      value_octas: u64, gas_bgu: u64): (bool, vector<u8>)
                 charge_bgu(host, gas_used, 8 * APTOS_GAS_TO_BGU, cap)?;
-                let to_ee = EeId(args.first().and_then(|b| b.first().copied()).ok_or_else(
-                    || StepErr::Revert("budlum_universal::call missing ee u8".to_string()),
-                )?);
+                if args.len() != 5 {
+                    return Err(StepErr::Revert(
+                        "budlum_universal::call expects exactly 5 arguments".to_string(),
+                    ));
+                }
+                let ee_arg = args.first().ok_or_else(|| {
+                    StepErr::Revert("budlum_universal::call missing ee u8".to_string())
+                })?;
+                if ee_arg.len() != 1 {
+                    return Err(StepErr::Revert(
+                        "budlum_universal::call ee expects 1-byte u8".to_string(),
+                    ));
+                }
+                let raw_ee = *ee_arg.first().ok_or_else(|| {
+                    StepErr::Revert("budlum_universal::call missing ee u8".to_string())
+                })?;
+                if raw_ee > EeId::RV32.0 {
+                    return Err(StepErr::Revert(format!(
+                        "budlum_universal::call unknown target ee {raw_ee}"
+                    )));
+                }
+                let to_ee = EeId(raw_ee);
                 let target_bytes = args
                     .get(1)
                     .ok_or_else(|| {
@@ -347,6 +376,11 @@ impl MoveWorker {
                         StepErr::Revert("budlum_universal::call missing gas_bgu".to_string())
                     })
                     .and_then(|b| decode_u64_le(b, "gas_bgu").map_err(StepErr::Revert))?;
+                if call_gas_bgu == 0 {
+                    return Err(StepErr::Revert(
+                        "budlum_universal::call gas_bgu must be non-zero".to_string(),
+                    ));
+                }
                 let value_attos = u128::from(value_octas)
                     .checked_mul(ATTO_PER_OCTA)
                     .ok_or_else(|| StepErr::Revert("value_octas overflow".to_string()))?;
@@ -1260,5 +1294,64 @@ mod tests {
             panic!("join");
         };
         assert!(srv.is_ok());
+    }
+
+    #[test]
+    fn move_universal_call_refuses_bad_arity_oversized_ee_byte_zero_gas_and_noncanonical_bcs() {
+        let mut worker = MoveWorker::new();
+        let mut host = MemoryHost::new(2_000_000);
+
+        // Non-canonical ULEB128 (`0x80, 0x00` for len 0) and u32 overflow must fail decode_bcs_bytes.
+        assert!(
+            decode_bcs_bytes(&[0x80, 0x00], "noncanonical").is_err(),
+            "non-canonical trailing-zero ULEB128 must be refused"
+        );
+        assert!(
+            decode_bcs_bytes(&[0x80, 0x80, 0x80, 0x80, 0x10], "u32_overflow").is_err(),
+            "5th ULEB128 byte overflowing u32 must be refused"
+        );
+
+        // Multi-byte `ee` arg (`vec![1, 2]`), trailing 6th arg, and `gas_bgu == 0` must revert.
+        for bad_args in [
+            vec![
+                vec![EeId::EVM.0, 0x99],
+                vec![0xAA; 20],
+                vec![0x01],
+                0u64.to_le_bytes().to_vec(),
+                50_000u64.to_le_bytes().to_vec(),
+            ],
+            vec![
+                vec![EeId::EVM.0],
+                vec![0xAA; 20],
+                vec![0x01],
+                0u64.to_le_bytes().to_vec(),
+                0u64.to_le_bytes().to_vec(),
+            ],
+            vec![
+                vec![EeId::EVM.0],
+                vec![0xAA; 20],
+                vec![0x01],
+                0u64.to_le_bytes().to_vec(),
+                50_000u64.to_le_bytes().to_vec(),
+                vec![0xFF],
+            ],
+        ] {
+            let payload = MovePayload::EntryFunction {
+                module_address: FRAMEWORK_ADDRESS,
+                module_name: "budlum_universal".to_string(),
+                function_name: "call".to_string(),
+                ty_args: Vec::new(),
+                args: bad_args,
+            };
+            let input = serde_json::to_vec(&payload).expect("serialize");
+            let res = worker
+                .execute(
+                    &sample_ctx(),
+                    &make_call([0x44u8; 32], FRAMEWORK_ADDRESS, input),
+                    &mut host,
+                )
+                .expect("execute");
+            assert_eq!(res.status, OutcomeStatus::Revert);
+        }
     }
 }
