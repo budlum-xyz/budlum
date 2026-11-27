@@ -146,6 +146,8 @@ pub fn initialize_committee(storage: &mut dyn Storage, config: &CommitteeConfig)
     Ok(())
 }
 
+const MAX_COMMITTEE_MEMBERS: usize = 512;
+
 fn validate_committee(config: &CommitteeConfig) -> StdResult<()> {
     if config.budlum_chain_id == 0 {
         return Err(StdError::generic_err(
@@ -153,8 +155,8 @@ fn validate_committee(config: &CommitteeConfig) -> StdResult<()> {
         ));
     }
     let n = config.members.len();
-    if n == 0 {
-        return Err(StdError::generic_err("budlum verifier: empty committee"));
+    if n == 0 || n > MAX_COMMITTEE_MEMBERS {
+        return Err(StdError::generic_err("budlum verifier: invalid committee size"));
     }
     let t = config.threshold as usize;
     if t == 0 || t > n || (t as u128).saturating_mul(3) <= (n as u128).saturating_mul(2) {
@@ -223,6 +225,11 @@ pub fn rotate_committee(
     if handoff.signatures.len() < current.threshold as usize {
         return Err(StdError::generic_err(
             "budlum verifier: insufficient handoff quorum signatures",
+        ));
+    }
+    if handoff.signatures.len() > current.members.len() {
+        return Err(StdError::generic_err(
+            "budlum verifier: duplicate handoff signer",
         ));
     }
 
@@ -313,18 +320,27 @@ pub fn record(
         ));
     }
 
+    let mut already_recorded = false;
     if let Some(existing) = CHECKPOINTS.may_load(storage, height)? {
-        if existing.state_root == state_root && existing.header_hash == header_hash {
-            return Ok(());
+        if existing.state_root != state_root
+            || existing.header_hash != header_hash
+            || existing.mode != proof.mode
+        {
+            return Err(StdError::generic_err(
+                "budlum verifier: conflicting checkpoint at height",
+            ));
         }
-        return Err(StdError::generic_err(
-            "budlum verifier: conflicting checkpoint at height",
-        ));
+        already_recorded = true;
     }
 
     if proof.signatures.len() < committee.threshold as usize {
         return Err(StdError::generic_err(
             "budlum verifier: insufficient quorum signatures",
+        ));
+    }
+    if proof.signatures.len() > committee.members.len() {
+        return Err(StdError::generic_err(
+            "budlum verifier: duplicate signer in proof",
         ));
     }
 
@@ -373,6 +389,10 @@ pub fn record(
         return Err(StdError::generic_err(
             "budlum verifier: quorum threshold not met",
         ));
+    }
+
+    if already_recorded {
+        return Ok(());
     }
 
     CHECKPOINTS.save(
@@ -586,6 +606,46 @@ mod tests {
 
         assert!(!height_final(deps.as_ref().storage, 42));
         assert_eq!(latest_final_height(deps.as_ref().storage), 0);
+    }
+
+    #[test]
+    fn replay_rejects_mode_mismatch_unverified_sigs_and_oversized_committee() {
+        let mut deps = mock_dependencies();
+        initialize_committee(deps.as_mut().storage, &sample_committee()).unwrap();
+
+        let root = [0x42; 32];
+        let header = [0x99; 32];
+        let proof = sample_proof(&[0, 1, 2]);
+        record(&mut deps.storage, &deps.api, 42, root, header, &proof).unwrap();
+
+        // Replay with different FinalityMode at same (height, root, header) must fail closed as conflict.
+        let mut diff_mode = sample_proof(&[0, 1, 2]);
+        diff_mode.mode = FinalityMode::ClassicalOnly;
+        let mode_err = record(&mut deps.storage, &deps.api, 42, root, header, &diff_mode).unwrap_err();
+        assert!(mode_err.to_string().contains("conflicting"), "{mode_err}");
+
+        // Replay with empty/forged signatures on existing checkpoint must fail closed.
+        let empty_sigs = sample_proof(&[]);
+        assert!(record(&mut deps.storage, &deps.api, 42, root, header, &empty_sigs).is_err());
+
+        // Oversized committee (> 512 members) must be rejected before O(n^2) duplicate scan.
+        let mut huge_members = Vec::with_capacity(513);
+        for i in 0..513u16 {
+            let mut pk = [0u8; 32];
+            pk[0..2].copy_from_slice(&(i + 1).to_le_bytes());
+            huge_members.push(Binary::from(pk.to_vec()));
+        }
+        let mut fresh_deps = mock_dependencies();
+        assert!(initialize_committee(
+            fresh_deps.as_mut().storage,
+            &CommitteeConfig {
+                budlum_chain_id: 1,
+                epoch: 1,
+                threshold: 343,
+                members: huge_members,
+            },
+        )
+        .is_err());
     }
 
     #[test]
