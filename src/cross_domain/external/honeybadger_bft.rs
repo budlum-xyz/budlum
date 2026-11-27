@@ -600,6 +600,14 @@ impl ExternalFinalityAdapter for HoneyBadgerBftAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        !self.network.trim().is_empty()
+            && self
+                .pinned
+                .as_ref()
+                .is_some_and(|p| p.network_id == self.network && p.validate().is_ok())
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,
@@ -619,6 +627,11 @@ impl ExternalFinalityAdapter for HoneyBadgerBftAdapter {
             return Err(AdapterError::WrongAdapter {
                 expected: self.descriptor.name.clone(),
                 found: "foreign-adapter".to_string(),
+            });
+        }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "HoneyBadgerBFT network identifier cannot be empty".into(),
             });
         }
         if evidence.network != self.network {
@@ -1211,5 +1224,32 @@ mod tests {
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
         );
+    }
+
+    #[test]
+    fn honeybadger_reports_pinned_trust_anchor_and_rejects_blank_or_unvalidated_pins() {
+        let (_keys, pinned, _ev, raw) = fixture();
+        let adapter = HoneyBadgerBftAdapter::new("hbbft-testnet", Some(pinned.clone()));
+        assert!(adapter.has_pinned_trust_anchor());
+        assert!(!HoneyBadgerBftAdapter::new("hbbft-testnet", None).has_pinned_trust_anchor());
+        assert!(!HoneyBadgerBftAdapter::new("   ", Some(pinned.clone())).has_pinned_trust_anchor());
+
+        let mut wrong_net_pin = pinned;
+        wrong_net_pin.network_id = "other-net".to_string();
+        assert!(
+            !HoneyBadgerBftAdapter::new("hbbft-testnet", Some(wrong_net_pin))
+                .has_pinned_trust_anchor()
+        );
+
+        let blank_adapter = HoneyBadgerBftAdapter::new("   ", None);
+        let mut blank_raw = raw;
+        blank_raw.adapter = blank_adapter.descriptor().id;
+        blank_raw.network = "   ".to_string();
+        let mut policy = VerificationPolicy::strict(15);
+        policy.require_slashable = false;
+        assert!(matches!(
+            blank_adapter.verify(&blank_raw, &policy),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
     }
 }
