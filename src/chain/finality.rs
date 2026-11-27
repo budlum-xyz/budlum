@@ -7,7 +7,7 @@ use bls12_381::{
 use serde::{Deserialize, Serialize};
 use sha2_010::Sha256;
 use sha3::{Digest, Sha3_256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::chain_config::{
     FINALITY_CHECKPOINT_INTERVAL, FINALITY_QUORUM_DENOMINATOR, FINALITY_QUORUM_NUMERATOR,
@@ -702,11 +702,12 @@ impl AggregatorState {
 
 #[derive(Debug)]
 pub struct FinalityAggregator {
+    expected_chain_id: Option<u64>,
     pub epoch: u64,
     pub checkpoint_height: u64,
     pub checkpoint_hash: String,
-    pub prevotes: HashMap<Address, Prevote>,
-    pub precommits: HashMap<Address, Precommit>,
+    pub prevotes: BTreeMap<Address, Prevote>,
+    pub precommits: BTreeMap<Address, Precommit>,
     /// The set every vote is checked against. Required at construction: an
     /// aggregator without a snapshot used to skip membership and BLS checks
     /// and could still emit consensus-verified equivocation reports.
@@ -728,11 +729,11 @@ pub struct FinalityAggregator {
     pub detected_equivocations: Vec<SlashingReport>,
     /// First validly-signed prevote (hash, signature) seen per voter, used to
     /// Detect a later conflicting-hash vote regardless of arrival order.
-    seen_prevotes: HashMap<Address, (String, Vec<u8>)>,
+    seen_prevotes: BTreeMap<Address, (String, Vec<u8>)>,
     /// First validly-signed precommit (hash, signature) seen per voter.
-    seen_precommits: HashMap<Address, (String, Vec<u8>)>,
+    seen_precommits: BTreeMap<Address, (String, Vec<u8>)>,
     /// Voters already flagged for equivocation, to avoid duplicate reports.
-    flagged_equivocators: std::collections::HashSet<Address>,
+    flagged_equivocators: BTreeSet<Address>,
 }
 
 impl FinalityAggregator {
@@ -752,13 +753,15 @@ impl FinalityAggregator {
             0,
             chain_id,
         );
-        Self::with_committee(
+        let mut agg = Self::with_committee(
             epoch,
             checkpoint_height,
             checkpoint_hash,
             validator_snapshot,
             committee,
-        )
+        );
+        agg.expected_chain_id = Some(chain_id);
+        agg
     }
 
     /// Start a round under a seat table the caller already derived, so Instant
@@ -774,19 +777,20 @@ impl FinalityAggregator {
         committee: crate::validators::committee::CommitteeTable,
     ) -> Self {
         Self {
+            expected_chain_id: None,
             epoch,
             checkpoint_height,
             checkpoint_hash,
-            prevotes: HashMap::new(),
-            precommits: HashMap::new(),
+            prevotes: BTreeMap::new(),
+            precommits: BTreeMap::new(),
             validator_snapshot,
             committee,
             prevote_quorum_reached: false,
             precommit_quorum_reached: false,
             detected_equivocations: Vec::new(),
-            seen_prevotes: HashMap::new(),
-            seen_precommits: HashMap::new(),
-            flagged_equivocators: std::collections::HashSet::new(),
+            seen_prevotes: BTreeMap::new(),
+            seen_precommits: BTreeMap::new(),
+            flagged_equivocators: BTreeSet::new(),
         }
     }
 
@@ -803,6 +807,14 @@ impl FinalityAggregator {
     ///
     /// Returns an error if the operation fails.
     pub fn add_prevote(&mut self, vote: Prevote) -> Result<(), String> {
+        if let Some(expected_chain_id) = self.expected_chain_id {
+            if vote.chain_id != expected_chain_id {
+                return Err(format!(
+                    "Prevote signed for chain {}, aggregator expects {expected_chain_id}",
+                    vote.chain_id
+                ));
+            }
+        }
         if vote.epoch != self.epoch {
             return Err("Prevote epoch mismatch".into());
         }
@@ -827,6 +839,10 @@ impl FinalityAggregator {
         )
         .map_err(|e| format!("Invalid prevote signature: {e}"))?;
 
+        if self.expected_chain_id.is_none() {
+            self.expected_chain_id = Some(vote.chain_id);
+        }
+
         // Equivocation detection . A validly-signed vote for a
         // DIFFERENT checkpoint hash than one already seen from this voter is a
         // Double-sign - record canonical evidence once (order-independent).
@@ -842,6 +858,10 @@ impl FinalityAggregator {
             return Err("Duplicate prevote".into());
         }
 
+        if self.flagged_equivocators.contains(&vote.voter_id) {
+            return Err("Equivocating validator excluded from finality round".into());
+        }
+
         self.prevotes.insert(vote.voter_id, vote);
         self.check_prevote_quorum();
         Ok(())
@@ -853,6 +873,14 @@ impl FinalityAggregator {
     ///
     /// Returns an error if the operation fails.
     pub fn add_precommit(&mut self, vote: Precommit) -> Result<(), String> {
+        if let Some(expected_chain_id) = self.expected_chain_id {
+            if vote.chain_id != expected_chain_id {
+                return Err(format!(
+                    "Precommit signed for chain {}, aggregator expects {expected_chain_id}",
+                    vote.chain_id
+                ));
+            }
+        }
         if vote.epoch != self.epoch {
             return Err("Precommit epoch mismatch".into());
         }
@@ -875,11 +903,43 @@ impl FinalityAggregator {
             &vote.sig_bls,
         )
         .map_err(|e| format!("Invalid precommit signature: {e}"))?;
-        // A registered PQ signer cannot downgrade its vote to BLS-only. Reject
-        // before deduplication or equivocation bookkeeping so a stripped copy
-        // cannot occupy the authentic precommit's slot (PR110-C4510256171).
+        // A registered PQ signer cannot downgrade its vote to BLS-only, and any
+        // non-empty PQ attestation must verify cryptographically before
+        // deduplication or equivocation bookkeeping so a forged PQ signature
+        // cannot occupy the honest precommit's slot or poison try_produce_qc_blob.
         if !entry.pq_public_key.is_empty() && vote.pq_sig.is_empty() {
             return Err("Missing PQ attestation in precommit".into());
+        }
+        if !vote.pq_sig.is_empty() {
+            if entry.pq_public_key.is_empty() {
+                return Err(
+                    "Unexpected PQ attestation from validator without registered PQ key".into(),
+                );
+            }
+            let index = self
+                .validator_snapshot
+                .validator_index(&vote.voter_id)
+                .ok_or("PQ attestation signer has no snapshot index")?;
+            let index = u32::try_from(index).map_err(|_| {
+                "Precommit attests a validator index that does not fit its wire field".to_string()
+            })?;
+            let pq_msg = crate::consensus::qc::pq_signing_message(
+                vote.epoch,
+                vote.checkpoint_height,
+                &vote.checkpoint_hash,
+                index,
+            );
+            crate::crypto::primitives::PqKeyPair::verify(
+                &entry.pq_public_key,
+                crate::crypto::ctx::QC_V2,
+                &pq_msg,
+                &vote.pq_sig,
+            )
+            .map_err(|e| format!("Invalid PQ attestation in precommit: {e}"))?;
+        }
+
+        if self.expected_chain_id.is_none() {
+            self.expected_chain_id = Some(vote.chain_id);
         }
 
         // Equivocation detection .
@@ -891,6 +951,10 @@ impl FinalityAggregator {
 
         if self.precommits.contains_key(&vote.voter_id) {
             return Err("Duplicate precommit".into());
+        }
+
+        if self.flagged_equivocators.contains(&vote.voter_id) {
+            return Err("Equivocating validator excluded from finality round".into());
         }
 
         self.precommits.insert(vote.voter_id, vote);
@@ -963,6 +1027,8 @@ impl FinalityAggregator {
         if !self.flagged_equivocators.insert(voter) {
             return;
         }
+        self.check_prevote_quorum();
+        self.check_precommit_quorum();
         let report = SlashingReport::consensus_double_sign(
             voter,
             crate::registry::evidence::SlashingProof::DoubleSign {
@@ -984,33 +1050,31 @@ impl FinalityAggregator {
     }
 
     fn check_prevote_quorum(&mut self) {
-        let covered = self.committee.covered_seats(self.prevotes.keys());
-        let voted_stake: u128 = self
+        let honest_voters = self
             .prevotes
             .keys()
+            .filter(|addr| !self.flagged_equivocators.contains(*addr));
+        let covered = self.committee.covered_seats(honest_voters.clone());
+        let voted_stake: u128 = honest_voters
             .filter_map(|addr| self.validator_snapshot.find_validator(addr))
             .map(|validator| u128::from(validator.stake))
             .sum();
-        if covered >= self.committee.quorum_seats()
-            && voted_stake >= self.validator_snapshot.quorum_stake()
-        {
-            self.prevote_quorum_reached = true;
-        }
+        self.prevote_quorum_reached = covered >= self.committee.quorum_seats()
+            && voted_stake >= self.validator_snapshot.quorum_stake();
     }
 
     fn check_precommit_quorum(&mut self) {
-        let covered = self.committee.covered_seats(self.precommits.keys());
-        let voted_stake: u128 = self
+        let honest_voters = self
             .precommits
             .keys()
+            .filter(|addr| !self.flagged_equivocators.contains(*addr));
+        let covered = self.committee.covered_seats(honest_voters.clone());
+        let voted_stake: u128 = honest_voters
             .filter_map(|addr| self.validator_snapshot.find_validator(addr))
             .map(|validator| u128::from(validator.stake))
             .sum();
-        if covered >= self.committee.quorum_seats()
-            && voted_stake >= self.validator_snapshot.quorum_stake()
-        {
-            self.precommit_quorum_reached = true;
-        }
+        self.precommit_quorum_reached = covered >= self.committee.quorum_seats()
+            && voted_stake >= self.validator_snapshot.quorum_stake();
     }
 
     #[must_use]
@@ -1023,8 +1087,12 @@ impl FinalityAggregator {
 
         let mut bitmap = vec![0u8; snapshot.validators.len().div_ceil(8)];
         let mut agg_sig = G1Projective::identity();
+        let mut honest_signers: Vec<&Address> = Vec::new();
 
         for (addr, precommit) in &self.precommits {
+            if self.flagged_equivocators.contains(addr) {
+                continue;
+            }
             if let Some(idx) = snapshot.validator_index(addr) {
                 // The bit is set only once the signature is in the aggregate:
                 // a claimed signer whose contribution is missing makes the
@@ -1038,20 +1106,34 @@ impl FinalityAggregator {
                 let Some(sig_affine) = G1Affine::from_compressed(&sig_bytes).into_option() else {
                     continue;
                 };
-                agg_sig += G1Projective::from(sig_affine);
-                bitmap[idx / 8] |= 1 << (idx % 8);
+                if let Some(slot) = bitmap.get_mut(idx / 8) {
+                    agg_sig += G1Projective::from(sig_affine);
+                    *slot |= 1 << (idx % 8);
+                    honest_signers.push(addr);
+                }
             }
+        }
+
+        let covered = self.committee.covered_seats(honest_signers.iter().copied());
+        let voted_stake: u128 = honest_signers
+            .iter()
+            .filter_map(|addr| snapshot.find_validator(addr))
+            .map(|validator| u128::from(validator.stake))
+            .sum();
+        if covered < self.committee.quorum_seats() || voted_stake < snapshot.quorum_stake() {
+            return None;
         }
 
         // The certificate commits to the chain its precommits were signed
         // for, so it is taken from those votes rather than assumed: every
         // precommit that reached this aggregator passed the chain check, and
         // a hardcoded id here would silently diverge on any other network.
-        let chain_id = self
-            .precommits
-            .values()
-            .next()
-            .map_or(0, |precommit| precommit.chain_id);
+        let chain_id = self.expected_chain_id.unwrap_or_else(|| {
+            self.precommits
+                .values()
+                .next()
+                .map_or(0, |precommit| precommit.chain_id)
+        });
         Some(FinalityCert {
             chain_id,
             epoch: self.epoch,
@@ -1084,7 +1166,7 @@ impl FinalityAggregator {
             .precommits
             .iter()
             .filter_map(|(address, precommit)| {
-                if precommit.pq_sig.is_empty() {
+                if self.flagged_equivocators.contains(address) || precommit.pq_sig.is_empty() {
                     return None;
                 }
                 let index = u32::try_from(snapshot.validator_index(address)?).ok()?;
@@ -2170,6 +2252,154 @@ mod tests {
             precommit(45261).signing_message(),
             "a precommit preimage must name the chain it was minted for"
         );
+
+        // (a) Standalone FinalityAggregator must reject foreign-chain votes
+        // before equivocation bookkeeping or quorum counting.
+        let (mut snap, sks) = make_snapshot_with_keys(4, 1_000);
+        let pq_kp = crate::crypto::primitives::PqKeyPair::generate();
+        snap.validators[0].pq_public_key = pq_kp.public_key_bytes().to_vec();
+        let snap = ValidatorSetSnapshot::new(snap.epoch, snap.validators);
+        let voter0 = snap.validators[0].address;
+        let idx0 = u32::try_from(snap.validator_index(&voter0).unwrap()).unwrap();
+        let mut agg = FinalityAggregator::new(45262, 1, 10, "cp_hash".into(), snap.clone());
+
+        let mut foreign_pv = Prevote {
+            chain_id: 45261,
+            epoch: 1,
+            checkpoint_height: 10,
+            checkpoint_hash: "cp_hash".into(),
+            voter_id: voter0,
+            sig_bls: Vec::new(),
+            auth_sig: Vec::new(),
+        };
+        foreign_pv.sig_bls = sign_bls(&sks[0], &foreign_pv.signing_message());
+        assert!(
+            agg.add_prevote(foreign_pv).is_err(),
+            "aggregator bound to chain 45262 must reject prevote signed for chain 45261"
+        );
+        assert!(agg.prevotes.is_empty());
+        assert!(agg.detected_equivocations.is_empty());
+
+        // (b) Equivocating validator must be excluded from quorum in BOTH arrival orders:
+        // Order 1: fork hash first, canonical hash second.
+        let mut byz_agg1 = FinalityAggregator::new(45262, 1, 10, "cp_hash".into(), snap.clone());
+        let mut fork_pv = Prevote {
+            chain_id: 45262,
+            epoch: 1,
+            checkpoint_height: 10,
+            checkpoint_hash: "fork_hash".into(),
+            voter_id: voter0,
+            sig_bls: Vec::new(),
+            auth_sig: Vec::new(),
+        };
+        fork_pv.sig_bls = sign_bls(&sks[0], &fork_pv.signing_message());
+        assert!(byz_agg1.add_prevote(fork_pv.clone()).is_err());
+        let mut canon_pv0 = Prevote {
+            chain_id: 45262,
+            epoch: 1,
+            checkpoint_height: 10,
+            checkpoint_hash: "cp_hash".into(),
+            voter_id: voter0,
+            sig_bls: Vec::new(),
+            auth_sig: Vec::new(),
+        };
+        canon_pv0.sig_bls = sign_bls(&sks[0], &canon_pv0.signing_message());
+        assert!(
+            byz_agg1.add_prevote(canon_pv0.clone()).is_err(),
+            "equivocator sending fork first then canonical second must not enter prevotes"
+        );
+        assert_eq!(byz_agg1.detected_equivocations.len(), 1);
+        for i in 1..3 {
+            let mut pv = Prevote {
+                chain_id: 45262,
+                epoch: 1,
+                checkpoint_height: 10,
+                checkpoint_hash: "cp_hash".into(),
+                voter_id: snap.validators[i].address,
+                sig_bls: Vec::new(),
+                auth_sig: Vec::new(),
+            };
+            pv.sig_bls = sign_bls(&sks[i], &pv.signing_message());
+            byz_agg1.add_prevote(pv).unwrap();
+        }
+        assert!(
+            !byz_agg1.prevote_quorum_reached,
+            "2/4 honest + 1 caught equivocator must not reach prevote quorum"
+        );
+
+        // Order 2: canonical hash first, fork hash second, then 2 honest prevotes.
+        let mut byz_agg2 = FinalityAggregator::new(45262, 1, 10, "cp_hash".into(), snap.clone());
+        byz_agg2.add_prevote(canon_pv0).unwrap();
+        assert!(byz_agg2.add_prevote(fork_pv).is_err());
+        for i in 1..3 {
+            let mut pv = Prevote {
+                chain_id: 45262,
+                epoch: 1,
+                checkpoint_height: 10,
+                checkpoint_hash: "cp_hash".into(),
+                voter_id: snap.validators[i].address,
+                sig_bls: Vec::new(),
+                auth_sig: Vec::new(),
+            };
+            pv.sig_bls = sign_bls(&sks[i], &pv.signing_message());
+            byz_agg2.add_prevote(pv).unwrap();
+        }
+        assert!(
+            !byz_agg2.prevote_quorum_reached,
+            "caught equivocator who voted canonical first must be excluded from quorum"
+        );
+
+        // (c) Direct ML-DSA-65 PQ signature verification inside FinalityAggregator::add_precommit.
+        for i in 0..3 {
+            let mut pv = Prevote {
+                chain_id: 45262,
+                epoch: 1,
+                checkpoint_height: 10,
+                checkpoint_hash: "cp_hash".into(),
+                voter_id: snap.validators[i].address,
+                sig_bls: Vec::new(),
+                auth_sig: Vec::new(),
+            };
+            pv.sig_bls = sign_bls(&sks[i], &pv.signing_message());
+            agg.add_prevote(pv).unwrap();
+        }
+        assert!(agg.prevote_quorum_reached);
+
+        let pq_msg = crate::consensus::qc::pq_signing_message(1, 10, "cp_hash", idx0);
+        let valid_pq_sig = pq_kp.sign(crate::crypto::ctx::QC_V2, &pq_msg).unwrap();
+        let mut forged_pq_sig = valid_pq_sig.clone();
+        forged_pq_sig[0] ^= 0x01;
+
+        let mut bad_pc = Precommit {
+            chain_id: 45262,
+            epoch: 1,
+            checkpoint_height: 10,
+            checkpoint_hash: "cp_hash".into(),
+            voter_id: voter0,
+            sig_bls: Vec::new(),
+            auth_sig: Vec::new(),
+            pq_sig: forged_pq_sig,
+        };
+        bad_pc.sig_bls = sign_bls(&sks[0], &bad_pc.signing_message());
+        assert!(
+            agg.add_precommit(bad_pc).is_err(),
+            "add_precommit must reject a corrupted ML-DSA-65 pq_sig directly"
+        );
+        assert!(agg.precommits.is_empty());
+
+        let mut good_pc = Precommit {
+            chain_id: 45262,
+            epoch: 1,
+            checkpoint_height: 10,
+            checkpoint_hash: "cp_hash".into(),
+            voter_id: voter0,
+            sig_bls: Vec::new(),
+            auth_sig: Vec::new(),
+            pq_sig: valid_pq_sig,
+        };
+        good_pc.sig_bls = sign_bls(&sks[0], &good_pc.signing_message());
+        agg.add_precommit(good_pc)
+            .expect("authentic ML-DSA-65 pq_sig must verify");
     }
 
     #[test]
