@@ -475,14 +475,24 @@ impl AptosUpstream {
         };
         let path_only = uri.path();
         let lower = suffix.to_ascii_lowercase();
-        if path_only.contains('\\')
+        if !suffix.bytes().all(|b| (0x21..=0x7e).contains(&b))
+            || path_only.contains('\\')
             || path_only.contains("//")
             || path_only.contains('@')
             || path_only.contains("..")
+            || path_only.contains(';')
+            || path_only
+                .split('/')
+                .any(|seg| seg == "." || seg == ".." || seg.starts_with('.') || seg.contains(';'))
             || lower.contains("%5c")
-            || lower.contains("%2f%2f")
-            || lower.contains("%2e%2e")
+            || lower.contains("%2f")
+            || lower.contains("%2e")
             || lower.contains("%40")
+            || lower.contains("%3b")
+            || lower.contains("%25")
+            || lower.contains("%0d")
+            || lower.contains("%0a")
+            || lower.contains("%00")
         {
             return Err(reject());
         }
@@ -853,6 +863,14 @@ impl AptosCompatGateway {
                         body: serde_json::json!({ "message": "missing BCS transaction body" }),
                     };
                 };
+                if raw.len() > crate::rpc::compat::ethereum::MAX_COMPAT_REQUEST_BYTES {
+                    return AptosRestResponse {
+                        status: 413,
+                        body: serde_json::json!({
+                            "message": "Aptos transaction body exceeds MAX_COMPAT_REQUEST_BYTES"
+                        }),
+                    };
+                }
                 let env = ForeignTx::Aptos {
                     raw_bcs: raw.to_vec(),
                     direct_native_pq_recipient: None,
@@ -875,14 +893,35 @@ impl AptosCompatGateway {
                     },
                 }
             }
-            ("POST", "/v1/transactions/simulate" | "/v1/view") => AptosRestResponse {
-                status: 200,
-                body: serde_json::json!([]),
-            },
+            ("POST", "/v1/transactions/simulate" | "/v1/view") => {
+                if body.is_some_and(|raw| {
+                    raw.len() > crate::rpc::compat::ethereum::MAX_COMPAT_REQUEST_BYTES
+                }) {
+                    return AptosRestResponse {
+                        status: 413,
+                        body: serde_json::json!({
+                            "message": "Aptos request body exceeds MAX_COMPAT_REQUEST_BYTES"
+                        }),
+                    };
+                }
+                AptosRestResponse {
+                    status: 200,
+                    body: serde_json::json!([]),
+                }
+            }
             ("GET", p) if p.starts_with("/v1/accounts/") => {
                 let rest = p.trim_start_matches("/v1/accounts/");
-                let addr_seg = rest.split('/').next().unwrap_or("");
-                let Ok(bytes) = hex::decode(addr_seg.trim_start_matches("0x")) else {
+                let mut parts = rest.split('/');
+                let addr_seg = parts.next().unwrap_or("");
+                let sub_seg = parts.next();
+                if parts.next().is_some() || matches!(sub_seg, Some(s) if s != "resources") {
+                    return AptosRestResponse {
+                        status: 404,
+                        body: serde_json::json!({ "message": "route not found" }),
+                    };
+                }
+                let hex_str = addr_seg.strip_prefix("0x").unwrap_or(addr_seg);
+                let Ok(bytes) = hex::decode(hex_str) else {
                     return AptosRestResponse {
                         status: 400,
                         body: serde_json::json!({ "message": "bad account hex" }),
@@ -902,7 +941,7 @@ impl AptosCompatGateway {
                     .get(&bud_addr)
                     .map_or(0u64, |r| r.next_nonce);
                 let octas = state.get_attos_balance(&bud_addr) / ATTOS_PER_OCTA;
-                if rest.ends_with("/resources") {
+                if sub_seg == Some("resources") {
                     return AptosRestResponse {
                         status: 200,
                         body: serde_json::json!([{
@@ -983,5 +1022,49 @@ mod upstream_tests {
                 parsed.path()
             );
         }
+    }
+
+    #[test]
+    fn aptos_upstream_url_for_rejects_encoded_and_matrix_traversals() {
+        let upstream = AptosUpstream::parse("https://aptos.example.org/v1").unwrap();
+        for bad in [
+            "/v1/accounts/..;x/secret",
+            "/v1/accounts/.;/secret",
+            "/v1/accounts/%2e/..%2fadmin",
+            "/v1/accounts/%252e%252e/admin",
+            "/v1/accounts/0x01%3badmin=1",
+            "/v1/accounts/0x01%0d%0aX-Inj:1",
+            "/v1/accounts/./secret",
+        ] {
+            let uri: hyper::Uri = bad.parse().unwrap();
+            assert!(
+                upstream.url_for(&uri).is_err(),
+                "encoded or matrix traversal {bad} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn aptos_compat_gateway_rejects_oversized_tx_and_smuggled_account_routes() {
+        let state = crate::core::account::AccountState::new();
+        let mut gw = super::AptosCompatGateway::new(super::AptosCompatConfig::default(), 1, 100);
+        let big = vec![b'a'; crate::rpc::compat::ethereum::MAX_COMPAT_REQUEST_BYTES + 1];
+        let over = gw.handle_rest("POST", "/v1/transactions", Some(&big), &state);
+        assert_eq!(
+            over.status, 413,
+            "oversized POST /v1/transactions must return 413"
+        );
+        let over_sim = gw.handle_rest("POST", "/v1/transactions/simulate", Some(&big), &state);
+        assert_eq!(over_sim.status, 413, "oversized simulate must return 413");
+        let double_prefix = gw.handle_rest("GET", "/v1/accounts/0x0x01/resources", None, &state);
+        assert_eq!(
+            double_prefix.status, 400,
+            "double 0x prefix must be refused"
+        );
+        let extra_suffix = gw.handle_rest("GET", "/v1/accounts/0x01/extra", None, &state);
+        assert_eq!(
+            extra_suffix.status, 404,
+            "unknown account suffix must be refused"
+        );
     }
 }
