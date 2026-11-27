@@ -20,11 +20,24 @@
 //! and they do not stand in for a proof system; the header of each module
 //! states separately what it does and does not claim.
 
+pub mod fee_and_session;
 pub mod private_transfer_auth;
 pub mod quantum_account;
 pub mod registry;
 pub mod tee_attestation;
 pub mod threshold_mldsa;
+
+pub use fee_and_session::{
+    recovery_approval_digest, recovery_cancel_digest, session_revoke_digest, session_spend_digest,
+    AccountAbstractionError, FeeSponsorAuthorization, FeeSponsorRegistry, FeeSponsorTerms,
+    GuardianRecoveryApproval, SessionDelegation, SessionDelegationParams,
+    SessionDelegationRegistry, SessionKeyPosture, SessionSpendRequest, SocialRecoveryPolicy,
+    TimelockedRecoveryRegistry, TimelockedRecoveryState, FEE_SPONSOR_DOMAIN_TAG,
+    MAX_ALLOWED_RECIPIENTS, MAX_CLASSICAL_HARDWARE_SESSION_CAP, MAX_CONSUMED_GRANTS, MAX_GUARDIANS,
+    MAX_RECOVERY_PROPOSALS, MAX_SESSIONS, MAX_SESSION_NONCES, RECOVERY_APPROVAL_DOMAIN_TAG,
+    RECOVERY_CANCEL_DOMAIN_TAG, SESSION_DELEGATION_DOMAIN_TAG, SESSION_REVOKE_DOMAIN_TAG,
+    SESSION_SPEND_DOMAIN_TAG,
+};
 
 pub use private_transfer_auth::{PrivateTransferAuth, PrivateTransferError, PrivateTransferGates};
 pub use quantum_account::{

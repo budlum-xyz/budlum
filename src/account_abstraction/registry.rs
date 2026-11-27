@@ -529,6 +529,54 @@ impl QuantumAccountRegistry {
         self.accounts.insert(*address, candidate);
         Ok(())
     }
+
+    /// Statelessly verify a single-transaction [`FeeSponsorAuthorization`] at
+    /// this registry's current `epoch` without mutating committed account state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`super::fee_and_session::AccountAbstractionError`] if verification fails.
+    pub fn verify_fee_sponsor(
+        &self,
+        grant: &super::fee_and_session::FeeSponsorAuthorization,
+        expected_chain_id: u64,
+        expected_tx_hash: &crate::domain::types::Hash32,
+        actual_fee_bud: u128,
+    ) -> Result<crate::domain::types::Hash32, super::fee_and_session::AccountAbstractionError> {
+        grant.verify(
+            expected_chain_id,
+            expected_tx_hash,
+            actual_fee_bud,
+            self.epoch,
+        )
+    }
+
+    /// Statelessly verify a [`SessionDelegation`] against `expected_chain_id`
+    /// without mutating committed account state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`super::fee_and_session::AccountAbstractionError`] if verification fails.
+    pub fn verify_session_delegation(
+        &self,
+        delegation: &super::fee_and_session::SessionDelegation,
+        expected_chain_id: u64,
+    ) -> Result<crate::domain::types::Hash32, super::fee_and_session::AccountAbstractionError> {
+        delegation.verify(expected_chain_id)
+    }
+
+    /// Statelessly validate a [`SocialRecoveryPolicy`] without mutating
+    /// committed account state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`super::fee_and_session::AccountAbstractionError`] if policy invariants fail.
+    pub fn verify_recovery_policy(
+        &self,
+        policy: &super::fee_and_session::SocialRecoveryPolicy,
+    ) -> Result<(), super::fee_and_session::AccountAbstractionError> {
+        policy.validate()
+    }
 }
 
 #[cfg(test)]

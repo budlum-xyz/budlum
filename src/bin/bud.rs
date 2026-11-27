@@ -5134,6 +5134,79 @@ fn run_cli_conformance(samples: usize) -> Result<(), String> {
     // Verify stateful platform registries & B.U.D. 3.0 subsystems on testnet (45261).
     let qa_reg = budlum_core::account_abstraction::registry::QuantumAccountRegistry::new();
     let _qa_ok = qa_reg.is_registered(&[0u8; 32]);
+    let aa_chain_id = budlum_core::core::chain_config::Network::Testnet
+        .chain_id()
+        .value();
+    let aa_probe_sponsor = budlum_core::crypto::composite::CompositeKeypair::from_seeds(
+        budlum_core::crypto::scheme::SuiteId::VALIDATOR,
+        &[0x41; budlum_core::crypto::pq::ML_DSA_SEED_LEN],
+        &[0x42; 32],
+    )
+    .map_err(|e| format!("conformance AA sponsor keypair failed: {e}"))?;
+    let aa_grant = budlum_core::account_abstraction::FeeSponsorAuthorization::sign(
+        &aa_probe_sponsor,
+        budlum_core::account_abstraction::FeeSponsorTerms {
+            chain_id: aa_chain_id,
+            tx_hash: [0x11; 32],
+            sender: Address::from([0x22; 32]),
+            max_fee_bud: 1_000,
+            expiry_epoch: 10,
+            sponsor_nonce: 1,
+        },
+        &[0x19; 32],
+    )
+    .map_err(|e| format!("conformance fee sponsor sign failed: {e}"))?;
+    let mut aa_sponsor_reg = budlum_core::account_abstraction::FeeSponsorRegistry::default();
+    let _aa_grant_id = aa_sponsor_reg
+        .consume(&aa_grant, aa_chain_id, &[0x11; 32], 500, 0)
+        .map_err(|e| format!("conformance fee sponsor consume failed: {e}"))?;
+    let _ = qa_reg.verify_fee_sponsor(&aa_grant, aa_chain_id, &[0x11; 32], 500);
+    let _ = aa_sponsor_reg.is_consumed(&_aa_grant_id);
+    let aa_del = budlum_core::account_abstraction::SessionDelegation::sign(
+        &aa_probe_sponsor,
+        budlum_core::account_abstraction::SessionDelegationParams {
+            chain_id: aa_chain_id,
+            session_key:
+                budlum_core::account_abstraction::SessionKeyPosture::HardwareClassicalCapped {
+                    evm_address: [0x33; 20],
+                },
+            total_spend_cap: 1_000,
+            per_tx_cap: 500,
+            allowed_recipients: vec![Address::from([0x44; 32])],
+            not_before_epoch: 0,
+            expiry_epoch: 10,
+            delegation_nonce: 1,
+        },
+        &[0x29; 32],
+    )
+    .map_err(|e| format!("conformance session delegation sign failed: {e}"))?;
+    let _ = qa_reg.verify_session_delegation(&aa_del, aa_chain_id);
+    let mut aa_sess_reg = budlum_core::account_abstraction::SessionDelegationRegistry::default();
+    let _aa_del_id = aa_sess_reg
+        .register(aa_del, aa_chain_id)
+        .map_err(|e| format!("conformance session register failed: {e}"))?;
+    let aa_recovery = budlum_core::account_abstraction::SocialRecoveryPolicy {
+        chain_id: aa_chain_id,
+        current_owner_pubkey: aa_probe_sponsor
+            .public_key()
+            .map_err(|e| format!("conformance owner pk failed: {e}"))?
+            .encode(),
+        guardians: vec![
+            budlum_core::crypto::composite::CompositeKeypair::from_seeds(
+                budlum_core::crypto::scheme::SuiteId::VALIDATOR,
+                &[0x51; budlum_core::crypto::pq::ML_DSA_SEED_LEN],
+                &[0x52; 32],
+            )
+            .map_err(|e| format!("conformance guardian pk failed: {e}"))?
+            .public_key()
+            .map_err(|e| format!("conformance guardian pk encode failed: {e}"))?
+            .encode(),
+        ],
+        threshold: 1,
+        delay_epochs: 2,
+    };
+    let _ = qa_reg.verify_recovery_policy(&aa_recovery);
+    let _aa_rec_reg = budlum_core::account_abstraction::TimelockedRecoveryRegistry::default();
 
     let dm_reg = budlum_core::data_market::DataMarketRegistry::new();
     let _dm_none = dm_reg.listing(&[0u8; 32]);

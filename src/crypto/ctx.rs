@@ -111,6 +111,18 @@ pub const IDENTITY_ADDR_LINK_V1: &[u8] = b"BDLM/IDENTITY_ADDR_LINK/V1";
 /// A payer's PQ-hybrid signature over a pre-authorized offline spend voucher
 /// (`unification::payment_router::SignedOfflineVoucher`).
 pub const OFFLINE_VOUCHER_V1: &[u8] = b"BDLM/OFFLINE_VOUCHER/V1";
+/// A gasless fee sponsor's PQ-hybrid signature over one transaction's fee ceiling.
+pub const FEE_SPONSOR_V1: &[u8] = b"BDLM/FEE_SPONSOR/V1";
+/// A master account key's PQ-hybrid signature delegating a bounded session key.
+pub const SESSION_DELEGATION_V1: &[u8] = b"BDLM/SESSION_DELEGATION/V1";
+/// A delegated session key's signature authorizing a bounded spend.
+pub const SESSION_SPEND_V1: &[u8] = b"BDLM/SESSION_SPEND/V1";
+/// A master account key's PQ-hybrid signature revoking a delegated session key.
+pub const SESSION_REVOKE_V1: &[u8] = b"BDLM/SESSION_REVOKE/V1";
+/// A guardian's PQ-hybrid signature approving a timelocked recovery proposal.
+pub const RECOVERY_APPROVAL_V1: &[u8] = b"BDLM/RECOVERY_APPROVAL/V1";
+/// A master account owner's PQ-hybrid signature vetoing a pending recovery.
+pub const RECOVERY_CANCEL_V1: &[u8] = b"BDLM/RECOVERY_CANCEL/V1";
 
 /// table, in the order of section 6.5.
 pub const TABLE: &[&[u8]] = &[
@@ -155,6 +167,12 @@ pub const EXTRAS: &[&[u8]] = &[
     AGG_SEGMENT_V1,
     IDENTITY_ADDR_LINK_V1,
     OFFLINE_VOUCHER_V1,
+    FEE_SPONSOR_V1,
+    SESSION_DELEGATION_V1,
+    SESSION_SPEND_V1,
+    SESSION_REVOKE_V1,
+    RECOVERY_APPROVAL_V1,
+    RECOVERY_CANCEL_V1,
 ];
 
 /// Whether `ctx` is a registered context string.
