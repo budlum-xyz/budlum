@@ -195,6 +195,9 @@ pub struct Blockchain {
     /// `enable_aggregator` is called on a chain with the layer on. Node
     /// local, never part of the state.
     agg_node: Option<crate::aggregation::node::AggNode>,
+    /// Node-local side-by-side shadow auditor active when genesis sets
+    /// `AggMode::Shadow`. Never part of consensus state.
+    shadow_auditor: Option<crate::aggregation::shadow::ShadowAuditor>,
     /// Votes that reached this node before it had a round - or a prevote
     /// quorum - to put them in. A peer votes the moment it holds the
     /// checkpoint, which can be earlier than this node's own aggregator
@@ -328,6 +331,24 @@ impl Blockchain {
         }
     }
 
+    fn emit_shadow_metrics(&self, m: &crate::core::metrics::Metrics) {
+        if let Some(report) = self.shadow_report() {
+            m.agg_shadow_blocks_audited
+                .set(i64::try_from(report.blocks_audited).unwrap_or(i64::MAX));
+            m.agg_shadow_txs_checked
+                .set(i64::try_from(report.txs_checked).unwrap_or(i64::MAX));
+            m.agg_shadow_matches
+                .set(i64::try_from(report.matches).unwrap_or(i64::MAX));
+            m.agg_shadow_mismatches
+                .set(i64::try_from(report.mismatches).unwrap_or(i64::MAX));
+        } else {
+            m.agg_shadow_blocks_audited.set(0);
+            m.agg_shadow_txs_checked.set(0);
+            m.agg_shadow_matches.set(0);
+            m.agg_shadow_mismatches.set(0);
+        }
+    }
+
     pub(crate) fn emit_chain_metrics(&self) {
         if let Some(ref m) = self.metrics {
             let height = self.chain.len() as i64;
@@ -414,6 +435,7 @@ impl Blockchain {
             let stalled = self.recovery_tracker.is_stalled() || lag >= checkpoint.saturating_mul(8);
             m.finality_stalled.set(i64::from(stalled));
             self.emit_bud3_metrics(m);
+            self.emit_shadow_metrics(m);
             m.mempool_size.set(self.mempool.len() as i64);
             // Exported alongside the count because the count does not bound
             // memory. See `mempool::pool::DEFAULT_MAX_POOL_BYTES`.
@@ -1309,6 +1331,14 @@ impl Blockchain {
         // disagree about a gate that decides writes inside blocks.
         state.execution_domain = consensus.domain_kind();
 
+        let shadow_auditor = (aggregation.mode == crate::aggregation::params::AggMode::Shadow)
+            .then(|| {
+                crate::aggregation::shadow::ShadowAuditor::new(
+                    state.scheme_registry.clone(),
+                    aggregation,
+                )
+            });
+
         let mut bc = Self {
             chain: chain_vec,
             consensus,
@@ -1346,6 +1376,7 @@ impl Blockchain {
             last_seat_participation: None,
             pending_block_frame: None,
             agg_node: None,
+            shadow_auditor,
             early_finality_votes: EarlyFinalityVotes::default(),
             metrics: None,
             anchor_emission: AnchorEmission::default(),
@@ -5329,16 +5360,43 @@ impl Blockchain {
         }
     }
 
+    /// Cumulative aggregation shadow-audit telemetry when `AggMode::Shadow` is active.
+    #[must_use]
+    fn shadow_report(&self) -> Option<&crate::aggregation::shadow::ShadowReport> {
+        self.shadow_auditor
+            .as_ref()
+            .map(crate::aggregation::shadow::ShadowAuditor::report)
+    }
+
     /// Tell the aggregation side about the blocks from `from` on, after
     /// they were committed: their frames are done and the claimed
-    /// transactions they spent leave the store.
+    /// transactions they spent leave the store. When `AggMode::Shadow` is
+    /// configured, also run [`ShadowAuditor::audit_block_in`] over the
+    /// newly committed suffix without affecting consensus validity.
     fn aggregation_after_commit(&mut self, from: usize) {
-        let Some(node) = self.agg_node.as_mut() else {
-            return;
-        };
         let state = &self.state;
-        for block in self.chain.iter().skip(from) {
-            node.on_block(block, |tx| tx.nonce < state.get_nonce(&tx.from));
+        if let Some(node) = self.agg_node.as_mut() {
+            for block in self.chain.iter().skip(from) {
+                node.on_block(block, |tx| tx.nonce < state.get_nonce(&tx.from));
+            }
+        }
+        if let Some(auditor) = self.shadow_auditor.as_mut() {
+            for block in self.chain.iter().skip(from) {
+                match auditor.audit_block_in(block, &state.scheme_registry) {
+                    Ok(true) => {}
+                    Ok(false) => warn!(
+                        "Aggregation shadow auditor recorded divergence at block {}",
+                        block.index
+                    ),
+                    Err(error) => warn!(
+                        "Aggregation shadow auditor skipped block {}: {error}",
+                        block.index
+                    ),
+                }
+            }
+            if let Some(ref m) = self.metrics {
+                self.emit_shadow_metrics(m);
+            }
         }
     }
 
@@ -11127,6 +11185,7 @@ impl Clone for Blockchain {
             last_seat_participation: None,
             pending_block_frame: None,
             agg_node: None,
+            shadow_auditor: self.shadow_auditor.clone(),
             early_finality_votes: EarlyFinalityVotes::default(),
             metrics: self.metrics.clone(),
             anchor_emission: self.anchor_emission.clone(),

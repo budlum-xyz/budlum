@@ -73,14 +73,18 @@ impl Digest4 {
         self.0
     }
 
-    /// True when the upper three limbs are all zero (the legacy V1 64-bit shape
-    /// refused by `no_64bit_commitments` on V2 paths unless the whole digest is
-    /// zero).
+    /// True when exactly one of the four 64-bit limbs is non-zero (any single-limb
+    /// 64-bit shape refused by `no_64bit_commitments` on V2 paths regardless of
+    /// which lane holds the 64-bit value).
     ///
     /// WIRING: exposed for V2 commitment gates that reject 64-bit truncated digests.
     #[must_use]
     pub const fn is_single_limb_truncated(&self) -> bool {
-        self.0[0] != 0 && self.0[1] == 0 && self.0[2] == 0 && self.0[3] == 0
+        let nz = (self.0[0] != 0) as u8
+            + (self.0[1] != 0) as u8
+            + (self.0[2] != 0) as u8
+            + (self.0[3] != 0) as u8;
+        nz == 1
     }
 
     /// Pack the four canonical limbs into 32 little-endian bytes (`NoteHash`).
@@ -159,8 +163,8 @@ impl SuiteTaggedCommitment {
     }
 
     /// Decode `[suite_byte, digest[0..32]]`, refusing all-zero or 64-bit
-    /// zero-padded V1 truncated commitments across every suite and validating
-    /// canonical Goldilocks limbs when `suite == PoseidonG12V1`.
+    /// single-limb commitments in any 8-byte lane across every suite and
+    /// validating canonical Goldilocks limbs when `suite == PoseidonG12V1`.
     ///
     /// WIRING: exposed for V2 wire decoding.
     #[must_use]
@@ -168,9 +172,14 @@ impl SuiteTaggedCommitment {
         let suite = HashSuiteId::from_byte(raw[0])?;
         let mut digest = [0u8; 32];
         digest.copy_from_slice(&raw[1..]);
-        // Refuse both all-zero commitments and 64-bit single-limb zero-padded
-        // commitments (`digest[8..32] == 0`) regardless of suite tag (`KP-2`).
-        if digest[8..].iter().all(|&b| b == 0) {
+        // Refuse both all-zero commitments (`nonzero_lanes == 0`) and any 64-bit
+        // single-limb commitment (`nonzero_lanes == 1`) regardless of which
+        // 8-byte lane carries the non-zero bytes (`KP-2`).
+        let nonzero_lanes = digest
+            .chunks_exact(8)
+            .filter(|lane| lane.iter().any(|&b| b != 0))
+            .count();
+        if nonzero_lanes < 2 {
             return None;
         }
         if matches!(suite, HashSuiteId::PoseidonG12V1) {

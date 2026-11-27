@@ -5,7 +5,9 @@ use budlum_core::core::transaction::ExternalChain;
 use budlum_core::cross_domain::external::IntakeState;
 use budlum_core::crypto::facts::{AssumptionClass, CryptoFacts, ObservedScheme, QuantumClass};
 use budlum_core::crypto::scheme::SchemeId;
-use budlum_core::domain::types::{ConsensusDomain, ConsensusKind, DomainStatus, RootScheme};
+use budlum_core::domain::types::{
+    ConsensusDomain, ConsensusKind, DomainCommitment, DomainStatus, PoWDomainParameters, RootScheme,
+};
 use budlum_core::relayer::{
     check_quantum_leg_posture, PolicyEnvelope, RelayerActionKind, RelayerIntentTx, SolverBid,
     UserIntent,
@@ -25,26 +27,53 @@ fn must<T, E: std::fmt::Debug>(res: Result<T, E>, msg: &str) -> T {
 fn make_domain(id: u32, status: DomainStatus) -> ConsensusDomain {
     ConsensusDomain {
         id,
-        kind: ConsensusKind::Bft,
+        kind: ConsensusKind::PoW,
         status,
         domain_chain_id: 70_000 + u64::from(id),
         operator: Some(Address::from([0x10; 32])),
         operator_bond: budlum_core::domain::registry::MIN_DOMAIN_OPERATOR_BOND,
         config_hash: [0xA1; 32],
         validator_set_hash: [0xB1; 32],
-        finality_adapter: "tendermint-v1".into(),
-        min_confirmations: 1,
+        finality_adapter: "pow-header-chain-v1".into(),
+        min_confirmations: 6,
         bridge_enabled: true,
         block_hash_scheme: RootScheme::Sha256,
         state_root_scheme: RootScheme::Sha256,
         tx_root_scheme: RootScheme::Sha256,
         last_committed_height: 10,
         last_committed_hash: [0x10; 32],
-        pow_parameters: None,
+        pow_parameters: Some(PoWDomainParameters {
+            min_difficulty_bits: 16,
+            max_difficulty_bits: 80,
+            min_cumulative_work: 6 * (1u128 << 16),
+            max_headers: 64,
+        }),
         zk_program_allowlist: Vec::new(),
         plugin_code_hash: None,
         genesis_state_root: [0x01; 32],
     }
+}
+
+fn insert_verified_commitment(state: &mut AccountState, domain_id: u32) {
+    must(
+        state.settlement.commitments.insert(DomainCommitment {
+            domain_id,
+            domain_height: 10,
+            domain_block_hash: [0x10; 32],
+            parent_domain_block_hash: [0x01; 32],
+            state_root: [0xCD; 32],
+            tx_root: [0xDE; 32],
+            event_root: [0xEF; 32],
+            finality_proof_hash: [0x77; 32],
+            consensus_kind: ConsensusKind::PoW,
+            validator_set_hash: [0xB1; 32],
+            timestamp_ms: 1_700_000_000_000,
+            sequence: 1,
+            producer: Some(Address::from([0x10; 32])),
+            state_updates: std::collections::BTreeMap::new(),
+        }),
+        "insert verified commitment",
+    );
 }
 
 fn make_policy(owner: Address, allowed_domains: Vec<u32>, max_fee: u64) -> PolicyEnvelope {
@@ -173,6 +202,7 @@ fn k4j_oj4_frozen_domain_suspends_intent_expiry_and_extends_solver_grace_without
             .restore_persisted(make_domain(source_domain, DomainStatus::Active)),
         "register source domain",
     );
+    insert_verified_commitment(&mut state, source_domain);
 
     let intent = UserIntent::new(
         owner,
@@ -331,6 +361,7 @@ fn k4j_oj5_quantum_canary_alarm_closes_classical_legs_while_pq_legs_continue_set
             .restore_persisted(make_domain(classical_domain, DomainStatus::Active)),
         "register classical domain",
     );
+    insert_verified_commitment(&mut state, classical_domain);
     let mut classical_facts = CryptoFacts::new();
     classical_facts.record(ObservedScheme::Scheme(SchemeId::ED25519));
     state
@@ -345,6 +376,7 @@ fn k4j_oj5_quantum_canary_alarm_closes_classical_legs_while_pq_legs_continue_set
             .restore_persisted(make_domain(pq_domain, DomainStatus::Active)),
         "register pq domain",
     );
+    insert_verified_commitment(&mut state, pq_domain);
     let mut pq_facts = CryptoFacts::new();
     pq_facts.record(ObservedScheme::Scheme(SchemeId::ML_DSA_65));
     pq_facts.record(ObservedScheme::Proof(AssumptionClass::Hash));

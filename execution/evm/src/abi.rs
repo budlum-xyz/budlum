@@ -101,7 +101,11 @@ fn read_u8_word(buf: &[u8], offset: usize) -> Option<u8> {
     word.get(31).copied()
 }
 
-fn read_dyn_bytes(args: &[u8], head_offset: usize, min_tail_offset: usize) -> Option<Vec<u8>> {
+fn read_dyn_bytes(
+    args: &[u8],
+    head_offset: usize,
+    min_tail_offset: usize,
+) -> Option<(usize, usize, Vec<u8>)> {
     let rel = read_usize_word(args, head_offset)?;
     if rel < min_tail_offset || !rel.is_multiple_of(32) {
         return None;
@@ -117,7 +121,22 @@ fn read_dyn_bytes(args: &[u8], head_offset: usize, min_tail_offset: usize) -> Op
     if args.get(data_end..padded_end)?.iter().any(|&b| b != 0) {
         return None;
     }
-    Some(args.get(data_start..data_end)?.to_vec())
+    Some((rel, padded_end, args.get(data_start..data_end)?.to_vec()))
+}
+
+/// Verify that dynamic ABI tail slices are pairwise disjoint and partition
+/// `head_len..args_len` with zero unreferenced gap or trailing bytes.
+fn tails_cover_exact(head_len: usize, args_len: usize, spans: &[(usize, usize)]) -> bool {
+    let mut sorted = spans.to_vec();
+    sorted.sort_unstable_by_key(|&(start, _)| start);
+    let mut cursor = head_len;
+    for (start, end) in sorted {
+        if start != cursor || end < start {
+            return false;
+        }
+        cursor = end;
+    }
+    cursor == args_len
 }
 
 /// Decode Solidity calldata targeting `0x000000000000000000000000000000000000B001`.
@@ -134,8 +153,11 @@ pub fn decode_precompile_call(calldata: &[u8]) -> Option<ParsedPrecompileCall> {
             return None;
         }
         let target_ee = read_u8_word(args, 0)?;
-        let target = read_dyn_bytes(args, 32, HEAD_LEN)?;
-        let input = read_dyn_bytes(args, 64, HEAD_LEN)?;
+        let (t_rel, t_end, target) = read_dyn_bytes(args, 32, HEAD_LEN)?;
+        let (i_rel, i_end, input) = read_dyn_bytes(args, 64, HEAD_LEN)?;
+        if !tails_cover_exact(HEAD_LEN, args.len(), &[(t_rel, t_end), (i_rel, i_end)]) {
+            return None;
+        }
         let value_attos = read_u128_word(args, 96)?;
         let gas_bgu = read_u64_word(args, 128)?;
         Some(ParsedPrecompileCall {
@@ -152,8 +174,11 @@ pub fn decode_precompile_call(calldata: &[u8]) -> Option<ParsedPrecompileCall> {
             return None;
         }
         let target_ee = read_u8_word(args, 0)?;
-        let target = read_dyn_bytes(args, 32, HEAD_LEN)?;
-        let input = read_dyn_bytes(args, 64, HEAD_LEN)?;
+        let (t_rel, t_end, target) = read_dyn_bytes(args, 32, HEAD_LEN)?;
+        let (i_rel, i_end, input) = read_dyn_bytes(args, 64, HEAD_LEN)?;
+        if !tails_cover_exact(HEAD_LEN, args.len(), &[(t_rel, t_end), (i_rel, i_end)]) {
+            return None;
+        }
         let gas_bgu = read_u64_word(args, 96)?;
         Some(ParsedPrecompileCall {
             is_static_selector: true,
@@ -289,7 +314,10 @@ pub fn decode_uol_call(calldata: &[u8]) -> Option<DecodedUolCall> {
         }
         let mut class_id = [0u8; 32];
         class_id.copy_from_slice(read_word(args, 0)?);
-        let holder = read_dyn_bytes(args, 32, HEAD_LEN)?;
+        let (h_rel, h_end, holder) = read_dyn_bytes(args, 32, HEAD_LEN)?;
+        if !tails_cover_exact(HEAD_LEN, args.len(), &[(h_rel, h_end)]) {
+            return None;
+        }
         return Some(DecodedUolCall::BalanceOf { class_id, holder });
     }
     if sel == uol_selector("holderOf(bytes32)") {
@@ -309,7 +337,10 @@ pub fn decode_uol_call(calldata: &[u8]) -> Option<DecodedUolCall> {
         class_id.copy_from_slice(read_word(args, 0)?);
         let mut asset_id = [0u8; 32];
         asset_id.copy_from_slice(read_word(args, 32)?);
-        let to = read_dyn_bytes(args, 64, HEAD_LEN)?;
+        let (to_rel, to_end, to) = read_dyn_bytes(args, 64, HEAD_LEN)?;
+        if !tails_cover_exact(HEAD_LEN, args.len(), &[(to_rel, to_end)]) {
+            return None;
+        }
         let amount = read_u128_word(args, 96)?;
         return Some(DecodedUolCall::Transfer {
             class_id,
@@ -327,8 +358,11 @@ pub fn decode_uol_call(calldata: &[u8]) -> Option<DecodedUolCall> {
         class_id.copy_from_slice(read_word(args, 0)?);
         let mut asset_id = [0u8; 32];
         asset_id.copy_from_slice(read_word(args, 32)?);
-        let taker = read_dyn_bytes(args, 64, HEAD_LEN)?;
-        let payment = read_dyn_bytes(args, 96, HEAD_LEN)?;
+        let (tk_rel, tk_end, taker) = read_dyn_bytes(args, 64, HEAD_LEN)?;
+        let (py_rel, py_end, payment) = read_dyn_bytes(args, 96, HEAD_LEN)?;
+        if !tails_cover_exact(HEAD_LEN, args.len(), &[(tk_rel, tk_end), (py_rel, py_end)]) {
+            return None;
+        }
         let amount = read_u128_word(args, 128)?;
         let expiry = read_u64_word(args, 160)?;
         return Some(DecodedUolCall::Offer {
@@ -502,6 +536,34 @@ mod tests {
         assert!(
             decode_uol_offer_bytes(&huge_raw).is_none(),
             "decode_uol_offer_bytes must reject taker exceeding MAX_PRECOMPILE_BYTES"
+        );
+
+        // 6. Trailing unreferenced garbage bytes and aliased dynamic offsets on
+        //    dynamic precompile calls (`call`, `staticCall`, `balanceOf`, `transfer`, `offer`)
+        //    must be refused.
+        let mut call_trailing = encode_universal_call_input(2, b"ab", b"cd", 0, 100);
+        call_trailing.extend_from_slice(&[0u8; 32]);
+        assert!(
+            decode_precompile_call(&call_trailing).is_none(),
+            "UniversalCall with unreferenced trailing word must be refused"
+        );
+
+        // Aliased dynamic offsets: both `target` and `input` point to offset 160!
+        let mut aliased = Vec::from(SEL_UNIVERSAL_CALL);
+        let mut ahead = vec![0u8; 160];
+        ahead[31] = 2;
+        ahead[56..64].copy_from_slice(&160u64.to_be_bytes());
+        ahead[88..96].copy_from_slice(&160u64.to_be_bytes());
+        ahead[152..160].copy_from_slice(&100u64.to_be_bytes());
+        aliased.extend_from_slice(&ahead);
+        let mut atail = vec![0u8; 64];
+        atail[31] = 2;
+        atail[32] = b'x';
+        atail[33] = b'y';
+        aliased.extend_from_slice(&atail);
+        assert!(
+            decode_precompile_call(&aliased).is_none(),
+            "aliased dynamic offsets (target == input) must be refused"
         );
     }
 }

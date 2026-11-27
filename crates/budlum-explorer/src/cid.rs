@@ -162,8 +162,20 @@ pub fn parse(s: &str) -> Result<Cid, String> {
             .ok_or_else(|| String::from("base32upper could not be decoded"))?
     } else if let Some(rest) = s.strip_prefix('z') {
         b58_decode(rest).ok_or_else(|| String::from("base58btc could not be decoded"))?
-    } else if let Some(rest) = s.strip_prefix('f').or_else(|| s.strip_prefix('F')) {
+    } else if let Some(rest) = s.strip_prefix('f') {
+        if rest.bytes().any(|b| b.is_ascii_uppercase()) {
+            return Err(String::from(
+                "multibase 'f' base16 requires lowercase hex digits",
+            ));
+        }
         hex::decode(rest).map_err(|e| format!("base16 could not be decoded: {e}"))?
+    } else if let Some(rest) = s.strip_prefix('F') {
+        if rest.bytes().any(|b| b.is_ascii_lowercase()) {
+            return Err(String::from(
+                "multibase 'F' base16upper requires uppercase hex digits",
+            ));
+        }
+        hex::decode(rest).map_err(|e| format!("base16upper could not be decoded: {e}"))?
     } else {
         return Err(format!(
             "unrecognised multibase prefix; the CID {:?} is neither a CIDv0 nor a supported CIDv1 encoding",
@@ -185,6 +197,9 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<Cid, String> {
     if bytes.len() == 34 && bytes[0] == 0x12 && bytes[1] == 0x20 {
         let mut digest = [0u8; 32];
         digest.copy_from_slice(&bytes[2..34]);
+        if digest == [0u8; 32] {
+            return Err(String::from("all-zero sha2-256 CID digest is refused"));
+        }
         return Ok(Cid {
             version: 0,
             codec: CODEC_DAG_PB,
@@ -224,6 +239,9 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<Cid, String> {
     }
     let mut digest = [0u8; 32];
     digest.copy_from_slice(rest);
+    if digest == [0u8; 32] {
+        return Err(String::from("all-zero sha2-256 CID digest is refused"));
+    }
     Ok(Cid {
         version: 1,
         codec,
@@ -342,5 +360,27 @@ mod tests {
         let mut overlong = vec![0x81, 0x00, 0x55, 0x12, 0x20];
         overlong.extend_from_slice(&[0u8; 32]);
         assert!(parse_bytes(&overlong).is_err());
+
+        // Multibase `f` requires lowercase hex and `F` requires uppercase hex; all-zero sha2-256 is refused.
+        let mut raw_cid = vec![0x01, 0x55, 0x12, 0x20];
+        raw_cid.extend_from_slice(&[0xAB; 32]);
+        let hex_lower = hex::encode(&raw_cid);
+        let hex_upper = hex_lower.to_ascii_uppercase();
+        assert!(parse(&format!("f{hex_lower}")).is_ok());
+        assert!(parse(&format!("F{hex_upper}")).is_ok());
+        assert!(
+            parse(&format!("f{hex_upper}")).is_err(),
+            "multibase 'f' must reject uppercase hex digits"
+        );
+        assert!(
+            parse(&format!("F{hex_lower}")).is_err(),
+            "multibase 'F' must reject lowercase hex digits"
+        );
+        let mut zero_digest = vec![0x01, 0x55, 0x12, 0x20];
+        zero_digest.extend_from_slice(&[0u8; 32]);
+        assert!(
+            parse_bytes(&zero_digest).is_err(),
+            "all-zero sha2-256 CID digest must be refused"
+        );
     }
 }

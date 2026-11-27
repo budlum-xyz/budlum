@@ -558,4 +558,53 @@ mod tests {
         let all_bytes: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
         assert_eq!(entropy_millibits(&all_bytes), 8_000);
     }
+
+    #[test]
+    fn decode_rejects_noncanonical_modes_trailing_bytes_and_active_context_retirement() {
+        let sample = b"alpha beta gamma\ndelta epsilon zeta\nalpha beta gamma\n";
+
+        // 1. Single-mode codec (LZMA2 = 2) with mutated mode != 1 must be refused.
+        let mut lz_enc = codecs::encode_codec(2, sample).expect("encode lzma2");
+        lz_enc[1] = 0x7F;
+        assert!(
+            matches!(
+                decode(2, &lz_enc, sample.len() as u64),
+                Err(CodecError::Malformed(_))
+            ),
+            "single-mode codec must reject mode != 1"
+        );
+
+        // 2. Dual-mode codec (COLUMNAR_JSON = 4) with mode >= 2 must be refused.
+        let mut col_enc = codecs::encode_codec(4, sample).expect("encode columnar");
+        col_enc[1] = 2;
+        assert!(
+            matches!(
+                decode(4, &col_enc, sample.len() as u64),
+                Err(CodecError::Malformed(_))
+            ),
+            "dual-mode codec must reject unknown mode >= 2"
+        );
+
+        // 3. Codec 8 (CONTEXT_MIX) with trailing garbage bytes must be refused.
+        let mut cm_enc = codecs::encode_codec(8, sample).expect("encode context mix");
+        cm_enc.extend_from_slice(&[0xAA; 16]);
+        assert!(
+            matches!(
+                decode(8, &cm_enc, sample.len() as u64),
+                Err(CodecError::Malformed(_))
+            ),
+            "Codec 8 must reject trailing garbage bytes"
+        );
+
+        // 4. ContextRegistry::retire must refuse Active contexts before deprecate().
+        let mut reg = registry::shared_context::ContextRegistry::default();
+        reg.register(7, "active-retire-check", b"dictionary bytes".to_vec())
+            .expect("register");
+        assert!(
+            reg.retire(7).is_err(),
+            "Active context must not retire without deprecate()"
+        );
+        reg.deprecate(7).expect("deprecate");
+        reg.retire(7).expect("retire deprecated zero-ref context");
+    }
 }

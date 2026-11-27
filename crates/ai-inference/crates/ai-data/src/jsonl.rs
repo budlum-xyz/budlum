@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// An SFT record: the system (optional) / user / assistant triple.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstructionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
@@ -42,6 +43,11 @@ pub fn encode(rec: &InstructionRecord) -> Result<String, String> {
 ///
 /// When the line is not valid JSON or fields are missing.
 pub fn decode(line: &str) -> Result<InstructionRecord, String> {
+    if line.contains(['\n', '\r']) {
+        return Err(String::from(
+            "the JSONL record could not be decoded: raw newline inside single JSONL line",
+        ));
+    }
     serde_json::from_str(line).map_err(|e| format!("the JSONL record could not be decoded: {e}"))
 }
 
@@ -80,5 +86,22 @@ mod tests {
     fn malformed_json_is_error() {
         assert!(decode("single-field").is_err());
         assert!(decode(r#"{"user":1}"#).is_err());
+    }
+
+    #[test]
+    fn decode_refuses_unknown_fields_and_multiline_lines() {
+        assert!(
+            decode(r#"{"user":"q","assistant":"a","injected":true}"#).is_err(),
+            "unknown JSONL fields must be refused"
+        );
+        assert!(
+            decode("{\"user\":\"q\",\"assistant\":\"a\"}\n{\"user\":\"q2\",\"assistant\":\"a2\"}")
+                .is_err(),
+            "multi-line JSONL input must be refused by single-line decode"
+        );
+        assert!(
+            decode("{\"user\":\"q\",\"assistant\":\"a\"}\r").is_err(),
+            "carriage-return JSONL input must be refused"
+        );
     }
 }

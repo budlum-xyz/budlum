@@ -125,6 +125,14 @@ impl HeaderStore {
     /// or a different hash at an index already held. The last is a sign of a
     /// fork, and is never quietly overwritten.
     pub fn accept(&mut self, header: TrackedHeader) -> Result<(), String> {
+        let zero64 = "0".repeat(64);
+        if header.state_root.trim().is_empty()
+            || header.hash.trim().is_empty()
+            || header.state_root == zero64
+            || header.hash == zero64
+        {
+            return Err("header hash and state_root must be non-empty and non-zero".into());
+        }
         if !header.is_epoch_boundary() {
             return Err(format!(
                 "header {} is not an epoch boundary (EPOCH_LENGTH={EPOCH_LENGTH}); \
@@ -359,17 +367,32 @@ pub fn select_quorum_header(
             .or_insert((1, hdr));
     }
 
-    let winner = counts
+    let qualified: Vec<(usize, &TrackedHeader)> = counts
         .into_values()
-        .filter(|(n, _)| *n >= min_quorum)
-        .max_by_key(|(n, _)| *n)
-        .map(|(_, hdr)| hdr.clone())
-        .ok_or_else(|| {
-            format!(
-                "RPC quorum disagreement: no header reached {min_quorum}-of-{} agreement",
-                responses.len()
-            )
-        })?;
+        .filter(|(n, hdr)| {
+            *n >= min_quorum
+                && !hdr.state_root.trim().is_empty()
+                && !hdr.hash.trim().is_empty()
+                && hdr.is_epoch_boundary()
+                && hdr.epoch == hdr.index / EPOCH_LENGTH
+        })
+        .collect();
+    let top_votes = qualified.iter().map(|(n, _)| *n).max().ok_or_else(|| {
+        format!(
+            "RPC quorum disagreement: no valid header reached {min_quorum}-of-{} agreement",
+            responses.len()
+        )
+    })?;
+    let mut tied_top = qualified.into_iter().filter(|(n, _)| *n == top_votes);
+    let (_, first_winner) = tied_top
+        .next()
+        .ok_or_else(|| "RPC quorum winner missing".to_string())?;
+    if tied_top.next().is_some() {
+        return Err(format!(
+            "RPC split-brain quorum tie at {top_votes} votes; refusing ambiguous header"
+        ));
+    }
+    let winner = first_winner.clone();
 
     if let Some(pin) = pinned_checkpoint {
         if winner.index == pin.index
@@ -593,5 +616,31 @@ mod tests {
             state_root: "root20".to_string(),
         };
         assert!(select_quorum_header(&[honest_a.clone(), honest_a], 2, Some(&bad_pin)).is_err());
+
+        // Split-brain tie (2 honest vs 2 Sybil at min_quorum = 2) and empty/zero roots must be refused.
+        let fork_a = header(30);
+        let fork_b = TrackedHeader {
+            index: 30,
+            epoch: 3,
+            state_root: "sybil_root".to_string(),
+            hash: "sybil_hash".to_string(),
+        };
+        assert!(
+            select_quorum_header(&[fork_a.clone(), fork_a, fork_b.clone(), fork_b], 2, None)
+                .is_err(),
+            "2-vs-2 split-brain quorum tie must be refused"
+        );
+        let mut store = HeaderStore::new();
+        assert!(
+            store
+                .accept(TrackedHeader {
+                    index: 10,
+                    epoch: 1,
+                    state_root: String::new(),
+                    hash: "hash10".to_string(),
+                })
+                .is_err(),
+            "empty state_root must be refused by HeaderStore"
+        );
     }
 }

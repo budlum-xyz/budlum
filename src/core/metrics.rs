@@ -352,6 +352,14 @@ pub struct Metrics {
     /// much of the network's custody sits on phones, and a single total
     /// hides it.
     pub bud3_custody_bytes: IntGaugeVec,
+    /// Blocks audited by the aggregation shadow auditor (`AggMode::Shadow`).
+    pub agg_shadow_blocks_audited: IntGauge,
+    /// Inline PQ transactions checked by the aggregation shadow auditor.
+    pub agg_shadow_txs_checked: IntGauge,
+    /// Transactions where native verification and aggregation claim derivation matched.
+    pub agg_shadow_matches: IntGauge,
+    /// Transactions where native verification and aggregation claim derivation diverged.
+    pub agg_shadow_mismatches: IntGauge,
 }
 
 impl Metrics {
@@ -951,6 +959,22 @@ impl Metrics {
         bud3_custody_bytes
             .with_label_values(&["mobile_opportunistic"])
             .set(0);
+        let agg_shadow_blocks_audited = IntGauge::new(
+            "budlum_agg_shadow_blocks_audited",
+            "Blocks audited by the aggregation shadow auditor",
+        )?;
+        let agg_shadow_txs_checked = IntGauge::new(
+            "budlum_agg_shadow_txs_checked",
+            "Inline PQ transactions checked by the aggregation shadow auditor",
+        )?;
+        let agg_shadow_matches = IntGauge::new(
+            "budlum_agg_shadow_matches",
+            "Transactions where native verification and aggregation claim derivation matched",
+        )?;
+        let agg_shadow_mismatches = IntGauge::new(
+            "budlum_agg_shadow_mismatches",
+            "Transactions where native verification and aggregation claim derivation diverged",
+        )?;
 
         registry.register(Box::new(chain_height.clone()))?;
         registry.register(Box::new(account_rows.clone()))?;
@@ -1103,6 +1127,10 @@ impl Metrics {
         registry.register(Box::new(bud3_repair_backlog.clone()))?;
         registry.register(Box::new(bud3_audit_latency_seconds.clone()))?;
         registry.register(Box::new(bud3_custody_bytes.clone()))?;
+        registry.register(Box::new(agg_shadow_blocks_audited.clone()))?;
+        registry.register(Box::new(agg_shadow_txs_checked.clone()))?;
+        registry.register(Box::new(agg_shadow_matches.clone()))?;
+        registry.register(Box::new(agg_shadow_mismatches.clone()))?;
 
         Ok(Self {
             registry: Arc::new(registry),
@@ -1257,6 +1285,10 @@ impl Metrics {
             bud3_repair_backlog,
             bud3_audit_latency_seconds,
             bud3_custody_bytes,
+            agg_shadow_blocks_audited,
+            agg_shadow_txs_checked,
+            agg_shadow_matches,
+            agg_shadow_mismatches,
         })
     }
 
@@ -1469,6 +1501,10 @@ mod tests {
             "budlum_bud3_repair_backlog",
             "budlum_bud3_audit_latency_seconds",
             "budlum_bud3_custody_bytes",
+            "budlum_agg_shadow_blocks_audited",
+            "budlum_agg_shadow_txs_checked",
+            "budlum_agg_shadow_matches",
+            "budlum_agg_shadow_mismatches",
         ] {
             assert!(
                 scrape.contains(name),
