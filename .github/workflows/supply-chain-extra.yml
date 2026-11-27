@@ -16,8 +16,16 @@ on:
   # `branches` filter of a stacked pull request against the root of the stack,
   # so the filter alone does not keep it out. This keeps one push from queueing
   # more work than the shared runner pool can finish before the next push cancels it.
+  #
+  # 2026-11-27: `testnet-50` was added to this trigger and to the job
+  # condition(s) below. It was a delivery base with an open pull request into
+  # it, and the condition named only `main` and `consensus-of-consensuses`, so
+  # the job(s) of this file reported `skipped` there. GitHub counts a skipped
+  # job as a passing check, so the branch looked gated and was not. The gate
+  # `ci-full-battery-parity` now fails when a branch listed in
+  # `.github/workflows/ci-full-battery-branches.txt` is left out of either place.
   pull_request:
-    branches: [main, consensus-of-consensuses]
+    branches: [main, consensus-of-consensuses, testnet-50]
   schedule:
     # Weekly hygiene scan (effects of cargo update + new deps)
     - cron: '17 16 * * 3' # Wednesday 16:17 UTC
@@ -33,9 +41,11 @@ permissions:
 
 jobs:
   udeps:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet`
+    # does not start this job; a pull request into a delivery base listed in
+    # `.github/workflows/ci-full-battery-branches.txt` always does. See the note
+    # at the top of the file; the gate is `ci-full-battery-parity`.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses","testnet-50"]'), github.event.pull_request.base.ref) }}
     name: "Udeps: the unused dependency gate"
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -94,9 +104,11 @@ jobs:
           cargo run --release --manifest-path ../xtask/gates/Cargo.toml -- udeps /tmp/udeps2.txt
 
   geiger:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet`
+    # does not start this job; a pull request into a delivery base listed in
+    # `.github/workflows/ci-full-battery-branches.txt` always does. See the note
+    # at the top of the file; the gate is `ci-full-battery-parity`.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses","testnet-50"]'), github.event.pull_request.base.ref) }}
     name: "Geiger: unsafe visibility (the first-party 0 evidence layer)"
     runs-on: ubuntu-latest
     permissions:

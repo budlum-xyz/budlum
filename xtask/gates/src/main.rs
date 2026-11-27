@@ -77,6 +77,7 @@ mod gates {
     pub mod cargo_vet;
     pub mod chain_id_is_not_hardcoded;
     pub mod ci_fanout_budget;
+    pub mod ci_full_battery_parity;
     pub mod ci_jobs_end_on_cancel;
     pub mod ci_trigger_coverage;
     pub mod ci_workflow_guards;
@@ -630,6 +631,14 @@ const GATES: &[Gate] = &[
         run: gates::ci_trigger_coverage::run,
         run_args: None,
         self_test: gates::ci_trigger_coverage::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "ci-full-battery-parity",
+        replaces: None,
+        run: gates::ci_full_battery_parity::run,
+        run_args: None,
+        self_test: gates::ci_full_battery_parity::self_test,
         run_log: None,
     },
     Gate {

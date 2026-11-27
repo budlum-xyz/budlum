@@ -1,0 +1,39 @@
+# Branches that are promised the FULL battery, not merely a trigger.
+# One name per line; `#` starts a comment.
+#
+# `ci-trigger-branches.txt` answers "does any workflow start for a pull
+# request into this branch". This file answers the harder question: "does
+# every job that runs for the branch above it in the stack also run here".
+# The two are different, and the difference was measured on 2026-11-27.
+#
+# What was measured. A pull request into `consensus-of-consensuses` produced
+# 112 check runs. The pull request one step below it in the same stack, into
+# `testnet-50`, produced 106 - and eight of the jobs it did show were
+# `skipped`: the binary SBOM + CVE audit, dead deps, binary size, taplo, the
+# Kani bond proofs, udeps, geiger and the semver gate. The cause is a
+# job-level `contains(fromJSON('["main","consensus-of-consensuses"]'),
+# github.event.pull_request.base.ref)`: in a stacked pull request GitHub
+# evaluates the `branches:` filter against the root of the stack, so the
+# workflow starts, and the job-level condition then sees the immediate base
+# and skips. GitHub reports a skipped job as a passing check and `testnet-50`
+# requires no status check at all, so the delivery branch looked gated and
+# was not.
+#
+# The rule this file enforces (gate `ci-full-battery-parity`, tests in
+# `xtask/gates/tests/full_battery_parity.rs`): for every name below, every
+# job-level base-ref allowlist in `.github/workflows` must admit it, and every
+# workflow that carries such an allowlist must also name it in its
+# `pull_request:` trigger. Fail-closed: a name here that a job skips is a
+# failure, not a note.
+#
+# Adding a name here is a cost decision: it runs the heavy battery (Kani,
+# udeps, geiger, auditable, semver) on every pull request into that branch.
+# Add a branch when a pull request actually targets it as a delivery base, and
+# take it out again when that pull request has landed. A branch that is only a
+# merge waypoint belongs in `ci-trigger-branches.txt` and not here.
+
+# The live delivery chain, 2026-11-27: #221 (slice -> testnet-50) and
+# #215 (testnet-50 -> consensus-of-consensuses).
+main
+consensus-of-consensuses
+testnet-50
