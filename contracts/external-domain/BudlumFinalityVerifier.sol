@@ -11,12 +11,26 @@ enum FinalityMode {
     Hybrid
 }
 
+/// @notice Quantum canary alarm level mirrored from Budlum's `AlarmLevel`
+///         (`src/security/quantum_canary.rs`).
+enum QuantumAlertLevel {
+    Open,
+    Advisory,
+    Restricted,
+    Isolated
+}
+
 /// @notice Minimal finality read surface consumed by downstream AppBinding receivers.
 interface IBudlumFinality {
     function rootAtHeight(uint64 height) external view returns (bytes32);
     function heightFinal(uint64 height) external view returns (bool);
     function latestFinalHeight() external view returns (uint64);
     function finalityModeAtHeight(uint64 height) external view returns (FinalityMode);
+}
+
+/// @notice Quantum canary alert read surface for cross-chain consumers.
+interface IBudlumQuantumAlert {
+    function alertLevel() external view returns (QuantumAlertLevel);
 }
 
 import {BudlumHash} from "../lib/BudlumHash.sol";
@@ -29,6 +43,19 @@ struct Attestation {
     bytes32 stateRoot;
     uint64 epoch;
     uint64 chainId;
+    bytes g2AggregatePubkey;
+    bytes g2Generator;
+    bytes g1NegSignature;
+    bytes mlDsaSignature;
+    bytes mlDsaPubkey;
+    bool mlDsaEthVariant;
+}
+
+/// @notice Signed committee attestation raising the on-chain quantum alert level.
+struct QuantumAlertAttestation {
+    uint64 height;
+    bytes32 stateRoot;
+    QuantumAlertLevel level;
     bytes g2AggregatePubkey;
     bytes g2Generator;
     bytes g1NegSignature;
@@ -60,7 +87,7 @@ interface IExternalFraudProofVerifier {
         returns (bool);
 }
 
-contract BudlumFinalityVerifier is IBudlumFinality {
+contract BudlumFinalityVerifier is IBudlumFinality, IBudlumQuantumAlert {
     address internal constant PRECOMPILE_BLS_G1ADD = address(0x0b);
     address internal constant PRECOMPILE_BLS_PAIRING = address(0x0f);
     address internal constant PRECOMPILE_BLS_MAP_FP_TO_G1 = address(0x10);
@@ -110,6 +137,9 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     mapping(uint64 => bool) public override heightFinal;
     mapping(uint64 => FinalityMode) public override finalityModeAtHeight;
     uint64 public override latestFinalHeight;
+    QuantumAlertLevel public override alertLevel;
+    uint64 public alertHeight;
+    mapping(uint64 => QuantumAlertLevel) public alertLevelAtHeight;
     mapping(bytes32 => Challenge) public challenges;
     mapping(bytes32 => bool) public fraudulent;
     /// @dev Verdicts that condemn the `(height, stateRoot)` substance rather
@@ -131,6 +161,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     event AttestationOptimistic(bytes32 indexed digest, uint64 height, string reason);
     event ChallengeOpened(bytes32 indexed digest, address indexed challenger);
     event ChallengeProven(bytes32 indexed digest, address indexed challenger, bool fraud);
+    event QuantumAlertRaised(uint64 indexed height, QuantumAlertLevel previousLevel, QuantumAlertLevel newLevel);
 
     error WrongChainId(uint64 expected, uint64 got);
     error ReentrantCall();
@@ -154,6 +185,10 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     error InsufficientChallengeGas();
     error SignatureInvalid(string what);
     error ConflictingRoot(uint64 height, bytes32 held, bytes32 got);
+    error ClassicalHaltedByQuantumAlert(QuantumAlertLevel currentLevel);
+    error InvalidAlertLevel(QuantumAlertLevel currentLevel, QuantumAlertLevel requestedLevel);
+    error AlertHeightNotFinal(uint64 height);
+    error AlertRootMismatch(uint64 height, bytes32 expected, bytes32 got);
 
     constructor(
         uint64 budlumChainId_,
@@ -264,6 +299,9 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         if (keccak256(a.mlDsaPubkey) != mlDsaPubkeyHash) {
             revert UntrustedKey("ML-DSA pubkey is not the pinned key");
         }
+        if (!hasMlDsaPrecompile && alertLevel != QuantumAlertLevel.Open) {
+            revert ClassicalHaltedByQuantumAlert(alertLevel);
+        }
 
         bytes32 held = rootAtHeight[a.height];
         if (held != bytes32(0) && held != a.stateRoot && heightFinal[a.height]) {
@@ -294,7 +332,8 @@ contract BudlumFinalityVerifier is IBudlumFinality {
             pqOk = _verifyMlDsa(root, a.mlDsaPubkey, a.mlDsaSignature, a.mlDsaEthVariant);
         }
 
-        if (hasBlsPrecompile && !blsOk) {
+        bool isolateAllowsPqOnly = alertLevel == QuantumAlertLevel.Isolated && hasMlDsaPrecompile && pqOk;
+        if (hasBlsPrecompile && !blsOk && !isolateAllowsPqOnly) {
             revert SignatureInvalid("BLS signature does not verify");
         }
         if (hasMlDsaPrecompile && !pqOk) {
@@ -321,6 +360,9 @@ contract BudlumFinalityVerifier is IBudlumFinality {
 
         if (!blsOk && !pqOk) {
             revert NoVerificationPath();
+        }
+        if (!pqOk && alertLevel != QuantumAlertLevel.Open) {
+            revert ClassicalHaltedByQuantumAlert(alertLevel);
         }
 
         // Optimistic path, reached only when exactly one half verified and
@@ -421,6 +463,9 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         if (fraudulent[digest] || fraudulentRoot[c.height][c.stateRoot]) {
             revert AlreadyFraudulent(digest);
         }
+        if (c.mode == FinalityMode.ClassicalOnly && alertLevel != QuantumAlertLevel.Open) {
+            revert ClassicalHaltedByQuantumAlert(alertLevel);
+        }
         uint256 elapsed = block.number - uint256(c.openedAt);
         if (elapsed < challengeWindow) {
             revert ChallengeWindowOpen(digest, challengeWindow - elapsed);
@@ -458,6 +503,70 @@ contract BudlumFinalityVerifier is IBudlumFinality {
 
     function isAccepted(bytes32 digest) external view returns (bool) {
         return accepted[digest];
+    }
+
+    function alertSigningRoot(uint64 height, bytes32 stateRoot, QuantumAlertLevel level)
+        public
+        view
+        returns (bytes32)
+    {
+        return keccak256(
+            bytes.concat(
+                bytes("bud-quantum-alert-v1"),
+                bytes32(block.chainid),
+                bytes8(budlumChainId),
+                bytes8(height),
+                stateRoot,
+                bytes1(uint8(level))
+            )
+        );
+    }
+
+    /// @notice Permissionlessly escalate the on-chain quantum alert level from a
+    ///         finalized Budlum checkpoint attestation signed by the pinned
+    ///         committee. Alert levels are strictly monotonic (never downgraded).
+    function submitQuantumAlert(QuantumAlertAttestation calldata q) external nonReentrant {
+        if (q.stateRoot == bytes32(0)) {
+            revert SignatureInvalid("zero state root cannot be attested");
+        }
+        if (uint8(q.level) <= uint8(alertLevel)) {
+            revert InvalidAlertLevel(alertLevel, q.level);
+        }
+        if (!heightFinal[q.height]) {
+            revert AlertHeightNotFinal(q.height);
+        }
+        bytes32 expectedRoot = rootAtHeight[q.height];
+        if (expectedRoot != q.stateRoot) {
+            revert AlertRootMismatch(q.height, expectedRoot, q.stateRoot);
+        }
+        if (keccak256(q.g2AggregatePubkey) != committeePubkeyHash) {
+            revert UntrustedKey("aggregate pubkey is not the pinned committee key");
+        }
+        if (keccak256(q.g2Generator) != g2GeneratorHash) {
+            revert UntrustedKey("G2 generator is not the pinned generator");
+        }
+        if (keccak256(q.mlDsaPubkey) != mlDsaPubkeyHash) {
+            revert UntrustedKey("ML-DSA pubkey is not the pinned key");
+        }
+
+        bytes32 root = alertSigningRoot(q.height, q.stateRoot, q.level);
+        if (hasMlDsaPrecompile) {
+            if (!_verifyMlDsa(root, q.mlDsaPubkey, q.mlDsaSignature, q.mlDsaEthVariant)) {
+                revert SignatureInvalid("ML-DSA signature does not verify");
+            }
+        } else if (hasBlsPrecompile) {
+            if (!_verifyBls(root, q.g2AggregatePubkey, q.g2Generator, q.g1NegSignature)) {
+                revert SignatureInvalid("BLS signature does not verify");
+            }
+        } else {
+            revert NoVerificationPath();
+        }
+
+        QuantumAlertLevel previous = alertLevel;
+        alertLevel = q.level;
+        alertHeight = q.height;
+        alertLevelAtHeight[q.height] = q.level;
+        emit QuantumAlertRaised(q.height, previous, q.level);
     }
 
     /// @notice Authenticate a global header through the finalized state root.
