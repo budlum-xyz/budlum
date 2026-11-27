@@ -349,6 +349,8 @@ impl std::error::Error for SuiEnvelopeError {}
 pub const MAX_SUI_ENVELOPE_BYTES: usize = 256 * 1024;
 /// Maximum inner serialized `SuiTransactionData` byte length (`128 KiB`).
 pub const MAX_SUI_TX_DATA_BYTES: usize = 128 * 1024;
+/// Maximum inner `ptb_json` byte length (`64 KiB`).
+pub const MAX_SUI_PTB_JSON_BYTES: usize = 64 * 1024;
 
 pub fn decode_and_recover_sui_tx(
     raw_envelope: &[u8],
@@ -410,12 +412,44 @@ pub fn decode_and_recover_sui_tx(
             actual: data.chain_id,
         });
     }
+    if data.nonce == u64::MAX {
+        return Err(SuiEnvelopeError::MalformedEnvelope(String::from(
+            "Sui nonce overflow",
+        )));
+    }
+    if data.gas_budget == 0 {
+        return Err(SuiEnvelopeError::MalformedEnvelope(String::from(
+            "Sui gas_budget must be non-zero",
+        )));
+    }
+    if data.gas_price_mist == 0 {
+        return Err(SuiEnvelopeError::MalformedEnvelope(String::from(
+            "Sui gas_price_mist must be non-zero",
+        )));
+    }
+    if data.gas_budget.checked_mul(data.gas_price_mist).is_none() {
+        return Err(SuiEnvelopeError::MalformedEnvelope(String::from(
+            "Sui gas_budget * gas_price_mist overflow",
+        )));
+    }
+    if data.ptb_json.is_empty() || data.ptb_json.len() > MAX_SUI_PTB_JSON_BYTES {
+        return Err(SuiEnvelopeError::MalformedEnvelope(String::from(
+            "Sui ptb_json must be non-empty and at most 64 KiB",
+        )));
+    }
+    let ptb_val: serde_json::Value = serde_json::from_slice(&data.ptb_json)
+        .map_err(|e| SuiEnvelopeError::MalformedEnvelope(format!("invalid Sui ptb_json: {e}")))?;
+    if !ptb_val.is_object() {
+        return Err(SuiEnvelopeError::MalformedEnvelope(String::from(
+            "Sui ptb_json must be a JSON object",
+        )));
+    }
     let derived_sender = sui_address_from_ed25519_pubkey(&pk_arr);
     if derived_sender != data.sender {
         return Err(SuiEnvelopeError::SenderMismatch);
     }
 
-    let mut tx_pre = Vec::with_capacity(14 + env.tx_data_bytes.len());
+    let mut tx_pre = Vec::with_capacity(17 + env.tx_data_bytes.len());
     tx_pre.extend_from_slice(b"TransactionData::");
     tx_pre.extend_from_slice(&env.tx_data_bytes);
     let tx_digest = blake2b_256(&tx_pre);
@@ -505,5 +539,81 @@ mod tests {
         };
         let dec = decode_and_recover_sui_tx(&raw, active).unwrap();
         assert_eq!(dec.sender_sui, sender);
+    }
+
+    #[test]
+    fn sui_rejects_zero_gas_overflow_max_nonce_and_invalid_ptb_json() {
+        let sk = SigningKey::from_bytes(&[0x42; 32]);
+        let pk = sk.verifying_key().to_bytes();
+        let sender = sui_address_from_ed25519_pubkey(&pk);
+        let active = SuiActivationPolicy {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: PROPOSED_SUI_ACTIVATION_HEIGHT,
+            activation_height: Some(PROPOSED_SUI_ACTIVATION_HEIGHT),
+        };
+        let sign_env = |tx_data: SuiTransactionData| -> Vec<u8> {
+            let tx_bytes = serde_json::to_vec(&tx_data).unwrap();
+            let digest = sui_transaction_signing_digest(&tx_bytes);
+            let sig = sk.sign(&digest);
+            let mut sui_sig = Vec::with_capacity(97);
+            sui_sig.push(SUI_ED25519_FLAG);
+            sui_sig.extend_from_slice(&sig.to_bytes());
+            sui_sig.extend_from_slice(&pk);
+            serde_json::to_vec(&SignedSuiEnvelope {
+                tx_data_bytes: tx_bytes,
+                sui_signature: sui_sig,
+            })
+            .unwrap()
+        };
+
+        let zero_budget = sign_env(SuiTransactionData {
+            sender,
+            nonce: 0,
+            ptb_json: br#"{"commands":[]}"#.to_vec(),
+            gas_budget: 0,
+            gas_price_mist: 1_000,
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+        });
+        assert!(decode_and_recover_sui_tx(&zero_budget, active).is_err());
+
+        let zero_price = sign_env(SuiTransactionData {
+            sender,
+            nonce: 0,
+            ptb_json: br#"{"commands":[]}"#.to_vec(),
+            gas_budget: 100_000,
+            gas_price_mist: 0,
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+        });
+        assert!(decode_and_recover_sui_tx(&zero_price, active).is_err());
+
+        let overflow_fee = sign_env(SuiTransactionData {
+            sender,
+            nonce: 0,
+            ptb_json: br#"{"commands":[]}"#.to_vec(),
+            gas_budget: u64::MAX,
+            gas_price_mist: 2,
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+        });
+        assert!(decode_and_recover_sui_tx(&overflow_fee, active).is_err());
+
+        let bad_ptb = sign_env(SuiTransactionData {
+            sender,
+            nonce: 0,
+            ptb_json: b"\xffnot-json\x00".to_vec(),
+            gas_budget: 100_000,
+            gas_price_mist: 1_000,
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+        });
+        assert!(decode_and_recover_sui_tx(&bad_ptb, active).is_err());
+
+        let max_nonce = sign_env(SuiTransactionData {
+            sender,
+            nonce: u64::MAX,
+            ptb_json: br#"{"commands":[]}"#.to_vec(),
+            gas_budget: 100_000,
+            gas_price_mist: 1_000,
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+        });
+        assert!(decode_and_recover_sui_tx(&max_nonce, active).is_err());
     }
 }
