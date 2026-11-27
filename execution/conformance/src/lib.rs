@@ -59,6 +59,19 @@ pub fn compute_conformance_execution_root(host: &MemoryHost) -> [u8; 32] {
         h.update(&who.id);
         h.update(bal.to_le_bytes());
     }
+    h.update((host.logs.len() as u64).to_le_bytes());
+    for log in &host.logs {
+        h.update([log.emitter.ee.0]);
+        h.update((log.emitter.id.len() as u64).to_le_bytes());
+        h.update(&log.emitter.id);
+        h.update((log.topics.len() as u64).to_le_bytes());
+        for topic in &log.topics {
+            h.update((topic.len() as u64).to_le_bytes());
+            h.update(topic);
+        }
+        h.update((log.data.len() as u64).to_le_bytes());
+        h.update(&log.data);
+    }
     h.finalize().into()
 }
 
@@ -1336,5 +1349,21 @@ mod tests {
         };
         assert_eq!(res.status, OutcomeStatus::Success);
         assert_eq!(res.output, 5i64.to_le_bytes());
+    }
+
+    #[test]
+    fn conformance_execution_root_commits_emitted_logs() {
+        let h1 = MemoryHost::new(100_000);
+        let mut h2 = MemoryHost::new(100_000);
+        h2.logs.push(budlum_uel_abi::EeLog {
+            emitter: EeIdentity::new(EeId::EVM, vec![0x11; 20]).unwrap(),
+            topics: vec![vec![0xAA; 32]],
+            data: vec![1, 2, 3, 4],
+        });
+        assert_ne!(
+            compute_conformance_execution_root(&h1),
+            compute_conformance_execution_root(&h2),
+            "conformance execution root must commit emitted receipt logs"
+        );
     }
 }
