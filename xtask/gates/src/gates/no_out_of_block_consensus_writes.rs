@@ -190,6 +190,12 @@ const READ_CHAINS: &[&str] = &[
     // Owned certificate derived by the settlement registry's `&self` accessor;
     // no exemption for the same method name on other receivers.
     ".settlement.universal_finality_certificate(",
+    // The joined finality root: `IntakeState::unified_finality_root` takes
+    // `&self` and folds owned digests into a local vector, so `chain_actor`
+    // answering `bud_unifiedFinalityRoot` reads consensus state without
+    // touching it. Pinned to the receiver chain, not to the method name: a
+    // future `unified_finality_root` on another receiver is still caught.
+    ".external_intake.unified_finality_root(",
 ];
 
 /// Calls on `self.state` inside a `Blockchain` method body that write it.
@@ -671,6 +677,36 @@ mod tests {
             "self.blockchain.state.settlement.universal_finality_certificate_mut(height);",
             "self.blockchain.state.settlement.universal_finality_certificate(height).take();",
             "self.blockchain.state.settlement.universal_finality_certificate(",
+        ] {
+            assert!(
+                check_actor_state_access(&normalize(path)).is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    /// The joined finality root is answered by `chain_actor` through the
+    /// intake, so the receiver chain is what is exempted - and only that.
+    #[test]
+    fn unified_finality_root_is_an_exact_read() {
+        for path in [
+            "let r = self.blockchain.state.settlement.external_intake.unified_finality_root(anchor);",
+            "let r = self\n.blockchain\n.state\n.settlement\n.external_intake\n.unified_finality_root(state.settlement_root);",
+        ] {
+            assert!(check_actor_state_access(&normalize(path)).is_ok(), "{path}");
+        }
+    }
+
+    /// The exemption is the receiver chain plus the exact method: the same
+    /// method on another receiver, a `_mut` variant, and a write that merely
+    /// starts with the name are all still refused.
+    #[test]
+    fn unified_finality_root_exemption_is_not_a_prefix() {
+        for path in [
+            "self.blockchain.state.settlement.unified_finality_root(anchor);",
+            "self.blockchain.state.settlement.external_intake.unified_finality_root_mut(anchor);",
+            "self.blockchain.state.settlement.external_intake.unified_finality_root(anchor).take();",
+            "self.blockchain.state.settlement.external_intake.unified_finality_root(",
         ] {
             assert!(
                 check_actor_state_access(&normalize(path)).is_err(),
