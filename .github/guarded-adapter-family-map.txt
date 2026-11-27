@@ -1,0 +1,51 @@
+# The construction surface of the finality acceptance surface.
+#
+# Why this file exists
+# --------------------
+# An adapter has two doors. Door A is `AdapterSpec::build` in
+# `src/cross_domain/external/intake.rs`: it never runs without `register_domain`,
+# which refuses a spec whose pin is `None` with `CommitteeNotPinned`. Door B is
+# `BridgeEconomicGuard::refresh_backing_from_adapter` in
+# `src/cross_domain/economic_guard.rs`: it builds eight adapters directly and
+# verifies them without passing through admission.
+#
+# The `finality-acceptance-surface-has-one-path` gate reads this file and holds
+# the tree to it. The surface may only shrink:
+#
+#   * a production constructor call site that is not listed here fails the gate;
+#   * a listed site whose call disappeared fails the gate, because removing a
+#     door is progress and must move this file in the same change;
+#   * `guarded-variants:` is the number of `GuardedExternalAdapter` variants and
+#     must equal the enum's variant count;
+#   * a `nonpresence` line records a `has_pinned_trust_anchor` body that is not
+#     a single presence test. The design (section 3.5) fixes those bodies; each
+#     fix deletes one line here.
+#
+# Format
+# ------
+#   guarded-variants: <n>
+#   <count> <file>            production constructor call sites in <file>
+#   nonpresence <file>        pin body is a conjunction, not one presence test
+#
+# Measured 2026-11-27 (budlum v3, branch vuslat/tek-kabul-yolu).
+
+guarded-variants: 8
+
+# Door B: `refresh_backing_from_adapter` builds the same eight adapters that
+# `GuardedExternalAdapter` declares, one arm per variant - eight construction
+# sites that never pass through `register_domain`.
+8 src/cross_domain/economic_guard.rs
+
+# The rest of Door A's callers: the CLI opens the admission path directly
+# (`ZkVmFinalityAdapter::new`, `TendermintFinalityAdapter::new_pinned`), and the
+# settlement light client builds its own Tendermint verifier.
+2 src/bin/bud.rs
+1 src/settlement/shared_security.rs
+
+# Recorded pin debt (design section 3.5): these bodies accept an anchor OR a
+# second pin, so a missing committee can be masked by an SSZ pin, and a ZK
+# program without its chain id is not the same anchor as one with it. Each is a
+# conjunction today; the fix is one presence test per adapter, and each fix
+# deletes its line here.
+nonpresence src/cross_domain/external/ethereum.rs
+nonpresence src/cross_domain/external/zkvm_proof.rs
