@@ -297,13 +297,8 @@ impl BudBitswap {
         requested_cid: ContentId,
         response: BitswapResponse,
     ) -> Result<(), StoreError> {
-        if response.not_found || response.data.is_empty() {
-            return Ok(()); // Nothing to store.
-        }
-        // MEDIUM (CWE-345, 2026-08-17): the response must be for the REQUESTED
-        // block. A payload that only hashes to its own cid would let a malicious
-        // peer hand over a different block (cache poisoning + eviction). If the
-        // requested cid does not match, refuse.
+        // The response must match the requested CID even on a miss so a peer
+        // cannot spoof or confuse request-response correlation.
         if response.cid != requested_cid {
             tracing::warn!(
                 wanted = %requested_cid,
@@ -315,8 +310,17 @@ impl BudBitswap {
                 got: response.cid,
             });
         }
+        if response.not_found {
+            if !response.data.is_empty() {
+                return Err(StoreError::Internal(
+                    "not_found bitswap response carried unsolicited payload bytes".into(),
+                ));
+            }
+            return Ok(());
+        }
 
-        // Integrity check: verify the data matches the claimed CID.
+        // Integrity check: verify the data matches the claimed CID (including
+        // rejecting empty data when `requested_cid` is not the empty chunk).
         let computed = ContentId::of(&response.data);
         if computed != response.cid {
             tracing::warn!(
@@ -361,7 +365,7 @@ fn bounded_bincode() -> impl bincode::Options {
     use bincode::Options;
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
-        .allow_trailing_bytes()
+        .reject_trailing_bytes()
         .with_limit(MAX_MESSAGE_SIZE as u64)
 }
 
@@ -404,9 +408,15 @@ pub fn decode_response(bytes: &[u8]) -> Result<BitswapResponse, CodecError> {
             max: MAX_MESSAGE_SIZE,
         });
     }
-    bounded_bincode()
+    let resp: BitswapResponse = bounded_bincode()
         .deserialize(bytes)
-        .map_err(|e| CodecError::Deserialize(e.to_string()))
+        .map_err(|e| CodecError::Deserialize(e.to_string()))?;
+    if resp.not_found && !resp.data.is_empty() {
+        return Err(CodecError::Deserialize(String::from(
+            "not_found bitswap response must not carry payload bytes",
+        )));
+    }
+    Ok(resp)
 }
 
 #[cfg(test)]

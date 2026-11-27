@@ -1694,6 +1694,374 @@ fn vote_history_was_written_by(history: &VoteHistory, ours: &str) -> bool {
     history.node.as_deref() == Some(ours)
 }
 
+/// Portable vote-mark interchange for a key migration (operator/HSM move).
+///
+/// WIRING: `VoteHistory` stays node-owned on disk (`load_vote_history`
+/// refuses a foreign owner). This envelope is the *explicit* hand-carry
+/// path: the old operator exports marks for the consensus key, the new
+/// operator imports them before the key signs again. Format: magic, version,
+/// then for each of prevote/precommit a u64 height (LE) and a length-prefixed
+/// hash (u32 LE byte length + bytes), then a length-prefixed UTF-8 key id.
+/// Canonical field order, no JSON -- a reader that does not recognise the
+/// magic/version refuses rather than starting from zero.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VoteMarkInterchange {
+    /// Marks cast at or below these heights must never be re-signed differently.
+    pub last_prevote_height: u64,
+    pub last_precommit_height: u64,
+    /// Hash signed at `last_prevote_height`, if the exporter recorded one.
+    pub prevote_hash: Option<String>,
+    /// Hash signed at `last_precommit_height`, if the exporter recorded one.
+    pub precommit_hash: Option<String>,
+    /// Consensus key / operator identity these marks belong to (not the
+    /// P2P peer id): the key moves; the new node's peer id need not match
+    /// the old file owner check.
+    pub key_id: String,
+}
+
+/// Magic prefix of the binary interchange encoding.
+/// WIRING: wire header tag for operator vote-mark migration envelopes.
+pub const VOTE_MARK_INTERCHANGE_MAGIC: &[u8; 17] = b"BDLM_VOTE_MARK_V1";
+/// Schema version of the binary interchange encoding.
+/// WIRING: wire schema version for operator vote-mark migration envelopes.
+pub const VOTE_MARK_INTERCHANGE_VERSION: u32 = 1;
+
+/// Why an interchange blob was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// WIRING: error surface returned by operator vote-mark migration import/export.
+pub enum InterchangeError {
+    /// Magic or version does not match; fail closed, never start from zero.
+    BadHeader,
+    /// Truncated body or a length prefix past the end.
+    Truncated,
+    /// Height/hash fields are not in canonical form (e.g. non-UTF-8 hash).
+    BadField(&'static str),
+    /// Import would move a high-water mark backwards or drop a hash.
+    WouldGoBackwards,
+}
+
+impl std::fmt::Display for InterchangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadHeader => write!(f, "vote-mark interchange: bad magic or version"),
+            Self::Truncated => write!(f, "vote-mark interchange: truncated body"),
+            Self::BadField(name) => write!(f, "vote-mark interchange: bad field {name}"),
+            Self::WouldGoBackwards => write!(
+                f,
+                "vote-mark interchange: import would move a high-water mark backwards"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for InterchangeError {}
+
+fn put_u32(buf: &mut Vec<u8>, v: u32) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+fn put_u64(buf: &mut Vec<u8>, v: u64) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+fn put_lp_bytes(buf: &mut Vec<u8>, bytes: &[u8]) -> Result<(), InterchangeError> {
+    let len = u32::try_from(bytes.len()).map_err(|_| InterchangeError::BadField("len"))?;
+    put_u32(buf, len);
+    buf.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn take_u32(cur: &mut &[u8]) -> Result<u32, InterchangeError> {
+    if cur.len() < 4 {
+        return Err(InterchangeError::Truncated);
+    }
+    let v = u32::from_le_bytes(cur[..4].try_into().map_err(|_| InterchangeError::Truncated)?);
+    *cur = &cur[4..];
+    Ok(v)
+}
+
+fn take_u64(cur: &mut &[u8]) -> Result<u64, InterchangeError> {
+    if cur.len() < 8 {
+        return Err(InterchangeError::Truncated);
+    }
+    let v = u64::from_le_bytes(cur[..8].try_into().map_err(|_| InterchangeError::Truncated)?);
+    *cur = &cur[8..];
+    Ok(v)
+}
+
+fn take_lp_bytes<'a>(cur: &mut &'a [u8]) -> Result<&'a [u8], InterchangeError> {
+    let len = take_u32(cur)? as usize;
+    if cur.len() < len {
+        return Err(InterchangeError::Truncated);
+    }
+    let out = &cur[..len];
+    *cur = &cur[len..];
+    Ok(out)
+}
+
+impl VoteMarkInterchange {
+    /// Canonical binary encoding: magic || version(u32 LE) || body.
+    ///
+    /// # Errors
+    ///
+    /// [`InterchangeError::BadField`] when a length prefix cannot fit `u32`.
+    pub fn encode(&self) -> Result<Vec<u8>, InterchangeError> {
+        let mut buf = Vec::with_capacity(64);
+        buf.extend_from_slice(VOTE_MARK_INTERCHANGE_MAGIC);
+        put_u32(&mut buf, VOTE_MARK_INTERCHANGE_VERSION);
+        put_u64(&mut buf, self.last_prevote_height);
+        put_u64(&mut buf, self.last_precommit_height);
+        let ph = self
+            .prevote_hash
+            .as_deref()
+            .map(str::as_bytes)
+            .unwrap_or(&[]);
+        put_lp_bytes(&mut buf, ph)?;
+        let qh = self
+            .precommit_hash
+            .as_deref()
+            .map(str::as_bytes)
+            .unwrap_or(&[]);
+        put_lp_bytes(&mut buf, qh)?;
+        put_lp_bytes(&mut buf, self.key_id.as_bytes())?;
+        Ok(buf)
+    }
+
+    /// Decode a blob produced by [`VoteMarkInterchange::encode`].
+    ///
+    /// # Errors
+    ///
+    /// [`InterchangeError::BadHeader`] on unknown magic/version,
+    /// [`InterchangeError::Truncated`] on short input,
+    /// [`InterchangeError::BadField`] on non-UTF-8 text or trailing bytes.
+    pub fn decode(bytes: &[u8]) -> Result<Self, InterchangeError> {
+        if bytes.len() < 21 {
+            return Err(InterchangeError::BadHeader);
+        }
+        if &bytes[..17] != VOTE_MARK_INTERCHANGE_MAGIC {
+            return Err(InterchangeError::BadHeader);
+        }
+        let mut cur = &bytes[17..];
+        let version = take_u32(&mut cur)?;
+        if version != VOTE_MARK_INTERCHANGE_VERSION {
+            return Err(InterchangeError::BadHeader);
+        }
+        let last_prevote_height = take_u64(&mut cur)?;
+        let last_precommit_height = take_u64(&mut cur)?;
+        let ph = take_lp_bytes(&mut cur)?;
+        let qh = take_lp_bytes(&mut cur)?;
+        let key = take_lp_bytes(&mut cur)?;
+        let prevote_hash = if ph.is_empty() {
+            None
+        } else {
+            Some(
+                std::str::from_utf8(ph)
+                    .map_err(|_| InterchangeError::BadField("prevote_hash"))?
+                    .to_string(),
+            )
+        };
+        let precommit_hash = if qh.is_empty() {
+            None
+        } else {
+            Some(
+                std::str::from_utf8(qh)
+                    .map_err(|_| InterchangeError::BadField("precommit_hash"))?
+                    .to_string(),
+            )
+        };
+        let key_id = std::str::from_utf8(key)
+            .map_err(|_| InterchangeError::BadField("key_id"))?
+            .to_string();
+        if !cur.is_empty() {
+            return Err(InterchangeError::BadField("trailing"));
+        }
+        Ok(Self {
+            last_prevote_height,
+            last_precommit_height,
+            prevote_hash,
+            precommit_hash,
+            key_id,
+        })
+    }
+
+    /// Merge `incoming` into `self` for the same `key_id` without moving any
+    /// high-water mark backwards and without accepting a second hash for one
+    /// height.
+    ///
+    /// # Errors
+    ///
+    /// [`InterchangeError::WouldGoBackwards`] when `incoming` claims the same
+    /// height with a different hash (a second signature for one slot).
+    /// [`InterchangeError::BadField`] when `key_id` disagrees.
+    /// WIRING: called by [`VoteHistory::import_interchange`] during operator key migration.
+    pub fn merge_for_import(&self, incoming: &Self) -> Result<Self, InterchangeError> {
+        if self.key_id != incoming.key_id {
+            return Err(InterchangeError::BadField("key_id"));
+        }
+        let mut out = self.clone();
+        if incoming.last_prevote_height > out.last_prevote_height {
+            out.last_prevote_height = incoming.last_prevote_height;
+            out.prevote_hash = incoming.prevote_hash.clone();
+        } else if incoming.last_prevote_height == out.last_prevote_height {
+            match (&out.prevote_hash, &incoming.prevote_hash) {
+                (Some(a), Some(b)) if a != b => return Err(InterchangeError::WouldGoBackwards),
+                (None, Some(b)) => out.prevote_hash = Some(b.clone()),
+                _ => {}
+            }
+        }
+        if incoming.last_precommit_height > out.last_precommit_height {
+            out.last_precommit_height = incoming.last_precommit_height;
+            out.precommit_hash = incoming.precommit_hash.clone();
+        } else if incoming.last_precommit_height == out.last_precommit_height {
+            match (&out.precommit_hash, &incoming.precommit_hash) {
+                (Some(a), Some(b)) if a != b => return Err(InterchangeError::WouldGoBackwards),
+                (None, Some(b)) => out.precommit_hash = Some(b.clone()),
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl VoteHistory {
+    /// Export the on-disk mark as a portable interchange for `key_id`.
+    #[must_use]
+    /// WIRING: called by [`VoteHistory::import_interchange`] and operator migration export.
+    pub fn to_interchange(&self, key_id: &str) -> VoteMarkInterchange {
+        VoteMarkInterchange {
+            last_prevote_height: self.last_prevote_height,
+            last_precommit_height: self.last_precommit_height,
+            prevote_hash: self.prevote_hash.clone(),
+            precommit_hash: self.precommit_hash.clone(),
+            key_id: key_id.to_string(),
+        }
+    }
+
+    /// WIRING: CLI/operator entry point for importing a vote-mark migration envelope.
+    /// Convenience: kept for the CLI
+    /// Import a portable mark, merging without moving marks backwards.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`InterchangeError`] from [`VoteMarkInterchange::merge_for_import`].
+    pub fn import_interchange(
+        &mut self,
+        incoming: &VoteMarkInterchange,
+    ) -> Result<(), InterchangeError> {
+        let mine = self.to_interchange(&incoming.key_id);
+        let merged = mine.merge_for_import(incoming)?;
+        self.last_prevote_height = merged.last_prevote_height;
+        self.last_precommit_height = merged.last_precommit_height;
+        self.prevote_hash = merged.prevote_hash;
+        self.precommit_hash = merged.precommit_hash;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod vote_mark_interchange_tests {
+    use super::*;
+
+    fn sample() -> VoteMarkInterchange {
+        VoteMarkInterchange {
+            last_prevote_height: 40,
+            last_precommit_height: 38,
+            prevote_hash: Some("aa".into()),
+            precommit_hash: Some("bb".into()),
+            key_id: "consensus-key-1".into(),
+        }
+    }
+
+    pub(super) fn round_trip_preserves_marks() {
+        let s = sample();
+        let bytes = s.encode().expect("encode");
+        let back = VoteMarkInterchange::decode(&bytes).expect("decode");
+        assert_eq!(s, back);
+        assert_eq!(&bytes[..17], VOTE_MARK_INTERCHANGE_MAGIC);
+    }
+
+    pub(super) fn bad_magic_and_version_refused() {
+        let s = sample();
+        let mut bytes = s.encode().expect("encode");
+        bytes[0] ^= 0xFF;
+        assert_eq!(
+            VoteMarkInterchange::decode(&bytes),
+            Err(InterchangeError::BadHeader)
+        );
+        let mut bytes = s.encode().expect("encode");
+        bytes[17..21].copy_from_slice(&99u32.to_le_bytes());
+        assert_eq!(
+            VoteMarkInterchange::decode(&bytes),
+            Err(InterchangeError::BadHeader)
+        );
+    }
+
+    pub(super) fn merge_never_goes_backwards() {
+        let local = sample();
+        let mut older = sample();
+        older.last_prevote_height = 10;
+        older.last_precommit_height = 9;
+        let merged = local.merge_for_import(&older).expect("older is fine");
+        assert_eq!(merged.last_prevote_height, 40);
+        assert_eq!(merged.last_precommit_height, 38);
+    }
+
+    pub(super) fn same_height_different_hash_is_refused() {
+        let local = sample();
+        let mut conflicting = sample();
+        conflicting.prevote_hash = Some("cc".into());
+        assert_eq!(
+            local.merge_for_import(&conflicting),
+            Err(InterchangeError::WouldGoBackwards)
+        );
+    }
+
+    pub(super) fn different_key_id_refused() {
+        let local = sample();
+        let mut other = sample();
+        other.key_id = "other-key".into();
+        assert_eq!(
+            local.merge_for_import(&other),
+            Err(InterchangeError::BadField("key_id"))
+        );
+    }
+
+    pub(super) fn truncated_body_refused() {
+        let bytes = sample().encode().expect("encode");
+        assert_eq!(
+            VoteMarkInterchange::decode(&bytes[..bytes.len() - 3]),
+            Err(InterchangeError::Truncated)
+        );
+    }
+
+    pub(super) fn import_into_history_keeps_high_water() {
+        let mut hist = VoteHistory {
+            last_prevote_height: 40,
+            last_precommit_height: 38,
+            prevote_hash: Some("aa".into()),
+            precommit_hash: Some("bb".into()),
+            node: Some("node-a".into()),
+        };
+        let incoming = VoteMarkInterchange {
+            last_prevote_height: 5,
+            last_precommit_height: 4,
+            prevote_hash: Some("zz".into()),
+            precommit_hash: None,
+            key_id: "consensus-key-1".into(),
+        };
+        hist.import_interchange(&incoming).expect("import");
+        assert_eq!(hist.last_prevote_height, 40);
+        assert_eq!(hist.last_precommit_height, 38);
+        assert_eq!(hist.prevote_hash.as_deref(), Some("aa"));
+    }
+
+    pub(super) fn encoding_is_deterministic() {
+        let a = sample().encode().expect("a");
+        let b = sample().encode().expect("b");
+        assert_eq!(a, b);
+    }
+}
+
 /// Whether signing `hash` at `height` would be equivocation.
 ///
 /// The high-water mark exists to stop one key signing twice at one height.
@@ -8652,6 +9020,14 @@ mod vote_history_wiring_tests {
     /// foreign branch below stops being reachable in the way this asserts.
     #[test]
     fn a_foreign_vote_history_file_is_not_adopted() {
+        super::vote_mark_interchange_tests::round_trip_preserves_marks();
+        super::vote_mark_interchange_tests::bad_magic_and_version_refused();
+        super::vote_mark_interchange_tests::merge_never_goes_backwards();
+        super::vote_mark_interchange_tests::same_height_different_hash_is_refused();
+        super::vote_mark_interchange_tests::different_key_id_refused();
+        super::vote_mark_interchange_tests::truncated_body_refused();
+        super::vote_mark_interchange_tests::import_into_history_keeps_high_water();
+        super::vote_mark_interchange_tests::encoding_is_deterministic();
         let own_record = super::VoteHistory {
             last_prevote_height: 9,
             last_precommit_height: 7,

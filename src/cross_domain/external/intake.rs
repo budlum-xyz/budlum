@@ -780,6 +780,68 @@ impl AdapterSpec {
     }
 }
 
+/// The canonical external verifier family a registered spec is bound to.
+///
+/// WIRING: admission-time spec -> consensus_kind mapping called by [`verify_family_binding`].
+/// The table is derived from `ExternalVerifierFamily` rather than repeating string
+/// literals; an added AdapterSpec variant without a row is a compile error.
+pub(crate) fn expected_consensus_kind(spec: &AdapterSpec) -> &'static str {
+    use crate::domain::finality_proof_model::ExternalVerifierFamily as Family;
+    match spec {
+        AdapterSpec::EthereumSync { .. } => Family::EthereumGasperSync.consensus_kind(),
+        AdapterSpec::ZkVm { .. } => Family::BudZkVmExecution.consensus_kind(),
+        AdapterSpec::BitcoinSpv { .. } => Family::BitcoinNakamotoPow.consensus_kind(),
+        AdapterSpec::TendermintCommit { .. } => Family::TendermintBft.consensus_kind(),
+        AdapterSpec::DataAvailability { .. } => Family::CelestiaDas.consensus_kind(),
+        AdapterSpec::HotStuffQc { .. } => Family::HotStuffChainedBft.consensus_kind(),
+        AdapterSpec::DagCertificate { .. } => Family::BullsharkDagBft.consensus_kind(),
+        AdapterSpec::CasperFfg { .. } => Family::CasperFfg.consensus_kind(),
+        AdapterSpec::MysticetiDag { .. } => Family::MysticetiDag.consensus_kind(),
+        AdapterSpec::BitVmCovenant { .. } => Family::BitVmCovenant.consensus_kind(),
+        AdapterSpec::SolanaTowerBft { .. } => Family::SolanaTowerBft.consensus_kind(),
+        AdapterSpec::PoSpaceVdf { .. } => Family::PoSpaceVdf.consensus_kind(),
+        AdapterSpec::AptosJolteonBft { .. } => Family::AptosJolteonBft.consensus_kind(),
+        AdapterSpec::NearDoomslugBft { .. } => Family::NearDoomslugBft.consensus_kind(),
+        AdapterSpec::ChainKeyNiDkg { .. } => Family::ChainKeyNiDkg.consensus_kind(),
+        AdapterSpec::BabylonEots { .. } => Family::BabylonEots.consensus_kind(),
+        AdapterSpec::NipopowSuperblock { .. } => Family::NipopowSuperblock.consensus_kind(),
+        AdapterSpec::Ghostdag { .. } => Family::GhostdagPow.consensus_kind(),
+        AdapterSpec::HoneyBadgerBft { .. } => Family::HoneyBadgerBft.consensus_kind(),
+        AdapterSpec::HeterogeneousMultiProver { .. } => Family::HeterogeneousMultiProver.consensus_kind(),
+        AdapterSpec::StarkValidityRollup { .. } => Family::StarkValidityRollup.consensus_kind(),
+        AdapterSpec::AlgorandStateProof { .. } => Family::AlgorandStateProof.consensus_kind(),
+        AdapterSpec::ArweaveSpOra { .. } => Family::ArweaveSpOra.consensus_kind(),
+        AdapterSpec::AuxPowPop { .. } => Family::AuxPowPop.consensus_kind(),
+        AdapterSpec::BasedPreconf { .. } => Family::BasedPreconf.consensus_kind(),
+        AdapterSpec::MinaSuccinctRecursive { .. } => Family::MinaSuccinctRecursive.consensus_kind(),
+        AdapterSpec::OuroborosMithril { .. } => Family::OuroborosMithril.consensus_kind(),
+        AdapterSpec::RestakingAvs { .. } => Family::RestakingAvs.consensus_kind(),
+        AdapterSpec::SimplexBft { .. } => Family::SimplexBft.consensus_kind(),
+        AdapterSpec::StellarScp { .. } => Family::StellarScp.consensus_kind(),
+        AdapterSpec::SymbioticVault { .. } => Family::SymbioticVault.consensus_kind(),
+        AdapterSpec::TonCatchainBft { .. } => Family::TonCatchainBft.consensus_kind(),
+    }
+}
+
+/// WIRING: admission-time spec -> consensus_kind binding called from [`IntakeState::register_domain`] before [`ExternalDomainRegistry::register`].
+/// Fail-closed binding check between the governance-selected spec and the
+/// descriptor the built adapter advertises. Refusal happens at the intake
+/// door, before the bond is posted and before registration enters consensus
+/// state; the later finality path is not a substitute for admission.
+pub(crate) fn verify_family_binding(
+    spec: &AdapterSpec,
+    descriptor: &crate::cross_domain::external::spec::AdapterDescriptor,
+) -> Result<(), IntakeError> {
+    let expected = expected_consensus_kind(spec);
+    if descriptor.consensus_kind != expected {
+        return Err(IntakeError::FamilyBindingMismatch {
+            expected: expected.to_owned(),
+            found: descriptor.consensus_kind.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn box_with_golden<A: ExternalFinalityAdapter + 'static>(
     make: impl FnOnce() -> A,
     golden: Option<RawConsensusEvidence>,
@@ -1252,6 +1314,10 @@ pub enum IntakeError {
     InvalidContradiction { reason: String },
     #[error(transparent)]
     Guard(#[from] IntakeGuardError),
+    #[error(
+        "adapter descriptor names consensus family {found}, but the registered spec is bound to {expected}"
+    )]
+    FamilyBindingMismatch { expected: String, found: String },
 }
 
 /// Verified receipt emitted by [`IntakeState::slash_on_contradiction`].
@@ -2335,6 +2401,7 @@ impl IntakeState {
             });
         }
         let descriptor = adapter.descriptor();
+        verify_family_binding(&spec, &descriptor)?;
         let key = self.registry.register(
             spec.network(),
             descriptor,
@@ -3631,6 +3698,18 @@ impl IntakeState {
                 },
             )));
         }
+        if !bool::from(trusted.next_validators_hash.ct_eq(pinned_hash)) {
+            return Err(IntakeError::Registry(RegistryError::Adapter(
+                crate::cross_domain::external::spec::AdapterError::ConsensusRule {
+                    rule: "trusted Tendermint next_validators_hash does not match pinned validator_set_hash"
+                        .to_string(),
+                },
+            )));
+        }
+        let _ = crate::cross_domain::external::tendermint::TendermintLightParams::standard_for_unbonding(
+            params.unbonding_period_secs,
+        )
+        .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
         let verdict = crate::cross_domain::external::tendermint::verify_tendermint_misbehaviour(
             trusted, params, evidence, now_secs,
         )
@@ -7029,6 +7108,10 @@ mod tests {
     /// door accepts must build an adapter that passes it with its own pin.
     #[test]
     fn every_pinned_family_spec_satisfies_its_own_verifier_profile() {
+        family_binding_table_matches_production_adapters();
+        family_binding_refuses_a_foreign_family_name();
+        family_binding_refuses_an_unknown_family_name();
+        family_binding_is_enforced_by_the_registration_door();
         use crate::domain::finality_proof_model::ExternalVerifierFamily;
 
         let specs = additional_family_specs_with_pins();
@@ -7329,5 +7412,84 @@ mod tests {
             .has_pinned_trust_anchor(),
             "BabylonEots without epoch keys must remain fail-closed"
         );
+    }
+
+    /// All 32 registered spec variants. Pins are deliberately absent:
+    /// descriptor construction must not depend on a pin being present.
+    fn all_spec_variants() -> Vec<AdapterSpec> {
+        let n = || "family-binding-test".to_string();
+        vec![
+            AdapterSpec::EthereumSync { network: n(), committee: None },
+            AdapterSpec::ZkVm { network: n(), program_hash: None, chain_id: None },
+            AdapterSpec::BitcoinSpv { network: n(), anchor: None },
+            AdapterSpec::TendermintCommit { network: n(), chain_id: "family-binding".to_string(), validator_set_hash: None },
+            AdapterSpec::DataAvailability { network: n(), committee: None },
+            AdapterSpec::HotStuffQc { network: n(), committee: None },
+            AdapterSpec::DagCertificate { network: n(), committee: None },
+            AdapterSpec::CasperFfg { network: n(), committee: None },
+            AdapterSpec::MysticetiDag { network: n(), committee: None },
+            AdapterSpec::BitVmCovenant { network: n(), anchor: None },
+            AdapterSpec::SolanaTowerBft { network: n(), pinned: None },
+            AdapterSpec::PoSpaceVdf { network: n(), pinned: None },
+            AdapterSpec::AptosJolteonBft { network: n(), pinned: None },
+            AdapterSpec::NearDoomslugBft { network: n(), pinned: None },
+            AdapterSpec::ChainKeyNiDkg { network: n(), pinned: None },
+            AdapterSpec::BabylonEots { network: n(), pinned: None },
+            AdapterSpec::NipopowSuperblock { network: n(), genesis: None },
+            AdapterSpec::Ghostdag { network: n(), anchor: None },
+            AdapterSpec::HoneyBadgerBft { network: n(), committee: None },
+            AdapterSpec::HeterogeneousMultiProver { network: n(), pinned: None },
+            AdapterSpec::StarkValidityRollup { network: n(), pinned: None },
+            AdapterSpec::AlgorandStateProof { network: n(), pinned: None },
+            AdapterSpec::ArweaveSpOra { network: n(), pinned: None },
+            AdapterSpec::AuxPowPop { network: n(), pinned: None },
+            AdapterSpec::BasedPreconf { network: n(), pinned: None },
+            AdapterSpec::MinaSuccinctRecursive { network: n(), pinned: None },
+            AdapterSpec::OuroborosMithril { network: n(), pinned: None },
+            AdapterSpec::RestakingAvs { network: n(), pinned: None },
+            AdapterSpec::SimplexBft { network: n(), pinned: None },
+            AdapterSpec::StellarScp { network: n(), pinned: None },
+            AdapterSpec::SymbioticVault { network: n(), pinned: None },
+            AdapterSpec::TonCatchainBft { network: n(), pinned: None },
+        ]
+    }
+
+    /// The adapters themselves are the oracle: a wrong row in the binding
+    /// table, or an adapter whose descriptor drifts from its canonical family,
+    /// fails before any registration is attempted.
+    fn family_binding_table_matches_production_adapters() {
+        let specs = all_spec_variants();
+        assert_eq!(specs.len(), 32, "every registered spec variant must be bound");
+        let mut seen = std::collections::HashSet::new();
+        for spec in &specs {
+            let descriptor = spec.build(Some(Box::new(StrictTestBls)), None).descriptor();
+            let expected = super::expected_consensus_kind(spec);
+            assert_eq!(descriptor.consensus_kind, expected, "family binding drifted for {}", spec.network());
+            assert!(seen.insert(expected), "duplicate canonical kind {expected}");
+            assert!(super::verify_family_binding(spec, &descriptor).is_ok(), "canonical descriptor must pass the intake binding gate");
+        }
+        assert_eq!(seen.len(), 32);
+    }
+
+    fn family_binding_refuses_a_foreign_family_name() {
+        let spec = eth_spec();
+        let mut descriptor = spec.build(Some(Box::new(StrictTestBls)), None).descriptor();
+        descriptor.consensus_kind = "nakamoto-pow".to_owned();
+        let err = super::verify_family_binding(&spec, &descriptor)
+            .expect_err("a descriptor naming another family must be refused");
+        assert!(matches!(err, IntakeError::FamilyBindingMismatch { .. }), "expected a family binding refusal, got {err:?}");
+    }
+
+    fn family_binding_refuses_an_unknown_family_name() {
+        let spec = eth_spec();
+        let mut descriptor = spec.build(Some(Box::new(StrictTestBls)), None).descriptor();
+        descriptor.consensus_kind = "not-a-registered-family".to_owned();
+        assert!(super::verify_family_binding(&spec, &descriptor).is_err(), "an unrecognised family name must not pass admission");
+    }
+
+    fn family_binding_is_enforced_by_the_registration_door() {
+        let src = include_str!("intake.rs");
+        let door = src.split("pub fn register_domain(").nth(1).unwrap_or("").split("pub fn ").next().unwrap_or("");
+        assert!(door.contains("verify_family_binding(&spec, &descriptor)?;"), "register_domain must call the family binding gate before registering");
     }
 }

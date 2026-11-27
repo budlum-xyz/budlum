@@ -166,14 +166,36 @@ fn imbat58_59_checked_counters_refuse_u64_max_overwrite_and_grace_overflow() {
         Err(SocialFiBud3Error::FolderLimitExceeded)
     );
 
-    // 2. Pollen MarketplaceRegistry refuses u64::MAX next_offer_id instead of saturating.
+    // 2. Pollen MarketplaceRegistry saturates at u64::MAX: the last id of the
+    // space is issued exactly once and never handed to a second seller. This
+    // used to assert that the first call is refused; `create_offer` saturates
+    // (`saturating_add`) and the live-id guard - which runs before the counter
+    // advances - is what keeps a saturated counter from overwriting a listing
+    // that resolves. The unit test in `pollen::offers` pins the same verdict
+    // from the inside, so the two now measure one contract.
     let mut market = MarketplaceRegistry::new();
     market.next_offer_id = u64::MAX;
     let cid = ContentId([0x44; 32]);
-    let offer_err = market.create_offer(addr(0x22), cid, 1_000, 10);
+    let seller = addr(0x22);
+    assert_eq!(
+        market.create_offer(seller, cid, 1_000, 10),
+        Ok(u64::MAX),
+        "the last id of the space is issued once"
+    );
+    let second = market.create_offer(addr(0x33), cid, 2_000, 10);
     assert!(
-        offer_err.is_err(),
-        "u64::MAX next_offer_id must fail closed"
+        second.is_err(),
+        "a saturated counter must not issue the last id twice"
+    );
+    assert_eq!(
+        market.offers.get(&u64::MAX).map(|o| o.seller),
+        Some(seller),
+        "the last id still resolves to the first seller"
+    );
+    assert_eq!(
+        market.next_offer_id,
+        u64::MAX,
+        "the counter stays saturated"
     );
 
     // 3. BNS renew refuses expires_at + GRACE_PERIOD overflow near u64::MAX.
