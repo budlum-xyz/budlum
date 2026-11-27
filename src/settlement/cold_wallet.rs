@@ -138,6 +138,9 @@ impl ColdWalletPolicy {
         if self.required_quorum == 0 {
             return Err("quorum-zero");
         }
+        if self.required_quorum < 2 {
+            return Err("single-device-quorum-forbidden");
+        }
         if self.required_quorum > self.device_count {
             return Err("quorum-above-device-count");
         }
@@ -738,6 +741,128 @@ impl ColdWalletState {
             });
         }
         Ok(())
+    }
+
+    /// Computes the dynamic per-settlement ceiling bounded by the external
+    /// domain's verified [`crate::cross_domain::external::spec::SecurityBacking`],
+    /// trust-anchor presence, and local slashable bond escrow.
+    ///
+    /// - Unanchored domains, `SecurityBacking::None`, or `SecurityBacking::Authority`
+    ///   have an effective ceiling of `0` (fail-closed).
+    /// - Shallow proof-of-work (`0 < difficulty_bits < 64`) or unslashable /
+    ///   zero-bond signature sets are capped to `10%` of
+    ///   `max_value_per_settlement_atoms`.
+    /// - Slashable signature sets with positive local bond are bounded by
+    ///   `min(max_value_per_settlement_atoms, local_slashable_bond_atoms)`.
+    /// - Deep proof-of-work (`>= 64` bits) and validity-proven `Zk` backings
+    ///   admit up to `max_value_per_settlement_atoms`.
+    ///
+    /// WIRING: USL cold-wallet external-finality settlement arm.
+    #[must_use]
+    pub fn effective_external_ceiling(
+        &self,
+        backing: &crate::cross_domain::external::spec::SecurityBacking,
+        has_pinned_anchor: bool,
+        local_slashable_bond_atoms: u128,
+    ) -> u128 {
+        use crate::cross_domain::external::spec::SecurityBacking;
+
+        if !has_pinned_anchor {
+            return 0;
+        }
+        let base = self.policy.max_value_per_settlement_atoms;
+        let low_tier = base / 10;
+        match backing {
+            SecurityBacking::None | SecurityBacking::Authority { .. } => 0,
+            SecurityBacking::Work { difficulty_bits } => {
+                if *difficulty_bits == 0 {
+                    0
+                } else if *difficulty_bits < 64 {
+                    low_tier
+                } else {
+                    base
+                }
+            }
+            SecurityBacking::SignatureSet {
+                signers,
+                required,
+                total_weight,
+                slashable,
+                ..
+            } => {
+                if *required == 0 || *total_weight == 0 || *signers < *required {
+                    0
+                } else if !*slashable || local_slashable_bond_atoms == 0 {
+                    low_tier
+                } else {
+                    base.min(local_slashable_bond_atoms)
+                }
+            }
+            SecurityBacking::Zk { .. } => base,
+        }
+    }
+
+    /// Evaluates [`Self::check`] plus the dynamic external-finality ceiling and
+    /// non-zero `global_root` requirement without mutating cold-wallet state.
+    ///
+    /// WIRING: called by `sign_with_external_finality` on the USL settlement arm.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`ColdRefusal`] that fires.
+    pub fn check_for_external_finality(
+        &self,
+        request: &SettlementRequest,
+        presented_key_epoch: u32,
+        presented_signatures: u32,
+        backing: &crate::cross_domain::external::spec::SecurityBacking,
+        has_pinned_anchor: bool,
+        local_slashable_bond_atoms: u128,
+    ) -> Result<(), ColdRefusal> {
+        self.check(request, presented_key_epoch, presented_signatures)?;
+        if request.global_root == [0u8; 32] {
+            return Err(ColdRefusal::InvalidState {
+                rule: "zero-global-root-forbidden".to_string(),
+            });
+        }
+        let ceiling =
+            self.effective_external_ceiling(backing, has_pinned_anchor, local_slashable_bond_atoms);
+        if request.value_atoms > ceiling {
+            return Err(ColdRefusal::ValueAboveCeiling {
+                ceiling,
+                requested: request.value_atoms,
+            });
+        }
+        Ok(())
+    }
+
+    /// Two-gate quorum + dynamic external-finality ceiling entry point.
+    ///
+    /// WIRING: USL cold-wallet external-finality settlement executor arm.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ColdSettleError`] if either the cryptographic quorum or the
+    /// external-finality ceiling / policy check refuses.
+    pub fn sign_with_external_finality(
+        &mut self,
+        request: &SettlementRequest,
+        presented_key_epoch: u32,
+        signatures: &[DeviceSignature],
+        backing: &crate::cross_domain::external::spec::SecurityBacking,
+        has_pinned_anchor: bool,
+        local_slashable_bond_atoms: u128,
+    ) -> Result<VerifiedSettlement, ColdSettleError> {
+        self.check_for_external_finality(
+            request,
+            presented_key_epoch,
+            self.policy.required_quorum,
+            backing,
+            has_pinned_anchor,
+            local_slashable_bond_atoms,
+        )
+        .map_err(ColdSettleError::Policy)?;
+        self.sign_with_quorum(request, presented_key_epoch, signatures)
     }
 
     /// Appends to the refusal history, evicting the oldest when full.
