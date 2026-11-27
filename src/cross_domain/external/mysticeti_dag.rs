@@ -910,10 +910,10 @@ impl MysticetiDagAdapter {
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
     ) -> Result<(FinalityAttestation, bool), AdapterError> {
+        // External Mysticeti stake is not slashable on Budlum; a caller that
+        // wants slashable backing pairs this with a bonded prover instead.
         if policy.require_slashable {
-            return Err(AdapterError::ConsensusRule {
-                rule: "external Mysticeti stake is not slashable on Budlum; pair with bonded IntakeState prover".to_string(),
-            });
+            return Err(AdapterError::UnslashableBacking);
         }
         let ValidatedMysticetiAnchor {
             committee,
@@ -1188,7 +1188,14 @@ mod tests {
         let policy = wave_policy();
         let mut slash_policy = VerificationPolicy::strict(0);
         slash_policy.require_slashable = true;
-        assert!(adapter.verify(&raw, &slash_policy).is_err());
+        assert!(
+            matches!(
+                adapter.verify(&raw, &slash_policy),
+                Err(AdapterError::UnslashableBacking)
+            ),
+            "external Mysticeti stake is not slashable on Budlum; the refusal must name that \
+             class and not merely be an error"
+        );
 
         let report = admit(&adapter, &policy);
         assert!(report.admitted, "selftest failed: {report:?}");

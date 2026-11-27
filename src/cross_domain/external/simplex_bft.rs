@@ -1101,10 +1101,10 @@ impl SimplexBftAdapter {
         };
         let attested_event_root =
             (!bool::from(block.event_root.ct_eq(&[0u8; 32]))).then_some(block.event_root);
+        // Foreign Simplex committee stake has no local confiscation escrow,
+        // so the backing is not slashable from Budlum.
         if policy.require_slashable {
-            return Err(AdapterError::ConsensusRule {
-                rule: "caller policy requires slashable backing; foreign Simplex committee stake has no local confiscation escrow".into(),
-            });
+            return Err(AdapterError::UnslashableBacking);
         }
         let min_signed = notarize_signers.min(finalize_signers);
         let required_weight = min_simplex_supermajority(active_total);
@@ -1386,9 +1386,9 @@ mod tests {
         assert!(
             matches!(
                 adapter.verify(&raw, &slash_policy),
-                Err(AdapterError::ConsensusRule { .. })
+                Err(AdapterError::UnslashableBacking)
             ),
-            "foreign Simplex stake without local confiscation escrow must refuse require_slashable"
+            "foreign Simplex stake without local confiscation escrow must refuse require_slashable with the class that names the rule"
         );
         let mut facts = CryptoFacts::new();
         let att = adapter

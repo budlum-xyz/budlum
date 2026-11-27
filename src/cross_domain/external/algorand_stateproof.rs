@@ -1081,10 +1081,11 @@ impl AlgorandStateProofAdapter {
             }
         }
 
+        // Foreign Algorand online stake has no local confiscation escrow, so
+        // the backing is not slashable from Budlum. The refusal has a class of
+        // its own so a consumer can match it instead of a sentence.
         if policy.require_slashable {
-            return Err(AdapterError::ConsensusRule {
-                rule: "caller policy requires slashable backing; foreign Algorand online stake has no local confiscation escrow".into(),
-            });
+            return Err(AdapterError::UnslashableBacking);
         }
         let (signers, required) = verify_stateproof_bundle(&self.network, pinned, &bundle)?;
 
@@ -1395,9 +1396,9 @@ mod tests {
         assert!(
             matches!(
                 adapter.verify(&fx.golden, &slash_policy),
-                Err(AdapterError::ConsensusRule { .. })
+                Err(AdapterError::UnslashableBacking)
             ),
-            "foreign Algorand online stake without local confiscation escrow must refuse require_slashable"
+            "foreign Algorand online stake without local confiscation escrow must refuse require_slashable with the class that names the rule"
         );
 
         // Verified zero-trust interval rotation to interval 41!
