@@ -155,6 +155,17 @@ pub fn verify_chains<H: BpqsHash, P: BpqsParams>(
     sig_chains: &[[u8; 32]; 256],
     msg_digest: &[u8; 32],
 ) -> [u8; 32] {
+    if sig_chains
+        .iter()
+        .take(P::LEN)
+        .any(|lane| lane[P::N..].iter().any(|&b| b != 0))
+        || sig_chains
+            .iter()
+            .skip(P::LEN)
+            .any(|lane| lane.iter().any(|&b| b != 0))
+    {
+        return [0u8; 32];
+    }
     let digits = digits_of::<P>(msg_digest);
     let mut heads = [[0u8; 32]; 256];
     for (i, head) in heads.iter_mut().take(P::LEN).enumerate() {
@@ -221,5 +232,34 @@ mod wots_tests {
         let chains = test_chains();
         let head = chain_walk::<Sha3_256Hash, P>(&chains[0], 3, 0, 0);
         assert!(head[P::N..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn non_canonical_lane_padding_or_unused_tail_breaks_verify_chains() {
+        use crate::params::ParamsL3;
+        let chains = epoch_secret_chains::<Sha3_256Hash, ParamsL3>(&[5u8; 32]);
+        let msg = [0x42; 32];
+        let sig = sign_chains::<Sha3_256Hash, ParamsL3>(&chains, &msg);
+        let expected = vk_of_chains::<Sha3_256Hash, ParamsL3>(&chains);
+        assert_eq!(
+            verify_chains::<Sha3_256Hash, ParamsL3>(&sig, &msg),
+            expected
+        );
+
+        let mut padded_lane = sig;
+        padded_lane[0][ParamsL3::N] = 0x80;
+        assert_ne!(
+            verify_chains::<Sha3_256Hash, ParamsL3>(&padded_lane, &msg),
+            expected,
+            "non-zero byte in lane padding [P::N..32] must not verify to the same vk digest"
+        );
+
+        let mut dirty_tail = sig;
+        dirty_tail[ParamsL3::LEN][0] = 0x01;
+        assert_ne!(
+            verify_chains::<Sha3_256Hash, ParamsL3>(&dirty_tail, &msg),
+            expected,
+            "non-zero byte in unused tail chain [P::LEN..256] must not verify to the same vk digest"
+        );
     }
 }

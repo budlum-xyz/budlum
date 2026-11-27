@@ -3631,6 +3631,18 @@ impl IntakeState {
                 },
             )));
         }
+        if !bool::from(trusted.next_validators_hash.ct_eq(pinned_hash)) {
+            return Err(IntakeError::Registry(RegistryError::Adapter(
+                crate::cross_domain::external::spec::AdapterError::ConsensusRule {
+                    rule: "trusted Tendermint next_validators_hash does not match pinned validator_set_hash"
+                        .to_string(),
+                },
+            )));
+        }
+        let _ = crate::cross_domain::external::tendermint::TendermintLightParams::standard_for_unbonding(
+            params.unbonding_period_secs,
+        )
+        .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
         let verdict = crate::cross_domain::external::tendermint::verify_tendermint_misbehaviour(
             trusted, params, evidence, now_secs,
         )

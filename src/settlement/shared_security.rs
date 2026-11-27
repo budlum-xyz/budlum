@@ -792,6 +792,40 @@ pub fn execute_tendermint_misbehaviour_slash(
     let _ = TendermintLightParams::standard_for_unbonding(light_params.unbonding_period_secs)
         .map_err(|e| refused(format!("Tendermint unbonding period rejected: {e}")))?;
     let anchor_root = validator_set_hash(&trusted.validators);
+    if !bool::from(subtle::ConstantTimeEq::ct_eq(
+        trusted.next_validators_hash.as_slice(),
+        anchor_root.as_slice(),
+    )) {
+        return Err(refused(
+            "Tendermint slash trusted next_validators_hash must match validator_set_hash",
+        ));
+    }
+    if let Some(entry) = state.settlement.external_intake.entries.get(&domain_key) {
+        if let crate::cross_domain::external::intake::AdapterSpec::TendermintCommit {
+            ref network,
+            ..
+        } = entry.spec
+        {
+            let pinned = state
+                .settlement
+                .external_intake
+                .pinned_tendermint_anchors
+                .get(network)
+                .ok_or_else(|| {
+                    refused("Tendermint slash domain has no governance-pinned Tendermint anchor")
+                })?;
+            if pinned.chain_id != trusted.chain_id
+                || !bool::from(subtle::ConstantTimeEq::ct_eq(
+                    pinned.validator_set_hash.as_slice(),
+                    anchor_root.as_slice(),
+                ))
+            {
+                return Err(refused(
+                    "Tendermint slash trusted state does not match governance-pinned anchor",
+                ));
+            }
+        }
+    }
     let mut client =
         TendermintLightClient::new(trusted.clone(), anchor_root, anchor_root, *light_params)
             .map_err(|e| refused(format!("Tendermint trusted anchor rejected: {e}")))?;
@@ -2145,6 +2179,29 @@ mod tests {
             validators: tm_vals.clone(),
             next_validators_hash: set_hash,
         };
+        // Framing a single honest commit (header_2: None) by forging
+        // trusted.next_validators_hash != set_hash must be refused before any
+        // honest validator (tm_vals[0]) can be slashed as a lunatic culprit.
+        let mut forged_trusted = trusted.clone();
+        forged_trusted.height = 899;
+        forged_trusted.next_validators_hash = [0xFF; 32];
+        let framed_single_commit = TendermintMisbehaviour {
+            header_1: mk_fork([0xA1; 32], &[0, 1, 2]),
+            header_2: None,
+        };
+        assert!(matches!(
+            execute_tendermint_misbehaviour_slash(
+                &mut state,
+                &ctx(carrier, devnet()),
+                dom_id,
+                &forged_trusted,
+                &light_params,
+                &framed_single_commit,
+                1_790_001_000,
+            ),
+            Err(SettlementTxError::Refused(_))
+        ));
+
         let misbehaviour = TendermintMisbehaviour {
             header_1: mk_fork([0xA1; 32], &[0, 1, 2]),
             header_2: Some(mk_fork([0xB2; 32], &[1, 2, 3])),
