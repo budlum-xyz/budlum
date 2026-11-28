@@ -779,6 +779,47 @@ impl ExternalDomainRegistry {
         Ok(())
     }
 
+    /// Adjudicates a Polkadot / Substrate `GRANDPA` double-precommit
+    /// equivocation proof for `network` under `pinned` and transitions the
+    /// registered domain to [`DomainState::Faulted`] so no further
+    /// attestations are served until explicit readmission.
+    ///
+    /// WIRING: external domain equivocation challenge door (`ChallengeEquivocation`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::UnknownDomain`] if the domain is not registered,
+    /// or [`RegistryError::Adapter`] if `proof` fails `GRANDPA` equivocation rules.
+    pub fn fault_on_grandpa_equivocation(
+        &mut self,
+        network: &str,
+        pinned: &crate::cross_domain::external::polkadot_grandpa::PinnedGrandpaSet,
+        proof: &crate::cross_domain::external::polkadot_grandpa::GrandpaEquivocationProof,
+    ) -> Result<
+        crate::cross_domain::external::polkadot_grandpa::GrandpaSlashedAuthority,
+        RegistryError,
+    > {
+        let adapter = crate::cross_domain::external::polkadot_grandpa::PolkadotGrandpaAdapter::new(
+            network,
+            Some(pinned.clone()),
+        );
+        let domain = DomainKey::from_parts(&adapter.descriptor().id, network);
+        if !self.domains.contains_key(&domain) {
+            return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
+        }
+        let slashed =
+            crate::cross_domain::external::polkadot_grandpa::adjudicate_grandpa_equivocation(
+                network, pinned, proof,
+            )
+            .map_err(RegistryError::Adapter)?;
+        let reason = format!(
+            "GRANDPA double-precommit equivocation at set_id={} round={} weight={}",
+            slashed.set_id, slashed.round, slashed.slashed_weight
+        );
+        self.mark_faulted(&domain, &reason)?;
+        Ok(slashed)
+    }
+
     /// The checks, in order. Split out of [`Self::submit`] so the intake path
     /// above stays readable and the order is in one place.
     #[allow(clippy::too_many_arguments)]

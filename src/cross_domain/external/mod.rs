@@ -137,6 +137,7 @@ pub mod near_doomslug;
 pub mod nipopow;
 pub mod ouroboros_mithril;
 pub mod phase_a_dual;
+pub mod polkadot_grandpa;
 pub mod pospace_vdf;
 pub mod profile;
 pub mod prover;
@@ -271,6 +272,13 @@ pub use ouroboros_mithril::{
     mithril_certificate_message, mithril_threshold, praos_vote_message, proof_of_equivocation,
     EpochSigner, EpochStake, MithrilEvidence, MithrilSignature, OuroborosMithrilAdapter,
     PraosEquivocationProof, PraosSlotProof, EVIDENCE_VERSION as PRAOS_EVIDENCE_VERSION,
+};
+pub use polkadot_grandpa::{
+    adjudicate_grandpa_equivocation, advance_grandpa_authority_set,
+    compute_grandpa_authority_set_hash, compute_grandpa_header_hash,
+    encode_grandpa_justification_evidence, grandpa_precommit_sign_bytes, GrandpaAuthority,
+    GrandpaEquivocationProof, GrandpaHeader, GrandpaScheduledChange, GrandpaSignedPrecommit,
+    GrandpaSlashedAuthority, PinnedGrandpaSet, PolkadotGrandpaAdapter,
 };
 pub use pospace_vdf::{
     verify_double_signage_equivocation, PinnedPoSpaceAnchor, PoSpaceEquivocationProof,
