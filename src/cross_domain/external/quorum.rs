@@ -230,9 +230,19 @@ pub fn group_answers(answers: &[Answer]) -> (Vec<AnswerGroup>, usize) {
 /// what "agreement" means.
 #[must_use]
 pub fn decide(answers: &[Answer], policy: &QuorumPolicy) -> QuorumOutcome {
-    if answers.len() > policy.max_participants {
+    // The cap bounds each kind of answer on its own. A refusal is a vote
+    // about the bytes its prover carried, not a seat taken from the claim;
+    // counted together, threshold-many refusals with a bad signature filled
+    // the round before the honest claims arrived, and the cap refused them.
+    let claims = answers
+        .iter()
+        .filter(|a| matches!(a, Answer::Claim(_)))
+        .count();
+    let others = answers.len().saturating_sub(claims);
+    let observed = claims.max(others);
+    if observed > policy.max_participants {
         return QuorumOutcome::TooManyParticipants {
-            observed: answers.len(),
+            observed,
             max: policy.max_participants,
         };
     }
@@ -264,27 +274,51 @@ pub fn decide(answers: &[Answer], policy: &QuorumPolicy) -> QuorumOutcome {
         };
     }
 
-    // Threshold winners. Only groups that reached the threshold are
-    // candidates; a group of one cannot win because a group of five exists.
-    let winners: Vec<&AnswerGroup> = groups
+    // Threshold winners, claims first. Only groups that reached the
+    // threshold are candidates; a group of one cannot win because a group of
+    // five exists. Claims and refusals are judged apart: a refusal says "the
+    // bytes I carried did not prove finality", never "there is no finality",
+    // so a claim at the threshold is agreement however many provers refused
+    // beside it, and only two claims at the threshold are a tie. Refusals
+    // answer the round only when no claim can.
+    let claim_winners: Vec<&AnswerGroup> = groups
         .iter()
-        .filter(|g| g.count >= policy.agreement_threshold)
+        .filter(|g| matches!(g.answer, Answer::Claim(_)) && g.count >= policy.agreement_threshold)
         .collect();
+    match claim_winners.len() {
+        0 => {}
+        1 => {
+            return claim_winners
+                .first()
+                .map(|only| outcome_of(only))
+                .unwrap_or(QuorumOutcome::Dispute { groups });
+        }
+        _ => {
+            // Two or more claims at the threshold. That is a tie, and a tie is
+            // a dispute: picking one would be a choice the evidence did not
+            // support. Named explicitly rather than resolved by sort order.
+            let tied: Vec<AnswerGroup> = claim_winners.into_iter().cloned().collect();
+            return QuorumOutcome::Dispute { groups: tied };
+        }
+    }
 
-    match winners.len() {
+    let refusal_winners: Vec<&AnswerGroup> = groups
+        .iter()
+        .filter(|g| {
+            matches!(g.answer, Answer::ConsensusRefusal(_)) && g.count >= policy.agreement_threshold
+        })
+        .collect();
+    match refusal_winners.len() {
         0 => match policy.dispute {
             DisputeBehavior::ReturnError => QuorumOutcome::Dispute { groups },
             DisputeBehavior::AcceptMostCommon => winner_of(&groups),
         },
-        1 => winners
+        1 => refusal_winners
             .first()
             .map(|only| outcome_of(only))
             .unwrap_or(QuorumOutcome::Dispute { groups }),
         _ => {
-            // Two or more groups at the threshold. That is a tie, and a tie is
-            // a dispute: picking one would be a choice the evidence did not
-            // support. Named explicitly rather than resolved by sort order.
-            let tied: Vec<AnswerGroup> = winners.into_iter().cloned().collect();
+            let tied: Vec<AnswerGroup> = refusal_winners.into_iter().cloned().collect();
             QuorumOutcome::Dispute { groups: tied }
         }
     }
@@ -497,6 +531,54 @@ mod tests {
                 count: 3
             }
         );
+    }
+
+    /// A refusal says "the bytes I carried did not prove finality"; it never
+    /// says "there is no finality". So a claim that reached the threshold is
+    /// agreement even when as many provers refused: the refusals are not a
+    /// rival claim, and reading them as one let a prover with threshold-many
+    /// bonds and a bad signature tie every honest round into a dispute.
+    #[test]
+    fn a_claim_at_the_threshold_is_not_tied_by_refusals_at_the_threshold() {
+        let answers = [
+            claim(0xaa),
+            claim(0xaa),
+            claim(0xaa),
+            Answer::ConsensusRefusal(RefusalKind::Crypto),
+            Answer::ConsensusRefusal(RefusalKind::Crypto),
+            Answer::ConsensusRefusal(RefusalKind::Crypto),
+        ];
+        assert_eq!(
+            decide(&answers, &policy(3)),
+            QuorumOutcome::AgreedClaim {
+                claim: [0xaa; 32],
+                count: 3
+            }
+        );
+    }
+
+    /// The participant cap bounds each kind of answer on its own: refusals
+    /// filling the cap must not refuse the claims that arrive after them.
+    #[test]
+    fn refusals_at_the_cap_do_not_close_the_round_to_claims() {
+        let mut answers = vec![Answer::ConsensusRefusal(RefusalKind::Crypto); 4];
+        answers.extend([claim(0xaa), claim(0xaa), claim(0xaa)]);
+        assert_eq!(
+            decide(&answers, &QuorumPolicy::strict(3, 4)),
+            QuorumOutcome::AgreedClaim {
+                claim: [0xaa; 32],
+                count: 3
+            }
+        );
+        // The cap still holds per kind: five claims in four seats is refused.
+        let flood = vec![claim(0xaa); 5];
+        assert!(matches!(
+            decide(&flood, &QuorumPolicy::strict(3, 4)),
+            QuorumOutcome::TooManyParticipants {
+                observed: 5,
+                max: 4
+            }
+        ));
     }
 
     #[test]
