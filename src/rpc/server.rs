@@ -3363,6 +3363,57 @@ impl BudlumApiServer for RpcServer {
         ))
     }
 
+    async fn get_domain_commitment(
+        &self,
+        domain_id: u32,
+        height: u64,
+        sequence: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let read = self
+            .chain
+            .get_domain_commitment(domain_id, height, sequence)
+            .await
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!(
+                        "no canonical commitment for domain_id={domain_id}, height={height}, sequence={sequence}: never accepted, or outside the node's retained window"
+                    ),
+                    None::<()>,
+                )
+            })?;
+        let leaf = read.commitment.leaf_hash();
+        if !read.proof.verify(&leaf, &read.root) {
+            return Err(ErrorObjectOwned::owned(
+                -32603,
+                "the commitment proof did not rebuild the registry's commitment root",
+                None::<()>,
+            ));
+        }
+        // Only a header that commits exactly this root anchors the path: a
+        // commitment accepted after the last checkpoint is in no committed
+        // header yet, and the answer says so instead of naming the older one.
+        let committed_header = read
+            .latest_header
+            .filter(|(_, _, root)| *root == read.root)
+            .map(|(global_height, hash, _)| {
+                serde_json::json!({
+                    "globalHeight": Self::to_hex(global_height),
+                    "globalHash": Self::bytes32_to_0x(hash),
+                })
+            });
+        Ok(serde_json::json!({
+            "commitment": Self::domain_commitment_to_json(read.commitment),
+            "leafHash": Self::bytes32_to_0x(leaf),
+            "leafIndex": Self::to_hex(read.proof.leaf_index as u64),
+            "leafCount": Self::to_hex(read.proof.leaf_count as u64),
+            "siblings": read.proof.siblings.iter().map(|s| Self::bytes32_to_0x(*s)).collect::<Vec<_>>(),
+            "domainCommitmentRoot": Self::bytes32_to_0x(read.root),
+            "tipHeight": Self::to_hex(read.tip_height),
+            "committedHeader": committed_header,
+        }))
+    }
+
     async fn get_consensus_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let domains = if self.mode == RpcMode::Operator {
             self.chain.get_consensus_domains_with_garden().await

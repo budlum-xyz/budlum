@@ -147,6 +147,22 @@ pub trait BudlumApi {
     #[method(name = "bud_getDomainCommitments")]
     async fn get_domain_commitments(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// One canonical (in-block) commitment by its content address
+    /// `(domain_id, height, sequence)`, with the Merkle sibling path from its
+    /// leaf to the `domain_commitment_root` the node's registry computes, and
+    /// the newest committed checkpoint header when that header commits exactly
+    /// this root. A commitment accepted after the last checkpoint is in no
+    /// committed header yet and answers `committedHeader: null`. Refuses
+    /// fail-closed (`-32602`) when the node holds no such commitment: never
+    /// accepted, or outside the node's retained window.
+    #[method(name = "bud_getDomainCommitment")]
+    async fn get_domain_commitment(
+        &self,
+        domain_id: u32,
+        height: u64,
+        sequence: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     #[method(name = "bud_getConsensusDomains")]
     async fn get_consensus_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 

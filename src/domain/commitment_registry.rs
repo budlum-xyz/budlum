@@ -175,6 +175,82 @@ impl DomainCommitmentRegistry {
     }
 }
 
+/// A Merkle sibling path from one domain commitment leaf to the root of the
+/// commitment tree a checkpoint header commits (`domain_commitment_root`).
+///
+/// The tree is the shared shape of `consensus::merkle_tree` under the
+/// settlement binding, so a promoted odd tail appears as the sibling
+/// `consensus::merkle_tree::odd_promotion_sentinel()`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainCommitmentInclusionProof {
+    /// The leaf's position among the tree's leaves: the registry's
+    /// `(domain_id, domain_height, sequence)` key order.
+    pub leaf_index: usize,
+    /// The number of leaves the root was computed over.
+    pub leaf_count: usize,
+    /// The sibling digests, leaf layer first.
+    pub siblings: Vec<Hash32>,
+}
+
+impl DomainCommitmentInclusionProof {
+    /// Whether `leaf` at `leaf_index` is a member of the tree whose root is
+    /// `root`: the path is walked with the settlement combine functions and
+    /// the rebuilt digest is compared with `root`. A sentinel in a paired
+    /// position, a leftover index, or any altered sibling rebuilds a different
+    /// digest and is refused.
+    #[must_use]
+    pub fn verify(&self, leaf: &Hash32, root: &Hash32) -> bool {
+        self.leaf_index < self.leaf_count
+            && crate::consensus::merkle_tree::merkle_root_from_proof(
+                leaf,
+                self.leaf_index,
+                &self.siblings,
+                crate::settlement::commitment_tree::merkle_node_hash,
+                crate::settlement::commitment_tree::merkle_odd_promote_hash,
+            )
+            .is_some_and(|rebuilt| rebuilt == *root)
+    }
+}
+
+impl DomainCommitmentRegistry {
+    /// The path from the commitment `(domain_id, domain_height, sequence)` to
+    /// the root [`Self::root`] computes over this registry's leaves, in key
+    /// order; `None` when the registry does not hold that commitment.
+    ///
+    /// A verifier needs only the leaf, the path and a root it trusts (a
+    /// checkpoint header's `domain_commitment_root`); see
+    /// [`DomainCommitmentInclusionProof::verify`].
+    #[must_use]
+    pub fn prove(
+        &self,
+        domain_id: DomainId,
+        domain_height: u64,
+        sequence: u64,
+    ) -> Option<DomainCommitmentInclusionProof> {
+        let key = (domain_id, domain_height, sequence);
+        let mut leaves = Vec::with_capacity(self.commitments.len());
+        let mut leaf_index = None;
+        for (at, (held, commitment)) in self.commitments.iter().enumerate() {
+            if *held == key {
+                leaf_index = Some(at);
+            }
+            leaves.push(commitment.leaf_hash());
+        }
+        let leaf_index = leaf_index?;
+        let siblings = crate::consensus::merkle_tree::merkle_proof(
+            &leaves,
+            leaf_index,
+            crate::settlement::commitment_tree::merkle_node_hash,
+            crate::settlement::commitment_tree::merkle_odd_promote_hash,
+        )?;
+        Some(DomainCommitmentInclusionProof {
+            leaf_index,
+            leaf_count: leaves.len(),
+            siblings,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +326,64 @@ mod tests {
         assert_eq!(by_hash.sequence, 3);
         assert!(registry.get_by_block_hash(1, 10, [1u8; 32]).is_none());
         assert!(registry.get_by_block_hash(1, 10, [2u8; 32]).is_none());
+    }
+
+    fn numbered(number: u64) -> DomainCommitment {
+        commitment(number, [u8::try_from(number + 1).unwrap_or(1); 32])
+    }
+
+    /// Every leaf's path rebuilds the registry root for odd and even tree
+    /// sizes, the promoted odd tail carries the sentinel, one altered sibling
+    /// is refused, and a key the registry does not hold has no path.
+    #[test]
+    fn every_commitment_proves_into_the_registry_root() {
+        for count in 1..=6u64 {
+            let mut registry = DomainCommitmentRegistry::new();
+            for number in 0..count {
+                registry.insert(numbered(number)).unwrap();
+            }
+            let root = registry.root();
+            for number in 0..count {
+                let leaf = registry.get(1, 10, number).unwrap().leaf_hash();
+                let proof = registry
+                    .prove(1, 10, number)
+                    .unwrap_or_else(|| panic!("sequence {number} of {count} has a path"));
+                assert_eq!(proof.leaf_index, usize::try_from(number).unwrap());
+                assert_eq!(proof.leaf_count, usize::try_from(count).unwrap());
+                assert!(
+                    proof.verify(&leaf, &root),
+                    "sequence {number} of {count} must rebuild the root"
+                );
+                let odd_tail = number + 1 == count && count > 1 && count % 2 == 1;
+                assert_eq!(
+                    proof.siblings.first()
+                        == Some(&crate::consensus::merkle_tree::odd_promotion_sentinel()),
+                    odd_tail,
+                    "sequence {number} of {count}: the sentinel marks the promoted tail and nothing else"
+                );
+                let mut forged = proof.clone();
+                if forged.siblings.is_empty() {
+                    forged.leaf_count = 0;
+                } else {
+                    forged.siblings[0][0] ^= 0x01;
+                }
+                assert!(
+                    !forged.verify(&leaf, &root),
+                    "an altered path for sequence {number} of {count} must be refused"
+                );
+            }
+            assert!(
+                registry.prove(1, 10, count).is_none(),
+                "an absent key has no path"
+            );
+            assert!(
+                registry.prove(2, 10, 0).is_none(),
+                "another domain has no path"
+            );
+        }
+        assert!(
+            DomainCommitmentRegistry::new().prove(1, 0, 0).is_none(),
+            "an empty registry proves nothing"
+        );
     }
 }
