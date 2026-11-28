@@ -171,6 +171,7 @@ pub fn member_set_is_valid(members: &[HandoffMember]) -> bool {
     let mut seen = BTreeSet::new();
     for member in members {
         if member.address.is_empty()
+            || member.address.iter().all(|&b| b == 0)
             || member.pq_public_key.is_empty()
             || member.stake == 0
             || !seen.insert(member.address.as_slice())
@@ -371,6 +372,12 @@ impl HandoffCertificate {
                 .ok()
                 .and_then(|idx| outgoing.get(idx))
                 .ok_or(HandoffError::NotCommittee(entry.index))?;
+            if entry.signature.is_empty() {
+                return Err(HandoffError::Signature {
+                    index: entry.index,
+                    reason: "empty signature".into(),
+                });
+            }
             verify_sig(&member.pq_public_key, &message, &entry.signature).map_err(|reason| {
                 HandoffError::Signature {
                     index: entry.index,
@@ -504,5 +511,47 @@ mod tests {
         );
         let c2 = HandoffCertificate::unsigned(45_261, 1, &[m1], &[m2], [8; 32]);
         assert_ne!(c1.signing_message(), c2.signing_message());
+    }
+
+    #[test]
+    fn handoff_refuses_all_zero_member_address_and_empty_signature() {
+        let zero_member = HandoffMember {
+            address: vec![0u8; 32],
+            bls_public_key: Vec::new(),
+            pop_signature: Vec::new(),
+            pq_public_key: vec![1; 32],
+            stake: 100,
+        };
+        assert!(
+            !member_set_is_valid(&[zero_member]),
+            "all-zero validator address must be refused"
+        );
+
+        let valid_member = HandoffMember {
+            address: vec![0x11; 32],
+            bls_public_key: Vec::new(),
+            pop_signature: Vec::new(),
+            pq_public_key: vec![2; 32],
+            stake: 100,
+        };
+        let mut cert = HandoffCertificate::unsigned(
+            45_261,
+            1,
+            std::slice::from_ref(&valid_member),
+            std::slice::from_ref(&valid_member),
+            [0x55; 32],
+        );
+        cert.insert_signature(0, Vec::new());
+        assert!(
+            matches!(
+                cert.verify_with(
+                    std::slice::from_ref(&valid_member),
+                    [0x55; 32],
+                    |_, _, _| Ok(())
+                ),
+                Err(HandoffError::Signature { index: 0, .. })
+            ),
+            "empty handoff signature must be refused before invoking verifier"
+        );
     }
 }
