@@ -2,11 +2,11 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: 28733856bc654c80bfd5b5a318a175a03d79694e9bb319fec95082dacd04fc87
+digest: 7dd229cd3b69dab00a72356c509172aea1fad5d3a68c1d13debc2a09284ab2d7
 files: 195
 Cargo.lock	7e8ca4b31fc0795bb139134686126f1d552e1e75e9ffbc2089fbc52944a48a1f
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
-pins/budzero-tree.pins	9b35703227241f1721f575942353ba0695429a7b4e043dba8033f41c083f071d
+pins/budzero-tree.pins	87a376cb17faa90124d71f5be9dda71d4e6edf1850370c353099812e20568a50
 src/gates/accumulators_pinned.rs	039dccfb6f67d93d521d0f4520c36f9ae58c763bc046b7c7cc582fd0ac14601c
 src/gates/actionlint.rs	3181e27ed5ab760f7db1d559288aa969956e60e96111132f42002287677f1975
 src/gates/agg_native_backend.rs	1fb65ca7d7283512767100e2761c982624d001b3aed1a08e1339f47c92bb9276

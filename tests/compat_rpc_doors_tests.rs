@@ -1,17 +1,17 @@
-//! CEO Direktif K3-D — Uyumluluk RPC kapıları (RED->GREEN kilitleri).
+//! Directive K3-D - Compatibility RPC doors (RED->GREEN locks).
 //!
-//! Dört kapı aynı disiplinde kilitlenir:
-//! 1. `eth_sendRawTransaction` — geçerli zarf bile `EE_UNAVAILABLE` (-32004) ile
-//!    `bud_sendRawTransaction` kapısını adlandırır; bozar/eksik parametre
-//!    `JSONRPC_INVALID_PARAMS` alır, asla sahte tx-hash dönmez.
-//! 2. `eth_getTransactionReceipt` — `bud_getTransactionReceipt` (UER-1 makbuz
-//!    kapısı) adlandırılmadan yanıt yoktur; yanıt `-32004` ve kapı adını taşır.
-//! 3. Solana `sendTransaction` — üretim uygulaması yokken `-32004` +
-//!    `bud_sendRawTransaction`; tel formatı bozuksa `-32602`.
-//! 4. CosmWasm — `SmartContractState`/`RawContractState` sorguları durumdan
-//!    okur; bilinmeyen abci_query yolu fail-closed reddedilir.
+//! Four doors are locked under the same discipline:
+//! 1. `eth_sendRawTransaction` - even a valid envelope is refused with `EE_UNAVAILABLE` (-32004)
+//!    naming the `bud_sendRawTransaction` door; malformed or missing parameters
+//!    receive `JSONRPC_INVALID_PARAMS` and never fabricate a tx hash.
+//! 2. `eth_getTransactionReceipt` - no response without naming the `bud_getTransactionReceipt`
+//!    (UER-1 receipt door); the response carries `-32004` and the door name.
+//! 3. Solana `sendTransaction` - when no production execution engine is present, `-32004` +
+//!    `bud_sendRawTransaction`; malformed wire format returns `-32602`.
+//! 4. CosmWasm - `SmartContractState`/`RawContractState` queries read from state;
+//!    an unknown abci_query path is refused fail-closed.
 //!
-//! Bu dosya kilitli satırlara dokunmaz; yalnız public gateway yüzeyini sınar.
+//! This file touches only the public gateway surface.
 
 use budlum_core::core::account::AccountState;
 use budlum_core::execution::coordinator::foreign::ethereum::{
@@ -39,9 +39,8 @@ fn eth_gw() -> EthereumCompatGateway {
     EthereumCompatGateway::new(EthereumCompatConfig::default())
 }
 
-/// K3-D / eth_sendRawTransaction: geçerli EIP-1559 zarfı bile bu yüzeyde
-/// `bud_sendRawTransaction` kapısını adlandırarak reddedilir (EE yoksa sahte
-/// başarı yok).
+/// K3-D / eth_sendRawTransaction: even a valid EIP-1559 envelope is refused on
+/// this surface by naming the `bud_sendRawTransaction` door (no fake success without EE).
 #[test]
 fn k3d_eth_send_raw_tx_names_the_bud_door() {
     let mut state = AccountState::new();
@@ -80,7 +79,7 @@ fn k3d_eth_send_raw_tx_names_the_bud_door() {
     );
     assert!(resp.result.is_none(), "no fabricated tx hash");
 
-    // Bozuk hex: invalid params, yine kapı sahtesi yok.
+    // Malformed hex: invalid params, no fake result.
     let bad = gw.handle_request(
         budlum_core::rpc::compat::CompatListener::Public,
         "127.0.0.1",
@@ -92,7 +91,7 @@ fn k3d_eth_send_raw_tx_names_the_bud_door() {
     assert_eq!(bad_err.code, JSONRPC_INVALID_PARAMS);
     assert!(bad.result.is_none());
 
-    // Eksik parametre.
+    // Missing parameter.
     let missing = gw.handle_request(
         budlum_core::rpc::compat::CompatListener::Public,
         "127.0.0.1",
@@ -103,12 +102,12 @@ fn k3d_eth_send_raw_tx_names_the_bud_door() {
     let miss_err = missing.error.expect("missing params refuse");
     assert_eq!(miss_err.code, JSONRPC_INVALID_PARAMS);
 
-    // state mutasyon kontrolü: reddeden kapı durumu değiştirmez.
+    // State mutation check: refusing door never mutates state.
     let _ = &mut state;
 }
 
-/// K3-D / eth_getTransactionReceipt: UER-1 makbuz kapısı `bud_getTransactionReceipt`
-/// adlandırılmadan yanıt yok.
+/// K3-D / eth_getTransactionReceipt: no response without naming the UER-1
+/// receipt door `bud_getTransactionReceipt`.
 #[test]
 fn k3d_eth_receipt_refuses_with_uer1_door() {
     let state = AccountState::new();
@@ -133,13 +132,13 @@ fn k3d_eth_receipt_refuses_with_uer1_door() {
     assert!(resp.result.is_none(), "no fake receipt object");
 }
 
-/// K3-D / Solana sendTransaction: üretim yokken kapı adlandırılmış reddi.
+/// K3-D / Solana sendTransaction: door-named refusal when production EE is absent.
 #[test]
 fn k3d_solana_send_transaction_names_the_bud_door() {
     let state = AccountState::new();
     let mut gw = SolanaCompatGateway::new(SolanaCompatConfig::default(), 50, [0x99; 32]);
 
-    // Devre dışı (varsayılan) — kapı adlandırılmış ret.
+    // Disabled (default) - door-named refusal.
     let resp = gw.handle_request(
         &rpc_req(
             "sendTransaction",
@@ -156,14 +155,14 @@ fn k3d_solana_send_transaction_names_the_bud_door() {
     );
     assert!(resp.result.is_none());
 
-    // Devre dışı yüzeyde eksik tel parametresi de ÖNCE kapı adlandırır:
-    // parametre ayrıştırımı kapıdan önce uydurma cevap üretmez (fail-closed sıra).
+    // On a disabled surface a missing wire parameter also names the door FIRST:
+    // parameter parsing never precedes the door check (fail-closed order).
     let missing = gw.handle_request(&rpc_req("sendTransaction", serde_json::json!([])), &state);
     let miss_err = missing.error.expect("missing wire refuses");
     assert_eq!(miss_err.code, SOLANA_UNAVAILABLE, "door before params when disabled");
     assert!(miss_err.message.contains("bud_sendRawTransaction"));
 
-    // enable=true iken bozuk base58/base64 yine uydurma imza üretmez.
+    // When enabled=true, malformed base58/base64 still never fabricates a signature.
     let mut enabled = SolanaCompatGateway::new(
         SolanaCompatConfig {
             enabled: true,
@@ -186,18 +185,18 @@ fn k3d_solana_send_transaction_names_the_bud_door() {
     }
 }
 
-/// K3-D / CosmWasm: smart query durumdan okur; bilinmeyen yol fail-closed.
+/// K3-D / CosmWasm: smart query reads from state; unknown path is fail-closed.
 #[test]
 fn k3d_cosmwasm_smart_query_and_fail_closed_path() {
     let mut state = AccountState::new();
     state
         .execution_state
-        .write(NS_WASM_STORE, b"bud1c:kv:greeting", Some(b"merhaba"))
+        .write(NS_WASM_STORE, b"bud1c:kv:greeting", Some(b"hello"))
         .expect("write");
 
     let mut gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 50);
 
-    // SmartContractState okuması gerçek durum kökünden gelir.
+    // SmartContractState read comes from the live state root.
     let data = hex::encode(
         serde_json::to_vec(&serde_json::json!({
             "contract": "bud1c",
@@ -221,11 +220,11 @@ fn k3d_cosmwasm_smart_query_and_fail_closed_path() {
         .clone();
     assert_eq!(
         value.as_str(),
-        Some(hex::encode(b"merhaba").as_str()),
+        Some(hex::encode(b"hello").as_str()),
         "smart query reads the store"
     );
 
-    // Bilinmeyen path: fail-closed, uydurma cevap yok.
+    // Unknown path: fail-closed, no fabricated response.
     let unknown = gw.handle_rpc(
         &rpc_req(
             "abci_query",
@@ -247,7 +246,7 @@ fn k3d_cosmwasm_smart_query_and_fail_closed_path() {
         uerr.message
     );
 
-    // Kapı envanteri: SmartContractState yolu listede, Execute listede değil.
+    // Door inventory: SmartContractState path is listed, Execute is not.
     assert!(ABCI_QUERY_PATHS.contains(&"/cosmwasm.wasm.v1.Query/SmartContractState"));
     assert!(
         !ABCI_QUERY_PATHS
@@ -257,8 +256,8 @@ fn k3d_cosmwasm_smart_query_and_fail_closed_path() {
     );
 }
 
-/// K3-D / method class senkronu: eth_* Refused satırları public listener'da
-/// kalır; sendRawTx/receipt Refused etkisindedir (method_class.rs kilidi).
+/// K3-D / method class sync: eth_* Refused rows stay on the public listener;
+/// sendRawTx/receipt remain Refused (method_class.rs lock).
 #[test]
 fn k3d_eth_class_rows_stay_refused_public() {
     let source = include_str!("../src/rpc/method_class.rs");

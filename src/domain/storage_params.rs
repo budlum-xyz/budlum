@@ -42,11 +42,12 @@ pub const MAX_STORAGE_CHALLENGE_INTERVAL: u64 = 2_592_000;
 ///
 /// It equals the default `min_operator_bond` of `StorageDomainParams`. The
 /// in-block path reads the registered domain's own statement from the
-/// settlement registry (`domain::storage_tx::registered_storage_params`) —
-/// the block carries the domain's parameters under the registered root — so
+/// settlement registry (`domain::storage_tx::registered_storage_params`) -
+/// the block carries the domain's parameters under the registered root - so
 /// this constant is the binding for direct escrow callers
 /// (`deal_open::open_deal_escrowed` and the reallocation-state machinery),
 /// which carry no block-level domain lookup.
+/// WIRING: enforced by storage domain operator bond floor.
 pub const STORAGE_MIN_OPERATOR_BOND: u64 = 1_000_000;
 
 /// The default `require_merkle_proof` binding: whether the deal doors demand
@@ -62,6 +63,7 @@ pub const STORAGE_MIN_OPERATOR_BOND: u64 = 1_000_000;
 /// the schedule flips, the domain registration moves and both doors enforce
 /// it. The registry-level gate itself is live and tested under
 /// `storage_deal::tests::deal_open_rejects_missing_merkle_proof`.
+/// WIRING: enforced by storage domain Merkle proof admission.
 pub const STORAGE_REQUIRE_MERKLE_PROOF: bool = false;
 
 /// Per-domain parameters for a `StorageAttestation` domain.

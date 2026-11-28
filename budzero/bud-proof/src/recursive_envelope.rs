@@ -10,6 +10,7 @@
 pub const PROOF_FORMAT_VERSION: u32 = 3;
 
 /// Hard upper bound checked before copying proof bytes out of the wire buffer.
+/// WIRING: enforced by recursive envelope proof size admission.
 pub const MAX_RECURSIVE_PROOF_BYTES: usize = 10 * 1024 * 1024;
 /// Recursion is bounded even before the caller validates a concrete frame.
 pub const MAX_RECURSION_LEVEL: u32 = 64;
@@ -64,6 +65,7 @@ pub struct RecursiveProofContext {
 
 /// A malformed recursive proof envelope or mismatch against pinned verifier context.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// WIRING: returned by recursive envelope open/seal boundaries.
 pub enum EnvelopeError {
     /// The wire version is not the one supported by this verifier.
     UnsupportedVersion(u32),

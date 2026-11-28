@@ -310,7 +310,7 @@ fn adapter_spec_variant_indices_stay_pinned() {
 
 /// STRX-194-01 full-pin lock: every persisted adapter family's bincode
 /// discriminant is pinned, not just tags 0, 1, 2. An insert or reorder
-/// anywhere in `AdapterSpec` fails this test — inserting in the middle would
+/// anywhere in `AdapterSpec` fails this test - inserting in the middle would
 /// reinterpret every intake registration already persisted in consensus state.
 /// New families are APPENDED with a new highest tag and this test is updated
 /// in the same commit.
