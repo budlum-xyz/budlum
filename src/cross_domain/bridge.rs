@@ -1771,6 +1771,132 @@ mod tests {
             "Forged transfer amount must change bridge root"
         );
     }
+
+    /// A certificate is an input to the economic ceiling, not a bearer token.
+    ///
+    /// `check_and_record_flow_with_certificate` reads the domain row's bond
+    /// and takes `min(policy_cap, cert_bound)`. A caller that can hand in a
+    /// row with a larger bond therefore replaces the honest tight ceiling with
+    /// the looser policy cap. The guard must refuse any certificate that is
+    /// not the one derived for the block being settled before any row is read;
+    /// this test drives that refusal through both bridge paths that feed it.
+    #[test]
+    fn a_certificate_with_a_stale_digest_cannot_loosen_the_bridge_ceiling() {
+        use crate::cross_domain::economic_guard::DomainCeilingPolicy;
+        use crate::cross_domain::external::spec::SecurityBacking;
+        use crate::crypto::facts::{ObservedScheme, QuantumClass};
+        use crate::settlement::universal_finality::{
+            compose, DomainFinalityEntry, FinalityGuarantee, FinalityReversibility,
+            FinalityVerdict, FINALITY_BINDS_ALL,
+        };
+
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"cert-ceiling-asset"]));
+        let owner = Address::from([1u8; 32]);
+        let recipient = Address::from([2u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        let (transfer, event) = bridge
+            .lock(1, 2, 10, 0, asset, owner, recipient, 500, 1_000)
+            .unwrap();
+        let message = event.message.unwrap();
+
+        // Policy cap: 1_000_000 atoms. The honest certificate carries a
+        // 100-atom bond, so its bound tightens the ceiling to 100 atoms and a
+        // 500-atom mint is refused.
+        bridge
+            .economic_guard
+            .configure_domain(
+                1,
+                DomainCeilingPolicy {
+                    backing: SecurityBacking::SignatureSet {
+                        scheme: ObservedScheme::Secp256k1,
+                        signers: 4,
+                        required: 3,
+                        total_weight: 1_000_000,
+                        slashable: true,
+                    },
+                    stake_haircut_bps: 10_000,
+                    bond_haircut_bps: 10_000,
+                    window_blocks: 100,
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .unwrap();
+
+        let certificate = |bond_atoms: u128, checkpoint_height: u64| {
+            compose(&[DomainFinalityEntry {
+                domain_id: 1,
+                height: 10,
+                checkpoint_height,
+                state_root: [0x11; 32],
+                adapter_id: "cometbft-v1".to_owned(),
+                adapter_version: 1,
+                finality_proof_hash: [0x22; 32],
+                guarantee_backing_hash: [0x33; 32],
+                bond_atoms,
+                guarantee: FinalityGuarantee {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: QuantumClass::Hash,
+                    attestation: FINALITY_BINDS_ALL,
+                    slashable_backing: true,
+                    fault_tolerance_bps: 10_000,
+                },
+                verdict: FinalityVerdict::Established,
+            }])
+            .expect("compose certificate")
+        };
+
+        // Honest row: the low bond tightens the ceiling below the flow.
+        let honest = certificate(100, 10);
+        let honest_err = bridge
+            .mint_with_certificate(&message, 10, &honest)
+            .expect_err("honest low-bond certificate must refuse the 500-atom flow");
+        assert!(
+            honest_err.0.contains("ceiling"),
+            "expected the economic ceiling, got: {honest_err}"
+        );
+
+        // Attacker row, shape one: the honest row with its bond edited after
+        // sealing. The digest no longer recomposes from the rows, so the
+        // certificate is refused even though its checkpoint height is right.
+        let mut tampered = certificate(100, 10);
+        tampered.established[0].bond_atoms = 1_000_000;
+        let tampered_err = bridge
+            .mint_with_certificate(&message, 10, &tampered)
+            .expect_err("row-edited certificate must be refused before the ceiling is read");
+        assert!(
+            tampered_err.0.contains("certificate not derived"),
+            "expected the derivation refusal, got: {tampered_err}"
+        );
+
+        // Attacker row, shape two: a self-consistent 1_000_000-atom bond
+        // sealed at a checkpoint height that was never settled (current
+        // height + 1). It recomposes cleanly, so only the height binding can
+        // refuse it before it raises the ceiling back to the policy cap.
+        let forged = certificate(1_000_000, 11);
+        forged
+            .verify_integrity()
+            .expect("forged row is self-consistent");
+        let forged_err = bridge
+            .mint_with_certificate(&message, 10, &forged)
+            .expect_err("stale-digest certificate must be refused before the ceiling is read");
+        assert!(
+            forged_err.0.contains("certificate not derived"),
+            "expected the derivation refusal, got: {forged_err}"
+        );
+
+        // The unlock path reads the same row and must apply the same refusal.
+        bridge.mint(&message, 10).unwrap();
+        bridge.burn(transfer.message_id, 2, [9u8; 20]).unwrap();
+        let unlock_err = bridge
+            .unlock_with_certificate(transfer.message_id, 2, 10, &forged)
+            .expect_err("stale-digest certificate must be refused on unlock");
+        assert!(
+            unlock_err.0.contains("certificate not derived"),
+            "expected the derivation refusal, got: {unlock_err}"
+        );
+    }
 }
 
 /// The consensus half of a bridge burn: what block execution does.

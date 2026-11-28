@@ -500,6 +500,16 @@ pub enum EconomicGuardError {
     },
     /// Contradiction or external adapter proof failed verification.
     InvalidEvidence(String),
+    /// Finality certificate supplied for a flow is not the state-derived
+    /// certificate for the block being settled: its checkpoint height differs
+    /// from the block being settled, or its rows do not recompose to its
+    /// digest.
+    CertificateNotDerived {
+        /// Checkpoint height carried by the supplied certificate.
+        certificate_checkpoint: u64,
+        /// Block height the flow is being settled at.
+        current_height: u64,
+    },
 }
 
 impl std::fmt::Display for EconomicGuardError {
@@ -539,6 +549,14 @@ impl std::fmt::Display for EconomicGuardError {
                 "economic guard replay ledger reached fail-closed capacity {capacity}"
             ),
             Self::InvalidEvidence(msg) => write!(f, "invalid contradiction evidence: {msg}"),
+            Self::CertificateNotDerived {
+                certificate_checkpoint,
+                current_height,
+            } => write!(
+                f,
+                "finality certificate not derived for block {current_height} \
+                 (certificate checkpoint {certificate_checkpoint})"
+            ),
         }
     }
 }
@@ -1206,9 +1224,16 @@ impl BridgeEconomicGuard {
     /// flow is refused with [`EconomicGuardError::CeilingExceeded`] before any
     /// state change.
     ///
+    /// The certificate is an input to the ceiling, not a bearer token: its
+    /// rows are read only after they recompose to its digest, and only for
+    /// the block being settled (`current_height`). A hand-built or stale row
+    /// with a larger bond would otherwise replace the honest tight ceiling
+    /// with the looser policy cap.
+    ///
     /// # Errors
     ///
-    /// Returns [`EconomicGuardError::UnknownDomain`],
+    /// Returns [`EconomicGuardError::CertificateNotDerived`] before any row
+    /// of `certificate` is read, then [`EconomicGuardError::UnknownDomain`],
     /// [`EconomicGuardError::DomainFrozen`], or
     /// [`EconomicGuardError::CeilingExceeded`] before any state change.
     pub fn check_and_record_flow_with_certificate(
@@ -1218,6 +1243,14 @@ impl BridgeEconomicGuard {
         current_height: u64,
         certificate: &crate::settlement::universal_finality::GlobalFinalityCertificate,
     ) -> Result<(), EconomicGuardError> {
+        let not_derived = || EconomicGuardError::CertificateNotDerived {
+            certificate_checkpoint: certificate.checkpoint_height,
+            current_height,
+        };
+        if certificate.checkpoint_height != current_height {
+            return Err(not_derived());
+        }
+        certificate.verify_integrity().map_err(|_| not_derived())?;
         let Some(rec) = self.domains.get(&domain_id) else {
             if self.require_configured_domains {
                 return Err(EconomicGuardError::UnknownDomain(domain_id));
@@ -3521,6 +3554,109 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// The certificate row decides the ceiling, so the row must be the one
+    /// derived for this block: a row edited after sealing (digest no longer
+    /// recomposes) and a self-consistent row sealed at another checkpoint
+    /// height are both refused before the ceiling is read, without consuming
+    /// window budget.
+    #[test]
+    fn a_certificate_not_derived_for_this_block_cannot_loosen_the_ceiling() {
+        use crate::crypto::facts::QuantumClass;
+        use crate::settlement::universal_finality::{
+            compose, DomainFinalityEntry, FinalityGuarantee, FinalityReversibility,
+            FinalityVerdict, FINALITY_BINDS_ALL,
+        };
+
+        let mut guard = BridgeEconomicGuard::new();
+        let domain_id = 405u32;
+        guard
+            .configure_domain(
+                domain_id,
+                DomainCeilingPolicy {
+                    backing: SecurityBacking::SignatureSet {
+                        scheme: ObservedScheme::Secp256k1,
+                        signers: 4,
+                        required: 3,
+                        total_weight: 1_000_000,
+                        slashable: true,
+                    },
+                    stake_haircut_bps: 10_000,
+                    bond_haircut_bps: 10_000,
+                    window_blocks: 100,
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .expect("configure domain");
+
+        let mk_cert = |bond_atoms: u128, checkpoint_height: u64| {
+            compose(&[DomainFinalityEntry {
+                domain_id,
+                height: 10,
+                checkpoint_height,
+                state_root: [0x11; 32],
+                adapter_id: "cometbft-v1".to_owned(),
+                adapter_version: 1,
+                finality_proof_hash: [0x22; 32],
+                guarantee_backing_hash: [0x33; 32],
+                bond_atoms,
+                guarantee: FinalityGuarantee {
+                    reversibility: FinalityReversibility::DeterministicQuorum,
+                    quantum_posture: QuantumClass::Hash,
+                    attestation: FINALITY_BINDS_ALL,
+                    slashable_backing: true,
+                    fault_tolerance_bps: 10_000,
+                },
+                verdict: FinalityVerdict::Established,
+            }])
+            .expect("compose certificate")
+        };
+        let height = 10u64;
+
+        // Honest row: a 100-atom bond tightens the ceiling below the flow.
+        let honest = mk_cert(100, height);
+        match guard.check_and_record_flow_with_certificate(domain_id, 500, height, &honest) {
+            Err(EconomicGuardError::CeilingExceeded { ceiling_atoms, .. }) => {
+                assert!(
+                    ceiling_atoms > 0 && ceiling_atoms < 500,
+                    "honest ceiling {ceiling_atoms}"
+                );
+            }
+            other => panic!("expected the economic ceiling, got: {other:?}"),
+        }
+
+        // Shape one: the honest row with its bond edited after sealing.
+        let mut tampered = mk_cert(100, height);
+        tampered.established[0].bond_atoms = 1_000_000;
+        assert_eq!(
+            guard.check_and_record_flow_with_certificate(domain_id, 500, height, &tampered),
+            Err(EconomicGuardError::CertificateNotDerived {
+                certificate_checkpoint: height,
+                current_height: height,
+            })
+        );
+
+        // Shape two: a self-consistent 1_000_000-atom row sealed at a height
+        // that was never settled. Only the height binding can refuse it.
+        let forged = mk_cert(1_000_000, height + 1);
+        forged
+            .verify_integrity()
+            .expect("forged row is self-consistent");
+        assert_eq!(
+            guard.check_and_record_flow_with_certificate(domain_id, 500, height, &forged),
+            Err(EconomicGuardError::CertificateNotDerived {
+                certificate_checkpoint: height + 1,
+                current_height: height,
+            })
+        );
+
+        // Neither refusal consumed window budget: a flow that fits the honest
+        // ceiling is still admitted afterwards.
+        guard
+            .check_and_record_flow_with_certificate(domain_id, 100, height, &honest)
+            .expect("100-atom flow fits the honest ceiling");
     }
 
     #[test]
