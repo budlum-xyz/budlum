@@ -94,8 +94,11 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/settlement/domains.rs",
-        5,
-        "three in `execute_relayer_intent_tx`: the unused paid fee returned to \
+        6,
+        "one in `cancel_unsettled_bundle_legs`: the intent's unspent escrowed \
+         amount already debited when the intent opened, returned to the intent \
+         owner on bundle cancellation or expiry; \
+         three in `execute_relayer_intent_tx`: the unused paid fee returned to \
          the sender, the owner's unspent escrow returned on the outcomes that \
          cancel or expire the intent, and the bond returned out of the same \
          recorded escrow; two in `execute_proof_market_tx`: the task creator's \

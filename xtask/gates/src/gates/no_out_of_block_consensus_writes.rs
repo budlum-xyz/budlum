@@ -195,7 +195,7 @@ const READ_CHAINS: &[&str] = &[
     // answering `bud_unifiedFinalityRoot` reads consensus state without
     // touching it. Pinned to the receiver chain, not to the method name: a
     // future `unified_finality_root` on another receiver is still caught.
-    ".external_intake.unified_finality_root(",
+    ".settlement.external_intake.unified_finality_root(",
 ];
 
 /// Calls on `self.state` inside a `Blockchain` method body that write it.
@@ -335,7 +335,7 @@ fn check_actor_state_access(actor: &str) -> Result<(), String> {
             let chain = actor[at..].trim_start();
             let nested_read = matches!(
                 method.as_str(),
-                "query_json" | "clone" | "universal_finality_certificate"
+                "query_json" | "clone" | "universal_finality_certificate" | "unified_finality_root"
             ) && READ_CHAINS.iter().any(|allowed| {
                 chain.strip_prefix(allowed).is_some_and(|arguments| {
                     // Walk this call's balanced parentheses. A following
