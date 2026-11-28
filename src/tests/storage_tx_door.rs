@@ -526,7 +526,8 @@ mod open_deal {
     }
 
     /// A chain with the manifest registered, the payer funded and an operator
-    /// that holds enough for the bond.
+    /// that holds enough for the bond. The storage domain the deal names is
+    /// registered too: the deal door reads its gate from the registry.
     fn world() -> (AccountState, ContentManifest, WalletKeyPair) {
         let mut state = AccountState::new();
         let m = deal_manifest();
@@ -534,7 +535,27 @@ mod open_deal {
         state.add_balance(&payer(), PAYER_FUNDS);
         let op = WalletKeyPair::generate();
         state.add_balance(&op.address(), STORAGE_MIN_OPERATOR_BOND * 2);
+        register_storage_domain(&mut state, 42, false);
         (state, m, op)
+    }
+
+    /// Register the storage domain every deal in this module names.
+    fn register_storage_domain(state: &mut AccountState, domain_id: u32, gate_open: bool) {
+        use crate::domain::storage_params::StorageDomainParams;
+        use crate::domain::types::ConsensusKind;
+        let mut domain = crate::domain::default_domain(
+            domain_id,
+            ConsensusKind::StorageAttestation(StorageDomainParams {
+                require_merkle_proof: gate_open,
+                ..StorageDomainParams::default()
+            }),
+            DEFAULT_CHAIN_ID,
+            "storage-attestation-v1",
+            0,
+        );
+        domain.operator_bond = STORAGE_MIN_OPERATOR_BOND;
+        crate::settlement::domains::register_domain(state, domain)
+            .expect("storage domain registers");
     }
 
     fn unsigned_body(m: &ContentManifest, op: &WalletKeyPair) -> StorageDealOpen {
@@ -639,6 +660,46 @@ mod open_deal {
         assert_eq!(state.get_nonce(&payer()), 1);
         assert_eq!(state.storage_registry.deals_iter().count(), 1);
         assert_ne!(state.calculate_state_root(), before);
+    }
+
+    /// The registered domain's gate, not a compile-time constant, decides
+    /// whether the in-block deal door demands the proof envelope. A domain
+    /// that registered `require_merkle_proof = true` must have its rule
+    /// enforced the moment the block executes the open.
+    #[test]
+    fn the_in_block_open_door_reads_the_registered_domain_gate_not_a_compile_time_constant() {
+        let (mut state, m, op) = world();
+        // The fixture world registers the domain with the gate closed; open
+        // it at the registry and the door must follow.
+        register_storage_domain(&mut state, 43, true);
+        let mut body = unsigned_body(&m, &op);
+        body.domain_id = 43;
+        body.merkle_proof = Vec::new();
+        body.storage_root = [0x42u8; 32];
+        body.operator_consent = consent(&op, DEFAULT_CHAIN_ID, &payer(), 0, &body);
+        let err = apply_without_write(&mut state, &op.address(), open_tx(body, DEFAULT_CHAIN_ID))
+            .expect_err("an envelope-less deal under an open gate must be refused");
+        assert!(
+            err.contains("VerifyMerkle") || err.contains("merkle") || err.contains("Merkle"),
+            "the refusal must name the merkle gate, got: {err}"
+        );
+    }
+
+    /// A deal may only open under a domain the chain has registered as a
+    /// storage domain. An unregistered id cannot smuggle a deal past the
+    /// gate by naming a domain that does not exist.
+    #[test]
+    fn an_open_deal_on_an_unregistered_storage_domain_is_refused() {
+        let (mut state, m, op) = world();
+        let mut body = signed_body(&m, &op);
+        body.domain_id = 404;
+        body.operator_consent = consent(&op, DEFAULT_CHAIN_ID, &payer(), 0, &body);
+        let err = apply_without_write(&mut state, &op.address(), open_tx(body, DEFAULT_CHAIN_ID))
+            .expect_err("an unregistered domain id must refuse the deal");
+        assert!(
+            err.contains("not a registered storage domain"),
+            "the refusal must name the missing registration, got: {err}"
+        );
     }
 
     #[test]
@@ -858,6 +919,7 @@ mod open_deal {
         let mut m = deal_manifest();
         m.owner = op.address();
         state.storage_registry.register_manifest(&m);
+        register_storage_domain(&mut state, 42, false);
         // Covers the escrow and the bond but not the transaction fee as well.
         state.add_balance(&op.address(), DEAL_FEE + STORAGE_MIN_OPERATOR_BOND);
         let mut body = unsigned_body(&m, &op);

@@ -885,6 +885,33 @@ mod tests {
         assert_ne!(domain_leaf_hash(&listed), domain_leaf_hash(&pinned));
     }
 
+    #[test]
+    fn the_leaf_commits_to_the_verify_merkle_gate_of_a_storage_domain() {
+        // The gate is the domain's activation statement. Two storage domains
+        // that differ only in it must not hash to the same leaf: a registry
+        // root that cannot tell an open domain from a closed one commits to
+        // neither.
+        use crate::domain::storage_params::StorageDomainParams;
+        let closed = default_domain(
+            7,
+            ConsensusKind::StorageAttestation(StorageDomainParams::default()),
+            1338,
+            "storage-attestation-v1",
+            0,
+        );
+        let mut open = closed.clone();
+        if let ConsensusKind::StorageAttestation(params) = &mut open.kind {
+            params.require_merkle_proof = true;
+        } else {
+            unreachable!("constructed as a storage domain");
+        }
+        assert_ne!(
+            domain_leaf_hash(&closed),
+            domain_leaf_hash(&open),
+            "the require_merkle_proof gate must be inside the registry leaf"
+        );
+    }
+
     /// what an adapter observed is consensus data. It reaches the
     /// progress root, it never touches a domain that reported nothing, and an
     /// unregistered id cannot park facts in the registry.

@@ -27,7 +27,6 @@ use crate::domain::storage_deal::{
     ChallengeOutcome, DealStatus, OperatorClass, RetrievalChallengeRequest, StorageEconomicsParams,
     StorageError, StorageReallocationTicket, StorageRegistry,
 };
-use crate::domain::storage_params::{STORAGE_MIN_OPERATOR_BOND, STORAGE_REQUIRE_MERKLE_PROOF};
 
 /// Minimum epochs an operator must have to respond to a retrieval challenge.
 /// Too-short windows make honest operators miss deadlines
@@ -561,6 +560,21 @@ pub fn operator_accept_reallocation_consent_digest(
     ))
 }
 
+/// The parameters the named domain registered, read from the settlement
+/// registry. The in-block door binds to the registration, not to a
+/// compile-time default: a domain that is absent, or does not carry the
+/// storage-attestation statement, keeps its rules unknown to the block, and
+/// the transaction is refused.
+fn registered_storage_params(
+    state: &AccountState,
+    domain_id: u32,
+) -> Option<crate::domain::storage_params::StorageDomainParams> {
+    match &state.settlement.domains.get(domain_id)?.kind {
+        crate::domain::ConsensusKind::StorageAttestation(params) => Some(params.clone()),
+        _ => None,
+    }
+}
+
 fn accept_reallocation(
     state: &mut AccountState,
     ctx: &StorageTxContext,
@@ -589,10 +603,10 @@ fn accept_reallocation(
     // the shard its own signature described, and its bond is slashed for an
     // answer it could not give. The ticket is read here rather than inside the
     // escrow kernel so the refusal happens before any write is attempted.
-    let (ticket_manifest_id, ticket_shard_id) = state
+    let (ticket_manifest_id, ticket_shard_id, ticket_domain_id) = state
         .storage_registry
         .get_reallocation_ticket(accept.ticket_id)
-        .map(|ticket| (ticket.manifest_id, ticket.shard_id))
+        .map(|ticket| (ticket.manifest_id, ticket.shard_id, ticket.domain_id))
         .ok_or_else(|| {
             StorageTxError::ReallocationRefused(format!(
                 "unknown reallocation ticket {}",
@@ -640,14 +654,19 @@ fn accept_reallocation(
         ctx.fee
     };
     let now_unix_secs = state.current_block_unix_secs;
+    let params = registered_storage_params(state, ticket_domain_id).ok_or_else(|| {
+        StorageTxError::ReallocationRefused(format!(
+            "storage domain {ticket_domain_id} is not a registered storage domain"
+        ))
+    })?;
     accept_reallocation_escrowed(
         state,
         &terms,
         ctx.sender,
         now_unix_secs,
-        STORAGE_MIN_OPERATOR_BOND,
+        params.min_operator_bond,
         payer_reserve,
-        STORAGE_REQUIRE_MERKLE_PROOF,
+        params.require_merkle_proof,
     )
     .map(|_| ())
     .map_err(StorageTxError::ReallocationRefused)
@@ -1065,14 +1084,20 @@ fn open_deal(
         ctx.fee
     };
     let now_unix_secs = state.current_block_unix_secs;
+    let params = registered_storage_params(state, open.domain_id).ok_or_else(|| {
+        StorageTxError::DealRefused(format!(
+            "storage domain {} is not a registered storage domain",
+            open.domain_id
+        ))
+    })?;
     open_deal_escrowed(
         state,
         &terms,
         ctx.sender,
         now_unix_secs,
-        STORAGE_MIN_OPERATOR_BOND,
+        params.min_operator_bond,
         payer_reserve,
-        STORAGE_REQUIRE_MERKLE_PROOF,
+        params.require_merkle_proof,
     )
     .map(|_| ())
     .map_err(StorageTxError::DealRefused)
@@ -1181,6 +1206,7 @@ fn register_manifest(
 mod tests {
     use super::*;
     use crate::domain::storage_deal::CodingAuditOutcome;
+    use crate::domain::storage_params::{STORAGE_MIN_OPERATOR_BOND, STORAGE_REQUIRE_MERKLE_PROOF};
     use crate::storage::{encode_object, ErasureScheme};
 
     fn owner() -> Address {
@@ -1229,6 +1255,26 @@ mod tests {
         // intentionally closed and is tested separately above.
         state.storage_registry.register_manifest(&m);
         m
+    }
+
+    /// Register the storage domain the deal and reallocation fixtures name,
+    /// with the verify-merkle gate as the domain's own activation statement.
+    fn register_storage_domain(state: &mut AccountState, domain_id: u32, gate_open: bool) {
+        let mut domain = crate::domain::default_domain(
+            domain_id,
+            crate::domain::ConsensusKind::StorageAttestation(
+                crate::domain::storage_params::StorageDomainParams {
+                    require_merkle_proof: gate_open,
+                    ..crate::domain::storage_params::StorageDomainParams::default()
+                },
+            ),
+            45262,
+            "storage-attestation-v1",
+            0,
+        );
+        domain.operator_bond = STORAGE_MIN_OPERATOR_BOND;
+        crate::settlement::domains::register_domain(state, domain)
+            .expect("storage domain registers");
     }
 
     fn registered_with_test_custody(state: &mut AccountState) -> ContentManifest {
@@ -2245,6 +2291,71 @@ mod tests {
     }
 
     #[cfg(feature = "wallet-ml-dsa")]
+    /// The reallocation door is the second in-block door. It must read the
+    /// registered domain's gate exactly like the open door does - a pending
+    /// ticket under a domain whose gate is open cannot be accepted without
+    /// the envelope.
+    #[test]
+    fn the_in_block_reallocation_door_reads_the_registered_domain_gate() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let mut state = AccountState::new();
+        let m = registered(&mut state);
+        let payer = owner();
+        let newcomer_wkp = WalletKeyPair::generate();
+        let newcomer = newcomer_wkp.address();
+        for addr in [payer, newcomer] {
+            state.add_balance(&addr, 50_000_000);
+        }
+        register_storage_domain(&mut state, 42, true);
+
+        let shard_id = m.shards.first().unwrap().shard_id;
+        let ticket_id = state
+            .storage_registry
+            .open_never_placed_ticket(42, m.manifest_id, shard_id, 0, 100)
+            .expect("never-placed ticket opens on an empty slot");
+
+        let accept_ctx = ctx(payer);
+        let mut accept = StorageReallocationAccept {
+            ticket_id,
+            shard_size: m.shards.first().unwrap().size,
+            replacement_operator: newcomer,
+            start_epoch: 120,
+            end_epoch: 200,
+            economics: StorageEconomicsParams {
+                operator_bond: STORAGE_MIN_OPERATOR_BOND,
+                fee_per_byte_epoch: 100,
+            },
+            merkle_proof: Vec::new(),
+            storage_root: [0x33; 32],
+            operator_consent: GrantAuthorization {
+                owner_key: newcomer_wkp.public_key_bytes(),
+                signature: Vec::new(),
+            },
+        };
+        let digest = accept_reallocation_consent_digest(
+            accept_ctx.chain_id,
+            &payer,
+            accept_ctx.nonce,
+            &accept,
+        );
+        accept.operator_consent.signature = newcomer_wkp
+            .sign(crate::crypto::ctx::STORAGE_V2, &digest)
+            .to_vec();
+
+        let err = execute_storage_tx(
+            &mut state,
+            &accept_ctx,
+            &StorageTx::AcceptReallocation(Box::new(accept)),
+        )
+        .expect_err("an envelope-less accept under an open gate must be refused");
+        assert!(
+            matches!(&err, StorageTxError::ReallocationRefused(msg)
+                if msg.contains("VerifyMerkle") || msg.contains("merkle") || msg.contains("Merkle")),
+            "the refusal must name the merkle gate, got: {err}"
+        );
+    }
+
     #[test]
     fn accept_reallocation_tx_refuses_operator_already_serving_shard() {
         use crate::crypto::primitives::WalletKeyPair;
@@ -2253,6 +2364,7 @@ mod tests {
         let m = registered(&mut state);
         let payer = owner();
         let slashed_op = Address::from([0x61; 32]);
+        register_storage_domain(&mut state, 42, false);
         let existing_wkp = WalletKeyPair::generate();
         let existing_op = existing_wkp.address();
         let opener = Address::from([0x62; 32]);
@@ -2373,6 +2485,7 @@ mod tests {
         let m = registered(&mut state);
         let payer = owner();
         let slashed_op = Address::from([0x71; 32]);
+        register_storage_domain(&mut state, 42, false);
         let newcomer_wkp = WalletKeyPair::generate();
         let newcomer = newcomer_wkp.address();
         let opener = Address::from([0x72; 32]);
@@ -2539,6 +2652,7 @@ mod tests {
         let squatter = Address::from([0xEE; 32]);
         let victim = Address::from([0x11; 32]);
         let grantee = Address::from([0x22; 32]);
+        register_storage_domain(&mut state, 42, false);
 
         let victim_manifest = manifest_owned_by(victim);
         let mut squatter_manifest = victim_manifest.clone();
@@ -2833,6 +2947,7 @@ mod tests {
         let mid = alice_manifest.manifest_id;
         let shard_id = alice_manifest.shards[0].shard_id;
         let shard_size = alice_manifest.shards[0].size;
+        register_storage_domain(&mut state, 42, false);
 
         // Registry fixture: the legacy registration transaction is closed and
         // has its own test above.
