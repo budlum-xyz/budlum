@@ -5,7 +5,9 @@
 //! Plonky3 Goldilocks/Keccak STARK proofs (`AggFoldAir`) binding every tree
 //! step's allowlisted program hash (`{agg_tick_program_hash(),
 //! agg_merge_program_hash()}`), `tick_pi`, recursive `merge_pi`, `domain`,
-//! `parameter_set`, and `master_pi`.
+//! `parameter_set`, `master_pi`, recursion level and child verifier-key digest.
+//! The versioned `RecursiveProofEnvelope` carries that context and the AIR's
+//! public challenges commit to the statement digest.
 //!
 //! Every `AggMerge` step enforces the Phase 3 program-hash allowlist
 //! `{agg_tick_program_hash(), agg_merge_program_hash()}` both in Rust before
@@ -17,10 +19,14 @@
 
 use std::sync::OnceLock;
 
+use bud_proof::adapter::PROOF_FORMAT_VERSION;
 use bud_proof::chips::fold::{
     prove_agg_fold, verify_agg_fold, AggFoldProof, AggFoldPublic, AggFoldStep, MAX_FOLD_STEPS,
 };
 use bud_proof::plonky3_prover::ChipProof;
+use bud_proof::recursive_envelope::{
+    RecursiveProofContext, RecursiveProofEnvelope, MAX_RECURSION_LEVEL,
+};
 
 use super::backend::{AggBackend, AggError, TickCtx};
 use super::claim::Claim;
@@ -37,10 +43,10 @@ use super::programs::chain_rules;
 use crate::crypto::scheme::SchemeStatusRegistry;
 use crate::domain::types::{DomainId, Hash32};
 
-/// Magic header identifying a `StarkBackend` frame proof.
-const STARK_MAGIC: [u8; 4] = *b"BSTK";
-/// Wire format version for `StarkBackend` frame proofs.
-const STARK_WIRE_VERSION: u8 = 2;
+/// Protocol tag for the transparent `AggFoldAir` verification-key descriptor.
+const AGG_FOLD_VK_TAG: &[u8] = b"BDLM_AGG_FOLD_VK_V1";
+/// Domain separator for the complete recursive fold statement.
+const AGG_FOLD_STATEMENT_TAG: &[u8] = b"BDLM_AGG_FOLD_STMT_V2";
 
 /// Canonical parameter set id for `StarkBackend` (distinct from devnet native id 1).
 pub const STARK_PARAMETER_SET: u32 = 2;
@@ -79,6 +85,31 @@ pub fn is_allowed_agg_program(program_hash: &Hash32) -> bool {
     *program_hash == agg_tick_program_hash() || *program_hash == agg_merge_program_hash()
 }
 
+/// Digest of the transparent child verifier key used by recursive aggregation.
+///
+/// `AggFoldAir` has no secret setup key: its verifier key is the versioned AIR,
+/// consensus parameter set, fold bound and canonical child-program allowlist.
+/// Domain is separately committed in every statement and envelope.
+#[must_use]
+pub fn agg_fold_child_verification_key_hash(parameter_set: u32) -> Hash32 {
+    let version = PROOF_FORMAT_VERSION.to_be_bytes();
+    let max_steps = u32::try_from(MAX_FOLD_STEPS)
+        .unwrap_or(u32::MAX)
+        .to_be_bytes();
+    let tick = agg_tick_program_hash();
+    let merge = agg_merge_program_hash();
+    let mut descriptor = Vec::with_capacity(
+        AGG_FOLD_VK_TAG.len() + version.len() + 4 + max_steps.len() + tick.len() + merge.len(),
+    );
+    descriptor.extend_from_slice(AGG_FOLD_VK_TAG);
+    descriptor.extend_from_slice(&version);
+    descriptor.extend_from_slice(&parameter_set.to_be_bytes());
+    descriptor.extend_from_slice(&max_steps);
+    descriptor.extend_from_slice(&tick);
+    descriptor.extend_from_slice(&merge);
+    h(&[&descriptor])
+}
+
 /// Production STARK proving and verifying backend.
 #[derive(Debug, Clone)]
 pub struct StarkBackend {
@@ -105,10 +136,7 @@ impl StarkBackend {
 }
 
 struct DecodedStarkProof {
-    parameter_set: u32,
-    domain: DomainId,
-    program_hash: Hash32,
-    public_input: Hash32,
+    envelope: RecursiveProofEnvelope,
     fold_proof: AggFoldProof,
 }
 
@@ -117,99 +145,100 @@ fn encode_stark_proof(
     domain: DomainId,
     program_hash: &Hash32,
     public_input: &Hash32,
+    recursion_level: u32,
+    child_verification_key_hash: &Hash32,
+    statement_digest: &Hash32,
     fold_proof: &AggFoldProof,
 ) -> Result<Vec<u8>, AggError> {
     let num_steps = u32::try_from(fold_proof.num_steps).map_err(|_| AggError::MalformedProof)?;
     let proof_bytes =
         postcard::to_allocvec(&fold_proof.proof).map_err(|_| AggError::MalformedProof)?;
-    let proof_len = u32::try_from(proof_bytes.len()).map_err(|_| AggError::MalformedProof)?;
-
-    let total = 4 + 1 + 4 + 4 + 32 + 32 + 4 + 4 + proof_bytes.len();
-    let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(&STARK_MAGIC);
-    out.push(STARK_WIRE_VERSION);
-    out.extend_from_slice(&parameter_set.to_be_bytes());
-    out.extend_from_slice(&domain.to_be_bytes());
-    out.extend_from_slice(program_hash);
-    out.extend_from_slice(public_input);
-    out.extend_from_slice(&num_steps.to_be_bytes());
-    out.extend_from_slice(&proof_len.to_be_bytes());
-    out.extend_from_slice(&proof_bytes);
-    Ok(out)
-}
-
-fn decode_stark_proof(bytes: &[u8]) -> Result<DecodedStarkProof, AggError> {
-    let (magic, rest) = bytes
-        .split_first_chunk::<4>()
-        .ok_or(AggError::MalformedProof)?;
-    if *magic != STARK_MAGIC {
-        return Err(AggError::MalformedProof);
-    }
-    let ([version], rest) = rest
-        .split_first_chunk::<1>()
-        .ok_or(AggError::MalformedProof)?;
-    if *version != STARK_WIRE_VERSION {
-        return Err(AggError::MalformedProof);
-    }
-    let (param_bytes, rest) = rest
-        .split_first_chunk::<4>()
-        .ok_or(AggError::MalformedProof)?;
-    let parameter_set = u32::from_be_bytes(*param_bytes);
-
-    let (domain_bytes, rest) = rest
-        .split_first_chunk::<4>()
-        .ok_or(AggError::MalformedProof)?;
-    let domain = u32::from_be_bytes(*domain_bytes);
-
-    let (program_hash, rest) = rest
-        .split_first_chunk::<32>()
-        .ok_or(AggError::MalformedProof)?;
-    let (public_input, rest) = rest
-        .split_first_chunk::<32>()
-        .ok_or(AggError::MalformedProof)?;
-
-    let (steps_bytes, rest) = rest
-        .split_first_chunk::<4>()
-        .ok_or(AggError::MalformedProof)?;
-    let num_steps =
-        usize::try_from(u32::from_be_bytes(*steps_bytes)).map_err(|_| AggError::MalformedProof)?;
-    if num_steps == 0 || num_steps > MAX_FOLD_STEPS {
-        return Err(AggError::MalformedProof);
-    }
-
-    let (proof_len_bytes, rest) = rest
-        .split_first_chunk::<4>()
-        .ok_or(AggError::MalformedProof)?;
-    let proof_len = usize::try_from(u32::from_be_bytes(*proof_len_bytes))
-        .map_err(|_| AggError::MalformedProof)?;
-    let (proof_bytes, trailing) = rest
-        .split_at_checked(proof_len)
-        .ok_or(AggError::MalformedProof)?;
-    if !trailing.is_empty() {
-        return Err(AggError::MalformedProof);
-    }
-    let chip_proof: ChipProof =
-        postcard::from_bytes(proof_bytes).map_err(|_| AggError::MalformedProof)?;
-
-    Ok(DecodedStarkProof {
+    let envelope = RecursiveProofEnvelope {
+        proof_format_version: PROOF_FORMAT_VERSION,
+        recursion_level,
+        child_verification_key_hash: *child_verification_key_hash,
         parameter_set,
         domain,
         program_hash: *program_hash,
         public_input: *public_input,
-        fold_proof: AggFoldProof {
-            num_steps,
-            proof: chip_proof,
-        },
+        statement_digest: *statement_digest,
+        num_steps,
+        proof_bytes,
+    };
+    envelope.to_bytes().map_err(|_| AggError::MalformedProof)
+}
+
+fn decode_stark_proof(bytes: &[u8]) -> Result<DecodedStarkProof, AggError> {
+    let envelope =
+        RecursiveProofEnvelope::from_bytes(bytes).map_err(|_| AggError::MalformedProof)?;
+    let num_steps = usize::try_from(envelope.num_steps).map_err(|_| AggError::MalformedProof)?;
+    if num_steps == 0 || num_steps > MAX_FOLD_STEPS {
+        return Err(AggError::MalformedProof);
+    }
+    let proof: ChipProof =
+        postcard::from_bytes(&envelope.proof_bytes).map_err(|_| AggError::MalformedProof)?;
+
+    Ok(DecodedStarkProof {
+        envelope,
+        fold_proof: AggFoldProof { num_steps, proof },
     })
 }
 
-/// Computes a canonical commitment over `domain`, `shape`, and every `Segment`
-/// (`claims_root`, `count`, `aggregator`) so reordering or altering any segment
-/// changes the AIR public challenges.
-fn compute_shape_digest(domain: DomainId, segments: &[Segment], shape: &[u8]) -> Hash32 {
-    let mut buf =
-        Vec::with_capacity(4 + 4 + shape.len() + 4 + segments.len().saturating_mul(32 + 4 + 32));
+/// Computes the tree depth of a postfix fold shape. A leaf `AggTick` is
+/// level zero; each parent merge is one level above its deepest child.
+fn recursion_level_for_shape(shape: &[u8]) -> Result<u32, AggError> {
+    if shape.is_empty() || shape.len() > MAX_FOLD_STEPS {
+        return Err(AggError::Frame(FrameError::BadShape));
+    }
+    let mut stack = Vec::with_capacity(shape.len());
+    for &op in shape {
+        match op {
+            SHAPE_TICK => stack.push(0u32),
+            SHAPE_MERGE => {
+                let right = stack.pop().ok_or(AggError::Frame(FrameError::BadShape))?;
+                let left = stack.pop().ok_or(AggError::Frame(FrameError::BadShape))?;
+                let level = left
+                    .max(right)
+                    .checked_add(1)
+                    .ok_or(AggError::MalformedProof)?;
+                if level > MAX_RECURSION_LEVEL {
+                    return Err(AggError::MalformedProof);
+                }
+                stack.push(level);
+            }
+            _ => return Err(AggError::Frame(FrameError::BadShape)),
+        }
+    }
+    let [level] = stack.as_slice() else {
+        return Err(AggError::Frame(FrameError::BadShape));
+    };
+    Ok(*level)
+}
+
+/// Computes a canonical statement commitment over the recursion level, child
+/// verifier-key digest, domain, shape, and every Segment. This digest feeds the
+/// `AggFoldAir` challenge derivation, so changing metadata changes the proof.
+fn compute_shape_digest(
+    domain: DomainId,
+    recursion_level: u32,
+    child_verification_key_hash: &Hash32,
+    segments: &[Segment],
+    shape: &[u8],
+) -> Hash32 {
+    let mut buf = Vec::with_capacity(
+        AGG_FOLD_STATEMENT_TAG.len()
+            + 4
+            + 4
+            + 32
+            + 4
+            + shape.len()
+            + 4
+            + segments.len().saturating_mul(32 + 4 + 32),
+    );
+    buf.extend_from_slice(AGG_FOLD_STATEMENT_TAG);
     buf.extend_from_slice(&domain.to_be_bytes());
+    buf.extend_from_slice(&recursion_level.to_be_bytes());
+    buf.extend_from_slice(child_verification_key_hash);
     buf.extend_from_slice(&u32::try_from(shape.len()).unwrap_or(u32::MAX).to_be_bytes());
     buf.extend_from_slice(shape);
     buf.extend_from_slice(
@@ -232,7 +261,7 @@ fn build_fold_statement(
     domain: DomainId,
     segments: &[Segment],
     shape: &[u8],
-) -> Result<(Vec<AggFoldStep>, AggFoldPublic), AggError> {
+) -> Result<(Vec<AggFoldStep>, AggFoldPublic, u32, Hash32), AggError> {
     if shape.is_empty() || shape.len() > MAX_FOLD_STEPS {
         return Err(AggError::Frame(FrameError::BadShape));
     }
@@ -294,7 +323,19 @@ fn build_fold_statement(
     };
     let step_count =
         u32::try_from(steps.len()).map_err(|_| AggError::Frame(FrameError::BadShape))?;
-    let shape_digest = compute_shape_digest(domain, segments, shape);
+    let recursion_level = recursion_level_for_shape(shape)?;
+    let child_verification_key_hash = if recursion_level == 0 {
+        [0; 32]
+    } else {
+        agg_fold_child_verification_key_hash(parameter_set)
+    };
+    let shape_digest = compute_shape_digest(
+        domain,
+        recursion_level,
+        &child_verification_key_hash,
+        segments,
+        shape,
+    );
 
     let pub_stmt = AggFoldPublic {
         parameter_set,
@@ -306,7 +347,12 @@ fn build_fold_statement(
         shape_digest,
         step_count,
     };
-    Ok((steps, pub_stmt))
+    Ok((
+        steps,
+        pub_stmt,
+        recursion_level,
+        child_verification_key_hash,
+    ))
 }
 
 impl AggBackend for StarkBackend {
@@ -337,7 +383,7 @@ impl AggBackend for StarkBackend {
         }
 
         let provisional = ClaimFrame::tick(ctx.domain, &ctx.signer_seed, claims, Vec::new())?;
-        let (steps, pub_stmt) = build_fold_statement(
+        let (steps, pub_stmt, recursion_level, child_verification_key_hash) = build_fold_statement(
             self.parameter_set,
             ctx.domain,
             &provisional.segments,
@@ -349,6 +395,9 @@ impl AggBackend for StarkBackend {
             ctx.domain,
             &pub_stmt.final_program_hash,
             &pub_stmt.master_pi,
+            recursion_level,
+            &child_verification_key_hash,
+            &pub_stmt.shape_digest,
             &fold_proof,
         )?;
         if proof_bytes.len() > self.limits.max_proof_bytes {
@@ -368,21 +417,21 @@ impl AggBackend for StarkBackend {
     fn prove_merge(&self, left: &ClaimFrame, right: &ClaimFrame) -> Result<Vec<u8>, AggError> {
         let left_decoded = decode_stark_proof(&left.proof)?;
         let right_decoded = decode_stark_proof(&right.proof)?;
-        if left_decoded.parameter_set != self.parameter_set
-            || right_decoded.parameter_set != self.parameter_set
+        if left_decoded.envelope.parameter_set != self.parameter_set
+            || right_decoded.envelope.parameter_set != self.parameter_set
         {
             return Err(AggError::WrongParameterSet);
         }
-        if left_decoded.domain != right_decoded.domain {
+        if left_decoded.envelope.domain != right_decoded.envelope.domain {
             return Err(AggError::WrongDomain);
         }
-        if !is_allowed_agg_program(&left_decoded.program_hash)
-            || !is_allowed_agg_program(&right_decoded.program_hash)
+        if !is_allowed_agg_program(&left_decoded.envelope.program_hash)
+            || !is_allowed_agg_program(&right_decoded.envelope.program_hash)
         {
             return Err(AggError::ProofMismatch);
         }
 
-        let domain = left_decoded.domain;
+        let domain = left_decoded.envelope.domain;
         self.verify(left, domain)?;
         self.verify(right, domain)?;
 
@@ -393,7 +442,7 @@ impl AggBackend for StarkBackend {
             )));
         }
 
-        let (steps, pub_stmt) = build_fold_statement(
+        let (steps, pub_stmt, recursion_level, child_verification_key_hash) = build_fold_statement(
             self.parameter_set,
             domain,
             &combined.segments,
@@ -405,6 +454,9 @@ impl AggBackend for StarkBackend {
             domain,
             &pub_stmt.final_program_hash,
             &pub_stmt.master_pi,
+            recursion_level,
+            &child_verification_key_hash,
+            &pub_stmt.shape_digest,
             &fold_proof,
         )?;
         if proof_bytes.len() > self.limits.max_proof_bytes {
@@ -420,31 +472,41 @@ impl AggBackend for StarkBackend {
         verify_segment_attestations(&self.registry, domain, &frame.segments)?;
         let decoded = decode_stark_proof(&frame.proof)?;
 
-        if decoded.parameter_set != self.parameter_set {
+        if decoded.envelope.parameter_set != self.parameter_set {
             return Err(AggError::WrongParameterSet);
         }
-        if decoded.domain != domain {
+        if decoded.envelope.domain != domain {
             return Err(AggError::WrongDomain);
         }
         let expected_program = match facts.program {
             AggProgram::Tick => agg_tick_program_hash(),
             AggProgram::Merge => agg_merge_program_hash(),
         };
-        if decoded.program_hash != expected_program
-            || !is_allowed_agg_program(&decoded.program_hash)
+        if decoded.envelope.program_hash != expected_program
+            || !is_allowed_agg_program(&decoded.envelope.program_hash)
         {
             return Err(AggError::ProofMismatch);
         }
-        if decoded.public_input != facts.master_pi {
-            return Err(AggError::ProofMismatch);
-        }
 
-        let (steps, pub_stmt) =
+        let (steps, pub_stmt, recursion_level, child_verification_key_hash) =
             build_fold_statement(self.parameter_set, domain, &frame.segments, &frame.shape)?;
         if pub_stmt.master_pi != facts.master_pi || pub_stmt.final_program_hash != expected_program
         {
             return Err(AggError::ProofMismatch);
         }
+        let expected_context = RecursiveProofContext {
+            recursion_level,
+            child_verification_key_hash,
+            parameter_set: self.parameter_set,
+            domain,
+            program_hash: expected_program,
+            public_input: facts.master_pi,
+            statement_digest: pub_stmt.shape_digest,
+        };
+        decoded
+            .envelope
+            .validate_for(&expected_context)
+            .map_err(|_| AggError::ProofMismatch)?;
         verify_agg_fold(&steps, &pub_stmt, &decoded.fold_proof).map_err(|_| AggError::ProofMismatch)
     }
 
@@ -452,3 +514,7 @@ impl AggBackend for StarkBackend {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "r8_tests.rs"]
+mod r8_tests;

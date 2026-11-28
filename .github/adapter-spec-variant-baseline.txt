@@ -20,6 +20,7 @@ DagCertificate
 CasperFfg
 MysticetiDag
 BitVmCovenant
+Nipopow
 # Families that exist on the delivery branch (Babylon EOTS, NIPoPoW superblock,
 # GHOSTDAG, HoneyBadgerBFT) are not declared on this branch; their patches
 # append them at the end of the enum and to this file in the same change.

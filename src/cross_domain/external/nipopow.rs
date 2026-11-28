@@ -1,8 +1,6 @@
-//! WIRING: unwired - external `NIPoPoW` superblock adapter awaits `AdapterSpec` variant registration in `external_tx`.
 //! Non-Interactive Proofs of Proof-of-Work (`NIPoPoW`, Kiayias-Miller-Zindros
 //! EUROCRYPT 2020) sublinear genesis-anchored external finality adapter.
 //!
-//! WIRING: unwired - the superblock verifier and its interlink checks are
 //! re-exported by `crate::cross_domain::external` but no production path
 //! constructs the adapter yet: sublinear sync is admitted only once an intake
 //! registration pins a genesis anchor for it, and admitting it before that

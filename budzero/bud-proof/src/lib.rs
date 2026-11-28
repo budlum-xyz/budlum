@@ -13,6 +13,7 @@ pub mod plonky3_air;
 pub mod plonky3_prover;
 pub mod predicates;
 pub mod quarantine;
+pub mod recursive_envelope;
 pub mod relayer;
 pub mod sigagg;
 pub mod transfer_verdict;
