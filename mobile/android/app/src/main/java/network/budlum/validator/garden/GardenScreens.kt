@@ -315,22 +315,19 @@ fun GardenApp(
             }
 
             Step.Seed -> SeedPhraseScreen(model) {
-                step = Step.SeedVerify
+                // The seed frame ends on one button: the words are written down
+                // and the sheet is done. Copying the file's verify frame here
+                // would mean asking a person to type twenty-four words back on
+                // a phone, which the design asks for nowhere else and the flow
+                // has no room for.
+                if (wantedTestnet) {
+                    wantedTestnet = false
+                    onTestnet()
+                    step = Step.Blocks
+                } else {
+                    step = Step.Choose
+                }
             }
-
-            Step.SeedVerify -> SeedVerifyScreen(
-                model = model,
-                onBackToWords = { step = Step.Seed },
-                onVerified = {
-                    if (wantedTestnet) {
-                        wantedTestnet = false
-                        onTestnet()
-                        step = Step.Blocks
-                    } else {
-                        step = Step.Choose
-                    }
-                },
-            )
 
             Step.Choose -> ChooseScreen(
                 model = model,

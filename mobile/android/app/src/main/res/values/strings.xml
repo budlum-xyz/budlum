@@ -113,9 +113,6 @@
     <string name="w_make_instead">Make a new one instead</string>
     <string name="w_words_hint">the twenty-four words, in order, separated by spaces</string>
     <string name="w_chain">chain</string>
-    <string name="w_verify_why">Type three of them back. This is the only moment a mistake can still be caught: the words cannot be shown again.</string>
-    <string name="w_word_number">word %1$d</string>
-    <string name="w_not_those_words">That is not what was written on the last screen. Check your paper.</string>
     <string name="g_become_validator">Become a validator</string>
     <string name="g_become_anyway">Become one anyway</string>
     <string name="g_without_notifications">Without the notification permission this phone validates only while the screen is on, and stops when it is off. Not impossible, just worse.</string>
@@ -123,7 +120,6 @@
     <string name="w_search_hint">search anything</string>
     <string name="w_no_wallet_yet">no wallet yet</string>
     <string name="w_noted_go_on">Noted, go on</string>
-    <string name="w_thats_it">That is it</string>
     <string name="w_open_transfers">open transfers</string>
     <string name="w_you">You</string>
     <string name="w_tokens_none">0 tokens (0M BUD)</string>
@@ -192,7 +188,6 @@
     <string name="g_skin_sage">Sage</string>
     <string name="g_skin_ground">Dark</string>
     <string name="w_word_count">%1$d / %2$d words</string>
-    <string name="w_back_to_words">show words again</string>
     <string name="w_receive_qr">receive qr</string>
     <string name="w_open_testnet">testnet faucet &amp; balance</string>
     <string name="w_address_copied">Address copied</string>

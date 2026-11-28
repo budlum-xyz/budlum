@@ -44,7 +44,6 @@ import network.budlum.validator.core.MobileConstants
  * masked until tapped, and verified by three positions before leaving memory.
  */
 
-private const val CHECKED_WORDS = 3
 
 /** No wallet yet: create a fresh 24-word wallet or restore an existing one. */
 @Composable
@@ -241,96 +240,6 @@ fun SeedPhraseScreen(model: GardenModel, onWritten: () -> Unit) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(top = 4.dp),
-                )
-            }
-        }
-    }
-}
-
-/**
- * Confirm three positions from the recovery phrase before dropping it from RAM.
- */
-@Composable
-fun SeedVerifyScreen(
-    model: GardenModel,
-    onBackToWords: () -> Unit,
-    onVerified: () -> Unit,
-) {
-    val skin = model.skin
-    val words = model.state.mnemonic
-    val positions = remember(words) {
-        if (words.size <= CHECKED_WORDS) {
-            words.indices.toList()
-        } else {
-            words.indices.shuffled().take(CHECKED_WORDS).sorted()
-        }
-    }
-    var answers by remember(positions) { mutableStateOf(List(positions.size) { "" }) }
-    var wrong by remember { mutableStateOf(false) }
-
-    BudlumPage(
-        skin = skin,
-        onSkinChange = { model.selectSkin(it) },
-        onBack = onBackToWords,
-    ) {
-        Sheet(skin) {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    text = stringResource(R.string.w_verify_why),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = skin.surfaceInk,
-                )
-
-                positions.forEachIndexed { slot, position ->
-                    val expected = words.getOrNull(position)?.lowercase().orEmpty()
-                    val typed = answers.getOrNull(slot).orEmpty()
-                    val matched = typed.trim().lowercase() == expected && expected.isNotEmpty()
-                    WordField(
-                        number = position + 1,
-                        value = typed,
-                        onValue = { fresh ->
-                            answers = answers.toMutableList().also { it[slot] = fresh }
-                            wrong = false
-                        },
-                        skin = skin,
-                        matched = matched,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-
-                if (wrong) {
-                    Text(
-                        text = stringResource(R.string.w_not_those_words),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = skin.danger,
-                    )
-                }
-
-                PillButton(
-                    text = stringResource(R.string.w_thats_it),
-                    onTap = {
-                        val allMatch = positions.indices.all { slot ->
-                            val expected = words.getOrNull(positions[slot])?.lowercase() ?: ""
-                            answers.getOrNull(slot)?.trim()?.lowercase() == expected
-                        }
-                        if (allMatch) {
-                            model.forgetMnemonic()
-                            onVerified()
-                        } else {
-                            wrong = true
-                        }
-                    },
-                    enabled = answers.all { it.isNotBlank() },
-                    skin = skin,
-                    primary = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-
-                PillButton(
-                    text = stringResource(R.string.w_back_to_words),
-                    onTap = onBackToWords,
-                    skin = skin,
-                    modifier = Modifier.fillMaxWidth(),
                 )
             }
         }
