@@ -28,6 +28,7 @@
 //! | `(DomainId, DomainId, Address)` | `"<src>:<dst>:<address hex>"` |
 //! | `(DomainId, u64, u64)` | `"<domain>:<height>:<index>"` |
 //! | `(u64, u32)` (height, evidence version) | `"<height>:<version>"` |
+//! | `(DomainId, u64)` (domain, epoch) | `"<domain>:<epoch>"` |
 //! | `DomainKey` | the inner 32 bytes as hex (impl in `external/spec.rs`) |
 //! | `(AiRequestId, [u8; 32])` | `"<request hex>:<hash hex>"` |
 //! | `(ContentId, ContentId)` | `"<content hex>:<shard hex>"` |
@@ -200,6 +201,16 @@ impl MapKey for (DomainId, u64, u64) {
             parse_uint(height, "height")?,
             parse_uint(index, "index")?,
         ))
+    }
+}
+
+impl MapKey for (DomainId, u64) {
+    fn to_key_string(&self) -> String {
+        format!("{}:{}", self.0, self.1)
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        let [domain, epoch] = parts::<2>(s)?;
+        Ok((parse_uint(domain, "domain")?, parse_uint(epoch, "epoch")?))
     }
 }
 
@@ -447,6 +458,24 @@ mod tests {
         assert_eq!(keyed_back, keyed);
         let derived_back: Derived = bincode::deserialize(&keyed_row).unwrap();
         assert_eq!(derived_back, derived);
+    }
+
+    #[test]
+    fn epoch_root_key_round_trips_and_refuses_a_short_key() {
+        // The liquidation request carries certified roots keyed by
+        // `(domain, epoch)`. Reading "3" as domain 3 on epoch zero would put a
+        // root under an epoch the sender never claimed, so the parse is strict.
+        let key = (3u32, 1_700_000_004u64);
+        let text = MapKey::to_key_string(&key);
+        assert_eq!(text, "3:1700000004");
+        let back: (u32, u64) = MapKey::from_key_string(&text).expect("round trip");
+        assert_eq!(back, key);
+        for bad in ["3", "3:", ":4", "x:1", "3:1:7"] {
+            assert!(
+                <(u32, u64) as MapKey>::from_key_string(bad).is_err(),
+                "{bad} was read as a key"
+            );
+        }
     }
 
     #[test]
