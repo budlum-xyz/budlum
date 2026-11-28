@@ -250,15 +250,18 @@ fn private_transfer_double_spend_fails() {
         "no note moves"
     );
 
-    // The registry's own double-spend door, reached directly.
+    // The registry's own double-spend door, reached directly. `c2` carries no
+    // ownership record, so the ownership layer would answer first and this
+    // test would pass for the wrong reason; the nullifier set is asked on its
+    // own, which is exactly the door a second spend of `n1` meets.
     state
         .note_registry
-        .apply_transfer_for_owner(&from, &[c_in], &[n1], &[c_out], &[proof])
+        .apply_transfer_with_proofs(&[c_in], &[n1], &[c_out], &[proof])
         .expect("the first spend of a fresh nullifier is recorded");
     assert!(state.note_registry.is_nullifier_spent(&n1));
     let twice = state
         .note_registry
-        .apply_transfer_for_owner(&from, &[c2], &[n1], &[c_out2], &[proof])
+        .apply_transfer_with_proofs(&[c2], &[n1], &[c_out2], &[proof])
         .expect_err("a nullifier may not be spent twice");
     assert!(twice.contains("already spent"), "got: {twice}");
 }
