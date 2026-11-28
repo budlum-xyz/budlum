@@ -2177,7 +2177,6 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
         let total = decoded.total_voting_power();
         let required = quorum_threshold(total);
         let mut signed: u128 = 0;
-        let mut signers: u64 = 0;
         let mut signed_times: Vec<(u64, u128)> = Vec::with_capacity(decoded.signatures.len());
         for signature in &decoded.signatures {
             let validator = validator_map
@@ -2204,7 +2203,6 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
             )?;
             let power = u128::from(validator.voting_power);
             signed += power;
-            signers += 1;
             signed_times.push((vote_ts, power));
         }
 
@@ -2260,6 +2258,12 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
             }
         }
 
+        let shift = 128u32
+            .saturating_sub(total.leading_zeros())
+            .saturating_sub(64);
+        let signers = u64::try_from(signed >> shift).unwrap_or(u64::MAX);
+        let required_u64 = u64::try_from(required >> shift).unwrap_or(u64::MAX).max(1);
+
         Ok(FinalityAttestation {
             adapter: self.descriptor.id,
             domain: DomainKey::from_parts(&self.descriptor.id, &self.network),
@@ -2270,7 +2274,7 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
             security: SecurityBacking::SignatureSet {
                 scheme: ObservedScheme::Scheme(SchemeId::ED25519),
                 signers,
-                required: u64::try_from(required).map_err(|_| rule("quorum above u64"))?,
+                required: required_u64,
                 total_weight: total,
                 slashable: BACKING_SLASHABLE,
             },

@@ -581,6 +581,22 @@ pub fn verify_jolteon_equivocation(
     Ok((offender, member.voting_power))
 }
 
+fn min_signers_for_quorum<I: IntoIterator<Item = u64>>(weights: I, total_power: u128) -> u64 {
+    let mut sorted: Vec<u64> = weights.into_iter().filter(|&w| w > 0).collect();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    let mut acc = 0u128;
+    let mut count = 0u64;
+    let two_thirds = total_power.saturating_mul(2);
+    for w in sorted {
+        acc = acc.saturating_add(u128::from(w));
+        count = count.saturating_add(1);
+        if acc.saturating_mul(3) > two_thirds {
+            return count;
+        }
+    }
+    count.max(1)
+}
+
 /// External finality adapter for `AptosBFT` / `Jolteon` 2-chain pipelined BFT.
 ///
 /// WIRING: registered via `crate::cross_domain::external` and admitted through `selftest::admit`.
@@ -729,11 +745,10 @@ impl AptosJolteonAdapter {
 
         let (min_signers, all_pq) =
             verify_jolteon_bundle_chain(&self.network, pinned, &bundle, &member_map, total_power)?;
-        let required_signers = (u64::try_from(pinned.validators.len())
-            .unwrap_or(1)
-            .saturating_mul(2))
-        .div_ceil(3)
-        .max(1);
+        let required_signers = min_signers_for_quorum(
+            pinned.validators.iter().map(|v| v.voting_power),
+            total_power,
+        );
         let scheme = if all_pq {
             ObservedScheme::Scheme(SchemeId::ML_DSA_65)
         } else {

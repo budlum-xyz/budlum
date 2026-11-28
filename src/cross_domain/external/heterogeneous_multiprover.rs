@@ -393,6 +393,7 @@ struct VerifiedLeg {
     used_ed25519: bool,
     used_ml_dsa: bool,
     used_stark: bool,
+    signed_weight: u128,
 }
 
 fn verify_pinned_config(cfg: &PinnedMultiProverConfig) -> Result<(), AdapterError> {
@@ -486,6 +487,7 @@ fn verify_stark_leg(
         used_ed25519: false,
         used_ml_dsa: false,
         used_stark: true,
+        signed_weight: 0,
     })
 }
 
@@ -579,6 +581,7 @@ fn verify_fault_leg(
         used_ed25519: true,
         used_ml_dsa: pq_safe,
         used_stark: false,
+        signed_weight: leg.proposer_bond_atoms,
     })
 }
 
@@ -687,6 +690,7 @@ fn verify_committee_leg(
         used_ed25519: true,
         used_ml_dsa: all_pq,
         used_stark: false,
+        signed_weight,
     })
 }
 
@@ -913,9 +917,13 @@ impl HeterogeneousMultiProverAdapter {
                 .saturating_mul(2)
                 .saturating_div(3)
                 .saturating_add(1);
+            let committee_signed_weight = legs
+                .iter()
+                .find(|l| l.family == ProverFamily::PqAttestedCommittee)
+                .map_or(req, |l| l.signed_weight);
             SecurityBacking::SignatureSet {
                 scheme,
-                signers: u64::try_from(legs.len()).unwrap_or(2),
+                signers: u64::try_from(committee_signed_weight).unwrap_or(u64::MAX),
                 required: u64::try_from(req).unwrap_or(u64::MAX),
                 total_weight,
                 // External rollup fault bonds and re-execution committees have no

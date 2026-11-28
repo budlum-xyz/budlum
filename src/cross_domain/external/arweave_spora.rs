@@ -536,7 +536,8 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
             return Err(AdapterError::UnslashableBacking);
         }
 
-        let digest = ev.digest();
+        let _bundle_digest = ev.digest();
+        let digest = evidence.digest();
         let backing = SecurityBacking::SignatureSet {
             scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
             signers: 1,

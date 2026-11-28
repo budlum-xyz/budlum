@@ -1715,7 +1715,14 @@ impl EthereumExecutionLightClient {
         Ok(())
     }
 
-    fn check_monotonic_advance(
+    /// Verify monotonic beacon slot, execution block number, timestamp, and parent hash progression.
+    ///
+    /// Convenience: exposed for light-client monotonicity regression tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncCommitteeError::NonMonotonicFinality`] when finality regresses or forks at the same slot.
+    pub fn check_monotonic_advance(
         latest: Option<&VerifiedExecutionPayload>,
         candidate: &VerifiedExecutionPayload,
     ) -> Result<(), SyncCommitteeError> {
