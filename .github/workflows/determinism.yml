@@ -25,7 +25,19 @@ on:
 
 concurrency:
   group: determinism-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
+  # The digest jobs spend about two hours on a macOS runner, so a run that is
+  # cancelled two hours in produces nothing and has to start over. Measured on
+  # 2026-11-27: the macOS digest of pull request 215 was cancelled after two and
+  # a half hours, its re-run was cancelled by the next head before it finished,
+  # and the determinism runs on the Garden branch were cancelled head after head
+  # all evening. Branches whose pull requests exist to produce a verdict are
+  # therefore exempt: `testnet`, `ortak-teslim`, `testnet-50` and
+  # `consensus-of-consensuses`. A queued run costs wall clock; a cancelled one
+  # costs the measurement.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' &&
+    github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' &&
+    github.base_ref != 'testnet-50' &&
+    github.base_ref != 'consensus-of-consensuses' }}
 
 permissions:
   contents: read
