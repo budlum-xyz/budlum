@@ -263,26 +263,28 @@ fn a_broken_parent_link_is_refused_by_the_bridge() {
 }
 
 /// Work backing is the first producer of `SecurityBacking::Work`. The bridge
-/// already treats accumulated work as clearing a slashability demand; the
-/// adapter must agree, or that branch of the shared model stays dead.
+/// enforces a slashable-only policy at its own layer: accumulated work is a
+/// different security class and must not be promoted to slashable, so a
+/// slashability demand is not cleared by work backing.
 #[test]
-fn work_backing_clears_the_bridges_slashability_demand() {
+fn work_backing_does_not_clear_a_slashability_demand() {
     let mut strict = policy();
     strict.require_slashable = true;
     let evidence = golden();
     let attestation = adapter()
         .verify(&evidence, &strict)
-        .expect("work clears the demand");
+        .expect("the adapter still emits work backing");
     assert!(matches!(attestation.security, SecurityBacking::Work { .. }));
 
     let proof = encode_external_evidence(&evidence).expect("evidence encodes");
     let (domain, commitment) = domain_and_commitment(&evidence, &proof);
     let bridge = ExternalDomainFinalityBridge::new(Box::new(adapter()), strict);
-    assert_eq!(
-        bridge
-            .verify_finality(&domain, &commitment, &proof)
-            .expect("bridge verifies"),
-        FinalityStatus::Finalized
+    let status = bridge
+        .verify_finality(&domain, &commitment, &proof)
+        .expect("the bridge answers");
+    assert!(
+        matches!(status, FinalityStatus::Rejected(ref message) if message.contains("slashable")),
+        "work backing must not satisfy a slashable-only policy: {status:?}"
     );
 }
 
