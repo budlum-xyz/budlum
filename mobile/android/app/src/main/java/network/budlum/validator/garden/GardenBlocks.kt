@@ -245,13 +245,7 @@ fun BlockField(
     // mesh is, not from where the glass is.
     var pan by remember { mutableStateOf(Offset.Zero) }
     val haptic = LocalHapticFeedback.current
-    val mark = ImageBitmap.imageResource(
-        when (skin) {
-            Skin.Page -> R.drawable.tile_page
-            Skin.Sage -> R.drawable.tile_sage
-            Skin.Ground -> R.drawable.tile_ground
-        },
-    )
+    val mark = ImageBitmap.imageResource(skin.tile())
 
     BoxWithConstraints(modifier = modifier) {
         val density = LocalDensity.current

@@ -316,10 +316,10 @@ fun Wordmark(
     skin: Skin = Skin.Page,
     modifier: Modifier = Modifier,
 ) {
-    val tint = when (skin) {
-        Skin.Sage -> Ink
-        Skin.Ground -> Sage
-        Skin.Page -> null
+    val tint = when {
+        skin.isDark -> Sage
+        skin.behind == Sage -> Ink
+        else -> null
     }
     Image(
         painter = painterResource(R.drawable.budlum_wordmark),
