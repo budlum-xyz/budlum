@@ -440,7 +440,13 @@ impl ChainKeyNiDkgAdapter {
                 required: policy.min_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > cup.height {
+        if policy.max_age > 0 {
+            if cup.height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: cup.height - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now - cup.height;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -670,6 +676,7 @@ mod tests {
     #[test]
     fn chain_key_refuses_misaligned_cup_height() {
         let (adapter, mut ev) = sample_adapter_with_golden();
+        let valid_ev = ev.clone();
         let mut bundle = decode_chain_key_evidence(&ev.payload).unwrap();
         bundle.cup.height = 5_001;
         ev.declared_height = 5_001;
@@ -678,5 +685,19 @@ mod tests {
             adapter.verify(&ev, &VerificationPolicy::strict(0)),
             Err(AdapterError::ConsensusRule { .. })
         ));
+
+        // Future cup.height > policy.now must fail closed with Stale when max_age > 0.
+        let future_policy = VerificationPolicy {
+            max_age: 100,
+            now: 100,
+            ..VerificationPolicy::strict(100)
+        };
+        assert!(
+            matches!(
+                adapter.verify(&valid_ev, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future Chain-Key CUP height bypassed max_age"
+        );
     }
 }

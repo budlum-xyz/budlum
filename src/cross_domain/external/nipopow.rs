@@ -347,9 +347,7 @@ pub fn best_superchain_score(
     let mut best: Option<(u8, u128)> = None;
     for mu in min_level..=max_seen.min(120) {
         let count = non_genesis_levels.iter().filter(|&&lv| lv >= mu).count();
-        if count >= usize::from(u16::try_from(min_superblocks_m).unwrap_or(u16::MAX))
-            || u64::try_from(count).unwrap_or(0) >= u64::from(min_superblocks_m)
-        {
+        if u64::try_from(count).unwrap_or(0) >= u64::from(min_superblocks_m) {
             let weight = 1u128.checked_shl(u32::from(mu)).unwrap_or(u128::MAX);
             let score = (count as u128).saturating_mul(weight);
             if best.is_none_or(|(_, prev)| score >= prev) {
@@ -616,7 +614,13 @@ impl NipopowAdapter {
                 required: policy.min_depth,
             });
         }
-        if policy.max_age > 0 && policy.now > finalized.height {
+        if policy.max_age > 0 {
+            if finalized.height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: finalized.height - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now - finalized.height;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -943,7 +947,7 @@ mod tests {
         ));
 
         // 3. Higher KMZ `m` requirement refuses under-dense superchain.
-        let mut stricter = pinned.clone();
+        let mut stricter = pinned;
         stricter.min_superblocks_m = 20;
         let strict_adapter = NipopowAdapter::new(NET, Some(stricter));
         assert!(matches!(
@@ -959,6 +963,20 @@ mod tests {
             adapter.verify(&ev, &policy),
             Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("min_suffix_k")
         ));
+
+        // 5. Future finalized.height > policy.now must fail closed with Stale when max_age > 0.
+        let future_policy = VerificationPolicy {
+            max_age: 5,
+            now: 1,
+            ..policy
+        };
+        assert!(
+            matches!(
+                adapter.verify(&golden, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future NIPoPoW finalized height bypassed max_age"
+        );
     }
 
     #[test]
@@ -976,5 +994,13 @@ mod tests {
         assert_eq!(superblock_level(&lvl3, &target), Some(3));
         assert_eq!(superblock_level(&fail, &target), None);
         assert_eq!(superblock_level(&[0u8; 32], &[0u8; 32]), None);
+
+        // min_superblocks_m > u16::MAX must never truncate to u16::MAX and accept fewer blocks.
+        let levels = vec![2u8; 66_000];
+        assert_eq!(
+            best_superchain_score(&levels, 70_000, 1),
+            None,
+            "best_superchain_score silently truncated min_superblocks_m > u16::MAX"
+        );
     }
 }

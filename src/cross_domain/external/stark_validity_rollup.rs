@@ -747,7 +747,13 @@ impl ExternalFinalityAdapter for StarkValidityRollupAdapter {
             });
         }
         if policy.max_age > 0 {
-            let age = policy.now.saturating_sub(ev.header.batch_number);
+            if ev.header.batch_number > policy.now {
+                return Err(AdapterError::Stale {
+                    age: ev.header.batch_number - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - ev.header.batch_number;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
                     age,
@@ -1101,7 +1107,7 @@ mod tests {
             sender: [0xB1; 32],
             tx_hash: [0xB2; 32],
         }];
-        let (ev, _raw) = prove_rollup_batch(&pinned, good_diffs, forced, 1);
+        let (ev, valid_raw) = prove_rollup_batch(&pinned, good_diffs, forced, 1);
         let post_root = ev.header.post_state_root;
         let adapter = StarkValidityRollupAdapter::new("stark-rollup-testnet", Some(pinned));
         let policy = VerificationPolicy::proven(50);
@@ -1146,5 +1152,19 @@ mod tests {
             adapter.verify(&raw_skipped, &policy),
             Err(AdapterError::ConsensusRule { .. })
         ));
+
+        // 4. Future batch_number > policy.now must fail closed with Stale when max_age > 0.
+        let future_policy = VerificationPolicy {
+            max_age: 10,
+            now: 10,
+            ..policy
+        };
+        assert!(
+            matches!(
+                adapter.verify(&valid_raw, &future_policy),
+                Err(AdapterError::Stale { .. })
+            ),
+            "future StarkValidityRollup batch_number bypassed max_age"
+        );
     }
 }
