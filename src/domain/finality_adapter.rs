@@ -1120,12 +1120,11 @@ impl DomainFinalityAdapter for PoSFinalityAdapter {
             FinalityProof::PoS {
                 cert,
                 validator_snapshot,
-            }
-            | FinalityProof::PoSPq {
-                cert,
-                validator_snapshot,
-                ..
             } => certificate_schemes(cert, validator_snapshot),
+            FinalityProof::PoSPq { .. } => vec![ObservedScheme::Hybrid {
+                classical: Some(SchemeId::BLS12381_MINSIG),
+                pq: SchemeId::ML_DSA_65,
+            }],
             _ => Vec::new(),
         }
     }
@@ -1637,10 +1636,10 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
     fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
         match proof {
             FinalityProof::PoA { .. } => vec![ObservedScheme::Scheme(SchemeId::ED25519)],
-            FinalityProof::PoAPq { .. } => vec![
-                ObservedScheme::Scheme(SchemeId::ED25519),
-                ObservedScheme::Scheme(SchemeId::ML_DSA_65),
-            ],
+            FinalityProof::PoAPq { .. } => vec![ObservedScheme::Hybrid {
+                classical: Some(SchemeId::ED25519),
+                pq: SchemeId::ML_DSA_65,
+            }],
             _ => Vec::new(),
         }
     }
@@ -1786,12 +1785,11 @@ impl DomainFinalityAdapter for BftFinalityAdapter {
                 cert,
                 validator_snapshot,
                 ..
-            }
-            | FinalityProof::BftPq {
-                cert,
-                validator_snapshot,
-                ..
             } => certificate_schemes(cert, validator_snapshot),
+            FinalityProof::BftPq { .. } => vec![ObservedScheme::Hybrid {
+                classical: Some(SchemeId::BLS12381_MINSIG),
+                pq: SchemeId::ML_DSA_65,
+            }],
             _ => Vec::new(),
         }
     }
@@ -3309,10 +3307,10 @@ impl DomainFinalityAdapter for DagFinalityAdapter {
                     crate::crypto::scheme::SchemeId::ED25519,
                 )]
             }
-            FinalityProof::DagPq { .. } => vec![
-                ObservedScheme::Scheme(crate::crypto::scheme::SchemeId::ED25519),
-                ObservedScheme::Scheme(crate::crypto::scheme::SchemeId::ML_DSA_65),
-            ],
+            FinalityProof::DagPq { .. } => vec![ObservedScheme::Hybrid {
+                classical: Some(crate::crypto::scheme::SchemeId::ED25519),
+                pq: crate::crypto::scheme::SchemeId::ML_DSA_65,
+            }],
             _ => BftFinalityAdapter::default().observed_schemes(proof),
         }
     }
@@ -3382,10 +3380,10 @@ impl DomainFinalityAdapter for PohFinalityAdapter {
                     crate::crypto::scheme::SchemeId::ED25519,
                 )]
             }
-            FinalityProof::PohPq { .. } => vec![
-                ObservedScheme::Scheme(crate::crypto::scheme::SchemeId::ED25519),
-                ObservedScheme::Scheme(crate::crypto::scheme::SchemeId::ML_DSA_65),
-            ],
+            FinalityProof::PohPq { .. } => vec![ObservedScheme::Hybrid {
+                classical: Some(crate::crypto::scheme::SchemeId::ED25519),
+                pq: crate::crypto::scheme::SchemeId::ML_DSA_65,
+            }],
             _ => Vec::new(),
         }
     }
@@ -3473,10 +3471,10 @@ impl DomainFinalityAdapter for PospaceFinalityAdapter {
                     crate::crypto::scheme::SchemeId::ED25519,
                 )]
             }
-            FinalityProof::PospacePq { .. } => vec![
-                ObservedScheme::Scheme(crate::crypto::scheme::SchemeId::ED25519),
-                ObservedScheme::Scheme(crate::crypto::scheme::SchemeId::ML_DSA_65),
-            ],
+            FinalityProof::PospacePq { .. } => vec![ObservedScheme::Hybrid {
+                classical: Some(crate::crypto::scheme::SchemeId::ED25519),
+                pq: crate::crypto::scheme::SchemeId::ML_DSA_65,
+            }],
             _ => Vec::new(),
         }
     }
@@ -6260,10 +6258,10 @@ mod tests {
         );
         assert_eq!(
             DagFinalityAdapter.observed_schemes(&dag_proof),
-            vec![
-                ObservedScheme::Scheme(SchemeId::ED25519),
-                ObservedScheme::Scheme(SchemeId::ML_DSA_65),
-            ]
+            vec![ObservedScheme::Hybrid {
+                classical: Some(SchemeId::ED25519),
+                pq: SchemeId::ML_DSA_65,
+            }]
         );
         // Flip one byte in the ML-DSA-65 half of signature 0 -> Rejected.
         let mut bad_dag = dag_proof.clone();
@@ -6404,10 +6402,10 @@ mod tests {
         );
         assert_eq!(
             AiInferenceFinalityAdapter.observed_schemes(&ai_proof),
-            vec![
-                ObservedScheme::Scheme(SchemeId::ED25519),
-                ObservedScheme::Scheme(SchemeId::ML_DSA_65),
-            ]
+            vec![ObservedScheme::Hybrid {
+                classical: Some(SchemeId::ED25519),
+                pq: SchemeId::ML_DSA_65,
+            }]
         );
     }
 }

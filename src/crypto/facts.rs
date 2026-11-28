@@ -71,11 +71,23 @@ pub enum ObservedScheme {
     Secp256k1,
     /// A validity proof, by the assumption it rests on.
     Proof(AssumptionClass),
+    /// A conjunctive hybrid signature obligation where both a classical scheme
+    /// (`secp256k1` when `classical` is `None`) and a post-quantum registry
+    /// scheme had to pass on the same commitment. Appended last so existing
+    /// bincode variant tags (`0..=2`) remain stable.
+    Hybrid {
+        classical: Option<SchemeId>,
+        pq: SchemeId,
+    },
 }
 
 impl ObservedScheme {
     /// The quantum class. A scheme the registry does not list counts as
     /// classical: a fact the table cannot vouch for is not credited.
+    ///
+    /// For a conjunctive [`Self::Hybrid`] obligation, forging the check requires
+    /// breaking both halves simultaneously, so the obligation rests on the
+    /// stronger assumption of the two.
     #[must_use]
     pub const fn quantum_class(self) -> QuantumClass {
         match self {
@@ -91,11 +103,23 @@ impl ObservedScheme {
                 },
                 None => QuantumClass::Classical,
             },
+            Self::Hybrid { classical, pq } => {
+                let c_class = match classical {
+                    Some(id) => Self::Scheme(id).quantum_class(),
+                    None => QuantumClass::Classical,
+                };
+                let pq_class = Self::Scheme(pq).quantum_class();
+                if (c_class as u8) >= (pq_class as u8) {
+                    c_class
+                } else {
+                    pq_class
+                }
+            }
         }
     }
 
-    /// The name the profile prints: the registry short name, `secp256k1`, or
-    /// `proof:<assumption>`.
+    /// The name the profile prints: the registry short name, `secp256k1`,
+    /// `proof:<assumption>`, or `<classical>+<pq>` for a hybrid obligation.
     #[must_use]
     pub fn name(self) -> String {
         match self {
@@ -106,18 +130,26 @@ impl ObservedScheme {
                 Some(short) => short.to_string(),
                 None => format!("unlisted-0x{:04x}", id.0),
             },
+            Self::Hybrid { classical, pq } => {
+                let c_name = match classical {
+                    Some(id) => Self::Scheme(id).name(),
+                    None => "secp256k1".to_string(),
+                };
+                format!("{c_name}+{}", Self::Scheme(pq).name())
+            }
         }
     }
 }
 
 /// The wire form of [`ObservedScheme`]. `SchemeId` carries no serde impl (the
 /// scheme table is mounted by crates with no serde), so the identifier travels
-/// as its `u16`.
+/// as its `u16`. New variants are appended last to preserve bincode indices.
 #[derive(Serialize, Deserialize)]
 enum ObservedWire {
     Scheme(u16),
     Secp256k1,
     Proof(AssumptionClass),
+    Hybrid { classical: Option<u16>, pq: u16 },
 }
 
 impl Serialize for ObservedScheme {
@@ -126,6 +158,10 @@ impl Serialize for ObservedScheme {
             Self::Scheme(id) => ObservedWire::Scheme(id.0),
             Self::Secp256k1 => ObservedWire::Secp256k1,
             Self::Proof(class) => ObservedWire::Proof(class),
+            Self::Hybrid { classical, pq } => ObservedWire::Hybrid {
+                classical: classical.map(|id| id.0),
+                pq: pq.0,
+            },
         }
         .serialize(serializer)
     }
@@ -137,6 +173,10 @@ impl<'de> Deserialize<'de> for ObservedScheme {
             ObservedWire::Scheme(id) => Self::Scheme(SchemeId(id)),
             ObservedWire::Secp256k1 => Self::Secp256k1,
             ObservedWire::Proof(class) => Self::Proof(class),
+            ObservedWire::Hybrid { classical, pq } => Self::Hybrid {
+                classical: classical.map(SchemeId),
+                pq: SchemeId(pq),
+            },
         })
     }
 }
@@ -220,12 +260,32 @@ impl CryptoFacts {
     }
 
     /// How often `scheme` was observed.
+    ///
+    /// Querying a primitive [`ObservedScheme::Scheme`] or
+    /// [`ObservedScheme::Secp256k1`] also counts every conjunctive
+    /// [`ObservedScheme::Hybrid`] row in which that primitive participated.
     #[must_use]
     pub fn count(&self, scheme: ObservedScheme) -> u64 {
-        self.observed
-            .iter()
-            .find(|row| row.scheme == scheme)
-            .map_or(0, |row| row.count)
+        self.observed.iter().fold(0u64, |acc, row| {
+            let matches = row.scheme == scheme
+                || match (scheme, row.scheme) {
+                    (ObservedScheme::Scheme(target), ObservedScheme::Hybrid { classical, pq }) => {
+                        classical == Some(target) || pq == target
+                    }
+                    (
+                        ObservedScheme::Secp256k1,
+                        ObservedScheme::Hybrid {
+                            classical: None, ..
+                        },
+                    ) => true,
+                    _ => false,
+                };
+            if matches {
+                acc.saturating_add(row.count)
+            } else {
+                acc
+            }
+        })
     }
 
     /// Whether nothing was observed.
@@ -351,5 +411,55 @@ mod tests {
         let bytes = bincode::serialize(&facts).expect("bincode");
         let back: CryptoFacts = bincode::deserialize(&bytes).expect("bincode back");
         assert_eq!(back, facts);
+    }
+
+    #[test]
+    fn hybrid_obligations_preserve_primitive_counts_and_conjunctive_quantum_class() {
+        let hybrid_ed_mldsa = ObservedScheme::Hybrid {
+            classical: Some(SchemeId::ED25519),
+            pq: SchemeId::ML_DSA_65,
+        };
+        let hybrid_bls_mldsa = ObservedScheme::Hybrid {
+            classical: Some(SchemeId::BLS12381_MINSIG),
+            pq: SchemeId::ML_DSA_65,
+        };
+        let hybrid_secp_mldsa = ObservedScheme::Hybrid {
+            classical: None,
+            pq: SchemeId::ML_DSA_65,
+        };
+        let hybrid_ed_slh = ObservedScheme::Hybrid {
+            classical: Some(SchemeId::ED25519),
+            pq: SchemeId::SLH_DSA_SHAKE_128S,
+        };
+        let hybrid_unlisted = ObservedScheme::Hybrid {
+            classical: Some(SchemeId::ED25519),
+            pq: SchemeId(0x7777),
+        };
+
+        assert_eq!(hybrid_ed_mldsa.quantum_class(), QuantumClass::Lattice);
+        assert_eq!(hybrid_bls_mldsa.quantum_class(), QuantumClass::Lattice);
+        assert_eq!(hybrid_secp_mldsa.quantum_class(), QuantumClass::Lattice);
+        assert_eq!(hybrid_ed_slh.quantum_class(), QuantumClass::Hash);
+        assert_eq!(hybrid_unlisted.quantum_class(), QuantumClass::Classical);
+        assert_eq!(hybrid_ed_mldsa.name(), "ed25519+ml-dsa-65");
+        assert_eq!(hybrid_secp_mldsa.name(), "secp256k1+ml-dsa-65");
+
+        let mut facts = CryptoFacts::new();
+        facts.record(hybrid_ed_mldsa);
+        assert_eq!(facts.count(ObservedScheme::Scheme(SchemeId::ED25519)), 1);
+        assert_eq!(facts.count(ObservedScheme::Scheme(SchemeId::ML_DSA_65)), 1);
+        assert_eq!(facts.count(hybrid_ed_mldsa), 1);
+        assert_eq!(facts.quantum_class(), Some(QuantumClass::Lattice));
+
+        // Recording a standalone classical observation later downgrades the history.
+        facts.record(ObservedScheme::Scheme(SchemeId::ED25519));
+        assert_eq!(facts.count(ObservedScheme::Scheme(SchemeId::ED25519)), 2);
+        assert_eq!(facts.quantum_class(), Some(QuantumClass::Classical));
+
+        let bytes = bincode::serialize(&hybrid_ed_mldsa).expect("bincode");
+        let tag = u32::from_le_bytes(bytes[..4].try_into().expect("tag"));
+        assert_eq!(tag, 3);
+        let back: ObservedScheme = bincode::deserialize(&bytes).expect("decode");
+        assert_eq!(back, hybrid_ed_mldsa);
     }
 }

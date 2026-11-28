@@ -1055,9 +1055,13 @@ impl ExternalFinalityAdapter for BitVmCovenantAdapter {
         observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityAttestation, AdapterError> {
         let (att, _, used_pq) = self.verify_envelope_and_policy(evidence, policy)?;
-        observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         if used_pq {
-            observer.observe(ObservedScheme::Scheme(SchemeId::ML_DSA_65));
+            observer.observe(ObservedScheme::Hybrid {
+                classical: Some(SchemeId::ED25519),
+                pq: SchemeId::ML_DSA_65,
+            });
+        } else {
+            observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         }
         Ok(att)
     }

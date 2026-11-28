@@ -372,10 +372,10 @@ fn five_consensus_families_settle_into_one_certificate_and_ulp_stark_bundle() {
             facts.count(ObservedScheme::Scheme(SchemeId::ML_DSA_65)) > 0,
             "domain {id} must record verified ML-DSA-65 post-quantum signatures"
         );
-        // Flat multiset `CryptoFacts::quantum_class()` takes `min()` across observed
-        // schemes, so hybrid `BLS12-381 + ML-DSA-65` and `Ed25519 + ML-DSA-65` report
-        // `Classical` alongside positive `ML_DSA_65` counts while classical schemes remain active.
-        assert_eq!(facts.quantum_class(), Some(QuantumClass::Classical));
+        // Conjunctive hybrid `BLS12-381 + ML-DSA-65` and `Ed25519 + ML-DSA-65`
+        // require breaking both halves simultaneously, so `quantum_class()` is
+        // `Lattice` while individual primitive counts remain observable.
+        assert_eq!(facts.quantum_class(), Some(QuantumClass::Lattice));
     }
 
     // State-derived GlobalFinalityCertificate covers all 5 registered domains under
@@ -494,7 +494,7 @@ fn five_consensus_families_settle_into_one_certificate_and_ulp_stark_bundle() {
             event_root: bft_built.commitment.event_root,
             anchor_hash: bft_registered.validator_set_hash,
             security_weight: bft_registered.operator_bond,
-            pq_attested: false,
+            pq_attested: true,
             outflow_bps: 0,
         },
         UlpDomainSnapshot {
@@ -507,7 +507,7 @@ fn five_consensus_families_settle_into_one_certificate_and_ulp_stark_bundle() {
             event_root: dag_built.commitment.event_root,
             anchor_hash: dag_registered.validator_set_hash,
             security_weight: dag_registered.operator_bond,
-            pq_attested: false,
+            pq_attested: true,
             outflow_bps: 0,
         },
         UlpDomainSnapshot {
@@ -520,7 +520,7 @@ fn five_consensus_families_settle_into_one_certificate_and_ulp_stark_bundle() {
             event_root: poh_built.commitment.event_root,
             anchor_hash: poh_registered.validator_set_hash,
             security_weight: poh_registered.operator_bond,
-            pq_attested: false,
+            pq_attested: true,
             outflow_bps: 0,
         },
         UlpDomainSnapshot {
@@ -533,7 +533,7 @@ fn five_consensus_families_settle_into_one_certificate_and_ulp_stark_bundle() {
             event_root: pospace_built.commitment.event_root,
             anchor_hash: pospace_registered.validator_set_hash,
             security_weight: pospace_registered.operator_bond,
-            pq_attested: false,
+            pq_attested: true,
             outflow_bps: 0,
         },
     ];
@@ -557,6 +557,11 @@ fn five_consensus_families_settle_into_one_certificate_and_ulp_stark_bundle() {
 
     assert_eq!(bundle.domains_merkle_root, hub_ulp_root);
     assert_eq!(bundle.domain_count, 5);
+    assert_eq!(
+        sorted_snapshots.iter().filter(|s| s.pq_attested).count(),
+        4,
+        "all four hybrid PQ quorum domains (102..=105) carry pq_attested=true while signatureless PoW (101) remains false"
+    );
     assert!(!bundle.all_pq_attested);
     assert!(metrics.master_frame_bytes > 0);
     assert!(metrics.verify_stark_tx_bytes > 0);

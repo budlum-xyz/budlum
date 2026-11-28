@@ -665,9 +665,13 @@ impl ExternalFinalityAdapter for HotStuffThreeChainAdapter {
         observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityAttestation, AdapterError> {
         let (att, all_pq) = self.verify_inner(evidence, policy)?;
-        observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         if all_pq {
-            observer.observe(ObservedScheme::Scheme(SchemeId::ML_DSA_65));
+            observer.observe(ObservedScheme::Hybrid {
+                classical: Some(SchemeId::ED25519),
+                pq: SchemeId::ML_DSA_65,
+            });
+        } else {
+            observer.observe(ObservedScheme::Scheme(SchemeId::ED25519));
         }
         Ok(att)
     }
