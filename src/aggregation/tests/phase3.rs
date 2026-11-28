@@ -7,6 +7,8 @@
 
 use zeroize::Zeroizing;
 
+use bud_proof::recursive_envelope::RecursiveProofEnvelope;
+
 use crate::aggregation::backend::{AggBackend, AggError, TickCtx};
 use crate::aggregation::frame::{merge_pi, ClaimFrame, FrameError, FrameLimits};
 use crate::aggregation::object::derive_claim;
@@ -243,6 +245,38 @@ fn stark_backend_proves_merges_and_rejects_forgery() {
     );
     backend.verify(&master, DOMAIN).expect("master verifies");
 
+    // R-8 / T-K.1: leaf proofs are level zero with no child key; the merged
+    // proof is level one and pins the transparent AggFoldAir child verifier.
+    let leaf_envelope =
+        RecursiveProofEnvelope::from_bytes(&tick_left.proof).expect("leaf envelope");
+    assert_eq!(leaf_envelope.recursion_level, 0);
+    assert_eq!(leaf_envelope.child_verification_key_hash, [0; 32]);
+    let parent_envelope =
+        RecursiveProofEnvelope::from_bytes(&master.proof).expect("parent envelope");
+    assert_eq!(parent_envelope.recursion_level, 1);
+    assert_ne!(parent_envelope.child_verification_key_hash, [0; 32]);
+
+    // The envelope cannot relabel a level-one proof as level zero.
+    let mut relabeled_level = master.clone();
+    let mut envelope = RecursiveProofEnvelope::from_bytes(&relabeled_level.proof).expect("decode");
+    envelope.recursion_level = 0;
+    envelope.child_verification_key_hash = [0; 32];
+    relabeled_level.proof = envelope.to_bytes().expect("encode tampered level");
+    assert_eq!(
+        backend.verify(&relabeled_level, DOMAIN),
+        Err(AggError::ProofMismatch)
+    );
+
+    // Nor can it substitute a digest for another child verification key.
+    let mut relabeled_key = master.clone();
+    let mut envelope = RecursiveProofEnvelope::from_bytes(&relabeled_key.proof).expect("decode");
+    envelope.child_verification_key_hash[0] ^= 1;
+    relabeled_key.proof = envelope.to_bytes().expect("encode tampered key");
+    assert_eq!(
+        backend.verify(&relabeled_key, DOMAIN),
+        Err(AggError::ProofMismatch)
+    );
+
     // Wrong domain must be refused.
     assert_eq!(
         backend.verify(&master, DOMAIN + 1),
@@ -288,10 +322,12 @@ fn stark_backend_proves_merges_and_rejects_forgery() {
     stolen_fee.segments[0].aggregator = Address::from([0xEE; 32]);
     assert!(backend.verify(&stolen_fee, DOMAIN).is_err());
 
-    // Tampering program_hash header to an unauthorized program must be refused.
+    // Tampering program_hash in the versioned envelope must be refused.
     let mut bad_program_frame = tick_left.clone();
-    // Header layout: magic(4) + ver(1) + param(4) + domain(4) + program_hash(32)
-    bad_program_frame.proof[13] ^= 0xFF;
+    let mut bad_program =
+        RecursiveProofEnvelope::from_bytes(&bad_program_frame.proof).expect("decode tick envelope");
+    bad_program.program_hash[0] ^= 0xFF;
+    bad_program_frame.proof = bad_program.to_bytes().expect("encode tampered program");
     assert_eq!(
         backend.verify(&bad_program_frame, DOMAIN),
         Err(AggError::ProofMismatch)

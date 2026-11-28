@@ -2,18 +2,18 @@ use bud_vm::Step;
 use serde::{Deserialize, Serialize};
 use tiny_keccak::{Hasher, Keccak};
 
-/// The current proof format version.
+/// The current proof format version, shared with the recursive envelope.
 ///
 /// Every `ProofEnvelope` carries it; the verifier rejects anything else
 /// (older bytes are not migrated, newer bytes are not understood). Bump this
-/// constant together with any change to the serialized proof shape,
-/// transcript, public inputs, or envelope fields - never edit the literals
-/// scattered across the codebase, or a bump is silently half-applied.
+/// constant together with any change to a serialized proof shape, transcript,
+/// public inputs, recursion metadata, or envelope fields.
 ///
-/// Version 2: the challenge field is the cubic extension of Goldilocks and the
-/// FRI query count is 76. Version 1 proofs (quadratic extension, 100 queries) gave less
-/// than 128 bits provable and are refused.
-pub const PROOF_FORMAT_VERSION: u32 = 2;
+/// Version 2 moved the execution proof to the cubic Goldilocks extension and
+/// 76 FRI queries. Version 3 adds `RecursiveProofEnvelope` for recursive
+/// `AggFoldAir` proofs. Direct `ProofEnvelope` execution proofs remain leaves;
+/// they do not claim a recursion level or a child verification key.
+pub use crate::recursive_envelope::PROOF_FORMAT_VERSION;
 
 /// A proof larger than this is refused before it is deserialized or hashed:
 /// the allocation cap that closes the parse-time side of a bloated-proof DoS
