@@ -6,7 +6,7 @@
     <string name="notif_boot_resume_title">Budlum Do&#x011F;rulay&#x0131;c&#x0131; G&#x00F6;revleri Kullan&#x0131;lam&#x0131;y&#x006F;r</string>
     <string name="notif_boot_resume_body">Do&#x011F;rulay&#x0131;c&#x0131; g&#x00F6;revleri hen&#x00FC;z ba&#x011F;l&#x0131; de&#x011F;il. Denetimler &#x00E7;al&#x0131;&#x015F;m&#x0131;y&#x006F;r. Durumu g&#x00F6;rmek i&#x00E7;in uygulamay&#x0131; a&#x00E7;&#x0131;n.</string>
     <string name="security_tradeoff_note">Sahip harcaması, stake, anahtar döndürme ve çıkış bu sürümde kapalıdır. Bu telefon bir cüzdan tutar ve onunla imzalayabilir, ancak bu imzayı henüz Keystore destekli biyometrik veya PIN yetkisi korumaz. Görev anahtarlarının saklanması çalışan doğrulayıcı anlamına gelmez.</string>
-    <string name="action_faucet_request">Musluk isteği gönder (100 BUD)</string>
+    <string name="action_faucet_request">100 BUD talep et</string>
     <string name="faucet_endpoint">Musluk HTTPS adresi (https://faucet.alan-adiniz)</string>
     <string name="faucet_own_wallet">Kendi cüzdanın: %1$s</string>
     <string name="faucet_no_wallet">Bu telefonda henüz cüzdan yok: test jetonu gönderilecek bir yer de yok. Önce bir küpe dokun.</string>

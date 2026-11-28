@@ -143,6 +143,42 @@ enum class Skin(
  */
 val TILE = 20.dp
 
+/**
+ * A place on the floor.
+ *
+ * The lattice has no origin corner: a block never sits at (0,0), and the
+ * places around any block are (x+1,y), (x,y+1) and (x+1,y+1) - the three the
+ * sheet fills first when it draws a cluster. Two people whose blocks are
+ * neighbours in this lattice are standing beside each other; two whose blocks
+ * are not are not, however close the drawing makes them look.
+ */
+data class Cell(val x: Int, val y: Int) {
+    /** Where a person can stand next to here, nearest first. */
+    val neighbours: List<Cell>
+        get() = listOf(
+            Cell(x - 1, y),
+            Cell(x, y - 1),
+            Cell(x - 1, y - 1),
+            Cell(x + 1, y),
+            Cell(x, y + 1),
+            Cell(x + 1, y + 1),
+        ).filter { it.x >= 0 && it.y >= 0 && (it.x != 0 || it.y != 0) }
+
+    /** Beside each other means one step in the lattice, either way. */
+    fun beside(other: Cell): Boolean = neighbours.contains(other)
+}
+
+/**
+ * The lit block: 32dp, which is the file's 64 against this floor's 20dp mesh.
+ *
+ * The same number is the step a person steps by when they move to the block
+ * beside them, so it is also the unit the coordinate system counts in.
+ */
+val CUBE = 32.dp
+
+/** The passive surface the file carries beside the mesh (`#D9D9D9`). */
+internal val Passive = Color(0xFFD9D9D9)
+
 /** The cube tile, repeated across the viewport with smooth skin transitions. */
 @Composable
 fun CubeFloor(theme: Skin, modifier: Modifier = Modifier, content: @Composable () -> Unit) {

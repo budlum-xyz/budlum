@@ -216,7 +216,7 @@ private fun CodeRow(model: GardenModel) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .border(1.dp, skin.surfaceRule, RoundedCornerShape(CONTROL_RADIUS))
-                        .background(Page, RoundedCornerShape(CONTROL_RADIUS))
+                        .background(skin.surface, RoundedCornerShape(CONTROL_RADIUS))
                         .padding(14.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -231,7 +231,7 @@ private fun CodeRow(model: GardenModel) {
                     Text(
                         text = stringResource(R.string.g_qr_hint),
                         style = MaterialTheme.typography.labelSmall,
-                        color = Ink,
+                        color = skin.surfaceInk,
                     )
                 }
             }

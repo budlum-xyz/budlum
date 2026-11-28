@@ -325,7 +325,7 @@ fun Wordmark(
         painter = painterResource(R.drawable.budlum_wordmark),
         contentDescription = stringResource(R.string.app_name),
         colorFilter = tint?.let { ColorFilter.tint(it) },
-        modifier = modifier.height(22.dp),
+        modifier = modifier.height(14.dp),
     )
 }
 

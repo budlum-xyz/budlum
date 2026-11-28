@@ -208,10 +208,13 @@ fun GardenApp(
         when (current) {
             Step.Blocks -> BlockFieldScreen(
                 model = model,
-                onCube = {
-                    // A block is the wallet: touching one draws this phone's
-                    // own twenty-four words out of the core, or the wallet it
-                    // already holds. No menu, no second screen to find.
+                onCube = { cell ->
+                    // A place on the floor is the wallet. Pressing one takes
+                    // that coordinate - two people one step apart are standing
+                    // beside each other, and that is the whole social model -
+                    // and then opens the wallet this phone has, or makes one
+                    // and shows its words.
+                    model.settle(cell)
                     if (model.state.walletExists) {
                         wantedTestnet = false
                         walletReturnStep = Step.Blocks

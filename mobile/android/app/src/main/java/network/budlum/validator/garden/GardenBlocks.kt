@@ -92,19 +92,23 @@ enum class BlockGoes {
  */
 data class Block(
     val id: Int,
-    val column: Int,
-    val row: Int,
+    val cell: Cell,
 )
 
-/** Where the blocks start out. Scattered, the way the sheet scatters them. */
+/**
+ * Where the blocks start out, in the lattice the floor uses.
+ *
+ * No block starts at the origin corner: the sheet's clusters always read as
+ * (0,1), (1,0), (1,1) around a place, never as (0,0).
+ */
 private fun openingBlocks(): List<Block> = listOf(
-    Block(0, 2, 2),
-    Block(1, 9, 4),
-    Block(2, 5, 9),
-    Block(3, 13, 11),
-    Block(4, 1, 15),
-    Block(5, 10, 18),
-    Block(6, 6, 22),
+    Block(0, Cell(0, 1)),
+    Block(1, Cell(1, 0)),
+    Block(2, Cell(1, 1)),
+    Block(3, Cell(3, 2)),
+    Block(4, Cell(2, 4)),
+    Block(5, Cell(5, 5)),
+    Block(6, Cell(4, 7)),
 )
 
 /**
@@ -115,7 +119,7 @@ private fun openingBlocks(): List<Block> = listOf(
 @Composable
 fun BlockFieldScreen(
     model: GardenModel,
-    onCube: () -> Unit,
+    onCube: (Cell) -> Unit,
     onGo: (BlockGoes) -> Unit,
     onJoin: () -> Unit,
     onChoose: () -> Unit,
@@ -197,7 +201,8 @@ fun BlockFieldScreen(
 
             BlockField(
                 skin = skin,
-                onTap = { onCube() },
+                mySeat = state.seat,
+                onPick = onCube,
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
@@ -224,16 +229,21 @@ fun BlockFieldScreen(
 @Composable
 fun BlockField(
     skin: Skin,
-    onTap: (Int) -> Unit = {},
+    mySeat: Cell? = null,
+    onPick: (Cell) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val blocks = remember { mutableStateListOf<Block>().apply { addAll(openingBlocks()) } }
     var held by remember { mutableStateOf<Int?>(null) }
     var carry by remember { mutableStateOf(Offset.Zero) }
-    // Where a block has been taken to, in pixels, on top of the tile it was
-    // drawn on. Free: no grid, no neighbour to stay clear of, nothing that
-    // refuses a place because another block is near it.
+    // Where a block has been taken to, in pixels, on top of the lattice place
+    // it was drawn at: free, with nothing refusing a spot because another
+    // block is near it.
     val taken = remember { mutableStateMapOf<Int, Offset>() }
+    // The floor itself moves. Dragging the ground shifts the mesh and every
+    // block with it, and the coordinate under a finger is read from where the
+    // mesh is, not from where the glass is.
+    var pan by remember { mutableStateOf(Offset.Zero) }
     val haptic = LocalHapticFeedback.current
     val mark = ImageBitmap.imageResource(
         when (skin) {
@@ -245,37 +255,55 @@ fun BlockField(
 
     BoxWithConstraints(modifier = modifier) {
         val density = LocalDensity.current
-        // One cell is one floor tile, so a block lands on the mesh
-        // CubeFloor already lays down instead of on a second grid.
-        val cell = TILE * SPAN
-        val cellPx = with(density) { TILE.toPx() }
-        val rowsDrawn = (with(density) { maxHeight.toPx() } / cellPx).toInt().coerceAtLeast(1)
-
+        // The cube is 32dp on a phone: the file draws it at 64 against a 60
+        // pixel mesh, and half of that against the 20dp mesh this floor lays
+        // down is the same drawing at phone scale.
+        val cubePx = with(density) { CUBE.toPx() }
         val floorWidth = with(density) { maxWidth.toPx() }
         val floorHeight = with(density) { maxHeight.toPx() }
 
+        fun cellAt(point: Offset): Cell {
+            val x = ((point.x - pan.x) / cubePx).roundToInt().coerceAtLeast(0)
+            val y = ((point.y - pan.y) / cubePx).roundToInt().coerceAtLeast(0)
+            // The lattice has no origin corner: a press at the very corner is
+            // read as the first place beside it.
+            return if (x == 0 && y == 0) Cell(0, 1) else Cell(x, y)
+        }
+
+        // The ground: a press names a place, a drag moves the mesh.
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .pointerInput(Unit) {
+                    detectTapGestures { point -> onPick(cellAt(point)) }
+                }
+                .pointerInput(Unit) {
+                    detectDragGestures { change, amount ->
+                        change.consume()
+                        pan += amount
+                    }
+                },
+        )
+
         blocks.forEach { block ->
             val lifted = held == block.id
+            val mine = mySeat == block.cell
             val settled = taken[block.id] ?: Offset.Zero
-            val dx = settled.x + if (lifted) carry.x else 0f
-            val dy = settled.y + if (lifted) carry.y else 0f
-            val clampedRow = block.row.coerceIn(0, (rowsDrawn - SPAN).coerceAtLeast(0))
+            val homeX = block.cell.x * cubePx + pan.x
+            val homeY = block.cell.y * cubePx + pan.y
+            val dx = homeX + settled.x + if (lifted) carry.x else 0f
+            val dy = homeY + settled.y + if (lifted) carry.y else 0f
 
             Box(
                 modifier = Modifier
                     .zIndex(if (lifted) 2f else 0f)
-                    .offset {
-                        IntOffset(
-                            (block.column * cellPx + dx).roundToInt(),
-                            (clampedRow * cellPx + dy).roundToInt(),
-                        )
-                    }
-                    .size(cell)
+                    .offset { IntOffset(dx.roundToInt(), dy.roundToInt()) }
+                    .size(CUBE)
                     // A lit cell in the sheet is not a bordered card. It
                     // glows into the dark around it, and the floor's
                     // four-petal mark still reads through the light.
                     .drawBehind {
-                        val reach = cellPx * HALO
+                        val reach = cubePx * HALO
                         drawRect(
                             brush = Brush.radialGradient(
                                 colors = listOf(
@@ -289,24 +317,24 @@ fun BlockField(
                             topLeft = Offset(-reach, -reach),
                             size = Size(size.width + reach * 2, size.height + reach * 2),
                         )
-                        drawRect(color = fillFor(skin, lifted))
-                        val step = cellPx.toInt()
+                        drawRect(color = if (mine) skin.accentOnSurface else fillFor(skin, lifted))
+                        val step = (cubePx / SPAN).toInt()
                         for (down in 0 until SPAN) {
                             for (across in 0 until SPAN) {
                                 drawImage(
                                     image = mark,
                                     dstOffset = IntOffset(across * step, down * step),
                                     dstSize = IntSize(step, step),
-                                    colorFilter = ColorFilter.tint(Ink.copy(alpha = 0.40f)),
+                                    colorFilter = ColorFilter.tint(skin.ink.copy(alpha = 0.40f)),
                                     alpha = 0.45f,
                                 )
                             }
                         }
                     }
                     .pointerInput(block.id) {
-                        detectTapGestures { onTap(block.id) }
+                        detectTapGestures { onPick(block.cell) }
                     }
-                    .pointerInput(block.id, rowsDrawn, floorWidth, floorHeight) {
+                    .pointerInput(block.id, floorWidth, floorHeight) {
                         detectDragGestures(
                             onDragStart = {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -318,12 +346,11 @@ fun BlockField(
                                 carry += amount
                             },
                             onDragEnd = {
-                                val home = Offset(block.column * cellPx, clampedRow * cellPx)
                                 val want = (taken[block.id] ?: Offset.Zero) + carry
-                                val minX = -home.x
-                                val minY = -home.y
-                                val topX = floorWidth - cellPx - home.x
-                                val topY = floorHeight - cellPx - home.y
+                                val minX = -homeX
+                                val minY = -homeY
+                                val topX = floorWidth - cubePx - homeX
+                                val topY = floorHeight - cubePx - homeY
                                 taken[block.id] = Offset(
                                     want.x.coerceIn(minX, maxOf(minX, topX)),
                                     want.y.coerceIn(minY, maxOf(minY, topY)),
@@ -410,13 +437,16 @@ private fun DestinationMenu(
 
 /** What a block is filled with. Lit, or brighter still while carried. */
 private fun fillFor(skin: Skin, lifted: Boolean): Color = when {
-    lifted -> Chalk
-    skin == Skin.Sage -> Page
+    // A held block turns to the sheet's brightest surface; on the dark skin
+    // that is chalk, on the light one it is the surface itself.
+    lifted -> if (skin.isDark) Chalk else skin.behind
+    skin.isDark -> skin.surface
     else -> Sage
 }
 
 /** What colour the light around a lit block is, per skin. */
-private fun glowFor(skin: Skin): Color = when (skin) {
-    Skin.Sage -> Page
+private fun glowFor(skin: Skin): Color = when {
+    skin.isDark -> skin.surface
+    skin == Skin.Sage -> skin.surface
     else -> Sage
 }

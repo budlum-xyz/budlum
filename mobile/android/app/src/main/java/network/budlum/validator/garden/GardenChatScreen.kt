@@ -408,7 +408,7 @@ private fun Composer(
     onSend: () -> Unit,
     onAttach: () -> Unit,
 ) {
-    val iconTint = if (skin.isDark) Page else Ink
+    val iconTint = if (skin.isDark) skin.surfaceInk else skin.surfaceInk
     Row(
         modifier = Modifier
             .fillMaxWidth()

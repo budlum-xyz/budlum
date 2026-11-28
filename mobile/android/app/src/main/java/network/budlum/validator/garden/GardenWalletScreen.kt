@@ -284,8 +284,17 @@ fun WalletScreen(
                 SheetHead(
                     name = stringResource(R.string.w_you),
                     address = GardenLogic.shortAddress(state.walletAddress),
-                    under = stringResource(R.string.w_chain) + " " +
-                        MobileConstants.TESTNET_CHAIN_ID.toString(),
+                    under = buildString {
+                        append(stringResource(R.string.w_chain))
+                        append(" ")
+                        append(MobileConstants.TESTNET_CHAIN_ID.toString())
+                        model.state.seat?.let {
+                            append(" · ")
+                            append(it.x)
+                            append(",")
+                            append(it.y)
+                        }
+                    },
                     skin = skin,
                     trailing = {
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -338,7 +347,7 @@ fun WalletScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .border(1.dp, skin.surfaceRule, RoundedCornerShape(CONTROL_RADIUS))
-                            .background(Page, RoundedCornerShape(CONTROL_RADIUS))
+                            .background(skin.surface, RoundedCornerShape(CONTROL_RADIUS))
                             .padding(16.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -353,7 +362,7 @@ fun WalletScreen(
                         Text(
                             text = state.walletAddress,
                             style = MaterialTheme.typography.labelSmall,
-                            color = Ink,
+                            color = skin.surfaceInk,
                         )
                     }
                 }

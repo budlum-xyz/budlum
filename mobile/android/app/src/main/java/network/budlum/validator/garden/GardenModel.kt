@@ -89,6 +89,8 @@ data class GardenState(
     val pendingJoinLink: String = "",
     val clipboardInvite: String = "",
     val dismissedClipboardInvite: String = "",
+    /** The place on the floor this phone took, and with it its coordinate. */
+    val seat: Cell? = null,
 ) {
     val waitingCount: Int get() = people.count { it.waiting }
     val seated: Boolean get() = GardenLogic.isGardenSeated(status)
@@ -119,12 +121,32 @@ class GardenModel(
      */
     private val seal by lazy { DeviceWalletSeal(app) }
 
-    var state by mutableStateOf(GardenState())
+    var state by mutableStateOf(GardenState(seat = storedSeat()))
         private set
 
     /** The active floor skin, persisted as a non-secret UI preference. */
     var skin by mutableStateOf(Skin.fromName(prefs.getString(PREF_SKIN, null)))
         private set
+
+    /**
+     * Take a place on the floor.
+     *
+     * The coordinate is the wallet's address on the floor rather than a label:
+     * two people whose places are neighbours in the lattice are standing beside
+     * each other, and the Garden only shows someone else's block when they are
+     * standing beside you.
+     */
+    fun settle(cell: Cell) {
+        if (state.seat == cell) return
+        state = state.copy(seat = cell)
+        prefs.edit().putInt(PREF_SEAT_X, cell.x).putInt(PREF_SEAT_Y, cell.y).apply()
+    }
+
+    /** The place this phone took in an earlier run, if it took one. */
+    private fun storedSeat(): Cell? {
+        if (!prefs.contains(PREF_SEAT_X)) return null
+        return Cell(prefs.getInt(PREF_SEAT_X, 0), prefs.getInt(PREF_SEAT_Y, 0))
+    }
 
     fun selectSkin(next: Skin) {
         if (skin == next) return
@@ -686,6 +708,10 @@ class GardenModel(
     companion object {
         private const val UI_PREFS = "budlum_garden_ui"
         private const val PREF_SKIN = "skin"
+
+        /** The floor coordinate this phone took. A place, not a secret. */
+        private const val PREF_SEAT_X = "seat_x"
+        private const val PREF_SEAT_Y = "seat_y"
         private const val FEED_LIMIT = 100u
         private val HEX = "0123456789abcdef".toCharArray()
     }
