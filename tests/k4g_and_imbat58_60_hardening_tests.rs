@@ -204,3 +204,37 @@ fn imbat58_59_checked_counters_refuse_u64_max_overwrite_and_grace_overflow() {
         );
     }
 }
+
+#[test]
+fn imbat58_59_offer_id_exhaustion_prevents_post_prune_id_reuse() {
+    let mut market = MarketplaceRegistry::new();
+    let first_seller = addr(0x51);
+    let second_seller = addr(0x52);
+    let cid = ContentId([0x45; 32]);
+    market.next_offer_id = u64::MAX - 1;
+
+    assert_eq!(
+        market.create_offer(first_seller, cid, 1_000, 10),
+        Ok(u64::MAX - 1)
+    );
+    assert_eq!(market.next_offer_id, u64::MAX);
+
+    // Close and evict the terminal offer (simulating MAX_OFFERS retain or TTL sweep):
+    // an exhausted counter at u64::MAX must still fail closed rather than issuing a
+    // saturating u64::MAX id that could later be evicted and handed to a second seller.
+    must(
+        market.close_offer(u64::MAX - 1, &first_seller),
+        "close terminal offer",
+    );
+    market.offers.remove(&(u64::MAX - 1));
+
+    assert_eq!(
+        market
+            .create_offer(second_seller, cid, 2_000, 11)
+            .err()
+            .as_deref(),
+        Some("offer id counter exhausted")
+    );
+    assert!(market.offers.is_empty());
+    assert_eq!(market.next_offer_id, u64::MAX);
+}

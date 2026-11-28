@@ -429,14 +429,15 @@ impl MarketplaceRegistry {
                  listing to another"
             ));
         }
-        // The counter saturates at u64::MAX rather than refusing the last id.
-        // The live-id guard above already refuses to mint over an id that
-        // resolves, so a saturated counter cannot hand one seller's listing to
-        // another: the second attempt at `u64::MAX` is refused by that guard.
-        // `checked_add` refused the id `u64::MAX` itself, which loses the last
-        // value of the space and breaks the recorded contract this module's
-        // test pins.
-        let next_offer_id = self.next_offer_id.saturating_add(1);
+        // Advance strictly with checked arithmetic before mutating state: once
+        // `next_offer_id == u64::MAX`, there is no successor id, and saturating
+        // at `u64::MAX` would permit `u64::MAX` to be re-allocated to a second
+        // seller after `close_offer` + inactive/TTL pruning removes the entry
+        // from `offers`.
+        let next_offer_id = self
+            .next_offer_id
+            .checked_add(1)
+            .ok_or_else(|| "offer id counter exhausted".to_string())?;
         let offer = DataOffer {
             id,
             seller,
@@ -2189,15 +2190,19 @@ mod tests {
     }
 
     #[test]
-    fn offer_counter_saturates_and_encryption_policy_cap_holds() {
+    fn offer_counter_exhaustion_is_refused_and_encryption_policy_cap_holds() {
         let mut reg = MarketplaceRegistry::new();
         let seller = addr(1);
         let cid = ContentId([0xEE; 32]);
         reg.next_offer_id = u64::MAX;
-        let id = reg.create_offer(seller, cid, 50, 7).unwrap();
-        assert_eq!(id, u64::MAX);
+        let refused = reg.create_offer(seller, cid, 50, 7);
+        assert_eq!(
+            refused.err().as_deref(),
+            Some("offer id counter exhausted"),
+            "an exhausted counter must fail closed without minting u64::MAX"
+        );
         assert_eq!(reg.next_offer_id, u64::MAX);
-        assert!(reg.create_offer(seller, cid, 50, 7).is_err());
+        assert!(reg.offers.is_empty());
 
         for v in 1..=(MAX_ENCRYPTION_POLICIES as u32) {
             reg.set_encryption_policy(EncryptionPolicy::post_quantum(v, 100, None))
@@ -2209,17 +2214,21 @@ mod tests {
     }
 
     #[test]
-    fn the_last_offer_id_is_issued_once_and_never_reused() {
+    fn the_last_allocatable_offer_id_is_issued_once_and_never_reused_after_prune() {
         let mut reg = MarketplaceRegistry::new();
-        let seller = addr(1);
+        let first_seller = addr(1);
+        let second_seller = addr(2);
         let cid = ContentId([0x7A; 32]);
-        reg.next_offer_id = u64::MAX;
-        assert_eq!(reg.create_offer(seller, cid, 10, 1), Ok(u64::MAX));
-        // The counter is saturated, so a second mint at the same id is refused
-        // by the live-id guard rather than by an arithmetic overflow: the id
-        // `u64::MAX` resolves to the first seller and to nobody else.
-        assert!(reg.create_offer(seller, cid, 99, 1).is_err());
-        assert_eq!(reg.offers.get(&u64::MAX).map(|o| o.seller), Some(seller));
+        reg.next_offer_id = u64::MAX - 1;
+        assert_eq!(reg.create_offer(first_seller, cid, 10, 1), Ok(u64::MAX - 1));
+        assert_eq!(reg.next_offer_id, u64::MAX);
+        // Even if the issued offer is closed and swept from `offers`, the
+        // exhausted counter at `u64::MAX` must stay fail-closed and never
+        // allocate a reusable terminal id to another seller.
+        reg.close_offer(u64::MAX - 1, &first_seller).unwrap();
+        reg.offers.remove(&(u64::MAX - 1));
+        assert!(reg.create_offer(second_seller, cid, 99, 2).is_err());
+        assert!(reg.offers.is_empty());
         assert_eq!(reg.next_offer_id, u64::MAX);
     }
 
