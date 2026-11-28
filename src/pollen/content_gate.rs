@@ -226,6 +226,18 @@ impl ProtectedContent {
         self.bindings.is_empty()
     }
 
+    /// Count protected-content bindings whose bound `AssetId` satisfies `predicate`.
+    #[must_use]
+    pub fn count_matching<F>(&self, mut predicate: F) -> usize
+    where
+        F: FnMut(&AssetId) -> bool,
+    {
+        self.bindings
+            .values()
+            .filter(|asset_id| predicate(asset_id))
+            .count()
+    }
+
     /// Decide whether a read may proceed.
     ///
     /// `grant_asset` is the asset covered by whatever grant the caller

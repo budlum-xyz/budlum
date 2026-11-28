@@ -268,6 +268,40 @@ pub const MAX_ENCRYPTION_POLICIES: usize = 1_024;
 /// same bound the registry enforces in this module.
 pub const MAX_PROTECTED_CONTENT: usize = 100_000;
 
+/// Maximum protected-content bindings a single data asset owner may hold so
+/// one account cannot exhaust [`MAX_PROTECTED_CONTENT`] across the marketplace.
+///
+/// Convenience: pub so marketplace callers can check the same per-owner ceiling.
+pub const MAX_PROTECTED_CONTENT_PER_OWNER: usize = 256;
+
+/// Occupancy deposit charged per epoch of a `.bud` name listing (`0.01` BUD/epoch).
+///
+/// Convenience: pub so wallet and RPC callers compute the exact deposit ceiling.
+pub const NAME_OFFER_DEPOSIT_PER_EPOCH_ATOMS: u64 = 10_000;
+
+/// Compute the duration-proportional occupancy deposit for a listing lasting
+/// `duration_epochs` (`1..=MAX_NAME_OFFER_TTL_EPOCHS`).
+///
+/// Convenience: pub so RPC and CLI callers can quote the exact listing deposit.
+///
+/// # Errors
+///
+/// Refuses zero duration, durations exceeding [`MAX_NAME_OFFER_TTL_EPOCHS`],
+/// or checked integer overflow.
+pub fn compute_offer_occupancy_deposit(duration_epochs: u64) -> Result<u64, String> {
+    if duration_epochs == 0 {
+        return Err("Offer occupancy duration must be >= 1 epoch".into());
+    }
+    if duration_epochs > MAX_NAME_OFFER_TTL_EPOCHS {
+        return Err(format!(
+            "Offer occupancy duration {duration_epochs} exceeds {MAX_NAME_OFFER_TTL_EPOCHS} epochs"
+        ));
+    }
+    duration_epochs
+        .checked_mul(NAME_OFFER_DEPOSIT_PER_EPOCH_ATOMS)
+        .ok_or_else(|| "Offer occupancy deposit overflow".into())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MarketplaceRegistry {
     #[serde(default)]
@@ -557,7 +591,20 @@ impl MarketplaceRegistry {
             return Err("AccessGrant already registered".into());
         }
         if self.access_grants.len() >= MAX_ACCESS_GRANTS {
-            return Err("access grant registry is full".into());
+            let has_reclaimable = self.access_grants.values().any(|existing| {
+                existing.status != super::AccessGrantStatus::Active
+                    || grant.issued_at_block >= existing.expires_at_block
+            });
+            if !has_reclaimable {
+                return Err("access grant registry is full".into());
+            }
+            self.access_grants.retain(|_, existing| {
+                existing.status == super::AccessGrantStatus::Active
+                    && grant.issued_at_block < existing.expires_at_block
+            });
+            if self.access_grants.len() >= MAX_ACCESS_GRANTS {
+                return Err("access grant registry is full".into());
+            }
         }
         // DAO policy is applied here. Until now `encryption_policies` was a
         // record that was only written and read: `set_encryption_policy`
@@ -660,6 +707,53 @@ impl MarketplaceRegistry {
         }
         self.encryption_policies.insert(policy.version, policy);
         Ok(())
+    }
+
+    /// Validate `policy` against `chain_id` (refusing classical suites on mainnet
+    /// and unknown chains) and install it in the registry.
+    ///
+    /// Convenience: kept for chain-aware governance and genesis policy callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `policy.validate_for_chain(chain_id)` fails or the
+    /// policy table is at [`MAX_ENCRYPTION_POLICIES`].
+    pub fn set_encryption_policy_for_chain(
+        &mut self,
+        policy: EncryptionPolicy,
+        chain_id: u64,
+    ) -> Result<(), String> {
+        policy.validate_for_chain(chain_id)?;
+        if !self.encryption_policies.contains_key(&policy.version)
+            && self.encryption_policies.len() >= MAX_ENCRYPTION_POLICIES
+        {
+            return Err("encryption policy registry is full".into());
+        }
+        self.encryption_policies.insert(policy.version, policy);
+        Ok(())
+    }
+
+    /// Install the canonical post-quantum HPKE default policy (`MLKEM768-X25519`,
+    /// version `MAINNET_MIN_ENCRYPTION_POLICY_VERSION`) validated for `chain_id`.
+    ///
+    /// Convenience: kept for mainnet/testnet marketplace initialization callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `max_grant_duration_blocks == 0` or the policy table is full.
+    pub fn install_post_quantum_default_policy(
+        &mut self,
+        chain_id: u64,
+        max_grant_duration_blocks: u64,
+    ) -> Result<u32, String> {
+        let policy = EncryptionPolicy::post_quantum(
+            super::data_rights::MAINNET_MIN_ENCRYPTION_POLICY_VERSION,
+            max_grant_duration_blocks,
+            None,
+        );
+        let version = policy.version;
+        self.set_encryption_policy_for_chain(policy, chain_id)?;
+        Ok(version)
     }
 
     #[must_use]
@@ -952,7 +1046,13 @@ impl MarketplaceRegistry {
         declared_asset: &AssetId,
         requester: &Address,
     ) -> Result<(), String> {
-        if AiDataInputRef::decode(input_ref)?.is_some() {
+        if let Some(reference) = AiDataInputRef::decode(input_ref)? {
+            if reference.asset_id != *declared_asset {
+                return Err(
+                    "AI data read denied: Pollen input_ref references a different asset than the declared perception asset"
+                        .into(),
+                );
+            }
             return Ok(());
         }
         match self.data_assets.get(declared_asset) {
@@ -1005,12 +1105,22 @@ impl MarketplaceRegistry {
                 "cannot bind content that does not match the asset's registered manifest".into(),
             );
         }
-        if self.protected_content.asset_for(&manifest_id).is_none()
-            && self.protected_content.len() >= MAX_PROTECTED_CONTENT
-        {
-            return Err("protected content registry is full".into());
-        }
         let owner = asset.owner;
+        if self.protected_content.asset_for(&manifest_id).is_none() {
+            let owner_bindings = self.protected_content.count_matching(|bound_asset| {
+                self.data_assets
+                    .get(bound_asset)
+                    .is_some_and(|existing| existing.owner == owner)
+            });
+            if owner_bindings >= MAX_PROTECTED_CONTENT_PER_OWNER {
+                return Err(format!(
+                    "owner reached maximum protected content bindings ({MAX_PROTECTED_CONTENT_PER_OWNER})"
+                ));
+            }
+            if self.protected_content.len() >= MAX_PROTECTED_CONTENT {
+                return Err("protected content registry is full".into());
+            }
+        }
         self.protected_content
             .bind(manifest_id, asset_id, owner, caller)
             .map_err(|e| e.to_string())
@@ -1104,6 +1214,23 @@ impl MarketplaceRegistry {
         requester: &Address,
         current_block: u64,
     ) -> Result<(), String> {
+        let (grant_asset_id, grant_owner) = {
+            let grant = self
+                .access_grants
+                .get(grant_id)
+                .ok_or("AccessGrant not found")?;
+            (grant.asset_id, grant.owner)
+        };
+        let asset = self
+            .data_assets
+            .get(&grant_asset_id)
+            .ok_or("AccessGrant references unknown DataAsset")?;
+        if !asset.is_active() {
+            return Err("AccessGrant cannot be consumed: DataAsset is inactive".into());
+        }
+        if asset.owner != grant_owner {
+            return Err("AccessGrant cannot be consumed: grant owner mismatch".into());
+        }
         let grant = self
             .access_grants
             .get_mut(grant_id)
@@ -1245,7 +1372,27 @@ impl MarketplaceRegistry {
             }
         }
 
+        let ttl_epochs = request.expires_at_epoch.saturating_sub(current_epoch);
+        let _required_occupancy_deposit = compute_offer_occupancy_deposit(ttl_epochs)?;
+
+        let id = self.next_name_offer_id;
+        if self.name_offers.contains_key(&id) {
+            return Err(format!(
+                "name offer id {id} is already live: refusing to overwrite an existing seller listing"
+            ));
+        }
+        let next_id = id
+            .checked_add(1)
+            .ok_or_else(|| "Name offer id overflow".to_string())?;
+
         if self.name_offers.len() >= MAX_OFFERS {
+            let has_expired = self
+                .name_offers
+                .values()
+                .any(|o| !o.active || current_epoch >= o.expires_at_epoch);
+            if !has_expired {
+                return Err(format!("Name offer table full (max {MAX_OFFERS})"));
+            }
             self.name_offers
                 .retain(|_, o| o.active && current_epoch < o.expires_at_epoch);
             if self.name_offers.len() >= MAX_OFFERS {
@@ -1253,10 +1400,7 @@ impl MarketplaceRegistry {
             }
         }
 
-        let id = self.next_name_offer_id;
-        self.next_name_offer_id = id
-            .checked_add(1)
-            .ok_or_else(|| "Name offer id overflow".to_string())?;
+        self.next_name_offer_id = next_id;
         self.name_offers.insert(
             id,
             NameOffer {
