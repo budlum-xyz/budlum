@@ -230,9 +230,19 @@ pub fn group_answers(answers: &[Answer]) -> (Vec<AnswerGroup>, usize) {
 /// what "agreement" means.
 #[must_use]
 pub fn decide(answers: &[Answer], policy: &QuorumPolicy) -> QuorumOutcome {
-    if answers.len() > policy.max_participants {
+    // The cap bounds each kind of answer on its own. A refusal is a vote
+    // about the bytes its prover carried, not a seat taken from the claim;
+    // counted together, threshold-many refusals with a bad signature filled
+    // the round before the honest claims arrived, and the cap refused them.
+    let claims = answers
+        .iter()
+        .filter(|a| matches!(a, Answer::Claim(_)))
+        .count();
+    let others = answers.len().saturating_sub(claims);
+    let observed = claims.max(others);
+    if observed > policy.max_participants {
         return QuorumOutcome::TooManyParticipants {
-            observed: answers.len(),
+            observed,
             max: policy.max_participants,
         };
     }
@@ -264,27 +274,51 @@ pub fn decide(answers: &[Answer], policy: &QuorumPolicy) -> QuorumOutcome {
         };
     }
 
-    // Threshold winners. Only groups that reached the threshold are
-    // candidates; a group of one cannot win because a group of five exists.
-    let winners: Vec<&AnswerGroup> = groups
+    // Threshold winners, claims first. Only groups that reached the
+    // threshold are candidates; a group of one cannot win because a group of
+    // five exists. Claims and refusals are judged apart: a refusal says "the
+    // bytes I carried did not prove finality", never "there is no finality",
+    // so a claim at the threshold is agreement however many provers refused
+    // beside it, and only two claims at the threshold are a tie. Refusals
+    // answer the round only when no claim can.
+    let claim_winners: Vec<&AnswerGroup> = groups
         .iter()
-        .filter(|g| g.count >= policy.agreement_threshold)
+        .filter(|g| matches!(g.answer, Answer::Claim(_)) && g.count >= policy.agreement_threshold)
         .collect();
+    match claim_winners.len() {
+        0 => {}
+        1 => {
+            return claim_winners
+                .first()
+                .map(|only| outcome_of(only))
+                .unwrap_or(QuorumOutcome::Dispute { groups });
+        }
+        _ => {
+            // Two or more claims at the threshold. That is a tie, and a tie is
+            // a dispute: picking one would be a choice the evidence did not
+            // support. Named explicitly rather than resolved by sort order.
+            let tied: Vec<AnswerGroup> = claim_winners.into_iter().cloned().collect();
+            return QuorumOutcome::Dispute { groups: tied };
+        }
+    }
 
-    match winners.len() {
+    let refusal_winners: Vec<&AnswerGroup> = groups
+        .iter()
+        .filter(|g| {
+            matches!(g.answer, Answer::ConsensusRefusal(_)) && g.count >= policy.agreement_threshold
+        })
+        .collect();
+    match refusal_winners.len() {
         0 => match policy.dispute {
             DisputeBehavior::ReturnError => QuorumOutcome::Dispute { groups },
             DisputeBehavior::AcceptMostCommon => winner_of(&groups),
         },
-        1 => winners
+        1 => refusal_winners
             .first()
             .map(|only| outcome_of(only))
             .unwrap_or(QuorumOutcome::Dispute { groups }),
         _ => {
-            // Two or more groups at the threshold. That is a tie, and a tie is
-            // a dispute: picking one would be a choice the evidence did not
-            // support. Named explicitly rather than resolved by sort order.
-            let tied: Vec<AnswerGroup> = winners.into_iter().cloned().collect();
+            let tied: Vec<AnswerGroup> = refusal_winners.into_iter().cloned().collect();
             QuorumOutcome::Dispute { groups: tied }
         }
     }
@@ -350,26 +384,42 @@ pub fn lead_is_unassailable(answers: &[Answer], policy: &QuorumPolicy, remaining
         return false;
     }
     let (groups, _) = group_answers(answers);
-    let Some(leader) = groups.first() else {
+    let claim_groups: Vec<&AnswerGroup> = groups
+        .iter()
+        .filter(|g| matches!(g.answer, Answer::Claim(_)))
+        .collect();
+    if let Some(leader) = claim_groups.first() {
+        if leader.count < policy.agreement_threshold {
+            return false;
+        }
+        // Only another claim group can tie or overtake a claim leader;
+        // refusals do not compete with claims in `decide`.
+        let best_rival = claim_groups
+            .get(1)
+            .map_or(remaining, |second| second.count.saturating_add(remaining));
+        return best_rival < leader.count;
+    }
+
+    // No claim has arrived yet: a refusal group can hold the round only if
+    // the remaining claim seats cannot even form a single threshold-sized
+    // claim group (which would overrule any refusal count in `decide`), and
+    // no rival refusal group has tied it.
+    let refusal_groups: Vec<&AnswerGroup> = groups
+        .iter()
+        .filter(|g| matches!(g.answer, Answer::ConsensusRefusal(_)))
+        .collect();
+    let Some(refusal_leader) = refusal_groups.first() else {
         return false;
     };
-    if leader.count < policy.agreement_threshold {
+    if refusal_leader.count < policy.agreement_threshold {
         return false;
     }
-    // The best any rival can reach is its current count plus every remaining
-    // participant. If that still falls short of the leader, the leader holds.
-    //
-    // When there is no second group yet the answer is `remaining`, not zero:
-    // every participant still out could answer with the SAME new claim and
-    // form one rival group from nothing. Counting that as zero would report an
-    // unassailable lead whenever only one claim had arrived so far, which is
-    // exactly the case where waiting is most informative.
-    let best_rival = groups
+    if remaining >= policy.agreement_threshold {
+        return false;
+    }
+    refusal_groups
         .get(1)
-        .map_or(remaining, |second| second.count.saturating_add(remaining));
-    // A tie is a dispute, so the rival must fall strictly short - reaching the
-    // leader's count would produce a tie, which is not a win.
-    best_rival < leader.count
+        .is_none_or(|second| second.count < refusal_leader.count)
 }
 
 /// Lowercase hex, local so this module's group keys do not depend on another
