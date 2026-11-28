@@ -1,0 +1,68 @@
+# merge-block-default-branch: producer of the required status context.
+#
+# The consensus-of-consensuses branch protection requires exactly one status
+# context: `merge-block-default-branch`. A delivery audit on 2026-11-27/28
+# measured that no workflow in this repository produced it (all 112 check
+# runs on the delivery PR head enumerated; zero producers found in
+# .github/workflows), which made every PR into the default branch
+# structurally unmergeable. This workflow restores the producer. The branch
+# protection rule is left untouched: the gate stays, the producer returns.
+#
+# Fail-closed semantics: the door refuses the delivery when the pull request
+# is not a strict descendant of its base (a rebase is owed) or when the
+# merge into the base cannot be computed as a clean tree (a conflict). There
+# is no continue-on-error, no `|| true`, no retry-until-green, and no manual
+# override path. A suite that cannot run is not a protection, so the job
+# fails loudly rather than skipping.
+
+name: Merge Block (default branch)
+
+on:
+  pull_request:
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses, agg/phase-5-pcs-claims]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: merge-block-${{ github.event.pull_request.head_ref }}
+  cancel-in-progress: false
+
+jobs:
+  merge-block-default-branch:
+    name: merge-block-default-branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout the delivery head (pinned, credentials not persisted)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: The head must be a strict descendant of the declared base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin "${BASE_SHA}" "${HEAD_SHA}"
+          if git merge-base --is-ancestor "${BASE_SHA}" "${HEAD_SHA}"; then
+            echo "delivery chain intact: base ${BASE_SHA} is an ancestor of head ${HEAD_SHA}"
+          else
+            echo "::error::delivery chain is not a strict descendant; rebase onto the base is owed"
+            exit 1
+          fi
+
+      - name: The merge into the base must compute as a clean tree
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if git merge-tree --write-tree "${BASE_SHA}" "${HEAD_SHA}" >/dev/null 2>&1; then
+            echo "merge tree is clean; the required context is satisfiable"
+          else
+            echo "::error::merge into the base has conflicts; the door stays closed"
+            exit 1
+          fi
