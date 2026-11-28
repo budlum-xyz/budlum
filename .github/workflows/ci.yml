@@ -2491,6 +2491,11 @@ jobs:
           shared-key: fuzz
       - name: Install cargo-fuzz
         run: cargo +nightly-2026-10-09 install --locked cargo-fuzz
+      - name: Every fuzz target compiles
+        # The loop below builds only the targets it lists. The others are first
+        # built by the weekly sweep, so an API change can break one of them
+        # and no pull request shows it.
+        run: cargo +nightly-2026-10-09 check --manifest-path fuzz/Cargo.toml --bins --keep-going
       # The corpus is carried across runs. Without this every run starts from
       # an empty corpus, so the same 60 seconds re-explores the same shallow
       # surface each time and the gate never gets deeper. `fuzz-nightly.yml`

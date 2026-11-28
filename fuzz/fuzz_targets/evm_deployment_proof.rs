@@ -102,5 +102,9 @@ fuzz_target!(|data: &[u8]| {
     let _ = verify_account(&nodes, &state_root, &contract);
     let _ = verify_storage(&nodes, &state_root, &transactions_root);
     let _ = check_code(tail, &receipts_root);
-    let _ = dependency_report(tail);
+    let trace: Vec<[u8; 20]> = tail
+        .chunks_exact(20)
+        .filter_map(|chunk| <[u8; 20]>::try_from(chunk).ok())
+        .collect();
+    let _ = dependency_report(contract, tail, &trace);
 });

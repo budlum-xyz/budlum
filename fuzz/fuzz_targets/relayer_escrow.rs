@@ -93,7 +93,7 @@ fuzz_target!(|data: &[u8]| {
                 ) {
                     accepted_lock_total += u128::from(amount);
                     if let Some(ref msg) = event.message {
-                        relayer.enqueue_relay(event.clone(), msg, height);
+                        let _ = relayer.enqueue_relay(event.clone(), msg, height);
                         last_lock_msg = Some(msg.clone());
                     }
                     tree.push(event);
