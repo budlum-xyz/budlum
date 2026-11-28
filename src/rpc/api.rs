@@ -1662,6 +1662,44 @@ pub trait BudlumApi {
         listing_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Prepare a Data Market listing transaction without mutating state.
+    ///
+    /// The seller's side of the settlement door: `SettlementTx::DataMarket`
+    /// could create a listing, and no RPC could build one, so the market was
+    /// readable from outside and not writable. Returns an unsigned
+    /// `TransactionType::Settlement` template for the seller to sign and
+    /// submit through `bud_sendRawTransaction`.
+    #[method(name = "bud_dataMarketPrepareListing")]
+    async fn data_market_prepare_listing(
+        &self,
+        seller: String,
+        content_id: serde_json::Value,
+        object_key: String,
+        nft_id: String,
+        price_atoms: u64,
+        grant_duration_epochs: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a sealed Data Market purchase transaction without mutating state.
+    ///
+    /// Together with [`Self::data_market_prepare_listing`] this closes the write
+    /// side. The content key never appears: the seller's device seals it to the
+    /// buyer's HPKE key (`SealedSellerGrant::seal`) and only the envelope goes
+    /// on chain, so the node can carry a purchase it cannot open.
+    #[method(name = "bud_dataMarketPreparePurchaseTx")]
+    async fn data_market_prepare_purchase(
+        &self,
+        buyer: String,
+        listing_id: String,
+        content_id: serde_json::Value,
+        price_atoms: u64,
+        buyer_ml_dsa_87_pk: String,
+        buyer_hpke_pk: String,
+        grant_nonce: String,
+        one_time_ml_dsa_65_pk: String,
+        sealed_key_package: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Compute a dry-run atomic multi-token split-tender payment quote across domains.
     #[method(name = "bud_quoteUniversalPayment")]
     async fn quote_universal_payment(

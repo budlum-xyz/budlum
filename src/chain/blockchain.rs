@@ -6305,6 +6305,24 @@ impl Blockchain {
                 }
                 return None;
             }
+            // The block rules accepted this frame, so it is now evidence: keep
+            // its canonical bytes, because
+            // `ClaimedDomainFinalityAdapter::admit_verified_frame` re-verifies a
+            // frame before any `Claim::Prog` digest it carries is allowed to make
+            // a domain final. Without this record the digest set that adapter
+            // consults stayed empty for the life of a node and every
+            // `AggregatedProg` finality proof was refused.
+            //
+            // `encode` is the same canonical encoding the block rule hashed into
+            // `frame_hash`, so the row cannot describe a frame the chain did not
+            // accept.
+            if let Some(frame) = block.claim_frame.as_ref() {
+                let encoded = frame.encode();
+                let intake = &mut self.state.settlement.external_intake;
+                if !intake.admitted_frames.contains(&encoded) {
+                    intake.admitted_frames.push(encoded);
+                }
+            }
         }
         block.witness_root = Some(block.calculate_witness_root());
         // One byte budget for every consensus payload this block carries on

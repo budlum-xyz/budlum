@@ -944,6 +944,35 @@ mod tests {
         let outcomes = execute_liquidation(&obs, &[]).expect("ok");
         assert!(outcomes.is_empty());
     }
+    #[test]
+    fn liquidation_request_certified_roots_serialize_as_string_keys() {
+        let mut roots = std::collections::BTreeMap::new();
+        roots.insert((7u32, 12u64), [0xabu8; 32]);
+        let request = LiquidationRequest {
+            position: LiquidationPosition {
+                position_id: 1,
+                debt_x: 1_000,
+                collateral_y: 2_000,
+                maintenance_threshold_bps: 8_000,
+            },
+            certified_roots: roots,
+            observations: Vec::new(),
+            collateral_legs: Vec::new(),
+            params: CrossDomainLiquidationParams {
+                debt_domain_id: 7,
+                repay_debt_x: 500,
+                bonus_bps: 100,
+                delivery_proof_root: [0u8; 32],
+            },
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(
+            json.contains("\"7:12\""),
+            "certified_roots must key by string: {json}"
+        );
+        let back: LiquidationRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.certified_roots, request.certified_roots);
+    }
 }
 
 /// A liquidation as it arrives on chain: everything the engine needs, in one
@@ -986,33 +1015,5 @@ impl LiquidationRequest {
         !self.certified_roots.is_empty() && !self.observations.is_empty()
     }
 
-    #[test]
-    fn liquidation_request_certified_roots_serialize_as_string_keys() {
-        let mut roots = std::collections::BTreeMap::new();
-        roots.insert((7u32, 12u64), Hash32([0xabu8; 32]));
-        let request = LiquidationRequest {
-            position: LiquidationPosition {
-                position_id: 1,
-                debt_x: 1_000,
-                collateral_y: 2_000,
-                maintenance_threshold_bps: 8_000,
-            },
-            certified_roots: roots,
-            observations: Vec::new(),
-            collateral_legs: Vec::new(),
-            params: CrossDomainLiquidationParams {
-                debt_domain_id: 7,
-                repay_debt_x: 500,
-                bonus_bps: 100,
-                delivery_proof_root: Hash32([0u8; 32]),
-            },
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(
-            json.contains("\"7:12\""),
-            "certified_roots must key by string: {json}"
-        );
-        let back: LiquidationRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.certified_roots, request.certified_roots);
-    }
+
 }

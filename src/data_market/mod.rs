@@ -37,6 +37,8 @@ pub const DATA_MARKET_RPC_METHODS: &[&str] = &[
     "bud_dataMarketPrepareSaleAuthorization",
     "bud_dataMarketPreparePurchase",
     "bud_dataMarketPurchase",
+    "bud_dataMarketPrepareListing",
+    "bud_dataMarketPreparePurchaseTx",
 ];
 
 /// Errors refused by the B.U.D. 3.0 Data Market.
@@ -890,6 +892,67 @@ mod tests {
                 3,
             ),
             Err(DataMarketError::InactiveListing)
+        );
+    }
+
+    /// Every name in the catalog is either served or explicitly accounted for.
+    ///
+    /// `DATA_MARKET_RPC_METHODS` is the published list, so a name in it that no
+    /// door serves is a promise the node does not keep. The two below were
+    /// exactly that: `bud_dataMarketPrepareListing` and
+    /// `bud_dataMarketPreparePurchaseTx` complete the write side, and
+    /// `bud_dataMarketPurchase` settles through `bud_sendRawTransaction`
+    /// (`SettlementTx::DataMarket` reaches `execute_data_market_tx` from the
+    /// executor), which is why it is not its own door.
+    #[test]
+    fn data_market_catalog_names_are_all_accounted_for() {
+        // Served directly by a `#[method(name = ...)]` RPC door.
+        let served = [
+            "bud_dataMarketGetListing",
+            "bud_dataMarketGetDataAssets",
+            "bud_dataMarketGetAccessGrants",
+            "bud_dataMarketGetSaleAuthorizations",
+            "bud_dataMarketGetPurchaseReceipts",
+            "bud_dataMarketBuildAiInputRef",
+            "bud_dataMarketPrepareSaleAuthorization",
+            "bud_dataMarketPreparePurchase",
+            "bud_dataMarketPrepareListing",
+            "bud_dataMarketPreparePurchaseTx",
+        ];
+        // Settled by submitting a signed transaction, not by its own door.
+        let submitted = ["bud_dataMarketPurchase"];
+
+        for name in DATA_MARKET_RPC_METHODS {
+            assert!(
+                served.contains(name) || submitted.contains(name),
+                "{name} is in the catalog and nothing serves it"
+            );
+        }
+        for name in served.iter().chain(submitted.iter()) {
+            assert!(
+                DATA_MARKET_RPC_METHODS.contains(name),
+                "{name} is served but missing from the catalog"
+            );
+        }
+    }
+
+    /// A sealed grant carries no content key in the clear.
+    ///
+    /// The purchase became a transaction only because the seller's device
+    /// seals the key; if a future field carried the bare key, settlement would
+    /// be handing the chain something it must never be able to open.
+    #[test]
+    fn sealed_seller_grant_never_carries_the_content_key() {
+        let grant = SealedSellerGrant {
+            grant_nonce: [0x11; 32],
+            one_time_ml_dsa_65_pk: vec![0x22; 32],
+            sealed_key_package: vec![0x33; 64],
+        };
+        let encoded = serde_json::to_string(&grant).expect("grant serializes");
+        let key = ContentKey([0x44; 32]);
+        assert!(
+            !encoded.contains(&hex::encode(key.0)),
+            "the content key must not appear in the envelope"
         );
     }
 }

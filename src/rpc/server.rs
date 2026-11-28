@@ -2645,6 +2645,67 @@ fn parse_content_id(hex_str: &str) -> Result<ContentId, ErrorObjectOwned> {
     Ok(ContentId(parse_hex32_field(hex_str, "ContentId")?))
 }
 
+/// The B.U.D. 3.0 `ContentId`, which carries a kind, a digest and a length.
+///
+/// Deliberately not `parse_content_id`: that returns `storage::content_id::ContentId`,
+/// a single hash with no length and no kind, and the Data Market needs the
+/// three-field id to record what was sold. Two types share the name, so the
+/// caller names the one it wants rather than reusing a helper that looks right.
+///
+/// # Errors
+///
+/// A hex refusal, a wrong digest length, or an unknown kind tag.
+fn parse_bud3_content_id(
+    value: &serde_json::Value,
+) -> Result<crate::storage::bud3::content_id::ContentId, ErrorObjectOwned> {
+    let bad = |message: String| ErrorObjectOwned::owned(-32602, message, None::<()>);
+    let kind = value
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| bad(String::from("contentId.kind is required (public or sealed)")))?;
+    let kind = match kind {
+        "public" => crate::storage::bud3::content_id::ContentIdKind::Public,
+        "sealed" => crate::storage::bud3::content_id::ContentIdKind::Sealed,
+        other => return Err(bad(format!("unknown contentId.kind `{other}`"))),
+    };
+    let digest = value
+        .get("digest")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| bad(String::from("contentId.digest is required")))?;
+    let len = value
+        .get("len")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| bad(String::from("contentId.len is required")))?;
+    if len == 0 {
+        return Err(bad(String::from("contentId.len must be greater than zero")));
+    }
+    Ok(crate::storage::bud3::content_id::ContentId {
+        kind,
+        digest: parse_hex32_field(digest, "contentId.digest")?,
+        len,
+    })
+}
+
+/// Decode a hex field that carries opaque bytes.
+///
+/// # Errors
+///
+/// A hex refusal naming the field, or an empty value.
+fn decode_hex_vec(value: &str, field: &str) -> Result<Vec<u8>, ErrorObjectOwned> {
+    let clean = value.strip_prefix("0x").unwrap_or(value);
+    let bytes = hex::decode(clean).map_err(|e| {
+        ErrorObjectOwned::owned(-32602, format!("Invalid {field} hex: {e}"), None::<()>)
+    })?;
+    if bytes.is_empty() {
+        return Err(ErrorObjectOwned::owned(
+            -32602,
+            format!("{field} is empty"),
+            None::<()>,
+        ));
+    }
+    Ok(bytes)
+}
+
 /// The refusal every byte-serving door answers for data-market-listed content.
 fn listed_content_grant_required() -> ErrorObjectOwned {
     ErrorObjectOwned::owned(
@@ -5884,6 +5945,191 @@ impl BudlumApiServer for RpcServer {
             // node that refused to look.
             None => Ok(serde_json::Value::Null),
         }
+    }
+
+    async fn data_market_prepare_listing(
+        &self,
+        seller: String,
+        content_id: String,
+        object_key: String,
+        nft_id: String,
+        price_atoms: u64,
+        grant_duration_epochs: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_seller = seller.strip_prefix("0x").unwrap_or(&seller);
+        let seller_addr = Address::from_hex(clean_seller).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid seller address: {e}"),
+                None::<()>,
+            )
+        })?;
+        // `parse_content_id` returns `storage::content_id::ContentId`, a hash
+        // wrapper, and this door needs the B.U.D. 3.0 three-field id. Two types
+        // with one name is exactly the mistake that made the Sealed/Public
+        // checks silently compare the wrong field before, so the parse below
+        // names the type it builds.
+        let content_id = parse_bud3_content_id(&content_id)?;
+        let object_key = parse_hex32_field(&object_key, "objectKey")?;
+        let nft_id = parse_hex32_field(&nft_id, "nftId")?;
+        if price_atoms == 0 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "price_atoms must be greater than zero",
+                None::<()>,
+            ));
+        }
+        if grant_duration_epochs == 0 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "grant_duration_epochs must be greater than zero",
+                None::<()>,
+            ));
+        }
+
+        let tx = crate::core::transaction::Transaction {
+            from: seller_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            max_fee: 500,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&seller_addr).await,
+            data: Vec::new(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::Settlement(
+                crate::settlement::domains::SettlementTx::DataMarket(Box::new(
+                    crate::settlement::domains::DataMarketTx::Listing {
+                        content_id,
+                        object_key,
+                        nft_id,
+                        price_atoms,
+                        grant_duration_epochs,
+                    },
+                )),
+            ),
+            auth_claim: None,
+            claim_refs: Vec::new(),
+        };
+        let tx = self.finish_template(tx).await?;
+
+        Ok(serde_json::json!({
+            "seller": seller_addr.to_hex(),
+            "contentId": format!("0x{}", hex::encode(content_id.digest)),
+            "contentLength": content_id.len,
+            "priceAtoms": price_atoms,
+            "grantDurationEpochs": grant_duration_epochs,
+            "transaction": tx,
+            "note": "prepare-only; sign and submit through bud_sendRawTransaction",
+        }))
+    }
+
+    async fn data_market_prepare_purchase(
+        &self,
+        buyer: String,
+        listing_id: String,
+        content_id: String,
+        price_atoms: u64,
+        buyer_ml_dsa_87_pk: String,
+        buyer_hpke_pk: String,
+        grant_nonce: String,
+        one_time_ml_dsa_65_pk: String,
+        sealed_key_package: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_buyer = buyer.strip_prefix("0x").unwrap_or(&buyer);
+        let buyer_addr = Address::from_hex(clean_buyer).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid buyer address: {e}"), None::<()>)
+        })?;
+        let listing_id = parse_hex32_field(&listing_id, "listingId")?;
+        let content_id = parse_bud3_content_id(&content_id)?;
+        let grant_nonce = parse_hex32_field(&grant_nonce, "grantNonce")?;
+        let buyer_ml_dsa_87_pk = decode_hex_vec(&buyer_ml_dsa_87_pk, "buyerMlDsa87Pk")?;
+        let buyer_hpke_pk = decode_hex_vec(&buyer_hpke_pk, "buyerHpkePk")?;
+        let one_time_ml_dsa_65_pk = decode_hex_vec(&one_time_ml_dsa_65_pk, "oneTimeMlDsa65Pk")?;
+        let sealed_key_package = decode_hex_vec(&sealed_key_package, "sealedKeyPackage")?;
+        if buyer_ml_dsa_87_pk.is_empty() || buyer_hpke_pk.is_empty() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "buyerMlDsa87Pk and buyerHpkePk are required",
+                None::<()>,
+            ));
+        }
+        if sealed_key_package.is_empty() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "sealedKeyPackage is required: the grant must arrive sealed",
+                None::<()>,
+            ));
+        }
+
+        let chain_id = self.chain.get_chain_id().await;
+        // The signature is the buyer's to make, over exactly this digest; the
+        // template therefore carries an empty one and the buyer fills it. A
+        // purchase submitted with an empty signature is refused by
+        // `PurchaseAuthorizationV5::verify_pq`, so this cannot settle unsigned.
+        let auth = crate::data_market::PurchaseAuthorizationV5 {
+            chain_id,
+            listing_id,
+            content_id,
+            price_atoms,
+            buyer: buyer_addr,
+            buyer_ml_dsa_87_pk,
+            buyer_signature: Vec::new(),
+            buyer_hpke_pk,
+        };
+        let digest = auth.signing_digest();
+        let seller_grant = crate::data_market::SealedSellerGrant {
+            grant_nonce,
+            one_time_ml_dsa_65_pk,
+            sealed_key_package,
+        };
+
+        let tx = crate::core::transaction::Transaction {
+            from: buyer_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            max_fee: 500,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&buyer_addr).await,
+            data: Vec::new(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::Settlement(
+                crate::settlement::domains::SettlementTx::DataMarket(Box::new(
+                    crate::settlement::domains::DataMarketTx::Purchase { auth, seller_grant },
+                )),
+            ),
+            auth_claim: None,
+            claim_refs: Vec::new(),
+        };
+        let tx = self.finish_template(tx).await?;
+
+        Ok(serde_json::json!({
+            "buyer": buyer_addr.to_hex(),
+            "listingId": format!("0x{}", hex::encode(listing_id)),
+            "priceAtoms": price_atoms,
+            "buyerSigningDigest": format!("0x{}", hex::encode(digest)),
+            "transaction": tx,
+            "note": "prepare-only; sign buyerSigningDigest with the buyer ML-DSA-87 key, place the signature in purchase authorization, then submit through bud_sendRawTransaction",
+        }))
     }
 
     async fn get_universal_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned> {

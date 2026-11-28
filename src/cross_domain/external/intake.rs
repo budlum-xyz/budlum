@@ -428,6 +428,33 @@ pub struct IntakeState {
         String,
         crate::cross_domain::external::ethereum::PinnedCommittee,
     >,
+    /// Canonical state-transition program per domain, as registered by the
+    /// domain operator (`register_domain_program`).
+    ///
+    /// [`ClaimedDomainFinalityAdapter::verify_finality`](crate::aggregation::domain_finality::ClaimedDomainFinalityAdapter)
+    /// rejects a transition whose `program_hash` does not match the program
+    /// registered for the domain, so the registration has to outlive the call
+    /// that made it. Empty on a chain that never registered one, and a domain
+    /// with no entry falls back to its own `zk_program_allowlist`.
+    #[serde(default)]
+    pub claim_programs:
+        std::collections::BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>,
+    /// Frames the block rules accepted, in block order, in the frame's own
+    /// canonical wire encoding ([`ClaimFrame::encode`]).
+    ///
+    /// Kept whole because verifying a frame a second time is the point:
+    /// `ClaimedDomainFinalityAdapter::admit_verified_frame` runs the aggregation
+    /// backend's own `verify` before it lets any `Claim::Prog` digest in, so the
+    /// digests a finality proof cites were checked against a proof rather than
+    /// recorded by whoever assembled the frame.
+    ///
+    /// Stored as bytes, not as `ClaimFrame`: the frame's encoding is pinned by
+    /// the block rule that hashed it (`frame_hash`), and a derived `Serialize`
+    /// would be a second encoding that could drift from the one the block
+    /// committed to. [`ClaimFrame::decode`] refuses anything that does not parse
+    /// under the wire limits, so a corrupted row cannot become a verified claim.
+    #[serde(default)]
+    pub admitted_frames: Vec<Vec<u8>>,
     /// Governance-pinned Bitcoin SPV checkpoints keyed by external network.
     #[serde(default)]
     pub pinned_bitcoin_anchors: std::collections::BTreeMap<String, PinnedBitcoinAnchor>,

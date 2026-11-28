@@ -901,10 +901,52 @@ pub fn verify_commitment_finality_observed(
                     crate::aggregation::chain::claim_domain(chain_id).ok_or_else(|| {
                         format!("chain id {chain_id} does not fit an aggregation claim domain")
                     })?;
-                let adapter =
+                let mut adapter =
                     crate::aggregation::domain_finality::ClaimedDomainFinalityAdapter::new(
                         claim_domain,
                     );
+                // The proof only names the claim digest; the frame is what
+                // carries the claim. Rebuilding the adapter from state for this
+                // one block means registering the programs the domain allows
+                // and replaying the frames the block rules accepted, so the
+                // digest below is checked against a proof the aggregation
+                // backend verified rather than one the submitter asserted.
+                //
+                // `admit_verified_frame` is the only writer of the digest set
+                // this adapter consults; before this call nothing on a running
+                // node ever invoked it, so every `AggregatedProg` proof was
+                // refused with "claim is not present in any verified
+                // MasterProof" and an aggregating domain could never finalize.
+                {
+                    let params = crate::aggregation::params::AggParams::default();
+                    let backend =
+                        crate::aggregation::chain::ChainBackend::new(&params, &state.scheme_registry);
+                    for (frame_domain, program_hash) in &state
+                        .settlement
+                        .external_intake
+                        .claim_programs
+                    {
+                        adapter.register_domain_program(*frame_domain, *program_hash);
+                    }
+                    for encoded in &state.settlement.external_intake.admitted_frames {
+                        // A row that does not decode is not a frame; it admits
+                        // nothing rather than being skipped silently, which is
+                        // why the refusal is logged.
+                        match crate::aggregation::frame::ClaimFrame::decode(
+                            encoded,
+                            &crate::aggregation::chain::WIRE_FRAME_LIMITS,
+                        ) {
+                            Ok(frame) => {
+                                let _ = adapter.admit_verified_frame(state, &backend, &frame);
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    "stored aggregation frame did not decode, admits nothing: {error}"
+                                );
+                            }
+                        }
+                    }
+                }
                 // The arm's value: the adapter's verdict takes the same
                 // attestation/shape path as every other shape. No `?` here -
                 // an early return would skip the checks the other shapes pass.
