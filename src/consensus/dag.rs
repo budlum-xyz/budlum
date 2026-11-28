@@ -95,9 +95,10 @@ impl DagEngine {
             .write()
             .map_err(|_| ConsensusError("DAG state lock poisoned".into()))?;
 
-        if !graph.parents.contains_key(&block.hash) {
-            graph.order.push_back(block.hash.clone());
+        if graph.parents.contains_key(&block.hash) {
+            return Ok(());
         }
+        graph.order.push_back(block.hash.clone());
         graph
             .parents
             .insert(block.hash.clone(), parent_hashes.clone());
@@ -110,9 +111,14 @@ impl DagEngine {
             }
         }
 
-        // Parents are no longer tips once built upon.
+        // Parents are no longer tips once built upon; only insert as a tip if no
+        // already-recorded child block references `block.hash` out of order.
         graph.tips.retain(|tip| !parent_hashes.contains(&tip.hash));
-        if !graph.tips.iter().any(|tip| tip.hash == block.hash) {
+        let has_known_child = graph
+            .parents
+            .iter()
+            .any(|(child, ps)| child != &block.hash && ps.iter().any(|p| p == &block.hash));
+        if !has_known_child && !graph.tips.iter().any(|tip| tip.hash == block.hash) {
             graph.tips.push(DagTip {
                 hash: block.hash.clone(),
                 height: block.index,
@@ -128,6 +134,11 @@ impl DagEngine {
 
     fn validate_parent_list(&self, block: &Block) -> Result<Vec<String>, ConsensusError> {
         let parent_hashes = parse_parent_hashes(&block.previous_hash);
+        if block.index == 0 && !parent_hashes.is_empty() {
+            return Err(ConsensusError(
+                "Genesis DAG block cannot reference parent hashes".into(),
+            ));
+        }
         if block.index > 0 && parent_hashes.is_empty() {
             return Err(ConsensusError(
                 "Non-genesis DAG block must reference at least one parent".into(),

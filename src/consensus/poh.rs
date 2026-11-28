@@ -254,6 +254,49 @@ impl PohEngine {
     fn current_hash_count(&self) -> u64 {
         self.ledger.read().map_or(0, |l| l.state.hash_count)
     }
+
+    fn verified_prefix<'a>(&self, chain: &'a [Block]) -> Option<&'a [Block]> {
+        let first = chain.first()?;
+        if first.index != 0 || first.hash.is_empty() || first.hash != first.calculate_hash() {
+            return None;
+        }
+        let required_steps = self.config.hashes_per_slot.max(1);
+        let mut valid_len = 1usize;
+        let mut verified_tip = first;
+        let mut expected_count = 0u64;
+        let mut expected_hash = self.config.seed;
+
+        for blk in chain.iter().skip(1) {
+            if blk.hash.is_empty()
+                || blk.hash != blk.calculate_hash()
+                || Some(blk.index) != verified_tip.index.checked_add(1)
+                || blk.previous_hash != verified_tip.hash
+                || blk.timestamp < verified_tip.timestamp
+            {
+                break;
+            }
+            let Ok((start_count, steps, end_hash)) = decode_poh_witness(blk) else {
+                break;
+            };
+            if start_count != expected_count
+                || steps < required_steps
+                || steps > MAX_POH_VERIFY_STEPS
+            {
+                break;
+            }
+            let Some(next_count) = start_count.checked_add(steps) else {
+                break;
+            };
+            if !verify_poh_sequence(&expected_hash, start_count, steps, &end_hash) {
+                break;
+            }
+            expected_count = next_count;
+            expected_hash = end_hash;
+            verified_tip = blk;
+            valid_len = valid_len.saturating_add(1);
+        }
+        chain.get(..valid_len)
+    }
 }
 
 impl ConsensusEngine for PohEngine {
@@ -452,24 +495,9 @@ impl ConsensusEngine for PohEngine {
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
-        let Some(first) = chain.first() else {
-            return 0;
-        };
-        let mut verified_tip = first;
-        for blk in chain.iter().skip(1) {
-            if Some(blk.index) != verified_tip.index.checked_add(1)
-                || blk.previous_hash != verified_tip.hash
-                || blk.timestamp < verified_tip.timestamp
-            {
-                break;
-            }
-            verified_tip = blk;
-        }
-        // Refuse single-block unanchored high-index inflation (must start at genesis 0).
-        if first.index != 0 {
-            return 0;
-        }
-        u128::from(verified_tip.index)
+        self.verified_prefix(chain)
+            .and_then(<[Block]>::last)
+            .map_or(0, |tip| u128::from(tip.index))
     }
 
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
@@ -478,9 +506,11 @@ impl ConsensusEngine for PohEngine {
         if candidate_score != current_score {
             return candidate_score > current_score;
         }
+        let cur_prefix = self.verified_prefix(current).unwrap_or(&[]);
+        let cand_prefix = self.verified_prefix(candidate).unwrap_or(&[]);
         resolve_split_tie(
-            &SplitCandidate::from_chain_tip(current, current_score),
-            &SplitCandidate::from_chain_tip(candidate, candidate_score),
+            &SplitCandidate::from_chain_tip(cur_prefix, current_score),
+            &SplitCandidate::from_chain_tip(cand_prefix, candidate_score),
         ) == SplitDecision::RightWins
     }
 }

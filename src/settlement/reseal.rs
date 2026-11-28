@@ -131,6 +131,12 @@ pub fn covered_root(anchors: &[(u64, [u8; 32])]) -> Result<[u8; 32], ResealError
     if anchors.windows(2).any(|pair| pair[1].0 <= pair[0].0) {
         return Err(ResealError::BadCoverage);
     }
+    if anchors
+        .iter()
+        .any(|(_, root)| bool::from(subtle::ConstantTimeEq::ct_eq(root.as_slice(), &[0u8; 32])))
+    {
+        return Err(ResealError::BadCoverage);
+    }
     let leaves: Vec<[u8; 32]> = anchors.iter().map(|(h, r)| leaf(*h, r)).collect();
     Ok(merkle_root(&leaves, combine_sha3, promote_sha3))
 }
@@ -276,7 +282,14 @@ pub fn verify_reseal(
             .map_err(|_| ResealError::InvalidSignature)
         }
         ResealAuthority::AnchorKeys(signatures) => {
+            if signatures.len() < ANCHOR_THRESHOLD {
+                return Err(ResealError::ThresholdNotReached);
+            }
+            if signatures.len() > super::anchor_ledger::ANCHOR_KEY_COUNT {
+                return Err(ResealError::InvalidSignature);
+            }
             let mut seen = std::collections::BTreeSet::new();
+            let mut resolved = Vec::with_capacity(signatures.len());
             for signature in signatures {
                 if !seen.insert(signature.key_index) {
                     return Err(ResealError::InvalidSignature);
@@ -287,18 +300,18 @@ pub fn verify_reseal(
                 if ledger.is_suspended(KeyFamily::Anchor, signature.key_index, ledger.key_epoch) {
                     return Err(ResealError::UnknownOrSuspendedKey);
                 }
+                resolved.push((key, signature.signature.as_slice()));
+            }
+            for (key, sig_bytes) in resolved {
                 crate::crypto::pq::verify_in(
                     registry,
                     SchemeId::ML_DSA_87,
                     key,
                     &payload,
                     crate::crypto::ctx::RESEAL_V1,
-                    &signature.signature,
+                    sig_bytes,
                 )
                 .map_err(|_| ResealError::InvalidSignature)?;
-            }
-            if seen.len() < ANCHOR_THRESHOLD {
-                return Err(ResealError::ThresholdNotReached);
             }
             Ok(())
         }
