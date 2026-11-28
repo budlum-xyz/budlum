@@ -623,7 +623,7 @@ impl DomainFinalityAdapter for ClaimedDomainFinalityAdapter {
                     "transition program_hash does not match registered domain program".into(),
                 ));
             }
-            if !domain.zk_program_allowlist.is_empty() && !allowlisted {
+            if !allowlisted {
                 return Ok(FinalityStatus::Rejected(
                     "transition program_hash is not in domain.zk_program_allowlist".into(),
                 ));
