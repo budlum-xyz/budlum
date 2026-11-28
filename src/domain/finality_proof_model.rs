@@ -342,83 +342,18 @@ impl ExternalVerifierFamily {
             });
         }
 
-        let valid_profile = match self {
-            Self::BitcoinNakamotoPow | Self::BitVmCovenant | Self::GhostdagPow => {
-                descriptor.finality_kind == FinalityKind::Probabilistic
-                    && matches!(descriptor.trust_model, TrustModel::Trustless)
-                    && descriptor.time_unit == TimeUnit::UnixSeconds
-            }
-            Self::NipopowSuperblock | Self::PoSpaceVdf => {
-                descriptor.finality_kind == FinalityKind::Probabilistic
-                    && matches!(descriptor.trust_model, TrustModel::Trustless)
-                    && descriptor.time_unit == TimeUnit::Height
-            }
-            Self::AuxPowPop => {
-                descriptor.time_unit == TimeUnit::Height
-                    && ((descriptor.finality_kind == FinalityKind::Probabilistic
-                        && matches!(descriptor.trust_model, TrustModel::Trustless))
-                        || (descriptor.finality_kind == FinalityKind::EconomicFinality
-                            && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })))
-            }
-            Self::BudZkVmExecution | Self::StarkValidityRollup | Self::MinaSuccinctRecursive => {
-                descriptor.finality_kind == FinalityKind::Proven
-                    && matches!(descriptor.trust_model, TrustModel::Trustless)
-                    && descriptor.time_unit == TimeUnit::Height
-            }
-            Self::HeterogeneousMultiProver => {
-                descriptor.finality_kind == FinalityKind::Proven
-                    && matches!(descriptor.trust_model, TrustModel::Trustless)
-                    && descriptor.time_unit == TimeUnit::UnixSeconds
-            }
-            Self::EthereumGasperSync => {
-                descriptor.finality_kind == FinalityKind::ProtocolFinality
-                    && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
-                    && matches!(descriptor.time_unit, TimeUnit::Slot | TimeUnit::Epoch)
-            }
-            Self::AlgorandStateProof | Self::MysticetiDag => {
-                descriptor.finality_kind == FinalityKind::ProtocolFinality
-                    && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
-                    && descriptor.time_unit == TimeUnit::Round
-            }
-            Self::HoneyBadgerBft => {
-                descriptor.finality_kind == FinalityKind::ProtocolFinality
-                    && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
-                    && descriptor.time_unit == TimeUnit::Epoch
-            }
-            Self::TendermintBft => {
-                descriptor.finality_kind == FinalityKind::ProtocolFinality
-                    && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
-                    && descriptor.time_unit == TimeUnit::UnixSeconds
-            }
-            Self::AptosJolteonBft
-            | Self::ChainKeyNiDkg
-            | Self::BullsharkDagBft
-            | Self::HotStuffChainedBft
-            | Self::NearDoomslugBft
-            | Self::SimplexBft
-            | Self::TonCatchainBft => {
-                descriptor.finality_kind == FinalityKind::ProtocolFinality
-                    && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
-                    && descriptor.time_unit == TimeUnit::Height
-            }
-            Self::SolanaTowerBft | Self::StellarScp => {
-                matches!(
-                    descriptor.finality_kind,
-                    FinalityKind::ProtocolFinality | FinalityKind::EconomicFinality
-                ) && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
-                    && descriptor.time_unit == TimeUnit::Height
-            }
-            Self::ArweaveSpOra | Self::BasedPreconf | Self::CelestiaDas | Self::RestakingAvs => {
-                descriptor.finality_kind == FinalityKind::EconomicFinality
-                    && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
-                    && descriptor.time_unit == TimeUnit::Height
-            }
-            Self::BabylonEots | Self::CasperFfg | Self::OuroborosMithril | Self::SymbioticVault => {
-                descriptor.finality_kind == FinalityKind::EconomicFinality
-                    && matches!(descriptor.trust_model, TrustModel::HonestMajority { .. })
-                    && descriptor.time_unit == TimeUnit::Epoch
-            }
+        // One table decides the profile; this function only asks it.
+        let Some(profile) = super::decision::family(self) else {
+            return Err(ExternalShapeError::FamilyProfileMismatch {
+                family: self,
+                reason: "family has no canonical profile row; its backing rule was never decided",
+            });
         };
+        let valid_profile = profile.accepts(
+            descriptor.finality_kind,
+            &descriptor.trust_model,
+            descriptor.time_unit,
+        );
 
         if !valid_profile {
             return Err(ExternalShapeError::FamilyProfileMismatch {
@@ -500,51 +435,25 @@ impl FinalityProofShape {
         if let Some(family) =
             ExternalVerifierFamily::from_consensus_kind(&descriptor.consensus_kind)
         {
-            let allowed = match family {
-                ExternalVerifierFamily::StarkValidityRollup
-                | ExternalVerifierFamily::MinaSuccinctRecursive
-                | ExternalVerifierFamily::BudZkVmExecution => {
-                    matches!(attestation.security, SecurityBacking::Zk { .. })
-                }
-                ExternalVerifierFamily::HeterogeneousMultiProver => matches!(
-                    attestation.security,
-                    SecurityBacking::Zk { .. } | SecurityBacking::SignatureSet { .. }
-                ),
-                ExternalVerifierFamily::BitcoinNakamotoPow
-                | ExternalVerifierFamily::BitVmCovenant
-                | ExternalVerifierFamily::GhostdagPow
-                | ExternalVerifierFamily::NipopowSuperblock => {
-                    matches!(attestation.security, SecurityBacking::Work { .. })
-                }
-                ExternalVerifierFamily::AuxPowPop | ExternalVerifierFamily::PoSpaceVdf => matches!(
-                    attestation.security,
-                    SecurityBacking::Work { .. } | SecurityBacking::SignatureSet { .. }
-                ),
-                ExternalVerifierFamily::AlgorandStateProof
-                | ExternalVerifierFamily::AptosJolteonBft
-                | ExternalVerifierFamily::ArweaveSpOra
-                | ExternalVerifierFamily::BabylonEots
-                | ExternalVerifierFamily::BasedPreconf
-                | ExternalVerifierFamily::CasperFfg
-                | ExternalVerifierFamily::ChainKeyNiDkg
-                | ExternalVerifierFamily::CelestiaDas
-                | ExternalVerifierFamily::BullsharkDagBft
-                | ExternalVerifierFamily::EthereumGasperSync
-                | ExternalVerifierFamily::HoneyBadgerBft
-                | ExternalVerifierFamily::HotStuffChainedBft
-                | ExternalVerifierFamily::MysticetiDag
-                | ExternalVerifierFamily::NearDoomslugBft
-                | ExternalVerifierFamily::OuroborosMithril
-                | ExternalVerifierFamily::RestakingAvs
-                | ExternalVerifierFamily::SimplexBft
-                | ExternalVerifierFamily::SolanaTowerBft
-                | ExternalVerifierFamily::StellarScp
-                | ExternalVerifierFamily::SymbioticVault
-                | ExternalVerifierFamily::TendermintBft
-                | ExternalVerifierFamily::TonCatchainBft => {
-                    matches!(attestation.security, SecurityBacking::SignatureSet { .. })
-                }
+            // The family's profile decides which backing may carry it. The
+            // pairing lives in `decision::FAMILY_PROFILES`; this call site no
+            // longer restates it, so a family cannot be widened here and
+            // narrowed there.
+            let Some(profile) = decision::family(family) else {
+                return Err(ExternalShapeError::FamilyProfileMismatch {
+                    family,
+                    reason:
+                        "family has no canonical profile row; its backing rule was never decided",
+                });
             };
+            let backing = match attestation.security {
+                SecurityBacking::SignatureSet { .. } => decision::Backing::SignatureSet,
+                SecurityBacking::Work { .. } => decision::Backing::Work,
+                SecurityBacking::Authority { .. } => decision::Backing::Authority,
+                SecurityBacking::Zk { .. } => decision::Backing::Zk,
+                SecurityBacking::None => return Err(ExternalShapeError::EmptySecurityBacking),
+            };
+            let allowed = profile.accepts_backing(backing);
             if !allowed {
                 return Err(ExternalShapeError::SecurityBackingMismatch {
                     consensus_kind: descriptor.consensus_kind.clone(),
@@ -1280,6 +1189,16 @@ pub(crate) mod decision {
         HonestMajority,
     }
 
+    /// The backing shapes that occur in the tree, as one small set.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Backings {
+        Work,
+        SignatureSet,
+        WorkOrSignatureSet,
+        Zk,
+        ZkOrSignatureSet,
+    }
+
     /// One family's canonical profile.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Profile {
@@ -1290,9 +1209,39 @@ pub(crate) mod decision {
         /// Empty means "any unit"; the families that accept more than one say
         /// so by listing them.
         pub units: &'static [TimeUnit],
+        /// Which security backing the attestation may carry.
+        pub backings: Backings,
+    }
+
+    /// The security backing an attestation carries.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Backing {
+        SignatureSet,
+        Work,
+        Authority,
+        Zk,
     }
 
     impl Profile {
+        /// Which security backings this family's attestation may carry.
+        ///
+        /// This is the second half of the family profile. The first half
+        /// (finality kind, trust model, time unit) lives in [`Profile`]; the
+        /// pairing between the two - "a family that declares `Trustless` must
+        /// present work or a proof" - used to be restated at each decision
+        /// point and is now read from [`FamilyProfile::backings`].
+        #[must_use]
+        pub fn accepts_backing(&self, backing: Backing) -> bool {
+            let b = match self.backings {
+                Backings::Work => &[Backing::Work][..],
+                Backings::SignatureSet => &[Backing::SignatureSet][..],
+                Backings::WorkOrSignatureSet => &[Backing::Work, Backing::SignatureSet][..],
+                Backings::Zk => &[Backing::Zk][..],
+                Backings::ZkOrSignatureSet => &[Backing::Zk, Backing::SignatureSet][..],
+            };
+            b.contains(&backing)
+        }
+
         /// Does this profile accept the descriptor's three profile fields?
         #[must_use]
         pub fn accepts(
@@ -1325,6 +1274,7 @@ pub(crate) mod decision {
         finality: FinalityKind,
         trust: Trust,
         units: &'static [TimeUnit],
+        backings: Backings,
     ) -> Profile {
         Profile {
             family,
@@ -1332,6 +1282,27 @@ pub(crate) mod decision {
             finality,
             trust,
             units,
+            backings,
+        }
+    }
+
+    /// The backing set the tree's previous `allowed` match asserted for each
+    /// family, kept here as the one place the pairing is written.
+    #[must_use]
+    pub const fn backings_of(family: ExternalVerifierFamily) -> Backings {
+        match family {
+            ExternalVerifierFamily::AuxPowPop | ExternalVerifierFamily::PoSpaceVdf => {
+                Backings::WorkOrSignatureSet
+            }
+            ExternalVerifierFamily::HeterogeneousMultiProver => Backings::ZkOrSignatureSet,
+            ExternalVerifierFamily::StarkValidityRollup
+            | ExternalVerifierFamily::MinaSuccinctRecursive
+            | ExternalVerifierFamily::BudZkVmExecution => Backings::Zk,
+            ExternalVerifierFamily::BitcoinNakamotoPow
+            | ExternalVerifierFamily::BitVmCovenant
+            | ExternalVerifierFamily::GhostdagPow
+            | ExternalVerifierFamily::NipopowSuperblock => Backings::Work,
+            _ => Backings::SignatureSet,
         }
     }
 
@@ -1354,6 +1325,7 @@ pub(crate) mod decision {
             PROTOCOL,
             MAJORITY,
             ROUND,
+            backings_of(ExternalVerifierFamily::AlgorandStateProof),
         ),
         p(
             ExternalVerifierFamily::AptosJolteonBft,
@@ -1361,6 +1333,7 @@ pub(crate) mod decision {
             PROTOCOL,
             MAJORITY,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::AptosJolteonBft),
         ),
         p(
             ExternalVerifierFamily::ArweaveSpOra,
@@ -1368,6 +1341,7 @@ pub(crate) mod decision {
             ECONOMIC,
             MAJORITY,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::ArweaveSpOra),
         ),
         p(
             ExternalVerifierFamily::AuxPowPop,
@@ -1375,6 +1349,7 @@ pub(crate) mod decision {
             PROBABILISTIC,
             TRUSTLESS,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::AuxPowPop),
         ),
         p(
             ExternalVerifierFamily::BabylonEots,
@@ -1382,6 +1357,7 @@ pub(crate) mod decision {
             ECONOMIC,
             MAJORITY,
             EPOCH,
+            backings_of(ExternalVerifierFamily::BabylonEots),
         ),
         p(
             ExternalVerifierFamily::BasedPreconf,
@@ -1389,6 +1365,7 @@ pub(crate) mod decision {
             ECONOMIC,
             MAJORITY,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::BasedPreconf),
         ),
         p(
             ExternalVerifierFamily::BitcoinNakamotoPow,
@@ -1396,6 +1373,7 @@ pub(crate) mod decision {
             PROBABILISTIC,
             TRUSTLESS,
             UNIX,
+            backings_of(ExternalVerifierFamily::BitcoinNakamotoPow),
         ),
         p(
             ExternalVerifierFamily::BitVmCovenant,
@@ -1403,6 +1381,7 @@ pub(crate) mod decision {
             PROBABILISTIC,
             TRUSTLESS,
             UNIX,
+            backings_of(ExternalVerifierFamily::BitVmCovenant),
         ),
         p(
             ExternalVerifierFamily::CasperFfg,
@@ -1410,6 +1389,7 @@ pub(crate) mod decision {
             ECONOMIC,
             MAJORITY,
             EPOCH,
+            backings_of(ExternalVerifierFamily::CasperFfg),
         ),
         p(
             ExternalVerifierFamily::ChainKeyNiDkg,
@@ -1417,6 +1397,7 @@ pub(crate) mod decision {
             PROTOCOL,
             MAJORITY,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::ChainKeyNiDkg),
         ),
         p(
             ExternalVerifierFamily::CelestiaDas,
@@ -1424,6 +1405,7 @@ pub(crate) mod decision {
             ECONOMIC,
             MAJORITY,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::CelestiaDas),
         ),
         p(
             ExternalVerifierFamily::BullsharkDagBft,
@@ -1431,6 +1413,7 @@ pub(crate) mod decision {
             PROTOCOL,
             MAJORITY,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::BullsharkDagBft),
         ),
         p(
             ExternalVerifierFamily::EthereumGasperSync,
@@ -1438,6 +1421,7 @@ pub(crate) mod decision {
             PROTOCOL,
             MAJORITY,
             SLOT_OR_EPOCH,
+            backings_of(ExternalVerifierFamily::EthereumGasperSync),
         ),
         p(
             ExternalVerifierFamily::GhostdagPow,
@@ -1445,6 +1429,7 @@ pub(crate) mod decision {
             PROBABILISTIC,
             TRUSTLESS,
             UNIX,
+            backings_of(ExternalVerifierFamily::GhostdagPow),
         ),
         p(
             ExternalVerifierFamily::HeterogeneousMultiProver,
@@ -1452,6 +1437,7 @@ pub(crate) mod decision {
             PROVEN,
             TRUSTLESS,
             UNIX,
+            backings_of(ExternalVerifierFamily::HeterogeneousMultiProver),
         ),
         p(
             ExternalVerifierFamily::HoneyBadgerBft,
@@ -1459,6 +1445,7 @@ pub(crate) mod decision {
             PROTOCOL,
             MAJORITY,
             EPOCH,
+            backings_of(ExternalVerifierFamily::HoneyBadgerBft),
         ),
         p(
             ExternalVerifierFamily::HotStuffChainedBft,
@@ -1466,6 +1453,7 @@ pub(crate) mod decision {
             PROTOCOL,
             MAJORITY,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::HotStuffChainedBft),
         ),
         p(
             ExternalVerifierFamily::MinaSuccinctRecursive,
@@ -1473,6 +1461,7 @@ pub(crate) mod decision {
             PROVEN,
             TRUSTLESS,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::MinaSuccinctRecursive),
         ),
         p(
             ExternalVerifierFamily::MysticetiDag,
@@ -1480,6 +1469,7 @@ pub(crate) mod decision {
             PROTOCOL,
             MAJORITY,
             ROUND,
+            backings_of(ExternalVerifierFamily::MysticetiDag),
         ),
         p(
             ExternalVerifierFamily::NearDoomslugBft,
@@ -1487,6 +1477,7 @@ pub(crate) mod decision {
             PROTOCOL,
             MAJORITY,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::NearDoomslugBft),
         ),
         p(
             ExternalVerifierFamily::NipopowSuperblock,
@@ -1494,6 +1485,7 @@ pub(crate) mod decision {
             PROBABILISTIC,
             TRUSTLESS,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::NipopowSuperblock),
         ),
         p(
             ExternalVerifierFamily::OuroborosMithril,
@@ -1501,6 +1493,7 @@ pub(crate) mod decision {
             ECONOMIC,
             MAJORITY,
             EPOCH,
+            backings_of(ExternalVerifierFamily::OuroborosMithril),
         ),
         p(
             ExternalVerifierFamily::PoSpaceVdf,
@@ -1508,6 +1501,7 @@ pub(crate) mod decision {
             PROBABILISTIC,
             TRUSTLESS,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::PoSpaceVdf),
         ),
         p(
             ExternalVerifierFamily::RestakingAvs,
@@ -1515,6 +1509,7 @@ pub(crate) mod decision {
             ECONOMIC,
             MAJORITY,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::RestakingAvs),
         ),
         p(
             ExternalVerifierFamily::SimplexBft,
@@ -1522,6 +1517,7 @@ pub(crate) mod decision {
             PROTOCOL,
             MAJORITY,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::SimplexBft),
         ),
         p(
             ExternalVerifierFamily::SolanaTowerBft,
@@ -1529,6 +1525,7 @@ pub(crate) mod decision {
             PROTOCOL,
             MAJORITY,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::SolanaTowerBft),
         ),
         p(
             ExternalVerifierFamily::StarkValidityRollup,
@@ -1536,6 +1533,7 @@ pub(crate) mod decision {
             PROVEN,
             TRUSTLESS,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::StarkValidityRollup),
         ),
         p(
             ExternalVerifierFamily::StellarScp,
@@ -1543,6 +1541,7 @@ pub(crate) mod decision {
             PROTOCOL,
             MAJORITY,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::StellarScp),
         ),
         p(
             ExternalVerifierFamily::SymbioticVault,
@@ -1550,6 +1549,7 @@ pub(crate) mod decision {
             ECONOMIC,
             MAJORITY,
             EPOCH,
+            backings_of(ExternalVerifierFamily::SymbioticVault),
         ),
         p(
             ExternalVerifierFamily::TendermintBft,
@@ -1557,6 +1557,7 @@ pub(crate) mod decision {
             PROTOCOL,
             MAJORITY,
             UNIX,
+            backings_of(ExternalVerifierFamily::TendermintBft),
         ),
         p(
             ExternalVerifierFamily::TonCatchainBft,
@@ -1564,6 +1565,7 @@ pub(crate) mod decision {
             PROTOCOL,
             MAJORITY,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::TonCatchainBft),
         ),
         p(
             ExternalVerifierFamily::BudZkVmExecution,
@@ -1571,6 +1573,7 @@ pub(crate) mod decision {
             PROVEN,
             TRUSTLESS,
             HEIGHT,
+            backings_of(ExternalVerifierFamily::BudZkVmExecution),
         ),
     ];
 
@@ -1586,7 +1589,14 @@ pub(crate) mod decision {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod decision_tests {
-    use super::decision::{family, FAMILY_PROFILES};
+    use super::decision::{family, Backing, FAMILY_PROFILES};
+
+    const BACKINGS: [Backing; 4] = [
+        Backing::SignatureSet,
+        Backing::Work,
+        Backing::Authority,
+        Backing::Zk,
+    ];
     use super::ExternalVerifierFamily;
     use crate::cross_domain::external::spec::{FinalityKind, TimeUnit, TrustModel};
 
@@ -1678,6 +1688,84 @@ mod decision_tests {
                         p.family
                     );
                 }
+            }
+            // The backing half of the profile is a decision too: a row that
+            // accepted every backing would let a work-only family finalize on
+            // a signature set, which is exactly what the match this table
+            // replaced refused.
+            let accepted: Vec<Backing> = BACKINGS
+                .iter()
+                .copied()
+                .filter(|b| p.accepts_backing(*b))
+                .collect();
+            assert!(
+                !accepted.is_empty(),
+                "row for {:?} accepts no backing; it could never finalize",
+                p.family
+            );
+            assert!(
+                accepted.len() < BACKINGS.len(),
+                "row for {:?} accepts every backing; the rule it states binds nothing",
+                p.family
+            );
+        }
+    }
+
+    /// The pairings the table states are the pairings the code asserted
+    /// before it, family by family. A row that silently widens a family's
+    /// backing turns this test red.
+    #[test]
+    fn the_pairings_are_the_ones_the_code_asserted() {
+        let has = |f: ExternalVerifierFamily, b: Backing| {
+            family(f)
+                .expect("every family has a row")
+                .accepts_backing(b)
+        };
+        for f in [
+            ExternalVerifierFamily::BitcoinNakamotoPow,
+            ExternalVerifierFamily::BitVmCovenant,
+            ExternalVerifierFamily::GhostdagPow,
+            ExternalVerifierFamily::NipopowSuperblock,
+        ] {
+            assert!(has(f, Backing::Work), "{f:?} must accept work");
+            assert!(
+                !has(f, Backing::SignatureSet),
+                "{f:?} must not accept a signature set"
+            );
+            assert!(!has(f, Backing::Zk), "{f:?} must not accept a proof");
+        }
+        for f in [
+            ExternalVerifierFamily::StarkValidityRollup,
+            ExternalVerifierFamily::MinaSuccinctRecursive,
+            ExternalVerifierFamily::BudZkVmExecution,
+        ] {
+            assert!(has(f, Backing::Zk), "{f:?} must accept a proof");
+            assert!(!has(f, Backing::Work), "{f:?} must not accept work");
+        }
+        for f in [
+            ExternalVerifierFamily::AuxPowPop,
+            ExternalVerifierFamily::PoSpaceVdf,
+        ] {
+            assert!(
+                has(f, Backing::Work) && has(f, Backing::SignatureSet),
+                "{f:?} keeps both halves"
+            );
+            assert!(!has(f, Backing::Zk), "{f:?} is not a proof family");
+        }
+        let multi = ExternalVerifierFamily::HeterogeneousMultiProver;
+        assert!(
+            has(multi, Backing::Zk) && has(multi, Backing::SignatureSet),
+            "the multi-prover aggregates both"
+        );
+        assert!(
+            !has(multi, Backing::Work),
+            "the multi-prover is not a work family"
+        );
+        for p in FAMILY_PROFILES {
+            if p.backings == super::decision::Backings::SignatureSet {
+                assert!(p.accepts_backing(Backing::SignatureSet), "{:?}", p.family);
+                assert!(!p.accepts_backing(Backing::Work), "{:?}", p.family);
+                assert!(!p.accepts_backing(Backing::Zk), "{:?}", p.family);
             }
         }
     }
