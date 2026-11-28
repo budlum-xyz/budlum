@@ -919,6 +919,14 @@ impl GenesisConfig {
     #[must_use]
     pub fn build_state(&self) -> AccountState {
         let mut state = AccountState::new();
+        // The bridge economic guard's mode is chain state, committed through
+        // the bridge root, and it is decided here: strict on the public chains
+        // (every inbound external domain needs an explicit ceiling policy
+        // before a mint or unlock can flow), permissive on a devnet. The
+        // guard's constructor cannot know the chain, so a genesis that did not
+        // say so left the public chains permissive - measured on this tree:
+        // nothing else on the production path called the mode helper.
+        crate::cross_domain::bridge_tx::enable_chain_economic_guard_mode(&mut state, self.chain_id);
         // TESTNET-DEFAULT: fee rates belong to genesis state, not
         // a node-local config overlay, so every testnet replay commits the same
         // economic profile. Mainnet and development chains keep their explicit
@@ -1781,6 +1789,47 @@ mod tests {
         assert_eq!(
             block.hash, "ba194aa08eb23a094c04cc1f005266e43f961aa2d8fd127f91cfec1c9f262484",
             "the pin in xtask/tools/src/docker_smoke.rs must move with devnet_genesis()"
+        );
+    }
+
+    /// The bridge economic guard is strict on the public chains and
+    /// permissive on a devnet, and it is the genesis state that says which.
+    /// `BridgeState::new()` is chain-agnostic and starts permissive, so a
+    /// public chain whose genesis did not flip the mode would route every
+    /// external bridge flow with no ceiling at all - the guard's own
+    /// `for_chain_id` existed, and nothing on the production path called it.
+    #[test]
+    fn genesis_state_binds_the_bridge_economic_guard_to_the_chain() {
+        for (config, strict) in [
+            (mainnet_genesis(), true),
+            (testnet_genesis(), true),
+            (devnet_genesis(), false),
+        ] {
+            let state = config.build_state();
+            assert_eq!(
+                state
+                    .bridge_state
+                    .economic_guard
+                    .requires_configured_domains(),
+                strict,
+                "chain {} must start with strict={strict}",
+                config.chain_id
+            );
+        }
+        // Strict means an unconfigured external domain carries no flow: the
+        // guard refuses before any ceiling arithmetic.
+        let mut strict_state = testnet_genesis().build_state();
+        let refused = strict_state
+            .bridge_state
+            .economic_guard
+            .check_and_record_flow(7, 1, 1)
+            .unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                crate::cross_domain::economic_guard::EconomicGuardError::UnknownDomain(7)
+            ),
+            "got {refused:?}"
         );
     }
 
