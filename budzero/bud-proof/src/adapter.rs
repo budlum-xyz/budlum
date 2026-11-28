@@ -277,7 +277,7 @@ impl ExecutionPublicInputs {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ProofEnvelope {
     pub proof_format_version: u32,
     pub backend: String,

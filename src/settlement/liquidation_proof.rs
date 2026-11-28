@@ -998,3 +998,79 @@ mod tests {
         assert!(outcomes.is_empty());
     }
 }
+
+/// A liquidation as it arrives on chain: everything the engine needs, in one
+/// object, so the door does not have to invent a wire format.
+///
+/// The fields are the engine's five inputs verbatim. Nothing is derived here:
+/// a request that lies about a root, a reserve or a leg is caught by
+/// `execute_proven_cross_domain_liquidation`, and the door's only extra work is
+/// to drop claimed roots this chain never accepted (see
+/// `domains::execute_liquidation_request`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiquidationRequest {
+    /// The position being liquidated.
+    pub position: LiquidationPosition,
+    /// Roots the sender claims are final, keyed by `(domain, epoch)`.
+    ///
+    /// The sender supplies these because only it knows which epochs its
+    /// observations cite; the chain then intersects them with what it has
+    /// accepted, which is why an invented root here is harmless rather than
+    /// exploitable.
+    #[serde(with = "crate::core::map_keys")]
+    pub certified_roots: std::collections::BTreeMap<(u32, u64), Hash32>,
+    /// Reserve observations, each carrying its own inclusion proof.
+    pub observations: Vec<ProvenReserveObservation>,
+    /// The collateral legs the position claims, one per source domain.
+    pub collateral_legs: Vec<CollateralLegSpec>,
+    /// Caps and the delivery anchor.
+    pub params: CrossDomainLiquidationParams,
+}
+
+impl LiquidationRequest {
+    /// Whether the request carries any evidence at all.
+    ///
+    /// A request with no observations cannot prove health, so it is refused
+    /// before the engine's heavier checks run - and, more importantly, before
+    /// any caller could mistake "the engine returned nothing" for "nothing was
+    /// wrong".
+    #[must_use]
+    pub fn has_evidence(&self) -> bool {
+        !self.certified_roots.is_empty() && !self.observations.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod certified_roots_tests {
+    use super::*;
+
+    #[test]
+    fn liquidation_request_certified_roots_serialize_as_string_keys() {
+        let mut roots = std::collections::BTreeMap::new();
+        roots.insert((7u32, 12u64), [0xabu8; 32]);
+        let request = LiquidationRequest {
+            position: LiquidationPosition {
+                position_id: 1,
+                debt_x: 1_000,
+                collateral_y: 2_000,
+                maintenance_threshold_bps: 8_000,
+            },
+            certified_roots: roots,
+            observations: Vec::new(),
+            collateral_legs: Vec::new(),
+            params: CrossDomainLiquidationParams {
+                debt_domain_id: 7,
+                repay_debt_x: 500,
+                bonus_bps: 100,
+                delivery_proof_root: [0u8; 32],
+            },
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(
+            json.contains("\"7:12\""),
+            "certified_roots must key by string: {json}"
+        );
+        let back: LiquidationRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.certified_roots, request.certified_roots);
+    }
+}
