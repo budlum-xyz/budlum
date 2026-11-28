@@ -1599,7 +1599,7 @@ pub(crate) mod tests {
             .verify(&raw, &VerificationPolicy::strict(0))
             .unwrap_err();
         assert!(
-            matches!(err, AdapterError::ConsensusRule { rule } if rule.contains("empty")),
+            matches!(&err, AdapterError::ConsensusRule { rule } if rule.contains("empty")),
             "empty-network adapter must refuse fail-closed, got {err:?}"
         );
     }

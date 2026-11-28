@@ -878,7 +878,7 @@ mod tests {
         };
         let err = adapter.verify(&raw, &default_policy()).unwrap_err();
         assert!(
-            matches!(err, AdapterError::ConsensusRule { rule } if rule.contains("empty")),
+            matches!(&err, AdapterError::ConsensusRule { rule } if rule.contains("empty")),
             "empty-network adapter must refuse fail-closed, got {err:?}"
         );
     }
@@ -916,7 +916,7 @@ mod tests {
 
         ev.classical_signatures[1] = ev.classical_signatures[0].clone();
         let err = adapter.verify_collateral(&ev).unwrap_err();
-        assert!(matches!(err, AdapterError::ConsensusRule { rule } if rule.contains("duplicate")));
+        assert!(matches!(&err, AdapterError::ConsensusRule { rule } if rule.contains("duplicate")));
 
         let foreign = sample_evidence("mainnet");
         let pin_err = adapter.verify_collateral(&foreign).unwrap_err();
@@ -986,7 +986,7 @@ mod tests {
                     matches!(err, AdapterError::DeclarationMismatch { field } if field == expected_field)
                 ),
                 None => assert!(
-                    matches!(err, AdapterError::ConsensusRule { rule } if rule.contains("network"))
+                    matches!(&err, AdapterError::ConsensusRule { rule } if rule.contains("network"))
                 ),
             }
         }
