@@ -2988,6 +2988,11 @@ mod tests {
             .expect("the real mainnet commit verifies");
 
         assert_eq!(attestation.height, 64_239_414);
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &attestation,
+        )
+        .expect("Tendermint BFT shape");
         assert_eq!(attestation.finalized_at, 1_794_986_334);
         assert_eq!(attestation.time_unit, TimeUnit::UnixSeconds);
         assert_eq!(attestation.state_root, commit.app_hash);

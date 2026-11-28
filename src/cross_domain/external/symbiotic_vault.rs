@@ -827,6 +827,11 @@ mod tests {
         let att = adapter
             .verify_observed(&raw, &default_policy(), &mut facts)
             .expect("full verify");
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("Symbiotic Vault shape");
         assert_eq!(att.state_root, [0xAB; 32]);
         assert_eq!(att.height, 100);
         assert_eq!(att.finalized_at, 100);

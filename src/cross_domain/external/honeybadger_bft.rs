@@ -1075,6 +1075,11 @@ mod tests {
                 &mut verify_facts,
             )
             .expect("verifies");
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("HoneyBadger BFT shape");
         assert_eq!(att.height, 12);
         assert_eq!(att.state_root, ev.state_root);
         assert_eq!(att.attested_block_hash, Some(ev.block_hash));

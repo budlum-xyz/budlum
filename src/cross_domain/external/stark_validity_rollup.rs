@@ -1065,6 +1065,11 @@ mod tests {
             .verify_observed(&raw, &VerificationPolicy::proven(45), &mut verify_facts)
             .expect("verifies");
         assert_eq!(att.height, 42);
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("STARK Validity Rollup shape");
         assert_eq!(att.state_root, expected_post_root);
         assert_eq!(att.attested_block_hash, Some(ev.header.batch_block_hash));
         assert_eq!(att.attested_event_root, Some(ev.header.withdrawal_root));

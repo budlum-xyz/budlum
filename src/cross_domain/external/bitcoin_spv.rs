@@ -2118,6 +2118,11 @@ mod tests {
         let attestation = adapter
             .verify(&evidence, &policy())
             .expect("golden verifies");
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &attestation,
+        )
+        .expect("Bitcoin SPV shape");
         assert!(matches!(
             attestation.security,
             SecurityBacking::Work { difficulty_bits } if difficulty_bits >= 32

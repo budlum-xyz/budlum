@@ -1170,6 +1170,11 @@ mod tests {
         assert!(facts.count(ObservedScheme::Scheme(SchemeId::ML_DSA_65)) >= 1);
 
         let att = adapter.verify(&raw, &policy).unwrap();
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("PoSpace VDF shape");
         assert_eq!(att.height, 101);
         assert_eq!(att.finalized_at, 104);
 
