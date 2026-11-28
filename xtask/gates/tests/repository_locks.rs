@@ -327,3 +327,66 @@ fn pool_deposit_amounts_come_only_from_the_single_table() {
         "inline deposit amounts at src/execution/executor.rs lines {forked:?}: take the value from pool_deposit::policy_of"
     );
 }
+
+/// Every standalone root integration test file in `tests/*.rs` must be named
+/// in a workflow under `.github/workflows/*.yml`. `budlum-lib-test` runs
+/// `cargo test --lib` rather than plain `cargo test`, so any `tests/<target>.rs`
+/// left unnamed by `--test <target>` never executes in CI.
+#[test]
+fn every_root_integration_test_target_is_wired_in_workflows() {
+    let tests_dir = root().join("tests");
+    let wf_dir = root().join(".github/workflows");
+
+    let mut wf_texts = Vec::new();
+    for entry in std::fs::read_dir(&wf_dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", wf_dir.display()))
+        .flatten()
+    {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("yml") || e.eq_ignore_ascii_case("yaml"))
+        {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                wf_texts.push(text);
+            }
+        }
+    }
+    assert!(!wf_texts.is_empty(), "no workflow files read");
+
+    let mut targets = Vec::new();
+    for entry in std::fs::read_dir(&tests_dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", tests_dir.display()))
+        .flatten()
+    {
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|e| e == "rs") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                targets.push(stem.to_string());
+            }
+        }
+    }
+    targets.sort();
+    assert!(
+        !targets.is_empty(),
+        "no root integration test targets found"
+    );
+
+    let mut orphans = Vec::new();
+    for target in &targets {
+        let flag = format!("--test {target}");
+        let wired = wf_texts.iter().any(|wf| {
+            wf.lines().any(|line| {
+                let code = line.split('#').next().unwrap_or("");
+                code.contains(&flag)
+            })
+        });
+        if !wired {
+            orphans.push(target.clone());
+        }
+    }
+    assert!(
+        orphans.is_empty(),
+        "root integration test targets in tests/*.rs never executed by any workflow (`--test <target>` missing): {orphans:?}"
+    );
+}
