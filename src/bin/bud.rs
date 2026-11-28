@@ -269,6 +269,12 @@ enum Command {
         #[arg(long, required = true)]
         local_asset: String,
     },
+    /// The bridge economic-guard doors: pin a prover and bond for a domain
+    /// you operate, or report a prover that signed two roots for one height.
+    Bridge {
+        #[command(subcommand)]
+        action: BridgeAction,
+    },
     /// Print the digest a storage operator signs to accept a deal, after
     /// measuring the shard bytes it will be challenged for.
     DealConsentDigest {
@@ -568,6 +574,127 @@ enum DomainAction {
         #[arg(long, default_value_t = 0)]
         now: u64,
     },
+}
+
+#[derive(Subcommand)]
+enum BridgeAction {
+    /// Pin the prover of a domain you operate and escrow your own bond
+    /// (`BridgeTx::ConfigureProverGuard`). The sender must be the domain
+    /// operator; the bond leaves the sender's spendable balance and is what a
+    /// proven contradiction slashes.
+    PinProver {
+        #[command(flatten)]
+        signer: V5Signer,
+        /// The domain whose prover is pinned.
+        #[arg(long, required = true)]
+        domain: u32,
+        /// The prover's Ed25519 public key (32 bytes, hex).
+        #[arg(long, required = true)]
+        prover_ed25519_pubkey: String,
+        /// The prover's ML-DSA-65 public key (hex); empty pins no PQ key.
+        #[arg(long, default_value = "")]
+        prover_pq_pubkey: String,
+        /// Bond to escrow, in whole BUD; 0 pins the keys and posts no bond.
+        #[arg(long, required = true)]
+        bond_bud: u64,
+    },
+    /// Report that a domain's pinned prover signed two different state roots
+    /// for one height (`BridgeTx::ReportProverDoubleRoot`). Anyone may send
+    /// it; the finder's share of the slashed bond goes to the sender.
+    ReportDoubleRoot {
+        #[command(flatten)]
+        signer: V5Signer,
+        /// The domain whose prover contradicted itself.
+        #[arg(long, required = true)]
+        domain: u32,
+        /// The domain height both roots were signed for.
+        #[arg(long, required = true)]
+        domain_height: u64,
+        /// First signed state root (32 bytes, hex).
+        #[arg(long, required = true)]
+        state_root_a: String,
+        /// Ed25519 signature over the first statement (hex).
+        #[arg(long, required = true)]
+        ed25519_sig_a: String,
+        /// ML-DSA-65 signature over the first statement (hex); empty when the
+        /// domain pins no PQ key.
+        #[arg(long, default_value = "")]
+        pq_sig_a: String,
+        /// Second signed state root (32 bytes, hex).
+        #[arg(long, required = true)]
+        state_root_b: String,
+        /// Ed25519 signature over the second statement (hex).
+        #[arg(long, required = true)]
+        ed25519_sig_b: String,
+        /// ML-DSA-65 signature over the second statement (hex).
+        #[arg(long, default_value = "")]
+        pq_sig_b: String,
+    },
+}
+
+impl BridgeAction {
+    fn signer(&self) -> &V5Signer {
+        match self {
+            Self::PinProver { signer, .. } | Self::ReportDoubleRoot { signer, .. } => signer,
+        }
+    }
+}
+
+/// The bridge write a `bud bridge` command sends, built from its arguments
+/// alone so it can be checked without a wallet or a node. Keys and roots are
+/// 32 bytes of hex, signatures any hex, the bond whole BUD.
+fn bridge_door_tx(action: &BridgeAction) -> Result<TransactionType, String> {
+    use budlum_core::cross_domain::bridge_tx::BridgeTx;
+    let write = match action {
+        BridgeAction::PinProver {
+            domain,
+            prover_ed25519_pubkey,
+            prover_pq_pubkey,
+            bond_bud,
+            ..
+        } => {
+            let bond_atoms = bond_bud
+                .checked_mul(budlum_core::tokenomics::BUD_UNIT)
+                .ok_or("the bond overflows the base unit")?;
+            BridgeTx::ConfigureProverGuard {
+                domain: *domain,
+                prover_ed25519_pubkey: hex32(prover_ed25519_pubkey, "prover_ed25519_pubkey")?,
+                prover_pq_pubkey: hex_bytes(prover_pq_pubkey, "prover_pq_pubkey")?,
+                bond_atoms,
+            }
+        }
+        BridgeAction::ReportDoubleRoot {
+            domain,
+            domain_height,
+            state_root_a,
+            ed25519_sig_a,
+            pq_sig_a,
+            state_root_b,
+            ed25519_sig_b,
+            pq_sig_b,
+            ..
+        } => BridgeTx::ReportProverDoubleRoot {
+            domain: *domain,
+            domain_height: *domain_height,
+            state_root_a: hex32(state_root_a, "state_root_a")?,
+            ed25519_sig_a: hex_bytes(ed25519_sig_a, "ed25519_sig_a")?,
+            pq_sig_a: hex_bytes(pq_sig_a, "pq_sig_a")?,
+            state_root_b: hex32(state_root_b, "state_root_b")?,
+            ed25519_sig_b: hex_bytes(ed25519_sig_b, "ed25519_sig_b")?,
+            pq_sig_b: hex_bytes(pq_sig_b, "pq_sig_b")?,
+        },
+    };
+    Ok(TransactionType::Bridge(write))
+}
+
+/// `bud bridge ...`: build the bridge write, sign it with the V5 wallet and
+/// send it. A bridge transaction carries no amount, recipient or data; the
+/// payload is the write itself.
+fn run_bridge_door(rpc_url: &str, action: &BridgeAction) -> Result<(), String> {
+    let tx_type = bridge_door_tx(action)?;
+    let signer = action.signer();
+    let key = open_wallet(signer)?;
+    send_v5(rpc_url, &key, v5_template(tx_type, 0, signer.fee), None)
 }
 
 #[derive(Subcommand)]
@@ -4759,6 +4886,7 @@ fn main() {
             domain,
             local_asset,
         } => run_bridge_asset_id(*domain, local_asset),
+        Command::Bridge { action } => run_bridge_door(&cli.rpc_url, action),
         Command::DealConsentDigest {
             chain_id,
             payer,
@@ -5105,6 +5233,114 @@ fn run_cli_conformance(samples: usize) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `bud bridge pin-prover` and `report-double-root` build the bridge write
+    /// from their arguments alone: keys and roots are 32-byte hex, signatures
+    /// any hex, the bond whole BUD, and a malformed field is refused before a
+    /// wallet is opened.
+    #[test]
+    fn bridge_door_commands_build_the_bridge_write_from_their_arguments() {
+        use budlum_core::cross_domain::bridge_tx::BridgeTx;
+        let signer = || V5Signer {
+            key_file: "wallet.key".into(),
+            password_file: None,
+            fee: None,
+        };
+        let pin = BridgeAction::PinProver {
+            signer: signer(),
+            domain: 7,
+            prover_ed25519_pubkey: format!("0x{}", "11".repeat(32)),
+            prover_pq_pubkey: "2222".into(),
+            bond_bud: 3,
+        };
+        match bridge_door_tx(&pin) {
+            Ok(TransactionType::Bridge(BridgeTx::ConfigureProverGuard {
+                domain,
+                prover_ed25519_pubkey,
+                prover_pq_pubkey,
+                bond_atoms,
+            })) => {
+                assert_eq!(domain, 7);
+                assert_eq!(prover_ed25519_pubkey, [0x11; 32]);
+                assert_eq!(prover_pq_pubkey, vec![0x22, 0x22]);
+                assert_eq!(bond_atoms, 3 * budlum_core::tokenomics::BUD_UNIT);
+            }
+            other => panic!("unexpected pin write: {other:?}"),
+        }
+
+        let report = BridgeAction::ReportDoubleRoot {
+            signer: signer(),
+            domain: 7,
+            domain_height: 10,
+            state_root_a: "aa".repeat(32),
+            ed25519_sig_a: "01".repeat(64),
+            pq_sig_a: String::new(),
+            state_root_b: "bb".repeat(32),
+            ed25519_sig_b: "02".repeat(64),
+            pq_sig_b: String::new(),
+        };
+        match bridge_door_tx(&report) {
+            Ok(TransactionType::Bridge(BridgeTx::ReportProverDoubleRoot {
+                domain,
+                domain_height,
+                state_root_a,
+                ed25519_sig_a,
+                pq_sig_a,
+                state_root_b,
+                ed25519_sig_b,
+                pq_sig_b,
+            })) => {
+                assert_eq!((domain, domain_height), (7, 10));
+                assert_eq!(state_root_a, [0xAA; 32]);
+                assert_eq!(ed25519_sig_a, vec![1u8; 64]);
+                assert!(pq_sig_a.is_empty());
+                assert_eq!(state_root_b, [0xBB; 32]);
+                assert_eq!(ed25519_sig_b, vec![2u8; 64]);
+                assert!(pq_sig_b.is_empty());
+            }
+            other => panic!("unexpected report write: {other:?}"),
+        }
+
+        // A short key, an overflowing bond and a non-hex signature are refused
+        // with the field named.
+        let short_key = BridgeAction::PinProver {
+            signer: signer(),
+            domain: 7,
+            prover_ed25519_pubkey: "11".repeat(31),
+            prover_pq_pubkey: String::new(),
+            bond_bud: 1,
+        };
+        match bridge_door_tx(&short_key) {
+            Err(e) => assert!(e.contains("prover_ed25519_pubkey"), "{e}"),
+            Ok(_) => panic!("a 31-byte key must be refused"),
+        }
+        let overflow = BridgeAction::PinProver {
+            signer: signer(),
+            domain: 7,
+            prover_ed25519_pubkey: "11".repeat(32),
+            prover_pq_pubkey: String::new(),
+            bond_bud: u64::MAX,
+        };
+        match bridge_door_tx(&overflow) {
+            Err(e) => assert!(e.contains("overflows"), "{e}"),
+            Ok(_) => panic!("an overflowing bond must be refused"),
+        }
+        let not_hex = BridgeAction::ReportDoubleRoot {
+            signer: signer(),
+            domain: 7,
+            domain_height: 10,
+            state_root_a: "aa".repeat(32),
+            ed25519_sig_a: "zz".into(),
+            pq_sig_a: String::new(),
+            state_root_b: "bb".repeat(32),
+            ed25519_sig_b: "02".repeat(64),
+            pq_sig_b: String::new(),
+        };
+        match bridge_door_tx(&not_hex) {
+            Err(e) => assert!(e.contains("ed25519_sig_a"), "{e}"),
+            Ok(_) => panic!("a non-hex signature must be refused"),
+        }
+    }
 
     /// The recipient of a `.bud` payment is read from the extras the proved
     /// leaf commits to: the address record, the owner when it is empty, and

@@ -112,6 +112,21 @@ operator listener (`operator_auth_required = true`). See
    `bud undelegate` starts the exit and `bud withdraw-delegation` pays it out
    after the unbonding period. `bud_validatorProfile` and `bud_validatorList`
    expose commission and stake (see [delegation guide](DELEGATION.md)).
+7. **Operate a bridged domain.** On the public testnet a bridge flow from a
+   domain is refused until the domain's operator has pinned its prover and
+   posted a bond: `bud --rpc-url http://127.0.0.1:28545 --signing-chain-id
+   45261 bridge pin-prover --key-file ./secrets/wallet.json --domain <id>
+   --prover-ed25519-pubkey 0x<32 bytes> --prover-pq-pubkey <hex>
+   --bond-bud <amount>` signs from the operator's wallet; the bond leaves the
+   wallet's spendable balance and the window ceiling the domain may move is
+   the bond under the protocol haircut. Anyone holding a pinned prover's two
+   signatures over different roots for one height sends `bud ... bridge
+   report-double-root --domain <id> --domain-height <h> --state-root-a
+   0x<32> --ed25519-sig-a <hex> --pq-sig-a <hex> --state-root-b 0x<32>
+   --ed25519-sig-b <hex> --pq-sig-b <hex>`: the node verifies the
+   signatures, slashes the bond, pays the sender the finder's share and
+   freezes the domain. Both are ordinary signed transactions with zero
+   amount; a report that does not verify costs only its fee.
 
 ## Parameters
 
