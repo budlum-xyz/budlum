@@ -60,6 +60,10 @@ jobs:
     timeout-minutes: 120
     env:
       CARGO_INCREMENTAL: "0"
+      # Override `rust-toolchain.toml` (`1.97.1`) cleanly for every `cargo` /
+      # `rustc` command in this job so `independent` (`1.98.0`) truly compiles
+      # with 1.98.0 instead of silently falling back to 1.97.1.
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     strategy:
       fail-fast: false
       matrix:
@@ -81,8 +85,8 @@ jobs:
         run: |
           set -euo pipefail
           rustup toolchain install "${{ matrix.toolchain }}" --profile minimal
-          rustup default "${{ matrix.toolchain }}"
           rustc --version
+          rustc --version | grep -F "rustc ${{ matrix.toolchain }} "
 
       - name: Install protoc
         run: python3 .github/scripts/install_protoc.py
@@ -99,17 +103,18 @@ jobs:
         run: |
           set -euo pipefail
           # Genesis: the chain's first agreed value. If something absent from the
-          # source gets in here, the two compilers diverge.
-          cargo test --release -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis.txt
+          # source gets in here, the two compilers diverge. Scope to `--lib`
+          # (matching `determinism.yml`) so Cargo does not spend 30+ minutes
+          # compiling unrelated bins, integration tests, and doctests.
+          cargo test --release --lib -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis.txt
           GENESIS=$(grep "GENESIS_HASH=" /tmp/genesis.txt | tail -1 | cut -d= -f2)
           test -n "${GENESIS}"
 
           # The canonical program hash: the identity of the zkVM program. If a
           # compiler changes the generated code this value shifts.
-          # No `|| true`. If the gate does not run this job goes red: something
-          # unmeasurable cannot be counted green, and a silently skipped stage empties
-          # the comparison.
-          (cd xtask/gates && cargo run --release --quiet -- canonical-programs-reproduce) > /tmp/proghash.txt 2>&1
+          # No `|| true` - yet keep stdout+stderr visible via `tee` so any real
+          # failure leaves its diagnostic in the job log before `set -e` exits.
+          cargo run --release --quiet --manifest-path xtask/gates/Cargo.toml -- canonical-programs-reproduce 2>&1 | tee /tmp/proghash.txt
           PROGRAM=$(grep -oE "program-hash [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
           test -n "${PROGRAM}"
           # The matmul guest is the largest canonical program; its hash is the
@@ -134,7 +139,7 @@ jobs:
           # two compilers must agree on is every deterministic part of the
           # relay outcome: the canonical-set token, the status word and the
           # program hash (regeneration is a dependency of relay).
-          (cd xtask/gates && cargo run --release --quiet -- relay) > /tmp/relay.txt 2>&1
+          cargo run --release --quiet --manifest-path xtask/gates/Cargo.toml -- relay 2>&1 | tee /tmp/relay.txt
           RELAYCANON=$(grep -oE "relay-canonical-set [0-9a-f]+" /tmp/relay.txt | tail -1 | awk '{print $2}')
           RELAYSTATUS=$(grep -oE "relay-status [a-z]+" /tmp/relay.txt | tail -1 | awk '{print $2}')
           RELAYPROG=$(grep -oE "relay-program-hash [0-9a-f]+" /tmp/relay.txt | tail -1 | awk '{print $2}')
@@ -146,7 +151,7 @@ jobs:
           # The tree-pin gate attests the whole budzero source tree; the pins
           # are committed with the tree, so both compilers must see the same
           # tree hash state. The gate prints the pinned-file count on success.
-          (cd xtask/gates && cargo run --release --quiet -- tree-pin) > /tmp/treepin.txt 2>&1
+          cargo run --release --quiet --manifest-path xtask/gates/Cargo.toml -- tree-pin 2>&1 | tee /tmp/treepin.txt
           TREEPIN_OK=$(grep -oE "all [0-9]+ files match their pins" /tmp/treepin.txt | tail -1)
           test -n "${TREEPIN_OK}"
 
