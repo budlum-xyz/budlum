@@ -5315,7 +5315,6 @@ mod rpc_tests {
     #[tokio::test]
     async fn storage_get_object_refuses_metadata_of_listed_content() {
         use crate::consensus::pow::PoWEngine;
-        use crate::pollen::data_rights::DataAsset;
         use crate::storage::bud3::limits::{Bud3Limits, Profile};
         use crate::storage::bud3::pipeline::prepare_sealed_upload;
         use crate::storage::bud3::seal::SEAL_SALT_LEN;
