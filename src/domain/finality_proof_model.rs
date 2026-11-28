@@ -1248,3 +1248,487 @@ mod tests {
         ));
     }
 }
+
+/// One canonical family profile, in the form the two decision points use.
+///
+/// The same family profile is asserted in two different `match` statements on
+/// two different paths: `verify_descriptor` (is this adapter still the family
+/// it claims to be?) and `from_external_attestation` (does the security
+/// backing this attestation carries belong to that family?). Each is written
+/// as one big match, and the pairing that matters - "a family declares profile
+/// P, and only backing B may satisfy P" - exists only in a reviewer's head. A
+/// family added to one match and not the other is precisely how an adapter
+/// would enter the tree trusting a party it was declared not to trust.
+///
+/// `decision::family` puts the profile in one row per family, keyed by the
+/// family's own discriminant, and the gate in `xtask/gates` refuses the tree
+/// when two rows disagree with the code or when the profiles cover less than
+/// the whole family set. It is a description of what the code already
+/// decides, not a second decision path.
+pub(crate) mod decision {
+    use crate::cross_domain::external::spec::{FinalityKind, TimeUnit, TrustModel};
+    use crate::domain::finality_proof_model::ExternalVerifierFamily;
+
+    /// The trust model a profile accepts, without the `set_size` payload: a
+    /// built-in family never depends on how large the certified set is, only
+    /// on whether honesty of that set is the assumption.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Trust {
+        /// Anybody with the evidence can check it.
+        Trustless,
+        /// An honest majority of a known, bounded set is assumed.
+        HonestMajority,
+    }
+
+    /// One family's canonical profile.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Profile {
+        pub family: ExternalVerifierFamily,
+        pub consensus_kind: &'static str,
+        pub finality: FinalityKind,
+        pub trust: Trust,
+        /// Empty means "any unit"; the families that accept more than one say
+        /// so by listing them.
+        pub units: &'static [TimeUnit],
+    }
+
+    impl Profile {
+        /// Does this profile accept the descriptor's three profile fields?
+        #[must_use]
+        pub fn accepts(
+            &self,
+            finality: FinalityKind,
+            trust_model: &TrustModel,
+            unit: TimeUnit,
+        ) -> bool {
+            self.finality == finality
+                && match (self.trust, trust_model) {
+                    (Trust::Trustless, TrustModel::Trustless) => true,
+                    (Trust::HonestMajority, TrustModel::HonestMajority { set_size }) => {
+                        *set_size > 0
+                    }
+                    _ => false,
+                }
+                && (self.units.is_empty() || self.units.contains(&unit))
+        }
+    }
+
+    const UNIX: &[TimeUnit] = &[TimeUnit::UnixSeconds];
+    const HEIGHT: &[TimeUnit] = &[TimeUnit::Height];
+    const ROUND: &[TimeUnit] = &[TimeUnit::Round];
+    const EPOCH: &[TimeUnit] = &[TimeUnit::Epoch];
+    const SLOT_OR_EPOCH: &[TimeUnit] = &[TimeUnit::Slot, TimeUnit::Epoch];
+
+    const fn p(
+        family: ExternalVerifierFamily,
+        consensus_kind: &'static str,
+        finality: FinalityKind,
+        trust: Trust,
+        units: &'static [TimeUnit],
+    ) -> Profile {
+        Profile {
+            family,
+            consensus_kind,
+            finality,
+            trust,
+            units,
+        }
+    }
+
+    const PROBABILISTIC: FinalityKind = FinalityKind::Probabilistic;
+    const ECONOMIC: FinalityKind = FinalityKind::EconomicFinality;
+    const PROTOCOL: FinalityKind = FinalityKind::ProtocolFinality;
+    const PROVEN: FinalityKind = FinalityKind::Proven;
+    const TRUSTLESS: Trust = Trust::Trustless;
+    const MAJORITY: Trust = Trust::HonestMajority;
+
+    /// The canonical profile of every built-in family.
+    ///
+    /// One row per family, in the family's own discriminant order. The gate
+    /// checks that the rows cover `0..=31` exactly once and that each row
+    /// agrees with `verify_descriptor` and `from_external_attestation`.
+    pub const FAMILY_PROFILES: &[Profile] = &[
+        p(
+            ExternalVerifierFamily::AlgorandStateProof,
+            "algorand-pure-pos-stateproof-pq",
+            PROTOCOL,
+            MAJORITY,
+            ROUND,
+        ),
+        p(
+            ExternalVerifierFamily::AptosJolteonBft,
+            "aptos-jolteon-2chain-bft",
+            PROTOCOL,
+            MAJORITY,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::ArweaveSpOra,
+            "arweave-spora-recall",
+            ECONOMIC,
+            MAJORITY,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::AuxPowPop,
+            "auxpow-pop-merged-mining",
+            PROBABILISTIC,
+            TRUSTLESS,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::BabylonEots,
+            "babylon-btc-restaking-eots",
+            ECONOMIC,
+            MAJORITY,
+            EPOCH,
+        ),
+        p(
+            ExternalVerifierFamily::BasedPreconf,
+            "based-preconf-focil",
+            ECONOMIC,
+            MAJORITY,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::BitcoinNakamotoPow,
+            "nakamoto-pow",
+            PROBABILISTIC,
+            TRUSTLESS,
+            UNIX,
+        ),
+        p(
+            ExternalVerifierFamily::BitVmCovenant,
+            "bitvm2-pow-covenant",
+            PROBABILISTIC,
+            TRUSTLESS,
+            UNIX,
+        ),
+        p(
+            ExternalVerifierFamily::CasperFfg,
+            "casper-ffg-checkpoint",
+            ECONOMIC,
+            MAJORITY,
+            EPOCH,
+        ),
+        p(
+            ExternalVerifierFamily::ChainKeyNiDkg,
+            "chain-key-nidkg-threshold-bls",
+            PROTOCOL,
+            MAJORITY,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::CelestiaDas,
+            "modular-das-nmt-2d",
+            ECONOMIC,
+            MAJORITY,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::BullsharkDagBft,
+            "bullshark-round-dag-bft",
+            PROTOCOL,
+            MAJORITY,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::EthereumGasperSync,
+            "gasper-pos",
+            PROTOCOL,
+            MAJORITY,
+            SLOT_OR_EPOCH,
+        ),
+        p(
+            ExternalVerifierFamily::GhostdagPow,
+            "ghostdag-k-cluster-pow",
+            PROBABILISTIC,
+            TRUSTLESS,
+            UNIX,
+        ),
+        p(
+            ExternalVerifierFamily::HeterogeneousMultiProver,
+            "heterogeneous-multiprover-2of3",
+            PROVEN,
+            TRUSTLESS,
+            UNIX,
+        ),
+        p(
+            ExternalVerifierFamily::HoneyBadgerBft,
+            "asynchronous-common-subset-bft",
+            PROTOCOL,
+            MAJORITY,
+            EPOCH,
+        ),
+        p(
+            ExternalVerifierFamily::HotStuffChainedBft,
+            "hotstuff-chained-bft",
+            PROTOCOL,
+            MAJORITY,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::MinaSuccinctRecursive,
+            "succinct-recursive-samasika-stark",
+            PROVEN,
+            TRUSTLESS,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::MysticetiDag,
+            "mysticeti-uncertified-dag",
+            PROTOCOL,
+            MAJORITY,
+            ROUND,
+        ),
+        p(
+            ExternalVerifierFamily::NearDoomslugBft,
+            "near-nightshade-doomslug-bft",
+            PROTOCOL,
+            MAJORITY,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::NipopowSuperblock,
+            "nipopow-superblock",
+            PROBABILISTIC,
+            TRUSTLESS,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::OuroborosMithril,
+            "ouroboros-praos-with-mithril-stm",
+            ECONOMIC,
+            MAJORITY,
+            EPOCH,
+        ),
+        p(
+            ExternalVerifierFamily::PoSpaceVdf,
+            "pospace-hash-vdf",
+            PROBABILISTIC,
+            TRUSTLESS,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::RestakingAvs,
+            "restaking-avs-eots",
+            ECONOMIC,
+            MAJORITY,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::SimplexBft,
+            "simplex-monadbft-2round",
+            PROTOCOL,
+            MAJORITY,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::SolanaTowerBft,
+            "solana-tower-bft",
+            PROTOCOL,
+            MAJORITY,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::StarkValidityRollup,
+            "stark-state-diff-validity-rollup",
+            PROVEN,
+            TRUSTLESS,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::StellarScp,
+            "federated-bft-scp",
+            PROTOCOL,
+            MAJORITY,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::SymbioticVault,
+            "symbiotic-curated-vault",
+            ECONOMIC,
+            MAJORITY,
+            EPOCH,
+        ),
+        p(
+            ExternalVerifierFamily::TendermintBft,
+            "tendermint-bft",
+            PROTOCOL,
+            MAJORITY,
+            UNIX,
+        ),
+        p(
+            ExternalVerifierFamily::TonCatchainBft,
+            "ton-masterchain-catchain-bft",
+            PROTOCOL,
+            MAJORITY,
+            HEIGHT,
+        ),
+        p(
+            ExternalVerifierFamily::BudZkVmExecution,
+            "zkvm-execution",
+            PROVEN,
+            TRUSTLESS,
+            HEIGHT,
+        ),
+    ];
+
+    /// The profile of one family, or `None` if the family has no row. `None` is
+    /// a finding, not a default: an unlisted family is a family nobody decided
+    /// the backing rule for.
+    #[must_use]
+    pub fn family(f: ExternalVerifierFamily) -> Option<Profile> {
+        FAMILY_PROFILES.iter().copied().find(|p| p.family == f)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod decision_tests {
+    use super::decision::{family, FAMILY_PROFILES};
+    use super::ExternalVerifierFamily;
+    use crate::cross_domain::external::spec::{FinalityKind, TimeUnit, TrustModel};
+
+    /// Every discriminant from 0 to 31 has exactly one row.
+    #[test]
+    fn every_family_has_exactly_one_profile() {
+        for d in 0u8..=31 {
+            let f = unsafe_free_family(d);
+            let rows: Vec<_> = FAMILY_PROFILES.iter().filter(|p| p.family == f).collect();
+            assert_eq!(
+                rows.len(),
+                1,
+                "family {f:?} must have exactly one profile row"
+            );
+        }
+        assert_eq!(FAMILY_PROFILES.len(), 32);
+    }
+
+    /// The row's `consensus_kind` is the family's canonical string, so the two
+    /// tables cannot drift apart.
+    #[test]
+    fn every_profile_carries_the_canonical_consensus_kind() {
+        for p in FAMILY_PROFILES {
+            assert_eq!(
+                p.consensus_kind,
+                p.family.consensus_kind(),
+                "row for {:?}",
+                p.family
+            );
+        }
+    }
+
+    /// A profile accepts its own canonical shape and refuses every other
+    /// finality kind, every wrong trust model, and an unlisted time unit.
+    #[test]
+    fn profiles_accept_their_shape_and_refuse_the_rest() {
+        for p in FAMILY_PROFILES {
+            let unit = p.units[0];
+            let trust = match p.trust {
+                super::decision::Trust::Trustless => TrustModel::Trustless,
+                super::decision::Trust::HonestMajority => {
+                    TrustModel::HonestMajority { set_size: 4 }
+                }
+            };
+            assert!(
+                p.accepts(p.finality, &trust, unit),
+                "row for {:?} refuses its own shape",
+                p.family
+            );
+            for other in [
+                FinalityKind::Probabilistic,
+                FinalityKind::EconomicFinality,
+                FinalityKind::ProtocolFinality,
+                FinalityKind::Proven,
+            ] {
+                if other != p.finality {
+                    assert!(
+                        !p.accepts(other, &trust, unit),
+                        "row for {:?} accepts {other:?}",
+                        p.family
+                    );
+                }
+            }
+            assert!(
+                !p.accepts(p.finality, &TrustModel::TrustedParty, unit),
+                "row for {:?} accepts a trusted party",
+                p.family
+            );
+            assert!(
+                !p.accepts(
+                    p.finality,
+                    &TrustModel::HonestMajority { set_size: 0 },
+                    unit
+                ),
+                "row for {:?} accepts an empty set",
+                p.family
+            );
+            for other in [
+                TimeUnit::Slot,
+                TimeUnit::Epoch,
+                TimeUnit::Round,
+                TimeUnit::Height,
+                TimeUnit::UnixSeconds,
+            ] {
+                if !p.units.contains(&other) {
+                    assert!(
+                        !p.accepts(p.finality, &trust, other),
+                        "row for {:?} accepts unit {other:?}",
+                        p.family
+                    );
+                }
+            }
+        }
+    }
+
+    /// The lookup agrees with the table for every family.
+    #[test]
+    fn lookup_matches_the_table() {
+        for d in 0u8..=31 {
+            let f = unsafe_free_family(d);
+            let row = family(f).expect("every family is listed");
+            assert_eq!(row.family, f);
+        }
+    }
+
+    /// Discriminant -> variant without `unsafe`, spelled out so the test refuses
+    /// to compile when a variant is added.
+    fn unsafe_free_family(d: u8) -> ExternalVerifierFamily {
+        match d {
+            0 => ExternalVerifierFamily::AlgorandStateProof,
+            1 => ExternalVerifierFamily::AptosJolteonBft,
+            2 => ExternalVerifierFamily::ArweaveSpOra,
+            3 => ExternalVerifierFamily::AuxPowPop,
+            4 => ExternalVerifierFamily::BabylonEots,
+            5 => ExternalVerifierFamily::BasedPreconf,
+            6 => ExternalVerifierFamily::BitcoinNakamotoPow,
+            7 => ExternalVerifierFamily::BitVmCovenant,
+            8 => ExternalVerifierFamily::CasperFfg,
+            9 => ExternalVerifierFamily::ChainKeyNiDkg,
+            10 => ExternalVerifierFamily::CelestiaDas,
+            11 => ExternalVerifierFamily::BullsharkDagBft,
+            12 => ExternalVerifierFamily::EthereumGasperSync,
+            13 => ExternalVerifierFamily::GhostdagPow,
+            14 => ExternalVerifierFamily::HeterogeneousMultiProver,
+            15 => ExternalVerifierFamily::HoneyBadgerBft,
+            16 => ExternalVerifierFamily::HotStuffChainedBft,
+            17 => ExternalVerifierFamily::MinaSuccinctRecursive,
+            18 => ExternalVerifierFamily::MysticetiDag,
+            19 => ExternalVerifierFamily::NearDoomslugBft,
+            20 => ExternalVerifierFamily::NipopowSuperblock,
+            21 => ExternalVerifierFamily::OuroborosMithril,
+            22 => ExternalVerifierFamily::PoSpaceVdf,
+            23 => ExternalVerifierFamily::RestakingAvs,
+            24 => ExternalVerifierFamily::SimplexBft,
+            25 => ExternalVerifierFamily::SolanaTowerBft,
+            26 => ExternalVerifierFamily::StarkValidityRollup,
+            27 => ExternalVerifierFamily::StellarScp,
+            28 => ExternalVerifierFamily::SymbioticVault,
+            29 => ExternalVerifierFamily::TendermintBft,
+            30 => ExternalVerifierFamily::TonCatchainBft,
+            31 => ExternalVerifierFamily::BudZkVmExecution,
+            other => panic!("discriminant {other} has no variant; the family set changed"),
+        }
+    }
+}
