@@ -4669,6 +4669,37 @@ impl AccountState {
                     Err(e) => tracing::warn!("Rejecting BnsSetBaseCost: {e}"),
                 }
             }
+            ProposalType::ConfigureBridgeCeiling {
+                domain_id, policy, ..
+            } => {
+                // The settlement registry is the list of domains that exist;
+                // a ceiling for a domain it does not know would be a record
+                // waiting for a stranger. The bond the domain already holds
+                // is kept: the vote sets the ceiling, provers post bonds.
+                if self.settlement.domains.get(*domain_id).is_none() {
+                    tracing::warn!(
+                        "Rejecting ConfigureBridgeCeiling: domain {domain_id} is not registered"
+                    );
+                } else {
+                    let existing_bond = self
+                        .bridge_state
+                        .economic_guard
+                        .record(*domain_id)
+                        .and_then(|record| record.prover_bond.clone());
+                    match self.bridge_state.economic_guard.configure_domain(
+                        *domain_id,
+                        policy.clone(),
+                        existing_bond,
+                    ) {
+                        Ok(()) => tracing::info!(
+                            "Executing Governance: bridge ceiling policy installed for domain {domain_id}"
+                        ),
+                        Err(e) => {
+                            tracing::warn!("Rejecting ConfigureBridgeCeiling for domain {domain_id}: {e}")
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -7905,6 +7936,131 @@ mod tests {
     /// action does get emitted, the same vote would be applied twice: once
     /// here and once in the executor. This test fails at that moment, which
     /// is the point at which the second writer has to be removed.
+    #[test]
+    /// The strict guard routes nothing for a domain with no ceiling policy,
+    /// and the vote is the one door a policy arrives through. A passed vote
+    /// for a registered domain installs the policy and the guard starts
+    /// measuring flows against it; a vote naming a domain the settlement
+    /// registry does not know installs nothing; and the vote emits no
+    /// governance action, so the one write stays one write.
+    #[test]
+    fn a_passed_bridge_ceiling_vote_installs_the_policy_the_strict_guard_waits_for() {
+        use crate::core::governance::{Proposal, ProposalStatus, ProposalType};
+        use crate::cross_domain::economic_guard::{DomainCeilingPolicy, EconomicGuardError};
+        use crate::cross_domain::external::spec::SecurityBacking;
+        use crate::domain::{ConsensusKind, DomainStatus};
+
+        let mut state = AccountState::new();
+        state
+            .bridge_state
+            .economic_guard
+            .set_require_configured_domains(true);
+        let mut domain = crate::domain::plugin::default_domain(
+            7,
+            ConsensusKind::PoW,
+            70_007,
+            "pow-header-chain-v1",
+            6,
+        );
+        domain.status = DomainStatus::Active;
+        domain.bridge_enabled = true;
+        state
+            .settlement
+            .domains
+            .register(domain)
+            .expect("a fresh registry takes the domain");
+
+        // Strict and unconfigured: the guard refuses before any arithmetic.
+        let refused = state
+            .bridge_state
+            .economic_guard
+            .check_and_record_flow(7, 1, 1)
+            .unwrap_err();
+        assert!(matches!(refused, EconomicGuardError::UnknownDomain(7)));
+
+        let policy = DomainCeilingPolicy {
+            backing: SecurityBacking::Work {
+                difficulty_bits: 70,
+            },
+            min_work_difficulty_bits: 64,
+            work_window_cap_atoms: 1_000,
+            window_blocks: 100,
+            ..DomainCeilingPolicy::default()
+        };
+        let voter = test_addr_from_byte(1u8);
+        let mut proposal = Proposal::new(
+            1,
+            voter,
+            ProposalType::ConfigureBridgeCeiling {
+                domain_id: 7,
+                policy: policy.clone(),
+                justification_hash: [0x5A; 32],
+            },
+            0,
+            10,
+        );
+        state.execute_proposal(&proposal);
+        assert_eq!(
+            state
+                .bridge_state
+                .economic_guard
+                .record(7)
+                .map(|record| record.policy.clone()),
+            Some(policy),
+            "execute_proposal is the writer of the ceiling policy"
+        );
+        state
+            .bridge_state
+            .economic_guard
+            .check_and_record_flow(7, 1_000, 1)
+            .expect("a flow at the window cap passes");
+        let over = state
+            .bridge_state
+            .economic_guard
+            .check_and_record_flow(7, 1, 2)
+            .unwrap_err();
+        assert!(
+            matches!(over, EconomicGuardError::CeilingExceeded { .. }),
+            "the window is full, got {over:?}"
+        );
+
+        // The other path stays silent: no action, no second write.
+        proposal.status = ProposalStatus::Passed;
+        state.governance.proposals.push(proposal);
+        let actions = state.governance.execute_passed_proposals(u64::MAX);
+        assert!(
+            actions.is_empty(),
+            "the ceiling already has a writer; an action here would apply the vote twice"
+        );
+    }
+
+    /// A ceiling vote naming a domain the settlement registry does not know
+    /// installs nothing: a policy for a stranger would be a record waiting
+    /// for whoever registers that id next.
+    #[test]
+    fn a_bridge_ceiling_vote_for_an_unregistered_domain_installs_nothing() {
+        use crate::core::governance::{Proposal, ProposalType};
+        use crate::cross_domain::economic_guard::DomainCeilingPolicy;
+
+        let mut state = AccountState::new();
+        let stranger = Proposal::new(
+            2,
+            test_addr_from_byte(1u8),
+            ProposalType::ConfigureBridgeCeiling {
+                domain_id: 8,
+                policy: DomainCeilingPolicy::default(),
+                justification_hash: [0x5A; 32],
+            },
+            0,
+            10,
+        );
+        state.execute_proposal(&stranger);
+        assert!(
+            state.bridge_state.economic_guard.record(8).is_none(),
+            "an unregistered domain must not receive a ceiling policy"
+        );
+    }
+
     #[test]
     fn a_passed_hub_verification_does_not_also_become_a_governance_action() {
         use crate::core::governance::{Proposal, ProposalStatus, ProposalType};

@@ -799,7 +799,7 @@ const fn mul_bps_floor(amount: u128, bps: u64) -> u128 {
         .saturating_add(r.saturating_mul(b) / BPS_DEN)
 }
 
-fn validate_policy(policy: &DomainCeilingPolicy) -> Result<(), EconomicGuardError> {
+pub(crate) fn validate_policy(policy: &DomainCeilingPolicy) -> Result<(), EconomicGuardError> {
     if policy.shared_consumer_count == 0 {
         return Err(EconomicGuardError::InvalidPolicy(
             "shared_consumer_count must be at least 1".into(),
