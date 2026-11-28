@@ -90,3 +90,21 @@ condition = "AND"
 regexTarget = "line"
 paths = ['''^crates/ai-inference/crates/ai-tune/src/schema\.rs$''']
 regexes = ['''"token: eyJhbGciOiJIUzI1NiJ9"''']
+
+# ---------------------------------------------------------------------------
+# Measured 2026-11-28: the full-history scan flagged
+# `.github/workflows/conformance-nightly.yml` line 264 in two commits
+# (`5a3ebbf`, `39bedb7`) as `generic-api-key`. The line is a
+# `Swatinem/rust-cache` `shared-key:` input - a cache namespace label that names
+# a cache bucket, not a credential; nothing secret is ever passed to it, and the
+# value is not used to authenticate anything. The line no longer exists at the
+# branch head, but history is scanned in full and rewriting history is forbidden,
+# so the exemption is recorded here, path-AND-line scoped: a real credential in
+# this file would still fail the scan unless it sits on a `shared-key:` line.
+# ---------------------------------------------------------------------------
+[[allowlists]]
+description = "rust-cache shared-key cache namespace label (not a credential)"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^\.github/workflows/conformance-nightly\.yml$''']
+regexes = ['''^\s+shared-key: [A-Za-z0-9_.:${}-]+$''']
