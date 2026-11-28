@@ -63,6 +63,21 @@ pub enum ValueGate {
 }
 
 impl ValueGate {
+    /// Minimum commitment bindings demanded by every cross-domain value operation.
+    ///
+    /// Callers may strengthen this floor with [`FinalityBinds::union`], never
+    /// weaken or erase it by passing [`FinalityBinds::NONE`].
+    const fn required_binds(self) -> FinalityBinds {
+        match self {
+            Self::BridgeMint
+            | Self::BridgeUnlock
+            | Self::RelayerIntentSettle
+            | Self::AppBindingClaim
+            | Self::ObjectLayerArrive
+            | Self::UniversalPayment => FinalityBinds::EVENT_ROOT,
+        }
+    }
+
     const fn as_str(self) -> &'static str {
         match self {
             Self::BridgeMint => "bridge-mint",
@@ -326,13 +341,10 @@ pub fn check_certificate_value_gate(
     }
 
     // What this move requires, checked against what the row carries. Placed
-    // after the verdict reads so a pending or refuted domain is refused with
-    // the more precise reason rather than with a binding complaint.
-    enforce_required_binds(cert, source_domain, required_binds)?;
-    if let Some(dst) = target_domain {
-        enforce_required_binds(cert, dst, required_binds)?;
-    }
-
+    // after the source verdict read so a pending or refuted source domain is
+    // refused with the more precise reason rather than with a binding complaint.
+    // If `target_domain` is present, validate its certificate presence and
+    // verdict first as well before checking its bindings.
     let hub = FinalityGuarantee::settlement_hub();
     let (target_guarantee, target_econ_ceiling) = match target_domain {
         Some(dst_id) => {
@@ -366,6 +378,12 @@ pub fn check_certificate_value_gate(
         }
         None => (hub, u128::MAX),
     };
+
+    let required_binds = gate.required_binds().union(required_binds);
+    enforce_required_binds(cert, source_domain, required_binds)?;
+    if let Some(dst) = target_domain {
+        enforce_required_binds(cert, dst, required_binds)?;
+    }
 
     let composed = src.entry.guarantee.meet(&hub).meet(&target_guarantee);
     let Some(route) = evaluate_route_guarantee(&src.entry.guarantee, &hub, &target_guarantee)
@@ -403,14 +421,16 @@ pub fn check_certificate_value_gate(
 /// would make the check decorative. `0` means "this move makes no binding
 /// demand", and then nothing is refused.
 ///
-/// A domain absent from the certificate is not refused here - `prove_domain`
-/// already refuses it with a more precise reason, and two checks racing to
-/// report the same domain would make the refusal depend on call order.
+/// A domain absent from the certificate is refused fail-closed with
+/// [`ValueGateRefusal::DomainMissing`] whenever `required_binds` is non-empty,
+/// so direct callers of [`enforce_required_binds`] cannot silently pass an
+/// absent domain.
 ///
 /// # Errors
 ///
-/// Returns [`ValueGateRefusal::RequiredBindMissing`] naming both bit sets when
-/// the row is present and under-bound.
+/// Returns [`ValueGateRefusal::DomainMissing`] when `domain_id` is absent from
+/// `cert`, or [`ValueGateRefusal::RequiredBindMissing`] naming both bit sets
+/// when the row is present and under-bound.
 /// WIRING: production path is `check_certificate_value_gate` (CLI `bud` and the
 /// RPC value gate call it; this helper is the binds half of that door).
 pub fn enforce_required_binds(
@@ -422,9 +442,9 @@ pub fn enforce_required_binds(
         return Ok(());
     }
     // `prove_domain` returns an inclusion proof, not the row: the fields live
-    // behind `entry`.
+    // behind `entry`. Refuse fail-closed if the domain is missing from `cert`.
     let Some(proof) = cert.prove_domain(domain_id) else {
-        return Ok(());
+        return Err(ValueGateRefusal::DomainMissing { domain_id });
     };
     if !proof.entry.binds.covers(required_binds) {
         return Err(ValueGateRefusal::RequiredBindMissing {
@@ -1163,12 +1183,14 @@ mod tests {
 
     #[test]
     fn bind_gate_defers_missing_domain_to_prove_domain() {
-        // Order and single-reason principle: the missing domain is `prove_domain`'s
-        // to report. If two checks raced on the same domain the refusal would depend
-        // on call order.
+        // Fail-closed: calling `enforce_required_binds` directly with a non-empty
+        // demand on an absent domain refuses with `DomainMissing` rather than
+        // returning `Ok(())`.
         let cert = single_domain_cert(23);
-        enforce_required_binds(&cert, 99, FinalityBinds::ALL)
-            .expect("missing domain is prove_domain's call");
+        assert_eq!(
+            enforce_required_binds(&cert, 99, FinalityBinds::ALL),
+            Err(ValueGateRefusal::DomainMissing { domain_id: 99 })
+        );
     }
 
     #[test]
