@@ -75,6 +75,7 @@ pub const fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
         | ProposalType::ResetConsensusDomainTip { .. }
         | ProposalType::PoaAddAdmin { .. }
         | ProposalType::PinExternalAnchor { .. }
+        | ProposalType::ConfigureBridgeCeiling { .. }
         | ProposalType::BnsSetPrimarySellers { .. } => GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS,
 
         // Actions aimed at one account.
@@ -350,6 +351,21 @@ pub enum ProposalType {
     /// touches no record: an existing registration keeps the term it paid for.
     BnsSetBaseCost {
         base_cost: u64,
+    },
+    /// Install or replace the bridge economic guard's ceiling policy for one
+    /// external domain. On the public chains the guard is strict from
+    /// genesis: a domain with no policy routes nothing, and this vote is the
+    /// only door through which a policy arrives - a ceiling that any account
+    /// could set would be no ceiling. The vote writes the policy and keeps
+    /// whatever prover bond the domain already holds; it never writes a bond.
+    ///
+    /// `justification_hash` names the published reasoning the ceiling rests
+    /// on (the external chain's security budget, the window, the haircuts),
+    /// as every trusted value in this system carries a published reason.
+    ConfigureBridgeCeiling {
+        domain_id: u32,
+        policy: crate::cross_domain::economic_guard::DomainCeilingPolicy,
+        justification_hash: [u8; 32],
     },
 }
 
@@ -748,6 +764,23 @@ impl GovernanceState {
                 // live price, which the proposal cannot know at submission.
                 crate::bns::BnsRegistry::check_base_cost_bounds(*base_cost)?;
             }
+            ProposalType::ConfigureBridgeCeiling {
+                domain_id,
+                policy,
+                justification_hash,
+            } => {
+                if *domain_id == 0 {
+                    return Err("ConfigureBridgeCeiling domain_id 0 is reserved".into());
+                }
+                if justification_hash == &[0u8; 32] {
+                    return Err("ConfigureBridgeCeiling justification_hash must be non-zero".into());
+                }
+                // The guard's own bounds (haircuts, window, finder share,
+                // prover keys), checked at submission so a vote cannot pass
+                // on a policy the guard would refuse to install.
+                crate::cross_domain::economic_guard::validate_policy(policy)
+                    .map_err(|e| format!("ConfigureBridgeCeiling policy refused: {e}"))?;
+            }
             _ => {}
         }
 
@@ -980,7 +1013,8 @@ impl GovernanceState {
                 | ProposalType::PoaAddAdmin { .. }
                 | ProposalType::PoaRemoveAdmin { .. }
                 | ProposalType::FreezePoaAccount { .. }
-                | ProposalType::UnfreezePoaAccount { .. } => None,
+                | ProposalType::UnfreezePoaAccount { .. }
+                | ProposalType::ConfigureBridgeCeiling { .. } => None,
             };
             if let Some(a) = action {
                 proposal.status = ProposalStatus::Executed;
