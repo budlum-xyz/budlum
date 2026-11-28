@@ -92,7 +92,11 @@ pub const MAINNET_GUARD_CHAIN_ID: u64 = 45_260;
 pub const TESTNET_GUARD_CHAIN_ID: u64 = 45_261;
 /// Hard fail-closed upper bound on stored contradiction and per-offender replay
 /// entries. Entries are never evicted (FIFO/LRU eviction would reopen historical
-/// slashing replays); once full, governance snapshot pruning is required.
+/// slashing replays). The cap is the last line of defence, not the budget: entries
+/// age out at epoch boundaries ([`GUARD_REPLAY_RETENTION_EPOCHS`]) and a domain
+/// that is already frozen with no live bond cannot keep adding entries for free
+/// ([`EconomicGuardError::RedundantEvidence`]), so one domain cannot pad the
+/// ledger shut for every other domain.
 ///
 /// WIRING: enforced prior to insertion inside
 /// [`BridgeEconomicGuard::submit_contradiction`].
@@ -500,6 +504,15 @@ pub enum EconomicGuardError {
     },
     /// Contradiction or external adapter proof failed verification.
     InvalidEvidence(String),
+    /// The domain is already frozen and has no live bond left, and the proof
+    /// slashes no external weight either: accepting it would only consume a
+    /// replay-ledger slot that other domains need.
+    RedundantEvidence {
+        /// Already-frozen domain identifier.
+        domain_id: DomainId,
+        /// Digest of the evidence that was refused as redundant.
+        evidence_digest: Hash32,
+    },
 }
 
 impl std::fmt::Display for EconomicGuardError {
@@ -539,6 +552,14 @@ impl std::fmt::Display for EconomicGuardError {
                 "economic guard replay ledger reached fail-closed capacity {capacity}"
             ),
             Self::InvalidEvidence(msg) => write!(f, "invalid contradiction evidence: {msg}"),
+            Self::RedundantEvidence {
+                domain_id,
+                evidence_digest,
+            } => write!(
+                f,
+                "domain {domain_id} is already frozen with no live bond; evidence {} slashes nothing new",
+                hex::encode(evidence_digest)
+            ),
         }
     }
 }
@@ -1753,6 +1774,17 @@ impl BridgeEconomicGuard {
             }
         };
 
+        // A domain that is already frozen with no live bond has nothing left to
+        // lose. Further evidence against it only pads the global replay ledger,
+        // and a padded ledger blocks fresh contradictions against *other*
+        // domains until the retention window rolls over. Committee-backed
+        // adapters still get in while they slash fresh external weight (see
+        // `compute_incremental_slash`); evidence that slashes nothing does not.
+        let frozen_and_spent = matches!(
+            rec.status,
+            DomainGuardStatus::FrozenByContradiction { .. }
+        ) && rec.prover_bond.as_ref().map_or(0u128, ProverBond::live_atoms) == 0;
+
         let current_epoch = at_height / GUARD_REPLAY_EPOCH_BLOCKS;
         if current_epoch < self.replay_pruned_before_epoch {
             return Err(EconomicGuardError::InvalidEvidence(
@@ -1762,6 +1794,12 @@ impl BridgeEconomicGuard {
         let _ = self.prune_expired_replay_entries(at_height);
         if self.consumed_evidence.contains(&evidence_digest) {
             return Err(EconomicGuardError::DuplicateEvidence(evidence_digest));
+        }
+        if frozen_and_spent && external_slashed_weight == 0 {
+            return Err(EconomicGuardError::RedundantEvidence {
+                domain_id,
+                evidence_digest,
+            });
         }
         if self.consumed_evidence.len().saturating_add(1) > MAX_GUARD_REPLAY_ENTRIES
             || self
@@ -3643,5 +3681,123 @@ mod tests {
             matches!(stale_err, EconomicGuardError::InvalidEvidence(_)),
             "pre-horizon epoch must be refused: {stale_err:?}"
         );
+    }
+
+    fn double_root_evidence(
+        domain_id: DomainId,
+        domain_height: u64,
+        ed_kp: &KeyPair,
+        pq_kp: &PqKeyPair,
+        root_a: Hash32,
+        root_b: Hash32,
+    ) -> ContradictionEvidence {
+        let stmt_a = contradiction_statement_bytes(domain_id, domain_height, &root_a);
+        let stmt_b = contradiction_statement_bytes(domain_id, domain_height, &root_b);
+        ContradictionEvidence::SignedProverDoubleRoot {
+            domain_height,
+            state_root_a: root_a,
+            ed25519_sig_a: ed_kp.sign(&stmt_a).to_vec(),
+            pq_sig_a: pq_kp
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt_a)
+                .expect("pq sign a"),
+            state_root_b: root_b,
+            ed25519_sig_b: ed_kp.sign(&stmt_b).to_vec(),
+            pq_sig_b: pq_kp
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt_b)
+                .expect("pq sign b"),
+        }
+    }
+
+    /// One self-contradicting domain must not be able to pad the global replay
+    /// ledger shut: once it is frozen and its bond is gone, further double-root
+    /// proofs against it slash nothing and are refused without touching the
+    /// ledger, so a fresh contradiction against another domain still lands.
+    #[test]
+    fn frozen_domain_with_spent_bond_cannot_pad_the_replay_ledger() {
+        let ed_kp = KeyPair::from_seed(&[0x51; 32]).expect("ed25519 key");
+        let pq_kp = PqKeyPair::generate();
+        let attacker = 608u32;
+        let prover = Address::from([0x5A; 32]);
+        let mut guard = BridgeEconomicGuard::new();
+        guard
+            .configure_domain(
+                attacker,
+                DomainCeilingPolicy {
+                    prover_ed25519_pubkey: Some(ed_kp.public_key_bytes()),
+                    prover_pq_pubkey: pq_kp.public_key_bytes().to_vec(),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(make_bond(prover, 1_000)),
+            )
+            .expect("configure attacker domain");
+
+        // The first proof is real work: it freezes the domain and sweeps the bond.
+        let first = double_root_evidence(attacker, 10, &ed_kp, &pq_kp, [0xA1; 32], [0xA2; 32]);
+        let outcome = guard
+            .submit_contradiction(attacker, &first, Address::from([0x70; 32]), 10)
+            .expect("first contradiction freezes the domain");
+        assert_eq!(outcome.slashed_bond_atoms, 1_000);
+        assert!(matches!(
+            guard.record(attacker).expect("record").status,
+            DomainGuardStatus::FrozenByContradiction { .. }
+        ));
+        assert_eq!(guard.consumed_evidence.len(), 1);
+
+        // Every further proof against the same frozen, bond-less domain is
+        // valid cryptography but slashes nothing: it must be refused and must
+        // not grow the ledger.
+        for i in 0u8..4 {
+            let padding = double_root_evidence(
+                attacker,
+                11 + u64::from(i),
+                &ed_kp,
+                &pq_kp,
+                [0xB0 + i; 32],
+                [0xC0 + i; 32],
+            );
+            let err = guard
+                .submit_contradiction(attacker, &padding, Address::from([0x71; 32]), 11)
+                .expect_err("frozen domain with no live bond cannot add ledger entries");
+            assert!(
+                matches!(
+                    err,
+                    EconomicGuardError::RedundantEvidence {
+                        domain_id,
+                        ..
+                    } if domain_id == attacker
+                ),
+                "{err:?}"
+            );
+        }
+        assert_eq!(guard.consumed_evidence.len(), 1);
+
+        // A second, honest domain is unaffected: its first contradiction lands.
+        let ed_kp2 = KeyPair::from_seed(&[0x52; 32]).expect("ed25519 key 2");
+        let pq_kp2 = PqKeyPair::generate();
+        let victim = 609u32;
+        guard
+            .configure_domain(
+                victim,
+                DomainCeilingPolicy {
+                    prover_ed25519_pubkey: Some(ed_kp2.public_key_bytes()),
+                    prover_pq_pubkey: pq_kp2.public_key_bytes().to_vec(),
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .expect("configure victim domain");
+        let victim_evidence =
+            double_root_evidence(victim, 5, &ed_kp2, &pq_kp2, [0xD1; 32], [0xD2; 32]);
+        guard
+            .submit_contradiction(victim, &victim_evidence, Address::from([0x72; 32]), 12)
+            .expect("an unrelated domain's first contradiction still lands");
+        assert_eq!(guard.consumed_evidence.len(), 2);
+
+        // Replaying the exact first proof is still a replay, not a redundancy:
+        // the duplicate gate keeps outranking the new rule.
+        let replay = guard
+            .submit_contradiction(attacker, &first, Address::from([0x70; 32]), 13)
+            .expect_err("spent evidence stays a replay");
+        assert!(matches!(replay, EconomicGuardError::DuplicateEvidence(_)));
     }
 }
