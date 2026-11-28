@@ -1049,7 +1049,7 @@ impl MarketplaceRegistry {
         if let Some(reference) = AiDataInputRef::decode(input_ref)? {
             if reference.asset_id != *declared_asset {
                 return Err(
-                    "AI data read denied: Pollen input_ref references a different asset than the declared perception asset"
+                    "AI data read denied: data-market input_ref references a different asset than the declared perception asset"
                         .into(),
                 );
             }

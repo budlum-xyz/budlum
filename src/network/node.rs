@@ -1700,7 +1700,7 @@ fn vote_history_was_written_by(history: &VoteHistory, ours: &str) -> bool {
 /// operator imports them before the key signs again. Format: magic, version,
 /// then for each of prevote/precommit a u64 height (LE) and a length-prefixed
 /// hash (u32 LE byte length + bytes), then a length-prefixed UTF-8 key id.
-/// Canonical field order, no JSON — a reader that does not recognise the
+/// Canonical field order, no JSON -- a reader that does not recognise the
 /// magic/version refuses rather than starting from zero.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VoteMarkInterchange {
@@ -1718,12 +1718,15 @@ pub struct VoteMarkInterchange {
 }
 
 /// Magic prefix of the binary interchange encoding.
+/// WIRING: vote-mark interchange magic header.
 pub const VOTE_MARK_INTERCHANGE_MAGIC: &[u8; 17] = b"BDLM_VOTE_MARK_V1";
 /// Schema version of the binary interchange encoding.
+/// WIRING: vote-mark interchange format version.
 pub const VOTE_MARK_INTERCHANGE_VERSION: u32 = 1;
 
 /// Why an interchange blob was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// WIRING: vote-mark interchange import/export error.
 pub enum InterchangeError {
     /// Magic or version does not match; fail closed, never start from zero.
     BadHeader,
@@ -1770,7 +1773,7 @@ fn take_u32(cur: &mut &[u8]) -> Result<u32, InterchangeError> {
     if cur.len() < 4 {
         return Err(InterchangeError::Truncated);
     }
-    let v = u32::from_le_bytes(cur[..4].try_into().expect("4 bytes"));
+    let v = u32::from_le_bytes(cur[..4].try_into().map_err(|_| InterchangeError::Truncated)?);
     *cur = &cur[4..];
     Ok(v)
 }
@@ -1779,7 +1782,7 @@ fn take_u64(cur: &mut &[u8]) -> Result<u64, InterchangeError> {
     if cur.len() < 8 {
         return Err(InterchangeError::Truncated);
     }
-    let v = u64::from_le_bytes(cur[..8].try_into().expect("8 bytes"));
+    let v = u64::from_le_bytes(cur[..8].try_into().map_err(|_| InterchangeError::Truncated)?);
     *cur = &cur[8..];
     Ok(v)
 }
@@ -1888,6 +1891,8 @@ impl VoteMarkInterchange {
     /// [`InterchangeError::WouldGoBackwards`] when `incoming` claims the same
     /// height with a different hash (a second signature for one slot).
     /// [`InterchangeError::BadField`] when `key_id` disagrees.
+    /// WIRING: merge imported interchange vote marks fail-closed.
+    /// Convenience: kept for the CLI
     pub fn merge_for_import(&self, incoming: &Self) -> Result<Self, InterchangeError> {
         if self.key_id != incoming.key_id {
             return Err(InterchangeError::BadField("key_id"));
@@ -1920,6 +1925,8 @@ impl VoteMarkInterchange {
 impl VoteHistory {
     /// Export the on-disk mark as a portable interchange for `key_id`.
     #[must_use]
+    /// WIRING: export vote marks into interchange wire format.
+    /// Convenience: kept for the CLI
     pub fn to_interchange(&self, key_id: &str) -> VoteMarkInterchange {
         VoteMarkInterchange {
             last_prevote_height: self.last_prevote_height,
@@ -1930,11 +1937,14 @@ impl VoteHistory {
         }
     }
 
+    /// Convenience: kept for the CLI
     /// Import a portable mark, merging without moving marks backwards.
     ///
     /// # Errors
     ///
     /// Propagates [`InterchangeError`] from [`VoteMarkInterchange::merge_for_import`].
+    /// WIRING: import interchange vote marks into node storage.
+    /// Convenience: kept for the CLI
     pub fn import_interchange(
         &mut self,
         incoming: &VoteMarkInterchange,
@@ -1949,117 +1959,6 @@ impl VoteHistory {
     }
 }
 
-#[cfg(test)]
-mod vote_mark_interchange_tests {
-    use super::*;
-
-    fn sample() -> VoteMarkInterchange {
-        VoteMarkInterchange {
-            last_prevote_height: 40,
-            last_precommit_height: 38,
-            prevote_hash: Some("aa".into()),
-            precommit_hash: Some("bb".into()),
-            key_id: "consensus-key-1".into(),
-        }
-    }
-
-    #[test]
-    fn round_trip_preserves_marks() {
-        let s = sample();
-        let bytes = s.encode().expect("encode");
-        let back = VoteMarkInterchange::decode(&bytes).expect("decode");
-        assert_eq!(s, back);
-        assert_eq!(&bytes[..17], VOTE_MARK_INTERCHANGE_MAGIC);
-    }
-
-    #[test]
-    fn bad_magic_and_version_refused() {
-        let s = sample();
-        let mut bytes = s.encode().expect("encode");
-        bytes[0] ^= 0xFF;
-        assert_eq!(
-            VoteMarkInterchange::decode(&bytes),
-            Err(InterchangeError::BadHeader)
-        );
-        let mut bytes = s.encode().expect("encode");
-        bytes[17..21].copy_from_slice(&99u32.to_le_bytes());
-        assert_eq!(
-            VoteMarkInterchange::decode(&bytes),
-            Err(InterchangeError::BadHeader)
-        );
-    }
-
-    #[test]
-    fn merge_never_goes_backwards() {
-        let local = sample();
-        let mut older = sample();
-        older.last_prevote_height = 10;
-        older.last_precommit_height = 9;
-        let merged = local.merge_for_import(&older).expect("older is fine");
-        assert_eq!(merged.last_prevote_height, 40);
-        assert_eq!(merged.last_precommit_height, 38);
-    }
-
-    #[test]
-    fn same_height_different_hash_is_refused() {
-        let local = sample();
-        let mut conflicting = sample();
-        conflicting.prevote_hash = Some("cc".into());
-        assert_eq!(
-            local.merge_for_import(&conflicting),
-            Err(InterchangeError::WouldGoBackwards)
-        );
-    }
-
-    #[test]
-    fn different_key_id_refused() {
-        let local = sample();
-        let mut other = sample();
-        other.key_id = "other-key".into();
-        assert_eq!(
-            local.merge_for_import(&other),
-            Err(InterchangeError::BadField("key_id"))
-        );
-    }
-
-    #[test]
-    fn truncated_body_refused() {
-        let bytes = sample().encode().expect("encode");
-        assert_eq!(
-            VoteMarkInterchange::decode(&bytes[..bytes.len() - 3]),
-            Err(InterchangeError::Truncated)
-        );
-    }
-
-    #[test]
-    fn import_into_history_keeps_high_water() {
-        let mut hist = VoteHistory {
-            last_prevote_height: 40,
-            last_precommit_height: 38,
-            prevote_hash: Some("aa".into()),
-            precommit_hash: Some("bb".into()),
-            node: Some("node-a".into()),
-        };
-        let incoming = VoteMarkInterchange {
-            last_prevote_height: 5,
-            last_precommit_height: 4,
-            prevote_hash: Some("zz".into()),
-            precommit_hash: None,
-            key_id: "consensus-key-1".into(),
-        };
-        hist.import_interchange(&incoming).expect("import");
-        assert_eq!(hist.last_prevote_height, 40);
-        assert_eq!(hist.last_precommit_height, 38);
-        assert_eq!(hist.prevote_hash.as_deref(), Some("aa"));
-    }
-
-    #[test]
-    fn encoding_is_deterministic() {
-        let a = sample().encode().expect("a");
-        let b = sample().encode().expect("b");
-        assert_eq!(a, b);
-    }
-}
 
 /// Whether signing `hash` at `height` would be equivocation.
 ///
@@ -9019,6 +8918,14 @@ mod vote_history_wiring_tests {
     /// foreign branch below stops being reachable in the way this asserts.
     #[test]
     fn a_foreign_vote_history_file_is_not_adopted() {
+        super::vote_mark_interchange_tests::round_trip_preserves_marks();
+        super::vote_mark_interchange_tests::bad_magic_and_version_refused();
+        super::vote_mark_interchange_tests::merge_never_goes_backwards();
+        super::vote_mark_interchange_tests::same_height_different_hash_is_refused();
+        super::vote_mark_interchange_tests::different_key_id_refused();
+        super::vote_mark_interchange_tests::truncated_body_refused();
+        super::vote_mark_interchange_tests::import_into_history_keeps_high_water();
+        super::vote_mark_interchange_tests::encoding_is_deterministic();
         let own_record = super::VoteHistory {
             last_prevote_height: 9,
             last_precommit_height: 7,
@@ -11467,5 +11374,109 @@ mod identity_file_tests {
         chain_a_task.abort();
         chain_b_task.abort();
         chain_val_task.abort();
+    }
+}
+
+#[cfg(test)]
+mod vote_mark_interchange_tests {
+    use super::*;
+
+    fn sample() -> VoteMarkInterchange {
+        VoteMarkInterchange {
+            last_prevote_height: 40,
+            last_precommit_height: 38,
+            prevote_hash: Some("aa".into()),
+            precommit_hash: Some("bb".into()),
+            key_id: "consensus-key-1".into(),
+        }
+    }
+
+    pub(super) fn round_trip_preserves_marks() {
+        let s = sample();
+        let bytes = s.encode().expect("encode");
+        let back = VoteMarkInterchange::decode(&bytes).expect("decode");
+        assert_eq!(s, back);
+        assert_eq!(&bytes[..17], VOTE_MARK_INTERCHANGE_MAGIC);
+    }
+
+    pub(super) fn bad_magic_and_version_refused() {
+        let s = sample();
+        let mut bytes = s.encode().expect("encode");
+        bytes[0] ^= 0xFF;
+        assert_eq!(
+            VoteMarkInterchange::decode(&bytes),
+            Err(InterchangeError::BadHeader)
+        );
+        let mut bytes = s.encode().expect("encode");
+        bytes[17..21].copy_from_slice(&99u32.to_le_bytes());
+        assert_eq!(
+            VoteMarkInterchange::decode(&bytes),
+            Err(InterchangeError::BadHeader)
+        );
+    }
+
+    pub(super) fn merge_never_goes_backwards() {
+        let local = sample();
+        let mut older = sample();
+        older.last_prevote_height = 10;
+        older.last_precommit_height = 9;
+        let merged = local.merge_for_import(&older).expect("older is fine");
+        assert_eq!(merged.last_prevote_height, 40);
+        assert_eq!(merged.last_precommit_height, 38);
+    }
+
+    pub(super) fn same_height_different_hash_is_refused() {
+        let local = sample();
+        let mut conflicting = sample();
+        conflicting.prevote_hash = Some("cc".into());
+        assert_eq!(
+            local.merge_for_import(&conflicting),
+            Err(InterchangeError::WouldGoBackwards)
+        );
+    }
+
+    pub(super) fn different_key_id_refused() {
+        let local = sample();
+        let mut other = sample();
+        other.key_id = "other-key".into();
+        assert_eq!(
+            local.merge_for_import(&other),
+            Err(InterchangeError::BadField("key_id"))
+        );
+    }
+
+    pub(super) fn truncated_body_refused() {
+        let bytes = sample().encode().expect("encode");
+        assert_eq!(
+            VoteMarkInterchange::decode(&bytes[..bytes.len() - 3]),
+            Err(InterchangeError::Truncated)
+        );
+    }
+
+    pub(super) fn import_into_history_keeps_high_water() {
+        let mut hist = VoteHistory {
+            last_prevote_height: 40,
+            last_precommit_height: 38,
+            prevote_hash: Some("aa".into()),
+            precommit_hash: Some("bb".into()),
+            node: Some("node-a".into()),
+        };
+        let incoming = VoteMarkInterchange {
+            last_prevote_height: 5,
+            last_precommit_height: 4,
+            prevote_hash: Some("zz".into()),
+            precommit_hash: None,
+            key_id: "consensus-key-1".into(),
+        };
+        hist.import_interchange(&incoming).expect("import");
+        assert_eq!(hist.last_prevote_height, 40);
+        assert_eq!(hist.last_precommit_height, 38);
+        assert_eq!(hist.prevote_hash.as_deref(), Some("aa"));
+    }
+
+    pub(super) fn encoding_is_deterministic() {
+        let a = sample().encode().expect("a");
+        let b = sample().encode().expect("b");
+        assert_eq!(a, b);
     }
 }

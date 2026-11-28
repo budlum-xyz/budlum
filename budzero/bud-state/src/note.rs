@@ -69,6 +69,7 @@ impl PrivacyNote {
     /// Construct a V2 256-bit privacy note from suite-tagged Poseidon
     /// commitments, refusing unknown/non-Poseidon suites, all-zero digests,
     /// non-canonical limbs, or 64-bit single-limb truncated digests.
+    /// WIRING: suite-tagged 256-bit v2 nullifier derivation door.
     pub fn from_suite_tagged(
         commitment: &SuiteTaggedCommitment,
         nullifier: &SuiteTaggedCommitment,
@@ -99,6 +100,7 @@ impl PrivacyNote {
 
     /// Derive a V2 256-bit privacy note using the single shared
     /// `budlum-note-packing` commitment and nullifier functions.
+    /// WIRING: 256-bit v2 note commitment derivation door.
     pub fn derive_v2(
         amount: u64,
         blinding: [u64; 2],

@@ -10,10 +10,12 @@ use crate::{is_canonical_field, poseidon, NoteHash};
 
 /// Canonical Goldilocks domain separator for V2 256-bit note commitments
 /// (ASCII `"NCOMMIT2"`, strictly below `GOLDILOCKS_P`).
+/// WIRING: domain tag for 256-bit v2 note commitments.
 pub const DOMAIN_NOTE_COMMIT_V2: u64 = 0x4E43_4F4D_4D49_5432;
 
 /// Canonical Goldilocks domain separator for V2 256-bit note nullifiers
 /// (ASCII `"NNULLIF2"`, strictly below `GOLDILOCKS_P`).
+/// WIRING: domain tag for 256-bit v2 note nullifiers.
 pub const DOMAIN_NOTE_NULLIFIER_V2: u64 = 0x4E4E_554C_4C49_4632;
 
 /// Canonical hash suite identifier carried alongside V2 commitments.
