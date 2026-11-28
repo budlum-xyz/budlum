@@ -1113,11 +1113,13 @@ impl Storage {
         Vec<crate::consensus::handoff::HandoffMember>,
         Vec<crate::consensus::handoff::HandoffCertificate>,
     )> {
-        use crate::consensus::handoff::{follow_handoffs, HandoffCertificate, HandoffMember};
+        use crate::consensus::handoff::{
+            follow_handoffs, from_snapshot, HandoffCertificate, HandoffMember,
+        };
         let mut snapshots: std::collections::BTreeMap<u64, Vec<HandoffMember>> =
             std::collections::BTreeMap::new();
         for (epoch, snapshot) in self.load_validator_snapshots()? {
-            snapshots.insert(epoch, HandoffMember::from_snapshot(&snapshot));
+            snapshots.insert(epoch, from_snapshot(&snapshot));
         }
         let Some(trusted) = snapshots.get(&start_epoch).cloned() else {
             return Ok((start_epoch, Vec::new(), Vec::new()));
@@ -1835,6 +1837,7 @@ impl Storage {
         chain.reverse();
         Ok(chain)
     }
+    #[must_use]
     pub const fn db(&self) -> &Db {
         &self.db
     }
@@ -2060,7 +2063,7 @@ impl Storage {
             // leaves the node with no checkpoints and no seen blocks, which
             // turns off checkpoint enforcement and double-sign detection.
             let parsed: Result<_, String> = (|| {
-                let producer = Address::from_hex(parts[0]).map_err(|e| e.to_string())?;
+                let producer = Address::from_hex(parts[0]).map_err(|e| e.clone())?;
                 let index: u64 = parts[1].parse().map_err(|e| format!("bad height: {e}"))?;
                 let data: (crate::core::block::BlockHeader, Vec<u8>) =
                     decode(&val).map_err(|e| e.to_string())?;
@@ -2691,7 +2694,7 @@ mod tests {
     #[test]
     fn a_stored_handoff_chain_survives_a_restart_and_verifies() {
         use crate::chain::finality::{ValidatorEntry, ValidatorSetSnapshot};
-        use crate::consensus::handoff::{HandoffCertificate, HandoffMember};
+        use crate::consensus::handoff::{from_snapshot, HandoffCertificate};
 
         // Two epochs of a one-validator chain: epoch 4 hands the set to epoch
         // 5, and the stake changes, so the two set digests differ and a
@@ -2714,8 +2717,8 @@ mod tests {
         entry.stake = 20;
         let epoch5 = snapshot(5, &entry);
 
-        let outgoing = HandoffMember::from_snapshot(&epoch4);
-        let incoming = HandoffMember::from_snapshot(&epoch5);
+        let outgoing = from_snapshot(&epoch4);
+        let incoming = from_snapshot(&epoch5);
         let mut cert = HandoffCertificate::unsigned(7, 4, &outgoing, &incoming, [3; 32]);
         let signature = key
             .sign(crate::crypto::ctx::HANDOFF_V1, &cert.signing_message())
@@ -2750,7 +2753,7 @@ mod tests {
     #[test]
     fn a_stored_handoff_chain_with_the_wrong_randomness_is_refused() {
         use crate::chain::finality::{ValidatorEntry, ValidatorSetSnapshot};
-        use crate::consensus::handoff::{HandoffCertificate, HandoffMember};
+        use crate::consensus::handoff::{from_snapshot, HandoffCertificate};
 
         let key = crate::crypto::primitives::PqKeyPair::generate();
         let entry = ValidatorEntry {
@@ -2767,8 +2770,8 @@ mod tests {
             total_stake: entry.stake,
         };
         let (e4, e5) = (snap(4), snap(5));
-        let outgoing = HandoffMember::from_snapshot(&e4);
-        let incoming = HandoffMember::from_snapshot(&e5);
+        let outgoing = from_snapshot(&e4);
+        let incoming = from_snapshot(&e5);
         let mut cert = HandoffCertificate::unsigned(7, 4, &outgoing, &incoming, [3; 32]);
         let signature = key
             .sign(crate::crypto::ctx::HANDOFF_V1, &cert.signing_message())
@@ -3286,7 +3289,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_202_restore_rejects_duplicate_keys_and_missing_schema() {
+    fn restore_rejects_duplicate_keys_and_missing_schema() {
         let root = tempdir().unwrap();
         let write_backup = |name: &str, entries: Vec<(Vec<u8>, Vec<u8>)>| {
             let payload = encode(&entries).unwrap();
@@ -3325,7 +3328,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_202_backup_decoder_is_bounded_and_rejects_trailing_bytes() {
+    fn backup_decoder_is_bounded_and_rejects_trailing_bytes() {
         let mut excessive_allocation = 1u32.to_le_bytes().to_vec();
         excessive_allocation.extend_from_slice(&[0; 32]);
         excessive_allocation.extend_from_slice(&u64::MAX.to_le_bytes());
@@ -3606,6 +3609,8 @@ mod tests {
             object_layer_root: None,
             proof_root: None,
             proven_height: 0,
+            ulp_domains_root: None,
+            finality_certificate_root: None,
         };
 
         let dir = tempdir().unwrap();

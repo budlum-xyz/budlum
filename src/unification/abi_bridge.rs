@@ -336,48 +336,78 @@ fn push_abi_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     }
 }
 
+fn abi_is_dynamic(val: &CanonicalValue) -> bool {
+    matches!(
+        val,
+        CanonicalValue::Bytes(_) | CanonicalValue::Text(_) | CanonicalValue::Address { .. }
+    )
+}
+
+fn abi_head_words(val: &CanonicalValue) -> usize {
+    match val {
+        CanonicalValue::AssetAmount { .. } => 2,
+        _ => 1,
+    }
+}
+
+fn push_abi_u64_word(out: &mut Vec<u8>, v: u64) {
+    out.extend_from_slice(&[0u8; 24]);
+    out.extend_from_slice(&v.to_be_bytes());
+}
+
 fn encode_evm_abi32(method: &str, args: &[CanonicalCallArg]) -> Vec<u8> {
     let mut selector_hasher = Sha3_256::new();
     selector_hasher.update(b"BDLM_EVM_SELECTOR_V1");
     selector_hasher.update(method.as_bytes());
     let digest: [u8; 32] = selector_hasher.finalize().into();
 
-    let mut out = Vec::with_capacity(4 + args.len().saturating_mul(32));
-    out.extend_from_slice(digest.get(..4).unwrap_or(&[]));
+    let head_bytes = args
+        .iter()
+        .map(|a| abi_head_words(&a.value).saturating_mul(32))
+        .fold(0usize, usize::saturating_add);
+    let mut head = Vec::with_capacity(head_bytes);
+    let mut tail = Vec::new();
+
     for arg in args {
+        if abi_is_dynamic(&arg.value) {
+            let offset = u64::try_from(head_bytes.saturating_add(tail.len())).unwrap_or(u64::MAX);
+            push_abi_u64_word(&mut head, offset);
+        }
         match &arg.value {
             CanonicalValue::Bool(b) => {
-                out.extend_from_slice(&[0u8; 31]);
-                out.push(u8::from(*b));
+                head.extend_from_slice(&[0u8; 31]);
+                head.push(u8::from(*b));
             }
-            CanonicalValue::U64(v) => {
-                out.extend_from_slice(&[0u8; 24]);
-                out.extend_from_slice(&v.to_be_bytes());
-            }
+            CanonicalValue::U64(v) => push_abi_u64_word(&mut head, *v),
             CanonicalValue::U128(v) => {
-                out.extend_from_slice(&[0u8; 16]);
-                out.extend_from_slice(&v.to_be_bytes());
+                head.extend_from_slice(&[0u8; 16]);
+                head.extend_from_slice(&v.to_be_bytes());
             }
             CanonicalValue::I128(v) => {
                 let fill = if *v < 0 { 0xFF } else { 0x00 };
-                out.extend_from_slice(&[fill; 16]);
-                out.extend_from_slice(&v.to_be_bytes());
+                head.extend_from_slice(&[fill; 16]);
+                head.extend_from_slice(&v.to_be_bytes());
             }
-            CanonicalValue::Bytes32(h) => out.extend_from_slice(h),
-            CanonicalValue::Bytes(b) => push_abi_bytes(&mut out, b),
-            CanonicalValue::Text(s) => push_abi_bytes(&mut out, s.as_bytes()),
+            CanonicalValue::Bytes32(h) => head.extend_from_slice(h),
+            CanonicalValue::Bytes(b) => push_abi_bytes(&mut tail, b),
+            CanonicalValue::Text(s) => push_abi_bytes(&mut tail, s.as_bytes()),
             CanonicalValue::Address { ee_id, raw } => {
-                out.extend_from_slice(&[0u8; 31]);
-                out.push(*ee_id);
-                push_abi_bytes(&mut out, raw);
+                tail.extend_from_slice(&[0u8; 31]);
+                tail.push(*ee_id);
+                push_abi_bytes(&mut tail, raw);
             }
             CanonicalValue::AssetAmount { asset_id, amount } => {
-                out.extend_from_slice(asset_id);
-                out.extend_from_slice(&[0u8; 16]);
-                out.extend_from_slice(&amount.to_be_bytes());
+                head.extend_from_slice(asset_id);
+                head.extend_from_slice(&[0u8; 16]);
+                head.extend_from_slice(&amount.to_be_bytes());
             }
         }
     }
+
+    let mut out = Vec::with_capacity(4usize.saturating_add(head.len()).saturating_add(tail.len()));
+    out.extend_from_slice(digest.get(..4).unwrap_or(&[]));
+    out.extend_from_slice(&head);
+    out.extend_from_slice(&tail);
     out
 }
 
@@ -882,5 +912,65 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, AbiBridgeError::InvalidArg(_)));
+    }
+
+    #[test]
+    fn evm_abi32_encodes_canonical_head_tail_offsets_and_preserves_text_bytes_parity() {
+        let catalog = UniversalDomainCatalog::with_canonical_ecosystems();
+        let env = CrossVmBridge::encode_call(
+            &catalog,
+            &CrossVmCallRequest {
+                source_domain: 4,
+                target_domain: 3,
+                source_language: LanguageTag::RustSvm,
+                target_language: LanguageTag::Solidity,
+                method: String::from("deliverMemo"),
+                args: vec![
+                    CanonicalCallArg {
+                        name: String::from("memo"),
+                        value: CanonicalValue::Text(String::from("hello")),
+                    },
+                    CanonicalCallArg {
+                        name: String::from("amount"),
+                        value: CanonicalValue::U64(42),
+                    },
+                    CanonicalCallArg {
+                        name: String::from("blob"),
+                        value: CanonicalValue::Bytes(vec![0xDE, 0xAD]),
+                    },
+                ],
+                encoding_override: None,
+                nonce: 1,
+            },
+        )
+        .expect("head/tail EVM ABI encodes");
+        let body = &env.encoded_payload[4..];
+        // Head = 3 * 32 = 96 bytes: offset(memo)=96, amount=42, offset(blob)=160.
+        assert_eq!(u64::from_be_bytes(body[24..32].try_into().unwrap()), 96);
+        assert_eq!(u64::from_be_bytes(body[56..64].try_into().unwrap()), 42);
+        assert_eq!(u64::from_be_bytes(body[88..96].try_into().unwrap()), 160);
+        // Tail[0]: memo len=5 + "hello" padded to 32 bytes; Tail[1]: blob len=2 + 0xDEAD.
+        assert_eq!(u64::from_be_bytes(body[120..128].try_into().unwrap()), 5);
+        assert_eq!(&body[128..133], b"hello");
+        assert_eq!(u64::from_be_bytes(body[184..192].try_into().unwrap()), 2);
+        assert_eq!(&body[192..194], &[0xDE, 0xAD]);
+
+        // Text("hello") projects identically to Bytes(b"hello") on EVM ABI wire.
+        let as_bytes = encode_evm_abi32(
+            "deliverMemo",
+            &[CanonicalCallArg {
+                name: String::from("memo"),
+                value: CanonicalValue::Bytes(b"hello".to_vec()),
+            }],
+        );
+        let as_text = encode_evm_abi32(
+            "deliverMemo",
+            &[CanonicalCallArg {
+                name: String::from("memo"),
+                value: CanonicalValue::Text(String::from("hello")),
+            }],
+        );
+        assert_eq!(as_bytes, as_text);
+        CrossVmBridge::verify_envelope(&env).expect("envelope verifies");
     }
 }

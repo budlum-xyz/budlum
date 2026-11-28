@@ -664,7 +664,7 @@ impl ContentSource for DirectorySource {
         // The rehearsal source serves the same objects the production source
         // does, so it applies the same ceiling, and refuses an object above it
         // before the bytes are read rather than after they are hashed.
-        if std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0) > ceiling {
+        if std::fs::metadata(&path).map_or(0, |meta| meta.len()) > ceiling {
             return Err(format!("{} exceeds the gateway ceiling", path.display()));
         }
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -731,15 +731,7 @@ impl Bud3RpcSource {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("bud3 rpc client: {e}"))?;
-        let held = std::fs::read_dir(&cache_dir)
-            .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .filter_map(|entry| entry.metadata().ok())
-                    .map(|meta| meta.len())
-                    .sum::<u64>()
-            })
-            .unwrap_or(0);
+        let held = Self::sweep_orphan_tmp_and_measure(&cache_dir);
         Ok(Self {
             endpoints,
             client,
@@ -750,6 +742,66 @@ impl Bud3RpcSource {
             cache_max_bytes: cache_max_bytes as u64,
             cache_bytes: std::sync::Mutex::new(held),
         })
+    }
+
+    /// Time-to-live after which stale cached objects may be reclaimed when the
+    /// on-disk verified cache hits `cache_max_bytes`.
+    const DISK_CACHE_ENTRY_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+    fn is_tmp_cache_entry(path: &std::path::Path) -> bool {
+        path.extension().and_then(|ext| ext.to_str()) == Some("tmp")
+    }
+
+    fn sweep_orphan_tmp_and_measure(cache_dir: &std::path::Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(cache_dir) else {
+            return 0;
+        };
+        let mut total = 0u64;
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if Self::is_tmp_cache_entry(&path) {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    total = total.saturating_add(meta.len());
+                }
+            }
+        }
+        total
+    }
+
+    fn reap_stale_entries(&self, preserve: &std::path::Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(&self.cache_dir) else {
+            return 0;
+        };
+        let now = std::time::SystemTime::now();
+        let mut remaining = 0u64;
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path != preserve && Self::is_tmp_cache_entry(&path) {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let expired = path != preserve
+                && meta
+                    .modified()
+                    .ok()
+                    .and_then(|mtime| now.duration_since(mtime).ok())
+                    .is_some_and(|age| age >= Self::DISK_CACHE_ENTRY_TTL);
+            if expired && std::fs::remove_file(&path).is_ok() {
+                continue;
+            }
+            remaining = remaining.saturating_add(meta.len());
+        }
+        remaining
     }
 
     fn call_rpc(
@@ -873,17 +925,22 @@ impl Bud3RpcSource {
             return;
         }
         let target = self.cache_path(digest);
-        let replaced = std::fs::metadata(&target)
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+        let replaced = std::fs::metadata(&target).map_or(0, |meta| meta.len());
         let len = bytes.len() as u64;
+        if len > self.cache_max_bytes {
+            return;
+        }
         let mut held = match self.cache_bytes.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let projected = held.saturating_sub(replaced).saturating_add(len);
+        let mut projected = held.saturating_sub(replaced).saturating_add(len);
         if projected > self.cache_max_bytes {
-            return;
+            *held = self.reap_stale_entries(&target);
+            projected = held.saturating_sub(replaced).saturating_add(len);
+            if projected > self.cache_max_bytes {
+                return;
+            }
         }
         let tmp = self.cache_dir.join(format!(
             "{}.{}.tmp",
@@ -1084,8 +1141,7 @@ fn answer(
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     {
         let mut limiter = match state.limiter.lock() {
             Ok(guard) => guard,
@@ -1144,8 +1200,8 @@ fn answer(
             state.counters.cache_hits.fetch_add(1, Ordering::Relaxed);
             bytes
         }
-        None => match state.content.fetch(&route.content) {
-            Ok(bytes) => {
+        None => {
+            if let Ok(bytes) = state.content.fetch(&route.content) {
                 state.counters.cache_fills.fetch_add(1, Ordering::Relaxed);
                 let mut cache = match state.cache.lock() {
                     Ok(guard) => guard,
@@ -1159,12 +1215,11 @@ fn answer(
                         return plain(StatusCode::BAD_GATEWAY, "content unavailable");
                     }
                 }
-            }
-            Err(_) => {
+            } else {
                 let response = plain(StatusCode::BAD_GATEWAY, "content unavailable");
                 return response;
             }
-        },
+        }
     };
 
     let headers = content_headers_with_csp(&route.mime, IMMUTABLE_CACHE, manifest.csp.as_deref());
@@ -1272,8 +1327,7 @@ fn resolve_name(
 ) -> Result<CachedResolution, GatewayError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     let key = format!("{name}|{:?}", target.sub);
     {
         let cache = match state.resolved.lock() {
@@ -2243,6 +2297,7 @@ mod tests {
 
     #[test]
     fn rpc_disk_cache_refuses_writes_above_cache_max_bytes() {
+        budlum_core::crypto::tls::install_default_provider();
         let dir = tempfile::tempdir().unwrap();
         let cfg = Bud3SourceConfig {
             payer: hex::encode([0x11; 32]),
@@ -2269,6 +2324,53 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.path().join(hex::encode([0x01; 32]))).unwrap(),
             vec![3u8; 50]
+        );
+    }
+
+    #[test]
+    fn rpc_disk_cache_purges_orphan_tmp_files_on_startup() {
+        budlum_core::crypto::tls::install_default_provider();
+        let dir = tempfile::tempdir().unwrap();
+        // Simulate a crashed write that left a 60-byte `.tmp` file consuming quota.
+        let orphan = dir.path().join(format!("{}.tmp", hex::encode([0xAA; 32])));
+        std::fs::write(&orphan, [0xEE_u8; 60]).unwrap();
+
+        let cfg = Bud3SourceConfig {
+            payer: hex::encode([0x11; 32]),
+            receipt_id: hex::encode([0x22; 32]),
+            fee_paid_atoms: budlum_core::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS,
+        };
+        let source = Bud3RpcSource::new(
+            vec!["http://127.0.0.1:9".to_string()],
+            &cfg,
+            dir.path().to_path_buf(),
+            64,
+        )
+        .unwrap();
+
+        assert!(!orphan.exists(), "startup must purge orphan .tmp files");
+        let first_path = dir.path().join(hex::encode([0x01; 32]));
+        source.write_verified_cache(&[0x01; 32], &[7u8; 40]);
+        assert!(
+            first_path.exists(),
+            "orphan .tmp bytes must not block verified cache writes"
+        );
+
+        // Age the first entry beyond DISK_CACHE_ENTRY_TTL (25h); a subsequent
+        // 40-byte entry must reclaim the stale entry instead of freezing cache.
+        let expired_mtime =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&first_path)
+            .unwrap()
+            .set_modified(expired_mtime)
+            .unwrap();
+        source.write_verified_cache(&[0x02; 32], &[9u8; 40]);
+        assert!(!first_path.exists(), "expired cache entry must be reaped");
+        assert!(
+            dir.path().join(hex::encode([0x02; 32])).exists(),
+            "fresh entry must fit after reaping expired entry"
         );
     }
 }

@@ -261,7 +261,7 @@ mod tests {
     /// bincode 1.x is held deliberately because its byte output is consensus
     /// input, so this size is a wire fact and not an implementation detail:
     ///   public = 32 commitment + 8 carousel (u16+u16+u32) + 32 stream + 2 block
-    ///   sealed = 32 commitment + 4 total_len + 2 k + 2 block_len
+    ///   sealed = 32 commitment + 4 `total_len` + 2 k + 2 `block_len`
     ///
     /// If this fails, do not edit the number here. Change the fee constants in
     /// the same commit, or the network charges for bytes it does not send.

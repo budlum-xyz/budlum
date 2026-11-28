@@ -1,4 +1,4 @@
-//! benches/agg_tick_steps.rs - what the reference programs of the
+//! `benches/agg_tick_steps.rs` - what the reference programs of the
 //! aggregation layer cost on the virtual machine (phase 2 measurement).
 //!
 //! The programs of `src/aggregation/programs` are plain `BudISA`: no chips.

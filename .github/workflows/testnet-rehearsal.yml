@@ -11,31 +11,36 @@ on:
   push:
     branches: [ main ]
   # Heavy battery. It runs on pull requests to `main` (the PR that merges the
-  # stack), on the schedule and on demand. A stacked pull request (base
-  # `testnet-quantum` or `testnet`) runs the PR gates in ci.yml,
-  # security-audit.yml, semgrep.yml and the other light workflows, and skips the
-  # jobs of this file through the job-level condition: GitHub evaluates the
-  # `branches` filter of a stacked pull request against the root of the stack,
-  # so the filter alone does not keep it out. This keeps one push from queueing
-  # more work than the shared runner pool can finish before the next push cancels it.
+  # stack) and to `testnet` (the branch the product is proven on), on the
+  # schedule and on demand.
+  #
+  # This file used to carry a job-level `base.ref` condition as well, on the
+  # reading that GitHub evaluates the `branches` filter of a stacked pull
+  # request against the root of the stack. Measured on 2026-11-23 that reading
+  # is wrong for the shape this repository has: `pull_request.branches` is
+  # matched against the pull request's base branch, so `testnet` in the list is
+  # what makes the rehearsal run there, and the condition only made the promise
+  # in the file name false - the rehearsal named after the testnet never ran on
+  # a testnet pull request. It is removed rather than narrowed: a rehearsal that
+  # runs after the merge is not a rehearsal. The runner cost is unchanged
+  # (ci-pull-request-fanout-is-budgeted: 24 workflows, 88 jobs, pinned 88)
+  # because the list swap replaces one base branch with another instead of
+  # adding a trigger.
   pull_request:
-    branches: [main, consensus-of-consensuses]
+    branches: [main, consensus-of-consensuses, testnet]
   schedule:
     - cron: "17 8 * * *" # daily 08:17 UTC, outside the long heavy windows
   workflow_dispatch:
 
 concurrency:
   group: testnet-rehearsal-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 permissions:
   contents: read
 
 jobs:
   testnet-native-e2e:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: Testnet Native E2E (chain 45261)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -44,27 +49,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          PROTOC_VER=29.3
-          case "$(uname -m)" in
-            aarch64|arm64)
-              PROTOC_ARCH=linux-aarch_64
-              PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-              ;;
-            *)
-              PROTOC_ARCH=linux-x86_64
-              PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-              ;;
-          esac
-          if ! command -v protoc >/dev/null 2>&1 || [ "$(protoc --version | awk '{print $2}')" != "${PROTOC_VER}" ]; then
-            curl -sSL --retry 3 --retry-delay 2 \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VER}/protoc-${PROTOC_VER}-${PROTOC_ARCH}.zip" \
-              -o /tmp/protoc.zip
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Install Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
@@ -101,9 +86,6 @@ jobs:
           if-no-files-found: warn
 
   rehearsal:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:

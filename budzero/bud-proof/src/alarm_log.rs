@@ -89,7 +89,7 @@ pub struct AlarmEntry {
 }
 
 /// The chained alarm log. `Default` gives an empty log at the genesis link.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AlarmLog {
     entries: Vec<AlarmEntry>,
     /// The latest link, or `None` when the log is empty.
@@ -100,12 +100,20 @@ pub struct AlarmLog {
     next_seq: u64,
 }
 
+impl Default for AlarmLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AlarmLog {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            entries: Vec::new(),
+            head: None,
             window_anchor: genesis_link(),
-            ..Self::default()
+            next_seq: 0,
         }
     }
 
@@ -154,13 +162,27 @@ impl AlarmLog {
     }
 
     /// Walk the chain and recompute every link: `true` only when the retained
-    /// window is contiguous from the window anchor and no entry was altered.
+    /// window is bounded, contiguous from the window anchor, free of duplicate
+    /// report signatures, consistent with `head`, and no entry was altered.
     #[must_use]
     pub fn verify_integrity(&self) -> bool {
+        if self.entries.len() > MAX_ALARM_LOG_ENTRIES {
+            return false;
+        }
+        if self.head != self.entries.last().map(|e| e.link) {
+            return false;
+        }
         let mut expected_prev = self.window_anchor;
         let mut prev_seq: Option<u64> = None;
+        let mut seen_sigs = std::collections::HashSet::with_capacity(self.entries.len());
         for entry in &self.entries {
             if entry.prev_link != expected_prev {
+                return false;
+            }
+            if !seen_sigs.insert(entry.report_sig) {
+                return false;
+            }
+            if entry.detail.chars().count() > MAX_ALARM_DETAIL_LEN {
                 return false;
             }
             if let Some(seen) = prev_seq {
@@ -352,5 +374,87 @@ mod tests {
             "detail must be truncated"
         );
         assert!(log.verify_integrity(), "the truncated detail must verify");
+    }
+
+    #[test]
+    fn budprf04_alarm_log_default_head_replay_and_bounds_integrity() {
+        // 1. Default must initialize at genesis_link(), matching AlarmLog::new().
+        let def = AlarmLog::default();
+        let fresh = AlarmLog::new();
+        assert_eq!(
+            def.window_anchor(),
+            fresh.window_anchor(),
+            "AlarmLog::default() must anchor at genesis_link()"
+        );
+        assert_eq!(
+            def.root(),
+            fresh.root(),
+            "AlarmLog::default().root() must equal AlarmLog::new().root()"
+        );
+
+        // 2. Empty log with forged head must fail verify_integrity().
+        let mut forged_empty = AlarmLog::new();
+        forged_empty.head = Some([0xABu8; 32]);
+        assert!(
+            !forged_empty.verify_integrity(),
+            "empty log with non-None head must fail integrity"
+        );
+
+        // 3. Non-empty log with forged or cleared head must fail verify_integrity().
+        let mut log = AlarmLog::new();
+        log.record(sig_of(1), AlarmKind::InvalidProof, "one");
+        log.record(sig_of(2), AlarmKind::TransferViolation, "two");
+        assert!(log.verify_integrity());
+
+        let mut bad_head = log.clone();
+        bad_head.head = Some([0xFFu8; 32]);
+        assert!(
+            !bad_head.verify_integrity(),
+            "forged head diverging from last entry link must fail integrity"
+        );
+
+        let mut missing_head = log.clone();
+        missing_head.head = None;
+        assert!(
+            !missing_head.verify_integrity(),
+            "non-empty log with head=None must fail integrity"
+        );
+
+        // 4. Replayed report_sig chained directly into entries must fail verify_integrity().
+        let mut replayed = log.clone();
+        let prev = replayed.head.unwrap();
+        let dup_link = AlarmLog::link_of(&prev, &sig_of(1), AlarmKind::InvalidProof, "dup", 2);
+        replayed.entries.push(AlarmEntry {
+            seq: 2,
+            kind: AlarmKind::InvalidProof,
+            detail: "dup".into(),
+            report_sig: sig_of(1),
+            link: dup_link,
+            prev_link: prev,
+        });
+        replayed.head = Some(dup_link);
+        assert!(
+            !replayed.verify_integrity(),
+            "duplicate report_sig in entries must fail integrity"
+        );
+
+        // 5. Over-length detail injected directly into entries must fail verify_integrity().
+        let mut overlong = log;
+        let prev = overlong.head.unwrap();
+        let huge = "z".repeat(MAX_ALARM_DETAIL_LEN + 10);
+        let huge_link = AlarmLog::link_of(&prev, &sig_of(99), AlarmKind::InvalidProof, &huge, 2);
+        overlong.entries.push(AlarmEntry {
+            seq: 2,
+            kind: AlarmKind::InvalidProof,
+            detail: huge,
+            report_sig: sig_of(99),
+            link: huge_link,
+            prev_link: prev,
+        });
+        overlong.head = Some(huge_link);
+        assert!(
+            !overlong.verify_integrity(),
+            "over-length alarm detail must fail integrity"
+        );
     }
 }

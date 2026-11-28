@@ -420,6 +420,15 @@ pub enum MessageTraceStatus {
     Failed,
 }
 
+/// The result of a full `Bat3` evidence processing batch: the anchored
+/// consensus fact, the admitted nullifier set, and the slashed offender
+/// pubkey with slashed power.
+pub type Bat3EvidenceBatch = (
+    crate::bat3::ConsensusFact,
+    crate::bat3::Bat3NullifierSet,
+    ([u8; 32], u64),
+);
+
 /// Atlas query engine.
 #[derive(Debug, Clone, Default)]
 pub struct AtlasQueryEngine {
@@ -519,6 +528,141 @@ impl AtlasQueryEngine {
     #[must_use]
     pub fn all_domain_summaries(&self) -> Vec<&DomainSummary> {
         self.domain_summaries.values().collect()
+    }
+
+    /// Anchors a canonical `Bat3` journal entry against a verified external
+    /// finality attestation (including `ChainKeyNiDkgAdapter` and
+    /// `AptosJolteonAdapter` domains).
+    ///
+    /// WIRING: connects `crate::bat3` and `crate::cross_domain::external` to
+    /// the explorer evidence query surface, calling
+    /// [`crate::bat3::ConsensusFact::verify_against_attestation`] and
+    /// [`crate::bat3::Bat3NullifierSet::admit_k3`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if the `Bat3` journal entry text fails NFC /
+    /// control-character validation or if the attestation lacks backing.
+    pub fn anchor_bat3_evidence_fact(
+        &self,
+        journal: &mut crate::bat3::Bat3Journal,
+        topic: &str,
+        canonical_text: &str,
+        attestation: &crate::cross_domain::external::spec::FinalityAttestation,
+    ) -> Result<crate::bat3::ConsensusFact, String> {
+        let entry = journal
+            .append(
+                attestation.height,
+                attestation.evidence_digest,
+                topic,
+                canonical_text,
+            )
+            .map_err(|e| format!("Bat3 journal append failed: {e}"))?;
+        let fact = crate::bat3::ConsensusFact::bind_from_attestation(&entry, attestation)
+            .map_err(|e| format!("Bat3 consensus fact binding failed: {e}"))?;
+        fact.verify_against_attestation(&entry, attestation)
+            .map_err(|e| format!("Bat3 consensus fact verification failed: {e}"))?;
+        journal
+            .verify_integrity()
+            .map_err(|e| format!("Bat3 journal integrity verification failed: {e}"))?;
+        Ok(fact)
+    }
+
+    /// Admits a `K3` shielded record's nullifier into a fresh `Bat3`
+    /// nullifier set, returning the set and the admitted record.
+    ///
+    /// WIRING: connects `crate::bat3::privacy_layers` to the explorer evidence
+    /// surface and calls [`crate::bat3::Bat3NullifierSet::admit_k3`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if the nullifier is a duplicate.
+    pub fn admit_bat3_k3_nullifier(
+        record: &crate::bat3::K3ShieldedRecord,
+    ) -> Result<(crate::bat3::Bat3NullifierSet, crate::bat3::K3ShieldedRecord), String> {
+        let mut nullifiers = crate::bat3::Bat3NullifierSet::new();
+        nullifiers
+            .admit_k3(record)
+            .map_err(|e| format!("Bat3 K3 nullifier admission failed: {e}"))?;
+        Ok((nullifiers, record.clone()))
+    }
+
+    /// Lists built-in post-quantum hybrid external finality adapter names
+    /// recognized by the explorer evidence inspector.
+    ///
+    /// WIRING: exposes `CHAIN_KEY_ADAPTER_NAME` and `APTOS_JOLTEON_ADAPTER_NAME`
+    /// descriptors to explorer inspection views.
+    #[must_use]
+    pub fn supported_pq_external_adapters() -> [&'static str; 2] {
+        [
+            crate::cross_domain::external::CHAIN_KEY_ADAPTER_NAME,
+            crate::cross_domain::external::APTOS_JOLTEON_ADAPTER_NAME,
+        ]
+    }
+
+    /// Reconstructs and verifies a `Bat3` zero-residual blueprint, returning
+    /// the reconstructed canonical bytes.
+    ///
+    /// WIRING: connects `crate::bat3::reconstruct` to the explorer evidence
+    /// surface and calls [`crate::bat3::reconstruct_and_verify`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if reconstruction exceeds the ceiling or the
+    /// commitment mismatches.
+    pub fn reconstruct_bat3_blueprint(
+        blueprint: &crate::bat3::Bat3Blueprint,
+    ) -> Result<Vec<u8>, String> {
+        crate::bat3::reconstruct_and_verify(blueprint)
+            .map_err(|e| format!("Bat3 reconstruction failed: {e}"))
+    }
+
+    /// Verifies accountable `Jolteon` double-vote slashing evidence against a
+    /// pinned epoch state, returning the offender pubkey and slashed power.
+    ///
+    /// WIRING: connects `crate::cross_domain::external::aptos_jolteon_bft` to
+    /// the explorer evidence surface and calls
+    /// [`crate::cross_domain::external::verify_jolteon_equivocation`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if the equivocation proof is invalid.
+    pub fn verify_jolteon_equivocation_evidence(
+        network: &str,
+        epoch_state: &crate::cross_domain::external::PinnedJolteonEpochState,
+        proof: &crate::cross_domain::external::JolteonEquivocationProof,
+    ) -> Result<([u8; 32], u64), String> {
+        crate::cross_domain::external::verify_jolteon_equivocation(network, epoch_state, proof)
+            .map_err(|e| format!("Jolteon equivocation verification failed: {e}"))
+    }
+
+    /// Processes a full `Bat3` evidence batch: anchors a journal entry,
+    /// admits a `K3` nullifier, and verifies a `Jolteon` equivocation proof.
+    ///
+    /// WIRING: awaiting RPC handler wiring; the three guards below are
+    /// exercised together as the canonical bat3 evidence processing path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if any guard refuses its input.
+    pub fn process_bat3_evidence(
+        &self,
+        journal: &mut crate::bat3::Bat3Journal,
+        entry: (&str, &str),
+        attestation: &crate::cross_domain::external::spec::FinalityAttestation,
+        k3_record: &crate::bat3::K3ShieldedRecord,
+        jolteon_fault: (
+            &str,
+            &crate::cross_domain::external::PinnedJolteonEpochState,
+            &crate::cross_domain::external::JolteonEquivocationProof,
+        ),
+    ) -> Result<Bat3EvidenceBatch, String> {
+        let (topic, canonical_text) = entry;
+        let (network, epoch_state, proof) = jolteon_fault;
+        let fact = self.anchor_bat3_evidence_fact(journal, topic, canonical_text, attestation)?;
+        let (nullifiers, _) = Self::admit_bat3_k3_nullifier(k3_record)?;
+        let slashing = Self::verify_jolteon_equivocation_evidence(network, epoch_state, proof)?;
+        Ok((fact, nullifiers, slashing))
     }
 }
 

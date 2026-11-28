@@ -13,7 +13,7 @@ fn block_size_is_bounded() {
         assert!(
             MAX_BLOCK_SIZE >= 100_000,
             "block size too small for useful txs"
-        )
+        );
     };
     const { assert!(MAX_BLOCK_SIZE <= 10_000_000, "block size exceeds 10MB") };
 }
@@ -67,7 +67,7 @@ fn block_interval_less_than_round_timeout() {
         assert!(
             MIN_BLOCK_INTERVAL_MS < ROUND_TIMEOUT_MS,
             "block interval must be less than round timeout"
-        )
+        );
     };
 }
 
@@ -77,6 +77,6 @@ fn round_timeout_less_than_future_block_time() {
         assert!(
             ROUND_TIMEOUT_MS < MAX_FUTURE_BLOCK_TIME_MS,
             "round timeout must be less than future block time tolerance"
-        )
+        );
     };
 }

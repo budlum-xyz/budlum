@@ -163,13 +163,17 @@ fn encode_string(bytes: &[u8], out: &mut Vec<u8>) {
 /// A length of 0 to 55 gives `[offset + len]`; above 55 it gives
 /// `[offset + 55 + len_of_len, ...len_be]`.
 fn encode_length(len: usize, offset: u8, out: &mut Vec<u8>) {
-    if len < 56 {
-        out.push(offset + (len as u8));
-    } else {
-        let len_be = trim_leading_zeros(len);
-        out.push(offset + 55 + (len_be.len() as u8));
-        out.extend_from_slice(&len_be);
+    if let Ok(short) = u8::try_from(len) {
+        if short < 56 {
+            out.push(offset + short);
+            return;
+        }
     }
+    let len_be = trim_leading_zeros(len);
+    // `usize` is at most 8 bytes on supported targets, so `len_be.len() <= 8`.
+    let len_of_len = u8::try_from(len_be.len()).unwrap_or(8);
+    out.push(offset + 55 + len_of_len);
+    out.extend_from_slice(&len_be);
 }
 
 /// Returns a `usize` big-endian in the minimal number of bytes, with NO leading
@@ -186,6 +190,11 @@ fn trim_leading_zeros(n: usize) -> Vec<u8> {
 
 /// Decodes an RLP byte stream. The whole input must be consumed; trailing
 /// bytes are FORBIDDEN.
+///
+/// # Errors
+///
+/// Returns [`RlpError`] if the encoding is truncated, non-canonical, exceeds depth/item
+/// budgets, or leaves trailing bytes.
 pub fn decode(input: &[u8]) -> Result<Item, RlpError> {
     let mut budget = MAX_ITEMS;
     let (item, rest) = decode_at(input, 0, &mut budget)?;
@@ -342,10 +351,14 @@ fn trim_leading_zeros_u64(n: u64) -> Vec<u8> {
 
 /// Parses an RLP item as a big-endian integer; a leading zero is FORBIDDEN and
 /// gives `NonCanonical`.
+///
+/// # Errors
+///
+/// Returns [`RlpError::NonCanonical`] for lists, leading-zero encodings, or byte strings
+/// wider than 8 bytes.
 pub fn decode_uint(item: &Item) -> Result<u64, RlpError> {
-    let bytes = match item {
-        Item::String(b) => b,
-        _ => return Err(RlpError::NonCanonical),
+    let Item::String(bytes) = item else {
+        return Err(RlpError::NonCanonical);
     };
     if !bytes.is_empty() && bytes[0] == 0 {
         return Err(RlpError::NonCanonical); // leading-zero integer encoding,
@@ -370,10 +383,14 @@ pub fn decode_uint(item: &Item) -> Result<u64, RlpError> {
 
 /// Returns the raw bytes of a byte-string item, a helper for extracting struct
 /// fields.
+///
+/// # Errors
+///
+/// Returns [`RlpError::NonCanonical`] if `item` is an [`Item::List`].
 pub fn as_bytes(item: &Item) -> Result<&[u8], RlpError> {
     match item {
         Item::String(b) => Ok(b),
-        _ => Err(RlpError::NonCanonical),
+        Item::List(_) => Err(RlpError::NonCanonical),
     }
 }
 
@@ -388,6 +405,11 @@ impl RlpBytes {
     pub fn from_item(item: &Item) -> Self {
         Self(encode(item))
     }
+    /// Decodes the wrapped RLP bytes back into an [`Item`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`RlpError`] from [`decode`].
     pub fn decode(&self) -> Result<Item, RlpError> {
         decode(&self.0)
     }
@@ -642,7 +664,7 @@ mod tests {
         assert!(matches!(decode(&enc), Err(RlpError::TooManyItems)));
     }
 
-    /// A nested list past MAX_DEPTH is refused, not
+    /// A nested list past `MAX_DEPTH` is refused, not
     /// recursed into.
     #[test]
     fn neg_nesting_too_deep_rejected() {

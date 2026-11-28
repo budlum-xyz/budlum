@@ -14,8 +14,9 @@
 use crate::core::account::ATTOS_PER_ATOM;
 use crate::execution::coordinator::alias::is_ed25519_on_curve;
 use crate::execution::coordinator::assets::{
-    decode_pointer_bytecode, resolve_pointer_party_for_home, MovePointerFlavor, MovePointerOp,
-    PointerDescriptor, SplPointerOp,
+    is_pointer_bytecode_prefixed, resolve_pointer_party_for_home,
+    verify_canonical_pointer_bytecode, MovePointerFlavor, MovePointerOp, PointerDescriptor,
+    SplPointerOp,
 };
 use crate::execution::coordinator::evm_ee::solidity_selector;
 use crate::execution::coordinator::state::NS_SVM_ACCOUNT;
@@ -575,6 +576,12 @@ impl ExecutionEnvironment for SvmEe {
                 code: RefusalCode::Denied,
                 message,
             })?;
+        if is_pointer_bytecode_prefixed(code) {
+            return Err(EeRefusal {
+                code: RefusalCode::InvalidCode,
+                message: String::from("system pointer bytecode prefix is reserved for uel/assets"),
+            });
+        }
         if code.len() < 4 || code.get(..4) != Some(&ELF_MAGIC) {
             return Err(EeRefusal {
                 code: RefusalCode::InvalidCode,
@@ -627,8 +634,25 @@ impl ExecutionEnvironment for SvmEe {
                         gas_used: 5_000,
                     });
                 }
+                let existing = match read_svm_account(host, &target_pk) {
+                    Ok(acct) => acct,
+                    Err(e) => {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: e.into_bytes(),
+                            gas_used: 5_000,
+                        });
+                    }
+                };
+                if existing.executable || !existing.data.is_empty() {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"target SVM account already holds program or state".to_vec(),
+                        gas_used: 5_000,
+                    });
+                }
                 let prog_acct = SvmAccountData {
-                    lamports: 1,
+                    lamports: existing.lamports.max(1),
                     owner: SVM_BPF_LOADER_ID,
                     executable: true,
                     rent_epoch: 0,
@@ -659,15 +683,26 @@ impl ExecutionEnvironment for SvmEe {
                 }
                 let (is_static, clean_input) = unwrap_static_universal_input(&call.input);
                 if let Ok(target_acc) = read_svm_account(host, &target_pk) {
-                    if let Some(ptr) = decode_pointer_bytecode(&target_acc.data) {
-                        return execute_svm_pointer(
-                            &ptr,
-                            &caller_pk,
-                            clean_input,
-                            is_static,
-                            call.gas_limit,
-                            host,
-                        );
+                    match verify_canonical_pointer_bytecode(&target_acc.data, EeId::SVM, &target_pk)
+                    {
+                        Err(reason) => {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: reason.into_bytes(),
+                                gas_used: 5_000,
+                            });
+                        }
+                        Ok(Some(ptr)) => {
+                            return execute_svm_pointer(
+                                &ptr,
+                                &caller_pk,
+                                clean_input,
+                                is_static,
+                                call.gas_limit,
+                                host,
+                            );
+                        }
+                        Ok(None) => {}
                     }
                 }
                 let (ix, from_pointer_op) = if let Ok(parsed) =

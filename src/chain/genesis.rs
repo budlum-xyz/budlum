@@ -623,6 +623,10 @@ impl GenesisConfig {
     /// nothing while telling operators the pool is live. Refusing names the
     /// owner instead of failing later as an empty epoch payout.
     /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
+    /// # Errors
+    ///
+    /// Returns an error when the genesis enables the reward pool on a chain that has no
+    /// reward-pool schedule in the binary.
     pub fn validate_reward_pool_flag(&self) -> Result<(), String> {
         let Some(flag) = self.reward_pool else {
             return Ok(());
@@ -647,6 +651,10 @@ impl GenesisConfig {
     /// arrives with the anchor key ceremony, and production anchoring refuses
     /// to start without it.
     /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
+    /// # Errors
+    ///
+    /// Returns an error when the anchor-key ledger is present but malformed, or names a
+    /// chain other than this genesis.
     pub fn validate_anchor_ledger(&self) -> Result<(), String> {
         let Some(ledger) = &self.anchor_ledger else {
             return Ok(());
@@ -1776,7 +1784,7 @@ mod tests {
         );
     }
 
-    /// A genesis that lists PoA authorities declares the
+    /// A genesis that lists `PoA` authorities declares the
     /// admission gate; an outsider with stake is not in the admitted set.
     #[test]
     fn genesis_poa_authorities_open_the_admission_gate() {
@@ -1907,7 +1915,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
     }
 
-    /// The mainnet bridge-enabled PoW domain must not keep the
+    /// The mainnet bridge-enabled `PoW` domain must not keep the
     /// 8-bit default floor.
     #[test]
     fn mainnet_bridge_pow_domain_has_a_non_trivial_difficulty_floor() {
@@ -2055,7 +2063,7 @@ mod tests {
                     assert!(
                         reason.contains("no registered validator set"),
                         "{kind}: {reason}"
-                    )
+                    );
                 }
                 other => panic!("{kind} placeholder must refuse, got {other:?}"),
             }

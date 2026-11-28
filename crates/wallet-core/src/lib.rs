@@ -66,6 +66,8 @@ pub mod rpc;
 mod tee;
 /// V5 transfers the node accepts, and the V7 composite transfer.
 pub mod transfer;
+/// Pre-sign stale simulation guard, agent spending caps, and sender-bound proof nullifiers.
+pub mod tx_safety;
 /// The V3 wallet: 24 words, SHAKE256 branches, Address V3.
 pub mod wallet_v3;
 

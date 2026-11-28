@@ -219,13 +219,33 @@ fn the_two_runtime_indexes_are_panic_free() {
         "the IPv6 bucket must use get_mut, not a runtime slice index"
     );
     let filter = read("src/storage/bud3/dedup_index.rs");
+    // Either constant-size chunking API is acceptable: `as_chunks` yields
+    // arrays and `chunks_exact` yields slices. What the lock is really about is
+    // that the lanes are filled by `zip`, never by a runtime index.
     assert!(
-        filter.contains("lanes.iter_mut().zip(digest.chunks_exact(8))"),
+        filter.contains("lanes.iter_mut().zip(digest.as_chunks::<8>().0)"),
         "the digest lanes must be filled by zip, not a runtime index"
     );
     assert!(
         !filter.contains("lanes[i] = v"),
         "a runtime index on the lane array is outside the indexing baseline"
+    );
+}
+
+/// The B.U.D. 3.0 key-backup parser reads untrusted bytes, so it must not index
+/// them: `pair[..32]` panics out of bounds on a body that somehow reached it
+/// short, and a panic in a parser is a denial of service on every node that
+/// loads the package.
+#[test]
+fn the_key_backup_parser_indexes_nothing() {
+    let keys = read("src/storage/bud3/keys.rs");
+    assert!(
+        keys.contains("pair.as_chunks::<32>().0"),
+        "the backup pair must be split by pattern, not by range"
+    );
+    assert!(
+        !keys.contains("pair[..32]") && !keys.contains("pair[32..64]"),
+        "a runtime range index on untrusted backup bytes is outside the indexing baseline"
     );
 }
 
@@ -261,4 +281,49 @@ fn android_compile_sdk_uses_a_compatible_toolchain() {
     assert!(workflow.contains("android-gradle:"));
     assert!(workflow.contains("gradle assembleDebug --no-daemon"));
     assert!(workflow.contains("gradle testDebugUnitTest --no-daemon"));
+}
+
+/// The pool-deposit economy has exactly one table
+/// (`src/tokenomics/pool_deposit.rs`): consumers take `policy_of(...)` and
+/// never carry an inline amount, so the K/TTL numbers cannot fork silently
+/// at a call site.
+#[test]
+fn pool_deposit_amounts_come_only_from_the_single_table() {
+    let table = read("src/tokenomics/pool_deposit.rs");
+    assert!(
+        table.contains("const POOL_DEPOSIT_ATOM"),
+        "the single table lost its atom"
+    );
+    assert!(
+        !table.contains("pub const POOL_DEPOSIT_ATOM"),
+        "the atom is the table's own unit: consumers take whole policies"
+    );
+    assert!(
+        table.contains("pub const fn policy_of"),
+        "the single table lost its lookup"
+    );
+    let module = read("src/tokenomics/mod.rs");
+    assert!(
+        module.contains("pub mod pool_deposit;"),
+        "the table module is unregistered"
+    );
+    // Every escrow call site in the consumer passes a named policy value,
+    // never a literal: a digit inside the call is a forked constant.
+    let executor = read("src/execution/executor.rs");
+    assert!(
+        executor.contains("pool_deposit::policy_of"),
+        "the consumer stopped reading the table"
+    );
+    let mut forked = Vec::new();
+    for (i, line) in executor.lines().enumerate() {
+        if (line.contains("lock_pool_deposit(") || line.contains("move_pool_deposit_claim("))
+            && line.chars().any(|c| c.is_ascii_digit())
+        {
+            forked.push(i + 1);
+        }
+    }
+    assert!(
+        forked.is_empty(),
+        "inline deposit amounts at src/execution/executor.rs lines {forked:?}: take the value from pool_deposit::policy_of"
+    );
 }

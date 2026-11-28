@@ -21,9 +21,25 @@ permissions:
 
 jobs:
   air-mutants:
-    name: cargo mutants (AIR rules)
+    # `bud-proof/src/plonky3_air.rs` produces ~2,069 viable mutants. Running all
+    # of them serially in one hosted runner requires ~139 runner-hours and
+    # hit the 350-minute job timeout on every weekly run before reaching 4% of
+    # the file. Splitting across 32 deterministic `cargo-mutants` shards gives
+    # each runner ~65 mutants (~4.3 h worst case, well inside 350 minutes) with
+    # zero softening: every shard validates the unmutated baseline first and
+    # fails on any surviving mutant, timeout, or unviable baseline.
+    name: cargo mutants AIR shard ${{ matrix.shard_index }}/32
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard_index:
+          [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+          ]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -34,15 +50,58 @@ jobs:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: budzero-air-mutants
+          shared-key: budzero-air-mutants-${{ matrix.shard_index }}
           workspaces: budzero
+          cache-on-failure: true
       - name: cargo install cargo-mutants
         run: cargo install cargo-mutants --locked
       # The baseline is not skipped: the unmutated tree has to be green before
       # a verdict is trusted. A timeout is never counted as caught.
-      - name: cargo mutants (AIR constraint file)
+      - name: cargo mutants (AIR constraint shard ${{ matrix.shard_index }}/32)
         working-directory: budzero
         run: |
           set -euo pipefail
+          shard='${{ matrix.shard_index }}'
+          shards=32
           cargo mutants --in-place --timeout 900 \
+            --shard "${shard}/${shards}" \
             --file bud-proof/src/plonky3_air.rs -- --lib
+      - name: Summarize AIR mutant shard outcomes
+        if: always()
+        env:
+          SHARD_INDEX: ${{ matrix.shard_index }}
+        run: |
+          set -euo pipefail
+          out_dir="budzero/mutants.out"
+          count_lines() {
+            if [ -f "$1" ]; then wc -l < "$1" | tr -d ' '; else echo 0; fi
+          }
+          caught="$(count_lines "$out_dir/caught.txt")"
+          missed="$(count_lines "$out_dir/missed.txt")"
+          timed_out="$(count_lines "$out_dir/timeout.txt")"
+          unviable="$(count_lines "$out_dir/unviable.txt")"
+          {
+            echo "### AIR mutants shard ${SHARD_INDEX}/32"
+            echo ""
+            echo "| verdict | count |"
+            echo "| :-- | --: |"
+            echo "| caught | ${caught} |"
+            echo "| missed | ${missed} |"
+            echo "| timeout | ${timed_out} |"
+            echo "| unviable | ${unviable} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -s "$out_dir/missed.txt" ]; then
+            echo "=== Surviving AIR mutants in shard ${SHARD_INDEX}/32 ===" >&2
+            cat "$out_dir/missed.txt" >&2
+          fi
+      - name: Upload surviving/timed-out mutant report
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: air-mutants-shard-${{ matrix.shard_index }}
+          path: |
+            budzero/mutants.out/missed.txt
+            budzero/mutants.out/timeout.txt
+            budzero/mutants.out/outcomes.json
+          if-no-files-found: ignore
+          retention-days: 30

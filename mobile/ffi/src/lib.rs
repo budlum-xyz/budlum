@@ -25,10 +25,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use budlum_mobile_core::{
     crypto::{ctx, pq, scheme::SchemeId},
-    Connection, CoreError, CoreStatus, DutyTx, KeyVault, LastAudit, MobileCore, NetworkPolicy,
-    OperatorKey, Policy, PowerPolicy, RelayOffer, SealedOperatorKey, ValidatorClass, VaultError,
-    FREE_SPACE_FLOOR_BYTES, OPERATOR_SEED_LEN, QUOTA_DEFAULT_BYTES, QUOTA_MAX_BYTES,
-    QUOTA_MIN_BYTES, TESTNET_CHAIN_ID,
+    CheckpointSummary, CheckpointVerifyError, Connection, CoreError, CoreStatus, DutyTx,
+    HandoffCertificate, HandoffError, HandoffMember, HandoffSignature, KeyVault, LastAudit,
+    MobileCore, MobileLightClient, NetworkPolicy, OperatorKey, Policy, PowerPolicy, QcBlob,
+    RelayOffer, SealedOperatorKey, TrustedCheckpoint, ValidatorClass, ValidatorEntry,
+    ValidatorSetSnapshot, VaultError, FREE_SPACE_FLOOR_BYTES, OPERATOR_SEED_LEN,
+    QUOTA_DEFAULT_BYTES, QUOTA_MAX_BYTES, QUOTA_MIN_BYTES, TESTNET_CHAIN_ID,
 };
 use budlum_types::class::AuditWindow;
 use sha3::{Digest, Sha3_256};
@@ -566,6 +568,275 @@ impl From<CoreError> for MobileError {
             reason: error.message,
         }
     }
+}
+
+impl From<CheckpointVerifyError> for MobileError {
+    fn from(error: CheckpointVerifyError) -> Self {
+        let code = match error {
+            CheckpointVerifyError::MalformedHash(_) => "mobile_light_malformed_hash",
+            CheckpointVerifyError::InvalidHeader(_) => "mobile_light_invalid_header",
+            CheckpointVerifyError::CertificateBinding(_) => "mobile_light_certificate_binding",
+            CheckpointVerifyError::TrustBinding(_) => "mobile_light_trust_binding",
+            CheckpointVerifyError::VerificationFailed(_) => "mobile_light_verification_failed",
+            CheckpointVerifyError::NotForward { .. } => "mobile_light_not_forward",
+            CheckpointVerifyError::SetChanged { .. } => "mobile_light_set_changed",
+        };
+        Self::refused(code, &error.to_string())
+    }
+}
+
+impl From<HandoffError> for MobileError {
+    fn from(error: HandoffError) -> Self {
+        Self::refused("mobile_light_handoff_refused", &error.to_string())
+    }
+}
+
+/// Trusted anchor record crossing the UniFFI boundary for Android and iOS (K-G.6).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiTrustedCheckpoint {
+    /// Anchor block height.
+    pub height: u64,
+    /// Canonical 64-hex block hash.
+    pub block_hash: String,
+    /// Canonical 64-hex validator-set digest.
+    pub set_hash: String,
+}
+
+impl From<FfiTrustedCheckpoint> for TrustedCheckpoint {
+    fn from(v: FfiTrustedCheckpoint) -> Self {
+        Self {
+            height: v.height,
+            block_hash: v.block_hash,
+            set_hash: v.set_hash,
+        }
+    }
+}
+
+impl From<TrustedCheckpoint> for FfiTrustedCheckpoint {
+    fn from(v: TrustedCheckpoint) -> Self {
+        Self {
+            height: v.height,
+            block_hash: v.block_hash,
+            set_hash: v.set_hash,
+        }
+    }
+}
+
+/// Candidate checkpoint header summary crossing the UniFFI boundary.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiCheckpointSummary {
+    /// Block height of the candidate checkpoint.
+    pub height: u64,
+    /// Canonical 64-hex block hash.
+    pub block_hash: String,
+    /// Canonical 64-hex state root.
+    pub state_root: String,
+}
+
+impl From<FfiCheckpointSummary> for CheckpointSummary {
+    fn from(v: FfiCheckpointSummary) -> Self {
+        Self {
+            height: v.height,
+            block_hash: v.block_hash,
+            state_root: v.state_root,
+        }
+    }
+}
+
+/// Verified checkpoint returned to Android and iOS callers.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiVerifiedCheckpoint {
+    /// Verified checkpoint block height.
+    pub height: u64,
+    /// Canonical 64-hex block hash.
+    pub block_hash: String,
+    /// Canonical 64-hex validator-set digest.
+    pub set_hash: String,
+    /// Epoch of the verified certificate.
+    pub epoch: u64,
+    /// Canonical 64-hex state root.
+    pub state_root: String,
+}
+
+/// One validator inside a UniFFI validator-set snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiValidatorEntry {
+    /// Canonical 64-hex validator address.
+    pub address_hex: String,
+    /// Bonded stake.
+    pub stake: u64,
+    /// BLS12-381 consensus public key bytes.
+    pub bls_public_key: Vec<u8>,
+    /// BLS proof-of-possession signature bytes.
+    pub pop_signature: Vec<u8>,
+    /// ML-DSA-65 post-quantum consensus public key bytes.
+    pub pq_public_key: Vec<u8>,
+}
+
+/// Validator-set snapshot crossing the UniFFI boundary.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiValidatorSetSnapshot {
+    /// Epoch of the validator set.
+    pub epoch: u64,
+    /// Validator entries.
+    pub validators: Vec<FfiValidatorEntry>,
+    /// Claimed canonical 64-hex validator-set digest (recomputed on entry).
+    pub set_hash: String,
+    /// Claimed total stake (recomputed on entry).
+    pub total_stake: u64,
+}
+
+impl TryFrom<FfiValidatorSetSnapshot> for ValidatorSetSnapshot {
+    type Error = MobileError;
+
+    fn try_from(value: FfiValidatorSetSnapshot) -> Result<Self, Self::Error> {
+        let mut validators = Vec::with_capacity(value.validators.len());
+        for entry in value.validators {
+            let address = budlum_types::Address::from_hex(&entry.address_hex)
+                .map_err(|e| MobileError::refused("mobile_light_validator_address", &e))?;
+            validators.push(ValidatorEntry {
+                address,
+                stake: entry.stake,
+                bls_public_key: entry.bls_public_key,
+                pop_signature: entry.pop_signature,
+                pq_public_key: entry.pq_public_key,
+            });
+        }
+        Ok(Self {
+            epoch: value.epoch,
+            validators,
+            set_hash: value.set_hash,
+            total_stake: value.total_stake,
+        })
+    }
+}
+
+/// One committee signature inside a UniFFI [`FfiHandoffCertificate`].
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiHandoffSignature {
+    /// Member index in the outgoing validator set.
+    pub index: u32,
+    /// ML-DSA-65 signature bytes under `BDLM/HANDOFF/V1`.
+    pub signature: Vec<u8>,
+}
+
+/// Persistent validator-set handoff certificate crossing the UniFFI boundary.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiHandoffCertificate {
+    /// Chain identifier.
+    pub chain_id: u64,
+    /// Outgoing epoch `e` handing over to `e + 1`.
+    pub epoch: u64,
+    /// 32-byte digest of the outgoing validator set.
+    pub outgoing_set: Vec<u8>,
+    /// 32-byte digest of the incoming validator set.
+    pub incoming_set: Vec<u8>,
+    /// 32-byte epoch randomness seating the committee.
+    pub randomness: Vec<u8>,
+    /// Committee signatures in strictly ascending index order.
+    pub signatures: Vec<FfiHandoffSignature>,
+}
+
+impl TryFrom<FfiHandoffCertificate> for HandoffCertificate {
+    type Error = MobileError;
+
+    fn try_from(value: FfiHandoffCertificate) -> Result<Self, Self::Error> {
+        let outgoing_set: [u8; 32] = value.outgoing_set.try_into().map_err(|_| {
+            MobileError::refused(
+                "mobile_light_handoff_digest",
+                "outgoing_set must be 32 bytes",
+            )
+        })?;
+        let incoming_set: [u8; 32] = value.incoming_set.try_into().map_err(|_| {
+            MobileError::refused(
+                "mobile_light_handoff_digest",
+                "incoming_set must be 32 bytes",
+            )
+        })?;
+        let randomness: [u8; 32] = value.randomness.try_into().map_err(|_| {
+            MobileError::refused(
+                "mobile_light_handoff_randomness",
+                "randomness must be 32 bytes",
+            )
+        })?;
+        let signatures = value
+            .signatures
+            .into_iter()
+            .map(|s| HandoffSignature {
+                index: s.index,
+                signature: s.signature,
+            })
+            .collect();
+        Ok(Self {
+            chain_id: value.chain_id,
+            epoch: value.epoch,
+            outgoing_set,
+            incoming_set,
+            randomness,
+            signatures,
+        })
+    }
+}
+
+/// Verify a canonical QC V2 binary checkpoint blob against `trusted`, `header`,
+/// and `snapshot` using the real dual-library ML-DSA-65 verifier (K-G.6).
+///
+/// # Errors
+///
+/// [`MobileError::Refused`] on any malformed input, untrusted set, invalid
+/// signature, or quorum shortfall.
+#[uniffi::export]
+pub fn verify_mobile_pq_checkpoint(
+    chain_id: u64,
+    trusted: FfiTrustedCheckpoint,
+    header: FfiCheckpointSummary,
+    qc_blob_bytes: Vec<u8>,
+    snapshot: FfiValidatorSetSnapshot,
+) -> Result<FfiVerifiedCheckpoint, MobileError> {
+    let snapshot = ValidatorSetSnapshot::try_from(snapshot)?;
+    let blob = QcBlob::from_bytes(&qc_blob_bytes, snapshot.validators.len())
+        .map_err(|e| MobileError::refused("mobile_light_qc_wire", &e))?;
+    let client = MobileLightClient::new(trusted.into(), chain_id)?;
+    let verified = client.verify_pq_checkpoint(&header.into(), &blob, &snapshot)?;
+    Ok(FfiVerifiedCheckpoint {
+        height: verified.height,
+        block_hash: verified.block_hash,
+        set_hash: verified.set_hash,
+        epoch: verified.epoch,
+        state_root: verified.state_root,
+    })
+}
+
+/// Verify one [`FfiHandoffCertificate`] transition from `outgoing` to `incoming`
+/// under `epoch_randomness` and return the rotated [`FfiTrustedCheckpoint`]
+/// anchored at the incoming validator set (K-G.6).
+///
+/// # Errors
+///
+/// [`MobileError::Refused`] on any set, randomness, committee, quorum, or
+/// ML-DSA-65 signature failure.
+#[uniffi::export]
+pub fn verify_mobile_handoff_step(
+    chain_id: u64,
+    trusted: FfiTrustedCheckpoint,
+    outgoing: FfiValidatorSetSnapshot,
+    certificate: FfiHandoffCertificate,
+    incoming: FfiValidatorSetSnapshot,
+    epoch_randomness: Vec<u8>,
+) -> Result<FfiTrustedCheckpoint, MobileError> {
+    let randomness: [u8; 32] = epoch_randomness.try_into().map_err(|_| {
+        MobileError::refused(
+            "mobile_light_handoff_randomness",
+            "epoch_randomness must be 32 bytes",
+        )
+    })?;
+    let outgoing = ValidatorSetSnapshot::try_from(outgoing)?;
+    let incoming = ValidatorSetSnapshot::try_from(incoming)?;
+    let cert = HandoffCertificate::try_from(certificate)?;
+    let mut client = MobileLightClient::new(trusted.into(), chain_id)?;
+    let _ = client.follow_handoffs(&outgoing, &[(cert, incoming)], &|_| randomness)?;
+    let _ = HandoffMember::clone;
+    Ok(client.trusted().clone().into())
 }
 
 /// A poisoned lock is fail-stop. No recovery may assume that a panic left
@@ -1154,5 +1425,153 @@ mod tests {
         let node = node(PhoneClass::Mobile);
         assert_eq!(node.report_free_space(32 * GIB), 0);
         assert_eq!(node.pending_duties(), 0);
+    }
+
+    #[test]
+    fn mobile_ffi_verifies_pq_checkpoint_and_handoff_and_refuses_forgeries() {
+        let mut seed = [0u8; 32];
+        seed[0] = 0x42;
+        let pk = pq::ml_dsa_public_key(SchemeId::ML_DSA_65, &seed).expect("pk");
+        let addr = budlum_types::Address::from([0x33; 32]);
+        let snapshot4 = ValidatorSetSnapshot::new(
+            4,
+            vec![ValidatorEntry {
+                address: addr,
+                stake: 500,
+                bls_public_key: vec![1; 96],
+                pop_signature: vec![2; 48],
+                pq_public_key: pk.clone(),
+            }],
+        );
+        let snapshot5 = ValidatorSetSnapshot::new(
+            5,
+            vec![ValidatorEntry {
+                address: addr,
+                stake: 700,
+                bls_public_key: vec![1; 96],
+                pop_signature: vec![2; 48],
+                pq_public_key: pk.clone(),
+            }],
+        );
+        let ffi_snap4 = FfiValidatorSetSnapshot {
+            epoch: 4,
+            validators: vec![FfiValidatorEntry {
+                address_hex: addr.to_hex(),
+                stake: 500,
+                bls_public_key: vec![1; 96],
+                pop_signature: vec![2; 48],
+                pq_public_key: pk.clone(),
+            }],
+            set_hash: snapshot4.set_hash.clone(),
+            total_stake: 500,
+        };
+        let ffi_snap5 = FfiValidatorSetSnapshot {
+            epoch: 5,
+            validators: vec![FfiValidatorEntry {
+                address_hex: addr.to_hex(),
+                stake: 700,
+                bls_public_key: vec![1; 96],
+                pop_signature: vec![2; 48],
+                pq_public_key: pk,
+            }],
+            set_hash: snapshot5.set_hash.clone(),
+            total_stake: 700,
+        };
+
+        let trusted = FfiTrustedCheckpoint {
+            height: 100,
+            block_hash: "11".repeat(32),
+            set_hash: snapshot4.set_hash.clone(),
+        };
+        let header = FfiCheckpointSummary {
+            height: 200,
+            block_hash: "22".repeat(32),
+            state_root: "33".repeat(32),
+        };
+        let qc_msg = budlum_types::checkpoint::pq_signing_message(4, 200, &header.block_hash, 0);
+        let qc_sig = pq::ml_dsa_sign(SchemeId::ML_DSA_65, &seed, &qc_msg, ctx::QC_V2, &[0u8; 32])
+            .expect("sig");
+        let blob = QcBlob::new(
+            4,
+            200,
+            header.block_hash.clone(),
+            vec![budlum_types::checkpoint::PqSignatureEntry {
+                validator_index: 0,
+                validator_address: addr.to_hex(),
+                pq_signature: qc_sig.clone(),
+            }],
+        );
+        let verified = verify_mobile_pq_checkpoint(
+            TESTNET_CHAIN_ID,
+            trusted.clone(),
+            header.clone(),
+            blob.to_bytes().expect("wire"),
+            ffi_snap4.clone(),
+        )
+        .expect("honest checkpoint");
+        assert_eq!(verified.height, 200);
+        assert_eq!(verified.epoch, 4);
+
+        // Forged signature is strictly refused across UniFFI.
+        let mut bad_sig = qc_sig;
+        bad_sig[0] ^= 0xFF;
+        let bad_blob = QcBlob::new(
+            4,
+            200,
+            header.block_hash.clone(),
+            vec![budlum_types::checkpoint::PqSignatureEntry {
+                validator_index: 0,
+                validator_address: addr.to_hex(),
+                pq_signature: bad_sig,
+            }],
+        );
+        assert_eq!(
+            refusal_code(verify_mobile_pq_checkpoint(
+                TESTNET_CHAIN_ID,
+                trusted.clone(),
+                header,
+                bad_blob.to_bytes().expect("wire"),
+                ffi_snap4.clone(),
+            )),
+            "mobile_light_verification_failed"
+        );
+
+        // Handoff rotation across UniFFI updates trusted set_hash to epoch 5.
+        let randomness = [0x99u8; 32];
+        let cert_unsigned = HandoffCertificate::unsigned(
+            TESTNET_CHAIN_ID,
+            4,
+            &snapshot4.to_handoff_members(),
+            &snapshot5.to_handoff_members(),
+            randomness,
+        );
+        let ho_sig = pq::ml_dsa_sign(
+            SchemeId::ML_DSA_65,
+            &seed,
+            &cert_unsigned.signing_message(),
+            ctx::HANDOFF_V1,
+            &[0u8; 32],
+        )
+        .expect("ho sig");
+        let rotated = verify_mobile_handoff_step(
+            TESTNET_CHAIN_ID,
+            trusted,
+            ffi_snap4,
+            FfiHandoffCertificate {
+                chain_id: TESTNET_CHAIN_ID,
+                epoch: 4,
+                outgoing_set: cert_unsigned.outgoing_set.to_vec(),
+                incoming_set: cert_unsigned.incoming_set.to_vec(),
+                randomness: randomness.to_vec(),
+                signatures: vec![FfiHandoffSignature {
+                    index: 0,
+                    signature: ho_sig,
+                }],
+            },
+            ffi_snap5,
+            randomness.to_vec(),
+        )
+        .expect("rotated");
+        assert_eq!(rotated.set_hash, snapshot5.set_hash);
     }
 }

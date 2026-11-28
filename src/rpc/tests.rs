@@ -6,6 +6,7 @@ mod rpc_tests {
     use crate::core::address::Address;
     use crate::core::transaction::Transaction;
     use crate::network::node::Node;
+    use crate::pollen::DataAsset;
     use crate::rpc::api::BudlumApiServer;
     use crate::rpc::server::{RpcMode, RpcSecurityConfig, RpcServer};
     use std::sync::Arc;
@@ -426,7 +427,7 @@ mod rpc_tests {
 
     /// The actor must see sender and payload, not only type and amount:
     /// subsequent governance proposals in one epoch require a higher fee.
-    /// Quoting base_fee alone would leave a wallet signing a rejected vote.
+    /// Quoting `base_fee` alone would leave a wallet signing a rejected vote.
     #[tokio::test]
     async fn estimate_gas_includes_escalating_governance_proposal_fee() {
         use crate::core::governance::ProposalType;
@@ -2180,6 +2181,31 @@ mod rpc_tests {
             .record_paid_view(payer.0, pub_key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 0)
             .unwrap();
 
+        // A market-bound commitment: the paid view door must refuse it
+        // before touching storage, receipts, or symbols.
+        let listed_owner = alice;
+        let listed_asset = DataAsset::new(
+            listed_owner,
+            crate::storage::ContentId([0x77u8; 32]),
+            [0x66; 32],
+            false,
+        );
+        let listed_asset_id = listed_asset.asset_id;
+        bc.state
+            .marketplace
+            .register_data_asset(listed_asset)
+            .unwrap();
+        bc.state
+            .marketplace
+            .protected_content
+            .bind(
+                crate::storage::ContentId([0x77u8; 32]),
+                listed_asset_id,
+                listed_owner,
+                listed_owner,
+            )
+            .unwrap();
+
         let (op_server, chain) = setup_with_blockchain(bc).await;
         let pub_node = Node::new(chain.clone()).unwrap();
         let pub_server = RpcServer::with_security_and_mode(
@@ -2364,7 +2390,7 @@ mod rpc_tests {
         assert_eq!(
             pub_server
                 .storage_get_content(
-                    payer_hex,
+                    payer_hex.clone(),
                     sealed_hex,
                     format!("0x{}", hex::encode([0x88u8; 32])),
                     MIN_PAID_VIEW_FEE_ATOMS
@@ -2373,6 +2399,22 @@ mod rpc_tests {
                 .unwrap_err()
                 .code(),
             -32602
+        );
+
+        // Market-listed bytes never leave through the paid storage view: the
+        // commitment-bound refusal fires before any decode or receipt burn.
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    payer_hex,
+                    format!("0x{}", hex::encode([0x77u8; 32])),
+                    format!("0x{}", hex::encode([0x99u8; 32])),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32004
         );
 
         // Live BNS content resolves through BlockchainSymbolSource.
@@ -2821,7 +2863,7 @@ mod rpc_tests {
         );
     }
 
-    /// third descent: the marketplace, Pollen, AI and directory
+    /// third descent: the marketplace, data market, AI and directory
     /// listings. Every one of them is a delegation to the chain actor, so on a
     /// fresh chain each answers with an empty collection. The lock worth keeping
     /// is that none of them errors and none of them collapses to a flag: a
@@ -3041,7 +3083,7 @@ mod rpc_tests {
     #[tokio::test]
     async fn data_market_prepare_purchase_ok_and_refused() {
         use crate::crypto::primitives::KeyPair;
-        use crate::pollen::{DataAsset, MarketplaceRegistry, SaleAuthorization, Signature64};
+        use crate::pollen::{MarketplaceRegistry, SaleAuthorization, Signature64};
         use crate::storage::ContentId;
 
         let seller_keys = KeyPair::from_seed(&[0x41; 32]).unwrap();
@@ -3893,6 +3935,52 @@ mod rpc_tests {
             .is_err());
     }
 
+    /// `read_record` answers with the fields the invite carries: the phone
+    /// shows who invited it before it acts. The refusing half lives in the
+    /// operator-only listener test below. This walks the public RPC surface
+    /// only, so it touches no Garden module a caller could not reach.
+    #[tokio::test]
+    async fn garden_read_record_answers_with_the_fields_it_carries() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45269, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node = Node::new(chain.clone()).expect("node");
+        let garden = Arc::new(crate::garden::GardenService::new(Some(chain.clone()), None));
+        let operator = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node.get_client(),
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Operator,
+        )
+        .with_garden(garden);
+        operator
+            .garden_create(
+                "Room".into(),
+                "host".into(),
+                Some(crate::garden::GardenOptions {
+                    listen: Some("/ip4/127.0.0.1/tcp/0".into()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("a garden is opened before an invite exists");
+        let invite = operator.garden_invite().await.unwrap();
+        let record = invite
+            .get("record")
+            .and_then(|v| v.as_str())
+            .expect("an invite carries the record the phone reads");
+        let answer = operator.garden_read_record(record.into()).await.unwrap();
+        assert_eq!(answer.get("version").and_then(|v| v.as_u64()), Some(1));
+        assert!(answer.get("host").and_then(|v| v.as_str()).is_some());
+        assert_eq!(
+            answer.get("peers").and_then(|v| v.as_array()).map(Vec::len),
+            Some(1)
+        );
+    }
+
     #[tokio::test]
     async fn garden_rpc_methods_are_operator_only_and_serve_lifecycle() {
         let consensus = Arc::new(PoWEngine::new(0));
@@ -3937,6 +4025,12 @@ mod rpc_tests {
             .await
             .is_err());
         assert!(public.garden_resolve("00".repeat(32)).await.is_err());
+        // Reading a record is a Garden surface too, and the public listener
+        // refuses it for the same reason it refuses every other one.
+        assert!(public
+            .garden_read_record("not a record".into())
+            .await
+            .is_err());
         assert!(public.garden_trace("00".repeat(32)).await.is_err());
         assert!(public.garden_feed(Some(5)).await.is_err());
 
@@ -4069,9 +4163,14 @@ mod rpc_tests {
 
         let (server, _) = setup().await;
 
-        // 1. bud_getUniversalDomains (0-arg answer)
+        // 1. bud_getUniversalDomains (0-arg live chain-state view, never leaks unregistered templates)
         let domains = server.get_universal_domains().await.unwrap();
-        assert!(domains["count"].as_u64().unwrap_or(0) >= 19);
+        assert_eq!(domains["source"], "chain_state");
+        assert!(domains["template_count"].as_u64().unwrap_or(0) >= 19);
+        assert_eq!(
+            domains["count"].as_u64().unwrap_or(u64::MAX) as usize,
+            domains["domains"].as_array().map_or(0, Vec::len)
+        );
         assert!(domains["catalog_root"].as_str().unwrap().starts_with("0x"));
 
         // 2. bud_quoteUniversalPayment (refusal + answer)
@@ -4211,6 +4310,51 @@ mod rpc_tests {
             }))
             .await
             .is_err());
+        // Verified replica attachment via RPC: forged preimage must fail closed; valid preimage upgrades primary replica.
+        let verified_replica = StorageReplica {
+            network: StorageNetworkKind::Ipfs,
+            domain_id: StorageNetworkKind::Ipfs.default_domain_id(),
+            native_locator: String::from(
+                "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            ),
+            verification: VerificationStrength::CryptographicHash,
+            available: true,
+            latency_ms: 5,
+        };
+        assert!(server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [&obj],
+                "bns_bindings": &bns,
+                "verified_replicas": [{
+                    "digest": digest,
+                    "replica": &verified_replica,
+                    "proof": crate::unification::storage_fabric::StorageReplicaProof::ContentHashPreimage {
+                        payload: b"tampered bytes".to_vec(),
+                    },
+                }],
+            }))
+            .await
+            .is_err());
+        let verified_res = server
+            .resolve_unified_storage(serde_json::json!({
+                "uri": "bns://site.bud",
+                "objects": [&obj],
+                "bns_bindings": &bns,
+                "verified_replicas": [{
+                    "digest": digest,
+                    "replica": &verified_replica,
+                    "proof": crate::unification::storage_fabric::StorageReplicaProof::ContentHashPreimage {
+                        payload: b"hello web3".to_vec(),
+                    },
+                }],
+            }))
+            .await
+            .expect("valid content hash preimage must attach replica via RPC");
+        assert_eq!(
+            verified_res["primary"]["native_locator"].as_str(),
+            Some("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+        );
 
         // 5. bud_encodeCrossVmCall (refusal + answer)
         assert!(server
@@ -4706,5 +4850,260 @@ mod rpc_tests {
 
         local_task.abort();
         remote_task.abort();
+    }
+
+    #[tokio::test]
+    async fn finality_certificate_domain_and_route_rpc_verify_and_refuse() {
+        use crate::domain::types::{
+            ConsensusDomain, ConsensusKind, DomainCommitment, DomainStatus, PoWDomainParameters,
+            RootScheme, POW_HEADER_CHAIN_ADAPTER,
+        };
+        use crate::settlement::{
+            DomainFinalityInclusionProof, FinalityBucket, GlobalFinalityCertificate,
+        };
+
+        // 1. Empty chain: every finality read endpoint refuses fail-closed.
+        let (empty_server, _empty_chain) = setup().await;
+        assert!(
+            empty_server
+                .get_finality_certificate(None)
+                .await
+                .expect_err("empty registry has no finality certificate")
+                .code()
+                != 0
+        );
+        assert!(
+            empty_server
+                .get_domain_finality(1, None)
+                .await
+                .expect_err("empty registry has no domain finality")
+                .code()
+                != 0
+        );
+        assert!(
+            empty_server
+                .get_route_finality(1, 2)
+                .await
+                .expect_err("empty registry has no route finality")
+                .code()
+                != 0
+        );
+
+        // 2. Populated settlement state:
+        //    - domain 1 & 2: PoW with 6 confirmations (Established + admits cross-domain value)
+        //    - domain 3: Active BFT with no commitment yet (Pending)
+        //    - domain 4: Active AiInference committed (Established, non-slashable -> no value transfer)
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+
+        // Header-chain depth is read only by the PoW header-chain adapter, so
+        // the registry refuses a depth above 1 anywhere else; the PoW domains
+        // carry it together with the bounded verifier parameters it needs.
+        let make_domain = |id: u32, kind: ConsensusKind, adapter: &str, last_h: u64| {
+            let header_chain = adapter == POW_HEADER_CHAIN_ADAPTER;
+            ConsensusDomain {
+                id,
+                kind,
+                status: DomainStatus::Active,
+                domain_chain_id: 45_000 + u64::from(id),
+                operator: Some(Address::from([u8::try_from(id).unwrap_or(1); 32])),
+                operator_bond: crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND,
+                config_hash: [0xA0; 32],
+                validator_set_hash: [0xB0; 32],
+                finality_adapter: adapter.to_owned(),
+                min_confirmations: if header_chain { 6 } else { 1 },
+                bridge_enabled: true,
+                block_hash_scheme: RootScheme::Sha256,
+                state_root_scheme: RootScheme::Sha256,
+                tx_root_scheme: RootScheme::Sha256,
+                last_committed_height: last_h,
+                last_committed_hash: if last_h > 0 { [0x21; 32] } else { [0u8; 32] },
+                pow_parameters: header_chain.then_some(PoWDomainParameters {
+                    min_difficulty_bits: 1,
+                    max_difficulty_bits: 120,
+                    min_cumulative_work: 1,
+                    max_headers: 64,
+                }),
+                zk_program_allowlist: Vec::new(),
+                plugin_code_hash: None,
+                genesis_state_root: [0u8; 32],
+            }
+        };
+
+        for (id, kind, adapter, last_h) in [
+            (1u32, ConsensusKind::PoW, POW_HEADER_CHAIN_ADAPTER, 12u64),
+            (2u32, ConsensusKind::PoW, POW_HEADER_CHAIN_ADAPTER, 14u64),
+            (3u32, ConsensusKind::Bft, "tendermint-v1", 0u64),
+            (4u32, ConsensusKind::AiInference, "ai-attest-v1", 16u64),
+        ] {
+            blockchain
+                .state
+                .settlement
+                .domains
+                .restore_persisted(make_domain(id, kind.clone(), adapter, last_h))
+                .expect("register consensus domain");
+            if last_h > 0 {
+                blockchain
+                    .state
+                    .settlement
+                    .commitments
+                    .insert(DomainCommitment {
+                        domain_id: id,
+                        domain_height: last_h,
+                        domain_block_hash: [0x21; 32],
+                        parent_domain_block_hash: [0x20; 32],
+                        state_root: [u8::try_from(0x30 + id).unwrap_or(0x30); 32],
+                        tx_root: [0x41; 32],
+                        event_root: [0x42; 32],
+                        finality_proof_hash: [0x43; 32],
+                        consensus_kind: kind,
+                        validator_set_hash: [0xB0; 32],
+                        timestamp_ms: 1_000,
+                        sequence: 1,
+                        producer: None,
+                        state_updates: std::collections::BTreeMap::new(),
+                    })
+                    .expect("insert domain commitment");
+            }
+        }
+
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+
+        // Future checkpoint refuses fail-closed.
+        let future_err = server
+            .get_finality_certificate(Some(999_999))
+            .await
+            .expect_err("future checkpoint must refuse");
+        assert_eq!(future_err.code(), -32004);
+
+        // Current tip certificate succeeds and passes full cryptographic integrity verification.
+        let cert_json = server
+            .get_finality_certificate(None)
+            .await
+            .expect("bud_getFinalityCertificate succeeds for registered domains");
+        assert_eq!(cert_json["establishedCount"], 3);
+        assert_eq!(cert_json["pendingCount"], 1);
+        assert_eq!(cert_json["refutedCount"], 0);
+        let cert: GlobalFinalityCertificate =
+            serde_json::from_value(cert_json["certificate"].clone())
+                .expect("deserialize GlobalFinalityCertificate");
+        assert_eq!(cert.verify_integrity(), Ok(()));
+        assert_eq!(
+            cert_json["certificateDigest"].as_str(),
+            Some(format!("0x{}", hex::encode(cert.certificate_digest)).as_str())
+        );
+
+        // Domain finality returns verifiable O(log N) Merkle inclusion proof.
+        let dom1_json = server
+            .get_domain_finality(1, None)
+            .await
+            .expect("bud_getDomainFinality succeeds for domain 1");
+        let proof1: DomainFinalityInclusionProof =
+            serde_json::from_value(dom1_json["proof"].clone())
+                .expect("deserialize DomainFinalityInclusionProof");
+        assert_eq!(proof1.bucket, FinalityBucket::Established);
+        assert!(proof1.verify(&cert.established_root));
+        assert_eq!(dom1_json["admitsCrossDomainValue"], true);
+        assert!(dom1_json["guaranteeLabel"]
+            .as_str()
+            .expect("guaranteeLabel")
+            .starts_with("probabilistic-work(6)|"));
+
+        // Unknown domain refuses fail-closed.
+        let missing_dom = server
+            .get_domain_finality(999, None)
+            .await
+            .expect_err("unknown domain must refuse");
+        assert_eq!(missing_dom.code(), -32004);
+
+        // Route between two established value-admitting domains (1 -> 2) succeeds with positive ceiling.
+        let route_ok = server
+            .get_route_finality(1, 2)
+            .await
+            .expect("bud_getRouteFinality succeeds for established pair");
+        assert_eq!(route_ok["admitsCrossDomainValue"], true);
+        assert_eq!(route_ok["refusalReason"], serde_json::Value::Null);
+        let ceiling: u128 = route_ok["safeValueOutflowCeilingAtoms"]
+            .as_str()
+            .expect("ceiling string")
+            .parse()
+            .expect("u128 ceiling");
+        assert!(ceiling > 0);
+        let src_proof: DomainFinalityInclusionProof =
+            serde_json::from_value(route_ok["sourceProof"].clone()).expect("sourceProof");
+        let dst_proof: DomainFinalityInclusionProof =
+            serde_json::from_value(route_ok["targetProof"].clone()).expect("targetProof");
+        assert!(src_proof.verify(&cert.established_root));
+        assert!(dst_proof.verify(&cert.established_root));
+
+        // Route involving a Pending domain (1 -> 3) must refuse value transfer with zero ceiling.
+        let route_pending = server
+            .get_route_finality(1, 3)
+            .await
+            .expect("bud_getRouteFinality reports non-admitted route for pending target");
+        assert_eq!(route_pending["admitsCrossDomainValue"], false);
+        assert_eq!(route_pending["safeValueOutflowCeilingAtoms"], "0");
+        assert!(route_pending["refusalReason"].is_string());
+
+        // Route from non-slashable DeterministicQuorum domain (4 -> 2) must refuse value transfer.
+        let route_non_slash = server
+            .get_route_finality(4, 2)
+            .await
+            .expect("bud_getRouteFinality reports non-admitted route for non-slashable source");
+        assert_eq!(route_non_slash["admitsCrossDomainValue"], false);
+        assert_eq!(route_non_slash["safeValueOutflowCeilingAtoms"], "0");
+
+        // Self-route and unknown domain route refuse fail-closed.
+        assert_eq!(
+            server
+                .get_route_finality(1, 1)
+                .await
+                .expect_err("self-route must refuse")
+                .code(),
+            -32602
+        );
+        assert_eq!(
+            server
+                .get_route_finality(1, 999)
+                .await
+                .expect_err("unknown target domain must refuse")
+                .code(),
+            -32004
+        );
+    }
+
+    #[tokio::test]
+    async fn domain_health_rpc_reports_sentry_circuit_state_and_refuses_reserved_domain() {
+        let (server, _chain) = setup().await;
+
+        // Summary query succeeds even before any external domain is registered.
+        let summary = server
+            .get_domain_health(None)
+            .await
+            .expect("bud_getDomainHealth summary must succeed");
+        assert_eq!(summary["watchedDomainCount"], 0);
+        assert_eq!(summary["frozenDomainCount"], 0);
+        assert_eq!(summary["crqcAlarmActive"], false);
+        assert!(summary["sentryAuditRoot"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("0x") && s.len() == 66));
+
+        // Reserved domain 0 refuses with -32602; unknown domain refuses with -32004.
+        assert_eq!(
+            server
+                .get_domain_health(Some(0))
+                .await
+                .expect_err("bud_getDomainHealth must refuse reserved domain 0")
+                .code(),
+            -32602
+        );
+        assert_eq!(
+            server
+                .get_domain_health(Some(999_999))
+                .await
+                .expect_err("bud_getDomainHealth must refuse unknown domain")
+                .code(),
+            -32004
+        );
     }
 }

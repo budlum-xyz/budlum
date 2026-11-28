@@ -532,7 +532,7 @@ mod tests {
         }
     }
 
-    /// Directive IP-35 suite gate for EVM (`0x01`).
+    /// Conformance suite gate for EVM (`0x01`).
     #[test]
     fn uel_conformance_evm() {
         let mut worker = EvmWorker;
@@ -588,7 +588,7 @@ mod tests {
         assert!(host.state.keys().any(|(ns, _)| ns == NS_EVM_STORAGE));
     }
 
-    /// Directive IP-35 suite gate for WASM (`0x02`).
+    /// Conformance suite gate for WASM (`0x02`).
     #[test]
     fn uel_conformance_wasm() {
         let worker = WasmWorker;
@@ -629,7 +629,7 @@ mod tests {
         assert!(host.state.keys().any(|(ns, _)| ns == NS_WASM_STORE));
     }
 
-    /// Directive IP-35 suite gate for SVM (`0x03`).
+    /// Conformance suite gate for SVM (`0x03`).
     #[test]
     fn uel_conformance_svm() {
         let mut worker = SvmWorker;
@@ -675,7 +675,7 @@ mod tests {
         assert!(full_host.state.keys().any(|(ns, _)| ns == NS_SVM_ACCOUNT));
     }
 
-    /// Directive IP-35 suite gate for Move (`0x04`).
+    /// Conformance suite gate for Move (`0x04`).
     #[test]
     fn uel_conformance_move() {
         assert!(is_scheme_byte_unused_in_pinned_aptos(
@@ -742,7 +742,7 @@ mod tests {
         assert_eq!(val, b"uel-ready");
     }
 
-    /// Directive IP-35 suite gate for BudZero (`0x00`).
+    /// Conformance suite gate for BudZero (`0x00`).
     #[test]
     fn uel_conformance_budzero() {
         let mut worker = BudZeroWorker;
@@ -814,7 +814,7 @@ mod tests {
         assert_eq!(run.output, vec![0x5A; 8]);
     }
 
-    /// Directive IP-35 item 2 gate: `uel_gas_calibration_bound` (`1 BGU <= 16 ns` p95).
+    /// Gas calibration gate: `uel_gas_calibration_bound` (`1 BGU <= 16 ns` p95).
     #[test]
     fn uel_gas_calibration_bound() {
         assert_eq!(BLOCK_GAS_LIMIT_BGU, 60_000_000);
@@ -868,7 +868,7 @@ mod tests {
         );
     }
 
-    /// Directive IP-35 item 3 & Section 8.16 gate: `uel_cross_arch_roots_equal`.
+    /// Cross-architecture determinism gate: `uel_cross_arch_roots_equal`.
     #[test]
     fn uel_cross_arch_roots_equal() {
         let Ok((_, root_a)) = run_canonical_multi_ee_block_sequence() else {
@@ -883,7 +883,7 @@ mod tests {
         println!("UEL_EXECUTION_ROOT={hex_root}");
     }
 
-    /// Directive IP-50 conformance gate: `uel_conformance_move_sui`.
+    /// Sui Move conformance gate: `uel_conformance_move_sui`.
     #[test]
     fn uel_conformance_move_sui() {
         let mut worker = MoveSuiWorker::with_activation_height(Some(0));
@@ -931,7 +931,7 @@ mod tests {
         assert_eq!(out.status, OutcomeStatus::Success);
     }
 
-    /// Directive IP-51 conformance gate: `uel_conformance_cairo`.
+    /// Cairo conformance gate: `uel_conformance_cairo`.
     #[test]
     fn uel_conformance_cairo() {
         assert_eq!(AUDITED_CAIRO_ENGINE_SPDX, "Apache-2.0");
@@ -983,7 +983,7 @@ mod tests {
         assert_eq!(out.status, OutcomeStatus::Success);
     }
 
-    /// Directive IP-53 (1/5) conformance gate: `uel_conformance_polkavm`.
+    /// PolkaVM conformance gate: `uel_conformance_polkavm`.
     #[test]
     fn uel_conformance_polkavm() {
         let mut worker = PolkaVmWorker::with_activation_height(Some(0));
@@ -1028,7 +1028,7 @@ mod tests {
         assert_eq!(dep.status, OutcomeStatus::Success);
     }
 
-    /// Directive IP-53 (2/5) conformance gate: `uel_conformance_near`.
+    /// NEAR conformance gate: `uel_conformance_near`.
     #[test]
     fn uel_conformance_near() {
         assert_eq!(AUDITED_NEAR_SPDX, "MIT OR Apache-2.0");
@@ -1106,7 +1106,7 @@ mod tests {
         assert_eq!(call_out.output, 7u64.to_le_bytes());
     }
 
-    /// Directive IP-53 (3/5) conformance gate: `uel_conformance_tvm`.
+    /// TVM conformance gate: `uel_conformance_tvm`.
     #[test]
     fn uel_conformance_tvm() {
         assert_eq!(AUDITED_TVM_SPDX, "MIT OR Apache-2.0");
@@ -1188,7 +1188,7 @@ mod tests {
         assert_eq!(res.output, 42i128.to_le_bytes());
     }
 
-    /// Directive IP-53 (4/5) conformance gate: `uel_conformance_utxo`.
+    /// UTXO conformance gate: `uel_conformance_utxo`.
     #[test]
     fn uel_conformance_utxo() {
         assert_eq!(AUDITED_UTXO_SPDX, "MIT");
@@ -1262,7 +1262,7 @@ mod tests {
         assert_eq!(res.output, [0xCC; 32]);
     }
 
-    /// Directive IP-53 (5/5) conformance gate: `uel_conformance_plutus`.
+    /// Plutus conformance gate: `uel_conformance_plutus`.
     #[test]
     fn uel_conformance_plutus() {
         assert_eq!(AUDITED_PLUTUS_SPDX, "Apache-2.0");

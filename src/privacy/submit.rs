@@ -8,6 +8,77 @@ use serde::{Deserialize, Serialize};
 /// Max inputs/outputs per private transfer (`DoS` bound).
 pub const MAX_PRIVATE_IO: usize = 16;
 
+/// Maximum per-note and aggregate value allowed in confidential transfer proofs (`2^59 - 1`).
+///
+/// Bounding every value strictly below `2^59` keeps sums of up to [`MAX_PRIVATE_IO`]
+/// notes plus fee strictly below the Goldilocks prime `2^64 - 2^32 + 1`, ruling out
+/// modular wrap-around value creation.
+///
+/// Convenience: exposed for confidential transfer range checks.
+pub const MAX_CONFIDENTIAL_VALUE: u64 = (1u64 << 59) - 1;
+
+/// Pack a 32-byte digest into four canonical Goldilocks field elements without
+/// dropping upper bytes: each 64-bit limb is reduced into `[0, p)` and combined
+/// with a top-bit carry flag folded via Poseidon so the full 256-bit preimage
+/// contributes to the resulting field commitment.
+fn fold_bytes32_to_poseidon(acc: u64, bytes: &[u8; 32]) -> u64 {
+    let p = budlum_note_packing::GOLDILOCKS_P;
+    let mut cur = acc;
+    for chunk in bytes.as_chunks::<8>().0 {
+        let mut limb_bytes = [0u8; 8];
+        limb_bytes.copy_from_slice(chunk);
+        let raw = u64::from_le_bytes(limb_bytes);
+        let lo = raw % p;
+        let carry = u64::from(raw >= p);
+        cur = bud_vm::poseidon4_hash4(cur, lo, carry, 0);
+    }
+    cur
+}
+
+/// Emit straight-line instructions loading an arbitrary 64-bit canonical field
+/// value into `dst`, assuming `r10 = 2^32` and `r11 = 1` are already initialized
+/// (`r12` and `r13` are scratch registers).
+fn emit_load_u64_const(prog: &mut Vec<u64>, dst: u8, value: u64) {
+    use bud_isa::{Instruction, Opcode};
+    let enc = |opcode: Opcode, rd: u8, rs1: u8, rs2: u8, imm: i32| {
+        Instruction {
+            opcode,
+            rd,
+            rs1,
+            rs2,
+            imm,
+        }
+        .encode()
+    };
+    let hi = (value >> 32) as u32;
+    let lo = (value & 0xFFFF_FFFF) as u32;
+    let load_u32 = |half: u32, out: &mut Vec<u64>, reg: u8| {
+        if half <= i32::MAX as u32 {
+            out.push(enc(Opcode::Load, reg, 0, 0, half as i32));
+        } else {
+            let low31 = (half - (1u32 << 31)) as i32;
+            out.push(enc(Opcode::Load, reg, 0, 0, low31));
+            out.push(enc(Opcode::Load, 12, 0, 0, i32::MAX));
+            out.push(enc(Opcode::Add, 12, 12, 11, 0));
+            out.push(enc(Opcode::Add, reg, reg, 12, 0));
+        }
+    };
+    load_u32(hi, prog, dst);
+    prog.push(enc(Opcode::Mul, dst, dst, 10, 0));
+    load_u32(lo, prog, 13);
+    prog.push(enc(Opcode::Add, dst, dst, 13, 0));
+}
+
+/// Keccak-256 over canonical little-endian instruction words (matching `BudZKVM`).
+fn stark_program_hash(program: &[u64]) -> [u8; 32] {
+    use sha3::{Digest, Keccak256};
+    let mut h = Keccak256::new();
+    for w in program {
+        h.update(w.to_le_bytes());
+    }
+    h.finalize().into()
+}
+
 /// The length of the legacy Ed25519 authorisation signature.
 pub const ED25519_AUTH_SIG_LEN: usize = 64;
 
@@ -139,8 +210,149 @@ impl PrivateTransferSubmit {
             == Self::compute_public_digest(&self.nullifiers, &self.output_commitments)
     }
 
+    /// Build the canonical straight-line `BudZKVM` program and expected logged
+    /// Poseidon commitment binding `chain_id`, all 256 bits of `public_digest`,
+    /// input/output arities, and every spent commitment, nullifier, and output
+    /// commitment of this transfer.
+    ///
+    /// Both prover and verifier reconstruct this exact program from `self` and
+    /// `chain_id`, preventing a malicious prover from substituting an arbitrary
+    /// `[Halt]` program or colliding on a 31-bit truncated digest prefix.
+    fn canonical_hiding_program_and_event(&self, chain_id: u64) -> (Vec<u64>, [u8; 32]) {
+        use bud_isa::{Instruction, Opcode};
+        let p = budlum_note_packing::GOLDILOCKS_P;
+        let enc = |opcode: Opcode, rd: u8, rs1: u8, rs2: u8, imm: i32| {
+            Instruction {
+                opcode,
+                rd,
+                rs1,
+                rs2,
+                imm,
+            }
+            .encode()
+        };
+
+        let mut words_to_absorb: Vec<u64> = Vec::with_capacity(8);
+        words_to_absorb.push(chain_id % p);
+        words_to_absorb.push(u64::from(chain_id >= p));
+        words_to_absorb.push(self.spent_commitments.len() as u64);
+        words_to_absorb.push(self.output_commitments.len() as u64);
+        for chunk in self.public_digest.as_chunks::<8>().0 {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(chunk);
+            let raw = u64::from_le_bytes(buf);
+            words_to_absorb.push(raw % p);
+            words_to_absorb.push(u64::from(raw >= p));
+        }
+        words_to_absorb.push(self.aggregate_spent_commitment_fe());
+        words_to_absorb.push(self.aggregate_nullifier_binding_fe());
+
+        let mut prog = Vec::with_capacity(8 + words_to_absorb.len() * 10);
+        // r11 = 1, r10 = 2^32, r1 = rolling Poseidon accumulator (starts at 0).
+        prog.push(enc(Opcode::Load, 11, 0, 0, 1));
+        prog.push(enc(Opcode::Load, 10, 0, 0, i32::MAX));
+        prog.push(enc(Opcode::Add, 10, 10, 11, 0));
+        prog.push(enc(Opcode::Add, 10, 10, 10, 0));
+        prog.push(enc(Opcode::Load, 1, 0, 0, 0));
+
+        let mut rolling = 0u64;
+        for limb in words_to_absorb {
+            emit_load_u64_const(&mut prog, 2, limb);
+            prog.push(enc(Opcode::Poseidon, 1, 1, 2, 0));
+            rolling = bud_vm::poseidon4_hash(rolling, limb);
+        }
+        prog.push(enc(Opcode::Log, 0, 1, 0, 0));
+        prog.push(enc(Opcode::Halt, 0, 0, 0, 0));
+
+        let event_digest = bud_proof::event_digest_from_events(&[rolling]);
+        (prog, event_digest)
+    }
+
+    /// Canonical non-zero Goldilocks commitment across every spent note in `self`.
+    fn aggregate_spent_commitment_fe(&self) -> u64 {
+        let mut acc = self.spent_commitments.len() as u64;
+        for c in &self.spent_commitments {
+            acc = fold_bytes32_to_poseidon(acc, c);
+        }
+        if acc == 0 {
+            1
+        } else {
+            acc
+        }
+    }
+
+    /// Canonical Goldilocks commitment binding every `(spent_commitment[i],
+    /// nullifier_proof[i], nullifier[i])` triple across all inputs `0..len`.
+    fn aggregate_nullifier_binding_fe(&self) -> u64 {
+        let mut acc = self.nullifiers.len() as u64;
+        for ((spent, proof), nf) in self
+            .spent_commitments
+            .iter()
+            .zip(self.nullifier_proofs.iter())
+            .zip(self.nullifiers.iter())
+        {
+            acc = fold_bytes32_to_poseidon(acc, spent);
+            acc = fold_bytes32_to_poseidon(acc, proof);
+            acc = fold_bytes32_to_poseidon(acc, nf);
+        }
+        acc
+    }
+
+    /// Canonical full-256-bit Goldilocks commitment over `self.public_digest`.
+    fn full_public_digest_fe(&self) -> u64 {
+        fold_bytes32_to_poseidon(0x5054_4449_4731, &self.public_digest)
+    }
+
+    /// Verify that every input's nullifier strictly equals the canonical
+    /// derivation from `(spent_commitments[i], nullifier_proofs[i])` and that
+    /// no duplicate spent commitments, nullifiers, or output commitments exist.
+    fn verify_all_input_bindings(&self) -> Result<(), String> {
+        use std::collections::BTreeSet;
+        let mut seen_spent = BTreeSet::new();
+        let mut seen_nf = BTreeSet::new();
+        let mut seen_out = BTreeSet::new();
+        for (idx, ((spent, proof), nf)) in self
+            .spent_commitments
+            .iter()
+            .zip(self.nullifier_proofs.iter())
+            .zip(self.nullifiers.iter())
+            .enumerate()
+        {
+            if !seen_spent.insert(*spent) {
+                return Err(format!(
+                    "private transfer: duplicate spent commitment at input {idx}"
+                ));
+            }
+            if !seen_nf.insert(*nf) {
+                return Err(format!(
+                    "private transfer: duplicate nullifier at input {idx}"
+                ));
+            }
+            let expected_nf = super::note_registry::L1NoteRegistry::derive_nullifier(spent, proof);
+            if *nf != expected_nf {
+                return Err(format!(
+                    "private transfer: nullifier derivation mismatch at input {idx}"
+                ));
+            }
+        }
+        for (idx, out) in self.output_commitments.iter().enumerate() {
+            if !seen_out.insert(*out) {
+                return Err(format!(
+                    "private transfer: duplicate output commitment at output {idx}"
+                ));
+            }
+            if seen_spent.contains(out) || seen_nf.contains(out) {
+                return Err(format!(
+                    "private transfer: output {idx} collides with spent input or nullifier"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Generate a `ProofClass::Hiding` `BudZero` STARK witness proof binding
-    /// this private transfer's `public_digest` to a fresh blinding salt.
+    /// this private transfer's full 256-bit `public_digest`, `chain_id`, and all
+    /// input/output commitments to a fresh blinding salt.
     ///
     /// # Errors
     ///
@@ -157,48 +369,19 @@ impl PrivateTransferSubmit {
         ),
         String,
     > {
-        use bud_isa::{Instruction, Opcode};
         use bud_vm::Vm;
-        use sha3::{Digest, Keccak256};
 
-        let digest_fe = i32::try_from(
-            u64::from_le_bytes(
-                self.public_digest
-                    .get(..8)
-                    .and_then(|s| s.try_into().ok())
-                    .unwrap_or([0u8; 8]),
-            ) & 0x7FFF_FFFF,
-        )
-        .unwrap_or(0);
-        let inputs_fe = i32::try_from(self.spent_commitments.len() & 0x7FFF_FFFF).unwrap_or(1);
-        let outputs_fe = i32::try_from(self.output_commitments.len() & 0x7FFF_FFFF).unwrap_or(1);
-        let enc = |opcode: Opcode, rd: u8, rs1: u8, rs2: u8, imm: i32| {
-            Instruction {
-                opcode,
-                rd,
-                rs1,
-                rs2,
-                imm,
-            }
-            .encode()
-        };
-        let program = vec![
-            enc(Opcode::Load, 1, 0, 0, digest_fe),
-            enc(Opcode::Load, 2, 0, 0, inputs_fe),
-            enc(Opcode::Load, 3, 0, 0, outputs_fe),
-            enc(Opcode::Log, 0, 1, 0, 0),
-            enc(Opcode::Halt, 0, 0, 0, 0),
-        ];
+        let (program, expected_event_digest) = self.canonical_hiding_program_and_event(chain_id);
         let mut vm = Vm::with_mainnet_mode(1024, 1_000_000, true);
         let receipt = vm.run_receipt(&program);
         if !receipt.success {
             return Err(format!("hiding transfer VM failed: {:?}", receipt.error));
         }
-        let mut h = Keccak256::new();
-        for w in &program {
-            h.update(w.to_le_bytes());
+        let event_digest = bud_proof::event_digest_from_events(&receipt.events);
+        if event_digest != expected_event_digest {
+            return Err("hiding transfer VM event digest mismatch".into());
         }
-        let program_hash: [u8; 32] = h.finalize().into();
+        let program_hash = stark_program_hash(&program);
         let pi = bud_proof::ExecutionPublicInputs {
             chain_id,
             program_hash,
@@ -218,7 +401,7 @@ impl PrivateTransferSubmit {
             gas_used: vm.gas_used,
             exit_code: 0,
             trace_len: u64::try_from(vm.trace.len()).unwrap_or(u64::MAX),
-            event_digest: bud_proof::event_digest_from_events(&receipt.events),
+            event_digest,
             state_writes_digest: receipt.state_writes_digest,
         };
         let pkg = bud_proof::hiding::prove_hiding(&vm.trace, &pi, &program, blinding_salt)
@@ -226,25 +409,56 @@ impl PrivateTransferSubmit {
         Ok((program, pi, pkg))
     }
 
-    /// Verify a `ProofClass::Hiding` witness proof for a private transfer
-    /// (failing closed if an unblinded `Open` proof package is supplied).
+    /// Verify a `ProofClass::Hiding` witness proof for a private transfer,
+    /// rebuilding the canonical program, `program_hash`, and `event_digest` from
+    /// `self` and `expected_chain_id` so a substituted or cross-transfer proof
+    /// is unconditionally rejected.
     ///
     /// # Errors
     ///
-    /// Returns an error if the proof package fails `ProofClass::Hiding` validation.
+    /// Returns an error if the canonical binding or `ProofClass::Hiding` STARK fails.
     fn verify_hiding_transfer(
         &self,
+        expected_chain_id: u64,
         package: &bud_proof::hiding::HidingProofPackage,
         expected_inputs: &bud_proof::ExecutionPublicInputs,
         program: &[u64],
     ) -> Result<(), String> {
+        self.validate_shape()?;
         if !self.verify_digest_matches() {
             return Err("private transfer: public_digest mismatch".into());
+        }
+        self.verify_all_input_bindings()?;
+        let (canonical_program, canonical_event_digest) =
+            self.canonical_hiding_program_and_event(expected_chain_id);
+        if program != canonical_program.as_slice() {
+            return Err(
+                "private transfer: hiding program does not match canonical transfer program".into(),
+            );
+        }
+        let canonical_hash = stark_program_hash(&canonical_program);
+        if expected_inputs.chain_id != expected_chain_id {
+            return Err("private transfer: hiding public_inputs chain_id mismatch".into());
+        }
+        if expected_inputs.program_hash != canonical_hash {
+            return Err("private transfer: hiding program_hash mismatch".into());
+        }
+        if expected_inputs.exit_code != 0 {
+            return Err("private transfer: hiding proof attests non-zero exit_code".into());
+        }
+        if expected_inputs.event_digest != canonical_event_digest {
+            return Err("private transfer: hiding event_digest does not bind transfer".into());
+        }
+        if expected_inputs.initial_state_root != [0u8; 32]
+            || expected_inputs.final_state_root != [0u8; 32]
+            || expected_inputs.state_writes_digest != [0u8; 32]
+        {
+            return Err("private transfer: unexpected state mutation in hiding proof".into());
         }
         bud_proof::hiding::verify_with_class(
             package,
             expected_inputs,
-            program,
+            &canonical_program,
             bud_proof::hiding::ProofClass::Hiding,
         )
         .map_err(|e| format!("hiding transfer STARK verification failed: {e:?}"))
@@ -258,8 +472,8 @@ impl PrivateTransferSubmit {
     ///
     /// # Errors
     ///
-    /// Returns an error if transfer shape/digest is invalid, value is unconserved,
-    /// or STARK proving fails.
+    /// Returns an error if transfer shape/digest is invalid, value exceeds
+    /// [`MAX_CONFIDENTIAL_VALUE`] or is unconserved, or STARK proving fails.
     pub fn prove_confidential_bundle(
         &self,
         chain_id: u64,
@@ -273,42 +487,31 @@ impl PrivateTransferSubmit {
         if !self.verify_digest_matches() {
             return Err("private transfer: public_digest mismatch".into());
         }
+        self.verify_all_input_bindings()?;
+        if input_sum > MAX_CONFIDENTIAL_VALUE || output_sum > MAX_CONFIDENTIAL_VALUE {
+            return Err(format!(
+                "private transfer: value exceeds MAX_CONFIDENTIAL_VALUE ({MAX_CONFIDENTIAL_VALUE})"
+            ));
+        }
         if input_sum != output_sum {
             return Err("private transfer: input_sum != output_sum".into());
         }
         let (hiding_program, hiding_inputs, hiding_package) =
             self.prove_hiding_transfer(chain_id, blinding_salt)?;
 
-        let digest_fe = u64::from_le_bytes(
-            self.public_digest
-                .get(..8)
-                .and_then(|s| s.try_into().ok())
-                .unwrap_or([1u8; 8]),
-        ) % budlum_note_packing::GOLDILOCKS_P;
-        let commitment_fe = (u64::from_le_bytes(
-            self.spent_commitments
-                .first()
-                .and_then(|c| c.get(..8))
-                .and_then(|s| s.try_into().ok())
-                .unwrap_or([1u8; 8]),
-        ) % budlum_note_packing::GOLDILOCKS_P)
-            .max(1);
-        let note_secret_fe = u64::from_le_bytes(
-            self.nullifier_proofs
-                .first()
-                .and_then(|p| p.get(..8))
-                .and_then(|s| s.try_into().ok())
-                .unwrap_or([1u8; 8]),
-        ) % budlum_note_packing::GOLDILOCKS_P;
-        let derived_nf = bud_vm::poseidon4_hash4(note_secret_fe, bud_vm::DOMAIN_NULLIFIER, 0, 0);
+        let digest_fe = self.full_public_digest_fe();
+        let commitment_fe = self.aggregate_spent_commitment_fe();
+        let nullifier_binding_fe = self.aggregate_nullifier_binding_fe();
+        let derived_nf =
+            bud_vm::poseidon4_hash4(nullifier_binding_fe, bud_vm::DOMAIN_NULLIFIER, 0, 0);
+        let in_count = u64::try_from(self.spent_commitments.len()).unwrap_or(u64::MAX);
+        let out_count = u64::try_from(self.output_commitments.len()).unwrap_or(u64::MAX);
 
         let ownership_proof = prove_predicate(&PredicateStatement {
             kind: PredicateKind::Yk1Ownership,
             lhs: digest_fe,
             rhs: digest_fe,
-            aux: u64::try_from(self.spent_commitments.len())
-                .unwrap_or(u64::MAX)
-                .max(1),
+            aux: in_count,
             chain_id,
         })
         .map_err(|e| format!("YK1 ownership proof failed: {e:?}"))?;
@@ -317,9 +520,7 @@ impl PrivateTransferSubmit {
             kind: PredicateKind::Yk2BalanceConservation,
             lhs: input_sum,
             rhs: output_sum,
-            aux: u64::try_from(self.output_commitments.len())
-                .unwrap_or(u64::MAX)
-                .max(1),
+            aux: out_count,
             chain_id,
         })
         .map_err(|e| format!("YK2 value-conservation proof failed: {e:?}"))?;
@@ -328,16 +529,16 @@ impl PrivateTransferSubmit {
             kind: PredicateKind::Yk3MerkleMembership,
             lhs: commitment_fe,
             rhs: commitment_fe,
-            aux: 1,
+            aux: in_count,
             chain_id,
         })
         .map_err(|e| format!("YK3 membership proof failed: {e:?}"))?;
 
         let nullifier_proof = prove_predicate(&PredicateStatement {
             kind: PredicateKind::Yk4NullifierFreshness,
-            lhs: note_secret_fe,
+            lhs: nullifier_binding_fe,
             rhs: derived_nf,
-            aux: 1,
+            aux: in_count,
             chain_id,
         })
         .map_err(|e| format!("YK4 nullifier freshness proof failed: {e:?}"))?;
@@ -361,8 +562,9 @@ impl PrivateTransferSubmit {
     ///
     /// # Errors
     ///
-    /// Fails closed on chain mismatch, open/unblinded proof packages, tampered
-    /// predicate statements, or invalid STARK proofs.
+    /// Fails closed on chain mismatch, substituted hiding programs, out-of-range
+    /// or unconserved balances, open/unblinded proof packages, tampered predicate
+    /// statements, multi-input nullifier drift, or invalid STARK proofs.
     pub fn verify_confidential_bundle(
         &self,
         bundle: &ConfidentialTransferProofBundle,
@@ -371,59 +573,60 @@ impl PrivateTransferSubmit {
         use bud_proof::predicates::{verify_predicate, PredicateKind};
 
         self.validate_shape()?;
+        self.verify_all_input_bindings()?;
         if bundle.chain_id != expected_chain_id
             || bundle.hiding_inputs.chain_id != expected_chain_id
         {
             return Err("private transfer bundle: chain_id mismatch".into());
         }
         self.verify_hiding_transfer(
+            expected_chain_id,
             &bundle.hiding_package,
             &bundle.hiding_inputs,
             &bundle.hiding_program,
         )?;
 
-        let expected_digest_fe = u64::from_le_bytes(
-            self.public_digest
-                .get(..8)
-                .and_then(|s| s.try_into().ok())
-                .unwrap_or([1u8; 8]),
-        ) % budlum_note_packing::GOLDILOCKS_P;
-        let expected_commitment_fe = (u64::from_le_bytes(
-            self.spent_commitments
-                .first()
-                .and_then(|c| c.get(..8))
-                .and_then(|s| s.try_into().ok())
-                .unwrap_or([1u8; 8]),
-        ) % budlum_note_packing::GOLDILOCKS_P)
-            .max(1);
-        let expected_secret_fe = u64::from_le_bytes(
-            self.nullifier_proofs
-                .first()
-                .and_then(|p| p.get(..8))
-                .and_then(|s| s.try_into().ok())
-                .unwrap_or([1u8; 8]),
-        ) % budlum_note_packing::GOLDILOCKS_P;
+        let expected_digest_fe = self.full_public_digest_fe();
+        let expected_commitment_fe = self.aggregate_spent_commitment_fe();
+        let expected_nullifier_binding_fe = self.aggregate_nullifier_binding_fe();
+        let expected_derived_nf = bud_vm::poseidon4_hash4(
+            expected_nullifier_binding_fe,
+            bud_vm::DOMAIN_NULLIFIER,
+            0,
+            0,
+        );
+        let expected_in_count = u64::try_from(self.spent_commitments.len()).unwrap_or(u64::MAX);
+        let expected_out_count = u64::try_from(self.output_commitments.len()).unwrap_or(u64::MAX);
 
         if bundle.ownership_proof.statement.kind != PredicateKind::Yk1Ownership
             || bundle.ownership_proof.statement.chain_id != expected_chain_id
             || bundle.ownership_proof.statement.lhs != expected_digest_fe
+            || bundle.ownership_proof.statement.rhs != expected_digest_fe
+            || bundle.ownership_proof.statement.aux != expected_in_count
         {
             return Err("private transfer bundle: YK1 ownership statement mismatch".into());
         }
         if bundle.conservation_proof.statement.kind != PredicateKind::Yk2BalanceConservation
             || bundle.conservation_proof.statement.chain_id != expected_chain_id
+            || bundle.conservation_proof.statement.lhs != bundle.conservation_proof.statement.rhs
+            || bundle.conservation_proof.statement.lhs > MAX_CONFIDENTIAL_VALUE
+            || bundle.conservation_proof.statement.aux != expected_out_count
         {
             return Err("private transfer bundle: YK2 value conservation mismatch".into());
         }
         if bundle.membership_proof.statement.kind != PredicateKind::Yk3MerkleMembership
             || bundle.membership_proof.statement.chain_id != expected_chain_id
             || bundle.membership_proof.statement.lhs != expected_commitment_fe
+            || bundle.membership_proof.statement.rhs != expected_commitment_fe
+            || bundle.membership_proof.statement.aux != expected_in_count
         {
             return Err("private transfer bundle: YK3 membership mismatch".into());
         }
         if bundle.nullifier_proof.statement.kind != PredicateKind::Yk4NullifierFreshness
             || bundle.nullifier_proof.statement.chain_id != expected_chain_id
-            || bundle.nullifier_proof.statement.lhs != expected_secret_fe
+            || bundle.nullifier_proof.statement.lhs != expected_nullifier_binding_fe
+            || bundle.nullifier_proof.statement.rhs != expected_derived_nf
+            || bundle.nullifier_proof.statement.aux != expected_in_count
         {
             return Err("private transfer bundle: YK4 nullifier freshness mismatch".into());
         }
@@ -562,5 +765,123 @@ mod tests {
             let err = sub.validate_shape().unwrap_err();
             assert!(err.contains("packed field element"), "slot {slot}: {err}");
         }
+    }
+
+    #[test]
+    fn hiding_transfer_binds_canonical_program_and_refuses_halt_substitution() {
+        use bud_isa::{Instruction, Opcode};
+        use bud_vm::Vm;
+
+        let sub = submit_with_sig(ED25519_AUTH_SIG_LEN);
+        let chain_id = crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value();
+        let salt = [0x5Au8; 32];
+        let (prog, pi, pkg) = sub
+            .prove_hiding_transfer(chain_id, &salt)
+            .expect("canonical hiding proof succeeds");
+        sub.verify_hiding_transfer(chain_id, &pkg, &pi, &prog)
+            .expect("canonical hiding proof verifies");
+
+        // Replaying on a different chain is refused.
+        let wrong_chain = sub
+            .verify_hiding_transfer(chain_id + 1, &pkg, &pi, &prog)
+            .expect_err("wrong chain must fail");
+        assert!(wrong_chain.contains("program") || wrong_chain.contains("chain_id"));
+
+        // Replaying the valid hiding proof onto a different transfer is refused.
+        let c2 = budlum_note_packing::hash_from_field(33);
+        let p2 = budlum_note_packing::hash_from_field(11);
+        let nf2 = vec![crate::privacy::note_registry::L1NoteRegistry::derive_nullifier(&c2, &p2)];
+        let out2 = vec![budlum_note_packing::hash_from_field(22)];
+        let other = PrivateTransferSubmit {
+            spent_commitments: vec![c2],
+            nullifiers: nf2.clone(),
+            output_commitments: out2.clone(),
+            nullifier_proofs: vec![p2],
+            authorization_sig: vec![0u8; ED25519_AUTH_SIG_LEN],
+            public_digest: PrivateTransferSubmit::compute_public_digest(&nf2, &out2),
+        };
+        assert!(other
+            .verify_hiding_transfer(chain_id, &pkg, &pi, &prog)
+            .is_err());
+
+        // Substituting a genuine hiding STARK over a trivial `[Halt]` program is refused.
+        let halt_prog = vec![Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode()];
+        let mut vm = Vm::with_mainnet_mode(1024, 100_000, true);
+        let receipt = vm.run_receipt(&halt_prog);
+        assert!(receipt.success);
+        let halt_pi = bud_proof::ExecutionPublicInputs {
+            chain_id,
+            program_hash: stark_program_hash(&halt_prog),
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: bud_proof::event_digest_from_events(&receipt.events),
+            state_writes_digest: [0u8; 32],
+        };
+        let halt_pkg = bud_proof::hiding::prove_hiding(&vm.trace, &halt_pi, &halt_prog, &salt)
+            .expect("prove trivial halt hiding package");
+        let err = sub
+            .verify_hiding_transfer(chain_id, &halt_pkg, &halt_pi, &halt_prog)
+            .expect_err("forged [Halt] hiding program must be rejected");
+        assert!(err.contains("canonical transfer program"), "{err}");
+    }
+
+    #[test]
+    fn confidential_bundle_enforces_range_ceiling_and_all_multi_input_nullifiers() {
+        let chain_id = crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value();
+        let salt = [0x33u8; 32];
+        let sub = submit_with_sig(ED25519_AUTH_SIG_LEN);
+
+        // Values at or above 2^59 are refused before proving.
+        let too_large = MAX_CONFIDENTIAL_VALUE + 1;
+        let err = sub
+            .prove_confidential_bundle(chain_id, &salt, too_large, too_large)
+            .expect_err("values >= 2^59 must be rejected");
+        assert!(err.contains("MAX_CONFIDENTIAL_VALUE"), "{err}");
+
+        // Forging the second input's nullifier while keeping input 0 valid is refused.
+        let c0 = budlum_note_packing::hash_from_field(100);
+        let p0 = budlum_note_packing::hash_from_field(200);
+        let nf0 = crate::privacy::note_registry::L1NoteRegistry::derive_nullifier(&c0, &p0);
+        let c1 = budlum_note_packing::hash_from_field(101);
+        let p1 = budlum_note_packing::hash_from_field(201);
+        let forged_nf1 = budlum_note_packing::hash_from_field(999);
+        let outs = vec![
+            budlum_note_packing::hash_from_field(300),
+            budlum_note_packing::hash_from_field(301),
+        ];
+        let nullifiers = vec![nf0, forged_nf1];
+        let multi = PrivateTransferSubmit {
+            spent_commitments: vec![c0, c1],
+            nullifiers: nullifiers.clone(),
+            output_commitments: outs.clone(),
+            nullifier_proofs: vec![p0, p1],
+            authorization_sig: vec![0u8; ED25519_AUTH_SIG_LEN],
+            public_digest: PrivateTransferSubmit::compute_public_digest(&nullifiers, &outs),
+        };
+        let err = multi
+            .prove_confidential_bundle(chain_id, &salt, 500, 500)
+            .expect_err("forged second-input nullifier must be rejected");
+        assert!(
+            err.contains("nullifier derivation mismatch at input 1"),
+            "{err}"
+        );
     }
 }

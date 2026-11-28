@@ -116,11 +116,11 @@ fn derive_member_pk(secret: u64) -> u64 {
 fn fold_message_hash(msg_hash: &Hash32) -> (u64, u64) {
     let mut lo = MSG_FOLD_TAG_LO;
     let mut hi = MSG_FOLD_TAG_HI;
-    for chunk in msg_hash.chunks_exact(4) {
+    for chunk in msg_hash.as_chunks::<4>().0 {
         let limb = u64::from(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         lo = poseidon4_hash(lo, limb);
     }
-    for chunk in msg_hash.chunks_exact(4).rev() {
+    for chunk in msg_hash.as_chunks::<4>().0.iter().rev() {
         let limb = u64::from(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         hi = poseidon4_hash(hi, limb);
     }

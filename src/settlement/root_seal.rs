@@ -189,7 +189,7 @@ pub fn seal_due(height: u64) -> bool {
 
 /// The digest of one anchor as a leaf of the seal tree:
 /// `SHA3-256(BDLM_ROOT_SEAL_LEAF_V1 || len || payload)`.
-fn anchor_leaf(anchor: &PqAnchor) -> [u8; 32] {
+pub(crate) fn anchor_leaf(anchor: &PqAnchor) -> [u8; 32] {
     let payload = anchor.payload();
     let mut hasher = Sha3_256::new();
     hasher.update(b"BDLM_ROOT_SEAL_LEAF_V1");

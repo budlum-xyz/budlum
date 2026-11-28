@@ -18,8 +18,8 @@
 use crate::cross_domain::evm::rlp::{self, Item};
 use crate::execution::coordinator::alias::{derive_foreign_cosmos_bech32, ALIAS_NAMESPACE};
 use crate::execution::coordinator::assets::{
-    decode_pointer_bytecode, AssetStandard, MovePointerFlavor, MovePointerOp, PointerDescriptor,
-    SplPointerOp,
+    is_pointer_bytecode_prefixed, verify_canonical_pointer_bytecode, AssetStandard,
+    MovePointerFlavor, MovePointerOp, PointerDescriptor, SplPointerOp,
 };
 use crate::execution::coordinator::foreign::ethereum::BUDLUM_EVM_CHAIN_ID;
 use crate::execution::coordinator::state::{
@@ -1334,6 +1334,12 @@ fn invoke_uol_precompile(
             if expiry > 0 && block_height > expiry {
                 return Ok((OutcomeStatus::Revert, b"UOL offer already expired".to_vec()));
             }
+            if !taker.is_empty() && taker.len() != 20 {
+                return Ok((
+                    OutcomeStatus::Revert,
+                    b"unsupported UOL offer taker encoding".to_vec(),
+                ));
+            }
             if !payment.is_empty() && payment.len() != 16 && payment.len() != 48 {
                 return Ok((
                     OutcomeStatus::Revert,
@@ -1358,16 +1364,26 @@ fn invoke_uol_precompile(
                     b"UOL offerer balance exhausted".to_vec(),
                 ));
             }
-            let mut preimage = Vec::with_capacity(96 + taker.len() + payment.len());
+            let mut preimage = Vec::with_capacity(112 + taker.len() + payment.len());
             preimage.extend_from_slice(b"BDLM_UOL_OFFER_V1");
             preimage.extend_from_slice(caller20);
             preimage.extend_from_slice(&class_id);
             preimage.extend_from_slice(&asset_id);
+            preimage.extend_from_slice(&(taker.len() as u64).to_le_bytes());
             preimage.extend_from_slice(&taker);
+            preimage.extend_from_slice(&(payment.len() as u64).to_le_bytes());
             preimage.extend_from_slice(&payment);
             preimage.extend_from_slice(&amount.to_le_bytes());
             preimage.extend_from_slice(&expiry.to_le_bytes());
             let offer_id: [u8; 32] = Keccak256::digest(&preimage).into();
+            let offer_key = uol_offer_key(&offer_id);
+            if host
+                .read(&ns, &offer_key)
+                .map_err(|e| e.to_string())?
+                .is_some()
+            {
+                return Ok((OutcomeStatus::Revert, b"UOL offer already exists".to_vec()));
+            }
             let rec = PrecompileUolOffer {
                 maker: *caller20,
                 class_id,
@@ -1378,7 +1394,12 @@ fn invoke_uol_precompile(
                 expiry,
             };
             let enc = encode_uol_offer_bytes(&rec);
-            host.write(&ns, &uol_offer_key(&offer_id), Some(&enc))
+            let growth_gas = u64::try_from(enc.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(16);
+            host.charge(growth_gas)
+                .map_err(|_| String::from("out of gas storing UOL offer"))?;
+            host.write(&ns, &offer_key, Some(&enc))
                 .map_err(|e| e.to_string())?;
             Ok((OutcomeStatus::Success, offer_id.to_vec()))
         }
@@ -2697,8 +2718,19 @@ fn deploy_runtime_code(
     target20: &[u8; 20],
     runtime_code: &[u8],
 ) -> Result<(), String> {
+    if is_pointer_bytecode_prefixed(runtime_code) {
+        return Err(String::from(
+            "system pointer bytecode prefix is reserved for uel/assets",
+        ));
+    }
     if runtime_code.len() > MAX_EVM_BYTECODE_BYTES {
         return Err(String::from("runtime code exceeds 24 KiB EIP-170 limit"));
+    }
+    let existing = read_account_rec(host, target20)?;
+    if existing.code_hash.is_some() || existing.nonce > 0 {
+        return Err(String::from(
+            "target collision: EVM account already holds code or state",
+        ));
     }
     host.charge(200 * runtime_code.len() as u64)
         .map_err(|_| String::from("out of gas storing contract code"))?;
@@ -2804,22 +2836,33 @@ fn prepare_evm_target(
     if code.is_empty() {
         return Ok(PreparedTarget::Finished(OutcomeStatus::Success, Vec::new()));
     }
-    if let Some(ptr) = decode_pointer_bytecode(&code) {
-        if is_delegated {
+    match verify_canonical_pointer_bytecode(&code, EeId::EVM, code_addr) {
+        Err(reason) => {
             return Ok(PreparedTarget::Finished(
                 OutcomeStatus::Revert,
-                b"DELEGATECALL/CALLCODE to pointer token forbidden".to_vec(),
+                reason.into_bytes(),
             ));
         }
-        let home = EeId(ptr.home_ee);
-        let (st, out) = if home == EeId::WASM {
-            execute_evm_pointer_to_wasm(&ptr, caller20, input, is_static, gas_limit, host)?
-        } else if home == EeId::SVM || home == EeId::MOVE {
-            execute_evm_pointer_to_svm_or_move(&ptr, caller20, input, is_static, gas_limit, host)?
-        } else {
-            execute_evm_pointer_to_expansion(&ptr, caller20, input, is_static, gas_limit, host)?
-        };
-        return Ok(PreparedTarget::Finished(st, out));
+        Ok(Some(ptr)) => {
+            if is_delegated {
+                return Ok(PreparedTarget::Finished(
+                    OutcomeStatus::Revert,
+                    b"DELEGATECALL/CALLCODE to pointer token forbidden".to_vec(),
+                ));
+            }
+            let home = EeId(ptr.home_ee);
+            let (st, out) = if home == EeId::WASM {
+                execute_evm_pointer_to_wasm(&ptr, caller20, input, is_static, gas_limit, host)?
+            } else if home == EeId::SVM || home == EeId::MOVE {
+                execute_evm_pointer_to_svm_or_move(
+                    &ptr, caller20, input, is_static, gas_limit, host,
+                )?
+            } else {
+                execute_evm_pointer_to_expansion(&ptr, caller20, input, is_static, gas_limit, host)?
+            };
+            return Ok(PreparedTarget::Finished(st, out));
+        }
+        Ok(None) => {}
     }
     if let Some(spec) = decode_std_evm_token_code(&code) {
         if exec_addr.is_some() {
@@ -2979,6 +3022,12 @@ impl ExecutionEnvironment for EvmEe {
                 message: String::from("EVM deploy code must not be empty"),
             });
         }
+        if is_pointer_bytecode_prefixed(code) {
+            return Err(EeRefusal {
+                code: RefusalCode::InvalidCode,
+                message: String::from("system pointer bytecode prefix is reserved for uel/assets"),
+            });
+        }
         if code.len() > MAX_EVM_INITCODE_BYTES {
             return Err(EeRefusal {
                 code: RefusalCode::TooLarge,
@@ -3040,6 +3089,11 @@ impl ExecutionEnvironment for EvmEe {
                         status: OutcomeStatus::OutOfGas,
                         output: Vec::new(),
                         gas_used: call.gas_limit,
+                    }),
+                    Err(msg) if msg.starts_with("target collision:") => Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: msg.into_bytes(),
+                        gas_used: 21_000,
                     }),
                     Err(msg) => Ok(EeOutcome {
                         status: OutcomeStatus::InvalidCode,
@@ -3595,6 +3649,15 @@ mod tests {
         let (st_bad_asset, _) =
             invoke_uol_precompile(10, &maker, &bad_xfer, false, &mut host).unwrap();
         assert_eq!(st_bad_asset, OutcomeStatus::Revert);
+
+        // Non-20-byte non-empty taker in UOL offer must revert cleanly.
+        let mut bad_offer = offer_calldata.clone();
+        // taker length word starts at 4 + 6*32 = 196; set taker length to 21 inside the 32B padded slot.
+        bad_offer[196 + 31] = 21;
+        let (st_bad_taker, out_bad_taker) =
+            invoke_uol_precompile(10, &maker, &bad_offer, false, &mut host).unwrap();
+        assert_eq!(st_bad_taker, OutcomeStatus::Revert);
+        assert_eq!(out_bad_taker, b"unsupported UOL offer taker encoding");
     }
 
     #[test]
@@ -3662,8 +3725,58 @@ mod tests {
             name: "Test".to_string(),
         })
         .unwrap();
-        drop(host);
-        deploy(&mut mem_host, ptr_addr, ptr_code);
+        // A pointer is installed by the asset door, which writes the code and
+        // the account metadata straight into the EVM namespaces; the raw
+        // `Deploy` path refuses the reserved prefix (see
+        // `conformance_tests::forged_or_misplaced_pointer_bytecode_is_refused`).
+        // Deploying it here would assert a door that no longer exists.
+        assert_ne!(
+            EvmEe::new()
+                .execute(
+                    &ctx,
+                    &EeCall {
+                        kind: EeCallKind::Deploy,
+                        caller: EeIdentity {
+                            ee: EeId::EVM,
+                            id: vec![0x01; 20],
+                        },
+                        target: EeIdentity {
+                            ee: EeId::EVM,
+                            id: ptr_addr.to_vec(),
+                        },
+                        value: BudAmount(0),
+                        input: ptr_code.clone(),
+                        gas_limit: 500_000,
+                        depth: 0,
+                        tx_hash: [0u8; 32],
+                    },
+                    &mut mem_host,
+                )
+                .expect("deploy is answered")
+                .status,
+            OutcomeStatus::Success,
+            "the raw EVM deploy door must refuse system pointer bytecode"
+        );
+        let ptr_code_hash: [u8; 32] = Keccak256::digest(&ptr_code).into();
+        mem_host
+            .write(
+                &Namespace::new(NS_EVM_CODE).expect("code namespace"),
+                &ptr_code_hash,
+                Some(&ptr_code),
+            )
+            .expect("write pointer code");
+        mem_host
+            .write(
+                &Namespace::new(NS_EVM_ACCOUNT).expect("account namespace"),
+                &ptr_addr,
+                Some(
+                    &serde_json::to_vec(
+                        &serde_json::json!({"nonce": 1u64, "code_hash": hex::encode(ptr_code_hash)}),
+                    )
+                    .expect("account metadata"),
+                ),
+            )
+            .expect("write pointer account");
         let mut host = EvmStackHost::new(&mut mem_host);
 
         let prep_ptr = prepare_evm_target(

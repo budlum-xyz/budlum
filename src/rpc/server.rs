@@ -993,6 +993,11 @@ impl SolanaListener {
 }
 
 impl RpcServer {
+    /// Whether the data market has listed this content id for sale.
+    async fn content_is_listed(&self, content: crate::storage::ContentId) -> bool {
+        self.chain.pollen_asset_for_content(content).await.is_some()
+    }
+
     #[must_use]
     pub fn new(chain: ChainHandle, node: NodeClient) -> Self {
         Self {
@@ -1568,6 +1573,8 @@ impl RpcServer {
                    "objectLayerRoot": h.object_layer_root.map(Self::bytes32_to_0x),
                    "proofRoot": h.proof_root.map(Self::bytes32_to_0x),
                    "provenHeight": Self::to_hex(h.proven_height),
+                   "ulpDomainsRoot": h.ulp_domains_root.map(Self::bytes32_to_0x),
+                   "finalityCertificateRoot": h.finality_certificate_root.map(Self::bytes32_to_0x),
                })
     }
 
@@ -1591,6 +1598,8 @@ impl RpcServer {
             "delegationRoot" => h.delegation_root,
             "objectLayerRoot" => h.object_layer_root,
             "proofRoot" => h.proof_root,
+            "ulpDomainsRoot" => h.ulp_domains_root,
+            "finalityCertificateRoot" => h.finality_certificate_root,
             _ => return None,
         })
     }
@@ -1616,6 +1625,7 @@ impl RpcServer {
 
     fn account_proof_to_json(
         bundle: &crate::core::account::ConsensusAccountProof,
+        opening: &crate::core::account::StateRootAccountsOpening,
         height: u64,
     ) -> serde_json::Value {
         let leaf_to_json = |leaf: &crate::core::account::ConsensusTreeLeaf| {
@@ -1635,29 +1645,35 @@ impl RpcServer {
             })
         };
         serde_json::json!({
-        // `accountsRoot` is the consensus accounts subtree root: it is
-        // folded into the block state root body, so a light client checks
-        // it against the finalized block at `blockHeight` (via
-        // `bud_getGlobalHeaderProof`'s `stateRootBody` and
-        // `root_from_opening`) and then verifies the proof against it.
-                   "accountsRoot": Self::bytes32_to_0x(bundle.root),
-                   "blockHeight": Self::to_hex(height),
-                   "address": Self::bytes32_to_0x(bundle.address.0),
-                   "present": bundle.present,
-                   "balance": Self::to_hex(bundle.balance),
-                   "nonce": Self::to_hex(bundle.nonce),
-                   "fracAttos": Self::to_hex(bundle.frac_attos),
-                   "authProgramHash": bundle.auth_program_hash.map(Self::bytes32_to_0x),
-                   "leafHash": Self::bytes32_to_0x(bundle.leaf_hash),
-                   "siblings": bundle
-                       .siblings
-                       .iter()
-                       .map(|s| Self::bytes32_to_0x(*s))
-                       .collect::<Vec<_>>(),
-                   "directions": bundle.directions.clone(),
-                   "predecessor": bundle.predecessor.as_ref().map(leaf_to_json),
-                   "successor": bundle.successor.as_ref().map(leaf_to_json),
-               })
+            // Light-client verification chain:
+            // 1. Verify leaf/absence proof against `accountsRoot`.
+            // 2. Compute `body = SHA256("v2" || epochIndex_le || accountsRoot || stateRootSuffix)`
+            //    and confirm `body == stateRootBody`.
+            // 3. Verify `AccountState::root_from_opening(body, globalHeaderSummary)` equals the
+            //    finalized block header's `state_root` at `blockHeight`.
+            "stateRoot": Self::bytes32_to_0x(opening.state_root),
+            "stateRootBody": Self::bytes32_to_0x(opening.state_root_body),
+            "epochIndex": Self::to_hex(opening.epoch_index),
+            "stateRootSuffix": format!("0x{}", hex::encode(&opening.suffix)),
+            "globalHeaderSummary": Self::bytes32_to_0x(opening.global_header_summary),
+            "accountsRoot": Self::bytes32_to_0x(bundle.root),
+            "blockHeight": Self::to_hex(height),
+            "address": Self::bytes32_to_0x(bundle.address.0),
+            "present": bundle.present,
+            "balance": Self::to_hex(bundle.balance),
+            "nonce": Self::to_hex(bundle.nonce),
+            "fracAttos": Self::to_hex(bundle.frac_attos),
+            "authProgramHash": bundle.auth_program_hash.map(Self::bytes32_to_0x),
+            "leafHash": Self::bytes32_to_0x(bundle.leaf_hash),
+            "siblings": bundle
+                .siblings
+                .iter()
+                .map(|s| Self::bytes32_to_0x(*s))
+                .collect::<Vec<_>>(),
+            "directions": bundle.directions.clone(),
+            "predecessor": bundle.predecessor.as_ref().map(leaf_to_json),
+            "successor": bundle.successor.as_ref().map(leaf_to_json),
+        })
     }
 
     fn consensus_domain_to_json(d: crate::domain::ConsensusDomain) -> serde_json::Value {
@@ -1755,6 +1771,7 @@ fn validate_operator_bind_address(
 /// callers. If it changes, the timing-safe CI gate (static scan plus a
 /// dudect-style statistical test) has to stay green.
 #[doc(hidden)]
+#[must_use]
 pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
     use subtle::ConstantTimeEq;
     // Walk the expected value `b` in full on every call, fold the length
@@ -2379,6 +2396,7 @@ fn parse_placement_roots(
                 root: parse_opt_hex32(r["root"].as_str()?)?,
                 first_esi: u32::try_from(r["first_esi"].as_u64()?).ok()?,
                 count: u32::try_from(r["count"].as_u64()?).ok()?,
+                settled: false,
             })
         })
         .collect()
@@ -2590,12 +2608,31 @@ fn reveal_gateway_rpc_error(e: crate::storage::RevealGatewayError) -> ErrorObjec
             format!("reveal: session {id} grant revoked"),
             None::<()>,
         ),
+        RevealGatewayError::PackedTooLarge { len, max } => ErrorObjectOwned::owned(
+            -32602,
+            format!("reveal: packed {len} bytes, per-session cap {max}"),
+            None::<()>,
+        ),
+        RevealGatewayError::PinnedBudget { needed, max } => ErrorObjectOwned::owned(
+            -32003,
+            format!("reveal: pinned-byte budget full ({needed} more over {max})"),
+            None::<()>,
+        ),
         RevealGatewayError::Reveal(_) => ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>),
     }
 }
 
 fn parse_content_id(hex_str: &str) -> Result<ContentId, ErrorObjectOwned> {
     Ok(ContentId(parse_hex32_field(hex_str, "ContentId")?))
+}
+
+/// The refusal every byte-serving door answers for data-market-listed content.
+fn listed_content_grant_required() -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(
+        -32004,
+        "Content is listed on the data market; an AccessGrant is required",
+        None::<()>,
+    )
 }
 
 fn parse_pollen_asset_id(hex_str: &str) -> Result<crate::pollen::AssetId, ErrorObjectOwned> {
@@ -2822,20 +2859,20 @@ impl BudlumApiServer for RpcServer {
         // gone). Reported as an error rather than an empty result: a caller
         // must never be able to read "we did not answer" as "the account is
         // absent", because absence here is a positive claim carrying a proof.
-        let (bundle, height) = self.chain.get_account_proof(&addr).await.ok_or_else(|| {
-            ErrorObjectOwned::owned(-32603, "Account proof unavailable", None::<()>)
-        })?;
-        // A bundle that does not verify against its own root is a node bug,
-        // not a client error, and must never reach the wire: a caller cannot
-        // tell a malformed proof from a forged one.
-        if !bundle.verify_self_consistent() {
+        let (bundle, opening, height) =
+            self.chain.get_account_proof(&addr).await.ok_or_else(|| {
+                ErrorObjectOwned::owned(-32603, "Account proof unavailable", None::<()>)
+            })?;
+        // Verify both the accounts-subtree Merkle path and the full opening into
+        // the committed `state_root` before returning a byte to the caller.
+        if !bundle.verify_against_state_root(&opening, &opening.state_root) {
             return Err(ErrorObjectOwned::owned(
                 -32603,
-                "Account proof failed its own verification",
+                "Account proof failed state root verification",
                 None::<()>,
             ));
         }
-        Ok(Self::account_proof_to_json(&bundle, height))
+        Ok(Self::account_proof_to_json(&bundle, &opening, height))
     }
 
     async fn send_raw_transaction(&self, tx: Transaction) -> Result<String, ErrorObjectOwned> {
@@ -3060,6 +3097,264 @@ impl BudlumApiServer for RpcServer {
                }))
     }
 
+    async fn get_finality_certificate(
+        &self,
+        checkpoint: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let cert = self
+            .chain
+            .get_finality_certificate(checkpoint)
+            .await
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(
+                    -32004,
+                    "no finality certificate available for the requested checkpoint",
+                    None::<()>,
+                )
+            })?;
+        let domain_labels: Vec<serde_json::Value> = cert
+            .established
+            .iter()
+            .map(|row| ("established", row))
+            .chain(cert.pending.iter().map(|row| ("pending", row)))
+            .chain(cert.refuted.iter().map(|row| ("refuted", row)))
+            .map(|(bucket, row)| {
+                serde_json::json!({
+                    "domainId": row.domain_id,
+                    "bucket": bucket,
+                    "height": row.height,
+                    "guaranteeLabel": row.guarantee.label(),
+                    "rowDigest": Self::bytes32_to_0x(row.row_digest()),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "checkpointHeight": cert.checkpoint_height,
+            "certificateDigest": Self::bytes32_to_0x(cert.certificate_digest),
+            "establishedRoot": Self::bytes32_to_0x(cert.established_root),
+            "pendingRoot": Self::bytes32_to_0x(cert.pending_root),
+            "refutedRoot": Self::bytes32_to_0x(cert.refuted_root),
+            "establishedCount": cert.established_count,
+            "pendingCount": cert.pending_count,
+            "refutedCount": cert.refuted_count,
+            "guaranteeLabel": cert.guarantee.map(|g| g.label()),
+            "domainLabels": domain_labels,
+            "certificate": cert,
+        }))
+    }
+
+    async fn get_domain_finality(
+        &self,
+        domain_id: u32,
+        checkpoint: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let cert = self
+            .chain
+            .get_finality_certificate(checkpoint)
+            .await
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(
+                    -32004,
+                    "no finality certificate available for the requested checkpoint",
+                    None::<()>,
+                )
+            })?;
+        let proof = cert.prove_domain(domain_id).ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32004,
+                format!("domain {domain_id} is not present in the finality certificate"),
+                None::<()>,
+            )
+        })?;
+        let bucket_root = cert.bucket_root(proof.bucket);
+        let econ = crate::settlement::EconomicSecurityBound::derive(
+            &proof.entry.guarantee,
+            proof.entry.bond_atoms,
+            proof.entry.bond_atoms,
+        );
+        let established = matches!(
+            proof.entry.verdict,
+            crate::settlement::FinalityVerdict::Established
+        );
+        let admits_value = established && proof.entry.guarantee.admits_cross_domain_value();
+        let safe_ceiling = if admits_value {
+            econ.safe_value_outflow_ceiling_atoms
+        } else {
+            0
+        };
+        Ok(serde_json::json!({
+            "domainId": domain_id,
+            "checkpointHeight": cert.checkpoint_height,
+            "certificateDigest": Self::bytes32_to_0x(cert.certificate_digest),
+            "bucket": proof.bucket,
+            "bucketRoot": Self::bytes32_to_0x(bucket_root),
+            "rowDigest": Self::bytes32_to_0x(proof.entry.row_digest()),
+            "guaranteeLabel": proof.entry.guarantee.label(),
+            "admitsCrossDomainValue": admits_value,
+            "corruptionCostAtoms": econ.corruption_cost_atoms.to_string(),
+            "safeValueOutflowCeilingAtoms": safe_ceiling.to_string(),
+            "entry": proof.entry,
+            "proof": proof,
+        }))
+    }
+
+    async fn get_route_finality(
+        &self,
+        source_domain: u32,
+        target_domain: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if source_domain == target_domain {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "source_domain and target_domain must differ",
+                None::<()>,
+            ));
+        }
+        let cert = self
+            .chain
+            .get_finality_certificate(None)
+            .await
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(
+                    -32004,
+                    "no finality certificate available at the current tip",
+                    None::<()>,
+                )
+            })?;
+        let src = cert.prove_domain(source_domain).ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32004,
+                format!("source domain {source_domain} is not present in the finality certificate"),
+                None::<()>,
+            )
+        })?;
+        let dst = cert.prove_domain(target_domain).ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32004,
+                format!("target domain {target_domain} is not present in the finality certificate"),
+                None::<()>,
+            )
+        })?;
+        let hub = crate::settlement::FinalityGuarantee::settlement_hub();
+        let bound = crate::settlement::compose_cross_domain_route(
+            &src.entry.guarantee,
+            &hub,
+            &dst.entry.guarantee,
+        );
+        let composed_guarantee = src.entry.guarantee.meet(&hub).meet(&dst.entry.guarantee);
+        let gate_result: Result<
+            crate::settlement::finality_gate::ValueGateVerdict,
+            crate::settlement::finality_gate::ValueGateRefusal,
+        > = crate::settlement::finality_gate::check_certificate_value_gate_with_proof_level(
+            &cert,
+            &self.chain.get_consensus_sentry().await,
+            crate::settlement::finality_gate::ValueGate::UniversalPayment,
+            source_domain,
+            Some(target_domain),
+            crate::settlement::universal_finality::FinalityBinds::EVENT_ROOT,
+            crate::settlement::finality_gate::ProofLivenessCheck {
+                block_height: cert.checkpoint_height,
+                proven_height: cert.checkpoint_height,
+                requirement: crate::settlement::finality_gate::ProofRequirement::VotedOnly,
+            },
+        );
+        let (admits_value, refusal_reason, safe_ceiling) = match gate_result {
+            Ok(verdict) => (true, None, verdict.safe_value_outflow_ceiling_atoms),
+            Err(refusal) => (false, Some(refusal.to_string()), 0),
+        };
+        Ok(serde_json::json!({
+            "checkpointHeight": cert.checkpoint_height,
+            "certificateDigest": Self::bytes32_to_0x(cert.certificate_digest),
+            "sourceDomain": source_domain,
+            "targetDomain": target_domain,
+            "admitsCrossDomainValue": admits_value,
+            "refusalReason": refusal_reason,
+            "routeGuaranteeLabel": composed_guarantee.label(),
+            "sourceGuaranteeLabel": src.entry.guarantee.label(),
+            "targetGuaranteeLabel": dst.entry.guarantee.label(),
+            "routeBound": bound,
+            "safeValueOutflowCeilingAtoms": safe_ceiling.to_string(),
+            "sourceBucket": src.bucket,
+            "targetBucket": dst.bucket,
+            "sourceBucketRoot": Self::bytes32_to_0x(cert.bucket_root(src.bucket)),
+            "targetBucketRoot": Self::bytes32_to_0x(cert.bucket_root(dst.bucket)),
+            "sourceProof": src,
+            "targetProof": dst,
+        }))
+    }
+
+    async fn get_domain_health(
+        &self,
+        domain_id: Option<u32>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if domain_id == Some(0) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "domain_id 0 is reserved",
+                None::<()>,
+            ));
+        }
+        let sentry = self.chain.get_consensus_sentry().await;
+        let cert = self.chain.get_finality_certificate(None).await;
+        let audit_root = Self::bytes32_to_0x(sentry.state_root());
+
+        if let Some(id) = domain_id {
+            let key = crate::cross_domain::external::sentry::ConsensusSentry::domain_key_for_id(id);
+            let watched = sentry.domain(&key);
+            let cert_proof = cert.as_ref().and_then(|c| c.prove_domain(id));
+            if watched.is_none() && cert_proof.is_none() {
+                return Err(ErrorObjectOwned::owned(
+                    -32004,
+                    format!("domain {id} is neither watched by sentry nor present in finality certificate"),
+                    None::<()>,
+                ));
+            }
+            let circuit_state = watched.map_or("OPEN", |w| w.circuit.label());
+            let accepts_settlement = watched.is_none_or(|w| w.circuit.accepts_settlement());
+            return Ok(serde_json::json!({
+                "domainId": id,
+                "sentryKey": key,
+                "watched": watched.is_some(),
+                "circuitState": circuit_state,
+                "acceptsSettlement": accepts_settlement,
+                "lastHeight": watched.and_then(|w| w.last_height),
+                "lastStateRoot": watched.and_then(|w| w.last_state_root).map(Self::bytes32_to_0x),
+                "consecutiveProofFailures": watched.map_or(0, |w| w.consecutive_proof_failures),
+                "latestRestakeSharePpm": watched.map_or(0, |w| w.latest_restake_share_ppm),
+                "crqcAlarmActive": sentry.crqc_alarm_active(),
+                "sentryAuditRoot": audit_root,
+                "certificateHeight": cert.as_ref().map(|c| c.checkpoint_height),
+                "certificateVerdict": cert_proof.as_ref().map(|p| format!("{:?}", p.entry.verdict)),
+            }));
+        }
+
+        let domains: Vec<serde_json::Value> = sentry
+            .watched_domains()
+            .iter()
+            .map(|(k, w)| {
+                serde_json::json!({
+                    "domainKey": k,
+                    "consensusFamily": w.policy.consensus_family,
+                    "circuitState": w.circuit.label(),
+                    "acceptsSettlement": w.circuit.accepts_settlement(),
+                    "lastHeight": w.last_height,
+                    "lastStateRoot": w.last_state_root.map(Self::bytes32_to_0x),
+                    "consecutiveProofFailures": w.consecutive_proof_failures,
+                    "latestRestakeSharePpm": w.latest_restake_share_ppm,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "watchedDomainCount": sentry.domain_count(),
+            "frozenDomainCount": sentry.frozen_domain_count(),
+            "alertCount": sentry.alerts().len(),
+            "crqcAlarmActive": sentry.crqc_alarm_active(),
+            "sentryAuditRoot": audit_root,
+            "certificateHeight": cert.as_ref().map(|c| c.checkpoint_height),
+            "domains": domains,
+        }))
+    }
+
     async fn get_domain_commitments(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let commitments = if self.mode == RpcMode::Operator {
             self.chain.get_domain_commitments_with_garden().await
@@ -3232,8 +3527,25 @@ impl BudlumApiServer for RpcServer {
             })
         };
         let hub = crate::settlement::FinalityGuarantee::settlement_hub();
+        // The guarantee is bound to the backing the domain's LAST ACCEPTED
+        // attestation actually carried, not to the registration spec alone.
+        // `profile.last_backing` is that backing (`None` until the domain has
+        // produced its first accepted attestation), so a domain that has never
+        // been attested reports zero fault tolerance instead of the
+        // registration's promise.
         let finality_guarantee =
-            crate::settlement::FinalityGuarantee::for_external_spec(&entry.spec);
+            crate::settlement::FinalityGuarantee::for_external_spec_with_backing(
+                &entry.spec,
+                profile.last_backing.as_ref(),
+            );
+        let economic_security = crate::settlement::EconomicSecurityBound::derive(
+            &finality_guarantee,
+            profile.bond_atoms,
+            profile.bond_atoms,
+        );
+        let value_outflow_open = economic_security
+            .check_value_outflow_conservation(0, 1)
+            .is_ok();
         let composed_with_hub: crate::settlement::RouteFinalityBound =
             crate::settlement::compose_cross_domain_route(&finality_guarantee, &hub, &hub);
         let reversibility_kind = match composed_with_hub.bottleneck_reversibility {
@@ -3251,6 +3563,8 @@ impl BudlumApiServer for RpcServer {
             "intakeEntry": to_val("Intake entry", serde_json::to_value(&entry))?,
             "descriptor": to_val("Descriptor", serde_json::to_value(&descriptor))?,
             "universalFinality": to_val("Universal finality", serde_json::to_value(finality_guarantee))?,
+            "economicSecurity": to_val("Economic security", serde_json::to_value(economic_security))?,
+            "valueOutflowOpen": value_outflow_open,
             "settlementComposition": to_val("Settlement composition", serde_json::to_value(composed_with_hub))?,
             "bottleneckReversibilityKind": reversibility_kind,
         }))
@@ -3642,6 +3956,12 @@ impl BudlumApiServer for RpcServer {
                            "valueBps": economics.fee.value_bps,
                            "bpsDenominator": BPS_DEN.to_string(),
                            "feeAtCeilingAtoms": economics.fee.for_value(ceiling).to_string(),
+                           "idleEscalatedRewardAtCeilingAtoms": economics
+                               .carrier_reward_for_idle(
+                                   ceiling,
+                                   profile.staleness(clock_height).unwrap_or(0),
+                               )
+                               .to_string(),
                        },
                        "challenge": to_val("Challenge", serde_json::to_value(economics.challenge))?,
                        "unbondingHeights": economics.unbonding_heights,
@@ -4955,6 +5275,19 @@ impl BudlumApiServer for RpcServer {
         };
         let packed = hex::decode(packed.strip_prefix("0x").unwrap_or(&packed))
             .map_err(|e| ErrorObjectOwned::owned(-32602, format!("packed: {e}"), None::<()>))?;
+        // The session keeps a padded copy of these bytes for its whole TTL:
+        // the per-session cap is enforced before any signature or chain work.
+        if packed.len() > crate::storage::reveal_gateway::MAX_REVEAL_PACKED_BYTES {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "packed: {} bytes exceeds the per-session cap {}",
+                    packed.len(),
+                    crate::storage::reveal_gateway::MAX_REVEAL_PACKED_BYTES
+                ),
+                None::<()>,
+            ));
+        }
         let owner = Address::from_hex(owner.strip_prefix("0x").unwrap_or(&owner))
             .map_err(|e| ErrorObjectOwned::owned(-32602, format!("owner: {e}"), None::<()>))?;
         let key_id = parse_hex32_field(&key_id, "key_id")?;
@@ -5218,6 +5551,10 @@ impl BudlumApiServer for RpcServer {
             .map(crate::storage::content_gateway::pollen_guard_ids)
             .unwrap_or_default()
         {
+            // Ask Pollen directly rather than through `content_is_listed`: the
+            // endpoint gate is a source-shape check, and a read path that hides
+            // the market lookup one call deeper is the shape it cannot see. The
+            // two calls are the same query.
             if self.chain.pollen_asset_for_content(cid).await.is_some() {
                 needs_grant = true;
             }
@@ -5450,13 +5787,24 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn get_universal_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let catalog = crate::unification::UniversalDomainCatalog::with_canonical_ecosystems();
+        let catalog = self.chain.get_universal_domains().await;
         let domains = catalog.list();
-        let root = hex::encode(catalog.catalog_root());
+        let root_bytes = catalog.catalog_root();
+        let root = hex::encode(root_bytes);
+        let inclusion_proofs: Vec<crate::unification::UniversalDomainInclusionProof> = domains
+            .iter()
+            .filter_map(|d| catalog.prove_domain_inclusion(d.domain_id))
+            .filter(|proof| proof.verify(&root_bytes))
+            .collect();
+        let template_count =
+            crate::unification::UniversalDomainCatalog::with_canonical_ecosystems().len();
         Ok(serde_json::json!({
             "count": catalog.len(),
             "catalog_root": format!("0x{root}"),
             "domains": domains,
+            "inclusion_proofs": inclusion_proofs,
+            "template_count": template_count,
+            "source": "chain_state",
         }))
     }
 
@@ -5513,11 +5861,19 @@ impl BudlumApiServer for RpcServer {
         request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         #[derive(serde::Deserialize)]
+        struct VerifiedReplicaRpcAttachment {
+            digest: [u8; 32],
+            replica: crate::unification::StorageReplica,
+            proof: crate::unification::storage_fabric::StorageReplicaProof,
+        }
+        #[derive(serde::Deserialize)]
         struct ResolveStorageRpcRequest {
             uri: String,
             objects: Vec<crate::unification::UnifiedContentRecord>,
             #[serde(default)]
             bns_bindings: std::collections::BTreeMap<String, [u8; 32]>,
+            #[serde(default)]
+            verified_replicas: Vec<VerifiedReplicaRpcAttachment>,
             #[serde(default = "default_rpc_storage_strength")]
             min_strength: crate::unification::VerificationStrength,
             #[serde(default)]
@@ -5538,10 +5894,11 @@ impl BudlumApiServer for RpcServer {
         })?;
         // Keep one RPC call strictly bounded so a single request cannot seed
         // thousands of transient records.
-        if req.objects.len() > 64 || req.bns_bindings.len() > 64 {
+        if req.objects.len() > 64 || req.bns_bindings.len() > 64 || req.verified_replicas.len() > 64
+        {
             return Err(ErrorObjectOwned::owned(
                 -32602,
-                "request exceeds 64-entry object or BNS binding limit",
+                "request exceeds 64-entry object, BNS binding, or verified replica limit",
                 None::<()>,
             ));
         }
@@ -5549,6 +5906,15 @@ impl BudlumApiServer for RpcServer {
         for obj in req.objects {
             fabric
                 .register_object(obj)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
+        }
+        for attachment in req.verified_replicas {
+            fabric
+                .verify_and_attach_replica(
+                    &attachment.digest,
+                    attachment.replica,
+                    &attachment.proof,
+                )
                 .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
         }
         for (name, digest) in req.bns_bindings {
@@ -5667,18 +6033,17 @@ impl BudlumApiServer for RpcServer {
                 return Ok(());
             }
         };
-        let slot = match feed_slot() {
-            Some(slot) => slot,
-            None => {
-                pending
-                    .reject(ErrorObjectOwned::owned(
-                        -32005,
-                        "subscription limit reached; retry later",
-                        None::<()>,
-                    ))
-                    .await;
-                return Ok(());
-            }
+        let slot = if let Some(slot) = feed_slot() {
+            slot
+        } else {
+            pending
+                .reject(ErrorObjectOwned::owned(
+                    -32005,
+                    "subscription limit reached; retry later",
+                    None::<()>,
+                ))
+                .await;
+            return Ok(());
         };
         let sink = pending.accept().await?;
         let chain = self.chain.clone();
@@ -8937,7 +9302,20 @@ impl BudlumApiServer for RpcServer {
             Some(height) => height,
             None => self.chain.get_height().await,
         };
-        let Some(snapshot) = self.chain.get_state_snapshot_data(height).await else {
+        // No such height is `null`; a state this node cannot rebuild is an
+        // error the caller can see. Both used to answer `null`.
+        let Some(snapshot) = self
+            .chain
+            .get_state_snapshot_data(height)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("cannot rebuild the state at height {height}: {e}"),
+                    None::<()>,
+                )
+            })?
+        else {
             return Ok(serde_json::Value::Null);
         };
         let verified = snapshot.verify();
@@ -9054,6 +9432,16 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
+        // The right to read market-listed bytes is sold through an
+        // AccessGrant; the paid storage view is a storage-fee door, not a
+        // grant, and the public web gateway serves over this method. Listed
+        // content therefore never leaves through here.
+        if self
+            .content_is_listed(crate::storage::ContentId(object))
+            .await
+        {
+            return Err(listed_content_grant_required());
+        }
         let reservation = PaidViewReservation::acquire(&self.consumed_paid_views, receipt_id)?;
         let receipt = crate::storage::bud3::view::PaidViewReceipt {
             payer,
@@ -9106,6 +9494,15 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ),
         })?;
+        // A binding may key the content digest rather than the commitment;
+        // the digest is only known once the bytes exist, so it is checked
+        // here, before the receipt is burned or anything is returned.
+        if self
+            .content_is_listed(crate::storage::ContentId::of(&bytes))
+            .await
+        {
+            return Err(listed_content_grant_required());
+        }
         reservation.commit()?;
         Ok(serde_json::json!({
             "object": hex::encode(object),
@@ -9410,6 +9807,11 @@ impl BudlumApiServer for RpcServer {
                     crate::settlement::FinalityGuarantee::for_domain(&domain, pq_enforced);
                 let route_bound: crate::settlement::RouteFinalityBound =
                     crate::settlement::compose_cross_domain_route(&guarantee, &hub, &hub);
+                let economic_security = crate::settlement::EconomicSecurityBound::derive(
+                    &guarantee,
+                    u128::from(domain.operator_bond),
+                    u128::from(domain.operator_bond),
+                );
                 Ok(serde_json::json!({
                     "domainId": domain.id,
                     "registered": true,
@@ -9427,6 +9829,8 @@ impl BudlumApiServer for RpcServer {
                     "quantumClass": facts["quantumClass"].clone(),
                     "observedSchemes": facts["observedSchemes"].clone(),
                     "universalFinality": serde_json::to_value(guarantee)
+                        .unwrap_or(serde_json::Value::Null),
+                    "economicSecurity": serde_json::to_value(economic_security)
                         .unwrap_or(serde_json::Value::Null),
                     "settlementRouteBound": serde_json::to_value(route_bound)
                         .unwrap_or(serde_json::Value::Null),
@@ -10160,6 +10564,14 @@ impl BudlumApiServer for RpcServer {
     async fn garden_invite(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_gardenInvite")?;
         self.garden.invite().await.map_err(Self::garden_refusal)
+    }
+
+    async fn garden_read_record(
+        &self,
+        record: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_gardenReadRecord")?;
+        crate::garden::GardenService::read_record(&record).map_err(Self::garden_refusal)
     }
 
     async fn garden_join(

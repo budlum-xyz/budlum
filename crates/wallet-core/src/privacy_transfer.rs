@@ -39,8 +39,11 @@ impl std::fmt::Debug for PrivateNoteInput {
 }
 
 impl PrivateNoteInput {
-    /// Overwrite the nullifier secret.
+    /// Overwrite the nullifier secret and all private note opening fields.
     fn wipe_spend_secret(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.amount);
+        zeroize::Zeroize::zeroize(&mut self.recipient_tag);
+        zeroize::Zeroize::zeroize(&mut self.blinding);
         zeroize::Zeroize::zeroize(&mut self.spend_secret);
     }
 
@@ -92,6 +95,14 @@ impl PrivateNoteOutput {
     pub fn commitment(&self) -> u64 {
         // privacy_commit(amount, blinding, recipient_tag)
         privacy_commit(self.amount, self.blinding, self.recipient_tag)
+    }
+}
+
+impl Drop for PrivateNoteOutput {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.amount);
+        zeroize::Zeroize::zeroize(&mut self.recipient_tag);
+        zeroize::Zeroize::zeroize(&mut self.blinding);
     }
 }
 
@@ -217,6 +228,16 @@ impl std::fmt::Debug for PrivateTransferRequest {
 
 impl PrivateTransferRequest {
     pub fn validate_conservation(&self) -> Result<(), WalletError> {
+        if self.to == [0u8; 32] {
+            return Err(WalletError::InvalidPrivateTransfer(
+                "recipient address cannot be the zero address".into(),
+            ));
+        }
+        if self.input.amount >= budlum_note_packing::GOLDILOCKS_P {
+            return Err(WalletError::InvalidPrivateTransfer(
+                "input.amount must be a canonical Goldilocks field element".into(),
+            ));
+        }
         if self.send_amount == 0 {
             return Err(WalletError::InvalidPrivateTransfer(
                 "send_amount must be > 0".into(),
@@ -228,8 +249,10 @@ impl PrivateTransferRequest {
                 self.send_amount, self.input.amount
             )));
         }
-        validate_canonical_blinding("input.blinding", self.input.blinding)?;
-        validate_canonical_blinding("output_blinding", self.output_blinding)?;
+        validate_canonical_field("input.spend_secret", self.input.spend_secret)?;
+        validate_canonical_field("input.recipient_tag", self.input.recipient_tag)?;
+        validate_canonical_field("input.blinding", self.input.blinding)?;
+        validate_canonical_field("output_blinding", self.output_blinding)?;
         if self.output_blinding == self.input.blinding {
             return Err(WalletError::InvalidPrivateTransfer(
                 "output_blinding must differ from input.blinding".into(),
@@ -242,12 +265,13 @@ impl PrivateTransferRequest {
                     "change output requires change_recipient_tag and change_blinding".into(),
                 ));
             };
-            if self.change_recipient_tag.is_none() {
+            let Some(change_tag) = self.change_recipient_tag else {
                 return Err(WalletError::InvalidPrivateTransfer(
                     "change output requires change_recipient_tag and change_blinding".into(),
                 ));
-            }
-            validate_canonical_blinding("change_blinding", cb)?;
+            };
+            validate_canonical_field("change_recipient_tag", change_tag)?;
+            validate_canonical_field("change_blinding", cb)?;
             if cb == self.output_blinding || cb == self.input.blinding {
                 return Err(WalletError::InvalidPrivateTransfer(
                     "change_blinding must differ from input.blinding and output_blinding".into(),
@@ -258,8 +282,8 @@ impl PrivateTransferRequest {
     }
 }
 
-fn validate_canonical_blinding(label: &str, blinding: u64) -> Result<(), WalletError> {
-    if blinding == 0 || blinding >= budlum_note_packing::GOLDILOCKS_P {
+fn validate_canonical_field(label: &str, value: u64) -> Result<(), WalletError> {
+    if value == 0 || value >= budlum_note_packing::GOLDILOCKS_P {
         return Err(WalletError::InvalidPrivateTransfer(format!(
             "{label} must be a non-zero canonical Goldilocks field element"
         )));
@@ -434,5 +458,87 @@ mod change_output_tests {
         req.send_amount = req.input.amount;
         let outs = build_outputs(&req).expect("an exact spend has no change output");
         assert_eq!(outs.len(), 1, "payment only");
+    }
+
+    #[test]
+    fn walcore01_private_transfer_rejects_zero_recipient_noncanonical_field_and_wipes_openings() {
+        let p = budlum_note_packing::GOLDILOCKS_P;
+
+        // 1. Zero recipient burn must be refused.
+        let mut zero_to = request_with_change(Some(19), Some(23));
+        zero_to.to = [0u8; 32];
+        assert!(
+            matches!(
+                zero_to.validate_conservation(),
+                Err(WalletError::InvalidPrivateTransfer(_))
+            ),
+            "sending a private note to the zero address must be refused"
+        );
+
+        // 2. Non-canonical Goldilocks input.amount (>= GOLDILOCKS_P) wraps mod p and must be refused.
+        let mut wrap_amt = request_with_change(Some(19), Some(23));
+        wrap_amt.input.amount = p;
+        wrap_amt.send_amount = 10;
+        assert!(
+            matches!(
+                wrap_amt.validate_conservation(),
+                Err(WalletError::InvalidPrivateTransfer(_))
+            ),
+            "input.amount >= GOLDILOCKS_P must be refused"
+        );
+
+        // 3. Zero or non-canonical spend_secret must be refused.
+        for bad_secret in [0u64, p, u64::MAX] {
+            let mut req = request_with_change(Some(19), Some(23));
+            req.input.spend_secret = bad_secret;
+            assert!(
+                matches!(
+                    req.validate_conservation(),
+                    Err(WalletError::InvalidPrivateTransfer(_))
+                ),
+                "bad spend_secret={bad_secret} must be refused"
+            );
+        }
+
+        // 4. Zero or non-canonical input.recipient_tag must be refused.
+        for bad_tag in [0u64, p, u64::MAX] {
+            let mut req = request_with_change(Some(19), Some(23));
+            req.input.recipient_tag = bad_tag;
+            assert!(
+                matches!(
+                    req.validate_conservation(),
+                    Err(WalletError::InvalidPrivateTransfer(_))
+                ),
+                "bad input.recipient_tag={bad_tag} must be refused"
+            );
+        }
+
+        // 5. Zero or non-canonical change_recipient_tag when change > 0 must be refused.
+        for bad_change_tag in [0u64, p, u64::MAX] {
+            let req = request_with_change(Some(bad_change_tag), Some(23));
+            assert!(
+                matches!(
+                    req.validate_conservation(),
+                    Err(WalletError::InvalidPrivateTransfer(_))
+                ),
+                "bad change_recipient_tag={bad_change_tag} must be refused"
+            );
+        }
+
+        // 6. Wiping PrivateNoteInput must clear ALL four opening fields, not only spend_secret.
+        let mut input = PrivateNoteInput {
+            amount: 42,
+            recipient_tag: 7,
+            blinding: 11,
+            spend_secret: 13,
+        };
+        input.wipe_spend_secret();
+        assert_eq!(input.spend_secret, 0);
+        assert_eq!(input.amount, 0, "amount opening must be zeroized");
+        assert_eq!(
+            input.recipient_tag, 0,
+            "recipient_tag opening must be zeroized"
+        );
+        assert_eq!(input.blinding, 0, "blinding opening must be zeroized");
     }
 }

@@ -17,6 +17,8 @@ use crate::execution::coordinator::foreign::sui::{decode_and_recover_sui_tx, Sui
 
 /// `1 MIST = 10^9 attoBUD`.
 const ATTO_PER_MIST: u128 = 1_000_000_000;
+/// Maximum Sui RPC request envelope size (1 MiB).
+pub const MAX_SUI_RPC_REQUEST_BYTES: usize = 1 << 20;
 
 /// Canonical Sui coin type string representing native BUD on Sui RPC.
 ///
@@ -93,6 +95,14 @@ pub fn handle_sui_rpc(
             req.id,
             -32050,
             "Move (Sui) RPC is closed on testnet before activation height",
+        );
+    }
+    // strict JSON-RPC 2.0 version enforcement.
+    if req.jsonrpc != "2.0" {
+        return SuiRpcResponse::err(
+            req.id,
+            -32600,
+            &format!("Sui RPC requires jsonrpc \"2.0\", got {:?}", req.jsonrpc),
         );
     }
     match req.method.as_str() {
@@ -211,5 +221,58 @@ mod tests {
             },
         );
         assert_eq!(bal.result.unwrap()["totalBalance"].as_str(), Some("7000"));
+    }
+
+    #[test]
+    fn sui_rpc_rejects_wrong_jsonrpc_version() {
+        let state = AccountState::new();
+        let policy = SuiActivationPolicy {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: 100,
+            activation_height: Some(100),
+        };
+        let resp = handle_sui_rpc(
+            &state,
+            policy,
+            SuiRpcRequest {
+                jsonrpc: "1.0".into(),
+                id: json!(1),
+                method: "sui_getChainIdentifier".into(),
+                params: vec![],
+            },
+        );
+        assert!(resp.result.is_none() && !resp.error.is_none());
+        assert!(resp.error.is_some());
+        assert!(resp.error.unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .contains("2.0"));
+    }
+
+    #[test]
+    fn sui_rpc_rejects_missing_jsonrpc_version() {
+        let state = AccountState::new();
+        let policy = SuiActivationPolicy {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            block_height: 100,
+            activation_height: Some(100),
+        };
+        let resp = handle_sui_rpc(
+            &state,
+            policy,
+            SuiRpcRequest {
+                jsonrpc: "".into(),
+                id: json!(1),
+                method: "sui_getChainIdentifier".into(),
+                params: vec![],
+            },
+        );
+        assert!(resp.result.is_none() && !resp.error.is_none());
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn max_sui_rpc_request_bytes_is_bounded() {
+        assert_eq!(MAX_SUI_RPC_REQUEST_BYTES, 1 << 20);
     }
 }

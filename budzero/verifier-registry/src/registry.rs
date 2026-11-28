@@ -97,8 +97,16 @@ impl SlashingCondition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemberStatus {
     Active,
-    Unbonding { release_epoch: u64 },
+    Unbonding {
+        release_epoch: u64,
+    },
     Slashed,
+    /// Exited from `Slashed` into an unbonding lock: stake stays locked until
+    /// `release_epoch`, after which `withdraw` honours exit, while replay
+    /// slashes are refused and role authority is never restored.
+    SlashedUnbonding {
+        release_epoch: u64,
+    },
 }
 
 /// A single (account, role) registration.
@@ -126,7 +134,9 @@ impl Registration {
     pub fn is_slashable(&self) -> bool {
         matches!(
             self.status,
-            MemberStatus::Active | MemberStatus::Unbonding { .. }
+            MemberStatus::Active
+                | MemberStatus::Unbonding { .. }
+                | MemberStatus::SlashedUnbonding { .. }
         ) && self.stake > 0
     }
 }
@@ -165,6 +175,7 @@ pub enum RegistryError {
         account: Address,
         role: RoleId,
     },
+    ZeroAddress,
 }
 
 impl std::fmt::Display for RegistryError {
@@ -205,6 +216,9 @@ impl std::fmt::Display for RegistryError {
             }
             RegistryError::StakeOverflow { account, role } => {
                 write!(f, "stake of {account} as {role} would overflow")
+            }
+            RegistryError::ZeroAddress => {
+                write!(f, "zero address cannot register a role bond")
             }
         }
     }
@@ -278,14 +292,29 @@ fn offence_identity_window(proof: &SlashingProof) -> Option<(u8, u64, u64)> {
         } => Some((1, *window_start_epoch, *window_end_epoch)),
         SlashingProof::DoubleSign { height, .. } => Some((2, *height, *height)),
         SlashingProof::InvalidSignatureSpam { epoch, .. } => Some((3, *epoch, *epoch)),
-        SlashingProof::Other { .. } => None,
+        SlashingProof::Other { tag, data } => {
+            let mut hasher = Sha256::new();
+            hasher.update(b"BDLM_SLASH_OTHER_V1");
+            hasher.update((tag.len() as u64).to_le_bytes());
+            hasher.update(tag.as_bytes());
+            hasher.update((data.len() as u64).to_le_bytes());
+            hasher.update(data);
+            let digest = hasher.finalize();
+            let mut hi = [0u8; 8];
+            let mut lo = [0u8; 8];
+            hi.copy_from_slice(&digest[0..8]);
+            lo.copy_from_slice(&digest[8..16]);
+            Some((4, u64::from_le_bytes(hi), u64::from_le_bytes(lo)))
+        }
     }
 }
 
 mod registrations_as_seq {
     use super::{Address, Registration, RoleId};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;
+
+    const MAX_DESER_REGISTRATIONS: usize = 1_000_000;
 
     pub fn serialize<S>(
         map: &BTreeMap<(RoleId, Address), Registration>,
@@ -305,10 +334,21 @@ mod registrations_as_seq {
         D: Deserializer<'de>,
     {
         let entries = Vec::<Registration>::deserialize(deserializer)?;
-        Ok(entries
-            .into_iter()
-            .map(|r| ((r.role, r.account), r))
-            .collect())
+        if entries.len() > MAX_DESER_REGISTRATIONS {
+            return Err(de::Error::custom(
+                "registration table exceeds deserialization safety cap",
+            ));
+        }
+        let mut map = BTreeMap::new();
+        for r in entries {
+            let key = (r.role, r.account);
+            if map.insert(key, r).is_some() {
+                return Err(de::Error::custom(
+                    "duplicate registration entry for (role, account)",
+                ));
+            }
+        }
+        Ok(map)
     }
 }
 
@@ -352,6 +392,9 @@ impl VerifierRegistry {
         stake: u64,
         current_epoch: u64,
     ) -> Result<(), RegistryError> {
+        if account == Address::zero() {
+            return Err(RegistryError::ZeroAddress);
+        }
         if stake < self.params.min_stake {
             return Err(RegistryError::InsufficientStake {
                 required: self.params.min_stake,
@@ -456,6 +499,9 @@ impl VerifierRegistry {
         total_stake: u64,
         current_epoch: u64,
     ) {
+        if account == Address::zero() || total_stake > MAX_VERIFIER_PARAM_AMOUNT {
+            return;
+        }
         let key = (role, account);
         match self.registrations.get_mut(&key) {
             Some(reg) => {
@@ -546,12 +592,15 @@ impl VerifierRegistry {
             .ok_or(RegistryError::NotRegistered { account, role })?;
         // decision 5A: exclusion is not confiscation. The
         // penalty already reduced stake; the remainder exits with the same
-        // delay as an active bond, matching the node registry.
-        if !matches!(reg.status, MemberStatus::Active | MemberStatus::Slashed) {
-            return Err(RegistryError::NotActive { account, role });
-        }
+        // delay as an active bond, matching the node registry. A slashed
+        // member moves into `SlashedUnbonding` (not clean `Unbonding`) so
+        // replay slashes remain refused and role authority is never restored.
         let release_epoch = current_epoch.saturating_add(self.params.unbonding_epochs);
-        reg.status = MemberStatus::Unbonding { release_epoch };
+        reg.status = match reg.status {
+            MemberStatus::Active => MemberStatus::Unbonding { release_epoch },
+            MemberStatus::Slashed => MemberStatus::SlashedUnbonding { release_epoch },
+            _ => return Err(RegistryError::NotActive { account, role }),
+        };
         Ok(release_epoch)
     }
 
@@ -566,7 +615,8 @@ impl VerifierRegistry {
             .get(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
         match reg.status {
-            MemberStatus::Unbonding { release_epoch } => {
+            MemberStatus::Unbonding { release_epoch }
+            | MemberStatus::SlashedUnbonding { release_epoch } => {
                 if current_epoch < release_epoch {
                     return Err(RegistryError::StillUnbonding {
                         release_epoch,
@@ -601,8 +651,12 @@ impl VerifierRegistry {
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
         // HIGH (2026-08-17): slashing must be idempotent - replaying the same
-        // report must not burn the remaining stake again. Refuse if already Slashed.
-        if matches!(reg.status, MemberStatus::Slashed) {
+        // report must not burn the remaining stake again. Refuse if already
+        // Slashed or SlashedUnbonding.
+        if matches!(
+            reg.status,
+            MemberStatus::Slashed | MemberStatus::SlashedUnbonding { .. }
+        ) {
             return Err(RegistryError::AlreadySlashed { account, role });
         }
 
@@ -651,7 +705,10 @@ impl VerifierRegistry {
 
         for role in other_keys {
             if let Some(reg) = self.registrations.get_mut(&(role, account)) {
-                if matches!(reg.status, MemberStatus::Slashed) {
+                if matches!(
+                    reg.status,
+                    MemberStatus::Slashed | MemberStatus::SlashedUnbonding { .. }
+                ) {
                     continue;
                 }
                 let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
@@ -845,6 +902,10 @@ impl VerifierRegistry {
                     hasher.update(release_epoch.to_le_bytes());
                 }
                 MemberStatus::Slashed => hasher.update(b"slashed"),
+                MemberStatus::SlashedUnbonding { release_epoch } => {
+                    hasher.update(b"slashed_unbonding");
+                    hasher.update(release_epoch.to_le_bytes());
+                }
             }
         }
         hasher.update((self.charged_offences.len() as u64).to_le_bytes());
@@ -1804,5 +1865,141 @@ mod tests {
         // Control: the same report, certified by this crate, slashes.
         assert!(reg.slash_from_report(&certified).unwrap().is_some());
         assert!(!reg.is_active_master_verifier(&addr(12)));
+    }
+
+    #[test]
+    fn slashed_member_exits_via_slashed_unbonding_and_cannot_be_double_slashed() {
+        let mut reg = VerifierRegistry::new();
+        reg.register_master_verifier(addr(31), 10_000, 0).unwrap();
+        reg.register_relayer(addr(31), 10_000, 0).unwrap();
+
+        let first = reg
+            .slash(
+                addr(31),
+                roles::MASTER_VERIFIER,
+                SlashingCondition::DoubleSign,
+                100_000, // 10%
+            )
+            .unwrap();
+        assert_eq!(first.penalty, 1_000);
+        assert_eq!(first.remaining_stake, 9_000);
+
+        let release = reg
+            .begin_unbonding(addr(31), roles::MASTER_VERIFIER, 5)
+            .unwrap();
+        assert_eq!(release, 5 + reg.params().unbonding_epochs);
+        assert_eq!(
+            reg.get(&addr(31), roles::MASTER_VERIFIER).unwrap().status,
+            MemberStatus::SlashedUnbonding {
+                release_epoch: release
+            }
+        );
+
+        // Replaying slash during SlashedUnbonding must fail closed, never slash a second time.
+        let replay = reg.slash(
+            addr(31),
+            roles::MASTER_VERIFIER,
+            SlashingCondition::DoubleSign,
+            100_000,
+        );
+        assert!(matches!(replay, Err(RegistryError::AlreadySlashed { .. })));
+        assert_eq!(
+            reg.get(&addr(31), roles::MASTER_VERIFIER).unwrap().stake,
+            9_000
+        );
+
+        // Cannot withdraw before release_epoch; can withdraw at release_epoch.
+        assert!(matches!(
+            reg.withdraw(addr(31), roles::MASTER_VERIFIER, release - 1),
+            Err(RegistryError::StillUnbonding { .. })
+        ));
+        let withdrawn = reg
+            .withdraw(addr(31), roles::MASTER_VERIFIER, release)
+            .unwrap();
+        assert_eq!(withdrawn, 9_000);
+    }
+
+    #[test]
+    fn zero_address_excessive_upsert_and_duplicate_deser_are_refused() {
+        let mut reg = VerifierRegistry::new();
+        assert_eq!(
+            reg.register(Address::zero(), roles::VALIDATOR, 10_000, 0),
+            Err(RegistryError::ZeroAddress)
+        );
+        reg.upsert_stake(Address::zero(), roles::VALIDATOR, 10_000, 0);
+        assert!(reg.get(&Address::zero(), roles::VALIDATOR).is_none());
+
+        reg.upsert_stake(addr(40), roles::VALIDATOR, MAX_VERIFIER_PARAM_AMOUNT + 1, 0);
+        assert!(reg.get(&addr(40), roles::VALIDATOR).is_none());
+
+        reg.register(addr(41), roles::VALIDATOR, 10_000, 0).unwrap();
+        let mut json: serde_json::Value = serde_json::to_value(&reg).unwrap();
+        let first = json["registrations"][0].clone();
+        json["registrations"].as_array_mut().unwrap().push(first);
+        let dup: Result<VerifierRegistry, _> = serde_json::from_value(json);
+        assert!(
+            dup.is_err(),
+            "duplicate (role, account) in serialized registrations must be rejected"
+        );
+    }
+
+    #[test]
+    fn other_proof_deduplicates_across_reporters_and_empty_double_sign_hash_fails() {
+        use crate::evidence::SlashingProof;
+
+        let empty_ds = SlashingReport::new_verified(
+            addr(50),
+            roles::VALIDATOR,
+            SlashingProof::DoubleSign {
+                height: 10,
+                block_hash_1: "0x".into(),
+                block_hash_2: "0xabcd".into(),
+                signature_1: vec![1; 64],
+                signature_2: vec![2; 64],
+            },
+            None,
+        );
+        assert_eq!(
+            empty_ds.validate_shape(),
+            Err(EvidenceError::NonConflictingHashes)
+        );
+
+        let blank_tag = SlashingReport::new_verified(
+            addr(50),
+            roles::VALIDATOR,
+            SlashingProof::Other {
+                tag: "   ".into(),
+                data: vec![1],
+            },
+            None,
+        );
+        assert_eq!(
+            blank_tag.validate_shape(),
+            Err(EvidenceError::EmptyProofTag)
+        );
+
+        let mut reg = VerifierRegistry::new();
+        reg.register(addr(51), roles::RELAYER, 10_000, 0).unwrap();
+        let r1 = SlashingReport::new_verified(
+            addr(51),
+            roles::RELAYER,
+            SlashingProof::Other {
+                tag: "bad_relay".into(),
+                data: vec![9, 8, 7],
+            },
+            Some(addr(90)),
+        );
+        let r2 = SlashingReport::new_verified(
+            addr(51),
+            roles::RELAYER,
+            SlashingProof::Other {
+                tag: "bad_relay".into(),
+                data: vec![9, 8, 7],
+            },
+            Some(addr(91)),
+        );
+        assert!(reg.slash_from_report(&r1).unwrap().is_some());
+        assert!(reg.slash_from_report(&r2).unwrap().is_none());
+        assert_eq!(reg.slashing_history().len(), 1);
     }
 }

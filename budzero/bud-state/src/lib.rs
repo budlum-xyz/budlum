@@ -2,7 +2,7 @@
 // enters, the build FAILs (a regression gate). The same policy as the main crate.
 #![forbid(unsafe_code)]
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use tiny_keccak::{Hasher, Keccak};
@@ -37,9 +37,9 @@ pub trait StateBackend {
 }
 
 pub struct State {
-    accounts: HashMap<u64, Account>,
+    accounts: BTreeMap<u64, Account>,
     path: String,
-    backup_stack: Vec<HashMap<u64, Account>>,
+    backup_stack: Vec<BTreeMap<u64, Account>>,
 }
 
 const SMT_LEAF_DOMAIN: &[u8; 1] = b"\x00";
@@ -79,7 +79,7 @@ static EMPTY_HASHES: LazyLock<[[u8; 32]; 65]> = LazyLock::new(|| {
 });
 
 pub fn get_empty_hash(depth: usize) -> Hash {
-    EMPTY_HASHES[depth]
+    EMPTY_HASHES.get(depth).copied().unwrap_or([0u8; 32])
 }
 
 fn compute_subtree_root(leaves: &[(u64, Hash)], depth: usize, prefix: u64) -> Hash {
@@ -180,7 +180,7 @@ impl State {
                 fs::read_to_string(path).map_err(|e| format!("Failed to read state file: {e}"))?;
             serde_json::from_str(&data).map_err(|e| format!("Failed to parse state JSON: {e}"))?
         } else {
-            HashMap::new()
+            BTreeMap::new()
         };
         Ok(Self {
             accounts,
@@ -272,6 +272,9 @@ impl StateBackend for State {
     }
 
     fn commit(&mut self) -> Result<(), String> {
+        if self.backup_stack.is_empty() {
+            return Err(String::from("commit called without an active transaction"));
+        }
         // Drop the innermost snapshot; parent frames stay intact. Only the
         // outermost commit reaches the disk: an inner commit that saved
         // would leave values on disk that an outer rollback then discards in
@@ -602,7 +605,7 @@ mod tests {
         // Point state path at a non-existent directory so rename/create fails.
         let bad_path = "/this/path/definitely/does/not/exist/state.json";
         let state = State {
-            accounts: HashMap::new(),
+            accounts: BTreeMap::new(),
             path: bad_path.to_string(),
             backup_stack: Vec::new(),
         };
@@ -628,5 +631,54 @@ mod tests {
         assert_ne!(leaf, node);
         assert_ne!(leaf, get_empty_hash(1));
         assert_eq!(node, get_empty_hash(1));
+    }
+
+    #[test]
+    fn get_empty_hash_bounds_safe_unmatched_commit_fails_and_save_is_deterministic() {
+        assert_eq!(get_empty_hash(65), [0u8; 32]);
+        assert_eq!(get_empty_hash(usize::MAX), [0u8; 32]);
+
+        let p1 = std::env::temp_dir().join("bud_state_det_1.json");
+        let p2 = std::env::temp_dir().join("bud_state_det_2.json");
+        let _ = fs::remove_file(&p1);
+        let _ = fs::remove_file(&p2);
+
+        let mut s1 = State::load(&p1.to_string_lossy()).unwrap();
+        assert!(
+            s1.commit().is_err(),
+            "unmatched commit must fail closed instead of silently succeeding"
+        );
+        s1.begin_transaction();
+        for id in [30u64, 5, 100, 1] {
+            s1.set_account(
+                id,
+                Account {
+                    nonce: id,
+                    balance: id * 10,
+                    code_hash: [0u8; 32],
+                    storage_root: [0u8; 32],
+                },
+            );
+        }
+        s1.commit().unwrap();
+
+        let mut s2 = State::load(&p2.to_string_lossy()).unwrap();
+        s2.begin_transaction();
+        for id in [1u64, 100, 5, 30] {
+            s2.set_account(
+                id,
+                Account {
+                    nonce: id,
+                    balance: id * 10,
+                    code_hash: [0u8; 32],
+                    storage_root: [0u8; 32],
+                },
+            );
+        }
+        s2.commit().unwrap();
+
+        assert_eq!(fs::read(&p1).unwrap(), fs::read(&p2).unwrap());
+        let _ = fs::remove_file(&p1);
+        let _ = fs::remove_file(&p2);
     }
 }

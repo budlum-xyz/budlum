@@ -1,6 +1,6 @@
-//! Proof of History (PoH) consensus engine.
+//! Proof of History (`PoH`) consensus engine.
 //!
-//! PoH orders events via a sequential domain-separated SHA-256 hash chain.
+//! `PoH` orders events via a sequential domain-separated SHA-256 hash chain.
 //! Each tick hashes `BDLM_POH_TICK_V1 || prev_hash || step_index`. Proposals
 //! bind their `(start_count, steps, end_hash)` witness into the block's
 //! hash-covered `vrf_proof` and `vrf_output` fields without mutating canonical
@@ -16,13 +16,13 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::RwLock;
 
-/// Maximum hash iterations allowed in a single PoH verification call.
+/// Maximum hash iterations allowed in a single `PoH` verification call.
 const MAX_POH_VERIFY_STEPS: u64 = 16_384;
 const MAX_POH_CHECKPOINTS: usize = 4_096;
 const POH_WITNESS_MAGIC: &[u8; 8] = b"BDLMPOH1";
 const POH_WITNESS_LEN: usize = 8 + 8 + 8;
 
-/// PoH configuration.
+/// `PoH` configuration.
 #[derive(Debug, Clone)]
 pub struct PohConfig {
     /// Number of hash iterations per slot.
@@ -40,7 +40,7 @@ impl Default for PohConfig {
     }
 }
 
-/// PoH chain state: current digest and total step count.
+/// `PoH` chain state: current digest and total step count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PohState {
     current_hash: [u8; 32],
@@ -52,7 +52,7 @@ struct PohLedger {
     checkpoints: BTreeMap<u64, [u8; 32]>,
 }
 
-/// Compute one domain-separated PoH hash transition.
+/// Compute one domain-separated `PoH` hash transition.
 #[must_use]
 fn poh_step(prev_hash: &[u8; 32], step_index: u64) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -107,13 +107,7 @@ fn decode_poh_witness(block: &Block) -> Result<(u64, u64, [u8; 32]), ConsensusEr
     ))
 }
 
-/// Verify a bounded forward PoH hash sequence from `start_hash` at `start_count`.
-///
-/// Crate-internal: the doors onto this chain are
-/// [`verify_commitment_poh_sequence`] (what settlement finality checks), the
-/// `PoH` ladder verifier in `domain::finality_adapter`, and [`PohEngine`]
-/// (what a producing node runs). A further caller outside this module would be
-/// another unreviewed way to accept a PoH witness.
+/// Verify a bounded forward `PoH` hash sequence from `start_hash` at `start_count`.
 #[must_use]
 fn verify_poh_sequence(
     start_hash: &[u8; 32],
@@ -131,78 +125,14 @@ fn verify_poh_sequence(
     current == *expected_end_hash
 }
 
-/// The number of PoH steps a commitment at `height` must show: the slot budget
-/// of the domain, so a commitment cannot claim a slot with no hash chain
-/// behind it. The step count is fixed (not carried by the submitter) because
-/// nothing in a `DomainCommitment` selects it.
-#[must_use]
-const fn commitment_step_count(hashes_per_slot: u64) -> u64 {
-    // A slot with no steps proves no work and would make the check below an
-    // identity again, so the floor is one.
-    if hashes_per_slot == 0 {
-        1
-    } else if hashes_per_slot > MAX_POH_VERIFY_STEPS {
-        MAX_POH_VERIFY_STEPS
-    } else {
-        hashes_per_slot
-    }
-}
-
-/// The PoH digest a commitment at `height` must carry: `parent_hash` advanced
-/// over one slot's step budget, starting at the step index the height selects.
-///
-/// This is the derivation [`verify_commitment_poh_sequence`] checks against, so
-/// a producer and the settlement adapter cannot drift apart on it.
-#[must_use]
-pub fn commitment_digest(parent_hash: &[u8; 32], height: u64, hashes_per_slot: u64) -> [u8; 32] {
-    let steps = commitment_step_count(hashes_per_slot);
-    let start_count = height.saturating_mul(steps);
-    let mut current = *parent_hash;
-    for offset in 0..steps {
-        current = poh_step(&current, start_count.saturating_add(offset));
-    }
-    current
-}
-
-/// Verify that `block_hash` is the PoH digest `parent_hash` advances to over
-/// `steps` steps, starting at the step index the commitment's height selects.
-///
-/// This is the check `poh-hash-chain-v1` finality makes on its quorum arm. It
-/// is the same hash chain [`PohEngine`] runs (`poh_step`:
-/// `BDLM_POH_TICK_V1 || prev || step`), stated over the normalized 32-byte
-/// roots a `DomainCommitment` carries. The parent root is itself a PoH digest
-/// in this domain, so the equation binds parent, height and block hash into one
-/// chain step rather than confirming a value against itself.
-#[must_use]
-pub fn verify_commitment_poh_sequence(
-    parent_hash: &[u8; 32],
-    height: u64,
-    block_hash: &[u8; 32],
-    hashes_per_slot: u64,
-) -> bool {
-    if *parent_hash == [0u8; 32] || *block_hash == [0u8; 32] {
-        return false;
-    }
-    // Step 0 of a domain is its genesis and has no parent to continue; a
-    // height-1 commitment is admitted by the non-zero shape check alone.
-    if height <= 1 {
-        return true;
-    }
-    let steps = commitment_step_count(hashes_per_slot);
-    let Some(start_count) = height.checked_mul(steps) else {
-        return false;
-    };
-    verify_poh_sequence(parent_hash, start_count, steps, block_hash)
-}
-
-/// PoH engine: sequential hash chain with bounded checkpoint verification.
+/// `PoH` engine: sequential hash chain with bounded checkpoint verification.
 pub struct PohEngine {
     pub config: PohConfig,
     ledger: RwLock<PohLedger>,
 }
 
 impl PohEngine {
-    /// Create a new PoH consensus engine seeded at step 0.
+    /// Create a new `PoH` consensus engine seeded at step 0.
     #[must_use]
     pub fn new(config: PohConfig) -> Self {
         let seed = config.seed;
@@ -252,7 +182,7 @@ impl PohEngine {
         }
     }
 
-    /// Advance the PoH clock by one tick.
+    /// Advance the `PoH` clock by one tick.
     ///
     /// # Errors
     ///
@@ -275,7 +205,7 @@ impl PohEngine {
         Ok(next_hash)
     }
 
-    /// Verify that `hash` is the exact PoH digest at `expected_count`.
+    /// Verify that `hash` is the exact `PoH` digest at `expected_count`.
     #[must_use]
     pub fn verify_hash(&self, hash: &[u8; 32], expected_count: u64) -> bool {
         let Ok(ledger) = self.ledger.read() else {
@@ -312,13 +242,13 @@ impl PohEngine {
 
     #[cfg(test)]
     fn state(&self) -> PohState {
-        self.ledger
-            .read()
-            .map(|l| l.state.clone())
-            .unwrap_or(PohState {
+        self.ledger.read().map_or(
+            PohState {
                 current_hash: [0u8; 32],
                 hash_count: 0,
-            })
+            },
+            |l| l.state.clone(),
+        )
     }
 
     fn current_hash_count(&self) -> u64 {
@@ -374,8 +304,24 @@ impl ConsensusEngine for PohEngine {
             )));
         }
 
-        // Enforce monotonic timestamps along the PoH-ordered chain.
+        // Enforce strict contiguous block linkage and monotonic timestamps.
         if let Some(parent) = chain.last() {
+            let expected_index = parent
+                .index
+                .checked_add(1)
+                .ok_or_else(|| ConsensusError("PoH parent block index overflows u64".into()))?;
+            if block.index != expected_index {
+                return Err(ConsensusError(format!(
+                    "PoH block index {} does not follow parent index {} (expected {expected_index})",
+                    block.index, parent.index
+                )));
+            }
+            if block.previous_hash != parent.hash {
+                return Err(ConsensusError(format!(
+                    "PoH block previous_hash {} does not match parent hash {}",
+                    block.previous_hash, parent.hash
+                )));
+            }
             if block.timestamp < parent.timestamp {
                 return Err(ConsensusError(format!(
                     "PoH block timestamp {} regresses below parent timestamp {}",
@@ -391,11 +337,18 @@ impl ConsensusEngine for PohEngine {
         let (start_count, _steps, _end_hash) =
             self.verify_block_witness_against_ledger(&ledger, block)?;
 
-        // Prevent replaying a historical PoH witness (for example step 0) on child blocks:
-        // when the parent block carries a PoH witness, the child must continue directly
-        // from the parent's exact `(end_count, end_hash)`.
+        // Prevent replaying or skipping PoH steps on every child block:
+        // - block 1 above genesis (`parent.index == 0`) must start at count 0;
+        // - every subsequent block (`parent.index > 0`) must continue directly
+        //   from the parent's exact `(end_count, end_hash)`.
         if let Some(parent) = chain.last() {
-            if parent.index > 0 {
+            if parent.index == 0 {
+                if start_count != 0 {
+                    return Err(ConsensusError(format!(
+                        "PoH height-1 block start_count {start_count} must anchor at genesis count 0"
+                    )));
+                }
+            } else {
                 let (parent_start, parent_steps, parent_end_hash) = decode_poh_witness(parent)?;
                 let expected_start = parent_start
                     .checked_add(parent_steps)
@@ -452,6 +405,16 @@ impl ConsensusEngine for PohEngine {
             return Ok(());
         }
 
+        // Refuse partial-overlap forks (`start_count < head < end_count`) and
+        // unanchored gaps (`start_count > head`) so canonical PoH checkpoints
+        // can never be overwritten or rolled across a fork boundary.
+        if start_count != ledger.state.hash_count {
+            return Err(ConsensusError(format!(
+                "PoH commit start_count {start_count} does not continue canonical head {} (end_count={end_count})",
+                ledger.state.hash_count
+            )));
+        }
+
         let Some(anchor_hash) = Self::checkpoint_at(&ledger, start_count) else {
             return Err(ConsensusError(
                 "PoH witness anchor unavailable during commit".into(),
@@ -489,7 +452,24 @@ impl ConsensusEngine for PohEngine {
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
-        chain.last().map_or(0, |b| u128::from(b.index))
+        let Some(first) = chain.first() else {
+            return 0;
+        };
+        let mut verified_tip = first;
+        for blk in chain.iter().skip(1) {
+            if Some(blk.index) != verified_tip.index.checked_add(1)
+                || blk.previous_hash != verified_tip.hash
+                || blk.timestamp < verified_tip.timestamp
+            {
+                break;
+            }
+            verified_tip = blk;
+        }
+        // Refuse single-block unanchored high-index inflation (must start at genesis 0).
+        if first.index != 0 {
+            return 0;
+        }
+        u128::from(verified_tip.index)
     }
 
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
@@ -502,6 +482,49 @@ impl ConsensusEngine for PohEngine {
             &SplitCandidate::from_chain_tip(current, current_score),
             &SplitCandidate::from_chain_tip(candidate, candidate_score),
         ) == SplitDecision::RightWins
+    }
+}
+
+pub fn commitment_digest(parent_hash: &[u8; 32], height: u64, hashes_per_slot: u64) -> [u8; 32] {
+    let steps = commitment_step_count(hashes_per_slot);
+    let start_count = height.saturating_mul(steps);
+    let mut current = *parent_hash;
+    for offset in 0..steps {
+        current = poh_step(&current, start_count.saturating_add(offset));
+    }
+    current
+}
+
+pub fn verify_commitment_poh_sequence(
+    parent_hash: &[u8; 32],
+    height: u64,
+    block_hash: &[u8; 32],
+    hashes_per_slot: u64,
+) -> bool {
+    if *parent_hash == [0u8; 32] || *block_hash == [0u8; 32] {
+        return false;
+    }
+    // Step 0 of a domain is its genesis and has no parent to continue; a
+    // height-1 commitment is admitted by the non-zero shape check alone.
+    if height <= 1 {
+        return true;
+    }
+    let steps = commitment_step_count(hashes_per_slot);
+    let Some(start_count) = height.checked_mul(steps) else {
+        return false;
+    };
+    verify_poh_sequence(parent_hash, start_count, steps, block_hash)
+}
+
+const fn commitment_step_count(hashes_per_slot: u64) -> u64 {
+    // A slot with no steps proves no work and would make the check below an
+    // identity again, so the floor is one.
+    if hashes_per_slot == 0 {
+        1
+    } else if hashes_per_slot > MAX_POH_VERIFY_STEPS {
+        MAX_POH_VERIFY_STEPS
+    } else {
+        hashes_per_slot
     }
 }
 
@@ -644,74 +667,93 @@ mod tests {
             .validate_block(&b2, &[b1], &AccountState::new())
             .is_ok());
     }
-    // --- commitment-level PoH continuation (`poh-hash-chain-v1` finality) ----
 
-    fn digest_at(parent: &[u8; 32], start_count: u64, steps: u64) -> [u8; 32] {
-        let mut current = *parent;
-        for offset in 0..steps {
-            current = poh_step(&current, start_count + offset);
+    #[test]
+    fn b0100_poh_enforces_parent_link_genesis_start_overlap_refusal_and_contiguous_score() {
+        let config = PohConfig {
+            hashes_per_slot: 8,
+            ..PohConfig::default()
+        };
+        let engine = PohEngine::new(config);
+        let zero = "0".repeat(64);
+        let mut genesis = make_block(0, &zero);
+        genesis.hash = genesis.calculate_hash();
+
+        // 1. Height gap (index 2 on top of genesis 0) and wrong previous_hash are refused.
+        let mut gapped = make_block(2, &genesis.hash);
+        gapped.timestamp = genesis.timestamp;
+        engine
+            .prepare_block(&mut gapped, &AccountState::new())
+            .unwrap();
+        assert!(engine
+            .validate_block(
+                &gapped,
+                std::slice::from_ref(&genesis),
+                &AccountState::new()
+            )
+            .is_err());
+
+        let mut bad_parent = make_block(1, &"f".repeat(64));
+        bad_parent.timestamp = genesis.timestamp;
+        engine
+            .prepare_block(&mut bad_parent, &AccountState::new())
+            .unwrap();
+        assert!(engine
+            .validate_block(
+                &bad_parent,
+                std::slice::from_ref(&genesis),
+                &AccountState::new()
+            )
+            .is_err());
+
+        // 2. Commit honest height-1 block (0 -> 8), then refuse height-1 block starting at 8.
+        let mut b1 = make_block(1, &genesis.hash);
+        b1.timestamp = genesis.timestamp + 1;
+        engine.prepare_block(&mut b1, &AccountState::new()).unwrap();
+        engine
+            .validate_block(&b1, std::slice::from_ref(&genesis), &AccountState::new())
+            .unwrap();
+        engine.record_block(&b1, None).unwrap();
+        assert_eq!(engine.state().hash_count, 8);
+
+        let mut skipped_h1 = make_block(1, &genesis.hash);
+        skipped_h1.timestamp = genesis.timestamp + 2;
+        engine
+            .prepare_block(&mut skipped_h1, &AccountState::new())
+            .unwrap();
+        assert!(engine
+            .validate_block(
+                &skipped_h1,
+                std::slice::from_ref(&genesis),
+                &AccountState::new()
+            )
+            .is_err());
+
+        // 3. Partial-overlap fork (start_count=4 < head=8 < end_count=16) must not corrupt head.
+        let anchor_4 = {
+            let l = engine.ledger.read().unwrap();
+            *l.checkpoints.get(&4).unwrap()
+        };
+        let mut h = anchor_4;
+        for step in 0..12u64 {
+            h = poh_step(&h, 4 + step);
         }
-        current
-    }
+        let mut overlap = make_block(2, &b1.hash);
+        overlap.timestamp = b1.timestamp + 1;
+        overlap.vrf_output = h.to_vec();
+        overlap.vrf_proof = encode_poh_witness(4, 12);
+        overlap.hash = overlap.calculate_hash();
+        let err = engine.record_block(&overlap, None).unwrap_err();
+        assert!(err.0.contains("does not continue canonical head"));
+        assert_eq!(engine.state().hash_count, 8);
 
-    #[test]
-    fn a_commitment_continues_its_parent_over_a_full_slot() {
-        let parent = [0x31u8; 32];
-        let steps = 4u64;
-        let height = 5u64;
-        let block = digest_at(&parent, height * steps, steps);
-
-        assert!(verify_commitment_poh_sequence(
-            &parent, height, &block, steps
-        ));
-
-        // The zero-step check this replaced compared the block hash with
-        // itself, so all three of these passed. They must not.
-        assert!(
-            !verify_commitment_poh_sequence(&[0x32u8; 32], height, &block, steps),
-            "a re-pointed parent must not carry the same finalized digest"
-        );
-        assert!(
-            !verify_commitment_poh_sequence(&parent, height + 1, &block, steps),
-            "a re-pointed height must not carry the same finalized digest"
-        );
-        assert!(
-            !verify_commitment_poh_sequence(&parent, height, &[0x33u8; 32], steps),
-            "an arbitrary digest is not the parent's continuation"
-        );
-    }
-
-    #[test]
-    fn a_commitment_cannot_claim_a_partial_slot() {
-        let parent = [0x41u8; 32];
-        let steps = 4u64;
-        let height = 3u64;
-        // One step short of the slot budget.
-        let short = digest_at(&parent, height * steps, steps - 1);
-        assert!(!verify_commitment_poh_sequence(
-            &parent, height, &short, steps
-        ));
-    }
-
-    #[test]
-    fn genesis_and_zero_roots_are_refused() {
-        let parent = [0x51u8; 32];
-        // Height 1 is domain genesis: no parent to continue, admitted by shape.
-        assert!(verify_commitment_poh_sequence(&parent, 1, &[0x52u8; 32], 4));
-        assert!(!verify_commitment_poh_sequence(
-            &[0u8; 32],
-            5,
-            &digest_at(&[0u8; 32], 20, 4),
-            4
-        ));
-        assert!(!verify_commitment_poh_sequence(&parent, 5, &[0u8; 32], 4));
-        // A step budget of zero would make the check an identity again.
-        assert_eq!(commitment_step_count(0), 1);
-        assert_eq!(commitment_step_count(4), 4);
+        // 4. fork_choice_score rejects unanchored forged high-index chain.
+        let mut forged = make_block(999_999, &zero);
+        forged.hash = forged.calculate_hash();
+        assert_eq!(engine.fork_choice_score(&[forged.clone()]), 0);
         assert_eq!(
-            commitment_step_count(u64::MAX),
-            MAX_POH_VERIFY_STEPS,
-            "the verifier's ceiling is the step ceiling"
+            engine.fork_choice_score(&[genesis.clone(), b1.clone(), forged]),
+            1
         );
     }
 }

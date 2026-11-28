@@ -95,42 +95,41 @@ pub struct ComplianceAuditEvent {
     pub admin: Address,
 }
 
-/// Caps on the compliance log, per domain and globally.
-///
-/// WIRING: unwired - the append path that enforces them is the compliance
-/// writer, which still takes the unbounded insert until the freeze/unfreeze
-/// admission slice lands. Both numbers are fixed here first so the writer and
-/// its snapshot size limit agree.
-pub const MAX_POA_COMPLIANCE_ENTRIES_PER_DOMAIN: usize = 4_096;
-/// WIRING: unwired - the global cap is checked by the same compliance writer
-/// that will enforce the per-domain one; both are defined here first so the
-/// writer and its snapshot size limit agree.
-pub const MAX_POA_COMPLIANCE_ENTRIES_GLOBAL: usize = 65_536;
+const MAX_POA_COMPLIANCE_ENTRIES_PER_DOMAIN: usize = 4_096;
+const MAX_POA_COMPLIANCE_ENTRIES_GLOBAL: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoaComplianceError {
     PermissionlessDomainForbidden,
     AdminRequired,
+    ZeroSubjectAddress,
     ZeroEvidenceHash,
+    TravelRuleAlreadyRecorded,
     CapacityExceeded,
 }
 
 impl std::fmt::Display for PoaComplianceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PoaComplianceError::PermissionlessDomainForbidden => {
+            Self::PermissionlessDomainForbidden => {
                 write!(
                     f,
                     "PoA compliance hooks are forbidden in permissionless domains"
                 )
             }
-            PoaComplianceError::AdminRequired => {
+            Self::AdminRequired => {
                 write!(f, "PoA compliance admin approval required")
             }
-            PoaComplianceError::ZeroEvidenceHash => {
+            Self::ZeroSubjectAddress => {
+                write!(f, "PoA compliance subject address must be non-zero")
+            }
+            Self::ZeroEvidenceHash => {
                 write!(f, "compliance evidence hash must be non-zero")
             }
-            PoaComplianceError::CapacityExceeded => {
+            Self::TravelRuleAlreadyRecorded => {
+                write!(f, "travel-rule metadata already recorded for transaction")
+            }
+            Self::CapacityExceeded => {
                 write!(f, "PoA compliance registry capacity limit exceeded")
             }
         }
@@ -156,6 +155,7 @@ pub struct PoaComplianceRegistry {
 }
 
 impl PoaComplianceRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -165,7 +165,7 @@ impl PoaComplianceRegistry {
         self.freezes.len()
     }
 
-    fn ensure_poa(domain: ComplianceDomainKind) -> Result<(), PoaComplianceError> {
+    const fn ensure_poa(domain: ComplianceDomainKind) -> Result<(), PoaComplianceError> {
         match domain {
             ComplianceDomainKind::PoA => Ok(()),
             ComplianceDomainKind::Permissionless => {
@@ -204,6 +204,9 @@ impl PoaComplianceRegistry {
         block: u64,
     ) -> Result<(), PoaComplianceError> {
         Self::ensure_poa(domain)?;
+        if address == Address::zero() {
+            return Err(PoaComplianceError::ZeroSubjectAddress);
+        }
         let evidence_hash = Self::ensure_non_zero(oracle_reference_hash)?;
         let key = (domain_id, address);
         if !self.screenings.contains_key(&key) {
@@ -239,7 +242,7 @@ impl PoaComplianceRegistry {
     }
 
     /// Freeze on the authority of a NAMED admin, scoped to `domain_id`, not a
-    /// bare `bool` or chain-wide map anybody could hijack across PoA domains.
+    /// bare `bool` or chain-wide map anybody could hijack across `PoA` domains.
     /// The caller verifies the admin against `domain_id`'s admin set first;
     /// the domain id and admin name land in the audit trail.
     ///
@@ -258,6 +261,9 @@ impl PoaComplianceRegistry {
         Self::ensure_poa(domain)?;
         if admin == Address::zero() {
             return Err(PoaComplianceError::AdminRequired);
+        }
+        if address == Address::zero() {
+            return Err(PoaComplianceError::ZeroSubjectAddress);
         }
         let evidence_hash = Self::ensure_non_zero(reason_hash)?;
         let key = (domain_id, address);
@@ -310,16 +316,23 @@ impl PoaComplianceRegistry {
         if admin == Address::zero() {
             return Err(PoaComplianceError::AdminRequired);
         }
+        if address == Address::zero() {
+            return Err(PoaComplianceError::ZeroSubjectAddress);
+        }
         let evidence_hash = Self::ensure_non_zero(reason_hash)?;
-        self.freezes.remove(&(domain_id, address));
-        self.push_audit_event(ComplianceAuditEvent {
-            domain_id,
-            action: ComplianceAction::AccountUnfrozen,
-            address,
-            block,
-            evidence_hash,
-            admin,
-        });
+        // Only record an unfreeze transition when a live freeze actually existed,
+        // so repeated no-op unfreeze calls cannot fabricate audit entries or evict
+        // genuine compliance records from the bounded audit log.
+        if self.freezes.remove(&(domain_id, address)).is_some() {
+            self.push_audit_event(ComplianceAuditEvent {
+                domain_id,
+                action: ComplianceAction::AccountUnfrozen,
+                address,
+                block,
+                evidence_hash,
+                admin,
+            });
+        }
         Ok(())
     }
 
@@ -337,11 +350,15 @@ impl PoaComplianceRegistry {
         block: u64,
     ) -> Result<(), PoaComplianceError> {
         Self::ensure_poa(domain)?;
+        if subject == Address::zero() {
+            return Err(PoaComplianceError::ZeroSubjectAddress);
+        }
         let tx_hash = Self::ensure_non_zero(tx_hash)?;
         let evidence_hash = Self::ensure_non_zero(metadata_hash)?;
-        if !self.travel_rules.contains_key(&tx_hash)
-            && self.travel_rules.len() >= MAX_POA_COMPLIANCE_ENTRIES_GLOBAL
-        {
+        if self.travel_rules.contains_key(&tx_hash) {
+            return Err(PoaComplianceError::TravelRuleAlreadyRecorded);
+        }
+        if self.travel_rules.len() >= MAX_POA_COMPLIANCE_ENTRIES_GLOBAL {
             return Err(PoaComplianceError::CapacityExceeded);
         }
         self.travel_rules.insert(
@@ -364,16 +381,19 @@ impl PoaComplianceRegistry {
         Ok(())
     }
 
+    #[must_use]
     pub fn screening(&self, domain_id: DomainId, address: &Address) -> Option<&ScreeningRecord> {
         self.screenings.get(&(domain_id, *address))
     }
 
+    #[must_use]
     pub fn travel_rule(&self, tx_hash: &[u8; 32]) -> Option<&TravelRuleRecord> {
         self.travel_rules.get(tx_hash)
     }
 
     /// Permissionless domains deliberately ignore `PoA` freeze state, and each
     /// `PoA` domain only sees freezes recorded for its own `domain_id`.
+    #[must_use]
     pub fn is_frozen(
         &self,
         domain: ComplianceDomainKind,
@@ -383,6 +403,7 @@ impl PoaComplianceRegistry {
         domain == ComplianceDomainKind::PoA && self.freezes.contains_key(&(domain_id, *address))
     }
 
+    #[must_use]
     pub fn audit_events(&self) -> &[ComplianceAuditEvent] {
         &self.audit_log
     }
@@ -391,6 +412,7 @@ impl PoaComplianceRegistry {
     /// screenings, freezes and the audit trail. This is what enters the
     /// state root, so a snapshot that drops a freeze diverges at the next
     /// block instead of quietly clearing the gate.
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
@@ -442,16 +464,19 @@ impl PoaComplianceRegistry {
         serde_json::to_string(&self.audit_log)
     }
 
+    #[must_use]
     pub fn export_audit_csv(&self) -> String {
+        use std::fmt::Write as _;
         let mut out = String::from("action,address,block,evidence_hash\n");
         for event in &self.audit_log {
-            out.push_str(&format!(
-                "{:?},{},{},{}\n",
+            let _ = writeln!(
+                out,
+                "{:?},{},{},{}",
                 event.action,
                 hex::encode(event.address.as_bytes()),
                 event.block,
                 hex::encode(event.evidence_hash)
-            ));
+            );
         }
         out
     }
@@ -799,7 +824,7 @@ mod tests {
         let mut reg = PoaComplianceRegistry::new();
         let domain_id = 77;
         let admin = addr(1);
-        for i in 0..4_096u32 {
+        for i in 1..=4_096u32 {
             let mut bytes = [0u8; 32];
             bytes[..4].copy_from_slice(&i.to_be_bytes());
             let subject = Address::from(bytes);
@@ -827,7 +852,9 @@ mod tests {
             "4097th distinct freeze in one domain must be rejected"
         );
         // Unfreezing an existing entry must still succeed even at capacity.
-        let first_subject = Address::from([0u8; 32]);
+        let mut first_bytes = [0u8; 32];
+        first_bytes[..4].copy_from_slice(&1u32.to_be_bytes());
+        let first_subject = Address::from(first_bytes);
         reg.unfreeze(
             ComplianceDomainKind::PoA,
             domain_id,
@@ -837,5 +864,86 @@ mod tests {
             3,
         )
         .expect("unfreeze at capacity must succeed");
+    }
+
+    #[test]
+    fn unfreeze_of_unfrozen_zero_subject_and_travel_rule_overwrite_are_refused() {
+        let mut reg = PoaComplianceRegistry::new();
+        let domain_id = 17;
+        let admin = addr(1);
+        let subject = addr(2);
+
+        reg.screen_address(
+            ComplianceDomainKind::PoA,
+            domain_id,
+            subject,
+            ScreeningStatus::Watchlist,
+            hash(1),
+            10,
+        )
+        .unwrap();
+        let root_before = reg.root();
+        let events_before = reg.audit_events().len();
+
+        // Unfreezing an address that was never frozen is a pure no-op: it must never
+        // append a phantom AccountUnfrozen entry, evict prior audit history, or move root.
+        reg.unfreeze(
+            ComplianceDomainKind::PoA,
+            domain_id,
+            admin,
+            subject,
+            hash(2),
+            11,
+        )
+        .unwrap();
+        assert_eq!(reg.audit_events().len(), events_before);
+        assert_eq!(reg.root(), root_before);
+
+        // Zero subject address is refused across screening, freeze, and travel rule.
+        assert!(reg
+            .screen_address(
+                ComplianceDomainKind::PoA,
+                domain_id,
+                Address::zero(),
+                ScreeningStatus::Sanctioned,
+                hash(3),
+                12,
+            )
+            .is_err());
+        assert!(reg
+            .freeze_suspicious(
+                ComplianceDomainKind::PoA,
+                domain_id,
+                admin,
+                Address::zero(),
+                hash(3),
+                12,
+            )
+            .is_err());
+        assert!(reg
+            .record_travel_rule_metadata(
+                ComplianceDomainKind::PoA,
+                hash(10),
+                Address::zero(),
+                hash(11),
+                12,
+            )
+            .is_err());
+
+        // Overwriting an existing travel-rule record for the same tx_hash is refused.
+        reg.record_travel_rule_metadata(ComplianceDomainKind::PoA, hash(10), subject, hash(11), 13)
+            .unwrap();
+        assert!(
+            reg.record_travel_rule_metadata(
+                ComplianceDomainKind::PoA,
+                hash(10),
+                subject,
+                hash(99),
+                14,
+            )
+            .is_err(),
+            "overwriting recorded travel-rule evidence must be refused"
+        );
+        assert_eq!(reg.travel_rule(&hash(10)).unwrap().metadata_hash, hash(11));
     }
 }

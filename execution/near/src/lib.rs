@@ -41,6 +41,11 @@ pub const WASM_MAGIC_V1: [u8; 8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x
 /// Maximum NEAR contract payload size (`1 MiB`).
 pub const MAX_NEAR_CONTRACT_BYTES: usize = 1_048_576;
 
+/// Gas charged per byte of a stored program loaded on a call, and per byte
+/// published or written to storage, at the rate the sibling expansion
+/// environments charge for stored code.
+pub const NEAR_CODE_LOAD_PER_BYTE_BGU: u64 = 25;
+
 /// Declarative NEAR contract method opcodes executed deterministically over `HostApi`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NearOp {
@@ -241,6 +246,7 @@ struct NearExecScope<'a> {
     contract_id: &'a str,
     caller_id: &'a [u8],
     gas_limit: u64,
+    is_view: bool,
 }
 
 fn run_near_ops(
@@ -255,8 +261,29 @@ fn run_near_ops(
         if !charge_step(gas_used, scope.gas_limit, 400, host) {
             return Err(b"OUT_OF_GAS".to_vec());
         }
+        if scope.is_view
+            && matches!(
+                op,
+                NearOp::StorageWrite { .. }
+                    | NearOp::StorageAddU64 { .. }
+                    | NearOp::SetFromArg { .. }
+                    | NearOp::EmitEvent { .. }
+                    | NearOp::UniversalPromise {
+                        is_static: false,
+                        ..
+                    }
+            )
+        {
+            return Err(b"state mutation forbidden in NEAR view method".to_vec());
+        }
         match op {
             NearOp::StorageWrite { key, value } => {
+                let write_cost = u64::try_from(value.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(NEAR_CODE_LOAD_PER_BYTE_BGU);
+                if !charge_step(gas_used, scope.gas_limit, write_cost, host) {
+                    return Err(b"OUT_OF_GAS".to_vec());
+                }
                 if host
                     .write(scope.ns, &state_key(scope.contract_id, key), Some(value))
                     .is_err()
@@ -288,6 +315,13 @@ fn run_near_ops(
                 arg_key,
             } => {
                 let val = args.get(arg_key).cloned().unwrap_or_default();
+                // A caller-sized value is permanent state: pay per byte.
+                let write_cost = u64::try_from(val.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(NEAR_CODE_LOAD_PER_BYTE_BGU);
+                if !charge_step(gas_used, scope.gas_limit, write_cost, host) {
+                    return Err(b"OUT_OF_GAS".to_vec());
+                }
                 if host
                     .write(
                         scope.ns,
@@ -322,7 +356,8 @@ fn run_near_ops(
             }
             NearOp::EmitEvent { event, data } => {
                 let topic: [u8; 32] = Sha256::digest(event.as_bytes()).into();
-                let payload = format!("EVENT_JSON:{{\"event\":\"{event}\",\"data\":\"{data}\"}}");
+                let body = serde_json::json!({ "event": event, "data": data }).to_string();
+                let payload = format!("EVENT_JSON:{body}");
                 if host
                     .emit_log(EeLog {
                         emitter: EeIdentity {
@@ -344,10 +379,11 @@ fn run_near_ops(
                 gas_limit: sub_gas,
                 is_static,
             } => {
+                let cap = (*sub_gas).min(scope.gas_limit.saturating_sub(*gas_used));
                 let call = UniversalCall {
                     from: EeIdentity {
                         ee: EeId::NEAR_WASM,
-                        id: scope.caller_id.to_vec(),
+                        id: scope.contract_id.as_bytes().to_vec(),
                     },
                     to_ee: EeId(*to_ee),
                     target: EeIdentity {
@@ -356,12 +392,21 @@ fn run_near_ops(
                     },
                     value: BudAmount(0),
                     input: input.clone(),
-                    gas_limit: *sub_gas,
-                    is_static: *is_static,
+                    gas_limit: cap,
+                    is_static: *is_static || scope.is_view,
                 };
                 match host.universal_call(call) {
-                    Ok(res) if res.success => ret = res.output,
-                    Ok(res) => return Err(res.output),
+                    Ok(res) => {
+                        if !charge_step(gas_used, scope.gas_limit, res.gas_used, host) {
+                            return Err(b"OUT_OF_GAS".to_vec());
+                        }
+                        if res.success {
+                            ret = res.output;
+                        } else {
+                            return Err(res.output);
+                        }
+                    }
+                    Err(budlum_uel_abi::HostError::OutOfGas) => return Err(b"OUT_OF_GAS".to_vec()),
                     Err(_) => return Err(b"universal promise failed".to_vec()),
                 }
             }
@@ -453,28 +498,54 @@ impl ExecutionEnvironment for NearWasmWorker {
                     gas_used,
                 ));
             };
+            // Published code is permanent state every validator keeps.
+            if !charge_step(
+                &mut gas_used,
+                call.gas_limit,
+                u64::try_from(call.input.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(NEAR_CODE_LOAD_PER_BYTE_BGU),
+                host,
+            ) {
+                return Ok(ee_out_of_gas(call.gas_limit));
+            }
             let mut h = Sha256::new();
+            h.update((call.caller.id.len() as u64).to_le_bytes());
             h.update(&call.caller.id);
             h.update(call.tx_hash);
             let derived: [u8; 32] = h.finalize().into();
             let contract_id = account_id_key(&derived);
+            match host.read(&ns, &code_key(&contract_id)) {
+                Ok(Some(_)) => {
+                    return Ok(ee_reverted(
+                        b"NEAR contract already deployed".to_vec(),
+                        gas_used,
+                    ));
+                }
+                Ok(None) => {}
+                Err(budlum_uel_abi::HostError::OutOfGas) => {
+                    return Ok(ee_out_of_gas(call.gas_limit));
+                }
+                Err(_) => {
+                    return Ok(ee_reverted(b"NEAR code read failed".to_vec(), gas_used));
+                }
+            }
+            let Ok(cp) = host.checkpoint_begin() else {
+                return Ok(ee_reverted(
+                    b"NEAR checkpoint begin failed".to_vec(),
+                    gas_used,
+                ));
+            };
             if host
                 .write(&ns, &code_key(&contract_id), Some(&call.input))
                 .is_err()
+                || host
+                    .write(&ns, &owner_key(&contract_id), Some(&call.caller.id))
+                    .is_err()
             {
+                let _ = host.checkpoint_rollback(cp);
                 return Ok(ee_reverted(
                     b"failed to store NEAR contract".to_vec(),
-                    gas_used,
-                ));
-            }
-            // The deployer is the owner. The init ops run as the deployer, so a
-            // `RequireOwner` in them passes.
-            if host
-                .write(&ns, &owner_key(&contract_id), Some(&call.caller.id))
-                .is_err()
-            {
-                return Ok(ee_reverted(
-                    b"failed to record the NEAR contract owner".to_vec(),
                     gas_used,
                 ));
             }
@@ -485,12 +556,26 @@ impl ExecutionEnvironment for NearWasmWorker {
                     contract_id: &contract_id,
                     caller_id: &call.caller.id,
                     gas_limit: call.gas_limit,
+                    is_view: false,
                 };
                 match run_near_ops(&scope, &prog.init_ops, &empty_args, &mut gas_used, host) {
-                    Ok(_) => return Ok(ee_success(contract_id.into_bytes(), gas_used)),
-                    Err(e) if e == b"OUT_OF_GAS" => return Ok(ee_out_of_gas(call.gas_limit)),
-                    Err(e) => return Ok(ee_reverted(e, gas_used)),
+                    Ok(_) => {}
+                    Err(e) if e == b"OUT_OF_GAS" => {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Ok(ee_out_of_gas(call.gas_limit));
+                    }
+                    Err(e) => {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Ok(ee_reverted(e, gas_used));
+                    }
                 }
+            }
+            if host.checkpoint_commit(cp).is_err() {
+                let _ = host.checkpoint_rollback(cp);
+                return Ok(ee_reverted(
+                    b"NEAR checkpoint commit failed".to_vec(),
+                    gas_used,
+                ));
             }
             return Ok(ee_success(contract_id.into_bytes(), gas_used));
         }
@@ -507,6 +592,18 @@ impl ExecutionEnvironment for NearWasmWorker {
         let Ok(Some(blob)) = host.read(&ns, &code_key(&contract_id)) else {
             return Ok(ee_reverted(b"NEAR contract not found".to_vec(), gas_used));
         };
+        // The stored program is re-read on every call; the read pays for
+        // its own bytes so a large contract cannot ride the flat entry fee.
+        if !charge_step(
+            &mut gas_used,
+            call.gas_limit,
+            u64::try_from(blob.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(NEAR_CODE_LOAD_PER_BYTE_BGU),
+            host,
+        ) {
+            return Ok(ee_out_of_gas(call.gas_limit));
+        }
         let Ok(parsed) = decode_near_blob(&blob) else {
             return Ok(ee_reverted(b"corrupt NEAR contract".to_vec(), gas_used));
         };
@@ -522,16 +619,38 @@ impl ExecutionEnvironment for NearWasmWorker {
         let Some(method) = prog.methods.iter().find(|m| m.name == fc.method_name) else {
             return Ok(ee_reverted(b"NEAR method not found".to_vec(), gas_used));
         };
+        let Ok(cp) = host.checkpoint_begin() else {
+            return Ok(ee_reverted(
+                b"NEAR checkpoint begin failed".to_vec(),
+                gas_used,
+            ));
+        };
         let scope = NearExecScope {
             ns: &ns,
             contract_id: &contract_id,
             caller_id: &call.caller.id,
             gas_limit: call.gas_limit,
+            is_view: method.is_view,
         };
         match run_near_ops(&scope, &method.ops, &fc.args, &mut gas_used, host) {
-            Ok(out) => Ok(ee_success(out, gas_used)),
-            Err(e) if e == b"OUT_OF_GAS" => Ok(ee_out_of_gas(call.gas_limit)),
-            Err(e) => Ok(ee_reverted(e, gas_used)),
+            Ok(out) => {
+                if host.checkpoint_commit(cp).is_err() {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Ok(ee_reverted(
+                        b"NEAR checkpoint commit failed".to_vec(),
+                        gas_used,
+                    ));
+                }
+                Ok(ee_success(out, gas_used))
+            }
+            Err(e) if e == b"OUT_OF_GAS" => {
+                let _ = host.checkpoint_rollback(cp);
+                Ok(ee_out_of_gas(call.gas_limit))
+            }
+            Err(e) => {
+                let _ = host.checkpoint_rollback(cp);
+                Ok(ee_reverted(e, gas_used))
+            }
         }
     }
 
@@ -903,5 +1022,220 @@ mod tests {
         );
         assert_eq!(out.status, OutcomeStatus::Success);
         assert_eq!(stored(&worker, &host, &target), b"by-bob".to_vec());
+    }
+
+    #[test]
+    fn deploy_fails_closed_on_code_read_error() {
+        use budlum_uel_abi::{HostError, HostRead, OutOfGas, UniversalCall, UniversalResult};
+
+        struct FaultyCodeReadHost {
+            inner: MemoryHost,
+        }
+        impl HostRead for FaultyCodeReadHost {
+            fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+                if key.starts_with(b"code:") {
+                    return Err(HostError::Invalid("injected near code read error".into()));
+                }
+                self.inner.read(ns, key)
+            }
+            fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
+                self.inner.bud_balance(who)
+            }
+        }
+        impl HostApi for FaultyCodeReadHost {
+            fn write(
+                &mut self,
+                ns: &Namespace,
+                key: &[u8],
+                value: Option<&[u8]>,
+            ) -> Result<(), HostError> {
+                self.inner.write(ns, key, value)
+            }
+            fn universal_call(
+                &mut self,
+                call: UniversalCall,
+            ) -> Result<UniversalResult, HostError> {
+                self.inner.universal_call(call)
+            }
+            fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+                self.inner.emit_log(log)
+            }
+            fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
+                self.inner.charge(bgu)
+            }
+            fn bud_transfer(
+                &mut self,
+                from: &EeIdentity,
+                to: &EeIdentity,
+                attos: u128,
+            ) -> Result<(), HostError> {
+                self.inner.bud_transfer(from, to, attos)
+            }
+            fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+                self.inner.checkpoint_begin()
+            }
+            fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_commit(id)
+            }
+            fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_rollback(id)
+            }
+        }
+
+        let mut worker = NearWasmWorker::with_activation_height(Some(0));
+        let host = MemoryHost::new(5_000_000);
+        let Ok(alice) = EeIdentity::new(EeId::NEAR_WASM, b"alice.budlum.near".to_vec()) else {
+            panic!("alice");
+        };
+        let mut faulty = FaultyCodeReadHost { inner: host };
+        let Ok(res) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice,
+                value: BudAmount(0),
+                input: b"\x00asm\x01\x00\x00\x00".to_vec(),
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xF1; 32],
+            },
+            &mut faulty,
+        ) else {
+            panic!("deploy");
+        };
+        assert_eq!(
+            res.status,
+            OutcomeStatus::Revert,
+            "NEAR Deploy must fail closed on code: host.read error"
+        );
+    }
+
+    #[test]
+    fn near_per_byte_deploy_code_load_and_storage_write_gas() {
+        let mut worker = NearWasmWorker::with_activation_height(Some(0));
+        let prog = NearContractProgram {
+            abi_version: String::from("near-sdk-5.0"),
+            init_ops: vec![NearOp::StorageWrite {
+                key: String::from("init"),
+                value: vec![b'z'; 16],
+            }],
+            methods: vec![
+                NearMethod {
+                    name: String::from("ping"),
+                    is_view: true,
+                    ops: vec![NearOp::StorageReturn {
+                        key: "k".repeat(2_200),
+                    }],
+                },
+                NearMethod {
+                    name: String::from("put"),
+                    is_view: false,
+                    ops: vec![NearOp::SetFromArg {
+                        storage_key: String::from("blob"),
+                        arg_key: String::from("v"),
+                    }],
+                },
+            ],
+        };
+        let Ok(blob) = encode_near_blob(&prog) else {
+            panic!("encode_near_blob");
+        };
+        let expected_deploy_gas = 1_500 + (blob.len() as u64) * NEAR_CODE_LOAD_PER_BYTE_BGU;
+        let Ok(alice) = EeIdentity::new(EeId::NEAR_WASM, b"alice.budlum.near".to_vec()) else {
+            panic!("alice");
+        };
+        let mut host = MemoryHost::new(10_000_000);
+
+        let Ok(low_dep) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice.clone(),
+                value: BudAmount(0),
+                input: blob.clone(),
+                gas_limit: expected_deploy_gas - 1,
+                depth: 0,
+                tx_hash: [0xA1; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("low deploy");
+        };
+        assert_eq!(low_dep.status, OutcomeStatus::OutOfGas);
+
+        let Ok(dep) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: alice.clone(),
+                target: alice.clone(),
+                value: BudAmount(0),
+                input: blob.clone(),
+                gas_limit: expected_deploy_gas + 10_000,
+                depth: 0,
+                tx_hash: [0xA2; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("deploy");
+        };
+        assert_eq!(dep.status, OutcomeStatus::Success);
+        assert!(dep.gas_used >= expected_deploy_gas + 16 * NEAR_CODE_LOAD_PER_BYTE_BGU);
+        let Ok(contract) = EeIdentity::new(EeId::NEAR_WASM, dep.output) else {
+            panic!("contract");
+        };
+
+        let Ok(ping_in) = serde_json::to_vec(&NearFunctionCall {
+            method_name: String::from("ping"),
+            args: BTreeMap::new(),
+        }) else {
+            panic!("ping json");
+        };
+        let expected_load_gas = 1_500 + (blob.len() as u64) * NEAR_CODE_LOAD_PER_BYTE_BGU;
+        let Ok(low_call) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: alice.clone(),
+                target: contract.clone(),
+                value: BudAmount(0),
+                input: ping_in,
+                gas_limit: expected_load_gas - 1,
+                depth: 0,
+                tx_hash: [0xA3; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("low call");
+        };
+        assert_eq!(low_call.status, OutcomeStatus::OutOfGas);
+
+        let mut args = BTreeMap::new();
+        args.insert(String::from("v"), vec![b'x'; 4_000]);
+        let Ok(put_in) = serde_json::to_vec(&NearFunctionCall {
+            method_name: String::from("put"),
+            args,
+        }) else {
+            panic!("put json");
+        };
+        let Ok(low_put) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: alice,
+                target: contract,
+                value: BudAmount(0),
+                input: put_in,
+                gas_limit: expected_load_gas + 50_000,
+                depth: 0,
+                tx_hash: [0xA4; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("low put");
+        };
+        assert_eq!(low_put.status, OutcomeStatus::OutOfGas);
     }
 }

@@ -65,6 +65,11 @@ pub const DEFAULT_OPERATOR_CEILING: EffortTier = EffortTier::BASELINE;
 /// Going to be.
 pub const MAX_CALLBACK_EVENTS_PER_ADDRESS: usize = 256;
 
+/// Maximum distinct verifier result submissions stored per pending request (`DoS` bound).
+///
+/// Convenience: exposed for AI registry capacity checks.
+pub const MAX_RESULTS_PER_REQUEST: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiRegistry {
     #[serde(with = "crate::core::map_keys")]
@@ -427,6 +432,18 @@ impl AiRegistry {
             Some(s) => s.clone(),
             None => return Err("Associated model for request not found".into()),
         };
+        // Enforce per-verifier effort ceiling so an operator whose hardware only
+        // reaches a shallow tier cannot answer and finalize a deep-effort request
+        // merely because another operator registered a higher ceiling.
+        let verifier_ceiling = self.effort_ceiling(&result.verifier);
+        if verifier_ceiling < request.effort {
+            return Err(format!(
+                "Verifier {} effort ceiling {} is below requested effort tier {}",
+                result.verifier.to_hex(),
+                verifier_ceiling,
+                request.effort
+            ));
+        }
         if result.output_ref.len() as u64 > spec.max_output_ref_bytes {
             return Err("output_ref exceeds model specification limits".into());
         }
@@ -517,6 +534,19 @@ impl AiRegistry {
                 result.request_id.to_hex()
             ));
         }
+        // Once an outcome is finalized (and after equivocation check above has
+        // caught any conflicting re-submission by an earlier participant), ignore
+        // new late submissions without bloating result storage or inflating QoS.
+        if self.outcomes.contains_key(&result.request_id) {
+            return Ok(None);
+        }
+        let existing_len = self.results.get(&result.request_id).map_or(0, Vec::len);
+        if existing_len >= MAX_RESULTS_PER_REQUEST {
+            return Err(format!(
+                "Request {} reached MAX_RESULTS_PER_REQUEST ({MAX_RESULTS_PER_REQUEST})",
+                result.request_id.to_hex()
+            ));
+        }
         let entries = self.results.entry(result.request_id).or_default();
         entries.push(result.clone());
 
@@ -533,10 +563,9 @@ impl AiRegistry {
 
         // Check if we reached agreement threshold for this commitment.
         // Hardening: when model.require_execution_proof, only verifiers that
-        // Already attached a structurally-valid execution proof count toward
-        // Agreement - attestation alone cannot finalize execution-class models.
-        // The stored output reference is the earliest one for the agreed
-        // commitment, the same choice `try_finalize_with_proofs` makes.
+        // already attached a verified execution proof count toward agreement,
+        // and any verifier flagged for equivocation on this request is excluded
+        // from quorum, fee sharing, and finalization QoS credit.
         let first_output_ref = entries
             .iter()
             .find(|r| r.output_commitment == result.output_commitment)
@@ -550,6 +579,9 @@ impl AiRegistry {
         let request_id_for_proof = result.request_id;
         let mut agreeing_verifiers = Vec::new();
         for (verifier, _) in candidates {
+            if self.has_equivocated(&request_id_for_proof, &verifier) {
+                continue;
+            }
             if spec.require_execution_proof
                 && !self.has_verified_execution_proof(&request_id_for_proof, &verifier)
             {
@@ -1218,10 +1250,10 @@ impl AiRegistry {
         // Slash verifier stake if present.
         // Return the staked amount that was seized.
         let seized_stake = self.verifier_stakes.remove(verifier).unwrap_or(0);
-        // The ceiling hangs off the stake: when the stake goes, the declaration
-        // goes with it, or the ceiling of an address that is no longer
-        // authorized stays dangling in `state_root`.
+        // The ceiling and any explicit whitelist seat are revoked alongside the
+        // slashed stake so an equivocating verifier loses privileged status.
         self.verifier_effort_ceilings.remove(verifier);
+        self.verifier_whitelist.remove(verifier);
 
         Ok((*verifier, seized_stake))
     }
@@ -1346,6 +1378,16 @@ impl AiRegistry {
         if has_pending {
             return Err(format!(
                 "Cannot withdraw stake: verifier {} has pending equivocation disputes",
+                verifier.to_hex()
+            ));
+        }
+        // Refuse unbonding while any submitted result is still inside its live
+        // request or post-submission dispute window; otherwise a Byzantine
+        // verifier submits a result and drains its slashable stake in the very
+        // same block before a conflicting submission or fraud challenge lands.
+        if self.operator_has_open_obligations(verifier, current_block) {
+            return Err(format!(
+                "Cannot withdraw stake: verifier {} has open inference or dispute obligations",
                 verifier.to_hex()
             ));
         }
@@ -1525,6 +1567,27 @@ impl AiRegistry {
                 request_id.to_hex()
             ));
         }
+        if self.has_equivocated(request_id, verifier) {
+            return Err(format!(
+                "Verifier {} has equivocated on request {} - proofs not accepted",
+                verifier.to_hex(),
+                request_id.to_hex()
+            ));
+        }
+        // Verification status only rises: once a (request, verifier) pair holds
+        // a cryptographically verified STARK proof, a structural-only re-attach
+        // cannot overwrite or downgrade it.
+        if !fully_verified
+            && self
+                .fully_verified_proofs
+                .contains(&(*request_id, verifier.0))
+        {
+            return Err(format!(
+                "Cannot downgrade already fully verified execution proof for verifier {} on request {}",
+                verifier.to_hex(),
+                request_id.to_hex()
+            ));
+        }
         // Verify that a result exists for this verifier
         let results = self
             .results
@@ -1608,9 +1671,9 @@ impl AiRegistry {
         use std::collections::BTreeMap;
         let mut by_commit: BTreeMap<[u8; 32], Vec<Address>> = BTreeMap::new();
         for r in entries {
-            // A model that requires an execution proof settles only on a proof
-            // that cleared full STARK verification (`fully_verified_proofs`),
-            // never on structural-only envelope bytes (CWE-345).
+            if self.has_equivocated(request_id, &r.verifier) {
+                continue;
+            }
             if spec.require_execution_proof
                 && !self.has_verified_execution_proof(request_id, &r.verifier)
             {
@@ -1622,22 +1685,43 @@ impl AiRegistry {
                 .push(r.verifier);
         }
         let mut best: Option<([u8; 32], Vec<Address>)> = None;
+        let mut tied = false;
         for (c, vs) in by_commit {
             if vs.len() as u32 >= spec.agreement_threshold {
                 match &best {
-                    Some((_, bvs)) if bvs.len() >= vs.len() => {}
-                    _ => best = Some((c, vs)),
+                    Some((_, bvs)) if vs.len() > bvs.len() => {
+                        best = Some((c, vs));
+                        tied = false;
+                    }
+                    Some((_, bvs)) if vs.len() == bvs.len() => {
+                        tied = true;
+                    }
+                    Some(_) => {}
+                    None => {
+                        best = Some((c, vs));
+                        tied = false;
+                    }
                 }
             }
+        }
+        if tied {
+            return None;
         }
         let (output_commitment, mut agreeing_verifiers) = best?;
         agreeing_verifiers.sort();
         let output_ref = entries
             .iter()
-            .find(|r| r.output_commitment == output_commitment)
+            .find(|r| {
+                r.output_commitment == output_commitment
+                    && agreeing_verifiers.binary_search(&r.verifier).is_ok()
+            })
             .map_or_else(BoundedBytes::empty, |r| r.output_ref.clone());
         let finalized_at_block = entries
             .iter()
+            .filter(|r| {
+                r.output_commitment == output_commitment
+                    && agreeing_verifiers.binary_search(&r.verifier).is_ok()
+            })
             .map(|r| r.submitted_at_block)
             .max()
             .unwrap_or(0);
@@ -2212,6 +2296,7 @@ impl AiRegistry {
 
         // Domain: models
         hasher.update(b"BDLM_AI_MODELS");
+        hasher.update((self.models.len() as u64).to_le_bytes());
         for (id, spec) in &self.models {
             hasher.update(id.0);
             hasher.update(spec.calculate_leaf());
@@ -2219,6 +2304,7 @@ impl AiRegistry {
 
         // Domain: requests
         hasher.update(b"BDLM_AI_REQUESTS");
+        hasher.update((self.requests.len() as u64).to_le_bytes());
         for (id, req) in &self.requests {
             hasher.update(id.0);
             hasher.update(req.calculate_leaf());
@@ -2226,9 +2312,11 @@ impl AiRegistry {
 
         // Domain: results
         hasher.update(b"BDLM_AI_RESULTS");
+        hasher.update((self.results.len() as u64).to_le_bytes());
         for (id, res_list) in &self.results {
             hasher.update(id.0);
             let mut list_hasher = Sha256::new();
+            list_hasher.update((res_list.len() as u64).to_le_bytes());
             for res in res_list {
                 list_hasher.update(res.calculate_leaf());
             }
@@ -2237,6 +2325,7 @@ impl AiRegistry {
 
         // Domain: outcomes
         hasher.update(b"BDLM_AI_OUTCOMES");
+        hasher.update((self.outcomes.len() as u64).to_le_bytes());
         for (id, outcome) in &self.outcomes {
             hasher.update(id.0);
             hasher.update(outcome.calculate_leaf());
@@ -2244,6 +2333,7 @@ impl AiRegistry {
 
         // Domain: reclaimed_fees
         hasher.update(b"BDLM_AI_RECLAIMED");
+        hasher.update((self.reclaimed_fees.len() as u64).to_le_bytes());
         for id in &self.reclaimed_fees {
             hasher.update(id.0);
             hasher.update(b"RECLAIMED");
@@ -2251,6 +2341,7 @@ impl AiRegistry {
 
         // Domain: equivocation_events
         hasher.update(b"BDLM_AI_EQUIVOCATIONS");
+        hasher.update((self.equivocation_events.len() as u64).to_le_bytes());
         for ((req_id, verifier_bytes), detected_block) in &self.equivocation_events {
             hasher.update(req_id.0);
             hasher.update(verifier_bytes);
@@ -2259,12 +2350,14 @@ impl AiRegistry {
 
         // Domain: cancelled_requests
         hasher.update(b"BDLM_AI_CANCELLED");
+        hasher.update((self.cancelled_requests.len() as u64).to_le_bytes());
         for id in &self.cancelled_requests {
             hasher.update(id.0);
         }
 
         // Domain: verifier_stakes
         hasher.update(b"BDLM_AI_VERIFIER_STAKES");
+        hasher.update((self.verifier_stakes.len() as u64).to_le_bytes());
         for (verifier, stake) in &self.verifier_stakes {
             hasher.update(verifier.as_bytes());
             hasher.update(stake.to_le_bytes());
@@ -2276,6 +2369,7 @@ impl AiRegistry {
         // it, so if it stays out of `state_root` two nodes settle the same
         // request differently.
         hasher.update(b"BDLM_AI_VERIFIER_CEILINGS");
+        hasher.update((self.verifier_effort_ceilings.len() as u64).to_le_bytes());
         for (verifier, ceiling) in &self.verifier_effort_ceilings {
             hasher.update(verifier.as_bytes());
             hasher.update(ceiling.as_bytes());
@@ -2283,6 +2377,7 @@ impl AiRegistry {
 
         // Domain: callback_queue
         hasher.update(b"BDLM_AI_CALLBACK_QUEUE_V2");
+        hasher.update((self.callback_queue.len() as u64).to_le_bytes());
         for (addr, events) in &self.callback_queue {
             hasher.update(addr.as_bytes());
             hasher.update((events.len() as u64).to_le_bytes());
@@ -2296,6 +2391,7 @@ impl AiRegistry {
 
         // Domain: execution_proofs
         hasher.update(b"BDLM_AI_EXEC_PROOFS");
+        hasher.update((self.execution_proofs.len() as u64).to_le_bytes());
         for ((req_id, verifier_bytes), proof) in &self.execution_proofs {
             hasher.update(req_id.0);
             hasher.update(verifier_bytes);
@@ -2308,6 +2404,7 @@ impl AiRegistry {
         // `require_proof` escrow release, and cannot be re-derived from
         // `execution_proofs` envelopes alone (CWE-345).
         hasher.update(b"BDLM_AI_FULLY_VERIFIED_PROOFS");
+        hasher.update((self.fully_verified_proofs.len() as u64).to_le_bytes());
         for (req_id, verifier_bytes) in &self.fully_verified_proofs {
             hasher.update(req_id.0);
             hasher.update(verifier_bytes);
@@ -2315,6 +2412,7 @@ impl AiRegistry {
 
         // Domain: verifier_qos
         hasher.update(b"BDLM_AI_VERIFIER_QOS");
+        hasher.update((self.verifier_qos.len() as u64).to_le_bytes());
         for (verifier, qos) in &self.verifier_qos {
             hasher.update(verifier.as_bytes());
             hasher.update(qos.calculate_leaf());
@@ -2322,23 +2420,27 @@ impl AiRegistry {
 
         // Domain: agent_payments
         hasher.update(b"BDLM_AI_AGENT_PAYMENTS");
+        hasher.update((self.agent_payments.len() as u64).to_le_bytes());
         for (pid, payment) in &self.agent_payments {
             hasher.update(pid);
             hasher.update(payment.calculate_leaf());
         }
         // Domain: settled agent payments (audit trail)
         hasher.update(b"BDLM_AI_AGENT_PAYMENT_SETTLEMENTS_V1");
+        hasher.update((self.settled_agent_payments.len() as u64).to_le_bytes());
         for (pid, settlement) in &self.settled_agent_payments {
             hasher.update(pid);
             hasher.update(settlement.calculate_leaf());
         }
         hasher.update(b"BDLM_AI_VERIFIER_WHITELIST");
+        hasher.update((self.verifier_whitelist.len() as u64).to_le_bytes());
         for verifier in &self.verifier_whitelist {
             hasher.update(verifier.as_bytes());
         }
 
         // Domain: agent_reputations
         hasher.update(b"BDLM_AI_AGENT_REPUTATIONS");
+        hasher.update((self.agent_reputations.len() as u64).to_le_bytes());
         for (addr, rep) in &self.agent_reputations {
             hasher.update(addr.as_bytes());
             hasher.update(rep.calculate_leaf());
@@ -2517,5 +2619,245 @@ mod tests {
                 rep.trust_score()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod registry_security_regression_tests {
+    use super::*;
+    use crate::ai::types::{
+        AiExecutionProof, AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec,
+        AiRequestId, BoundedBytes,
+    };
+    use crate::ai_inference::effort::EffortTier;
+
+    fn addr(b: u8) -> Address {
+        Address::from([b; 32])
+    }
+
+    fn build_spec(owner: Address, threshold: u32) -> AiModelSpec {
+        let model_id = AiModelId::of(&owner, &[0xAB; 32], 1);
+        AiModelSpec {
+            model_id,
+            model_hash: [0xAB; 32],
+            owner,
+            min_verifier_count: threshold.max(2),
+            agreement_threshold: threshold,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 1024,
+            request_deadline_blocks: 200,
+            result_deadline_blocks: 200,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_dims: None,
+            execution_weights_digest: None,
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        }
+    }
+
+    fn build_req(
+        requester: Address,
+        model_id: AiModelId,
+        effort: EffortTier,
+        block: u64,
+    ) -> AiInferenceRequest {
+        let payload = b"prompt".to_vec();
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId([0; 32]),
+            requester,
+            model_id,
+            input_commitment: crate::ai::types::canonical_input_commitment(&payload),
+            input_ref: BoundedBytes::try_new(payload).unwrap(),
+            max_fee: 500,
+            callback: None,
+            submitted_at_block: block,
+            deadline_block: block + 150,
+            perception: Some(crate::ai_inference::perception::PerceptionRequest {
+                asset_id: Default::default(),
+                content_id: crate::storage::content_id::ContentId([2; 32]),
+                kind: crate::ai_inference::perception::PerceptionKind::Text,
+                declared_units: 6,
+            }),
+            effort,
+        };
+        req.request_id = req.calculate_id();
+        req
+    }
+
+    fn build_res(
+        request_id: AiRequestId,
+        verifier: Address,
+        body: &[u8],
+        nonce: u64,
+        block: u64,
+    ) -> AiInferenceResult {
+        AiInferenceResult {
+            request_id,
+            verifier,
+            output_commitment: crate::ai::types::canonical_output_commitment(body),
+            output_ref: BoundedBytes::try_new(body.to_vec()).unwrap(),
+            result_nonce: nonce,
+            signature: Vec::new(),
+            submitted_at_block: block,
+        }
+    }
+
+    #[test]
+    fn withdraw_stake_is_blocked_until_result_dispute_window_closes() {
+        let mut reg = AiRegistry::new();
+        let owner = addr(0x50);
+        let v1 = addr(0x51);
+        let spec = build_spec(owner, 2);
+        let model_id = reg.register_model(spec).unwrap();
+        reg.lock_verifier_stake(&v1, MIN_VERIFIER_STAKE * 2)
+            .unwrap();
+        let req_id = reg
+            .submit_request(build_req(owner, model_id, EffortTier::BASELINE, 10), 10)
+            .unwrap();
+        reg.submit_result(build_res(req_id, v1, b"out-a", 1, 20), 20)
+            .unwrap();
+
+        // Immediate same-block and in-window stake escape must fail closed.
+        let err_now = reg
+            .withdraw_verifier_stake(&v1, MIN_VERIFIER_STAKE, 20)
+            .expect_err("same-block stake withdrawal after submit_result must fail");
+        assert!(err_now.contains("open inference or dispute obligations"));
+        let last_locked = 20 + DISPUTE_WINDOW_BLOCKS;
+        assert!(reg
+            .withdraw_verifier_stake(&v1, MIN_VERIFIER_STAKE, last_locked)
+            .is_err());
+        assert_eq!(reg.verifier_stake(&v1), MIN_VERIFIER_STAKE * 2);
+
+        // Once both the dispute window and request deadline have passed, unbonding works.
+        let free_block = (20 + DISPUTE_WINDOW_BLOCKS + 1).max(220);
+        let withdrawn = reg
+            .withdraw_verifier_stake(&v1, MIN_VERIFIER_STAKE, free_block)
+            .expect("withdrawal after all obligations close succeeds");
+        assert_eq!(withdrawn, MIN_VERIFIER_STAKE);
+    }
+
+    #[test]
+    fn shallow_ceiling_verifier_cannot_answer_deep_effort_request() {
+        let mut reg = AiRegistry::new();
+        let owner = addr(0x60);
+        let deep_op = addr(0x61);
+        let shallow_op = addr(0x62);
+        let spec = build_spec(owner, 1);
+        let model_id = reg.register_model(spec).unwrap();
+
+        reg.lock_verifier_stake(&deep_op, MIN_VERIFIER_STAKE)
+            .unwrap();
+        reg.declare_effort_ceiling(&deep_op, EffortTier::DEEPEST)
+            .unwrap();
+        reg.lock_verifier_stake(&shallow_op, MIN_VERIFIER_STAKE)
+            .unwrap();
+        // `shallow_op` stays at `DEFAULT_OPERATOR_CEILING` (1.0x).
+
+        let deep = EffortTier::from_tenths(50).unwrap();
+        let req_id = reg
+            .submit_request(build_req(owner, model_id, deep, 5), 5)
+            .unwrap();
+
+        let err = reg
+            .submit_result(build_res(req_id, shallow_op, b"cheap", 1, 6), 6)
+            .expect_err("shallow operator must not finalize a deep request");
+        assert!(err.contains("effort ceiling"), "{err}");
+        assert!(reg.get_outcome(&req_id).is_none());
+
+        let ok = reg
+            .submit_result(build_res(req_id, deep_op, b"deep-ok", 1, 6), 6)
+            .unwrap();
+        assert!(ok.is_some());
+    }
+
+    #[test]
+    fn equivocator_is_excluded_from_quorum_proofs_and_whitelist_and_no_proof_downgrade() {
+        let mut reg = AiRegistry::new();
+        let owner = addr(0x70);
+        let v_byz = addr(0x71);
+        let v_honest1 = addr(0x72);
+        let v_honest2 = addr(0x73);
+        let v_late = addr(0x74);
+        let model_id = reg.register_model(build_spec(owner, 2)).unwrap();
+
+        for v in [v_byz, v_honest1, v_honest2, v_late] {
+            reg.lock_verifier_stake(&v, MIN_VERIFIER_STAKE).unwrap();
+            reg.verifier_whitelist.insert(v);
+        }
+
+        let req = build_req(owner, model_id, EffortTier::BASELINE, 10);
+        let in_c = req.input_commitment;
+        let req_id = reg.submit_request(req, 10).unwrap();
+
+        // Byzantine verifier submits "yes", then equivocates with "no".
+        reg.submit_result(build_res(req_id, v_byz, b"yes", 1, 11), 11)
+            .unwrap();
+        assert!(reg
+            .submit_result(build_res(req_id, v_byz, b"no", 2, 12), 12)
+            .is_err());
+
+        // First honest verifier submits "yes": must NOT reach quorum=2 with v_byz.
+        let not_yet = reg
+            .submit_result(build_res(req_id, v_honest1, b"yes", 1, 13), 13)
+            .unwrap();
+        assert!(
+            not_yet.is_none(),
+            "equivocator must not count toward quorum"
+        );
+
+        // Second honest verifier submits "yes": finalizes with ONLY honest verifiers.
+        let outcome = reg
+            .submit_result(build_res(req_id, v_honest2, b"yes", 1, 14), 14)
+            .unwrap()
+            .expect("two honest verifiers reach quorum");
+        assert_eq!(outcome.agreeing_verifiers, vec![v_honest1, v_honest2]);
+
+        // Late verifier after finalization neither appends state nor farms QoS.
+        let stored_before = reg.results.get(&req_id).unwrap().len();
+        assert!(reg
+            .submit_result(build_res(req_id, v_late, b"yes", 1, 15), 15)
+            .unwrap()
+            .is_none());
+        assert_eq!(reg.results.get(&req_id).unwrap().len(), stored_before);
+        assert!(!reg.verifier_qos.contains_key(&v_late));
+
+        // Proof attach from equivocator is refused; verified proof cannot be downgraded.
+        let out_c = crate::ai::types::canonical_output_commitment(b"yes");
+        let proof_a = AiExecutionProof {
+            model_id,
+            input_commitment: in_c,
+            output_commitment: out_c,
+            program_hash: [0x11; 32],
+            proof_bytes: vec![1, 2, 3, 4],
+            steps: 8,
+            gas_used: 16,
+            weights_digest: None,
+            public_inputs: None,
+        };
+        let mut proof_b = proof_a.clone();
+        proof_b.proof_bytes = vec![9, 9, 9, 9];
+        assert_ne!(
+            proof_a.calculate_leaf(),
+            proof_b.calculate_leaf(),
+            "proof leaf must commit to proof_bytes"
+        );
+        assert!(reg
+            .attach_execution_proof(&req_id, &v_byz, proof_a.clone(), true)
+            .is_err());
+        reg.attach_execution_proof(&req_id, &v_honest1, proof_a.clone(), true)
+            .unwrap();
+        let downgrade = reg
+            .attach_execution_proof(&req_id, &v_honest1, proof_a, false)
+            .expect_err("verified proof must not be downgraded");
+        assert!(downgrade.contains("downgrade"), "{downgrade}");
+        assert!(reg.has_verified_execution_proof(&req_id, &v_honest1));
+
+        // Slashing revokes stake and removes the equivocator from the whitelist.
+        let (_, seized) = reg.slash_equivocator(&req_id, &v_byz, 16).unwrap();
+        assert_eq!(seized, MIN_VERIFIER_STAKE);
+        assert!(!reg.verifier_whitelist.contains(&v_byz));
     }
 }

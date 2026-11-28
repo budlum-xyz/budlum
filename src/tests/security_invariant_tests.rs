@@ -351,7 +351,10 @@ fn a_restart_keeps_the_epoch_boundary_checkpoint() {
         "the boundary committed before the restart must still bound fork choice: {checkpoints:?}"
     );
     assert_eq!(
-        engine.last_checkpoint().map(|(h, _)| h),
+        engine
+            .last_checkpoint()
+            .expect("checkpoint lock")
+            .map(|(h, _)| h),
         Some(boundary.index),
         "the restored checkpoint is the revert limit the node had"
     );

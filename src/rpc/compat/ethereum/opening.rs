@@ -2,7 +2,7 @@
 //!
 //! # What this gateway is
 //!
-//! An Ethereum tool (Foundry, Hardhat, viem, ethers, MetaMask) speaks one
+//! An Ethereum tool (Foundry, Hardhat, viem, ethers, `MetaMask`) speaks one
 //! vocabulary. This gateway answers that vocabulary from Budlum state. It is
 //! not an Ethereum node and it holds no state of its own: every answer is a
 //! read of the same chain `bud_*` serves.

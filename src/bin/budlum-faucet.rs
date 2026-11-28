@@ -583,7 +583,7 @@ impl Faucet {
             .ok_or("request needs a challenge string")?;
         let nonce = value
             .get("nonce")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .ok_or("request needs an unsigned nonce")?;
         let mut challenges = self.challenges.lock().await;
         // Take before checking: one challenge yields at most one submission,

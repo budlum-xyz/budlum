@@ -121,11 +121,17 @@ fn slot_key(contract: &[u8], slot: u64) -> Vec<u8> {
 }
 
 fn set_caller_256(vm: &mut Vm, caller_id: &[u8]) {
-    let mut buf = [0u8; 32];
-    let n = caller_id.len().min(32);
-    if let (Some(dst), Some(src)) = (buf.get_mut(..n), caller_id.get(..n)) {
-        dst.copy_from_slice(src);
-    }
+    let buf: [u8; 32] = if let Ok(exact) = caller_id.try_into() {
+        exact
+    } else {
+        let mut h = Sha256::new();
+        let tag = b"bud-ee-budzero-caller-v1";
+        h.update((tag.len() as u64).to_le_bytes());
+        h.update(tag);
+        h.update((caller_id.len() as u64).to_le_bytes());
+        h.update(caller_id);
+        h.finalize().into()
+    };
     vm.context.set_sender_bytes(&buf);
 }
 
@@ -201,6 +207,34 @@ impl ExecutionEnvironment for BudZeroWorker {
                         gas_used: call.gas_limit,
                     });
                 }
+                // Published code is permanent state every validator keeps:
+                // the deploy pays the shared per-byte publication rate.
+                let deploy_gas = 5_000u64.saturating_add(
+                    u64::try_from(call.input.len())
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(25),
+                );
+                if deploy_gas > call.gas_limit || host.charge(deploy_gas).is_err() {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::OutOfGas,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
+                    });
+                }
+                if matches!(host.read(&prog_ns, &call.target.id), Ok(Some(_))) {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"program already deployed".to_vec(),
+                        gas_used: 0,
+                    });
+                }
+                let Ok(cp) = host.checkpoint_begin() else {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
+                    });
+                };
                 if host
                     .write(&prog_ns, &call.target.id, Some(&call.input))
                     .is_err()
@@ -211,7 +245,9 @@ impl ExecutionEnvironment for BudZeroWorker {
                             Some(&call.caller.id),
                         )
                         .is_err()
+                    || host.checkpoint_commit(cp).is_err()
                 {
+                    let _ = host.checkpoint_rollback(cp);
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
                         output: Vec::new(),
@@ -221,7 +257,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                 Ok(EeOutcome {
                     status: OutcomeStatus::Success,
                     output: call.target.id.clone(),
-                    gas_used: 0,
+                    gas_used: deploy_gas,
                 })
             }
             EeCallKind::Call => {
@@ -254,19 +290,117 @@ impl ExecutionEnvironment for BudZeroWorker {
                 set_caller_256(&mut vm, &call.caller.id);
                 vm.context.block_height = ctx.height;
 
+                // Every storage slot the bytecode reads or writes must be covered
+                // so a caller cannot hide committed state behind an omitted
+                // `declared` entry and force a zero read.
+                for raw in &program {
+                    let Ok(inst) =
+                        Instruction::decode_for_mainnet(*raw, MainnetActivation::default())
+                    else {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::InvalidCode,
+                            output: Vec::new(),
+                            gas_used: call.gas_limit,
+                        });
+                    };
+                    if matches!(inst.opcode, Opcode::SRead | Opcode::SWrite) {
+                        if inst.imm == -1 {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::InvalidCode,
+                                output: b"dynamic BudZero storage slot operand".to_vec(),
+                                gas_used: call.gas_limit,
+                            });
+                        }
+                        let slot = bud_vm::constant_storage_slot(inst.imm);
+                        let covered = if inst.opcode == Opcode::SWrite {
+                            declared.contains(&slot)
+                        } else {
+                            declared.contains(&slot) || pairs.iter().any(|(s, _)| *s == slot)
+                        };
+                        if !covered {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: format!("BudZero storage slot {slot} not declared")
+                                    .into_bytes(),
+                                gas_used: 0,
+                            });
+                        }
+                    }
+                }
+
                 for &slot in &declared {
+                    if slot >= bud_vm::GOLDILOCKS_P {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"non-canonical storage slot in declared list".to_vec(),
+                            gas_used: 0,
+                        });
+                    }
                     let key = slot_key(&call.target.id, slot);
-                    if let Ok(Some(raw)) = host.read(&store_ns, &key) {
-                        if let Ok(arr) = raw.as_slice().try_into() {
-                            vm.storage.insert(slot, u64::from_le_bytes(arr));
+                    match host.read(&store_ns, &key) {
+                        Ok(Some(raw)) => {
+                            let Ok(arr) = <[u8; 8]>::try_from(raw.as_slice()) else {
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: b"corrupt committed storage word".to_vec(),
+                                    gas_used: 0,
+                                });
+                            };
+                            let word = u64::from_le_bytes(arr);
+                            if word >= bud_vm::GOLDILOCKS_P {
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: b"non-canonical committed storage word".to_vec(),
+                                    gas_used: 0,
+                                });
+                            }
+                            vm.storage.insert(slot, word);
+                        }
+                        Ok(None) => {}
+                        Err(HostError::OutOfGas) => {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::OutOfGas,
+                                output: Vec::new(),
+                                gas_used: call.gas_limit,
+                            });
+                        }
+                        Err(_) => {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"committed storage read failed".to_vec(),
+                                gas_used: 0,
+                            });
                         }
                     }
                 }
                 for (slot, val) in pairs {
+                    if slot >= bud_vm::GOLDILOCKS_P || val >= bud_vm::GOLDILOCKS_P {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"non-canonical field element in call input".to_vec(),
+                            gas_used: 0,
+                        });
+                    }
                     let key = slot_key(&call.target.id, slot);
-                    let collides_committed = declared.contains(&slot)
-                        || matches!(host.read(&store_ns, &key), Ok(Some(_)));
-                    if collides_committed {
+                    let has_committed = match host.read(&store_ns, &key) {
+                        Ok(Some(_)) => true,
+                        Ok(None) => false,
+                        Err(HostError::OutOfGas) => {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::OutOfGas,
+                                output: Vec::new(),
+                                gas_used: call.gas_limit,
+                            });
+                        }
+                        Err(_) => {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"committed storage read failed".to_vec(),
+                                gas_used: 0,
+                            });
+                        }
+                    };
+                    if declared.contains(&slot) || has_committed {
                         return Ok(EeOutcome {
                             status: OutcomeStatus::Revert,
                             output: b"call input slot collides with declared storage".to_vec(),
@@ -276,6 +410,14 @@ impl ExecutionEnvironment for BudZeroWorker {
                     vm.storage.insert(slot, val);
                 }
 
+                let Ok(call_cp) = host.checkpoint_begin() else {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
+                    });
+                };
+
                 let mut ucall_gas = 0u64;
                 if program_has_universal_syscall(&program) {
                     let is_owner_or_self = call.caller.id == call.target.id
@@ -284,6 +426,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                             Ok(Some(ref owner)) if owner.as_slice() == call.caller.id.as_slice()
                         );
                     if !is_owner_or_self {
+                        let _ = host.checkpoint_rollback(call_cp);
                         return Ok(EeOutcome {
                             status: OutcomeStatus::Revert,
                             output: b"unauthorized budzero universal syscall".to_vec(),
@@ -319,6 +462,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                             vm.storage.insert(0x4006, u64::from(ures.success));
                         }
                         Err(HostError::OutOfGas) => {
+                            let _ = host.checkpoint_rollback(call_cp);
                             return Ok(EeOutcome {
                                 status: OutcomeStatus::OutOfGas,
                                 output: Vec::new(),
@@ -326,6 +470,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                             });
                         }
                         Err(_) => {
+                            let _ = host.checkpoint_rollback(call_cp);
                             return Ok(EeOutcome {
                                 status: OutcomeStatus::Revert,
                                 output: Vec::new(),
@@ -338,6 +483,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                 let receipt = vm.run_receipt(&program);
                 let total_gas = receipt.gas_used.saturating_add(ucall_gas);
                 if host.charge(total_gas).is_err() {
+                    let _ = host.checkpoint_rollback(call_cp);
                     return Ok(EeOutcome {
                         status: OutcomeStatus::OutOfGas,
                         output: Vec::new(),
@@ -345,15 +491,19 @@ impl ExecutionEnvironment for BudZeroWorker {
                     });
                 }
                 if !receipt.success {
+                    let _ = host.checkpoint_rollback(call_cp);
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
                         output: Vec::new(),
                         gas_used: total_gas,
                     });
                 }
-                for (slot, val) in &vm.state_writes {
-                    let key = slot_key(&call.target.id, *slot);
+                let ordered_writes: std::collections::BTreeMap<u64, u64> =
+                    vm.state_writes.iter().copied().collect();
+                for (slot, val) in ordered_writes {
+                    let key = slot_key(&call.target.id, slot);
                     if let Err(err) = host.write(&store_ns, &key, Some(&val.to_le_bytes())) {
+                        let _ = host.checkpoint_rollback(call_cp);
                         let status = if matches!(err, HostError::OutOfGas) {
                             OutcomeStatus::OutOfGas
                         } else {
@@ -367,10 +517,30 @@ impl ExecutionEnvironment for BudZeroWorker {
                     }
                 }
                 for ev in &receipt.events {
-                    let _ = host.emit_log(EeLog {
+                    if let Err(err) = host.emit_log(EeLog {
                         emitter: call.target.clone(),
                         topics: Vec::new(),
                         data: ev.to_le_bytes().to_vec(),
+                    }) {
+                        let _ = host.checkpoint_rollback(call_cp);
+                        let status = if matches!(err, HostError::OutOfGas) {
+                            OutcomeStatus::OutOfGas
+                        } else {
+                            OutcomeStatus::Revert
+                        };
+                        return Ok(EeOutcome {
+                            status,
+                            output: Vec::new(),
+                            gas_used: call.gas_limit,
+                        });
+                    }
+                }
+                if host.checkpoint_commit(call_cp).is_err() {
+                    let _ = host.checkpoint_rollback(call_cp);
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
                     });
                 }
                 let mut out = Vec::with_capacity(receipt.events.len() * 8);
@@ -420,15 +590,81 @@ impl ExecutionEnvironment for BudZeroWorker {
         let mut vm = Vm::with_mainnet_mode(WORKER_VM_MEMORY_BYTES, 1_000_000, true)
             .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
         vm.context.block_height = ctx.height;
-        for slot in declared {
-            let key = slot_key(&q.target.id, slot);
-            if let Ok(Some(raw)) = host.read(&store_ns, &key) {
-                if let Ok(arr) = raw.as_slice().try_into() {
-                    vm.storage.insert(slot, u64::from_le_bytes(arr));
+        for raw in &program {
+            let inst = Instruction::decode_for_mainnet(*raw, MainnetActivation::default())
+                .map_err(|e| EeRefusal {
+                    code: RefusalCode::InvalidCode,
+                    message: format!("invalid BudZero instruction: {e:?}"),
+                })?;
+            if matches!(inst.opcode, Opcode::SRead | Opcode::SWrite) {
+                if inst.imm == -1 {
+                    return Err(EeRefusal {
+                        code: RefusalCode::InvalidCode,
+                        message: "dynamic BudZero storage slot operand".into(),
+                    });
+                }
+                let slot = bud_vm::constant_storage_slot(inst.imm);
+                let covered = if inst.opcode == Opcode::SWrite {
+                    declared.contains(&slot)
+                } else {
+                    declared.contains(&slot) || pairs.iter().any(|(s, _)| *s == slot)
+                };
+                if !covered {
+                    return Err(EeRefusal {
+                        code: RefusalCode::Denied,
+                        message: format!("BudZero storage slot {slot} not declared"),
+                    });
                 }
             }
         }
+        for &slot in &declared {
+            if slot >= bud_vm::GOLDILOCKS_P {
+                return Err(EeRefusal {
+                    code: RefusalCode::InvalidCode,
+                    message: "non-canonical storage slot in declared list".into(),
+                });
+            }
+            let key = slot_key(&q.target.id, slot);
+            let raw_opt = host.read(&store_ns, &key).map_err(|e| EeRefusal {
+                code: RefusalCode::Denied,
+                message: e.to_string(),
+            })?;
+            if let Some(raw) = raw_opt {
+                let arr = <[u8; 8]>::try_from(raw.as_slice()).map_err(|_| EeRefusal {
+                    code: RefusalCode::Denied,
+                    message: "corrupt committed storage word".into(),
+                })?;
+                let word = u64::from_le_bytes(arr);
+                if word >= bud_vm::GOLDILOCKS_P {
+                    return Err(EeRefusal {
+                        code: RefusalCode::Denied,
+                        message: "non-canonical committed storage word".into(),
+                    });
+                }
+                vm.storage.insert(slot, word);
+            }
+        }
         for (slot, val) in pairs {
+            if slot >= bud_vm::GOLDILOCKS_P || val >= bud_vm::GOLDILOCKS_P {
+                return Err(EeRefusal {
+                    code: RefusalCode::InvalidCode,
+                    message: "non-canonical field element in call input".into(),
+                });
+            }
+            let key = slot_key(&q.target.id, slot);
+            let has_committed = host
+                .read(&store_ns, &key)
+                .map_err(|e| EeRefusal {
+                    code: RefusalCode::Denied,
+                    message: e.to_string(),
+                })?
+                .is_some();
+            if declared.contains(&slot) || has_committed {
+                return Err(EeRefusal {
+                    code: RefusalCode::Denied,
+                    message: "call input slot collides with committed storage".into(),
+                });
+            }
             vm.storage.insert(slot, val);
         }
         let receipt = vm.run_receipt(&program);
@@ -743,5 +979,431 @@ mod tests {
         fx.deploy(counter_loop(1_000));
         assert_eq!(fx.call(1_000_000).status, OutcomeStatus::Success);
         assert!(fx.query().is_ok());
+    }
+
+    #[test]
+    fn short_caller_ids_with_trailing_zeros_remain_distinct_and_redeploy_refuses() {
+        let mut vm_a = Vm::new(256);
+        let mut vm_b = Vm::new(256);
+        set_caller_256(&mut vm_a, &[0x42]);
+        set_caller_256(&mut vm_b, &[0x42, 0x00]);
+        assert_ne!(
+            vm_a.context.sender, vm_b.context.sender,
+            "distinct variable-length caller ids must not collide under zero-padding"
+        );
+        let exact = [0x5Au8; 32];
+        let mut vm_c = Vm::new(256);
+        set_caller_256(&mut vm_c, &exact);
+        assert_eq!(vm_c.context.sender, u64::from_le_bytes([0x5Au8; 8]));
+
+        let mut fx = Fixture::new();
+        let code = counter_loop(4);
+        fx.deploy(code.clone());
+        let second = BudZeroWorker
+            .execute(
+                &BlockContext {
+                    chain_id: 1,
+                    height: 2,
+                    timestamp_ms: 0,
+                },
+                &EeCall {
+                    kind: EeCallKind::Deploy,
+                    caller: EeIdentity {
+                        ee: EeId::BUDZERO,
+                        id: vec![9; 32],
+                    },
+                    target: fx.target.clone(),
+                    value: BudAmount(0),
+                    input: code,
+                    gas_limit: 100_000,
+                    depth: 0,
+                    tx_hash: [0xAB; 32],
+                },
+                &mut fx.host,
+            )
+            .expect("no fault");
+        assert_eq!(second.status, OutcomeStatus::Revert);
+    }
+
+    fn encode_call_payload(declared: &[u64], pairs: &[(u64, u64)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(declared.len() as u32).to_le_bytes());
+        for &slot in declared {
+            out.extend_from_slice(&slot.to_le_bytes());
+        }
+        out.extend_from_slice(&(pairs.len() as u32).to_le_bytes());
+        for &(slot, val) in pairs {
+            out.extend_from_slice(&slot.to_le_bytes());
+            out.extend_from_slice(&val.to_le_bytes());
+        }
+        out
+    }
+
+    fn read_slot_and_log_program(slot: i32) -> Vec<u8> {
+        let steps = [
+            Instruction {
+                opcode: Opcode::SRead,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: slot,
+            },
+            Instruction {
+                opcode: Opcode::Log,
+                rd: 0,
+                rs1: 1,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+        ];
+        steps
+            .iter()
+            .flat_map(|ins| ins.encode().to_le_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn query_refuses_call_input_colliding_with_committed_or_declared_storage() {
+        let mut fx = Fixture::new();
+        fx.deploy(read_slot_and_log_program(7));
+
+        let Ok(store_ns) = Namespace::new(NS_BUDZERO_STORAGE) else {
+            panic!("storage namespace");
+        };
+        let key = slot_key(&fx.target.id, 7);
+        assert!(fx
+            .host
+            .write(&store_ns, &key, Some(&42u64.to_le_bytes()))
+            .is_ok());
+
+        // Legitimate read-only query returns the committed storage value.
+        let ok = fx.worker.query(
+            &fx.ctx,
+            &EeQuery {
+                target: fx.target.clone(),
+                input: encode_call_payload(&[7], &[]),
+            },
+            &fx.host,
+        );
+        assert_eq!(ok, Ok(42u64.to_le_bytes().to_vec()));
+
+        // Passing an input pair for a declared slot must be refused.
+        let collide_declared = fx.worker.query(
+            &fx.ctx,
+            &EeQuery {
+                target: fx.target.clone(),
+                input: encode_call_payload(&[7], &[(7, 999)]),
+            },
+            &fx.host,
+        );
+        assert!(
+            matches!(&collide_declared, Err(r) if r.code == RefusalCode::Denied),
+            "query must refuse input colliding with declared slot: {collide_declared:?}"
+        );
+
+        // Omitting the slot from `declared` while it is already committed in storage must also be refused.
+        let collide_committed = fx.worker.query(
+            &fx.ctx,
+            &EeQuery {
+                target: fx.target.clone(),
+                input: encode_call_payload(&[], &[(7, 999)]),
+            },
+            &fx.host,
+        );
+        assert!(
+            matches!(&collide_committed, Err(r) if r.code == RefusalCode::Denied),
+            "query must refuse input colliding with committed storage: {collide_committed:?}"
+        );
+    }
+
+    #[test]
+    fn execute_and_query_refuse_non_canonical_goldilocks_input_words() {
+        let mut fx = Fixture::new();
+        fx.deploy(read_slot_and_log_program(9));
+
+        for bad_word in [bud_vm::GOLDILOCKS_P, u64::MAX] {
+            let Ok(call_res) = fx.worker.execute(
+                &fx.ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: fx.caller.clone(),
+                    target: fx.target.clone(),
+                    value: BudAmount(0),
+                    input: encode_call_payload(&[], &[(9, bad_word)]),
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [3u8; 32],
+                },
+                &mut fx.host,
+            ) else {
+                panic!("call faulted unexpectedly");
+            };
+            assert_eq!(
+                call_res.status,
+                OutcomeStatus::Revert,
+                "execute must refuse non-canonical word {bad_word}"
+            );
+
+            let query_res = fx.worker.query(
+                &fx.ctx,
+                &EeQuery {
+                    target: fx.target.clone(),
+                    input: encode_call_payload(&[], &[(9, bad_word)]),
+                },
+                &fx.host,
+            );
+            assert!(
+                query_res.is_err(),
+                "query must refuse non-canonical word {bad_word}: {query_res:?}"
+            );
+        }
+
+        let max_canonical = bud_vm::GOLDILOCKS_P - 1;
+        let Ok(ok_call) = fx.worker.execute(
+            &fx.ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: fx.caller.clone(),
+                target: fx.target.clone(),
+                value: BudAmount(0),
+                input: encode_call_payload(&[], &[(9, max_canonical)]),
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [4u8; 32],
+            },
+            &mut fx.host,
+        ) else {
+            panic!("call faulted unexpectedly");
+        };
+        assert_eq!(ok_call.status, OutcomeStatus::Success);
+        assert_eq!(ok_call.output, max_canonical.to_le_bytes().to_vec());
+
+        let ok_query = fx.worker.query(
+            &fx.ctx,
+            &EeQuery {
+                target: fx.target.clone(),
+                input: encode_call_payload(&[], &[(9, max_canonical)]),
+            },
+            &fx.host,
+        );
+        assert_eq!(ok_query, Ok(max_canonical.to_le_bytes().to_vec()));
+    }
+
+    #[test]
+    fn execute_and_query_refuse_corrupt_or_non_canonical_committed_storage_word() {
+        let mut fx = Fixture::new();
+        fx.deploy(read_slot_and_log_program(11));
+
+        let Ok(store_ns) = Namespace::new(NS_BUDZERO_STORAGE) else {
+            panic!("storage namespace");
+        };
+        assert!(fx
+            .host
+            .write(&store_ns, &slot_key(&fx.target.id, 11), Some(&[1, 2, 3, 4]))
+            .is_ok());
+        assert!(fx
+            .host
+            .write(
+                &store_ns,
+                &slot_key(&fx.target.id, 12),
+                Some(&bud_vm::GOLDILOCKS_P.to_le_bytes()),
+            )
+            .is_ok());
+
+        for bad_slot in [11u64, 12u64] {
+            let Ok(call_res) = fx.worker.execute(
+                &fx.ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: fx.caller.clone(),
+                    target: fx.target.clone(),
+                    value: BudAmount(0),
+                    input: encode_call_payload(&[bad_slot], &[]),
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [5u8; 32],
+                },
+                &mut fx.host,
+            ) else {
+                panic!("call faulted unexpectedly");
+            };
+            assert_eq!(
+                call_res.status,
+                OutcomeStatus::Revert,
+                "execute must fail closed on corrupt/non-canonical committed slot {bad_slot}"
+            );
+
+            let query_res = fx.worker.query(
+                &fx.ctx,
+                &EeQuery {
+                    target: fx.target.clone(),
+                    input: encode_call_payload(&[bad_slot], &[]),
+                },
+                &fx.host,
+            );
+            assert!(
+                query_res.is_err(),
+                "query must fail closed on corrupt/non-canonical committed slot {bad_slot}: {query_res:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_declared_slot_cannot_hide_committed_storage_or_force_zero_read() {
+        let mut fx = Fixture::new();
+        let steps = [
+            Instruction {
+                opcode: Opcode::SRead,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 7,
+            },
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 2,
+                rs1: 0,
+                rs2: 0,
+                imm: 1,
+            },
+            Instruction {
+                opcode: Opcode::Add,
+                rd: 3,
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
+            Instruction {
+                opcode: Opcode::SWrite,
+                rd: 0,
+                rs1: 3,
+                rs2: 0,
+                imm: 7,
+            },
+            Instruction {
+                opcode: Opcode::Log,
+                rd: 0,
+                rs1: 3,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+        ];
+        fx.deploy(
+            steps
+                .iter()
+                .flat_map(|ins| ins.encode().to_le_bytes())
+                .collect(),
+        );
+
+        let Ok(store_ns) = Namespace::new(NS_BUDZERO_STORAGE) else {
+            panic!("storage namespace");
+        };
+        let key = slot_key(&fx.target.id, 7);
+        assert!(fx
+            .host
+            .write(&store_ns, &key, Some(&40u64.to_le_bytes()))
+            .is_ok());
+
+        // Invoking with an empty `declared` list must be refused rather than reading 0 and writing 1.
+        let Ok(call_res) = fx.worker.execute(
+            &fx.ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: fx.caller.clone(),
+                target: fx.target.clone(),
+                value: BudAmount(0),
+                input: encode_call_payload(&[], &[]),
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [6u8; 32],
+            },
+            &mut fx.host,
+        ) else {
+            panic!("call faulted unexpectedly");
+        };
+        assert_eq!(call_res.status, OutcomeStatus::Revert);
+        assert_eq!(
+            fx.host.read(&store_ns, &key).ok().flatten(),
+            Some(40u64.to_le_bytes().to_vec()),
+            "committed slot must remain unchanged when caller omits it from declared list"
+        );
+
+        let q_res = fx.worker.query(
+            &fx.ctx,
+            &EeQuery {
+                target: fx.target.clone(),
+                input: encode_call_payload(&[], &[]),
+            },
+            &fx.host,
+        );
+        assert!(q_res.is_err(), "query omitting required slot must fail");
+    }
+
+    #[test]
+    fn budzero_deploy_charges_per_byte_and_reports_nonzero_gas_used() {
+        let halt = bud_isa::Instruction {
+            opcode: bud_isa::Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode();
+        let code: Vec<u8> = std::iter::repeat_n(halt, 64)
+            .flat_map(u64::to_le_bytes)
+            .collect();
+        let expected_gas = 5_000 + (code.len() as u64) * 25;
+        let mut fx = Fixture::new();
+
+        let Ok(low) = fx.worker.execute(
+            &fx.ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: fx.caller.clone(),
+                target: fx.target.clone(),
+                value: BudAmount(0),
+                input: code.clone(),
+                gas_limit: expected_gas - 1,
+                depth: 0,
+                tx_hash: [0x91; 32],
+            },
+            &mut fx.host,
+        ) else {
+            panic!("low deploy");
+        };
+        assert_eq!(low.status, OutcomeStatus::OutOfGas);
+
+        let Ok(ok) = fx.worker.execute(
+            &fx.ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: fx.caller.clone(),
+                target: fx.target.clone(),
+                value: BudAmount(0),
+                input: code,
+                gas_limit: expected_gas,
+                depth: 0,
+                tx_hash: [0x92; 32],
+            },
+            &mut fx.host,
+        ) else {
+            panic!("ok deploy");
+        };
+        assert_eq!(ok.status, OutcomeStatus::Success);
+        assert_eq!(ok.gas_used, expected_gas);
     }
 }

@@ -31,7 +31,7 @@
 //!
 //! The anchor signature covers a local SHA3 Merkle root, and the `VerifyMerkle`
 //! opcode does not run on that path. Only an anchor that carries a
-//! `stark_root` depends on the VerifyMerkle audit. Production mode therefore
+//! `stark_root` depends on the `VerifyMerkle` audit. Production mode therefore
 //! emits aggregate-root anchors without it and refuses a `stark_root` until an
 //! audit record is supplied ([`VerifyMerkleAudit`]).
 
@@ -226,7 +226,7 @@ impl ProductionGrant {
         self.ledger_digest
     }
 
-    /// Whether anchors may carry a `stark_root` (a VerifyMerkle audit is on
+    /// Whether anchors may carry a `stark_root` (a `VerifyMerkle` audit is on
     /// record).
     #[must_use]
     pub fn stark_path_open(&self) -> bool {

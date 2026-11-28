@@ -379,6 +379,13 @@ impl AggBackend for ChainBackend {
         #[cfg(not(any(test, feature = "agg-native-backend")))]
         return self.stark().verify(frame, domain);
     }
+
+    fn requires_bonded_aggregators(&self) -> bool {
+        #[cfg(any(test, feature = "agg-native-backend"))]
+        return self.native().requires_bonded_aggregators();
+        #[cfg(not(any(test, feature = "agg-native-backend")))]
+        return self.stark().requires_bonded_aggregators();
+    }
 }
 
 /// The commitment to the consensus parameters of the layer on one chain:
@@ -388,15 +395,39 @@ impl AggBackend for ChainBackend {
 fn params_commitment(params: &AggParams, domain: DomainId) -> Hash32 {
     let max_claims = u64::try_from(params.max_claims_per_block).unwrap_or(u64::MAX);
     let max_proof = u64::try_from(params.max_proof_bytes).unwrap_or(u64::MAX);
-    h(&[
-        TAG_AGG_PARAMS,
-        &domain.to_be_bytes(),
-        &max_claims.to_be_bytes(),
-        &max_proof.to_be_bytes(),
-        &params.claim_fee_per_byte.to_be_bytes(),
-        &params.agg_share_bps.to_be_bytes(),
-        &ACTIVE_PARAMETER_SET.to_be_bytes(),
-    ])
+    let domain_be = domain.to_be_bytes();
+    let max_claims_be = max_claims.to_be_bytes();
+    let max_proof_be = max_proof.to_be_bytes();
+    let fee_be = params.claim_fee_per_byte.to_be_bytes();
+    let share_be = params.agg_share_bps.to_be_bytes();
+    let pset_be = ACTIVE_PARAMETER_SET.to_be_bytes();
+    if params.activation_height.is_some() || params.require_proven_ticks {
+        let act_flag = [u8::from(params.activation_height.is_some())];
+        let act_height = params.activation_height.unwrap_or(0).to_be_bytes();
+        let proven_flag = [u8::from(params.require_proven_ticks)];
+        h(&[
+            TAG_AGG_PARAMS,
+            &domain_be,
+            &max_claims_be,
+            &max_proof_be,
+            &fee_be,
+            &share_be,
+            &pset_be,
+            &act_flag,
+            &act_height,
+            &proven_flag,
+        ])
+    } else {
+        h(&[
+            TAG_AGG_PARAMS,
+            &domain_be,
+            &max_claims_be,
+            &max_proof_be,
+            &fee_be,
+            &share_be,
+            &pset_be,
+        ])
+    }
 }
 
 /// The genesis `frame_hash` commitment when the aggregation layer is enabled.
@@ -449,10 +480,21 @@ pub fn validate_params(params: &AggParams, chain_id: u64) -> Result<(), String> 
             params.max_proof_bytes
         ));
     }
-    // The only backend is the native one, whose proof is the objects
-    // themselves. The main network waits for the STARK backend.
-    if Network::from_chain_id(chain_id) == Some(Network::Mainnet) {
-        return Err("aggregation: the main network does not turn the layer on yet".into());
+    // AggMode ladder gate: Mainnet stays closed until external audit + 30-night
+    // fuzz sign-off (Rung 6); public Testnet opens `On` only when Rung-4
+    // conditions (`activation_height > 0` and `require_proven_ticks = true`)
+    // are explicitly pinned (`Off` and `Shadow` remain unconditionally allowed).
+    match Network::from_chain_id(chain_id) {
+        Some(Network::Mainnet) => {
+            return Err("aggregation: the main network does not turn the layer on yet".into());
+        }
+        Some(Network::Testnet) if !params.testnet_ladder_ready() => {
+            return Err(
+                "aggregation: the public testnet rejects mode `on` until rung-4 conditions (positive activation_height and require_proven_ticks) are set (use `off` or `shadow`)"
+                    .into(),
+            );
+        }
+        _ => {}
     }
     if claim_domain(chain_id).is_none() {
         return Err(format!(
@@ -559,10 +601,53 @@ pub fn check_block_with_backend_and_airs<B: AggBackend>(
             }
         }
     }
+    // Enforce chain_id + activation_height AggMode ladder gate.
+    let mut effective_params = *params;
+    if params.mode == AggMode::On {
+        match Network::from_chain_id(block.chain_id) {
+            Some(Network::Mainnet) => {
+                return Err(
+                    "aggregation: mode `on` is closed on Mainnet until external audit and fuzz sign-off"
+                        .into(),
+                );
+            }
+            Some(Network::Testnet) => {
+                if !params.testnet_ladder_ready() {
+                    return Err(
+                        "aggregation: mode `on` is closed on Testnet until rung-4 conditions (positive activation_height and require_proven_ticks) are set"
+                            .into(),
+                    );
+                }
+                if params
+                    .activation_height
+                    .is_some_and(|activation| block.index < activation)
+                {
+                    effective_params.mode = AggMode::Off;
+                }
+            }
+            _ => {
+                if params
+                    .activation_height
+                    .is_some_and(|activation| block.index < activation)
+                {
+                    effective_params.mode = AggMode::Off;
+                }
+            }
+        }
+    }
+    if effective_params.mode == AggMode::On && backend.requires_bonded_aggregators() {
+        if let Some(frame) = block.claim_frame.as_ref() {
+            let state = accounts.ok_or_else(|| {
+                "aggregation: attestation-backed frames require validator bond state".to_string()
+            })?;
+            super::fraud::verify_bonded_segment_aggregators(state, block.chain_id, frame)
+                .map_err(|e| format!("aggregation: {e}"))?;
+        }
+    }
     let views = views_with_accounts(domain, block, accounts);
     let txs = tx_claims(&views, block);
     check_block_claims(
-        params,
+        &effective_params,
         domain,
         block.frame_hash.as_ref(),
         block.claim_frame.as_ref(),
@@ -579,7 +664,7 @@ pub fn check_block_with_backend_and_airs<B: AggBackend>(
     if !has_verify_stark {
         return Ok(());
     }
-    if params.mode != AggMode::On {
+    if effective_params.mode != AggMode::On {
         return Err("aggregation: VerifyStark requires aggregation mode On".into());
     }
     let proven_claims: BTreeSet<Hash32> = block

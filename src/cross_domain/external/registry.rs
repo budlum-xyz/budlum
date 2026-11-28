@@ -747,6 +747,7 @@ impl ExternalDomainRegistry {
                 refused: 0,
             },
         );
+        reg.sync_record_bond_facts();
         Ok(())
     }
 
@@ -1011,11 +1012,140 @@ impl ExternalDomainRegistry {
         }
         reg.attestations
             .retain(|_, a| a.evidence_digest != evidence_digest);
+        reg.sync_record_bond_facts();
+        Ok((taken, reward))
+    }
+
+    /// Invoked exclusively by [`crate::cross_domain::external::intake::IntakeState::slash_on_contradiction`]
+    /// after full cryptographic adapter verification of a conflicting finality proof.
+    pub(crate) fn slash_verified_contradiction(
+        &mut self,
+        domain: &DomainKey,
+        prover: Address,
+        evidence_digest: [u8; 32],
+        value_atoms: u128,
+        challenger: Address,
+    ) -> Result<(u128, u128), RegistryError> {
+        self.slash(domain, prover, evidence_digest, value_atoms, challenger)
+    }
+
+    /// Slash a Symbiotic vault operator for equivocation: two valid
+    /// attestations at the same epoch with different collateral roots.
+    /// The epoch+root pair is recorded so replayed contradictions are refused.
+    ///
+    /// # Errors
+    /// Slash a Symbiotic vault operator for equivocation: two conflicting
+    /// collateral roots attested at the same `epoch`.
+    ///
+    /// Identical root pairs are refused fail-closed, and the root pair is
+    /// sorted into canonical order before hashing so swapping `(a, b)` to
+    /// `(b, a)` cannot replay-drain the operator's bond. Any accepted
+    /// attestation at `epoch` matching either root is withdrawn and tombstoned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::Adapter`] if both roots are equal,
+    /// [`RegistryError::AlreadySlashed`] if this equivocation pair was already
+    /// slashed, or [`RegistryError::UnknownDomain`] /
+    /// [`RegistryError::UnknownProver`] if the domain or prover is not found.
+    ///
+    /// WIRING: external Symbiotic vault equivocation slash entry point.
+    /// Convenience: exposed for the governance-gated Symbiotic slashing intake door.
+    pub fn slash_symbiotic_equivocation(
+        &mut self,
+        domain: &DomainKey,
+        prover: Address,
+        epoch: u64,
+        conflicting_roots: ([u8; 32], [u8; 32]),
+        value_atoms: u128,
+        challenger: Address,
+    ) -> Result<(u128, u128), RegistryError> {
+        let (collateral_root_a, collateral_root_b) = conflicting_roots;
+        if bool::from(subtle::ConstantTimeEq::ct_eq(
+            collateral_root_a.as_slice(),
+            collateral_root_b.as_slice(),
+        )) {
+            return Err(RegistryError::Adapter(AdapterError::ConsensusRule {
+                rule: "symbiotic equivocation slash requires two distinct collateral roots"
+                    .to_string(),
+            }));
+        }
+        let (root_lo, root_hi) = if collateral_root_a < collateral_root_b {
+            (collateral_root_a, collateral_root_b)
+        } else {
+            (collateral_root_b, collateral_root_a)
+        };
+        let evidence_digest = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_SYMBIOTIC_EQUIVOCATION_V1",
+            domain.as_bytes(),
+            prover.as_bytes(),
+            &epoch.to_le_bytes(),
+            &root_lo,
+            &root_hi,
+        ]);
+        let height = self.height;
+        let Some(reg) = self.domains.get_mut(domain) else {
+            return Err(RegistryError::UnknownDomain(hex(domain.as_bytes())));
+        };
+        let Some(bond) = reg.provers.get_mut(&prover) else {
+            return Err(RegistryError::UnknownProver(hex(prover.as_bytes())));
+        };
+        if bond
+            .slashings
+            .iter()
+            .any(|slashing| slashing.evidence_digest == evidence_digest)
+        {
+            return Err(RegistryError::AlreadySlashed {
+                evidence: hex(&evidence_digest),
+            });
+        }
+        let penalty = reg.economics.penalty_for(value_atoms, bond.live_atoms());
+        let reward = reg.economics.challenge.for_slash(penalty);
+        let taken = bond.slash(height, evidence_digest, penalty, challenger, reward);
+        let reward = reward.min(taken);
+        let tombstones: Vec<[u8; 32]> = reg
+            .attestations
+            .values()
+            .filter(|a| {
+                a.height == epoch
+                    && (bool::from(subtle::ConstantTimeEq::ct_eq(
+                        a.state_root.as_slice(),
+                        root_lo.as_slice(),
+                    )) || bool::from(subtle::ConstantTimeEq::ct_eq(
+                        a.state_root.as_slice(),
+                        root_hi.as_slice(),
+                    )))
+            })
+            .map(|a| slashed_claim_tombstone(a.height, a.evidence_version, &a.state_root))
+            .collect();
+        for ts in tombstones {
+            reg.attestation_provers.insert(ts, Address::zero());
+        }
+        reg.attestations.retain(|_, a| {
+            !(a.height == epoch
+                && (bool::from(subtle::ConstantTimeEq::ct_eq(
+                    a.state_root.as_slice(),
+                    root_lo.as_slice(),
+                )) || bool::from(subtle::ConstantTimeEq::ct_eq(
+                    a.state_root.as_slice(),
+                    root_hi.as_slice(),
+                ))))
+        });
+        reg.sync_record_bond_facts();
         Ok((taken, reward))
     }
 }
 
 impl DomainRegistration {
+    fn sync_record_bond_facts(&mut self) {
+        self.record.bond_atoms = self
+            .provers
+            .values()
+            .fold(0u128, |acc, b| acc.saturating_add(b.live_atoms()));
+        self.record.bond_posters =
+            self.provers.values().filter(|b| b.live_atoms() > 0).count() as u64;
+    }
+
     /// Returns `true` iff `(height, version, state_root)` is currently in the
     /// attestation book AND was committed by a quorum round (`commit_attestation`).
     #[must_use]
@@ -1069,7 +1199,7 @@ pub fn no_backing() -> SecurityBacking {
 #[cfg(test)]
 mod tests {
     // The R3 registry had no direct tests at all - the
-    // defects of F03, F05 and F11 would have been found by any of these.
+    // prior header, quorum and encoding defects are all caught by these probes.
     use super::*;
     use crate::cross_domain::external::selftest::{admit, FaultProbe};
     use crate::cross_domain::external::spec::{
@@ -1203,6 +1333,7 @@ mod tests {
     #[test]
     fn slash_charges_the_carrier_and_withdraws_the_attestation() {
         let (mut registry, key, att) = registered();
+        let initial_bond = registry.domain(&key).expect("domain").record.bond_atoms;
         let (taken, reward) = registry
             .slash(
                 &key,
@@ -1221,6 +1352,43 @@ mod tests {
             reg.latest_attestation().is_none(),
             "a slashed attestation must not be served"
         );
+        let live_after_slash = initial_bond.saturating_sub(taken);
+        assert_eq!(
+            reg.record.bond_atoms, live_after_slash,
+            "DomainRecord.bond_atoms must reflect live unslashed bond after slash"
+        );
+        assert_eq!(
+            crate::cross_domain::external::profile::profile_of(&reg.record).bond_atoms,
+            live_after_slash
+        );
+
+        // Bonding a second prover updates both live bond total and poster count.
+        registry
+            .bond_prover(&key, Address::from([8u8; 32]), initial_bond)
+            .expect("second prover bonds");
+        let reg = registry.domain(&key).expect("domain");
+        assert_eq!(
+            reg.record.bond_atoms,
+            live_after_slash.saturating_add(initial_bond)
+        );
+        assert_eq!(reg.record.bond_posters, 2);
+
+        // Slashing the second prover's full bond via Symbiotic equivocation drops
+        // its live contribution and active poster count back to 1.
+        let (sym_taken, _) = registry
+            .slash_symbiotic_equivocation(
+                &key,
+                Address::from([8u8; 32]),
+                1,
+                ([0xAA; 32], [0xBB; 32]),
+                u128::MAX,
+                Address::from([9u8; 32]),
+            )
+            .expect("symbiotic equivocation slashes second prover");
+        assert_eq!(sym_taken, initial_bond);
+        let reg = registry.domain(&key).expect("domain");
+        assert_eq!(reg.record.bond_atoms, live_after_slash);
+        assert_eq!(reg.record.bond_posters, 1);
     }
 
     #[test]
@@ -1551,5 +1719,69 @@ mod tests {
             slashed_err,
             RegistryError::DuplicateAttestation { .. }
         ));
+    }
+
+    #[test]
+    fn slash_symbiotic_equivocation_refuses_replay() {
+        let (mut registry, key, _att) = registered();
+        let prover = Address::from([7u8; 32]);
+        let challenger = Address::from([8u8; 32]);
+
+        let root_a = [0xAA; 32];
+        let root_b = [0xBB; 32];
+
+        // Identical roots are not equivocation and must be refused fail-closed.
+        let same = registry.slash_symbiotic_equivocation(
+            &key,
+            prover,
+            100,
+            (root_a, root_a),
+            50,
+            challenger,
+        );
+        assert!(
+            matches!(
+                same,
+                Err(RegistryError::Adapter(AdapterError::ConsensusRule { .. }))
+            ),
+            "identical root pair must be refused: {same:?}"
+        );
+
+        // First slash succeeds.
+        let result = registry.slash_symbiotic_equivocation(
+            &key,
+            prover,
+            100,
+            (root_a, root_b),
+            50,
+            challenger,
+        );
+        assert!(result.is_ok(), "first equivocation slash must succeed");
+
+        // Replay of the same equivocation (in either order) is refused.
+        let replay = registry.slash_symbiotic_equivocation(
+            &key,
+            prover,
+            100,
+            (root_a, root_b),
+            50,
+            challenger,
+        );
+        assert!(
+            matches!(replay, Err(RegistryError::AlreadySlashed { .. })),
+            "replayed equivocation slash must be refused: {replay:?}"
+        );
+        let swapped = registry.slash_symbiotic_equivocation(
+            &key,
+            prover,
+            100,
+            (root_b, root_a),
+            50,
+            challenger,
+        );
+        assert!(
+            matches!(swapped, Err(RegistryError::AlreadySlashed { .. })),
+            "swapped-order equivocation replay must be refused: {swapped:?}"
+        );
     }
 }

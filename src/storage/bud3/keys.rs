@@ -25,6 +25,7 @@ use crate::crypto::hpke::{HpkeEnvelope, HpkeError, HpkeKeyPair};
 use crate::crypto::pq::{ml_dsa_public_key, ml_dsa_sign, PqError};
 use crate::crypto::scheme::SchemeId;
 use std::collections::BTreeMap;
+use zeroize::Zeroize;
 
 /// Tag deriving per-object 32-byte `ContentKey`s from a wallet seed.
 pub const OBJ_KEY_TAG: &[u8] = b"BDLM_BUD3_OBJ_KEY_V1";
@@ -145,8 +146,9 @@ pub fn seal_key_package(
     if let Some(second) = pt.get_mut(32..64) {
         second.copy_from_slice(&content_key.0);
     }
-    let env = HpkeEnvelope::seal(grantee_hpke_public, KEYPKG_INFO_TAG, grant_tag, &pt)?;
-    Ok(env.to_bytes())
+    let res = HpkeEnvelope::seal(grantee_hpke_public, KEYPKG_INFO_TAG, grant_tag, &pt);
+    pt.zeroize();
+    Ok(res?.to_bytes())
 }
 
 /// Attempt to open `sealed_package` with `grantee_kp` and `grant_tag`.
@@ -164,20 +166,21 @@ pub fn open_key_package(
     sealed_package: &[u8],
 ) -> Result<(ObjectKey, ContentKey), KeyPkgBud3Error> {
     let env = HpkeEnvelope::from_bytes(sealed_package)?;
-    let pt = grantee_kp.open(KEYPKG_INFO_TAG, grant_tag, &env)?;
+    let mut pt = grantee_kp.open(KEYPKG_INFO_TAG, grant_tag, &env)?;
     if pt.len() != KEYPKG_PLAINTEXT_LEN {
-        return Err(KeyPkgBud3Error::BadPlaintextLen(pt.len()));
+        let bad_len = pt.len();
+        pt.zeroize();
+        return Err(KeyPkgBud3Error::BadPlaintextLen(bad_len));
     }
     let mut obj = [0u8; 32];
-    obj.copy_from_slice(
-        pt.get(..32)
-            .ok_or(KeyPkgBud3Error::BadPlaintextLen(pt.len()))?,
-    );
+    if let Some(first) = pt.get(..32) {
+        obj.copy_from_slice(first);
+    }
     let mut key = [0u8; 32];
-    key.copy_from_slice(
-        pt.get(32..64)
-            .ok_or(KeyPkgBud3Error::BadPlaintextLen(pt.len()))?,
-    );
+    if let Some(second) = pt.get(32..64) {
+        key.copy_from_slice(second);
+    }
+    pt.zeroize();
     Ok((obj, ContentKey(key)))
 }
 
@@ -187,6 +190,12 @@ pub fn open_key_package(
 pub struct ClientSealedDedupIndex {
     dedup_key: [u8; 32],
     entries: BTreeMap<[u8; 32], ObjectKey>,
+}
+
+impl Drop for ClientSealedDedupIndex {
+    fn drop(&mut self) {
+        self.dedup_key.zeroize();
+    }
 }
 
 impl ClientSealedDedupIndex {
@@ -202,7 +211,8 @@ impl ClientSealedDedupIndex {
     /// Compute the keyed HMAC-SHA-256 content tag locally on the client.
     #[must_use]
     pub fn content_tag(&self, content: &[u8]) -> [u8; 32] {
-        ContentId::sealed(&ContentKey(self.dedup_key), content).digest
+        let key = ContentKey(self.dedup_key);
+        ContentId::sealed(&key, content).digest
     }
 
     /// Look up whether the owner already holds a live sealed object for `content`.
@@ -216,23 +226,25 @@ impl ClientSealedDedupIndex {
         self.entries.insert(self.content_tag(content), object);
     }
 
-    /// Convenience: export an encrypted BOF-1 sealed backup object of this client index.
+    /// Convenience: export an encrypted BOF-1 sealed backup object of this client index
+    /// using a fresh 24-byte salt drawn from the OS CSPRNG.
     ///
     /// # Errors
     ///
     /// Returns [`KeyPkgBud3Error`] if sealing fails.
-    pub fn export_sealed_backup(
-        &self,
-        backup_salt: [u8; SEAL_SALT_LEN],
-    ) -> Result<Object, KeyPkgBud3Error> {
+    pub fn export_sealed_backup(&self) -> Result<Object, KeyPkgBud3Error> {
         let mut raw = Vec::with_capacity(self.entries.len().saturating_mul(64).saturating_add(8));
         raw.extend_from_slice(&(self.entries.len() as u64).to_le_bytes());
         for (tag, obj) in &self.entries {
             raw.extend_from_slice(tag);
             raw.extend_from_slice(obj);
         }
+        let mut backup_salt = [0u8; SEAL_SALT_LEN];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut backup_salt);
         let backup_key = ContentKey(self.dedup_key);
-        Ok(seal_object(&raw, &backup_key, backup_salt)?)
+        let sealed = seal_object(&raw, &backup_key, backup_salt);
+        raw.zeroize();
+        Ok(sealed?)
     }
 
     /// Convenience: restore entries from an encrypted BOF-1 sealed backup object.
@@ -247,23 +259,34 @@ impl ClientSealedDedupIndex {
     ) -> Result<Self, KeyPkgBud3Error> {
         let mut idx = Self::from_wallet_seed(wallet_seed);
         let backup_key = ContentKey(idx.dedup_key);
-        let raw = open_sealed_object(backup_object, &backup_key, meter)?;
-        let count_bytes = raw.get(..8).ok_or(KeyPkgBud3Error::MalformedBackup)?;
-        let mut count_arr = [0u8; 8];
-        count_arr.copy_from_slice(count_bytes);
-        let count = usize::try_from(u64::from_le_bytes(count_arr))
-            .map_err(|_| KeyPkgBud3Error::MalformedBackup)?;
-        let body = raw.get(8..).ok_or(KeyPkgBud3Error::MalformedBackup)?;
-        if body.len() != count.saturating_mul(64) {
-            return Err(KeyPkgBud3Error::MalformedBackup);
-        }
-        for pair in body.chunks_exact(64) {
-            let mut tag = [0u8; 32];
-            tag.copy_from_slice(pair.get(..32).ok_or(KeyPkgBud3Error::MalformedBackup)?);
-            let mut obj = [0u8; 32];
-            obj.copy_from_slice(pair.get(32..64).ok_or(KeyPkgBud3Error::MalformedBackup)?);
-            idx.entries.insert(tag, obj);
-        }
+        let mut raw = open_sealed_object(backup_object, &backup_key, meter)?;
+        let parse_res = (|| -> Result<(), KeyPkgBud3Error> {
+            let count_bytes = raw.get(..8).ok_or(KeyPkgBud3Error::MalformedBackup)?;
+            let mut count_arr = [0u8; 8];
+            count_arr.copy_from_slice(count_bytes);
+            let count = usize::try_from(u64::from_le_bytes(count_arr))
+                .map_err(|_| KeyPkgBud3Error::MalformedBackup)?;
+            let expected_body_len = count
+                .checked_mul(64)
+                .ok_or(KeyPkgBud3Error::MalformedBackup)?;
+            let body = raw.get(8..).ok_or(KeyPkgBud3Error::MalformedBackup)?;
+            if body.len() != expected_body_len {
+                return Err(KeyPkgBud3Error::MalformedBackup);
+            }
+            for pair in body.as_chunks::<64>().0 {
+                // Split the chunk by pattern rather than by range: a range index
+                // panics out of bounds, and a key backup is untrusted input. The
+                // length check above already decided the shape, so the split
+                // cannot fail.
+                let [tag_bytes, obj_bytes] = pair.as_chunks::<32>().0 else {
+                    return Err(KeyPkgBud3Error::MalformedBackup);
+                };
+                idx.entries.insert(*tag_bytes, *obj_bytes);
+            }
+            Ok(())
+        })();
+        raw.zeroize();
+        parse_res?;
         Ok(idx)
     }
 }
@@ -301,11 +324,62 @@ mod tests {
         assert_eq!(idx.lookup(b"photo-1"), Some([0xa1u8; 32]));
         assert_eq!(idx.lookup(b"photo-2"), None);
 
-        let backup = idx.export_sealed_backup([0x77u8; SEAL_SALT_LEN]).unwrap();
+        let backup = idx.export_sealed_backup().unwrap();
         assert_eq!(backup.header.content_len, 0);
         let mut m = Meter::for_object(1 << 20);
         let restored =
             ClientSealedDedupIndex::import_sealed_backup(&seed, &backup, &mut m).unwrap();
         assert_eq!(restored.lookup(b"photo-1"), Some([0xa1u8; 32]));
+
+        // Consecutive exports under the same wallet seed must draw distinct
+        // 24-byte OS CSPRNG salts so XChaCha20-Poly1305 never reuses a
+        // (backup_key, nonce) pair across index snapshots.
+        idx.record(b"photo-2", [0xb2u8; 32]);
+        let second_backup = idx.export_sealed_backup().unwrap();
+        assert_ne!(
+            &backup.payload[..SEAL_SALT_LEN],
+            &second_backup.payload[..SEAL_SALT_LEN],
+            "consecutive backup exports must draw fresh CSPRNG salts"
+        );
+        assert_ne!(backup.payload, second_backup.payload);
+        let mut m2 = Meter::for_object(1 << 20);
+        let restored_second =
+            ClientSealedDedupIndex::import_sealed_backup(&seed, &second_backup, &mut m2).unwrap();
+        assert_eq!(restored_second.lookup(b"photo-1"), Some([0xa1u8; 32]));
+        assert_eq!(restored_second.lookup(b"photo-2"), Some([0xb2u8; 32]));
+    }
+
+    /// A backup whose declared count disagrees with its body must be refused,
+    /// and the refusal must come from the length check, never from an index.
+    ///
+    /// Measured: the pair used to be split with range-index expressions on a
+    /// byte slice. A range index panics when out of range and release builds
+    /// abort on panic, so the import door must not depend on the iterator
+    /// yielding a full 64-byte chunk to stay in bounds.
+    #[test]
+    fn a_truncated_backup_body_is_refused_not_indexed() {
+        let seed = [0x44u8; 32];
+        let mut idx = ClientSealedDedupIndex::from_wallet_seed(&seed);
+        idx.record(b"photo-1", [0xb1u8; 32]);
+        let backup = idx.export_sealed_backup().unwrap();
+        let mut m = Meter::for_object(1 << 20);
+        assert!(ClientSealedDedupIndex::import_sealed_backup(&seed, &backup, &mut m).is_ok());
+
+        // Forge a body whose declared count claims one more entry than it has.
+        // The door must refuse on the length check, before any chunk is split,
+        // so the refusal cannot come from an out-of-range slice index (which
+        // aborts in release builds).
+        let mut body = vec![0u8; 8 + 64];
+        body[..8].copy_from_slice(&2u64.to_le_bytes());
+        let dedup_key = hash_fields_bytes(&[OWNER_DEDUP_TAG, &seed]);
+        let forged = seal_object(&body, &ContentKey(dedup_key), [0x78u8; SEAL_SALT_LEN])
+            .expect("the forged object seals");
+        assert!(
+            matches!(
+                ClientSealedDedupIndex::import_sealed_backup(&seed, &forged, &mut m),
+                Err(KeyPkgBud3Error::MalformedBackup)
+            ),
+            "a body shorter than its declared count is refused, not indexed"
+        );
     }
 }

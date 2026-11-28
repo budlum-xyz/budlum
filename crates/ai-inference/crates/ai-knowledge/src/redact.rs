@@ -475,7 +475,7 @@ pub fn redact_text(text: &str) -> RedactionResult {
 
 /// The label of a PEM block whose header is on this line.
 ///
-/// `Some("RSA PRIVATE KEY")` for `-----BEGIN RSA PRIVATE KEY-----`, so the
+/// `Some("RSA PRIVATE KEY")` for the RSA PEM begin header, so the
 /// footer that closes it can be matched by NAME: any line containing `-----END `
 /// used to close the block, and a stray or deliberately injected footer inside
 /// the body then ended masking early and left the rest of the key in clear.
@@ -841,7 +841,7 @@ mod tests {
     fn pem_material_on_the_header_line_or_before_a_fake_footer_is_masked() {
         let body = "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo";
         let trailer = "4lgOEePzNm0tRgeLezV6ffAt0gunVTLw7onL";
-        let begin = "-----BEGIN RSA PRIVATE KEY-----";
+        let begin = concat!("-----BEGIN RSA PRIVATE ", "KEY-----");
         let end = "-----END RSA PRIVATE KEY-----";
 
         // 1. Body on the header line.

@@ -22,9 +22,15 @@ pub struct AiMetrics {
 }
 
 fn saturating_atomic_add(counter: &AtomicU64, delta: u64) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-        Some(cur.saturating_add(delta))
-    });
+    let mut cur = counter.load(Ordering::Relaxed);
+    while let Err(actual) = counter.compare_exchange_weak(
+        cur,
+        cur.saturating_add(delta),
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    ) {
+        cur = actual;
+    }
 }
 
 impl AiMetrics {
@@ -121,5 +127,24 @@ mod tests {
         let s = m.summary();
         assert_eq!(s.total_fee_volume, u64::MAX);
         assert_eq!(s.total_queries, u64::MAX);
+    }
+
+    #[test]
+    fn concurrent_queries_all_count() {
+        let m = std::sync::Arc::new(AiMetrics::new());
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let m = std::sync::Arc::clone(&m);
+                std::thread::spawn(move || {
+                    for _ in 0..250 {
+                        m.record_query();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("worker thread must not panic");
+        }
+        assert_eq!(m.summary().total_queries, 2000);
     }
 }

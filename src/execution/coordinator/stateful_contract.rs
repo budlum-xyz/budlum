@@ -202,10 +202,8 @@ fn decode_checked_budzero(code: &[u8]) -> Result<Vec<u64>, String> {
         return Err("BudZero bytecode must be non-empty and 8-byte aligned".into());
     }
     let mut words = Vec::with_capacity(code.len() / 8);
-    for chunk in code.chunks_exact(8) {
-        let arr: [u8; 8] = chunk
-            .try_into()
-            .map_err(|_| "bad instruction word".to_string())?;
+    for chunk in code.as_chunks::<8>().0 {
+        let arr: [u8; 8] = *chunk;
         let raw = u64::from_le_bytes(arr);
         Instruction::decode_for_mainnet(raw, bud_isa::MainnetActivation::default())
             .map_err(|e| e.to_string())?;
@@ -270,6 +268,11 @@ pub fn execute_stateful_contract_tx(
                 .write(NS_BUDZERO_PROGRAM, &contract_addr.0, Some(&code))
                 .map_err(|e| e.to_string())?;
             for (slot, val) in init_slots {
+                if slot >= bud_vm::GOLDILOCKS_P || val >= bud_vm::GOLDILOCKS_P {
+                    return Err(format!(
+                        "init slot ({slot}, {val}) is out of canonical field range"
+                    ));
+                }
                 let key = storage_slot_key(&contract_addr, slot);
                 overlay
                     .write(NS_BUDZERO_STORAGE, &key, Some(&val.to_le_bytes()))
@@ -306,18 +309,60 @@ pub fn execute_stateful_contract_tx(
             vm.context.nonce = tx.nonce;
             vm.context.block_height = state.current_block_height;
 
+            for raw in &program {
+                let inst =
+                    Instruction::decode_for_mainnet(*raw, bud_isa::MainnetActivation::default())
+                        .map_err(|e| format!("invalid BudZero instruction: {e:?}"))?;
+                if matches!(
+                    inst.opcode,
+                    bud_isa::Opcode::SRead | bud_isa::Opcode::SWrite
+                ) {
+                    if inst.imm == -1 {
+                        return Err("dynamic BudZero storage slot operand".to_string());
+                    }
+                    let slot = bud_vm::constant_storage_slot(inst.imm);
+                    let covered = if inst.opcode == bud_isa::Opcode::SWrite {
+                        declared_slots.contains(&slot)
+                    } else {
+                        declared_slots.contains(&slot)
+                            || call_inputs.iter().any(|(s, _)| *s == slot)
+                    };
+                    if !covered {
+                        return Err(format!("BudZero storage slot {slot} not declared"));
+                    }
+                }
+            }
+
             for &slot in &declared_slots {
+                if slot >= bud_vm::GOLDILOCKS_P {
+                    return Err(format!(
+                        "declared storage slot {slot} is out of canonical field range"
+                    ));
+                }
                 let key = storage_slot_key(&contract, slot);
                 if let Some(raw) = overlay
                     .read(&state.execution_state, &cache, NS_BUDZERO_STORAGE, &key)
                     .map_err(|e| e.to_string())?
                 {
-                    if let Ok(arr) = raw.as_slice().try_into() {
-                        vm.storage.insert(slot, u64::from_le_bytes(arr));
+                    let arr: [u8; 8] = raw
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| format!("corrupt committed storage word for slot {slot}"))?;
+                    let val = u64::from_le_bytes(arr);
+                    if val >= bud_vm::GOLDILOCKS_P {
+                        return Err(format!(
+                            "committed storage value for slot {slot} is out of canonical field range"
+                        ));
                     }
+                    vm.storage.insert(slot, val);
                 }
             }
             for (slot, val) in call_inputs {
+                if slot >= bud_vm::GOLDILOCKS_P || val >= bud_vm::GOLDILOCKS_P {
+                    return Err(format!(
+                        "call input ({slot}, {val}) is out of canonical field range"
+                    ));
+                }
                 let key = storage_slot_key(&contract, slot);
                 let collides_committed = declared_slots.contains(&slot)
                     || overlay
@@ -523,6 +568,49 @@ mod tests {
         assert!(
             err.contains("collides with committed contract storage"),
             "unexpected error: {err}"
+        );
+        assert_eq!(read_budzero_contract_slot(&state, &contract, 0), Some(42));
+
+        // 5. Non-canonical Goldilocks field values (>= GOLDILOCKS_P) in call_inputs or init_slots must be rejected.
+        let mut non_canon_call = Transaction::new(
+            alice,
+            contract,
+            0,
+            StatefulContractEnvelope::Call {
+                contract,
+                declared_slots: vec![0],
+                call_inputs: vec![(9, bud_vm::GOLDILOCKS_P)],
+                gas_limit: 500_000,
+            }
+            .encode(),
+        );
+        non_canon_call.nonce = 5;
+        let err_nc =
+            execute_stateful_contract_tx(&non_canon_call, &mut state, &policy).unwrap_err();
+        assert!(
+            err_nc.contains("out of canonical field range"),
+            "unexpected error: {err_nc}"
+        );
+
+        // 6. Omitting required storage slot 0 from declared_slots must be rejected rather than reading 0.
+        let mut omitted_slot_call = Transaction::new(
+            alice,
+            contract,
+            0,
+            StatefulContractEnvelope::Call {
+                contract,
+                declared_slots: Vec::new(),
+                call_inputs: Vec::new(),
+                gas_limit: 500_000,
+            }
+            .encode(),
+        );
+        omitted_slot_call.nonce = 6;
+        let err_omit =
+            execute_stateful_contract_tx(&omitted_slot_call, &mut state, &policy).unwrap_err();
+        assert!(
+            err_omit.contains("not declared"),
+            "unexpected error: {err_omit}"
         );
         assert_eq!(read_budzero_contract_slot(&state, &contract, 0), Some(42));
     }

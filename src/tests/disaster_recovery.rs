@@ -188,7 +188,7 @@ use crate::persistence::db::Storage;
 use crate::registry::role::roles;
 
 /// Sled's file-lock release is not guaranteed to be synchronous with the
-/// Previous owner's `drop` under CI scheduling (os error 11 / WouldBlock
+/// Previous owner's `drop` under CI scheduling (os error 11 / `WouldBlock`
 /// Flake - Budlum Core run on `4d57f61`, `test_chaos_v2_ultimate_byzantine_recovery`).
 /// Reopen with a bounded wait: the lock always drains within milliseconds in
 /// Practice; 100 x 25ms is generous, then the final open reports the error.

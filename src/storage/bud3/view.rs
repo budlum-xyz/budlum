@@ -181,6 +181,11 @@ fn verify_segment_candidate(
     if u64::try_from(bytes.len()) != Ok(seg_len) {
         return None;
     }
+    // An unbounded record would materialize symbols_per_segment symbols
+    // right here, before any root check: refuse above the protocol ceiling.
+    if record.symbols_per_segment > super::pipeline::MAX_SYMBOLS_PER_SEGMENT {
+        return None;
+    }
     let enc = SegmentEncoder::new(seg, &bytes, &record.profile).ok()?;
     let k = enc.k();
     let initial_count = record.symbols_per_segment.max(k);
@@ -483,7 +488,7 @@ pub fn fallback_decode_public<N: NetworkSymbolSource>(
         .map(|(k, _)| k);
     if receipt_resolved != Some(resolved_key)
         || receipt.fee_paid_atoms < MIN_PAID_VIEW_FEE_ATOMS
-        || !registry.verify_paid_view(receipt)
+        || !registry.verify_paid_view_at(receipt, registry.observed_paid_view_epoch())
     {
         return Err(ViewBud3Error::UnpaidFallbackView);
     }
@@ -1257,5 +1262,42 @@ mod tests {
             std::slice::from_ref(&up.segments[0]),
         )
         .is_none());
+    }
+}
+
+#[cfg(test)]
+mod view_entry_ceiling_tests {
+    use super::super::limits::{Bud3Limits, Profile};
+    use super::super::pipeline::{prepare_public_upload, view_public, MAX_SYMBOLS_PER_SEGMENT};
+    use super::*;
+
+    const SMALL: Profile = Profile {
+        id: 0,
+        qr_version: 40,
+        symbol_size: 128,
+        fps: 10,
+        k_max: 16,
+    };
+
+    /// `view_public` derives its step and byte budgets from
+    /// `record.symbols_per_segment`, which the submitter chose. A record above
+    /// the protocol ceiling must be refused at the entry with a named error,
+    /// not silently filtered deeper in, so no caller can mistake the refusal
+    /// for a missing segment.
+    #[test]
+    fn view_public_refuses_a_record_above_the_ceiling_at_the_entry() {
+        let data = b"a viewer payload whose record overstates its placement";
+        let up = prepare_public_upload(data, &SMALL, &Bud3Limits::default(), 20).unwrap();
+        let mut record = up.record.clone();
+        record.symbols_per_segment = MAX_SYMBOLS_PER_SEGMENT + 1;
+        match view_public(&record, up.segments.concat()) {
+            Err(PipelineError::TooManySymbols { want, max }) => {
+                assert_eq!(
+                    (want, max),
+                    (MAX_SYMBOLS_PER_SEGMENT + 1, MAX_SYMBOLS_PER_SEGMENT)
+                );
+            }
+            other => panic!("an overstated record must be refused at the entry, got {other:?}"),
+        }
     }
 }

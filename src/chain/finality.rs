@@ -2044,12 +2044,12 @@ mod tests {
         );
     }
 
-    /// (security audit) `verify_pop` must reject PoP
+    /// (security audit) `verify_pop` must reject `PoP`
     /// Entries whose public key is not in the prime-order
     /// Subgroup. The same subgroup check that protects
     /// `verify_bls_sig` must protect `verify_pop`, otherwise a
     /// Malicious validator could register a small-subgroup public
-    /// Key, get it through the PoP gate, and then use it to make
+    /// Key, get it through the `PoP` gate, and then use it to make
     /// Votes aggregate against a forged finality certificate.
     #[test]
     fn verify_pop_rejects_subgroup_attack_on_public_key() {
@@ -2261,5 +2261,55 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn finality_snapshot_hash_matches_shared_budlum_types_definition() {
+        let mut a1 = [0u8; 32];
+        a1[0] = 0x22;
+        let mut a2 = [0u8; 32];
+        a2[0] = 0x11;
+        let node_snap = ValidatorSetSnapshot::new(
+            9,
+            vec![
+                ValidatorEntry {
+                    address: crate::core::address::Address::from(a1),
+                    stake: 300,
+                    bls_public_key: vec![1; 96],
+                    pop_signature: vec![2; 48],
+                    pq_public_key: vec![3; 64],
+                },
+                ValidatorEntry {
+                    address: crate::core::address::Address::from(a2),
+                    stake: 700,
+                    bls_public_key: vec![4; 96],
+                    pop_signature: vec![5; 48],
+                    pq_public_key: vec![6; 64],
+                },
+            ],
+        );
+        let shared_snap = budlum_types::checkpoint::ValidatorSetSnapshot::new(
+            9,
+            vec![
+                budlum_types::checkpoint::ValidatorEntry {
+                    address: budlum_types::Address::from(a1),
+                    stake: 300,
+                    bls_public_key: vec![1; 96],
+                    pop_signature: vec![2; 48],
+                    pq_public_key: vec![3; 64],
+                },
+                budlum_types::checkpoint::ValidatorEntry {
+                    address: budlum_types::Address::from(a2),
+                    stake: 700,
+                    bls_public_key: vec![4; 96],
+                    pop_signature: vec![5; 48],
+                    pq_public_key: vec![6; 64],
+                },
+            ],
+        );
+        assert_eq!(node_snap.set_hash, shared_snap.set_hash);
+        assert_eq!(node_snap.total_stake, shared_snap.total_stake);
+        assert_eq!(node_snap.quorum_stake(), shared_snap.quorum_stake());
+        assert_eq!(node_snap.quorum_count(), shared_snap.quorum_count());
     }
 }

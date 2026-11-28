@@ -82,3 +82,11 @@ condition = "AND"
 regexTarget = "line"
 paths = ['''^src/rpc/server\.rs$''']
 regexes = ['''Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==''']
+
+# Synthetic JWT header prefix ("{\"alg\":\"HS256\"}") in the AI-tune secret redaction test.
+[[allowlists]]
+description = "Synthetic JWT header fixture in ai-tune schema redaction unit test"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^crates/ai-inference/crates/ai-tune/src/schema\.rs$''']
+regexes = ['''"token: eyJhbGciOiJIUzI1NiJ9"''']

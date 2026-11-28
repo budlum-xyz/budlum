@@ -113,7 +113,10 @@ impl PredicateStatement {
     pub fn holds(&self) -> bool {
         match self.kind {
             PredicateKind::Yk1Ownership => self.lhs == self.rhs && self.aux != 0,
-            PredicateKind::Yk2BalanceConservation => self.lhs == self.rhs,
+            // YK2 only carries the caller's two public numbers and cannot bind
+            // hidden note commitments, so it must never report value
+            // conservation until a commitment-bound circuit exists.
+            PredicateKind::Yk2BalanceConservation => false,
             PredicateKind::Yk3MerkleMembership => self.lhs == self.rhs && self.lhs != 0,
             PredicateKind::Yk4NullifierFreshness => {
                 poseidon4_hash4(self.lhs, bud_vm::DOMAIN_NULLIFIER, 0, 0) == self.rhs
@@ -159,27 +162,36 @@ impl PredicateStatement {
             }
             .encode()
         };
-        let aux_imm = i32::try_from(self.aux & 0x7FFF_FFFF).unwrap_or(0);
+        let lo31 = |v: u64| i32::try_from(v & 0x7FFF_FFFF).unwrap_or(0);
+        let hi31 = |v: u64| i32::try_from((v >> 31) & 0x7FFF_FFFF).unwrap_or(0);
+        let top_bits = (((self.lhs >> 62) & 3)
+            | (((self.rhs >> 62) & 3) << 2)
+            | (((self.aux >> 62) & 3) << 4)
+            | (((self.chain_id >> 62) & 3) << 6)) as i32;
+        let aux_lo = lo31(self.aux);
         let kind_tag = u64::from(self.kind.code());
         let ok = u64::from(self.holds());
+        // Bind all 64 bits of (lhs, rhs, aux, chain_id) plus kind into the
+        // instruction stream and Poseidon commitment so reusing a STARK proof
+        // under modified high bits is rejected by program_hash verification.
         vec![
-            enc(Opcode::Load, 1, 0, 0, aux_imm),
+            enc(Opcode::Load, 1, 0, 0, aux_lo),
             enc(Opcode::Load, 2, 0, 0, i32::from(self.kind.code())),
-            enc(
-                Opcode::Load,
-                3,
-                0,
-                0,
-                i32::try_from((self.lhs ^ kind_tag) & 0x7FFF_FFFF).unwrap_or(0),
-            ),
-            enc(
-                Opcode::Load,
-                4,
-                0,
-                0,
-                i32::try_from(self.rhs & 0x7FFF_FFFF).unwrap_or(0),
-            ),
-            enc(commitment_opcode, 5, 3, 4, aux_imm),
+            enc(Opcode::Load, 3, 0, 0, lo31(self.lhs ^ kind_tag)),
+            enc(Opcode::Load, 4, 0, 0, lo31(self.rhs)),
+            enc(Opcode::Load, 7, 0, 0, hi31(self.lhs)),
+            enc(Opcode::Load, 8, 0, 0, hi31(self.rhs)),
+            enc(Opcode::Load, 9, 0, 0, hi31(self.aux)),
+            enc(Opcode::Load, 10, 0, 0, lo31(self.chain_id)),
+            enc(Opcode::Load, 11, 0, 0, hi31(self.chain_id)),
+            enc(Opcode::Load, 12, 0, 0, top_bits),
+            enc(Opcode::Poseidon, 13, 7, 8, 0),
+            enc(Opcode::Poseidon, 14, 9, 10, 0),
+            enc(Opcode::Poseidon, 15, 11, 12, 0),
+            enc(Opcode::Poseidon, 16, 13, 14, 0),
+            enc(Opcode::Poseidon, 17, 16, 15, 0),
+            enc(commitment_opcode, 5, 3, 4, aux_lo),
+            enc(Opcode::Poseidon, 5, 5, 17, 0),
             enc(Opcode::Load, 6, 0, 0, i32::try_from(ok).unwrap_or(0)),
             enc(Opcode::Assert, 0, 6, 0, 0),
             enc(Opcode::Log, 0, 5, 0, 0),
@@ -227,14 +239,14 @@ fn hash_program(program: &[u64]) -> [u8; 32] {
 /// Fails closed if `statement.holds()` is false, VM execution fails, or
 /// STARK proving fails.
 pub fn prove_predicate(statement: &PredicateStatement) -> Result<PredicateProof, PredicateError> {
-    if !statement.holds() {
-        return Err(PredicateError::ConditionUnsatisfied(statement.kind));
-    }
     // A VM accepting VerifyInference would still only prove an equality of
     // caller-supplied public numbers, not ownership, Merkle membership, or an
     // actual inference. Opening the opcode must not implicitly open YK1..YK11.
     if statement.kind != PredicateKind::Yk6ThresholdQuorum {
         return Err(PredicateError::ActivationClosed(statement.kind));
+    }
+    if !statement.holds() {
+        return Err(PredicateError::ConditionUnsatisfied(statement.kind));
     }
     let program = statement.to_program();
     let mut vm = Vm::with_mainnet_mode(1024, 1_000_000, true);
@@ -277,14 +289,14 @@ pub fn prove_predicate(statement: &PredicateStatement) -> Result<PredicateProof,
 ///
 /// Fails closed on unsatisfied statement, forged digest/program, or invalid STARK proof.
 pub fn verify_predicate(proof: &PredicateProof) -> Result<(), PredicateError> {
-    if !proof.statement.holds() {
-        return Err(PredicateError::ConditionUnsatisfied(proof.statement.kind));
-    }
     // Independently refuse externally produced STARKs for the unbound kinds:
     // an isolated prover can run the opcode even while production decoding is
     // closed. A valid execution trace is not a proof of a missing relation.
     if proof.statement.kind != PredicateKind::Yk6ThresholdQuorum {
         return Err(PredicateError::ActivationClosed(proof.statement.kind));
+    }
+    if !proof.statement.holds() {
+        return Err(PredicateError::ConditionUnsatisfied(proof.statement.kind));
     }
     if proof.statement_digest != proof.statement.digest() {
         return Err(PredicateError::ProgramMismatch);
@@ -294,6 +306,7 @@ pub fn verify_predicate(proof: &PredicateProof) -> Result<(), PredicateError> {
     }
     if proof.public_inputs.chain_id != proof.statement.chain_id
         || proof.public_inputs.exit_code != 0
+        || proof.public_inputs.program_hash != hash_program(&proof.program)
     {
         return Err(PredicateError::ProgramMismatch);
     }
@@ -323,7 +336,40 @@ mod tests {
 
     #[test]
     fn yk2_balance_conservation_stays_closed_until_private_witness_is_bound() {
-        let st = PredicateStatement {
+        for (lhs, rhs) in [(500, 500), (0, 0), (1_000, 999)] {
+            let st = PredicateStatement {
+                kind: PredicateKind::Yk2BalanceConservation,
+                lhs,
+                rhs,
+                aux: 7,
+                chain_id: 45261,
+            };
+            assert!(
+                !st.holds(),
+                "prover-chosen public sums must never report value conservation"
+            );
+            let mut isolated_vm = Vm::with_mainnet_mode(1024, 1_000_000, false);
+            assert!(
+                !isolated_vm.run_receipt(&st.to_program()).success,
+                "even an isolated VM must reject a YK2 statement lacking hidden note commitments"
+            );
+            assert_eq!(
+                prove_predicate(&st).unwrap_err(),
+                PredicateError::ActivationClosed(PredicateKind::Yk2BalanceConservation)
+            );
+        }
+
+        // Verifier must refuse YK2 with ActivationClosed before evaluating holds(),
+        // even when handed an externally built proof shell.
+        let quorum = PredicateStatement {
+            kind: PredicateKind::Yk6ThresholdQuorum,
+            lhs: 4,
+            rhs: 4,
+            aux: 7,
+            chain_id: 45261,
+        };
+        let mut forged_yk2 = prove_predicate(&quorum).expect("quorum proof builds");
+        forged_yk2.statement = PredicateStatement {
             kind: PredicateKind::Yk2BalanceConservation,
             lhs: 500,
             rhs: 500,
@@ -331,7 +377,7 @@ mod tests {
             chain_id: 45261,
         };
         assert_eq!(
-            prove_predicate(&st).unwrap_err(),
+            verify_predicate(&forged_yk2).unwrap_err(),
             PredicateError::ActivationClosed(PredicateKind::Yk2BalanceConservation)
         );
     }
@@ -461,5 +507,82 @@ mod tests {
             prove_predicate(&unsat_quorum).unwrap_err(),
             PredicateError::ConditionUnsatisfied(PredicateKind::Yk6ThresholdQuorum)
         );
+    }
+
+    #[test]
+    fn budprf01_predicates_refuses_upper_33bit_stark_forgery_and_program_hash_tamper() {
+        // 1. Every single bit of all four 64-bit statement inputs must affect to_program().
+        let base = PredicateStatement {
+            kind: PredicateKind::Yk6ThresholdQuorum,
+            lhs: 4,
+            rhs: 4,
+            aux: 7,
+            chain_id: 45261,
+        };
+        let base_prog = base.to_program();
+        for bit in [31u32, 32, 62, 63] {
+            let mask = 1u64 << bit;
+            let mut s_lhs = base.clone();
+            s_lhs.lhs ^= mask;
+            assert_ne!(
+                s_lhs.to_program(),
+                base_prog,
+                "flipping lhs bit {bit} must change to_program()"
+            );
+            let mut s_rhs = base.clone();
+            s_rhs.rhs ^= mask;
+            assert_ne!(
+                s_rhs.to_program(),
+                base_prog,
+                "flipping rhs bit {bit} must change to_program()"
+            );
+            let mut s_aux = base.clone();
+            s_aux.aux ^= mask;
+            assert_ne!(
+                s_aux.to_program(),
+                base_prog,
+                "flipping aux bit {bit} must change to_program()"
+            );
+            let mut s_cid = base.clone();
+            s_cid.chain_id ^= mask;
+            assert_ne!(
+                s_cid.to_program(),
+                base_prog,
+                "flipping chain_id bit {bit} must change to_program()"
+            );
+        }
+
+        // 2. Live zero-cost STARK forgery: prove a small quorum once, then forge upper
+        // 33 bits of aux or (lhs, rhs) while recomputing statement_digest only.
+        let honest = prove_predicate(&base).expect("honest quorum proves");
+        verify_predicate(&honest).expect("honest quorum verifies");
+
+        let mut forged_aux = honest.clone();
+        forged_aux.statement.aux |= 1u64 << 32;
+        forged_aux.statement_digest = forged_aux.statement.digest();
+        assert!(
+            verify_predicate(&forged_aux).is_err(),
+            "reusing STARK proof with forged upper-33-bit aux must be refused"
+        );
+
+        let mut forged_quorum = honest;
+        forged_quorum.statement.lhs |= 1u64 << 32;
+        forged_quorum.statement.rhs |= 1u64 << 32;
+        forged_quorum.statement_digest = forged_quorum.statement.digest();
+        assert!(
+            verify_predicate(&forged_quorum).is_err(),
+            "reusing STARK proof with forged upper-33-bit quorum weight must be refused"
+        );
+
+        // 3. Honest full-64-bit escrow aux value (> 2^63, >= GOLDILOCKS_P) still proves & verifies.
+        let high_aux = PredicateStatement {
+            kind: PredicateKind::Yk6ThresholdQuorum,
+            lhs: 5,
+            rhs: 4,
+            aux: 0xFFFF_FFFF_FFFF_FFFE,
+            chain_id: 45261,
+        };
+        let high_proof = prove_predicate(&high_aux).expect("high-64-bit aux proves");
+        verify_predicate(&high_proof).expect("high-64-bit aux verifies");
     }
 }

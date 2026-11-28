@@ -10,9 +10,9 @@
 //!
 //! What is measured (the things that MUST be independent of platform and run):
 //!   * The resolution of the three networks (Mainnet=45260, Testnet=45261,
-//!     Devnet=45262) plus an undefined chain_id fallback
+//!     Devnet=45262) plus an undefined `chain_id` fallback
 //!     (`GenesisConfig::new`). For each: the genesis block hash, the
-//!     timestamp, tx_root, validator_set_hash, the state root, the
+//!     timestamp, `tx_root`, `validator_set_hash`, the state root, the
 //!     account count and the total circulation.
 //!   * The equality of the `state_root` in the block and the root of
 //!     `build_state` - a mirror of the node's fail-closed genesis and DB check
@@ -24,7 +24,7 @@
 //! Every observation is reduced to a single SHA-256 digest and written to
 //! stdout as `GENESIS_HASH=<64hex>` (under `--nocapture`).
 //! Inside the test every observation is produced from two independent builds and
-//! their equality is asserted: in-process nondeterminism (HashMap iteration, a
+//! their equality is asserted: in-process nondeterminism (`HashMap` iteration, a
 //! wall-clock leak and the like) turns red on the spot. Equality across builds is
 //! the CI job's business - the same test runs in two builds after `cargo clean`.
 
@@ -35,7 +35,7 @@ use crate::core::chain_config::Network;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-/// The genesis observation vector for one chain_id. It mirrors the resolution
+/// The genesis observation vector for one `chain_id`. It mirrors the resolution
 /// path inside `Blockchain::new_with_genesis`: `for_network` when the network is
 /// known,
 /// otherwise the `GenesisConfig::new` fallback.

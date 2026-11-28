@@ -554,6 +554,7 @@ const MAX_PENDING_INCOMING_PER_SOURCE: usize = 2;
 pub enum SourceKey {
     V4([u8; 3]),
     V6([u8; 8]),
+    Relay(PeerId),
 }
 
 impl SourceKey {
@@ -572,29 +573,41 @@ impl SourceKey {
                     && octets[6] == 0
                     && octets[7] == 0
             }
+            Self::Relay(_) => false,
         }
     }
 }
 
 fn source_key(address: &Multiaddr) -> Option<SourceKey> {
-    address.iter().find_map(|part| match part {
-        libp2p::multiaddr::Protocol::Ip4(ip) => {
-            let octets = ip.octets();
-            Some(SourceKey::V4([octets[0], octets[1], octets[2]]))
-        }
-        libp2p::multiaddr::Protocol::Ip6(ip) => {
-            if let Some(mapped) = ip.to_ipv4_mapped() {
-                let octets = mapped.octets();
+    let mut last_peer = None;
+    let mut relay_peer = None;
+    for part in address {
+        match part {
+            libp2p::multiaddr::Protocol::Ip4(ip) => {
+                let octets = ip.octets();
                 return Some(SourceKey::V4([octets[0], octets[1], octets[2]]));
             }
-            let octets = ip.octets();
-            Some(SourceKey::V6([
-                octets[0], octets[1], octets[2], octets[3], octets[4], octets[5], octets[6],
-                octets[7],
-            ]))
+            libp2p::multiaddr::Protocol::Ip6(ip) => {
+                if let Some(mapped) = ip.to_ipv4_mapped() {
+                    let octets = mapped.octets();
+                    return Some(SourceKey::V4([octets[0], octets[1], octets[2]]));
+                }
+                let octets = ip.octets();
+                return Some(SourceKey::V6([
+                    octets[0], octets[1], octets[2], octets[3], octets[4], octets[5], octets[6],
+                    octets[7],
+                ]));
+            }
+            libp2p::multiaddr::Protocol::P2p(peer) => {
+                last_peer = Some(peer);
+            }
+            libp2p::multiaddr::Protocol::P2pCircuit if relay_peer.is_none() => {
+                relay_peer = last_peer;
+            }
+            _ => {}
         }
-        _ => None,
-    })
+    }
+    relay_peer.map(SourceKey::Relay)
 }
 
 /// Refuses a pending inbound handshake from a source prefix that already holds
@@ -774,13 +787,39 @@ pub fn is_unspecified(address: &Multiaddr) -> bool {
 /// Open a swarm with the validator key as its identity and listen on
 /// `listen`.
 pub(super) async fn start(secret_key: [u8; 32], listen: &str) -> Result<GardenNet, String> {
-    start_with(
-        secret_key,
-        listen,
-        MAX_CONNECTIONS,
-        libp2p::dns::tokio::Transport::system,
-    )
-    .await
+    start_with(secret_key, listen, MAX_CONNECTIONS, system_dns).await
+}
+
+/// The system resolver, where there is one this library may read.
+///
+/// On Android there is not. There is no `/etc/resolv.conf`, and the
+/// resolver config lives behind the connectivity service, which hickory
+/// reaches for through a JNI handle that only a NativeActivity sets up.
+/// A library loaded from an ordinary activity has no such handle, so the
+/// read does not fail - it panics, with "Android context was not
+/// initialized", and a panic is not something the caller's `match` can
+/// catch. That panic is what met a person opening the app.
+///
+/// A Garden does not need names to work: invites carry `/ip4` and `/ip6`
+/// multiaddrs, and a phone finds its Garden on the network it is on. So
+/// the resolving layer is simply not built there, which is the honest
+/// version of what the fallback arm was already trying to say.
+#[cfg(target_os = "android")]
+fn system_dns(
+    _tcp: tcp::tokio::Transport,
+) -> std::io::Result<libp2p::dns::tokio::Transport<tcp::tokio::Transport>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Android keeps its resolver behind a JNI handle this library is not given; \
+         Garden dials the /ip4 and /ip6 addresses an invite carries",
+    ))
+}
+
+#[cfg(not(target_os = "android"))]
+fn system_dns(
+    tcp: tcp::tokio::Transport,
+) -> std::io::Result<libp2p::dns::tokio::Transport<tcp::tokio::Transport>> {
+    libp2p::dns::tokio::Transport::system(tcp)
 }
 
 /// [`start`] with the number of connections the swarm keeps.
@@ -1880,41 +1919,6 @@ mod tests {
     }
 
     #[test]
-    fn forged_length_prefix_garden_frames_are_rejected_without_allocating() {
-        // Variant tags for collection-bearing variants (`GardenRequest::Gossip` = 1,
-        // `GardenResponse::Commits` = 2, `GardenResponse::Refused` = 4) followed by
-        // a forged 8-byte collection length claiming 281 TB in a 16-byte buffer.
-        let forged_frame = |variant: u32| {
-            let mut buf = Vec::with_capacity(16);
-            buf.extend_from_slice(&variant.to_le_bytes());
-            buf.extend_from_slice(&0x0000_FFFF_FFFF_FFFFu64.to_le_bytes());
-            buf.extend_from_slice(&[0u8; 4]);
-            buf
-        };
-        assert!(
-            crate::network::bounded_bincode::decode_bounded_bincode::<GardenRequest>(
-                &forged_frame(1),
-                MAX_UNADMITTED_REQUEST_BYTES,
-            )
-            .is_err()
-        );
-        assert!(
-            crate::network::bounded_bincode::decode_bounded_bincode::<GardenResponse>(
-                &forged_frame(2),
-                MAX_RESPONSE_BYTES,
-            )
-            .is_err()
-        );
-        assert!(
-            crate::network::bounded_bincode::decode_bounded_bincode::<GardenResponse>(
-                &forged_frame(4),
-                MAX_RESPONSE_BYTES,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
     fn garden_codec_clone_isolates_per_connection_large_and_response_shares() {
         let base = GardenCodec::default();
         let conn_a = base.clone();
@@ -2109,5 +2113,60 @@ mod tests {
             .await
             .expect("public start succeeds with or without /etc/resolv.conf");
         let _ = live.commands.send(NetCommand::Shutdown).await;
+    }
+
+    #[test]
+    fn forged_length_prefix_garden_frames_are_rejected_without_allocating() {
+        let forged_frame = |variant: u32| {
+            let mut buf = Vec::with_capacity(16);
+            buf.extend_from_slice(&variant.to_le_bytes());
+            buf.extend_from_slice(&0x0000_FFFF_FFFF_FFFFu64.to_le_bytes());
+            buf.extend_from_slice(&[0u8; 4]);
+            buf
+        };
+        assert!(
+            crate::network::bounded_bincode::decode_bounded_bincode::<GardenRequest>(
+                &forged_frame(1),
+                MAX_UNADMITTED_REQUEST_BYTES,
+            )
+            .is_err()
+        );
+        assert!(
+            crate::network::bounded_bincode::decode_bounded_bincode::<GardenResponse>(
+                &forged_frame(2),
+                MAX_RESPONSE_BYTES,
+            )
+            .is_err()
+        );
+        assert!(
+            crate::network::bounded_bincode::decode_bounded_bincode::<GardenResponse>(
+                &forged_frame(4),
+                MAX_RESPONSE_BYTES,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn source_key_buckets_circuit_only_relay_multiaddr_by_relay_peer() {
+        let relay = PeerId::random();
+        let client_a = PeerId::random();
+        let client_b = PeerId::random();
+        let addr_a: Multiaddr = format!("/p2p/{relay}/p2p-circuit/p2p/{client_a}")
+            .parse()
+            .expect("valid circuit multiaddr");
+        let addr_b: Multiaddr = format!("/p2p/{relay}/p2p-circuit/p2p/{client_b}")
+            .parse()
+            .expect("valid circuit multiaddr");
+        let other_relay = PeerId::random();
+        let addr_c: Multiaddr = format!("/p2p/{other_relay}/p2p-circuit/p2p/{client_a}")
+            .parse()
+            .expect("valid circuit multiaddr");
+        let key_a = source_key(&addr_a).expect("circuit-only relay multiaddr must yield a key");
+        let key_b = source_key(&addr_b).expect("circuit-only relay multiaddr must yield a key");
+        let key_c = source_key(&addr_c).expect("distinct relay multiaddr must yield a key");
+        assert_eq!(key_a, key_b);
+        assert_ne!(key_a, key_c);
+        assert!(!key_a.is_loopback());
     }
 }

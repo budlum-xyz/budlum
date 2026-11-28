@@ -11,7 +11,10 @@
 
 use crate::domain::types::{DomainId, Hash32};
 use crate::unification::payment_router::{PaymentRail, UniversalPaymentIntent};
-use crate::unification::{hash_domain_fields, unification_merkle_root, validate_safe_label};
+use crate::unification::{
+    build_merkle_proof, hash_domain_fields, unification_merkle_root, validate_safe_label,
+    verify_merkle_proof,
+};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
@@ -356,6 +359,8 @@ pub enum StorageFabricError {
     NotFound(String),
     #[error("no live replicas available for URI `{0}` meeting minimum verification strength")]
     NoEligibleReplica(String),
+    #[error("caller is not authorized to mutate owner-locked `{0}`")]
+    UnauthorizedOwner(String),
 }
 
 /// In-core unified registry coordinating B.U.D. 3.0, IPFS, Arweave, Filecoin,
@@ -366,6 +371,10 @@ pub struct UnifiedStorageFabric {
     objects: BTreeMap<Hash32, UnifiedContentRecord>,
     locator_index: BTreeMap<String, Hash32>,
     bns_bindings: BTreeMap<String, Hash32>,
+    #[serde(default, with = "crate::core::map_keys")]
+    object_owners: BTreeMap<Hash32, Hash32>,
+    #[serde(default)]
+    bns_owners: BTreeMap<String, Hash32>,
 }
 
 impl UnifiedStorageFabric {
@@ -385,6 +394,35 @@ impl UnifiedStorageFabric {
         &mut self,
         record: UnifiedContentRecord,
     ) -> Result<Hash32, StorageFabricError> {
+        self.insert_object_checked(None, record)
+    }
+
+    /// Registers or updates a content object authenticated by a non-zero
+    /// `owner_id`. Once bound to `owner_id`, neither unauthenticated callers nor
+    /// any other owner may overwrite or downgrade its replica set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageFabricError`] if `owner_id` is zero, the object is owned
+    /// by another principal, or metadata/capacity validation fails.
+    pub fn register_owned_object(
+        &mut self,
+        owner_id: Hash32,
+        record: UnifiedContentRecord,
+    ) -> Result<Hash32, StorageFabricError> {
+        if owner_id == [0u8; 32] {
+            return Err(StorageFabricError::InvalidMetadata(String::from(
+                "owner_id must be non-zero",
+            )));
+        }
+        self.insert_object_checked(Some(owner_id), record)
+    }
+
+    fn insert_object_checked(
+        &mut self,
+        caller_owner: Option<Hash32>,
+        record: UnifiedContentRecord,
+    ) -> Result<Hash32, StorageFabricError> {
         validate_safe_label("content_type", &record.content_type, 96)
             .map_err(StorageFabricError::InvalidMetadata)?;
         if record.sha3_256_digest == [0u8; 32] || record.sha256_digest == [0u8; 32] {
@@ -396,6 +434,11 @@ impl UnifiedStorageFabric {
             return Err(StorageFabricError::ReplicaLimitExceeded);
         }
         let digest = record.sha3_256_digest;
+        if let Some(&existing_owner) = self.object_owners.get(&digest) {
+            if caller_owner != Some(existing_owner) {
+                return Err(StorageFabricError::UnauthorizedOwner(hex::encode(digest)));
+            }
+        }
         let mut seen_uris: BTreeSet<String> = BTreeSet::new();
         for replica in &record.replicas {
             if replica.domain_id == 0 {
@@ -437,6 +480,9 @@ impl UnifiedStorageFabric {
         for replica in &record.replicas {
             self.locator_index.insert(replica.uri(), digest);
         }
+        if let Some(owner) = caller_owner {
+            self.object_owners.insert(digest, owner);
+        }
         self.objects.insert(digest, record);
         Ok(record_hash)
     }
@@ -461,11 +507,46 @@ impl UnifiedStorageFabric {
         bns_name: &str,
         digest: Hash32,
     ) -> Result<(), StorageFabricError> {
+        self.bind_bns_checked(None, bns_name, digest)
+    }
+
+    /// Binds a `bns://name.bud` Web3 name to a registered `digest` under
+    /// authenticated `owner_id`. Rejects hijacks by foreign or unauthenticated callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageFabricError`] if `owner_id` is zero, `bns_name` is already
+    /// locked by another owner, `bns_name` is malformed, or `digest` is unregistered.
+    pub fn bind_owned_bns_name(
+        &mut self,
+        owner_id: Hash32,
+        bns_name: &str,
+        digest: Hash32,
+    ) -> Result<(), StorageFabricError> {
+        if owner_id == [0u8; 32] {
+            return Err(StorageFabricError::InvalidMetadata(String::from(
+                "owner_id must be non-zero",
+            )));
+        }
+        self.bind_bns_checked(Some(owner_id), bns_name, digest)
+    }
+
+    fn bind_bns_checked(
+        &mut self,
+        caller_owner: Option<Hash32>,
+        bns_name: &str,
+        digest: Hash32,
+    ) -> Result<(), StorageFabricError> {
         let uri = UniversalContentUri::parse(&format!("bns://{bns_name}"))?;
         if uri.sub_path.is_some() {
             return Err(StorageFabricError::InvalidUri(String::from(
                 "BNS name binding must not include a sub-path",
             )));
+        }
+        if let Some(&existing_owner) = self.bns_owners.get(&uri.locator) {
+            if caller_owner != Some(existing_owner) {
+                return Err(StorageFabricError::UnauthorizedOwner(uri.locator));
+            }
         }
         if !self.objects.contains_key(&digest) {
             return Err(StorageFabricError::NotFound(hex::encode(digest)));
@@ -475,8 +556,42 @@ impl UnifiedStorageFabric {
         {
             return Err(StorageFabricError::FabricFull);
         }
+        if let Some(owner) = caller_owner {
+            self.bns_owners.insert(uri.locator.clone(), owner);
+        }
         self.bns_bindings.insert(uri.locator, digest);
         Ok(())
+    }
+
+    /// Deterministic Merkle commitment over all registered content records,
+    /// owner locks, and `bns://` bindings in canonical `BTreeMap` order.
+    #[must_use]
+    pub fn state_root(&self) -> Hash32 {
+        let obj_leaves: Vec<Hash32> = self
+            .objects
+            .iter()
+            .map(|(digest, rec)| {
+                let owner = self.object_owners.get(digest).copied().unwrap_or([0u8; 32]);
+                hash_domain_fields(
+                    b"BDLM_FABRIC_OBJ_LEAF_V1",
+                    &[digest, &rec.record_hash(), &owner],
+                )
+            })
+            .collect();
+        let bns_leaves: Vec<Hash32> = self
+            .bns_bindings
+            .iter()
+            .map(|(name, digest)| {
+                let owner = self.bns_owners.get(name).copied().unwrap_or([0u8; 32]);
+                hash_domain_fields(
+                    b"BDLM_FABRIC_BNS_LEAF_V1",
+                    &[name.as_bytes(), digest, &owner],
+                )
+            })
+            .collect();
+        let obj_root = unification_merkle_root(b"BDLM_FABRIC_OBJECTS_V1", &obj_leaves);
+        let bns_root = unification_merkle_root(b"BDLM_FABRIC_BNS_V1", &bns_leaves);
+        hash_domain_fields(b"BDLM_STORAGE_FABRIC_ROOT_V1", &[&obj_root, &bns_root])
     }
 
     /// Resolves any universal Web3 URI (`bns://`, `bud://`, `ipfs://`, `ar://`,
@@ -686,6 +801,260 @@ impl UnifiedStorageFabric {
             invoice_hash: req.content_digest,
             rail: PaymentRail::OnChain,
         }
+    }
+}
+
+/// Domain separation tag binding an external storage network's finalized state
+/// or transaction commitment to a Budlum content object and native locator.
+pub const STORAGE_DOMAIN_COMMITMENT_TAG: &[u8] = b"BDLM_STORAGE_DOMAIN_LEAF_V1";
+
+/// Network-specific cryptographic proof backing a [`StorageReplica`] so external
+/// decentralized storage claims are verified against each network's own rule
+/// rather than accepted as unverified caller assertions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StorageReplicaProof {
+    /// Native B.U.D. 3.0 erasure-coded custody proof (`ErasureVerified`).
+    Bud3Custody {
+        data_shards: u16,
+        parity_shards: u16,
+        custody_merkle_root: Hash32,
+    },
+    /// Byte-exact content preimage recomputing both `SHA3-256` and `SHA-256`
+    /// (`CryptographicHash`, e.g., IPFS CID verification).
+    ContentHashPreimage { payload: Vec<u8> },
+    /// Merkle inclusion proof against a finalized external storage domain root
+    /// (`Arweave`, `Filecoin`, `Walrus`, `Swarm`, `Sia` -> `MerkleRoot`).
+    ExternalDomainMerkle {
+        domain_id: DomainId,
+        finalized_state_root: Hash32,
+        leaf_index: usize,
+        leaf_count: usize,
+        proof: Vec<Hash32>,
+    },
+    /// Unproven off-chain / deal declaration (`AttestedDeal` only, e.g., Storj).
+    DeclaredDealOnly { deal_commitment: Hash32 },
+}
+
+/// Compute the deterministic commitment leaf for a storage replica anchored on
+/// an external domain (`Arweave`, `Filecoin`, `Walrus`, `Swarm`, `Sia`).
+///
+/// Convenience: shared by external storage relayers and verifiers anchoring
+/// storage commitments into finalized domain state roots.
+#[must_use]
+pub fn storage_domain_commitment_leaf(
+    network: StorageNetworkKind,
+    domain_id: DomainId,
+    sha3_256_digest: &Hash32,
+    sha256_digest: &Hash32,
+    native_locator: &str,
+) -> Hash32 {
+    hash_domain_fields(
+        STORAGE_DOMAIN_COMMITMENT_TAG,
+        &[
+            network.scheme().as_bytes(),
+            &domain_id.to_le_bytes(),
+            sha3_256_digest,
+            sha256_digest,
+            native_locator.as_bytes(),
+        ],
+    )
+}
+
+/// Build the deterministic Merkle root over external storage domain leaves.
+///
+/// Convenience: external storage provers and test suites construct finalized
+/// storage state roots verified by [`UnifiedStorageFabric::verify_and_attach_replica`].
+#[must_use]
+pub fn build_storage_domain_commitment_root(leaves: &[Hash32]) -> Hash32 {
+    unification_merkle_root(STORAGE_DOMAIN_COMMITMENT_TAG, leaves)
+}
+
+/// Build a Merkle inclusion proof for `leaf_index` in an external storage
+/// domain commitment tree.
+///
+/// Convenience: external storage relayers generate inclusion proofs consumed
+/// by [`UnifiedStorageFabric::verify_and_attach_replica`].
+#[must_use]
+pub fn build_storage_domain_inclusion_proof(
+    leaves: &[Hash32],
+    leaf_index: usize,
+) -> Option<Vec<Hash32>> {
+    build_merkle_proof(STORAGE_DOMAIN_COMMITMENT_TAG, leaves, leaf_index)
+}
+
+impl StorageNetworkKind {
+    /// Whether this storage network maintains an on-chain finalized state or
+    /// transaction root readable via an external domain finality proof.
+    ///
+    /// IPFS provides content-addressing without an on-chain persistence ledger,
+    /// and Storj exposes no on-chain proof surface.
+    ///
+    /// Convenience: classifies storage networks by whether on-chain domain
+    /// Merkle inclusion proofs are structurally valid.
+    #[must_use]
+    pub const fn supports_domain_state_proof(self) -> bool {
+        matches!(
+            self,
+            Self::Arweave | Self::Filecoin | Self::Walrus | Self::Swarm | Self::Sia
+        )
+    }
+}
+
+impl UnifiedStorageFabric {
+    /// Cryptographically verify `proof` for `replica` against the registered
+    /// object identified by `digest`, enforce exact [`VerificationStrength`]
+    /// honesty (callers cannot inflate declared strength above what the proof
+    /// establishes), and attach the verified replica to the object.
+    ///
+    /// Convenience: upgrades external storage replica registration from caller
+    /// assertion to proof-verified external-domain anchoring.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageFabricError`] if `digest` is unknown, the replica URI
+    /// or metadata is invalid, the proof fails cryptographic verification, the
+    /// storage network does not support the claimed proof family, or the object
+    /// has reached [`MAX_REPLICAS_PER_OBJECT`].
+    pub fn verify_and_attach_replica(
+        &mut self,
+        digest: &Hash32,
+        replica: StorageReplica,
+        proof: &StorageReplicaProof,
+    ) -> Result<Hash32, StorageFabricError> {
+        let Some(record) = self.objects.get(digest) else {
+            return Err(StorageFabricError::NotFound(hex::encode(digest)));
+        };
+        if record.replicas.len() >= MAX_REPLICAS_PER_OBJECT {
+            return Err(StorageFabricError::ReplicaLimitExceeded);
+        }
+        let replica_uri = replica.uri();
+        let parsed = UniversalContentUri::parse(&replica_uri)?;
+        let expected_scheme = replica.network.scheme();
+        if parsed.scheme != expected_scheme {
+            return Err(StorageFabricError::InvalidUri(format!(
+                "replica scheme `{}` disagrees with network `{expected_scheme}`",
+                parsed.scheme
+            )));
+        }
+
+        let proven_strength = match proof {
+            StorageReplicaProof::Bud3Custody {
+                data_shards,
+                parity_shards,
+                custody_merkle_root,
+            } => {
+                if replica.network != StorageNetworkKind::Bud3 {
+                    return Err(StorageFabricError::InvalidMetadata(String::from(
+                        "Bud3Custody proof is only valid for B.U.D. 3.0 replicas",
+                    )));
+                }
+                if *data_shards == 0 || *parity_shards == 0 || *custody_merkle_root == [0u8; 32] {
+                    return Err(StorageFabricError::InvalidMetadata(String::from(
+                        "Bud3Custody requires positive data/parity shards and non-zero custody root",
+                    )));
+                }
+                VerificationStrength::ErasureVerified
+            }
+            StorageReplicaProof::ContentHashPreimage { payload } => {
+                if !record.verify_bytes(payload) {
+                    return Err(StorageFabricError::InvalidMetadata(String::from(
+                        "content preimage fails SHA3-256 / SHA-256 / byte_len verification",
+                    )));
+                }
+                VerificationStrength::CryptographicHash
+            }
+            StorageReplicaProof::ExternalDomainMerkle {
+                domain_id,
+                finalized_state_root,
+                leaf_index,
+                leaf_count,
+                proof: merkle_proof,
+            } => {
+                if !replica.network.supports_domain_state_proof() {
+                    return Err(StorageFabricError::InvalidMetadata(format!(
+                        "network `{}` has no on-chain domain state proof surface",
+                        replica.network.scheme()
+                    )));
+                }
+                if *domain_id != replica.domain_id {
+                    return Err(StorageFabricError::InvalidMetadata(format!(
+                        "proof domain ({domain_id}) disagrees with replica domain ({})",
+                        replica.domain_id
+                    )));
+                }
+                if *finalized_state_root == [0u8; 32] {
+                    return Err(StorageFabricError::InvalidMetadata(String::from(
+                        "external storage domain finalized_state_root must be non-zero",
+                    )));
+                }
+                let leaf = storage_domain_commitment_leaf(
+                    replica.network,
+                    *domain_id,
+                    &record.sha3_256_digest,
+                    &record.sha256_digest,
+                    &replica.native_locator,
+                );
+                if !verify_merkle_proof(
+                    STORAGE_DOMAIN_COMMITMENT_TAG,
+                    finalized_state_root,
+                    *leaf_index,
+                    *leaf_count,
+                    &leaf,
+                    merkle_proof,
+                ) {
+                    return Err(StorageFabricError::InvalidMetadata(format!(
+                        "external storage Merkle inclusion proof failed for `{replica_uri}`"
+                    )));
+                }
+                VerificationStrength::MerkleRoot
+            }
+            StorageReplicaProof::DeclaredDealOnly { deal_commitment } => {
+                if *deal_commitment == [0u8; 32] {
+                    return Err(StorageFabricError::InvalidMetadata(String::from(
+                        "declared deal commitment must be non-zero",
+                    )));
+                }
+                VerificationStrength::AttestedDeal
+            }
+        };
+
+        if replica.verification > proven_strength {
+            return Err(StorageFabricError::InvalidMetadata(format!(
+                "replica claims verification {:?}, but proof only establishes {:?}",
+                replica.verification, proven_strength
+            )));
+        }
+
+        let mut verified_replica = replica;
+        verified_replica.verification = proven_strength;
+        let canonical_locator = parsed.canonical_string();
+        if let Some(existing_digest) = self.locator_index.get(&canonical_locator) {
+            if existing_digest != digest {
+                return Err(StorageFabricError::InvalidMetadata(format!(
+                    "replica locator `{canonical_locator}` is already bound to a different content digest"
+                )));
+            }
+        }
+
+        let Some(record_mut) = self.objects.get_mut(digest) else {
+            return Err(StorageFabricError::NotFound(hex::encode(digest)));
+        };
+        if let Some(existing) = record_mut.replicas.iter_mut().find(|r| {
+            r.network == verified_replica.network
+                && r.native_locator == verified_replica.native_locator
+        }) {
+            if verified_replica.verification > existing.verification {
+                existing.verification = verified_replica.verification;
+            }
+            existing.domain_id = verified_replica.domain_id;
+            existing.available = verified_replica.available;
+            existing.latency_ms = verified_replica.latency_ms;
+        } else {
+            record_mut.replicas.push(verified_replica);
+        }
+        let next_hash = record_mut.record_hash();
+        self.locator_index.insert(canonical_locator, *digest);
+        Ok(next_hash)
     }
 }
 
@@ -962,5 +1331,57 @@ mod tests {
             Err(StorageFabricError::FabricFull)
         ));
         assert!(fabric.bind_bns_name("site0000.bud", digest).is_ok());
+    }
+
+    #[test]
+    fn verify_and_attach_replica_upgrades_existing_attested_deal_strength() {
+        let mut fabric = UnifiedStorageFabric::new();
+        let mut rec = UnifiedContentRecord::from_bytes(b"upgradeable-bud3-payload", "text/plain");
+        let digest = rec.sha3_256_digest;
+        let locator = hex::encode(digest);
+        rec.replicas.push(StorageReplica {
+            network: StorageNetworkKind::Bud3,
+            domain_id: StorageNetworkKind::Bud3.default_domain_id(),
+            native_locator: locator.clone(),
+            verification: VerificationStrength::AttestedDeal,
+            available: true,
+            latency_ms: 9,
+        });
+        let initial_hash = fabric.register_object(rec).expect("register attested deal");
+        let initial_root = fabric.state_root();
+        let uri = format!("bud://{locator}");
+        assert!(fabric
+            .resolve(&uri, VerificationStrength::ErasureVerified)
+            .is_err());
+
+        let upgraded_hash = fabric
+            .verify_and_attach_replica(
+                &digest,
+                StorageReplica {
+                    network: StorageNetworkKind::Bud3,
+                    domain_id: StorageNetworkKind::Bud3.default_domain_id(),
+                    native_locator: locator,
+                    verification: VerificationStrength::ErasureVerified,
+                    available: true,
+                    latency_ms: 3,
+                },
+                &StorageReplicaProof::Bud3Custody {
+                    data_shards: 4,
+                    parity_shards: 2,
+                    custody_merkle_root: [0xAB; 32],
+                },
+            )
+            .expect("upgrade attested replica with Bud3Custody proof");
+        assert_ne!(upgraded_hash, initial_hash);
+        assert_ne!(fabric.state_root(), initial_root);
+
+        let resolved = fabric
+            .resolve(&uri, VerificationStrength::ErasureVerified)
+            .expect("resolves at ErasureVerified after proof upgrade");
+        assert_eq!(
+            resolved.primary.verification,
+            VerificationStrength::ErasureVerified
+        );
+        assert_eq!(resolved.primary.latency_ms, 3);
     }
 }

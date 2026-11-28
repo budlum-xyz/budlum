@@ -40,6 +40,14 @@ impl std::fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
+/// Base byte offset where host-supplied private witness words are staged.
+/// Sits strictly below [`HEAP_BASE`] (`2048..4096`) so witness loads never
+/// collide with dynamic struct allocations.
+pub const WITNESS_BASE: i32 = 2048;
+
+/// Maximum number of 64-bit witness fields in a single contract (`256 * 8 = 2048` bytes).
+pub const MAX_WITNESS_SLOTS: usize = 256;
+
 /// Byte offset where the generated prologue points the heap pointer (`r31`).
 ///
 /// Struct literals allocate above this address, so a VM whose memory is
@@ -77,6 +85,59 @@ pub fn compile(source: &str, profile: IsaProfile) -> Result<Vec<u64>, CompileErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn witness_declaration_compiles_and_rejects_reassignment() {
+        let src = r#"
+            contract WitnessAuth {
+                witness { secret: u64 }
+                pub fn main() {
+                    let x = witness::secret + 1;
+                    constrain(x == 10);
+                }
+            }
+        "#;
+        let bytecode = compile(src, IsaProfile::Production).expect("witness program compiles");
+        let mut vm = bud_vm::Vm::new(MIN_VM_MEMORY_BYTES);
+        vm.set_witness_words(&[9]).unwrap();
+        assert!(vm.run_receipt(&bytecode).success);
+
+        let mut vm_wrong = bud_vm::Vm::new(MIN_VM_MEMORY_BYTES);
+        vm_wrong.set_witness_words(&[8]).unwrap();
+        assert!(!vm_wrong.run_receipt(&bytecode).success);
+
+        // Witness cannot be reassigned as a mutable variable.
+        let bad_mut = r#"
+            contract BadMut {
+                witness { secret: u64 }
+                pub fn main() {
+                    secret = 5;
+                }
+            }
+        "#;
+        assert!(compile(bad_mut, IsaProfile::Production).is_err());
+
+        // Match statement lowers cleanly through BudIR as well.
+        let match_src = r#"
+            contract MatchIr {
+                witness { mode: u64 }
+                storage { out: u64 }
+                pub fn main() {
+                    match (witness::mode) {
+                        1 => { storage::out = 10; },
+                        _ => { storage::out = 20; }
+                    };
+                }
+            }
+        "#;
+        let mut parser = parser::Parser::new(match_src).unwrap();
+        let contract = parser.parse_contract().unwrap();
+        let mut sema = sema::SemanticAnalyzer::new();
+        sema.analyze(&contract).unwrap();
+        let ir =
+            ir::lower::lower_contract(&contract, &sema).expect("match and witness lower to IR");
+        assert!(!ir.functions.is_empty());
+    }
 
     /// A CRLF source compiles like its LF twin.
     #[test]

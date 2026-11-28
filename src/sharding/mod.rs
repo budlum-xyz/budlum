@@ -11,9 +11,9 @@
 //!   a shard root is comparable with the whole-state root.
 //! * A single commitment over all shard roots ([`shards_commitment`]) is
 //!   folded into the block header (`Block::shards_root`) and therefore into
-//!   the block hash the BLS finality certificate seals. Enforcement is not
-//!   wired: no validation rule recomputes the commitment yet, so today a
-//!   block with a wrong `shards_root` is not rejected for that reason.
+//!   the block hash the BLS finality certificate seals. Block production
+//!   sets `shards_root` and block validation (`Blockchain`) recomputes and
+//!   enforces it whenever sharding is active at the block height.
 //! * A transfer between two shards is a single state transition: the source
 //!   shard is debited and the destination shard credited in one
 //!   `apply_transaction` call, so the pair commits together or not at all
@@ -72,7 +72,10 @@ impl ShardingConfig {
     /// the unsharded state), and the height to have reached activation.
     #[must_use]
     pub const fn is_active_at(&self, height: u64) -> bool {
-        self.enabled && self.num_shards >= 2 && height >= self.activation_height
+        self.enabled
+            && self.num_shards >= 2
+            && self.num_shards <= MAX_SHARDS
+            && height >= self.activation_height
     }
 }
 
@@ -251,6 +254,10 @@ pub fn apply_cross_shard_transfer(
         .get_balance(&tx.to)
         .checked_add(tx.amount)
         .ok_or_else(|| "receiver balance overflow on cross-shard transfer".to_string())?;
+    let next_burned = state
+        .burned_total
+        .checked_add(tx.fee)
+        .ok_or_else(|| "burned_total overflow on cross-shard transfer".to_string())?;
 
     // Both mutations below are infallible after the checks above.
     // The checks above establish both, but this is a transaction-execution
@@ -267,6 +274,7 @@ pub fn apply_cross_shard_transfer(
         .balance
         .checked_add(tx.amount)
         .ok_or("shard transfer: receiver balance overflow")?;
+    state.burned_total = next_burned;
     state.dirty_accounts.insert(tx.from);
     state.dirty_accounts.insert(tx.to);
     Ok(())
@@ -543,5 +551,29 @@ mod tests {
         state.get_or_create(&addr(3)).balance += 1;
         let after = shards_commitment(&state, num_shards);
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn cross_shard_transfer_conserves_supply_via_burned_total_and_caps_config() {
+        let mut state = AccountState::new();
+        let sender = addr(0x00);
+        let receiver = addr(0x01);
+        state.get_or_create(&sender).balance = 1_000;
+        let tx = transfer(sender, receiver, 250, 15);
+        apply_cross_shard_transfer(&mut state, &tx, 4).expect("cross-shard transfer");
+        assert_eq!(state.get_balance(&sender), 735);
+        assert_eq!(state.get_balance(&receiver), 250);
+        assert_eq!(state.burned_total, 15);
+        assert_eq!(
+            state.get_balance(&sender) + state.get_balance(&receiver) + state.burned_total,
+            1_000
+        );
+
+        let over_cap = ShardingConfig {
+            enabled: true,
+            num_shards: MAX_SHARDS + 1,
+            activation_height: 0,
+        };
+        assert!(!over_cap.is_active_at(10));
     }
 }

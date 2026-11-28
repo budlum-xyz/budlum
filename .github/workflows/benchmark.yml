@@ -1,35 +1,32 @@
 name: Benchmark
 
 on:
+  pull_request:
+    # Pull requests into the product branch still pay the full battery; the
+    # daily integration pull request into `main` does not - that path is
+    # budgeted by `ci-pull-request-fanout-is-budgeted` and the evidence-window
+    # owner dispatches this workflow on the wave head instead.
+    branches: [consensus-of-consensuses]
+  workflow_dispatch:
   push:
     branches: [main]
-  # Heavy battery. It runs on pull requests to `main` (the PR that merges the
-  # stack), on the schedule and on demand. A stacked pull request (base
-  # `testnet-quantum` or `testnet`) runs the PR gates in ci.yml,
-  # security-audit.yml, semgrep.yml and the other light workflows, and skips the
-  # jobs of this file through the job-level condition: GitHub evaluates the
-  # `branches` filter of a stacked pull request against the root of the stack,
-  # so the filter alone does not keep it out. This keeps one push from queueing
-  # more work than the shared runner pool can finish before the next push cancels it.
-  pull_request:
-    branches: [main, consensus-of-consensuses]
-  # On demand: an operator can start this battery on a branch without
-  # pushing to it, which is how a blocked stack gets its heavy evidence
-  # when the queue is empty enough to take one more run.
-  workflow_dispatch:
+  # Heavy battery. It runs on demand (the evidence-window
+  # owner dispatches it on the wave head) and on pushes to `main`. It is out
+  # of the pull-request path on purpose: one push was queueing more work than
+  # the shared runner pool could finish, and the budget gate
+  # `ci-pull-request-fanout-is-budgeted` pins that path's size.
 
 concurrency:
   group: benchmark-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 permissions:
   contents: read
 
 jobs:
   benchmark:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
     # CI Expansion item 10: performance regression tracking.
     # It runs the Criterion benchmarks and stores the results as an artifact.
     name: Benchmark Regression (item 10)
@@ -47,25 +44,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       # The micro benches are plain binaries (`[[bin]] bench_*` in
       # Cargo.toml), not Criterion targets: there is no bench target named
       # `micro` or `single_node`, and with pipefail on that error is now
@@ -103,18 +82,18 @@ jobs:
       # needs recorded baseline history and lands when there is a baseline to
       # compare against; until then a run that produces no numbers is itself a
       # failure, never a silent green.
-      - name: Fail on a vacuous benchmark run (BLG-1049 interim)
+      - name: Fail on a vacuous benchmark run
         run: |
           set -euo pipefail
           for f in /tmp/bench-micro.txt /tmp/bench-single.txt; do
             if ! grep -qE 'Throughput:|Avg per' "$f"; then
-              echo "::error file=$f::no benchmark metric in $f - a vacuous run must fail (BLG-1049)"
+              echo "::error file=$f::no benchmark metric in $f - a vacuous run must fail"
               exit 1
             fi
           done
           for f in /tmp/bench-budzero-canonical.txt /tmp/bench-budzero-baseline.txt; do
             if [ ! -s "$f" ]; then
-              echo "::error file=$f::empty BudZero bench output - a vacuous run must fail (BLG-1049)"
+              echo "::error file=$f::empty BudZero bench output - a vacuous run must fail"
               exit 1
             fi
           done

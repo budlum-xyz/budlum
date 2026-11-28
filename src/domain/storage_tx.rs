@@ -30,6 +30,15 @@ use crate::domain::storage_deal::{
     ChallengeOutcome, DealStatus, OperatorClass, RetrievalChallengeRequest, StorageEconomicsParams,
     StorageError, StorageReallocationTicket, StorageRegistry,
 };
+
+/// Minimum epochs an operator must have to respond to a retrieval challenge.
+/// Too-short windows make honest operators miss deadlines
+/// through no fault of their own and lose their bond.
+///
+/// WIRING: enforced by the storage challenge window check in this module; the
+/// constant is part of the public audit-policy surface for operators reading
+/// the challenge parameters from RPC.
+pub const MIN_AUDIT_RESPONSE_WINDOW_EPOCHS: u64 = 3;
 use crate::domain::Hash32;
 use crate::storage::{
     ConfidentialBodyCommit, ContentId, ContentManifest, GrantAuthorization, GrantIssueTerms,
@@ -139,7 +148,7 @@ pub enum StorageTx {
 /// envelope follows the deal-open convention: an empty `merkle_proof` means
 /// none and an all-zero `storage_root` means none, and the registry refuses
 /// an acceptance without both.
-/// exposed for StorageTx::AcceptReallocation: the executor and the signing bytes in core/transaction.rs reach it through the variant, not by name.
+/// exposed for `StorageTx::AcceptReallocation`: the executor and the signing bytes in core/transaction.rs reach it through the variant, not by name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageReallocationAccept {
     pub ticket_id: u64,
@@ -172,7 +181,7 @@ pub struct StorageReallocationAccept {
 /// encoding: an empty `merkle_proof` means none and an all-zero
 /// `storage_root` means none. The registry refuses a deal without both, so in
 /// block today an open that leaves either empty is refused.
-/// exposed for StorageTx::OpenDeal: the executor and the signing bytes in core/transaction.rs reach it through the variant, not by name.
+/// exposed for `StorageTx::OpenDeal`: the executor and the signing bytes in core/transaction.rs reach it through the variant, not by name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageDealOpen {
     pub domain_id: u32,
@@ -477,7 +486,7 @@ fn is_mainnet(chain_id: u64) -> bool {
 /// It binds the chain, the payer, the payer's account nonce and every body
 /// field except the consent itself, under its own tag, so a deal-open consent
 /// cannot be presented as a repair consent or the reverse.
-/// WIRING: the in-block check is accept_reallocation below; the outside caller is the operator-side consent signer, which does not exist yet.
+/// WIRING: the in-block check is `accept_reallocation` below; the outside caller is the operator-side consent signer, which does not exist yet.
 #[must_use]
 pub fn accept_reallocation_consent_digest(
     chain_id: u64,
@@ -662,6 +671,13 @@ fn open_challenge(
     let epoch = state.epoch_index;
     StorageRegistry::validate_challenge_window(epoch, deadline_epoch, epoch)
         .map_err(|e| StorageTxError::ChallengeRefused(e.to_string()))?;
+    // minimum operator response window.
+    let window = deadline_epoch.saturating_sub(epoch);
+    if window < MIN_AUDIT_RESPONSE_WINDOW_EPOCHS {
+        return Err(StorageTxError::ChallengeRefused(format!(
+            "response window {window} epochs < minimum {MIN_AUDIT_RESPONSE_WINDOW_EPOCHS}"
+        )));
+    }
     // A question about these bytes must be answerable inside the term it is
     // asked about. A deadline past the deal's own end holds the row `Active`
     // (the missed-answer slash needs it), blocking expiry, bond return, and
@@ -838,12 +854,11 @@ fn answer_coding_audit(
             max: MAX_CODING_AUDIT_DATA_COLUMN_BYTES,
         });
     }
-    let manifest_id = match state.storage_registry.coding_audit(audit_id) {
-        Some(stored) => stored.audit.manifest_id,
-        None => {
-            let unknown = StorageError::UnknownCodingAudit(audit_id);
-            return Err(StorageTxError::CodingAuditRefused(unknown.to_string()));
-        }
+    let manifest_id = if let Some(stored) = state.storage_registry.coding_audit(audit_id) {
+        stored.audit.manifest_id
+    } else {
+        let unknown = StorageError::UnknownCodingAudit(audit_id);
+        return Err(StorageTxError::CodingAuditRefused(unknown.to_string()));
     };
     // A pruned manifest is the registry's case: it voids the audit.
     if let Some(manifest) = state.storage_registry.get_manifest(&manifest_id) {
@@ -878,7 +893,7 @@ fn answer_coding_audit(
 /// field except the consent itself, so the consent cannot move to another
 /// chain, payer, placement or price, and it is spent when the payer's nonce
 /// advances.
-/// WIRING: the in-block check is open_deal below; the outside caller is the operator-side consent signer of the storage RPC mutation path, which does not exist yet.
+/// WIRING: the in-block check is `open_deal` below; the outside caller is the operator-side consent signer of the storage RPC mutation path, which does not exist yet.
 #[must_use]
 pub fn open_deal_consent_digest(
     chain_id: u64,
@@ -1131,7 +1146,7 @@ fn register_manifest(
 ) -> Result<(), StorageTxError> {
     manifest
         .validate_untrusted()
-        .map_err(|e| StorageTxError::Refused(e.to_string()))?;
+        .map_err(|e| StorageTxError::Refused(e.clone()))?;
     if manifest.erasure.n > manifest.erasure.k {
         let parity = manifest.erasure.parity_count() as usize;
         if manifest.column_roots.len() != parity {
@@ -2956,5 +2971,67 @@ mod tests {
             &wrong_bytes,
         )
         .is_err());
+    }
+
+    #[test]
+    fn the_registry_window_floor_already_covers_the_audit_response_floor() {
+        // A challenge has two floors: the registry refuses a deadline closer
+        // than `MIN_CHALLENGE_WINDOW_EPOCHS`, and the transaction door refuses
+        // one closer than `MIN_AUDIT_RESPONSE_WINDOW_EPOCHS`. Because the
+        // registry floor is the larger of the two, every window that reaches
+        // the door has already cleared the audit floor, so no window can
+        // satisfy one floor and fail the other. The ordering is pinned here
+        // rather than left implicit: inverted, the door's guard would be the
+        // only thing between an opener and a deadline too short to answer.
+        const {
+            assert!(
+                StorageRegistry::MIN_CHALLENGE_WINDOW_EPOCHS >= MIN_AUDIT_RESPONSE_WINDOW_EPOCHS,
+                "the registry floor is below the audit response floor; the door \
+                 would then refuse windows the registry allowed",
+            );
+        }
+        let mut state = AccountState::new();
+        let (_operator, opener, deal_id) = challengeable(&mut state);
+        let epoch = state.epoch_index;
+        for window in [
+            1,
+            MIN_AUDIT_RESPONSE_WINDOW_EPOCHS - 1,
+            StorageRegistry::MIN_CHALLENGE_WINDOW_EPOCHS - 1,
+        ] {
+            let err = execute_storage_tx(
+                &mut state,
+                &ctx(opener),
+                &StorageTx::OpenChallenge {
+                    deal_id,
+                    range_len: 16,
+                    deadline_epoch: epoch + window,
+                    opener_bond: StorageRegistry::required_opener_bond(16),
+                },
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, StorageTxError::ChallengeRefused(_)),
+                "a window of {window} epochs must be refused: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_challenge_refuses_deadline_past_deal_expiry() {
+        let mut state = AccountState::new();
+        let (_operator, opener, deal_id) = challengeable(&mut state);
+        let deal_end = state
+            .storage_registry
+            .get_deal(deal_id)
+            .unwrap()
+            .deal_end_epoch;
+        let tx = StorageTx::OpenChallenge {
+            deal_id,
+            range_len: 16,
+            deadline_epoch: deal_end + 10,
+            opener_bond: 100,
+        };
+        let err = execute_storage_tx(&mut state, &ctx(opener), &tx).unwrap_err();
+        assert!(err.to_string().contains("deal term"), "unexpected: {err}");
     }
 }

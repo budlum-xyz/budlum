@@ -132,6 +132,10 @@ pub fn is_empty_or_halt_only_program(program: &[u64]) -> bool {
 /// height, the window applies in full.
 pub const MAX_ZK_PROOF_HEIGHT_LAG: u64 = 128;
 
+/// Upper bound on instruction words carried in one [`ZkProofSubmission`],
+/// preventing unbounded heap allocation and hashing before STARK verification.
+pub const MAX_ZK_PROGRAM_WORDS: usize = 65_536;
+
 /// How far one accepted zk claim may carry a domain's tip.
 ///
 /// An accepted claim parks the domain's `last_committed_height`, and nothing
@@ -190,7 +194,7 @@ impl ZkProofSubmission {
             fallback
         });
         let pi_bytes = public_inputs.to_canonical_bytes();
-        let mut program_bytes = Vec::with_capacity(program.len() * 8);
+        let mut program_bytes = Vec::with_capacity(program.len().saturating_mul(8));
         for word in program {
             program_bytes.extend_from_slice(&word.to_le_bytes());
         }
@@ -471,7 +475,7 @@ mod tests {
     /// The cap refuses at the boundary and the refusal is total -
     /// the registry state is untouched, so a full registry still answers
     /// its recorded claims and still classifies duplicates correctly.
-    /// Filling 100k keys is a loop of BTreeMap inserts; keep it cheap by
+    /// Filling 100k keys is a loop of `BTreeMap` inserts; keep it cheap by
     /// testing the boundary: fill exactly to capacity with distinct keys.
     #[test]
     fn registry_refuses_past_the_cap() {

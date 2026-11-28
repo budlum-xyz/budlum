@@ -156,6 +156,9 @@ pub struct SemanticAnalyzer {
     /// are verified once: a typo in a field's type name must not silently turn
     /// into an imaginary struct type, as it can with struct field types.
     pub storage: HashMap<String, Type>,
+    /// Declared private witness fields (`witness { secret: u64, ... }`).
+    /// Read-only scalar inputs staged by the host in `[WITNESS_BASE, HEAP_BASE)`.
+    pub witnesses: HashMap<String, Type>,
     pub current_func_ret: Type,
 }
 
@@ -188,6 +191,7 @@ impl SemanticAnalyzer {
             structs: HashMap::new(),
             functions: HashMap::new(),
             storage: HashMap::new(),
+            witnesses: HashMap::new(),
             current_func_ret: Type::Void,
         }
     }
@@ -246,6 +250,36 @@ impl SemanticAnalyzer {
                     &format!("storage field '{}'", field.name),
                     &mut errors,
                 );
+            }
+        }
+
+        if contract.witnesses.len() > crate::MAX_WITNESS_SLOTS {
+            errors.push(CompileError::SemanticError(format!(
+                "contract declares {} witness slots, max {}",
+                contract.witnesses.len(),
+                crate::MAX_WITNESS_SLOTS
+            )));
+        }
+        for w in &contract.witnesses {
+            match Type::from_str(&w.ty) {
+                Ok(ty) => {
+                    if !matches!(
+                        ty,
+                        Type::U64 | Type::Bool | Type::Field | Type::Address | Type::Hash32
+                    ) {
+                        errors.push(CompileError::SemanticError(format!(
+                            "witness field '{}' must be a scalar (u64/bool/field/Address/Hash32), got {}",
+                            w.name,
+                            ty.name()
+                        )));
+                    } else if self.witnesses.insert(w.name.clone(), ty).is_some() {
+                        errors.push(CompileError::SemanticError(format!(
+                            "witness field '{}' is declared twice",
+                            w.name
+                        )));
+                    }
+                }
+                Err(e) => errors.push(CompileError::SemanticError(e)),
             }
         }
 
@@ -543,7 +577,13 @@ impl SemanticAnalyzer {
                 self.check_condition_type(&ty, "constrain", errors);
             }
             Stmt::Assign(name, expr) => {
-                if let Some(expected_ty) = env.get(name).cloned() {
+                if self.witnesses.contains_key(name) && !env.contains_key(name) {
+                    errors.push(CompileError::SemanticError(format!(
+                        "cannot assign to immutable witness field '{}'",
+                        name
+                    )));
+                    self.analyze_expr(expr, env, errors);
+                } else if let Some(expected_ty) = env.get(name).cloned() {
                     let ty = self.analyze_expr(expr, env, errors);
                     if ty != expected_ty && ty != Type::Unknown && expected_ty != Type::Unknown {
                         errors.push(CompileError::SemanticError(format!(
@@ -724,6 +764,8 @@ impl SemanticAnalyzer {
             Expr::Ident(name) => {
                 if let Some(ty) = env.get(name) {
                     ty.clone()
+                } else if let Some(ty) = self.witnesses.get(name) {
+                    ty.clone()
                 } else {
                     errors.push(CompileError::SemanticError(format!(
                         "Undefined identifier: {}",
@@ -733,6 +775,16 @@ impl SemanticAnalyzer {
                 }
             }
             Expr::StorageRead(name) => self.scalar_storage_type(name, errors),
+            Expr::WitnessRead(name) => match self.witnesses.get(name) {
+                Some(ty) => ty.clone(),
+                None => {
+                    errors.push(CompileError::SemanticError(format!(
+                        "Undefined witness field '{}'",
+                        name
+                    )));
+                    Type::Unknown
+                }
+            },
             Expr::MappingRead(name, key) => self.mapping_access_type(name, key, env, errors),
             Expr::FieldAccess(base, field) => {
                 let base_ty = self.analyze_expr(base, env, errors);

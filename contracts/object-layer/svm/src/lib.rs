@@ -105,7 +105,22 @@ pub enum Instruction {
     HomeCall {
         calls: Vec<u8>,
     },
-    /// Accounts: endpoint state PDA (writable).
+    /// Accounts: verifier state PDA (writable, seed `b"verifier"`).
+    InitVerifier {
+        committee: verifier::CommitteeConfig,
+    },
+    /// Accounts: verifier state PDA (writable, seed `b"verifier"`), `sysvar::instructions`.
+    RotateCommittee {
+        handoff: verifier::CommitteeHandoffProof,
+    },
+    /// Accounts: verifier state PDA (writable, seed `b"verifier"`), `sysvar::instructions`.
+    RecordCheckpoint {
+        height: u64,
+        state_root: [u8; 32],
+        header_hash: [u8; 32],
+        proof: verifier::SignedFinalityProof,
+    },
+    /// Accounts: endpoint state PDA (writable), verifier state PDA (seed `b"verifier"`).
     AcceptHeader {
         height: u64,
     },
@@ -261,10 +276,71 @@ pub fn process_instruction(
                 },
             )
         }
+        Instruction::InitVerifier { committee } => {
+            let verifier_account = next_account_info(&mut it)?;
+            let (expected, _) = Pubkey::find_program_address(&[b"verifier"], program_id);
+            if *verifier_account.key != expected || verifier_account.owner != program_id {
+                return Err(ProgramError::InvalidSeeds);
+            }
+            let mut vstate =
+                verifier::VerifierState::try_from_slice(&verifier_account.try_borrow_data()?)
+                    .unwrap_or_default();
+            verifier::initialize_committee(&mut vstate, committee)?;
+            vstate
+                .serialize(&mut &mut verifier_account.try_borrow_mut_data()?[..])
+                .map_err(|_| ProgramError::AccountDataTooSmall)
+        }
+        Instruction::RotateCommittee { handoff } => {
+            let verifier_account = next_account_info(&mut it)?;
+            let sysvar_ix_account = next_account_info(&mut it)?;
+            let (expected, _) = Pubkey::find_program_address(&[b"verifier"], program_id);
+            if *verifier_account.key != expected || verifier_account.owner != program_id {
+                return Err(ProgramError::InvalidSeeds);
+            }
+            let mut vstate =
+                verifier::VerifierState::try_from_slice(&verifier_account.try_borrow_data()?)
+                    .unwrap_or_default();
+            verifier::rotate_committee(&mut vstate, sysvar_ix_account, &handoff)?;
+            vstate
+                .serialize(&mut &mut verifier_account.try_borrow_mut_data()?[..])
+                .map_err(|_| ProgramError::AccountDataTooSmall)
+        }
+        Instruction::RecordCheckpoint {
+            height,
+            state_root,
+            header_hash,
+            proof,
+        } => {
+            let verifier_account = next_account_info(&mut it)?;
+            let sysvar_ix_account = next_account_info(&mut it)?;
+            let (expected, _) = Pubkey::find_program_address(&[b"verifier"], program_id);
+            if *verifier_account.key != expected || verifier_account.owner != program_id {
+                return Err(ProgramError::InvalidSeeds);
+            }
+            let mut vstate =
+                verifier::VerifierState::try_from_slice(&verifier_account.try_borrow_data()?)
+                    .unwrap_or_default();
+            verifier::record(
+                &mut vstate,
+                sysvar_ix_account,
+                height,
+                state_root,
+                header_hash,
+                &proof,
+            )?;
+            vstate
+                .serialize(&mut &mut verifier_account.try_borrow_mut_data()?[..])
+                .map_err(|_| ProgramError::AccountDataTooSmall)
+        }
         Instruction::AcceptHeader { height } => {
             let state_account = next_account_info(&mut it)?;
+            let verifier_account = next_account_info(&mut it)?;
             let (expected, _) = Pubkey::find_program_address(&[b"endpoint"], program_id);
             if *state_account.key != expected || state_account.owner != program_id {
+                return Err(ProgramError::InvalidSeeds);
+            }
+            let (expected_verifier, _) = Pubkey::find_program_address(&[b"verifier"], program_id);
+            if *verifier_account.key != expected_verifier || verifier_account.owner != program_id {
                 return Err(ProgramError::InvalidSeeds);
             }
             let mut state = EndpointState::try_from_slice(&state_account.try_borrow_data()?)
@@ -272,7 +348,10 @@ pub fn process_instruction(
             if height <= state.last_accepted_height {
                 return Err(ProgramError::Custom(NOT_NEWER));
             }
-            if !verifier::height_final(height) {
+            let vstate =
+                verifier::VerifierState::try_from_slice(&verifier_account.try_borrow_data()?)
+                    .unwrap_or_default();
+            if !verifier::height_final(&vstate, height) {
                 return Err(ProgramError::Custom(NOT_FINAL));
             }
             state.last_accepted_height = height;

@@ -258,13 +258,14 @@ impl PoAEngine {
     }
 
     /// VRF-like leader slot selection in `[0, n)`.
-    /// Added previous_block_hash as an
+    /// Added `previous_block_hash` as an
     /// Entropy source. Previously the leader was fully deterministic from
-    /// Public inputs (block_index + validator set), allowing DoS/bribery
+    /// Public inputs (`block_index` + validator set), allowing DoS/bribery
     /// Attacks. Now the leader is unpredictable until the previous block
     /// Is produced, since its hash is unknown beforehand.
     /// Test-only convenience wrapper.
     #[cfg(test)]
+    #[must_use]
     pub fn leader_slot(block_index: u64, active_validators: &[&Validator]) -> Option<usize> {
         Self::leader_slot_with_entropy(block_index, active_validators, &[0u8; 32], 0)
     }
@@ -877,7 +878,7 @@ mod tests {
     }
 
     /// A state where every listed address is an active validator *and* holds a
-    /// live PoA admission record in domain 0.
+    /// live `PoA` admission record in domain 0.
     fn admitted_state(addrs: &[Address]) -> AccountState {
         let mut state = AccountState::new();
         for a in addrs {
@@ -1092,7 +1093,7 @@ mod tests {
         assert!(block.composite_pq_key().is_some());
         assert!(block.verify_signature());
 
-        let pq_bytes = block.composite_pq_key().unwrap().to_vec();
+        let pq_bytes = block.composite_pq_key().unwrap().clone();
         let unregistered_err = engine.validate_block(&block, &[], &state).unwrap_err();
         assert!(
             unregistered_err
@@ -1111,7 +1112,7 @@ mod tests {
             )
             .unwrap();
         state.validators.get_mut(&pubkey).unwrap().pq_public_key =
-            wrong_block.composite_pq_key().unwrap().to_vec();
+            wrong_block.composite_pq_key().unwrap().clone();
         let mismatch_err = engine.validate_block(&block, &[], &state).unwrap_err();
         assert!(
             mismatch_err

@@ -221,7 +221,7 @@ mod tests {
         CompactContext {
             project_name: "example".to_string(),
             facts: vec![FactRow {
-                subject: "StorageRegistry".to_string(),
+                subject: "Bud3Registry".to_string(),
                 predicate: "defines".to_string(),
                 object: "erasure".to_string(),
                 confidence: "high".to_string(),
@@ -246,7 +246,7 @@ mod tests {
     fn renders_tables() {
         let out = render(&sample(), None);
         assert!(out.contains("# Facts"));
-        assert!(out.contains("StorageRegistry"));
+        assert!(out.contains("Bud3Registry"));
         assert!(out.contains("src/storage.rs:L10-L20"));
         assert!(out.contains("# Relations"));
         assert!(out.contains("# Notes"));

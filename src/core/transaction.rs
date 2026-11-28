@@ -88,7 +88,7 @@ pub const MAX_V8_SIGNERS: usize = 16;
 /// admission instead of being guessed from key length.
 ///
 /// WIRING: consumed cross-file by the identity verification-method encoding
-/// (`registry::identity`, MethodKind::MlDsa87) when the identity transaction
+/// (`registry::identity`, `MethodKind::MlDsa87`) when the identity transaction
 /// door lands; until then the account-identity absorb in this file pins it.
 pub const ML_DSA_87_SCHEME_ID: &str = "ml-dsa-87-fips204-v1";
 
@@ -150,9 +150,10 @@ pub struct GasSchedule {
 const TX_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/transaction";
 
 impl crate::core::chain_config::Network {
-    pub fn gas_schedule(&self) -> GasSchedule {
+    #[must_use]
+    pub const fn gas_schedule(&self) -> GasSchedule {
         match self {
-            crate::core::chain_config::Network::Mainnet => GasSchedule {
+            Self::Mainnet => GasSchedule {
                 base_fee: 10,
                 gas_per_byte: 2,
                 gas_per_signature: 1_000,
@@ -161,7 +162,7 @@ impl crate::core::chain_config::Network {
                 vote_gas: 35_000,
                 contract_call_gas: 50_000,
             },
-            crate::core::chain_config::Network::Testnet => GasSchedule {
+            Self::Testnet => GasSchedule {
                 base_fee: 1,
                 gas_per_byte: 1,
                 gas_per_signature: 500,
@@ -170,7 +171,7 @@ impl crate::core::chain_config::Network {
                 vote_gas: 25_000,
                 contract_call_gas: 35_000,
             },
-            crate::core::chain_config::Network::Devnet => GasSchedule {
+            Self::Devnet => GasSchedule {
                 base_fee: 1,
                 gas_per_byte: 1,
                 gas_per_signature: 100,
@@ -183,7 +184,7 @@ impl crate::core::chain_config::Network {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExternalChain {
     Ethereum,
     Solana,
@@ -199,6 +200,7 @@ impl ExternalChain {
     /// Canonical domain id used by the consensus-owned external-root anchor
     /// Registry. These ids are part of the bridge wire contract and must not
     /// Be derived from an untrusted relayer payload.
+    #[must_use]
     pub const fn domain_id(self) -> u32 {
         match self {
             Self::Ethereum => 1,
@@ -321,6 +323,7 @@ impl BridgeBurnTx {
     /// `holder_signature` itself is not in here (it is the result of signing
     /// this value), and neither is an amount: the amount comes from the
     /// transfer row, which the row's own id pins.
+    #[must_use]
     pub fn authorization_hash(&self, chain_id: u64) -> [u8; 32] {
         crate::core::hash::hash_fields_bytes(&[
             BRIDGE_BURN_AUTHORIZATION_TAG,
@@ -608,24 +611,24 @@ pub enum TransactionType {
     AiInferenceRequest(crate::ai::types::AiInferenceRequest),
     /// Submit an AI inference layer inference result by an active bonded RoleId(8) operator.
     AiInferenceResult(crate::ai::types::AiInferenceResult),
-    /// Reclaim escrowed max_fee for expired unfinalized AI request.
+    /// Reclaim escrowed `max_fee` for expired unfinalized AI request.
     AiFeeReclaim(crate::ai::types::AiRequestId),
     /// Deactivate an AI model (owner-only, prevents new requests).
     AiModelDeactivate(crate::ai::types::AiModelId),
     /// Reactivate a previously deactivated AI model.
     AiModelReactivate(crate::ai::types::AiModelId),
     /// Cancel a pending AI inference request (requester-only).
-    /// Returns escrowed max_fee for refund by the executor layer.
+    /// Returns escrowed `max_fee` for refund by the executor layer.
     AiRequestCancel(crate::ai::types::AiRequestId),
-    /// Register a Pollen DataAsset (owner-submitted).
+    /// Register a Pollen `DataAsset` (owner-submitted).
     PollenRegisterDataAsset(crate::pollen::DataAsset),
-    /// Register a seller/owner sale authorization for DataAsset pollen.
+    /// Register a seller/owner sale authorization for `DataAsset` pollen.
     PollenAuthorizeSale(crate::pollen::SaleAuthorization),
-    /// Register an owner-submitted AccessGrant.
+    /// Register an owner-submitted `AccessGrant`.
     PollenGrantAccess(crate::pollen::AccessGrant),
-    /// Revoke a Pollen AccessGrant by id (owner-only in executor).
+    /// Revoke a Pollen `AccessGrant` by id (owner-only in executor).
     PollenRevokeGrant(crate::pollen::GrantId),
-    /// Revoke a Pollen DataAsset by id (owner-only in executor).
+    /// Revoke a Pollen `DataAsset` by id (owner-only in executor).
     PollenRevokeDataAsset(crate::pollen::AssetId),
     /// Slash a verifier for equivocation.
     AiDisputeSlash {
@@ -646,20 +649,20 @@ pub enum TransactionType {
     PrivateTransferSubmit(crate::privacy::PrivateTransferSubmit),
     /// Faucet/test helper - insert a live note commitment (governance/tests).
     PrivacyNoteInsert([u8; 32]),
-    /// AI execution layer: attach BudZKVM execution proof to a result
+    /// AI execution layer: attach `BudZKVM` execution proof to a result
     /// (active RoleId(8) operator-submitted; structural verify on the chain).
     AiAttachExecutionProof {
         request_id: crate::ai::types::AiRequestId,
         proof: crate::ai::types::AiExecutionProof,
     },
     /// AI inference layer production onboarding: bond `amount` from the signed sender into
-    /// The permissionless AI_OPERATOR role (RoleId 8).
+    /// The permissionless `AI_OPERATOR` role (`RoleId` 8).
     AiOperatorBond,
     /// Begin RoleId(8) unbonding after all observable tasks/disputes close.
     AiOperatorUnbond,
     /// Withdraw the complete RoleId(8) principal after the unbonding epoch.
     AiOperatorWithdraw,
-    /// Register the validator's consensus public keys and RFC 9380 BLS PoP.
+    /// Register the validator's consensus public keys and RFC 9380 BLS `PoP`.
     /// The outer Ed25519 transaction signature binds these keys to `from`.
     RegisterConsensusKeys(ConsensusKeyRegistration),
     /// Domain settlement: apply the nonce writes a verified domain commitment
@@ -676,7 +679,7 @@ pub enum TransactionType {
     ///
     /// Carries the registry's own `IdentityTx` and nothing else. No domain
     /// field is defined here: the executor's single arm supplies the kind
-    /// read from state, because a caller-declared "this is PoA" is authority
+    /// read from state, because a caller-declared "this is `PoA`" is authority
     /// fabrication - the same refusal the domain-freeze path applies in
     /// `chain/blockchain.rs`, applied at the identity door.
     Identity(crate::registry::IdentityTx),
@@ -697,7 +700,7 @@ pub enum TransactionType {
     /// naming types: the signing gate reads the enum
     /// body's identifiers to resolve carried payload types.)
     Storage(crate::domain::storage_tx::StorageTx),
-    /// PoA admission door: a candidate applies for themselves, an admin of
+    /// `PoA` admission door: a candidate applies for themselves, an admin of
     /// the target domain decides, and the admin set changes only through
     /// admins or governance. Ids, a dossier commitment and reasons - no
     /// authority fields, because the sender IS the claimed actor at the one
@@ -1067,6 +1070,7 @@ pub fn decode_v7_signer_key(
 }
 
 impl Transaction {
+    #[must_use]
     pub fn new(from: Address, to: Address, amount: u64, data: Vec<u8>) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1080,6 +1084,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_stake(from: Address, amount: u64, nonce: u64) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1094,6 +1099,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_delegate(
         from: Address,
         validator: Address,
@@ -1115,6 +1121,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_undelegate(
         from: Address,
         validator: Address,
@@ -1136,6 +1143,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_withdraw_delegation(
         from: Address,
         validator: Address,
@@ -1156,6 +1164,7 @@ impl Transaction {
     }
 
     /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    #[must_use]
     pub fn new_validator_commission(
         from: Address,
         commission_ppm: u32,
@@ -1175,6 +1184,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_consensus_key_registration(
         from: Address,
         fee: u64,
@@ -1194,6 +1204,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_ai_operator_bond(
         from: Address,
         amount: u64,
@@ -1213,6 +1224,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_ai_operator_unbond(from: Address, fee: u64, nonce: u64, chain_id: u64) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1226,6 +1238,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_ai_operator_withdraw(from: Address, fee: u64, nonce: u64, chain_id: u64) -> Self {
         Self::new_with_chain_id(
             from,
@@ -1239,6 +1252,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_proposal(from: Address, p_type: ProposalType, duration: u64, nonce: u64) -> Self {
         let mut data = Vec::new();
         data.extend_from_slice(&duration.to_le_bytes());
@@ -1258,6 +1272,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_vote(from: Address, proposal_id: u64, vote_for: bool, nonce: u64) -> Self {
         let mut data = Vec::new();
         data.push(if vote_for { 1 } else { 0 });
@@ -1275,6 +1290,7 @@ impl Transaction {
         )
     }
 
+    #[must_use]
     pub fn new_contract_call(from: Address, fee: u64, nonce: u64, bytecode: Vec<u8>) -> Self {
         Self::new_contract_call_to(from, Address::zero(), fee, nonce, bytecode)
     }
@@ -1285,6 +1301,7 @@ impl Transaction {
     /// bytecode-only calls. A non-zero `to` is an explicit application identity
     /// and enables the testnet application revenue split at block settlement.
     /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    #[must_use]
     pub fn new_contract_call_to(
         from: Address,
         to: Address,
@@ -1305,6 +1322,7 @@ impl Transaction {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new_with_chain_id(
         from: Address,
         to: Address,
@@ -1318,7 +1336,7 @@ impl Transaction {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
-        let mut tx = Transaction {
+        let mut tx = Self {
             from,
             to,
             amount,
@@ -1341,6 +1359,7 @@ impl Transaction {
         tx.hash = tx.calculate_hash();
         tx
     }
+    #[must_use]
     pub fn new_with_fee(
         from: Address,
         to: Address,
@@ -1360,8 +1379,9 @@ impl Transaction {
             TransactionType::Transfer,
         )
     }
+    #[must_use]
     pub fn genesis() -> Self {
-        let mut tx = Transaction {
+        let mut tx = Self {
             from: Address::zero(),
             to: Address::zero(),
             amount: 0,
@@ -1387,6 +1407,7 @@ impl Transaction {
     /// Canonical V4 signing preimage. Every execution-relevant variant
     /// Field is committed explicitly; serde/bincode/JSON are never used as a
     /// Consensus signing encoding.
+    #[must_use]
     pub fn signing_hash(&self) -> [u8; 32] {
         let mut preimage = Vec::new();
         put_u8(&mut preimage, transaction_type_tag(&self.tx_type));
@@ -1456,6 +1477,7 @@ impl Transaction {
         }
         wrapped.finalize().into()
     }
+    #[must_use]
     pub fn calculate_hash(&self) -> String {
         hex::encode(self.signing_hash())
     }
@@ -2043,7 +2065,7 @@ impl Transaction {
 
     /// Whether this transaction uses the aggregation layer at all.
     #[must_use]
-    pub fn uses_claims(&self) -> bool {
+    pub const fn uses_claims(&self) -> bool {
         self.auth_claim.is_some() || !self.claim_refs.is_empty()
     }
 
@@ -2106,6 +2128,7 @@ impl Transaction {
     /// Verify under the scheme statuses of a fresh genesis. Every path that
     /// decides on behalf of a chain calls [`Self::verify_in`] with the
     /// chain-state registry.
+    #[must_use]
     pub fn verify(&self) -> bool {
         self.verify_in(&crate::crypto::scheme::SchemeStatusRegistry::genesis())
     }
@@ -2177,12 +2200,11 @@ impl Transaction {
             debug!("only a V6 transaction may carry a multisig authorization");
             return false;
         }
-        let signature = match &self.signature {
-            Some(s) => s,
-            None => {
-                debug!("TX has no signature");
-                return false;
-            }
+        let signature = if let Some(s) = &self.signature {
+            s
+        } else {
+            debug!("TX has no signature");
+            return false;
         };
         let signing_hash = self.signing_hash();
         if self.signature_version == SIGNATURE_VERSION_V5 {
@@ -2545,10 +2567,12 @@ impl Transaction {
         }
         true
     }
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).unwrap_or_else(|_| TX_SERIALIZE_FAILED.to_vec())
     }
-    pub fn fee_bid(&self) -> crate::chain::fee_market::FeeBid {
+    #[must_use]
+    pub const fn fee_bid(&self) -> crate::chain::fee_market::FeeBid {
         crate::chain::fee_market::FeeBid {
             max_fee: if self.max_fee == 0 {
                 self.fee
@@ -2563,7 +2587,8 @@ impl Transaction {
     ///
     /// `max_fee` and `priority_fee` remain signed wire-compatibility fields;
     /// State validation rejects any value that diverges from this flat fee.
-    pub fn fee_limit(&self) -> u64 {
+    #[must_use]
+    pub const fn fee_limit(&self) -> u64 {
         self.fee
     }
 
@@ -2575,7 +2600,7 @@ impl Transaction {
     /// zero liquid cost. Admission, pending-balance projection and execution
     /// share this classification; `None` is a refusal, never a saturated cost.
     #[must_use]
-    pub fn checked_liquid_cost(&self) -> Option<u64> {
+    pub const fn checked_liquid_cost(&self) -> Option<u64> {
         match self.tx_type {
             TransactionType::AiOperatorWithdraw => Some(0),
             TransactionType::Unstake
@@ -2593,6 +2618,7 @@ impl Transaction {
     ///
     /// Do not use this helper for admission or state transitions. Those paths
     /// must use `checked_liquid_cost` and reject overflow.
+    #[must_use]
     pub fn total_cost(&self) -> u64 {
         self.checked_total_cost().unwrap_or(u64::MAX)
     }
@@ -2618,6 +2644,7 @@ impl Transaction {
     /// Caller reaching for this to size a transaction will get a number the
     /// Chain has never charged. `bud_estimateGas` deliberately does not use it;
     /// It returns the flat fee floor instead.
+    #[must_use]
     pub fn estimate_gas_with_schedule(&self, schedule: GasSchedule) -> u64 {
         let intrinsic = match &self.tx_type {
             TransactionType::Transfer => schedule.transfer_gas,
@@ -2744,8 +2771,14 @@ impl Transaction {
                 | crate::cross_domain::external::ExternalDomainTx::Readmit { .. },
             ) => schedule.contract_call_gas * 4 + schedule.gas_per_signature * 8,
             TransactionType::ExternalDomain(
-                crate::cross_domain::external::ExternalDomainTx::SubmitEvidence(_),
+                crate::cross_domain::external::ExternalDomainTx::SubmitEvidence(_)
+                | crate::cross_domain::external::ExternalDomainTx::ChallengeContradiction(_)
+                | crate::cross_domain::external::ExternalDomainTx::ChallengeAncestry(_),
             ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature,
+            TransactionType::ExternalDomain(
+                crate::cross_domain::external::ExternalDomainTx::SubmitFaultProof { .. }
+                | crate::cross_domain::external::ExternalDomainTx::RotateCommittee { .. },
+            ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature * 2,
             TransactionType::ExternalDomain(_) => schedule.contract_call_gas * 2,
             // Registration validates the domain record and escrows a bond; a
             // ZK proof runs the STARK verifier: both are verification work on
@@ -3140,7 +3173,7 @@ fn put_option_address(out: &mut Vec<u8>, value: Option<Address>) {
         None => put_u8(out, 0),
     }
 }
-fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
+const fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
     match tx_type {
         TransactionType::Transfer => 0,
         TransactionType::Stake => 1,
@@ -3273,7 +3306,7 @@ fn encode_message(message: &crate::cross_domain::message::CrossDomainMessage, ou
         crate::cross_domain::message::quantum_class_code(message.source_quantum_class),
     );
 }
-/// Canonical preimage of a PoA admission transaction.
+/// Canonical preimage of a `PoA` admission transaction.
 ///
 /// Operation tag, domain id, and the addresses/commitments/reasons each arm
 /// carries - every field the execution body reads is under the signature, so
@@ -3780,6 +3813,13 @@ fn encode_identity_record(record: &crate::registry::IdentityRecord, out: &mut Ve
         put_fixed(out, guardian.as_bytes());
     }
     put_u64(out, record.recovery_threshold as u64);
+    // The per-subject credential ceiling reads `issued_credentials`, and the
+    // recovery digest reads `recovery_nonce` to refuse a replayed guardian
+    // quorum. Both ride on the wire, so both are inside the signed preimage:
+    // otherwise a relay could lower the counter or rewind the nonce on a
+    // record whose signature still verifies.
+    put_u64(out, record.issued_credentials);
+    put_u64(out, record.recovery_nonce);
 }
 fn encode_credential_commitment(
     credential: &crate::registry::CredentialCommitment,
@@ -5030,6 +5070,422 @@ fn encode_external_domain_tx(
                 },
             );
         }
+        // Tag 6: cryptographic contradiction challenge, appended first.
+        ExternalDomainTx::ChallengeContradiction(evidence) => {
+            put_u8(out, 6);
+            encode_raw_evidence(evidence, out);
+        }
+        // Tag 7: cross-slot ancestry challenge.
+        ExternalDomainTx::ChallengeAncestry(evidence) => {
+            put_u8(out, 7);
+            encode_raw_evidence(evidence, out);
+        }
+        // Tag 8: objective protocol equivocation or BitVM2 single-step fault proof.
+        ExternalDomainTx::SubmitFaultProof { domain, proof } => {
+            put_u8(out, 8);
+            put_fixed(out, &domain.0);
+            encode_objective_fault_proof(proof, out);
+        }
+        // Tag 9: permissionless committee or validator-set rotation proof, appended last.
+        ExternalDomainTx::RotateCommittee { domain, proof } => {
+            put_u8(out, 9);
+            put_fixed(out, &domain.0);
+            encode_committee_rotation_proof(proof, out);
+        }
+    }
+}
+
+fn encode_committee_rotation_proof(
+    proof: &crate::cross_domain::external::CommitteeRotationProof,
+    out: &mut Vec<u8>,
+) {
+    use crate::cross_domain::external::CommitteeRotationProof;
+    match proof {
+        CommitteeRotationProof::EthereumSyncSsz(eth) => {
+            put_u8(out, 0);
+            put_u64(out, eth.next_period);
+            put_u64(out, eth.next_member_pubkeys.len() as u64);
+            for pk in &eth.next_member_pubkeys {
+                put_bytes(out, pk);
+            }
+            put_bytes(out, &eth.next_aggregate_pubkey);
+            put_fixed(out, &eth.finalized_state_root);
+            put_u64(out, eth.next_sync_committee_gindex);
+            put_u64(out, eth.next_sync_committee_branch.len() as u64);
+            for node in &eth.next_sync_committee_branch {
+                put_fixed(out, node);
+            }
+            put_u64(out, eth.finalized_root_gindex);
+            put_fixed(out, &eth.subsequent_committee_root);
+        }
+        CommitteeRotationProof::TendermintSkip {
+            anchor_commit,
+            update,
+            next_validators_proof,
+            trusting_period_secs,
+        } => {
+            put_u8(out, 1);
+            encode_tendermint_commit_evidence(anchor_commit, out);
+            encode_tendermint_commit_evidence(update, out);
+            match next_validators_proof {
+                Some((root, merkle)) => {
+                    put_u8(out, 1);
+                    put_fixed(out, root);
+                    put_u64(out, merkle.index as u64);
+                    put_u64(out, merkle.total as u64);
+                    put_u64(out, merkle.aunts.len() as u64);
+                    for aunt in &merkle.aunts {
+                        put_fixed(out, aunt);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+            put_u64(out, *trusting_period_secs);
+        }
+        CommitteeRotationProof::TendermintBisection {
+            trusted,
+            light_params,
+            steps,
+        } => {
+            put_u8(out, 2);
+            put_string(out, &trusted.chain_id);
+            put_u64(out, trusted.height);
+            put_u64(out, trusted.time_secs);
+            put_u64(out, trusted.trusting_period_secs);
+            put_u64(out, trusted.validators.len() as u64);
+            for v in &trusted.validators {
+                put_fixed(out, &v.address);
+                put_fixed(out, &v.public_key);
+                put_u64(out, v.voting_power);
+            }
+            put_fixed(out, &trusted.next_validators_hash);
+            put_u64(out, light_params.trusting_period_secs);
+            put_u64(out, light_params.unbonding_period_secs);
+            put_u64(out, light_params.max_clock_drift_secs);
+            put_u64(out, light_params.max_height_drift);
+            put_u64(out, steps.len() as u64);
+            for step in steps {
+                encode_tendermint_commit_evidence(step, out);
+            }
+        }
+    }
+}
+
+fn encode_objective_fault_proof(
+    proof: &crate::cross_domain::external::ObjectiveFaultProof,
+    out: &mut Vec<u8>,
+) {
+    use crate::cross_domain::external::ObjectiveFaultProof;
+    match proof {
+        ObjectiveFaultProof::HotStuffEquivocation(hs) => {
+            put_u8(out, 0);
+            put_u64(out, hs.epoch);
+            put_u64(out, hs.view);
+            put_fixed(out, &hs.block_hash_a);
+            put_fixed(out, &hs.block_hash_b);
+            for vote in [&hs.vote_a, &hs.vote_b] {
+                put_fixed(out, &vote.signer_pubkey);
+                put_bytes(out, &vote.ed25519_sig);
+                put_bytes(out, &vote.pq_sig);
+            }
+        }
+        ObjectiveFaultProof::CasperFfgEquivocation(ffg) => {
+            put_u8(out, 1);
+            for vote in [&ffg.vote_a, &ffg.vote_b] {
+                put_fixed(out, &vote.signer);
+                put_u64(out, vote.source_epoch);
+                put_fixed(out, &vote.source_root);
+                put_u64(out, vote.target_epoch);
+                put_fixed(out, &vote.target_root);
+                put_bytes(out, &vote.signature);
+                put_bytes(out, &vote.pq_signature);
+            }
+        }
+        ObjectiveFaultProof::MysticetiEquivocation(my) => {
+            put_u8(out, 2);
+            for vertex in [&my.vertex_a, &my.vertex_b] {
+                put_fixed(out, &vertex.author);
+                put_u64(out, vertex.epoch);
+                put_u64(out, vertex.round);
+                put_fixed(out, &vertex.payload_digest);
+                put_u64(out, vertex.parents.len() as u64);
+                for parent in &vertex.parents {
+                    put_fixed(out, parent);
+                }
+                put_bytes(out, &vertex.ed25519_sig);
+                put_bytes(out, &vertex.pq_sig);
+            }
+        }
+        ObjectiveFaultProof::BitVmDisprove(bv) => {
+            put_u8(out, 3);
+            put_fixed(out, &bv.claim.state_root);
+            put_fixed(out, &bv.claim.tx_root);
+            put_fixed(out, &bv.claim.event_root);
+            put_fixed(out, &bv.claim.program_hash);
+            put_fixed(out, &bv.claim.trace_merkle_root);
+            put_u32(out, bv.claim.trace_chunk_count);
+            put_u64(out, bv.claim.claim_pow_height);
+            put_bytes(out, &bv.claim.operator_ed25519_sig);
+            put_bytes(out, &bv.claim.operator_pq_sig);
+            put_u32(out, bv.disputed_chunk.chunk_index);
+            put_fixed(out, &bv.disputed_chunk.pre_state);
+            put_fixed(out, &bv.disputed_chunk.claimed_post_state);
+            put_u8(out, bv.disputed_chunk.step_opcode);
+            put_fixed(out, &bv.disputed_chunk.step_witness);
+            put_u64(out, bv.trace_merkle_proof.len() as u64);
+            for step in &bv.trace_merkle_proof {
+                put_fixed(out, &step.sibling);
+                put_u8(out, u8::from(step.sibling_is_left));
+            }
+        }
+        ObjectiveFaultProof::DagEquivocation(dag) => {
+            use crate::cross_domain::external::dag_bft::DagEquivocationProof;
+            put_u8(out, 4);
+            match dag.as_ref() {
+                DagEquivocationProof::AnchorCertificate {
+                    round,
+                    first_anchor_digest,
+                    first_sigs,
+                    second_anchor_digest,
+                    second_sigs,
+                } => {
+                    put_u8(out, 0);
+                    put_u64(out, *round);
+                    put_fixed(out, first_anchor_digest);
+                    put_u64(out, first_sigs.len() as u64);
+                    for s in first_sigs {
+                        put_fixed(out, &s.signer_pubkey);
+                        put_bytes(out, &s.ed25519_sig);
+                        put_bytes(out, &s.pq_sig);
+                    }
+                    put_fixed(out, second_anchor_digest);
+                    put_u64(out, second_sigs.len() as u64);
+                    for s in second_sigs {
+                        put_fixed(out, &s.signer_pubkey);
+                        put_bytes(out, &s.ed25519_sig);
+                        put_bytes(out, &s.pq_sig);
+                    }
+                }
+                DagEquivocationProof::CausalParent { first, second } => {
+                    put_u8(out, 1);
+                    for cp in [first, second] {
+                        put_u64(out, cp.round);
+                        put_fixed(out, &cp.author);
+                        put_fixed(out, &cp.payload_root);
+                        put_fixed(out, &cp.digest);
+                        put_bytes(out, &cp.author_ed25519_sig);
+                        put_bytes(out, &cp.author_pq_sig);
+                    }
+                }
+                DagEquivocationProof::VoterVertex { first, second } => {
+                    put_u8(out, 2);
+                    for vv in [first, second] {
+                        put_u64(out, vv.round);
+                        put_fixed(out, &vv.author);
+                        put_u64(out, vv.parent_digests.len() as u64);
+                        for pd in &vv.parent_digests {
+                            put_fixed(out, pd);
+                        }
+                        put_fixed(out, &vv.digest);
+                        put_bytes(out, &vv.ed25519_sig);
+                        put_bytes(out, &vv.pq_sig);
+                    }
+                }
+            }
+        }
+        ObjectiveFaultProof::TendermintMisbehaviour {
+            trusted,
+            params: light_params,
+            evidence: misbehaviour,
+        } => {
+            put_u8(out, 5);
+            put_string(out, &trusted.chain_id);
+            put_u64(out, trusted.height);
+            put_u64(out, trusted.time_secs);
+            put_u64(out, trusted.trusting_period_secs);
+            put_u64(out, trusted.validators.len() as u64);
+            for v in &trusted.validators {
+                put_fixed(out, &v.address);
+                put_fixed(out, &v.public_key);
+                put_u64(out, v.voting_power);
+            }
+            put_fixed(out, &trusted.next_validators_hash);
+            put_u64(out, light_params.trusting_period_secs);
+            put_u64(out, light_params.unbonding_period_secs);
+            put_u64(out, light_params.max_clock_drift_secs);
+            put_u64(out, light_params.max_height_drift);
+            encode_tendermint_commit_evidence(&misbehaviour.header_1, out);
+            match &misbehaviour.header_2 {
+                Some(h2) => {
+                    put_u8(out, 1);
+                    encode_tendermint_commit_evidence(h2, out);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        ObjectiveFaultProof::BabylonEotsEquivocation(proof) => {
+            use crate::cross_domain::external::babylon_eots::EotsEquivocationProof;
+            put_u8(out, 6);
+            put_fixed(out, &proof.provider);
+            put_fixed(out, &proof.eots_key);
+            put_bytes(out, &proof.first_message);
+            put_bytes(out, &proof.second_message);
+            put_bytes(out, &proof.first_signature);
+            put_bytes(out, &proof.second_signature);
+            put_fixed(out, &proof.first_state_root);
+            put_fixed(out, &proof.second_state_root);
+            let EotsEquivocationProof {
+                first_checkpoint,
+                second_checkpoint,
+                proof_digest,
+                ..
+            } = proof.as_ref();
+            put_fixed(out, &first_checkpoint.block_hash);
+            put_u64(out, first_checkpoint.btc_height);
+            put_fixed(out, &first_checkpoint.mmr_root);
+            put_fixed(out, &second_checkpoint.block_hash);
+            put_u64(out, second_checkpoint.btc_height);
+            put_fixed(out, &second_checkpoint.mmr_root);
+            put_fixed(out, proof_digest);
+        }
+        ObjectiveFaultProof::HoneyBadgerRbcEquivocation(proof) => {
+            let crate::cross_domain::external::honeybadger_bft::RbcEquivocationProof {
+                genesis_hash,
+                committee_epoch,
+                acs_epoch,
+                proposer_index,
+                first_root,
+                first_sig,
+                second_root,
+                second_sig,
+            } = proof.as_ref();
+            put_u8(out, 7);
+            put_fixed(out, genesis_hash);
+            put_u64(out, *committee_epoch);
+            put_u64(out, *acs_epoch);
+            put_u64(out, u64::from(*proposer_index));
+            put_fixed(out, first_root);
+            put_bytes(out, first_sig);
+            put_fixed(out, second_root);
+            put_bytes(out, second_sig);
+        }
+        ObjectiveFaultProof::NearDoomslugSlash(proof) => {
+            let crate::cross_domain::external::near_doomslug::NearApprovalSlashProof {
+                inner_a,
+                target_a,
+                sig_a,
+                inner_b,
+                target_b,
+                sig_b,
+            } = proof.as_ref();
+            put_u8(out, 8);
+            encode_near_approval_inner(inner_a, out);
+            put_u64(out, *target_a);
+            encode_near_approval_sig(sig_a, out);
+            encode_near_approval_inner(inner_b, out);
+            put_u64(out, *target_b);
+            encode_near_approval_sig(sig_b, out);
+        }
+        ObjectiveFaultProof::PoSpaceDoubleSignage { first, second } => {
+            put_u8(out, 9);
+            encode_signed_pospace_signage(first, out);
+            encode_signed_pospace_signage(second, out);
+        }
+    }
+}
+
+fn encode_near_approval_inner(
+    inner: &crate::cross_domain::external::near_doomslug::NearApprovalInner,
+    out: &mut Vec<u8>,
+) {
+    use crate::cross_domain::external::near_doomslug::NearApprovalInner;
+    match inner {
+        NearApprovalInner::Endorsement {
+            parent_hash,
+            parent_height,
+        } => {
+            put_u8(out, 0);
+            put_fixed(out, parent_hash);
+            put_u64(out, *parent_height);
+        }
+        NearApprovalInner::Skip { source_height } => {
+            put_u8(out, 1);
+            put_u64(out, *source_height);
+        }
+    }
+}
+
+fn encode_near_approval_sig(
+    sig: &crate::cross_domain::external::near_doomslug::NearApprovalSig,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::near_doomslug::NearApprovalSig {
+        signer_pubkey,
+        ed25519_sig,
+        pq_sig,
+    } = sig;
+    put_fixed(out, signer_pubkey);
+    put_bytes(out, ed25519_sig);
+    put_bytes(out, pq_sig);
+}
+
+fn encode_signed_pospace_signage(
+    signage: &crate::cross_domain::external::pospace_vdf::SignedPoSpaceSignage,
+    out: &mut Vec<u8>,
+) {
+    let crate::cross_domain::external::pospace_vdf::SignedPoSpaceSignage {
+        network,
+        sub_slot,
+        signage_index,
+        infusion_block_hash,
+        signer_pq_pubkey,
+        signature,
+    } = signage;
+    put_string(out, network);
+    put_u64(out, *sub_slot);
+    put_u8(out, *signage_index);
+    put_fixed(out, infusion_block_hash);
+    put_bytes(out, signer_pq_pubkey);
+    put_bytes(out, signature);
+}
+
+fn encode_tendermint_commit_evidence(
+    c: &crate::cross_domain::external::tendermint::TendermintCommitEvidence,
+    out: &mut Vec<u8>,
+) {
+    put_string(out, &c.chain_id);
+    put_u64(out, c.height);
+    put_u64(out, c.round.cast_unsigned());
+    put_fixed(out, &c.block_hash);
+    put_u32(out, c.parts_total);
+    put_fixed(out, &c.parts_hash);
+    put_u64(out, c.version_block);
+    put_fixed(out, &c.last_block_hash);
+    put_u32(out, c.last_parts_total);
+    put_fixed(out, &c.last_parts_hash);
+    put_fixed(out, &c.last_commit_hash);
+    put_fixed(out, &c.data_hash);
+    put_fixed(out, &c.validators_hash);
+    put_fixed(out, &c.next_validators_hash);
+    put_fixed(out, &c.consensus_hash);
+    put_fixed(out, &c.app_hash);
+    put_fixed(out, &c.last_results_hash);
+    put_fixed(out, &c.evidence_hash);
+    put_fixed(out, &c.proposer_address);
+    put_u64(out, c.commit_time);
+    put_u32(out, c.commit_time_nanos);
+    put_u64(out, c.validators.len() as u64);
+    for v in &c.validators {
+        put_fixed(out, &v.address);
+        put_fixed(out, &v.public_key);
+        put_u64(out, v.voting_power);
+    }
+    put_u64(out, c.signatures.len() as u64);
+    for sig in &c.signatures {
+        put_fixed(out, &sig.address);
+        put_u64(out, sig.timestamp_seconds.cast_unsigned());
+        put_u32(out, sig.timestamp_nanos);
+        put_bytes(out, &sig.signature);
     }
 }
 
@@ -5119,6 +5575,446 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                         put_u64(out, *voting_weight);
                         put_bytes(out, pq_pubkey);
                     }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 5: linear chained BFT (HotStuff 3-chain QC) adapter, appended last.
+        AdapterSpec::HotStuffQc { network, committee } => {
+            put_u8(out, 5);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::hotstuff::HotStuffValidator {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 6: stake-weighted round-DAG BFT (Bullshark) adapter, appended last.
+        AdapterSpec::DagCertificate { network, committee } => {
+            put_u8(out, 6);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::dag_bft::DagBftValidator {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 7: dual-quorum Casper-FFG checkpoint adapter, appended last.
+        AdapterSpec::CasperFfg { network, committee } => {
+            put_u8(out, 7);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.validators.len() as u64);
+                    for member in &pin.validators {
+                        let crate::cross_domain::external::casper_ffg::FfgValidator {
+                            pubkey,
+                            stake,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, pubkey);
+                        put_u64(out, *stake);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 8: uncertified 3-round Mysticeti DAG adapter, appended last.
+        AdapterSpec::MysticetiDag { network, committee } => {
+            put_u8(out, 8);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.epoch);
+                    put_u64(out, pin.members.len() as u64);
+                    for member in &pin.members {
+                        let crate::cross_domain::external::mysticeti_dag::MysticetiMember {
+                            ed25519_pubkey,
+                            voting_weight,
+                            pq_pubkey,
+                        } = member;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_weight);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 9: BitVM2 / DisproveScript PoW covenant adapter, appended last.
+        AdapterSpec::BitVmCovenant { network, anchor } => {
+            put_u8(out, 9);
+            put_string(out, network);
+            match anchor {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.height);
+                    put_fixed(out, &pin.block_hash);
+                    put_u32(out, pin.bits);
+                    put_fixed(out, &pin.program_hash);
+                    put_u64(out, pin.min_pow_confirmations);
+                    put_u64(out, pin.challenge_blocks);
+                    put_fixed(out, &pin.operator_ed25519_pubkey);
+                    put_bytes(out, &pin.operator_pq_pubkey);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tags 10..14: append-only additional consensus families, encoded
+        // explicitly field-by-field with destructuring so adding any field to
+        // a pinned anchor fails to compile until signed.
+        AdapterSpec::SolanaTowerBft { network, pinned } => {
+            put_u8(out, 10);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    let crate::cross_domain::external::solana_tower_bft::PinnedSolEpoch {
+                        genesis_hash_hex,
+                        epoch,
+                        first_slot,
+                        last_slot,
+                        has_bonded_slash_escrow,
+                        validators,
+                    } = pin;
+                    put_u8(out, 1);
+                    put_string(out, genesis_hash_hex);
+                    put_u64(out, *epoch);
+                    put_u64(out, *first_slot);
+                    put_u64(out, *last_slot);
+                    put_u8(out, u8::from(*has_bonded_slash_escrow));
+                    put_u64(out, validators.len() as u64);
+                    for v in validators {
+                        let crate::cross_domain::external::solana_tower_bft::SolanaValidator {
+                            vote_account,
+                            stake_lamports,
+                            ed25519_pubkey,
+                            pq_pubkey,
+                        } = v;
+                        put_fixed(out, vote_account);
+                        put_u64(out, *stake_lamports);
+                        put_fixed(out, ed25519_pubkey);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::PoSpaceVdf { network, pinned } => {
+            put_u8(out, 11);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    let crate::cross_domain::external::pospace_vdf::PinnedPoSpaceAnchor {
+                        genesis_challenge,
+                        min_plot_k,
+                        min_iterations_per_block,
+                        max_iterations_per_block,
+                        required_depth,
+                        min_cumulative_weight,
+                        require_pq_attestation,
+                        pq_attestor_pubkey,
+                    } = pin;
+                    put_u8(out, 1);
+                    put_fixed(out, genesis_challenge);
+                    put_u8(out, *min_plot_k);
+                    put_u64(out, *min_iterations_per_block);
+                    put_u64(out, *max_iterations_per_block);
+                    put_u32(out, *required_depth);
+                    put_u128(out, *min_cumulative_weight);
+                    put_u8(out, u8::from(*require_pq_attestation));
+                    match pq_attestor_pubkey {
+                        Some(pk) => {
+                            put_u8(out, 1);
+                            put_bytes(out, pk);
+                        }
+                        None => put_u8(out, 0),
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::AptosJolteonBft { network, pinned } => {
+            put_u8(out, 12);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    let crate::cross_domain::external::aptos_jolteon_bft::PinnedJolteonEpochState {
+                        epoch,
+                        validators,
+                    } = pin;
+                    put_u8(out, 1);
+                    put_u64(out, *epoch);
+                    put_u64(out, validators.len() as u64);
+                    for v in validators {
+                        let crate::cross_domain::external::aptos_jolteon_bft::JolteonValidator {
+                            ed25519_pubkey,
+                            voting_power,
+                            pq_pubkey,
+                        } = v;
+                        put_fixed(out, ed25519_pubkey);
+                        put_u64(out, *voting_power);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::NearDoomslugBft { network, pinned } => {
+            put_u8(out, 13);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    let crate::cross_domain::external::near_doomslug::PinnedNearEpoch {
+                        epoch_id,
+                        next_epoch_id,
+                        next_bp_hash,
+                        block_producers,
+                    } = pin;
+                    put_u8(out, 1);
+                    put_fixed(out, epoch_id);
+                    put_fixed(out, next_epoch_id);
+                    put_fixed(out, next_bp_hash);
+                    put_u64(out, block_producers.len() as u64);
+                    for bp in block_producers {
+                        let crate::cross_domain::external::near_doomslug::NearBlockProducer {
+                            account_id,
+                            ed25519_pubkey,
+                            stake,
+                            pq_pubkey,
+                        } = bp;
+                        put_string(out, account_id);
+                        put_fixed(out, ed25519_pubkey);
+                        put_u128(out, *stake);
+                        put_bytes(out, pq_pubkey);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::ChainKeyNiDkg { network, pinned } => {
+            put_u8(out, 14);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    let crate::cross_domain::external::chain_key_ni_dkg::PinnedChainKeyRoot {
+                        subnet_id,
+                        root_bls_pubkey,
+                        root_pq_pubkey,
+                        dkg_interval_length,
+                        min_registry_version,
+                    } = pin;
+                    put_u8(out, 1);
+                    put_fixed(out, subnet_id);
+                    put_bytes(out, root_bls_pubkey);
+                    put_bytes(out, root_pq_pubkey);
+                    put_u64(out, *dkg_interval_length);
+                    put_u64(out, *min_registry_version);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::BabylonEots { network, pinned } => {
+            put_u8(out, 15);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_u64(out, pin.chain_id);
+                    put_fixed(out, &pin.anchor.tip_block_hash);
+                    put_u64(out, pin.anchor.tip_height);
+                    put_u64(out, pin.anchor.required_confirmations);
+                    put_u64(out, pin.epoch_keys.len() as u64);
+                    for (epoch, key) in &pin.epoch_keys {
+                        put_u64(out, *epoch);
+                        put_fixed(out, &key.x_only);
+                    }
+                    put_u64(out, pin.epoch_pq_keys.len() as u64);
+                    for (epoch, key) in &pin.epoch_pq_keys {
+                        put_u64(out, *epoch);
+                        put_bytes(out, key);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 16: sublinear NIPoPoW superblock adapter.
+        //
+        // Every pinned field reaches the preimage: a relay that could lower
+        // `min_superblocks_m` or widen `pow_target` on a signed registration
+        // would be choosing how much work its own evidence must prove.
+        AdapterSpec::NipopowSuperblock { network, genesis } => {
+            put_u8(out, 16);
+            put_string(out, network);
+            match genesis {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.genesis_id);
+                    put_u64(out, pin.genesis_height);
+                    put_fixed(out, &pin.pow_target);
+                    put_u32(out, pin.min_superblocks_m);
+                    put_u8(out, pin.min_superblock_level);
+                    put_u32(out, pin.min_suffix_k);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 17: PHANTOM-GHOSTDAG blockDAG adapter.
+        //
+        // The whole checkpoint reaches the preimage, not just its hash: a
+        // relay that could lower `required_blue_depth`, widen `k`, or raise the
+        // merge-depth bound on a signed registration would be choosing how much
+        // parallelism and how much depth its own DAG certificate must survive.
+        AdapterSpec::Ghostdag { network, anchor } => {
+            put_u8(out, 17);
+            put_string(out, network);
+            match anchor {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.anchor_hash);
+                    put_u64(out, pin.anchor_daa_score);
+                    put_u64(out, pin.anchor_blue_score);
+                    for limb in pin.anchor_blue_work {
+                        put_u64(out, limb);
+                    }
+                    put_u64(out, pin.anchor_timestamp_secs);
+                    put_u8(out, pin.k);
+                    put_u8(out, pin.max_parents);
+                    put_u64(out, pin.merge_depth_bound);
+                    put_u32(out, pin.max_target_bits);
+                    put_u64(out, pin.required_blue_depth);
+                    put_u64(out, pin.max_future_drift_secs);
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        // Tag 18: leaderless asynchronous HoneyBadgerBFT adapter.
+        //
+        // The full committee reaches the preimage: every validator id, ML-DSA-65
+        // key and weight, plus the genesis, the epoch and the lowest accepted
+        // ACS epoch. A relay able to swap one key on a signed registration
+        // would be choosing the quorum its own certificate must satisfy.
+        AdapterSpec::HoneyBadgerBft { network, committee } => {
+            put_u8(out, 18);
+            put_string(out, network);
+            match committee {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_string(out, &pin.network_id);
+                    put_fixed(out, &pin.genesis_hash);
+                    put_u64(out, pin.committee_epoch);
+                    put_u64(out, pin.min_acs_epoch);
+                    put_u64(out, pin.validators.len() as u64);
+                    for v in &pin.validators {
+                        put_fixed(out, &v.validator_id);
+                        put_bytes(out, &v.mldsa65_pubkey);
+                        put_u64(out, v.weight);
+                    }
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::HeterogeneousMultiProver { network, pinned } => {
+            put_u8(out, 19);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    let crate::cross_domain::external::heterogeneous_multiprover::PinnedMultiProverConfig {
+                        stark_program_hash,
+                        chain_id,
+                        challenge_window_secs,
+                        min_fault_bond_atoms,
+                        fault_proposers,
+                        expected_measurement,
+                        committee,
+                        require_canonical_stark_set,
+                        require_pq_leg,
+                    } = pin;
+                    put_u8(out, 1);
+                    put_fixed(out, stark_program_hash);
+                    put_u64(out, *chain_id);
+                    put_u64(out, *challenge_window_secs);
+                    put_u128(out, *min_fault_bond_atoms);
+                    put_u64(out, fault_proposers.len() as u64);
+                    for p in fault_proposers {
+                        let crate::cross_domain::external::heterogeneous_multiprover::PinnedFaultProposer {
+                            ed25519_pk,
+                            pq_pk,
+                        } = p;
+                        put_fixed(out, ed25519_pk);
+                        put_bytes(out, pq_pk);
+                    }
+                    put_fixed(out, expected_measurement);
+                    put_u64(out, committee.len() as u64);
+                    for member in committee {
+                        let crate::cross_domain::external::heterogeneous_multiprover::MultiProverCommitteeMember {
+                            ed25519_pk,
+                            pq_pk,
+                            weight,
+                        } = member;
+                        put_fixed(out, ed25519_pk);
+                        put_bytes(out, pq_pk);
+                        put_u64(out, *weight);
+                    }
+                    put_u8(out, u8::from(*require_canonical_stark_set));
+                    put_u8(out, u8::from(*require_pq_leg));
+                }
+                None => put_u8(out, 0),
+            }
+        }
+        AdapterSpec::StarkValidityRollup { network, pinned } => {
+            put_u8(out, 20);
+            put_string(out, network);
+            match pinned {
+                Some(pin) => {
+                    let crate::cross_domain::external::stark_validity_rollup::PinnedStarkRollupConfig {
+                        network_id,
+                        chain_id,
+                        pinned_program_hash,
+                        trusted_batch_number,
+                        trusted_state_root,
+                        expected_forced_queue_head,
+                        max_forced_inclusion_lag_batches,
+                        require_canonical_program,
+                    } = pin;
+                    put_u8(out, 1);
+                    put_string(out, network_id);
+                    put_u64(out, *chain_id);
+                    put_fixed(out, pinned_program_hash);
+                    put_u64(out, *trusted_batch_number);
+                    put_fixed(out, trusted_state_root);
+                    put_fixed(out, expected_forced_queue_head);
+                    put_u64(out, *max_forced_inclusion_lag_batches);
+                    put_u8(out, u8::from(*require_canonical_program));
                 }
                 None => put_u8(out, 0),
             }
@@ -5318,6 +6214,558 @@ mod v29_signing_tests {
             ..QuorumPolicy::strict(2, 3)
         });
         assert_ne!(strict.signing_hash(), loose.signing_hash());
+
+        assert_bft_fault_proof_preimages();
+        assert_dag_and_bitvm_fault_proof_preimages();
+        assert_babylon_preimages();
+        assert_nipopow_preimages();
+        assert_ghostdag_preimages();
+        assert_honeybadger_preimages();
+    }
+
+    /// The HoneyBadgerBFT registration carries its whole epoch committee under
+    /// family tag 18 (17 GHOSTDAG, 16 NIPoPoW, 15 Babylon, 10..14 spoken for),
+    /// and each committee field reaches the signing preimage.
+    fn assert_honeybadger_preimages() {
+        use crate::cross_domain::external::honeybadger_bft::{
+            HoneyBadgerValidator, PinnedHoneyBadgerCommittee,
+        };
+        use crate::cross_domain::external::AdapterSpec;
+
+        let validator = |id: u8| HoneyBadgerValidator {
+            validator_id: [id; 32],
+            mldsa65_pubkey: vec![id; 1952],
+            weight: 25,
+        };
+        let base = PinnedHoneyBadgerCommittee {
+            network_id: "hbbft-mainnet".to_string(),
+            genesis_hash: [0x42; 32],
+            committee_epoch: 3,
+            min_acs_epoch: 10,
+            validators: vec![validator(1), validator(2), validator(3), validator(4)],
+        };
+        let encode = |committee: Option<PinnedHoneyBadgerCommittee>| {
+            let mut out = Vec::new();
+            encode_adapter_spec(
+                &AdapterSpec::HoneyBadgerBft {
+                    network: "hbbft-mainnet".to_string(),
+                    committee,
+                },
+                &mut out,
+            );
+            out
+        };
+        let base_bytes = encode(Some(base.clone()));
+        assert_eq!(
+            base_bytes.first().copied(),
+            Some(18),
+            "the HoneyBadgerBFT spec must keep wire tag 18"
+        );
+        assert_ne!(
+            encode(None),
+            base_bytes,
+            "the presence of the pin must be signed"
+        );
+
+        let mut variants = Vec::new();
+        let mut v = base.clone();
+        v.network_id = "hbbft-other".to_string();
+        variants.push(("network_id", v));
+        let mut v = base.clone();
+        v.genesis_hash = [0x43; 32];
+        variants.push(("genesis_hash", v));
+        let mut v = base.clone();
+        v.committee_epoch += 1;
+        variants.push(("committee_epoch", v));
+        let mut v = base.clone();
+        v.min_acs_epoch += 1;
+        variants.push(("min_acs_epoch", v));
+        let mut v = base.clone();
+        v.validators[0].weight += 1;
+        variants.push(("validator weight", v));
+        let mut v = base.clone();
+        v.validators[3].validator_id = [0x99; 32];
+        variants.push(("validator id", v));
+        let mut v = base.clone();
+        v.validators[2].mldsa65_pubkey[0] ^= 0xFF;
+        variants.push(("validator key", v));
+        let mut v = base.clone();
+        v.validators.truncate(3);
+        variants.push(("validator count", v));
+        for (field, changed) in variants {
+            assert_ne!(
+                encode(Some(changed)),
+                base_bytes,
+                "committee field {field} is not covered by the signing preimage"
+            );
+        }
+    }
+
+    /// The GHOSTDAG registration carries its checkpoint and `k`-cluster
+    /// parameters under family tag 17 (16 is NIPoPoW's, 15 Babylon's, 10..14
+    /// are spoken for), and every pinned field reaches the signing preimage.
+    fn assert_ghostdag_preimages() {
+        use crate::cross_domain::external::ghostdag::PinnedGhostdagAnchor;
+        use crate::cross_domain::external::AdapterSpec;
+
+        let base = PinnedGhostdagAnchor {
+            anchor_hash: [0xA0; 32],
+            anchor_daa_score: 1_000,
+            anchor_blue_score: 5_000,
+            anchor_blue_work: [100, 0, 0, 0],
+            anchor_timestamp_secs: 1_700_000_000,
+            k: 2,
+            max_parents: 8,
+            merge_depth_bound: 64,
+            max_target_bits: 0x207F_FFFF,
+            required_blue_depth: 4,
+            max_future_drift_secs: 120,
+        };
+        let encode = |anchor: Option<PinnedGhostdagAnchor>| {
+            let mut out = Vec::new();
+            encode_adapter_spec(
+                &AdapterSpec::Ghostdag {
+                    network: "kaspa-mainnet".to_string(),
+                    anchor,
+                },
+                &mut out,
+            );
+            out
+        };
+        let base_bytes = encode(Some(base.clone()));
+        assert_eq!(
+            base_bytes.first().copied(),
+            Some(17),
+            "the GHOSTDAG spec must keep wire tag 17; renumbering rewrites the signed meaning of every stored registration"
+        );
+        assert_ne!(
+            encode(None),
+            base_bytes,
+            "the presence of the pin must be signed"
+        );
+
+        let mut variants = Vec::new();
+        let mut v = base.clone();
+        v.anchor_hash = [0xA1; 32];
+        variants.push(("anchor_hash", v));
+        let mut v = base.clone();
+        v.anchor_daa_score += 1;
+        variants.push(("anchor_daa_score", v));
+        let mut v = base.clone();
+        v.anchor_blue_score += 1;
+        variants.push(("anchor_blue_score", v));
+        let mut v = base.clone();
+        v.anchor_blue_work = [101, 0, 0, 0];
+        variants.push(("anchor_blue_work", v));
+        let mut v = base.clone();
+        v.anchor_timestamp_secs += 1;
+        variants.push(("anchor_timestamp_secs", v));
+        let mut v = base.clone();
+        v.k += 1;
+        variants.push(("k", v));
+        let mut v = base.clone();
+        v.max_parents += 1;
+        variants.push(("max_parents", v));
+        let mut v = base.clone();
+        v.merge_depth_bound += 1;
+        variants.push(("merge_depth_bound", v));
+        let mut v = base.clone();
+        v.max_target_bits += 1;
+        variants.push(("max_target_bits", v));
+        let mut v = base.clone();
+        v.required_blue_depth += 1;
+        variants.push(("required_blue_depth", v));
+        let mut v = base;
+        v.max_future_drift_secs += 1;
+        variants.push(("max_future_drift_secs", v));
+        for (field, changed) in variants {
+            assert_ne!(
+                encode(Some(changed)),
+                base_bytes,
+                "pinned field {field} is not covered by the signing preimage"
+            );
+        }
+    }
+
+    /// The NIPoPoW registration carries its pinned genesis and KMZ `(m, k)`
+    /// parameters under family tag 16 (15 is Babylon's, 10..14 are spoken
+    /// for), and every pinned field reaches the signing preimage: a relay that
+    /// could move one of them would be choosing how much work its own evidence
+    /// has to prove.
+    fn assert_nipopow_preimages() {
+        use crate::cross_domain::external::nipopow::PinnedNipopowGenesis;
+        use crate::cross_domain::external::AdapterSpec;
+
+        let base = PinnedNipopowGenesis {
+            genesis_id: [0x11; 32],
+            genesis_height: 7,
+            pow_target: [0x7F; 32],
+            min_superblocks_m: 3,
+            min_superblock_level: 3,
+            min_suffix_k: 4,
+        };
+        let encode = |genesis: Option<PinnedNipopowGenesis>| {
+            let mut out = Vec::new();
+            encode_adapter_spec(
+                &AdapterSpec::NipopowSuperblock {
+                    network: "ergo-mainnet".to_string(),
+                    genesis,
+                },
+                &mut out,
+            );
+            out
+        };
+        let base_bytes = encode(Some(base.clone()));
+        assert_eq!(
+            base_bytes.first().copied(),
+            Some(16),
+            "the NIPoPoW spec must keep wire tag 16; renumbering rewrites the \n             signed meaning of every stored registration"
+        );
+        assert_ne!(
+            encode(None),
+            base_bytes,
+            "the presence of the pin must be signed"
+        );
+
+        let mut variants = Vec::new();
+        let mut v = base.clone();
+        v.genesis_id = [0x12; 32];
+        variants.push(("genesis_id", v));
+        let mut v = base.clone();
+        v.genesis_height += 1;
+        variants.push(("genesis_height", v));
+        let mut v = base.clone();
+        v.pow_target = [0x7E; 32];
+        variants.push(("pow_target", v));
+        let mut v = base.clone();
+        v.min_superblocks_m += 1;
+        variants.push(("min_superblocks_m", v));
+        let mut v = base.clone();
+        v.min_superblock_level += 1;
+        variants.push(("min_superblock_level", v));
+        let mut v = base;
+        v.min_suffix_k += 1;
+        variants.push(("min_suffix_k", v));
+        for (field, changed) in variants {
+            assert_ne!(
+                encode(Some(changed)),
+                base_bytes,
+                "pinned field {field} is not covered by the signing preimage"
+            );
+        }
+    }
+
+    /// The Babylon registration carries the pinned epoch-key table under family
+    /// tag 15 (10..14 are spoken for), and every field of an EOTS equivocation
+    /// proof reaches the signing preimage: the pinned key, either signature,
+    /// either checkpoint, and the digest itself.
+    fn assert_babylon_preimages() {
+        use crate::cross_domain::external::babylon_eots::{
+            test_support, BtcCheckpoint, BtcWeakSubjectivityAnchor, EotsEquivocationProof,
+            PinnedBabylonEots,
+        };
+        use crate::cross_domain::external::{
+            AdapterSpec, DomainKey, ExternalDomainTx, IntakeState, ObjectiveFaultProof,
+            RegistrationRequest, VersionPolicy,
+        };
+
+        let pin = test_support::pinned();
+        let request = |spec: AdapterSpec| {
+            let golden = test_support::golden_evidence();
+            let mut policy = crate::cross_domain::external::VerificationPolicy::strict(0);
+            policy.require_slashable = false;
+            let economics = IntakeState::conservative_economics(1_000);
+            RegistrationRequest {
+                versions: VersionPolicy::single(golden.adapter, golden.evidence_version, 0),
+                spec,
+                policy,
+                economics,
+                bond_atoms: economics.required_bond_atoms(),
+                poster: test_addr_from_byte(1u8),
+                golden,
+            }
+        };
+        let register = |spec: AdapterSpec| {
+            TransactionType::ExternalDomain(ExternalDomainTx::Register(Box::new(request(spec))))
+        };
+        let network = test_support::NETWORK.to_string();
+        let base = signed_variant(register(AdapterSpec::BabylonEots {
+            network: network.clone(),
+            pinned: Some(pin.clone()),
+        }))
+        .signing_hash();
+
+        // Family tag: the byte after the tx-type byte and before the network
+        // string is 15, and a tag-9 reading of the same bytes is impossible.
+        let mut bytes = Vec::new();
+        encode_external_domain_tx(
+            &ExternalDomainTx::Register(Box::new(request(AdapterSpec::BabylonEots {
+                network: network.clone(),
+                pinned: Some(pin.clone()),
+            }))),
+            &mut bytes,
+        );
+        assert_eq!(bytes[0], 0, "Register is external tx 0");
+        assert_eq!(bytes[1], 15, "BabylonEots is adapter family 15");
+
+        let variants = [
+            AdapterSpec::BabylonEots {
+                network: "babylon-testnet".to_string(),
+                pinned: Some(pin.clone()),
+            },
+            AdapterSpec::BabylonEots {
+                network: network.clone(),
+                pinned: None,
+            },
+            AdapterSpec::BabylonEots {
+                network: network.clone(),
+                pinned: Some(PinnedBabylonEots {
+                    anchor: BtcWeakSubjectivityAnchor {
+                        tip_block_hash: pin.anchor.tip_block_hash,
+                        tip_height: pin.anchor.tip_height + 1,
+                        required_confirmations: pin.anchor.required_confirmations,
+                    },
+                    ..pin.clone()
+                }),
+            },
+            AdapterSpec::BabylonEots {
+                network: network.clone(),
+                pinned: Some(PinnedBabylonEots {
+                    epoch_pq_keys: vec![(test_support::EPOCH, vec![9, 9])],
+                    ..pin.clone()
+                }),
+            },
+        ];
+        for (i, variant) in variants.into_iter().enumerate() {
+            assert_ne!(
+                signed_variant(register(variant)).signing_hash(),
+                base,
+                "Babylon registration field {i} is not signed"
+            );
+        }
+
+        let proof = test_support::equivocation_proof(&pin, test_support::PINNED_SEED);
+        let submit_fault = |proof: EotsEquivocationProof| {
+            TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof {
+                domain: DomainKey([6u8; 32]),
+                proof: ObjectiveFaultProof::BabylonEotsEquivocation(Box::new(proof)),
+            })
+        };
+        let proof_base = signed_variant(submit_fault(proof.clone())).signing_hash();
+        let mut proof_bytes = Vec::new();
+        encode_objective_fault_proof(
+            &ObjectiveFaultProof::BabylonEotsEquivocation(Box::new(proof.clone())),
+            &mut proof_bytes,
+        );
+        assert_eq!(
+            proof_bytes[0], 6,
+            "BabylonEotsEquivocation is fault proof 6"
+        );
+
+        let mut second_sig = proof.clone();
+        second_sig.second_signature.push(0);
+        assert_ne!(
+            signed_variant(submit_fault(second_sig)).signing_hash(),
+            proof_base
+        );
+        let mut second_checkpoint = proof.clone();
+        second_checkpoint.second_checkpoint = BtcCheckpoint {
+            block_hash: [0x77; 32],
+            btc_height: proof.second_checkpoint.btc_height + 1,
+            mmr_root: [0x78; 32],
+        };
+        assert_ne!(
+            signed_variant(submit_fault(second_checkpoint)).signing_hash(),
+            proof_base
+        );
+        let mut second_root = proof.clone();
+        second_root.second_state_root[0] ^= 1;
+        assert_ne!(
+            signed_variant(submit_fault(second_root)).signing_hash(),
+            proof_base
+        );
+        let mut digest = proof;
+        digest.proof_digest[31] ^= 1;
+        assert_ne!(
+            signed_variant(submit_fault(digest)).signing_hash(),
+            proof_base
+        );
+    }
+
+    fn assert_bft_fault_proof_preimages() {
+        use crate::cross_domain::external::casper_ffg::{FfgEquivocationProof, FfgVote};
+        use crate::cross_domain::external::hotstuff::{HotStuffEquivocationProof, HotStuffVoteSig};
+        use crate::cross_domain::external::{DomainKey, ExternalDomainTx, ObjectiveFaultProof};
+
+        let submit_fault = |domain: DomainKey, proof: ObjectiveFaultProof| {
+            TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof { domain, proof })
+        };
+        let hs_base = HotStuffEquivocationProof {
+            epoch: 7,
+            view: 12,
+            block_hash_a: [0x11; 32],
+            block_hash_b: [0x22; 32],
+            vote_a: HotStuffVoteSig {
+                signer_pubkey: [0x33; 32],
+                ed25519_sig: vec![1, 2],
+                pq_sig: vec![3, 4],
+            },
+            vote_b: HotStuffVoteSig {
+                signer_pubkey: [0x33; 32],
+                ed25519_sig: vec![5, 6],
+                pq_sig: vec![7, 8],
+            },
+        };
+        let hs_h0 = signed_variant(submit_fault(
+            DomainKey([1u8; 32]),
+            ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_base.clone())),
+        ))
+        .signing_hash();
+        let mut hs_mut = hs_base.clone();
+        hs_mut.vote_b.pq_sig.push(9);
+        assert_ne!(
+            hs_h0,
+            signed_variant(submit_fault(
+                DomainKey([1u8; 32]),
+                ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_mut)),
+            ))
+            .signing_hash()
+        );
+        assert_ne!(
+            hs_h0,
+            signed_variant(submit_fault(
+                DomainKey([2u8; 32]),
+                ObjectiveFaultProof::HotStuffEquivocation(Box::new(hs_base)),
+            ))
+            .signing_hash()
+        );
+
+        let ffg_base = FfgEquivocationProof {
+            vote_a: FfgVote {
+                signer: [0x41; 32],
+                source_epoch: 1,
+                source_root: [0x42; 32],
+                target_epoch: 3,
+                target_root: [0x43; 32],
+                signature: vec![1],
+                pq_signature: vec![2],
+            },
+            vote_b: FfgVote {
+                signer: [0x41; 32],
+                source_epoch: 2,
+                source_root: [0x44; 32],
+                target_epoch: 4,
+                target_root: [0x45; 32],
+                signature: vec![3],
+                pq_signature: vec![4],
+            },
+        };
+        let ffg_h0 = signed_variant(submit_fault(
+            DomainKey([3u8; 32]),
+            ObjectiveFaultProof::CasperFfgEquivocation(Box::new(ffg_base.clone())),
+        ))
+        .signing_hash();
+        let mut ffg_mut = ffg_base;
+        ffg_mut.vote_b.pq_signature.push(5);
+        assert_ne!(
+            ffg_h0,
+            signed_variant(submit_fault(
+                DomainKey([3u8; 32]),
+                ObjectiveFaultProof::CasperFfgEquivocation(Box::new(ffg_mut)),
+            ))
+            .signing_hash()
+        );
+    }
+
+    fn assert_dag_and_bitvm_fault_proof_preimages() {
+        use crate::cross_domain::external::bitvm_covenant::{
+            BitVmPegClaim, DisproveScriptProof, MerkleStep, TraceChunkStep,
+        };
+        use crate::cross_domain::external::mysticeti_dag::{
+            MysticetiEquivocationProof, MysticetiVertex,
+        };
+        use crate::cross_domain::external::{DomainKey, ExternalDomainTx, ObjectiveFaultProof};
+
+        let submit_fault = |domain: DomainKey, proof: ObjectiveFaultProof| {
+            TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof { domain, proof })
+        };
+        let my_base = MysticetiEquivocationProof {
+            vertex_a: MysticetiVertex {
+                author: [0x51; 32],
+                epoch: 2,
+                round: 10,
+                payload_digest: [0x52; 32],
+                parents: vec![[0x53; 32]],
+                ed25519_sig: vec![1],
+                pq_sig: vec![2],
+            },
+            vertex_b: MysticetiVertex {
+                author: [0x51; 32],
+                epoch: 2,
+                round: 10,
+                payload_digest: [0x54; 32],
+                parents: vec![[0x55; 32]],
+                ed25519_sig: vec![3],
+                pq_sig: vec![4],
+            },
+        };
+        let my_h0 = signed_variant(submit_fault(
+            DomainKey([4u8; 32]),
+            ObjectiveFaultProof::MysticetiEquivocation(Box::new(my_base.clone())),
+        ))
+        .signing_hash();
+        let mut my_mut = my_base;
+        my_mut.vertex_b.parents.push([0x56; 32]);
+        assert_ne!(
+            my_h0,
+            signed_variant(submit_fault(
+                DomainKey([4u8; 32]),
+                ObjectiveFaultProof::MysticetiEquivocation(Box::new(my_mut)),
+            ))
+            .signing_hash()
+        );
+
+        let bv_base = DisproveScriptProof {
+            claim: BitVmPegClaim {
+                state_root: [0x61; 32],
+                tx_root: [0x62; 32],
+                event_root: [0x63; 32],
+                program_hash: [0x64; 32],
+                trace_merkle_root: [0x65; 32],
+                trace_chunk_count: 2,
+                claim_pow_height: 51,
+                operator_ed25519_sig: vec![1],
+                operator_pq_sig: vec![2],
+            },
+            disputed_chunk: TraceChunkStep {
+                chunk_index: 0,
+                pre_state: [0x66; 32],
+                claimed_post_state: [0x67; 32],
+                step_opcode: 3,
+                step_witness: [0x68; 32],
+            },
+            trace_merkle_proof: vec![MerkleStep {
+                sibling: [0x69; 32],
+                sibling_is_left: false,
+            }],
+        };
+        let bv_h0 = signed_variant(submit_fault(
+            DomainKey([5u8; 32]),
+            ObjectiveFaultProof::BitVmDisprove(Box::new(bv_base.clone())),
+        ))
+        .signing_hash();
+        let mut bv_mut = bv_base;
+        if let Some(step) = bv_mut.trace_merkle_proof.first_mut() {
+            step.sibling_is_left = true;
+        }
+        assert_ne!(
+            bv_h0,
+            signed_variant(submit_fault(
+                DomainKey([5u8; 32]),
+                ObjectiveFaultProof::BitVmDisprove(Box::new(bv_mut)),
+            ))
+            .signing_hash()
+        );
     }
 
     /// Every field a settlement transaction carries reaches the signing
@@ -5763,6 +7211,8 @@ mod v29_signing_tests {
             credential_roots: Default::default(),
             guardians: vec![],
             recovery_threshold: 0,
+            issued_credentials: 0,
+            recovery_nonce: 0,
         };
         let base_credential = CredentialCommitment {
             issuer: test_addr_from_byte(2u8),
@@ -5837,6 +7287,26 @@ mod v29_signing_tests {
         let mut r = base_record.clone();
         r.recovery_threshold = 1;
         assert_ne!(base_register, hash_of(register(r)), "recovery_threshold");
+        // `issued_credentials` is the per-subject ceiling the credential door
+        // reads, and `recovery_nonce` is what stops an applied guardian quorum
+        // from being replayed into the same epoch. A record carries both on the
+        // wire, so a relay that lowered the counter or rewound the nonce would
+        // otherwise be editing an authorization outcome behind a signature that
+        // still verifies.
+        let mut r = base_record.clone();
+        r.issued_credentials = 7;
+        assert_ne!(
+            base_register,
+            hash_of(register(r)),
+            "issued_credentials must be in the signed preimage"
+        );
+        let mut r = base_record.clone();
+        r.recovery_nonce = 3;
+        assert_ne!(
+            base_register,
+            hash_of(register(r)),
+            "recovery_nonce must be in the signed preimage"
+        );
 
         let base_issue = hash_of(issue(base_credential.clone()));
         let mut c = base_credential.clone();
@@ -6874,5 +8344,295 @@ mod recovery_tests {
         kind.tx_type = TransactionType::Stake;
         kind.hash = kind.calculate_hash();
         assert!(!kind.verify_in(&registry));
+    }
+
+    #[test]
+    fn objective_fault_proof_preimage_covers_dag_and_tendermint_fields() {
+        use crate::cross_domain::external::dag_bft::{
+            DagBftSig, DagCausalParent, DagEquivocationProof, DagVoterVertex,
+        };
+        use crate::cross_domain::external::tendermint::{
+            TendermintCommitEvidence, TendermintLightParams, TendermintMisbehaviour,
+            TendermintSignature, TendermintValidator, TrustedTendermintState,
+        };
+        use crate::cross_domain::external::{DomainKey, ExternalDomainTx, ObjectiveFaultProof};
+
+        let domain = DomainKey([0x44; 32]);
+        let base_tx = Transaction::new_with_chain_id(
+            Address::from([1u8; 32]),
+            Address::from([2u8; 32]),
+            0,
+            1,
+            0,
+            Vec::new(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::Transfer,
+        );
+        let hash_of = |proof: ObjectiveFaultProof| {
+            let mut tx = base_tx.clone();
+            tx.tx_type = TransactionType::ExternalDomain(ExternalDomainTx::SubmitFaultProof {
+                domain,
+                proof,
+            });
+            tx.signing_hash()
+        };
+
+        let base_sig = DagBftSig {
+            signer_pubkey: [1u8; 32],
+            ed25519_sig: vec![2u8; 64],
+            pq_sig: vec![3u8; 8],
+        };
+        let anchor_base = DagEquivocationProof::AnchorCertificate {
+            round: 4,
+            first_anchor_digest: [0xA1; 32],
+            first_sigs: vec![base_sig.clone()],
+            second_anchor_digest: [0xA2; 32],
+            second_sigs: vec![base_sig],
+        };
+        let mut anchor_round = anchor_base.clone();
+        if let DagEquivocationProof::AnchorCertificate { round, .. } = &mut anchor_round {
+            *round = 6;
+        }
+        let mut anchor_pq = anchor_base.clone();
+        if let DagEquivocationProof::AnchorCertificate { second_sigs, .. } = &mut anchor_pq {
+            second_sigs[0].pq_sig.push(9);
+        }
+
+        let parent_base = DagCausalParent {
+            round: 3,
+            author: [0xB1; 32],
+            payload_root: [0xB2; 32],
+            digest: [0xB3; 32],
+            author_ed25519_sig: vec![4u8; 64],
+            author_pq_sig: vec![5u8; 8],
+        };
+        let mut parent_alt = parent_base.clone();
+        parent_alt.payload_root[0] ^= 1;
+
+        let voter_base = DagVoterVertex {
+            round: 5,
+            author: [0xC1; 32],
+            parent_digests: vec![[0xC2; 32]],
+            digest: [0xC3; 32],
+            ed25519_sig: vec![6u8; 64],
+            pq_sig: vec![7u8; 8],
+        };
+        let mut voter_alt = voter_base.clone();
+        voter_alt.parent_digests.push([0xC4; 32]);
+
+        let tm_val = TendermintValidator {
+            address: [0x11; 20],
+            public_key: [0x22; 32],
+            voting_power: 100,
+        };
+        let tm_header = TendermintCommitEvidence {
+            chain_id: "cosmoshub-4".to_string(),
+            height: 50,
+            round: 0,
+            block_hash: [0x31; 32],
+            parts_total: 1,
+            parts_hash: [0x32; 32],
+            version_block: 11,
+            last_block_hash: [0x33; 32],
+            last_parts_total: 1,
+            last_parts_hash: [0x34; 32],
+            last_commit_hash: [0x35; 32],
+            data_hash: [0x36; 32],
+            validators_hash: [0x37; 32],
+            next_validators_hash: [0x38; 32],
+            consensus_hash: [0x39; 32],
+            app_hash: [0x3A; 32],
+            last_results_hash: [0x3B; 32],
+            evidence_hash: [0x3C; 32],
+            proposer_address: [0x3D; 20],
+            commit_time: 1_700_000_000,
+            commit_time_nanos: 42,
+            validators: vec![tm_val],
+            signatures: vec![TendermintSignature {
+                address: [0x11; 20],
+                timestamp_seconds: 1_700_000_000,
+                timestamp_nanos: 42,
+                signature: vec![8u8; 64],
+            }],
+        };
+        let tm_trusted = TrustedTendermintState {
+            chain_id: "cosmoshub-4".to_string(),
+            height: 49,
+            time_secs: 1_699_999_990,
+            trusting_period_secs: 1_209_600,
+            validators: vec![tm_val],
+            next_validators_hash: [0x37; 32],
+        };
+        let tm_params = TendermintLightParams {
+            trusting_period_secs: 1_209_600,
+            unbonding_period_secs: 1_814_400,
+            max_clock_drift_secs: 10,
+            max_height_drift: 10_000,
+        };
+        let mut tm_header_2 = tm_header.clone();
+        tm_header_2.block_hash[0] ^= 0xFF;
+
+        let mut tm_params_alt = tm_params;
+        tm_params_alt.max_height_drift += 1;
+
+        let hashes = [
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(anchor_base))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(anchor_round))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(anchor_pq))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::CausalParent {
+                    first: parent_base.clone(),
+                    second: parent_base,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::CausalParent {
+                    first: parent_alt.clone(),
+                    second: parent_alt,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::VoterVertex {
+                    first: voter_base.clone(),
+                    second: voter_base,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::DagEquivocation(Box::new(
+                DagEquivocationProof::VoterVertex {
+                    first: voter_alt.clone(),
+                    second: voter_alt,
+                },
+            ))),
+            hash_of(ObjectiveFaultProof::TendermintMisbehaviour {
+                trusted: Box::new(tm_trusted.clone()),
+                params: tm_params,
+                evidence: Box::new(TendermintMisbehaviour {
+                    header_1: tm_header.clone(),
+                    header_2: None,
+                }),
+            }),
+            hash_of(ObjectiveFaultProof::TendermintMisbehaviour {
+                trusted: Box::new(tm_trusted.clone()),
+                params: tm_params,
+                evidence: Box::new(TendermintMisbehaviour {
+                    header_1: tm_header.clone(),
+                    header_2: Some(tm_header_2),
+                }),
+            }),
+            hash_of(ObjectiveFaultProof::TendermintMisbehaviour {
+                trusted: Box::new(tm_trusted),
+                params: tm_params_alt,
+                evidence: Box::new(TendermintMisbehaviour {
+                    header_1: tm_header,
+                    header_2: None,
+                }),
+            }),
+        ];
+        let unique: std::collections::BTreeSet<[u8; 32]> = hashes.into_iter().collect();
+        assert_eq!(
+            unique.len(),
+            hashes.len(),
+            "every DagEquivocation and TendermintMisbehaviour field must move signing_hash"
+        );
+    }
+
+    #[test]
+    fn appended_adapter_specs_have_distinct_append_only_signing_bytes() {
+        use crate::cross_domain::external::AdapterSpec;
+        let cases: [(u8, AdapterSpec); 11] = [
+            (
+                10,
+                AdapterSpec::SolanaTowerBft {
+                    network: "solana".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                11,
+                AdapterSpec::PoSpaceVdf {
+                    network: "chia".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                12,
+                AdapterSpec::AptosJolteonBft {
+                    network: "aptos".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                13,
+                AdapterSpec::NearDoomslugBft {
+                    network: "near".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                14,
+                AdapterSpec::ChainKeyNiDkg {
+                    network: "ic".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                15,
+                AdapterSpec::BabylonEots {
+                    network: "babylon".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                16,
+                AdapterSpec::NipopowSuperblock {
+                    network: "nipopow".into(),
+                    genesis: None,
+                },
+            ),
+            (
+                17,
+                AdapterSpec::Ghostdag {
+                    network: "kaspa".into(),
+                    anchor: None,
+                },
+            ),
+            (
+                18,
+                AdapterSpec::HoneyBadgerBft {
+                    network: "hbbft".into(),
+                    committee: None,
+                },
+            ),
+            (
+                19,
+                AdapterSpec::HeterogeneousMultiProver {
+                    network: "rollup".into(),
+                    pinned: None,
+                },
+            ),
+            (
+                20,
+                AdapterSpec::StarkValidityRollup {
+                    network: "starknet".into(),
+                    pinned: None,
+                },
+            ),
+        ];
+        let mut encoded = Vec::with_capacity(cases.len());
+        for (tag, spec) in cases {
+            let mut first = Vec::new();
+            let mut second = Vec::new();
+            encode_adapter_spec(&spec, &mut first);
+            encode_adapter_spec(&spec, &mut second);
+            assert_eq!(first, second, "signing bytes must be deterministic");
+            assert_eq!(first.first().copied(), Some(tag), "tags are append-only");
+            encoded.push(first);
+        }
+        let unique: std::collections::BTreeSet<Vec<u8>> = encoded.into_iter().collect();
+        assert_eq!(
+            unique.len(),
+            11,
+            "every appended family must have distinct canonical signing bytes"
+        );
     }
 }

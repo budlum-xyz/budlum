@@ -27,7 +27,7 @@ mod tests {
 
     /// The sled file lock is not released synchronously on drop, so this is a
     /// bounded-wait reopen - a mirror of the restart practice in
-    /// disaster_recovery.rs.
+    /// `disaster_recovery.rs`.
     fn open_storage_bounded(path: &str) -> Storage {
         for _ in 0..100 {
             if let Ok(storage) = Storage::new(path) {

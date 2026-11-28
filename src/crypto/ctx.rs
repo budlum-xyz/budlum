@@ -105,6 +105,12 @@ pub const UEL_TX_V1: &[u8] = b"BDLM/UEL_TX/V1";
 
 /// Aggregator ownership attestation over a segment's `tick_pi`.
 pub const AGG_SEGMENT_V1: &[u8] = b"BDLM/AGG_SEGMENT/V1";
+/// An address owner's PQ-hybrid signature binding the address to a Budlum
+/// identity (`wallet::identity_profile::LinkedAccountClaim`).
+pub const IDENTITY_ADDR_LINK_V1: &[u8] = b"BDLM/IDENTITY_ADDR_LINK/V1";
+/// A payer's PQ-hybrid signature over a pre-authorized offline spend voucher
+/// (`unification::payment_router::SignedOfflineVoucher`).
+pub const OFFLINE_VOUCHER_V1: &[u8] = b"BDLM/OFFLINE_VOUCHER/V1";
 
 /// table, in the order of section 6.5.
 pub const TABLE: &[&[u8]] = &[
@@ -147,6 +153,8 @@ pub const EXTRAS: &[&[u8]] = &[
     APB_LEVEL_V1,
     UEL_TX_V1,
     AGG_SEGMENT_V1,
+    IDENTITY_ADDR_LINK_V1,
+    OFFLINE_VOUCHER_V1,
 ];
 
 /// Whether `ctx` is a registered context string.

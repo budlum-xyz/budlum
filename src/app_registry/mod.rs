@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
-use crate::storage::bud3::content_id::ContentId;
+use crate::storage::bud3::content_id::{ContentId, ContentIdKind};
 use crate::storage::bud3::content_ref::{ContentRef, ContentRefError};
 use crate::storage::bud3::registry::{Bud3Registry, ObjectKey};
 
@@ -38,8 +38,31 @@ pub enum AppRegistryError {
     NotOwner,
     UnknownObject,
     ContentIdMismatch,
+    SealedBundleForbidden,
     InvalidContentRef(ContentRefError),
     FeeBelowMinimum,
+}
+
+fn is_valid_canonical_app_name(canonical: &str) -> bool {
+    let bytes = canonical.as_bytes();
+    if bytes.len() < 3 || bytes.len() > 64 {
+        return false;
+    }
+    if !bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        || !bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+    {
+        return false;
+    }
+    let mut prev_space = false;
+    for &b in bytes {
+        let allowed =
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.' | b' ');
+        if !allowed || (b == b' ' && prev_space) {
+            return false;
+        }
+        prev_space = b == b' ';
+    }
+    true
 }
 
 /// Registered application entry backed by a B.U.D. 3.0 [`ContentRef`].
@@ -88,16 +111,22 @@ impl AppRegistry {
             return Err(AppRegistryError::FeeBelowMinimum);
         }
         let canonical = name.trim().to_ascii_lowercase();
-        if canonical.len() < 3 || canonical.len() > 64 {
+        if !is_valid_canonical_app_name(&canonical) {
             return Err(AppRegistryError::InvalidName);
         }
         if self.apps.contains_key(&canonical) {
             return Err(AppRegistryError::AlreadyRegistered);
         }
         let (cid, obj_key) = bundle;
-        let obj = bud3
-            .object(&obj_key)
+        if cid.kind != ContentIdKind::Public {
+            return Err(AppRegistryError::SealedBundleForbidden);
+        }
+        let (live_key, obj) = bud3
+            .resolve_live_object(&obj_key)
             .ok_or(AppRegistryError::UnknownObject)?;
+        if live_key != obj_key {
+            return Err(AppRegistryError::UnknownObject);
+        }
         if obj.record.content_id != cid {
             return Err(AppRegistryError::ContentIdMismatch);
         }
@@ -215,5 +244,83 @@ mod tests {
             .unwrap();
         assert_eq!(registered.developer, owner);
         assert_eq!(reg.get_app("budswap"), Some(&registered));
+
+        // Zero-width/control characters and non-ASCII homoglyphs must be refused.
+        for bad_name in [
+            "bud\u{200b}swap",
+            "app\x00one",
+            "app\nname",
+            "\u{202e}budswap",
+            "-leading",
+            "two  spaces",
+        ] {
+            assert_eq!(
+                reg.register_app(
+                    &bud3,
+                    bad_name,
+                    owner,
+                    AppRegistryCategory::DeFi,
+                    (cid, key),
+                    APP_REGISTRY_MIN_FEE,
+                ),
+                Err(AppRegistryError::InvalidName),
+                "spoofable app name {bad_name:?} must be refused"
+            );
+        }
+
+        // Sealed private objects cannot be registered as public dApp bundles.
+        let ck = crate::storage::bud3::content_id::ContentKey([0x77; 32]);
+        let sealed_up = crate::storage::bud3::pipeline::prepare_sealed_upload(
+            b"private user photo",
+            &ck,
+            [0x33; 24],
+            &profile,
+            &Bud3Limits::default(),
+            4,
+        )
+        .unwrap();
+        let sealed_cid = sealed_up.record.content_id;
+        let sealed_key = sealed_up.record.commitment;
+        let sealed_total = sealed_up.record.symbols_per_segment;
+        let sh = sealed_total / 2;
+        bud3.register_object(
+            *owner.as_bytes(),
+            sealed_up.record,
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: [0x99; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: sh,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: [0x9A; 32],
+                        class: Class::Full,
+                        first_esi: sh,
+                        symbols: sealed_total - sh,
+                    },
+                ),
+            ],
+            0,
+            50,
+        )
+        .unwrap();
+        assert!(
+            reg.register_app(
+                &bud3,
+                "sealed-app",
+                owner,
+                AppRegistryCategory::Storage,
+                (sealed_cid, sealed_key),
+                APP_REGISTRY_MIN_FEE,
+            )
+            .is_err(),
+            "sealed object must be refused as a public App Registry bundle"
+        );
     }
 }

@@ -59,6 +59,29 @@ impl std::fmt::Display for WorkerError {
 /// Factory creating fresh in-process environment instances after a restart.
 pub type InProcessFactory = Box<dyn Fn() -> Box<dyn ExecutionEnvironment + Send> + Send>;
 
+/// Where the code that answers a UEL call actually lives.
+///
+/// The distinction is not cosmetic. An in-process environment is an in-tree
+/// interpreter written to the same ABI as the engine it stands in for: it reads
+/// the same transactions and returns the same shape of receipt, so nothing in
+/// the receipt tells a caller which of the two produced it. A chain can
+/// therefore execute under the stand-in and publish the result as the engine's
+/// own, which is exactly the difference the feature matrix calls "model" and
+/// "real engine".
+///
+/// The class is derived from the registered endpoint, never declared by the
+/// environment itself: an environment that could name its own class would be
+/// the same unverifiable claim in another place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EngineClass {
+    /// The upstream engine (`revm`, `wasmi`, `solana-sbpf`, `BudZero`) behind a
+    /// separate `budlum-ee-*` worker process, reached over its own socket.
+    Real,
+    /// The in-tree interpreter that stands in for the engine. Its answer is a
+    /// faithful implementation of the written rules, not the engine's answer.
+    Model,
+}
+
 /// Endpoint backing one registered execution environment.
 pub enum WorkerEndpoint {
     /// In-process `ExecutionEnvironment` isolated behind `catch_unwind`
@@ -116,6 +139,21 @@ impl WorkerEndpoint {
             Self::InProcess { ee, .. } => *ee,
             #[cfg(unix)]
             Self::UnixSocket { ee, .. } => *ee,
+        }
+    }
+
+    /// Which engine answers a call routed to this endpoint.
+    ///
+    /// A socket-backed endpoint is the engine: the node spawns the worker
+    /// binary and speaks its protocol. An in-process endpoint is this tree's
+    /// interpreter for that environment, so it reports [`EngineClass::Model`]
+    /// no matter how complete it is.
+    #[must_use]
+    pub const fn engine_class(&self) -> EngineClass {
+        match self {
+            Self::InProcess { .. } => EngineClass::Model,
+            #[cfg(unix)]
+            Self::UnixSocket { .. } => EngineClass::Real,
         }
     }
 
@@ -387,6 +425,25 @@ impl WorkerSupervisor {
     #[must_use]
     pub fn fault_count(&self, ee: EeId) -> u64 {
         self.fault_counts.get(&ee.0).copied().unwrap_or(0)
+    }
+
+    /// Every registered environment with the class of the engine behind it,
+    /// in catalog order.
+    #[must_use]
+    pub fn registered_engines(&self) -> Vec<(EeId, EngineClass)> {
+        self.workers
+            .iter()
+            .map(|(raw, endpoint)| (EeId(*raw), endpoint.engine_class()))
+            .collect()
+    }
+
+    /// Engine class registered for `ee`, or `None` when nothing is registered.
+    ///
+    /// `None` is not a class: a caller that treats "no endpoint" as "the stand-in
+    /// is fine" starts a chain on an environment it cannot name.
+    #[must_use]
+    pub fn engine_class(&self, ee: EeId) -> Option<EngineClass> {
+        self.workers.get(&ee.0).map(WorkerEndpoint::engine_class)
     }
 
     /// Records a critical node halt alarm after 3 failed worker retries.

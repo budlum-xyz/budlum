@@ -455,6 +455,26 @@ pub fn run_budzero_conformance() -> Result<ConformanceReport, String> {
         return Err(String::from("BudZero conformance deploy failed"));
     }
     let root = state.execution_state.execution_root();
+    let ctx = conformance_ctx();
+    let uer_batch: Vec<_> = recs
+        .iter()
+        .enumerate()
+        .map(|(idx, r)| {
+            crate::execution::uer::UniversalExecutionReceipt::from_uel_receipt(
+                &ctx,
+                u32::try_from(idx).unwrap_or(u32::MAX),
+                EeId::BUDZERO,
+                r,
+                root,
+                None,
+            )
+        })
+        .collect();
+    let uer_root =
+        crate::execution::uer::compute_uer_batch_root(&uer_batch).map_err(|e| e.to_string())?;
+    let uer_proof =
+        crate::execution::uer::prove_uer_inclusion(&uer_batch, 0).map_err(|e| e.to_string())?;
+    uer_proof.verify(&uer_root).map_err(|e| e.to_string())?;
     Ok(ConformanceReport {
         ee: EeId::BUDZERO,
         passed_vectors: 2,

@@ -129,6 +129,8 @@ struct Lowerer<'a> {
     sema: &'a SemanticAnalyzer,
     /// Storage field name to slot index (0-based).
     storage_slots: HashMap<String, i32>,
+    /// Private witness field name to byte offset under `WITNESS_BASE`.
+    witness_offsets: HashMap<String, i64>,
     /// Struct name to ordered field-name list (for byte-offset computation).
     struct_field_order: HashMap<String, Vec<String>>,
     /// Function name to FunctionId (first pass).
@@ -144,6 +146,18 @@ impl<'a> Lowerer<'a> {
             .map(|(i, f)| (f.name.clone(), i as i32))
             .collect();
 
+        let witness_offsets = contract
+            .witnesses
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                (
+                    w.name.clone(),
+                    i64::from(crate::WITNESS_BASE) + (i as i64) * 8,
+                )
+            })
+            .collect();
+
         let struct_field_order = contract
             .structs
             .iter()
@@ -156,6 +170,7 @@ impl<'a> Lowerer<'a> {
         Lowerer {
             sema,
             storage_slots,
+            witness_offsets,
             struct_field_order,
             function_ids: HashMap::new(),
         }
@@ -441,10 +456,57 @@ impl<'a> Lowerer<'a> {
                 });
             }
 
-            Stmt::Match { .. } => {
-                return Err(LoweringError::UnsupportedNode(
-                    "match statement - not yet supported in IR lowering".into(),
-                ));
+            Stmt::Match { scrutinee, arms } => {
+                let (scrutinee_val, scrutinee_ty) = self.lower_expr_value(scrutinee, ctx)?;
+                let merge_block = ctx.fresh_block();
+
+                for (idx, arm) in arms.iter().enumerate() {
+                    let is_last = idx + 1 == arms.len();
+                    let arm_body_block = ctx.fresh_block();
+                    let next_test_block = if is_last {
+                        merge_block
+                    } else {
+                        ctx.fresh_block()
+                    };
+
+                    match &arm.pattern {
+                        crate::ast::MatchPattern::IntLit(lit) => {
+                            let pat_val = ctx.push_value_instr(Instruction::Const {
+                                ty: scrutinee_ty.clone(),
+                                value: *lit,
+                            })?;
+                            let cond_val = ctx.push_value_instr(Instruction::IrEq {
+                                ty: scrutinee_ty.clone(),
+                                lhs: scrutinee_val,
+                                rhs: pat_val,
+                            })?;
+                            ctx.set_terminator(Terminator::Branch {
+                                condition: cond_val,
+                                then_block: arm_body_block,
+                                else_block: next_test_block,
+                            });
+                        }
+                        crate::ast::MatchPattern::Wildcard => {
+                            ctx.set_terminator(Terminator::Jump(arm_body_block));
+                        }
+                    }
+
+                    ctx.switch_to(arm_body_block);
+                    ctx.push_scope();
+                    for s in &arm.body {
+                        self.lower_stmt(s, ctx)?;
+                    }
+                    ctx.pop_scope();
+                    if !ctx.current_block_terminated() {
+                        ctx.set_terminator(Terminator::Jump(merge_block));
+                    }
+
+                    if !is_last {
+                        ctx.switch_to(next_test_block);
+                    }
+                }
+
+                ctx.switch_to(merge_block);
             }
 
             Stmt::Expr(expr) => {
@@ -481,14 +543,43 @@ impl<'a> Lowerer<'a> {
             }
 
             Expr::Ident(name) => {
-                let (local, ty) = ctx
-                    .lookup_local(name)
+                if let Some((local, ty)) = ctx.lookup_local(name) {
+                    let val = ctx.push_value_instr(Instruction::ReadLocal {
+                        local,
+                        ty: ty.clone(),
+                    })?;
+                    Ok(Some((val, ty)))
+                } else if let Some(&offset) = self.witness_offsets.get(name) {
+                    let base = ctx.push_value_instr(Instruction::Const {
+                        ty: IrType::U64,
+                        value: offset as u64,
+                    })?;
+                    let val = ctx.push_value_instr(Instruction::Load {
+                        ty: IrType::U64,
+                        base,
+                        offset: 0,
+                    })?;
+                    Ok(Some((val, IrType::U64)))
+                } else {
+                    Err(LoweringError::UndefinedVariable(name.clone()))
+                }
+            }
+
+            Expr::WitnessRead(name) => {
+                let offset = *self
+                    .witness_offsets
+                    .get(name)
                     .ok_or_else(|| LoweringError::UndefinedVariable(name.clone()))?;
-                let val = ctx.push_value_instr(Instruction::ReadLocal {
-                    local,
-                    ty: ty.clone(),
+                let base = ctx.push_value_instr(Instruction::Const {
+                    ty: IrType::U64,
+                    value: offset as u64,
                 })?;
-                Ok(Some((val, ty)))
+                let val = ctx.push_value_instr(Instruction::Load {
+                    ty: IrType::U64,
+                    base,
+                    offset: 0,
+                })?;
+                Ok(Some((val, IrType::U64)))
             }
 
             Expr::Binary(lhs, op, rhs) => {

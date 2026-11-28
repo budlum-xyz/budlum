@@ -267,6 +267,12 @@ const BUDGETS: &[Budget] = &[
         reason: "the bridge lock, verified-mint and settlement evidence entry points, whose arguments are all required and none of which groups into a meaningful struct; the storage escrow wrappers that were here left when deal opening and repair acceptance became `StorageTx` transactions, and the evidence path arrived with the slashing work",
     },
         Budget {
+        file: "src/garden/record.rs",
+        lint: "clippy::too_many_arguments",
+        count: 1,
+        reason: "`GardenRecord::issue` takes exactly the fields a record carries (section 5 of the directive: chain, genesis, token, host, peers, now, ttl, uses, signing key), so the argument list is the wire format itself; folding any two into a struct would invent a type the record does not have, and every one of the nine is a distinct fact a caller has to supply",
+    },
+    Budget {
         file: "src/cross_domain/bridge.rs",
         lint: "clippy::too_many_arguments",
         count: 1,

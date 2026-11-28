@@ -17,23 +17,25 @@ pub enum MessageKind {
 
 impl MessageKind {
     /// The variant's name, for error text that reports what arrived.
+    #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
-            MessageKind::BridgeLock => "BridgeLock",
-            MessageKind::BridgeMint => "BridgeMint",
-            MessageKind::BridgeBurn => "BridgeBurn",
-            MessageKind::BridgeUnlock => "BridgeUnlock",
-            MessageKind::Custom(_) => "Custom",
+            Self::BridgeLock => "BridgeLock",
+            Self::BridgeMint => "BridgeMint",
+            Self::BridgeBurn => "BridgeBurn",
+            Self::BridgeUnlock => "BridgeUnlock",
+            Self::Custom(_) => "Custom",
         }
     }
 
+    #[must_use]
     pub fn as_bytes(&self) -> Vec<u8> {
         match self {
-            MessageKind::BridgeLock => b"bridge-lock".to_vec(),
-            MessageKind::BridgeMint => b"bridge-mint".to_vec(),
-            MessageKind::BridgeBurn => b"bridge-burn".to_vec(),
-            MessageKind::BridgeUnlock => b"bridge-unlock".to_vec(),
-            MessageKind::Custom(bytes) => {
+            Self::BridgeLock => b"bridge-lock".to_vec(),
+            Self::BridgeMint => b"bridge-mint".to_vec(),
+            Self::BridgeBurn => b"bridge-burn".to_vec(),
+            Self::BridgeUnlock => b"bridge-unlock".to_vec(),
+            Self::Custom(bytes) => {
                 let mut out = b"custom:".to_vec();
                 out.extend_from_slice(bytes);
                 out
@@ -121,8 +123,9 @@ pub const fn quantum_class_from_code(code: u8) -> Option<Option<QuantumClass>> {
 }
 
 impl CrossDomainMessage {
+    #[must_use]
     pub fn new(params: CrossDomainMessageParams) -> Self {
-        let mut message = CrossDomainMessage {
+        let mut message = Self {
             message_id: [0u8; 32],
             correlation_id: None,
             source_domain: params.source_domain,
@@ -153,6 +156,7 @@ impl CrossDomainMessage {
         self
     }
 
+    #[must_use]
     pub fn new_correlated(params: CrossDomainMessageParams, correlation_id: MessageId) -> Self {
         let mut message = Self::new(params);
         message.correlation_id = Some(correlation_id);
@@ -241,6 +245,7 @@ impl CrossDomainMessage {
         .map_err(|e| format!("message sender signature does not verify: {e}"))
     }
 
+    #[must_use]
     pub fn calculate_message_id(&self) -> MessageId {
         let kind = self.kind.as_bytes();
         // Presence is folded in through the shared
@@ -265,6 +270,7 @@ impl CrossDomainMessage {
         ])
     }
 
+    #[must_use]
     pub fn verify_id(&self) -> bool {
         self.message_id == self.calculate_message_id()
     }
@@ -312,11 +318,10 @@ pub fn register_cross_domain_on_state(
             message.source_domain
         ));
     }
-    // Expiry is judged against the block being executed, not against the
-    // request's idea of the height: the height is consensus state and the
-    // request has none.
+    // Half-open live window `[source_height, expiry_height)` matching bridge
+    // mint, unlock, claim issuance, relay verification, and expiry sweeps.
     let height = state.current_block_height;
-    if message.expiry_height > 0 && height > message.expiry_height {
+    if message.expiry_height > 0 && height >= message.expiry_height {
         return Err(format!(
             "Cross-domain message expired (expiry={}, current={height})",
             message.expiry_height
@@ -391,6 +396,35 @@ pub fn register_relayed_cross_domain_on_state(
         return Err(format!(
             "source domain {} is not bridge-enabled",
             message.source_domain
+        ));
+    }
+    if let Some(target_domain) = state.settlement.domains.get(message.target_domain) {
+        if target_domain.status != crate::domain::types::DomainStatus::Active {
+            return Err(format!(
+                "target domain {} is not active (status={:?})",
+                message.target_domain, target_domain.status
+            ));
+        }
+        if !target_domain.bridge_enabled {
+            return Err(format!(
+                "target domain {} is not bridge-enabled",
+                message.target_domain
+            ));
+        }
+    }
+    let max_horizon = state
+        .current_block_height
+        .saturating_add(super::message_registry::MAX_MESSAGE_LIFETIME_BLOCKS);
+    if message.expiry_height > max_horizon {
+        return Err(format!(
+            "relayed message expiry horizon {} exceeds maximum lifetime ceiling {max_horizon}",
+            message.expiry_height
+        ));
+    }
+    if message.source_height > max_horizon {
+        return Err(format!(
+            "relayed message source height {} exceeds maximum lifetime ceiling {max_horizon}",
+            message.source_height
         ));
     }
     let derived = Some(
@@ -684,6 +718,81 @@ mod tests {
         assert!(
             held_err.contains("held by the quantum alarm"),
             "got: {held_err}"
+        );
+    }
+
+    #[test]
+    fn register_cross_domain_refuses_exact_expiry_boundary() {
+        let mut state = crate::core::account::AccountState::new();
+        state.current_block_height = 250;
+        let msg = CrossDomainMessage::new(CrossDomainMessageParams {
+            source_domain: 1,
+            target_domain: 2,
+            source_height: 200,
+            event_index: 0,
+            nonce: 0,
+            sender: Address::from([1u8; 32]),
+            recipient: Address::from([2u8; 32]),
+            payload_hash: [0xAA; 32],
+            kind: MessageKind::BridgeLock,
+            expiry_height: 250,
+        });
+        let err = register_cross_domain_on_state(&mut state, &msg)
+            .expect_err("exact expiry_height == current_block_height must be refused");
+        assert!(err.contains("expired"), "got: {err}");
+    }
+
+    #[test]
+    fn register_relayed_refuses_disabled_target_and_unbounded_horizon() {
+        use crate::crypto::facts::QuantumClass;
+        use crate::domain::plugin::default_domain;
+        use crate::domain::ConsensusKind;
+
+        let mut state = crate::core::account::AccountState::new();
+        state.current_block_height = 100;
+        let d10 = default_domain(10, ConsensusKind::PoS, 46010, "pos-checkpoint-v1", 1);
+        let mut d20 = default_domain(20, ConsensusKind::PoS, 46020, "pos-checkpoint-v1", 1);
+        d20.bridge_enabled = false;
+        state.settlement.domains.register(d10).unwrap();
+        state.settlement.domains.register(d20).unwrap();
+
+        let mut to_disabled = CrossDomainMessage::new(CrossDomainMessageParams {
+            source_domain: 10,
+            target_domain: 20,
+            source_height: 50,
+            event_index: 0,
+            nonce: 1,
+            sender: Address::from([0x10; 32]),
+            recipient: Address::from([0x20; 32]),
+            payload_hash: [0xBB; 32],
+            kind: MessageKind::Custom(b"relayed".to_vec()),
+            expiry_height: 500,
+        });
+        to_disabled.source_quantum_class = Some(QuantumClass::Lattice);
+        to_disabled.message_id = to_disabled.calculate_message_id();
+        let derr = register_relayed_cross_domain_on_state(&mut state, &to_disabled)
+            .expect_err("relayed message to bridge-disabled target domain must be refused");
+        assert!(derr.contains("target domain"), "got: {derr}");
+
+        let mut far_horizon = CrossDomainMessage::new(CrossDomainMessageParams {
+            source_domain: 10,
+            target_domain: 99,
+            source_height: 50,
+            event_index: 1,
+            nonce: 2,
+            sender: Address::from([0x10; 32]),
+            recipient: Address::from([0x20; 32]),
+            payload_hash: [0xCC; 32],
+            kind: MessageKind::Custom(b"relayed".to_vec()),
+            expiry_height: u64::MAX - 1,
+        });
+        far_horizon.source_quantum_class = Some(QuantumClass::Lattice);
+        far_horizon.message_id = far_horizon.calculate_message_id();
+        let herr = register_relayed_cross_domain_on_state(&mut state, &far_horizon)
+            .expect_err("relayed message with immortal expiry horizon must be refused");
+        assert!(
+            herr.contains("lifetime") || herr.contains("horizon") || herr.contains("expiry"),
+            "got: {herr}"
         );
     }
 }

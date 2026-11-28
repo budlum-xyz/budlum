@@ -234,9 +234,11 @@ pub fn weights_digest(spec: &FixedPointMlpSpec) -> [u8; 32] {
     for d in &spec.dims {
         h.update(d.to_le_bytes());
     }
+    h.update((spec.weights.len() as u64).to_le_bytes());
     for w in &spec.weights {
         h.update(w.to_le_bytes());
     }
+    h.update((spec.biases.len() as u64).to_le_bytes());
     for b in &spec.biases {
         h.update(b.to_le_bytes());
     }
@@ -314,6 +316,7 @@ pub fn program_hash_from_words(words: &[u64]) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(b"BDLM_AI_GUEST_PROGRAM_V1");
     h.update(MLP_GUEST_VERSION.to_le_bytes());
+    h.update((words.len() as u64).to_le_bytes());
     for w in words {
         h.update(w.to_le_bytes());
     }
@@ -620,10 +623,10 @@ pub const GAS_PER_LAYER: u64 = 50;
 /// Base gas cost for STARK proof verification (deserialize + FRI check).
 pub const GAS_BASE_STARK: u64 = 10_000;
 
-/// Per-KiB gas cost for proof_bytes (STARK proof size).
+/// Per-KiB gas cost for `proof_bytes` (STARK proof size).
 pub const GAS_PER_KIB_PROOF: u64 = 100;
 
-/// Maximum allowed proof_bytes size (256 KiB).
+/// Maximum allowed `proof_bytes` size (256 KiB).
 pub const MAX_PROOF_BYTES: usize = 256 * 1024;
 
 /// Estimated gas for structural verification of an AI execution proof.
@@ -636,7 +639,7 @@ pub fn estimate_structural_gas(spec: &FixedPointMlpSpec) -> u64 {
 }
 
 /// Estimated gas for full verification (structural + STARK).
-/// `proof_bytes_len` is the size of the serialized ProofEnvelope.
+/// `proof_bytes_len` is the size of the serialized `ProofEnvelope`.
 pub fn estimate_full_gas(spec: &FixedPointMlpSpec, proof_bytes_len: usize) -> u64 {
     let structural = estimate_structural_gas(spec);
     let proof_kib = (proof_bytes_len as u64).saturating_add(1023) / 1024;
@@ -661,7 +664,7 @@ pub fn estimate_full_gas(spec: &FixedPointMlpSpec, proof_bytes_len: usize) -> u6
 /// path, and nothing turns a gas figure into a debit. Comparing them is a
 /// unit error that happens to typecheck because both are `u64`.
 ///
-/// Measured before deciding: `GAS_BASE_STARK` alone is 10_000, while every
+/// Measured before deciding: `GAS_BASE_STARK` alone is `10_000`, while every
 /// `max_fee` in the tree is at most 500. Wiring the comparison would have
 /// rejected every valid inference request on the chain, and recalibrating the
 /// gas table until the numbers stopped colliding would be fitting the
@@ -697,7 +700,7 @@ mod gas_tests {
 
     /// The size bound is wired; the gas ceiling is not, and the names say so.
     ///
-    /// Measured before deciding: `GAS_BASE_STARK` is 10_000 on its own, and
+    /// Measured before deciding: `GAS_BASE_STARK` is `10_000` on its own, and
     /// every `max_fee` in the tree is at most 500. `max_fee` is a balance
     /// escrowed from the requester's account, `estimate_full_gas` returns gas
     /// units, and nothing converts between them. Comparing them typechecks,
@@ -1109,11 +1112,11 @@ pub fn estimate_guest_instruction_count(spec: &FixedPointMlpSpec) -> Result<usiz
     Ok(ops)
 }
 
-/// Build a BudZKVM guest program that computes the MLP forward pass.
+/// Build a `BudZKVM` guest program that computes the MLP forward pass.
 ///
 /// The program reads weights, biases and inputs from the memory image that
 /// [`setup_guest_memory`] writes, accumulates each neuron in the Goldilocks
-/// field, applies a branchless ReLU on hidden layers, stores the outputs and
+/// field, applies a branchless `ReLU` on hidden layers, stores the outputs and
 /// folds them into a Poseidon commitment that is logged before `Halt`.
 ///
 /// # Errors
@@ -1347,9 +1350,9 @@ mod matmul_tests {
         assert_guest_matches_host(&spec, &[4, 5]);
     }
 
-    /// Regression for the ReLU that never fired. `Lt` is unsigned, so
+    /// Regression for the `ReLU` that never fired. `Lt` is unsigned, so
     /// `Lt(acc, 0)` was always 0 and hidden-layer negatives passed through.
-    /// Layer 1 raw output is `[-5, 5]`; with ReLU the result is 5, without it
+    /// Layer 1 raw output is `[-5, 5]`; with `ReLU` the result is 5, without it
     /// the negative branch cancels and the result is 0.
     #[test]
     fn guest_relu_actually_clamps_negative_activations() {
@@ -1474,7 +1477,7 @@ mod matmul_tests {
     }
 
     /// `FIELD_HALF` does not fit in a 32-bit immediate, so the guest builds it
-    /// arithmetically. If that sequence drifts, every ReLU silently breaks.
+    /// arithmetically. If that sequence drifts, every `ReLU` silently breaks.
     #[test]
     fn guest_materialises_field_half_exactly() {
         let mut prog = vec![
@@ -1520,7 +1523,7 @@ mod matmul_tests {
     }
 
     /// No `Jnz`/`Jmp`: the Program CTL argument models a
-    /// straight-line fetch, and the old ReLU jumped over an instruction.
+    /// straight-line fetch, and the old `ReLU` jumped over an instruction.
     #[test]
     fn guest_program_is_branchless() {
         let spec = FixedPointMlpSpec {

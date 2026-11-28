@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Minimum blocks before a settled bridge row can be dropped.
+///
 /// Must be >= the maximum reorg depth for the chain's consensus. The bridge
 /// derives its settled-row retention from this depth, so the two horizons
 /// cannot drift apart by an edit to one of them.

@@ -173,15 +173,20 @@ fn is_set(slice: &ClassSlice, field: &Option<String>) -> bool {
         .is_some_and(|v| v.iter().any(|b| *b != 0))
 }
 
+const MAX_PROGRAM_PROOF_BYTES: usize = 256 * 1024;
+
 fn verify_program_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
     let Some(raw_code) = class_slice.get("program_bytecode") else {
+        if class_slice.contains_key("program_proof") {
+            return Err(RuleRefusal::WrongShape);
+        }
         return Ok(());
     };
     if raw_code.is_empty() || !raw_code.len().is_multiple_of(8) || raw_code.len() > 8_192 {
         return Err(RuleRefusal::WrongShape);
     }
     let mut words = Vec::with_capacity(raw_code.len() / 8);
-    for chunk in raw_code.chunks_exact(8) {
+    for chunk in raw_code.as_chunks::<8>().0 {
         let mut arr = [0u8; 8];
         arr.copy_from_slice(chunk);
         words.push(u64::from_le_bytes(arr));
@@ -195,15 +200,37 @@ fn verify_program_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
         return Err(RuleRefusal::Paused);
     }
     if let Some(raw_proof) = class_slice.get("program_proof") {
+        if raw_proof.is_empty() || raw_proof.len() > MAX_PROGRAM_PROOF_BYTES {
+            return Err(RuleRefusal::WrongShape);
+        }
         let (envelope, inputs): (ProofEnvelope, ExecutionPublicInputs) =
             postcard::from_bytes(raw_proof).map_err(|_| RuleRefusal::WrongShape)?;
+        envelope
+            .validate_shape()
+            .map_err(|_| RuleRefusal::WrongShape)?;
+        if inputs.exit_code != 0
+            || inputs.gas_used != receipt.gas_used
+            || inputs.trace_len != receipt.trace_len
+            || inputs.trace_len == 0
+            || inputs.gas_used > inputs.gas_limit
+        {
+            return Err(RuleRefusal::Paused);
+        }
         DefaultAdapter::verify(&envelope, &inputs, &words).map_err(|_| RuleRefusal::Paused)?;
     }
     Ok(())
 }
 
 fn verify_replica_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
+    use subtle::ConstantTimeEq;
+
     let Some(root) = class_slice.get("replica_state_root") else {
+        if class_slice.contains_key("replica_quorum")
+            || class_slice.contains_key("replica_weight")
+            || class_slice.contains_key("replica_digest")
+        {
+            return Err(RuleRefusal::WrongShape);
+        }
         return Ok(());
     };
     if root.len() != 32 {
@@ -228,12 +255,16 @@ fn verify_replica_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
     let digest = class_slice
         .get("replica_digest")
         .ok_or(RuleRefusal::WrongShape)?;
+    if digest.len() != 32 {
+        return Err(RuleRefusal::WrongShape);
+    }
     let mut h = Sha3_256::new();
     h.update(b"BDLM_UOL_REPLICA_V1");
     h.update(root);
     h.update(quorum_bytes);
+    h.update(weight_bytes);
     let expected: [u8; 32] = h.finalize().into();
-    if digest.as_slice() != expected {
+    if !bool::from(digest.as_slice().ct_eq(&expected)) {
         return Err(RuleRefusal::Paused);
     }
     Ok(())
@@ -597,6 +628,40 @@ mod tests {
             apply_rule(&ClassRule::Program, &fail_slice, &before, &verb),
             Err(RuleRefusal::Paused)
         );
+
+        // A program_proof claiming a different trace_len than the VM receipt must
+        // be refused before entering the STARK verifier (prevents setup-sizing DoS).
+        let bogus_inputs = ExecutionPublicInputs {
+            chain_id: 0,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            program_hash: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: 100_000,
+            gas_used: 1,
+            exit_code: 0,
+            trace_len: 43_690,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+        let bogus_env = ProofEnvelope {
+            proof_format_version: bud_proof::adapter::PROOF_FORMAT_VERSION,
+            backend: String::from("Plonky3-Keccak-Goldilocks"),
+            p3_version: String::from("0.5.2"),
+            fri_params_id: String::from("test_fri_params"),
+            public_inputs_hash: bogus_inputs.hash(),
+            proof_bytes: vec![0xFFu8; 8],
+            degree_bits: 17,
+        };
+        let raw_proof = postcard::to_allocvec(&(bogus_env, bogus_inputs)).expect("encode proof");
+        let mut mismatched_trace_slice = ok_slice.clone();
+        mismatched_trace_slice.insert(String::from("program_proof"), raw_proof);
+        assert_eq!(
+            apply_rule(&ClassRule::Program, &mismatched_trace_slice, &before, &verb),
+            Err(RuleRefusal::Paused)
+        );
     }
 
     /// A counter loop that records `3 + 2 * iterations` trace rows.
@@ -659,16 +724,18 @@ mod tests {
         };
         let root = [0x44u8; 32];
         let quorum = 3u32.to_le_bytes();
+        let weight = 4u32.to_le_bytes();
         let mut h = Sha3_256::new();
         h.update(b"BDLM_UOL_REPLICA_V1");
         h.update(root);
         h.update(quorum);
+        h.update(weight);
         let digest: [u8; 32] = h.finalize().into();
 
         let mut slice = ClassSlice::new();
         slice.insert(String::from("replica_state_root"), root.to_vec());
         slice.insert(String::from("replica_quorum"), quorum.to_vec());
-        slice.insert(String::from("replica_weight"), 4u32.to_le_bytes().to_vec());
+        slice.insert(String::from("replica_weight"), weight.to_vec());
         slice.insert(String::from("replica_digest"), digest.to_vec());
         assert!(apply_rule(&ClassRule::Replica, &slice, &before, &verb).is_ok());
 
@@ -676,6 +743,53 @@ mod tests {
         assert_eq!(
             apply_rule(&ClassRule::Replica, &slice, &before, &verb),
             Err(RuleRefusal::Paused)
+        );
+    }
+
+    #[test]
+    fn replica_digest_authenticates_weight_and_refuses_partial_fields() {
+        let before = AssetSlice::Unique { holder: acct(1) };
+        let verb = Verb::Transfer {
+            from: acct(1),
+            to: acct(2),
+            amount: 1,
+        };
+        let root = [0x55u8; 32];
+        let quorum = 5u32.to_le_bytes();
+        let low_weight = 1u32.to_le_bytes();
+        let mut h = Sha3_256::new();
+        h.update(b"BDLM_UOL_REPLICA_V1");
+        h.update(root);
+        h.update(quorum);
+        h.update(low_weight);
+        let digest: [u8; 32] = h.finalize().into();
+
+        // Attacker inflates replica_weight from 1 to 9 without updating digest.
+        let mut forged = ClassSlice::new();
+        forged.insert(String::from("replica_state_root"), root.to_vec());
+        forged.insert(String::from("replica_quorum"), quorum.to_vec());
+        forged.insert(String::from("replica_weight"), 9u32.to_le_bytes().to_vec());
+        forged.insert(String::from("replica_digest"), digest.to_vec());
+        assert_eq!(
+            apply_rule(&ClassRule::Replica, &forged, &before, &verb),
+            Err(RuleRefusal::Paused),
+            "inflating replica_weight against a digest for weight=1 must fail closed"
+        );
+
+        // Omitting replica_state_root while replica_quorum is set must fail closed.
+        let mut partial = ClassSlice::new();
+        partial.insert(String::from("replica_quorum"), quorum.to_vec());
+        assert_eq!(
+            apply_rule(&ClassRule::Replica, &partial, &before, &verb),
+            Err(RuleRefusal::WrongShape)
+        );
+
+        // Setting program_proof without program_bytecode must also fail closed.
+        let mut orphan_proof = ClassSlice::new();
+        orphan_proof.insert(String::from("program_proof"), vec![1, 2, 3]);
+        assert_eq!(
+            apply_rule(&ClassRule::Program, &orphan_proof, &before, &verb),
+            Err(RuleRefusal::WrongShape)
         );
     }
 }

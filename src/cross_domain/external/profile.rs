@@ -49,7 +49,7 @@ pub enum DomainState {
 
 impl DomainState {
     #[must_use]
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Registered => "registered",
             Self::Admitted => "admitted",
@@ -62,7 +62,7 @@ impl DomainState {
 
     /// Whether attestations from this domain are currently consumed.
     #[must_use]
-    pub fn serves(&self) -> bool {
+    pub const fn serves(&self) -> bool {
         matches!(self, Self::Admitted | Self::Active)
     }
 }
@@ -159,7 +159,7 @@ impl DomainProfile {
     /// a percentage invites a threshold, and any threshold we chose would be
     /// a score with extra steps.
     #[must_use]
-    pub fn refusal_ratio(&self) -> (u64, u64) {
+    pub const fn refusal_ratio(&self) -> (u64, u64) {
         (
             self.attestations_refused,
             self.attestations_accepted

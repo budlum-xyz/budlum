@@ -321,12 +321,11 @@ async fn async_main() {
                 }
                 "--chain-id" | "-c" => {
                     if i + 1 < args.len() {
-                        chain_id = match args[i + 1].parse() {
-                            Ok(v) => v,
-                            Err(_) => {
-                                eprintln!("Invalid --chain-id: {}", args[i + 1]);
-                                std::process::exit(1);
-                            }
+                        chain_id = if let Ok(v) = args[i + 1].parse() {
+                            v
+                        } else {
+                            eprintln!("Invalid --chain-id: {}", args[i + 1]);
+                            std::process::exit(1);
                         };
                         i += 2;
                     } else {
@@ -357,22 +356,17 @@ async fn async_main() {
                         for item in allocs_str.split(',') {
                             let parts: Vec<&str> = item.split(':').collect();
                             if parts.len() == 2 {
-                                let addr = match Address::from_hex(parts[0].trim()) {
-                                    Ok(a) => a,
-                                    Err(_) => {
-                                        eprintln!(
-                                            "Invalid allocation address: {}",
-                                            parts[0].trim()
-                                        );
-                                        std::process::exit(1);
-                                    }
+                                let addr = if let Ok(a) = Address::from_hex(parts[0].trim()) {
+                                    a
+                                } else {
+                                    eprintln!("Invalid allocation address: {}", parts[0].trim());
+                                    std::process::exit(1);
                                 };
-                                let amount: u64 = match parts[1].trim().parse() {
-                                    Ok(v) => v,
-                                    Err(_) => {
-                                        eprintln!("Invalid allocation amount: {}", parts[1].trim());
-                                        std::process::exit(1);
-                                    }
+                                let amount: u64 = if let Ok(v) = parts[1].trim().parse() {
+                                    v
+                                } else {
+                                    eprintln!("Invalid allocation amount: {}", parts[1].trim());
+                                    std::process::exit(1);
                                 };
                                 allocations.push((addr, amount));
                             } else {
@@ -388,12 +382,11 @@ async fn async_main() {
                 }
                 "--block-reward" => {
                     if i + 1 < args.len() {
-                        block_reward = match args[i + 1].parse() {
-                            Ok(v) => v,
-                            Err(_) => {
-                                eprintln!("Invalid --block-reward: {}", args[i + 1]);
-                                std::process::exit(1);
-                            }
+                        block_reward = if let Ok(v) = args[i + 1].parse() {
+                            v
+                        } else {
+                            eprintln!("Invalid --block-reward: {}", args[i + 1]);
+                            std::process::exit(1);
                         };
                         i += 2;
                     } else {
@@ -403,12 +396,11 @@ async fn async_main() {
                 }
                 "--base-fee" => {
                     if i + 1 < args.len() {
-                        base_fee = match args[i + 1].parse() {
-                            Ok(v) => v,
-                            Err(_) => {
-                                eprintln!("Invalid --base-fee: {}", args[i + 1]);
-                                std::process::exit(1);
-                            }
+                        base_fee = if let Ok(v) = args[i + 1].parse() {
+                            v
+                        } else {
+                            eprintln!("Invalid --base-fee: {}", args[i + 1]);
+                            std::process::exit(1);
                         };
                         i += 2;
                     } else {
@@ -956,12 +948,11 @@ async fn async_main() {
         // pinned as the announced identity.
         let decode_expected = |raw: Option<&str>, what: &str| -> Option<Vec<u8>> {
             let raw = raw?.trim().trim_start_matches("0x").to_string();
-            match hex::decode(&raw) {
-                Ok(bytes) => Some(bytes),
-                Err(_) => {
-                    eprintln!("CRITICAL: --{what} is not valid hex; refusing to start");
-                    std::process::exit(1);
-                }
+            if let Ok(bytes) = hex::decode(&raw) {
+                Some(bytes)
+            } else {
+                eprintln!("CRITICAL: --{what} is not valid hex; refusing to start");
+                std::process::exit(1);
             }
         };
         let expected_bls_key = decode_expected(
@@ -1535,6 +1526,10 @@ async fn async_main() {
             std::process::exit(1);
         }
     }
+    tracing::info!(
+        registered_plugins = blockchain.plugin_registry.domain_ids().len(),
+        "Domain consensus plugin registry initialized"
+    );
 
     for validator in &poa_validators {
         // A restart must not reset a stored authority to stake 1, active and

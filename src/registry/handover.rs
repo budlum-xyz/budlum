@@ -2,7 +2,7 @@
 //! recovery mode (Section 7.7), and multi-validator churn simulation.
 //! exposed for consensus proposer rotation, checkpoint seat handover, storage
 //! task schedulers, and the standalone rehearsal harness. The node's live
-//! recovery metric and PoS round path use `validators::handover`; this
+//! recovery metric and `PoS` round path use `validators::handover`; this
 //! coordinator remains a separate drill model, not a second chain-state
 //! authority.
 //!
@@ -120,7 +120,7 @@ impl HandoverCoordinator {
 
     /// Row 1 (Block proposal): deterministic round-robin leader handover when a
     /// slot leader misses its turn (max delay: 1 round = 3 seconds).
-    /// Convenience: exposed for PoS round leader selection.
+    /// Convenience: exposed for `PoS` round leader selection.
     #[must_use]
     pub fn proposer_for_round(proposers: &[Address], height: u64, round: u64) -> Option<Address> {
         if proposers.is_empty() {

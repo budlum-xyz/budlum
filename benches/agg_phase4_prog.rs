@@ -215,6 +215,13 @@ fn main() -> Result<(), String> {
         prog_addr,
         Account::with_auth_program(prog_addr, 10_000_000, msig_prog.program_hash),
     );
+    let agg_floor = budlum_core::core::chain_config::Network::Devnet
+        .min_stake()
+        .max(state.registry.params().min_stake)
+        .max(1);
+    for seg in &master.segments {
+        state.add_validator_with_floor(seg.aggregator, agg_floor, agg_floor);
+    }
     let mut block = Block::new_with_chain_id(
         1,
         "0".repeat(64),
@@ -235,7 +242,7 @@ fn main() -> Result<(), String> {
     let mut adapter = ClaimedDomainFinalityAdapter::new(DOMAIN);
     adapter.register_domain_program(ext_domain.id, dom_prog.program_hash);
     adapter
-        .admit_verified_frame(&backend, &master)
+        .admit_verified_frame(&state, &backend, &master)
         .map_err(|e| format!("admit frame: {e}"))?;
     let fin_proof = FinalityProof::AggregatedProg {
         program_hash: dom_prog.program_hash,

@@ -89,29 +89,29 @@ pub fn published_writes_digest_many(digests: &[&Hash32]) -> Hash32 {
     let mut acc = [0u64; 4];
     let mut slot = 0u64;
     for digest in digests {
-        for chunk in digest.chunks_exact(4) {
-            if let [b0, b1, b2, b3] = *chunk {
-                let limb = u32::from_le_bytes([b0, b1, b2, b3]);
-                let mut st = [0u64; POSEIDON_WIDTH];
-                if let Some(first) = st.get_mut(0) {
-                    *first = slot;
-                }
-                if let Some(second) = st.get_mut(1) {
-                    *second = u64::from(limb);
-                }
-                for (dst, src) in st.iter_mut().skip(2).zip(acc.iter()) {
-                    *dst = *src;
-                }
-                let out = poseidon_full_state(st);
-                for (dst, src) in acc.iter_mut().zip(out.iter()) {
-                    *dst = *src;
-                }
-                slot += 1;
+        for chunk in digest.as_chunks::<4>().0 {
+            let [b0, b1, b2, b3] = *chunk;
+
+            let limb = u32::from_le_bytes([b0, b1, b2, b3]);
+            let mut st = [0u64; POSEIDON_WIDTH];
+            if let Some(first) = st.get_mut(0) {
+                *first = slot;
             }
+            if let Some(second) = st.get_mut(1) {
+                *second = u64::from(limb);
+            }
+            for (dst, src) in st.iter_mut().skip(2).zip(acc.iter()) {
+                *dst = *src;
+            }
+            let out = poseidon_full_state(st);
+            for (dst, src) in acc.iter_mut().zip(out.iter()) {
+                *dst = *src;
+            }
+            slot += 1;
         }
     }
     let mut out = [0u8; 32];
-    for (chunk, lane) in out.chunks_exact_mut(8).zip(acc.iter()) {
+    for (chunk, lane) in out.as_chunks_mut::<8>().0.iter_mut().zip(acc.iter()) {
         chunk.copy_from_slice(&lane.to_le_bytes());
     }
     out

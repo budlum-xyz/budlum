@@ -69,7 +69,7 @@ impl UnsignedTransfer {
             proof,
             headers,
         )?;
-        Ok(Self {
+        let transfer = Self {
             from,
             to: verified_to,
             amount,
@@ -79,7 +79,34 @@ impl UnsignedTransfer {
             nonce,
             timestamp_ms,
             chain_id,
-        })
+        };
+        transfer.validate_fields()?;
+        Ok(transfer)
+    }
+
+    fn validate_fields(&self) -> Result<(), String> {
+        if self.to == [0u8; 32] {
+            return Err("transfer recipient cannot be the zero address".into());
+        }
+        if self.chain_id == 0 {
+            return Err("transfer chain_id must be non-zero".into());
+        }
+        if self.max_fee < self.fee {
+            return Err(format!(
+                "transfer max_fee ({}) cannot be less than fee ({})",
+                self.max_fee, self.fee
+            ));
+        }
+        if self.priority_fee > self.max_fee {
+            return Err(format!(
+                "transfer priority_fee ({}) cannot exceed max_fee ({})",
+                self.priority_fee, self.max_fee
+            ));
+        }
+        if self.amount.checked_add(self.max_fee).is_none() {
+            return Err("transfer amount + max_fee overflows u64".into());
+        }
+        Ok(())
     }
 
     /// The hash the node verifies the signature over (V5).
@@ -176,8 +203,12 @@ pub fn signed_transfer_v7_json(
     transfer: &UnsignedTransfer,
     rnd: &[u8; 32],
 ) -> Result<String, String> {
+    if rnd.iter().fold(0u8, |acc, &b| acc | b) == 0 {
+        return Err("hedged ML-DSA signing randomness rnd cannot be all zeros".into());
+    }
     let mut transfer = transfer.clone();
     transfer.from = account.address;
+    transfer.validate_fields()?;
     let hash = transfer.signing_hash_v7();
     let signature = account
         .signing
@@ -211,6 +242,44 @@ pub fn signed_transfer_v7_json(
         chain_id = transfer.chain_id,
         version = SIGNATURE_VERSION_V7,
     ))
+}
+
+/// Verify a pre-sign simulation snapshot against live wallet state, refuse
+/// self-transfers, authorize optional agent session limits, and sign `transfer`
+/// only if every check passes.
+///
+/// WIRING: Client wallet pre-sign wrapper combining [`crate::tx_safety`] simulation
+/// freshness, wash-loop guard, and autonomous agent cap checks with [`signed_transfer_json`].
+///
+/// # Errors
+///
+/// Returns [`crate::tx_safety::TxSafetyError`] when simulation state drifted,
+/// an approval trap is present, sender equals recipient, or agent spending
+/// guardrails refuse the spend.
+pub fn signed_transfer_after_simulation(
+    wallet: &Wallet,
+    transfer: &UnsignedTransfer,
+    sim: &crate::tx_safety::SimulationSnapshot,
+    live: &crate::tx_safety::LiveSignContext,
+    agent_guard: Option<(
+        &mut crate::tx_safety::AgentSpendGuard,
+        &crate::tx_safety::AgentExecutionPolicy,
+        bool,
+    )>,
+) -> Result<String, crate::tx_safety::TxSafetyError> {
+    crate::tx_safety::verify_simulation_freshness(sim, live)?;
+    let sender = wallet.address();
+    crate::tx_safety::enforce_non_self_agent_transfer(&sender, &transfer.to)?;
+    if let Some((guard, policy, human_countersigned)) = agent_guard {
+        guard.authorize_spend(
+            policy,
+            live.current_height,
+            &transfer.to,
+            u128::from(transfer.amount),
+            human_countersigned,
+        )?;
+    }
+    Ok(signed_transfer_json(wallet, transfer))
 }
 
 #[cfg(test)]
@@ -413,5 +482,242 @@ mod tests {
         named.from = wallet.address();
         assert!(json.contains(&hex::encode(named.signing_hash())));
         assert!(json.contains("\"signature_version\":5"));
+    }
+
+    #[test]
+    fn signed_transfer_after_simulation_gates_stale_state_and_agent_caps() {
+        use crate::tx_safety::{
+            AgentExecutionPolicy, AgentSpendGuard, LiveSignContext, SimulationSnapshot,
+            TxSafetyError,
+        };
+
+        let wallet = Wallet::from_entropy(&[9u8; 32]).expect("256-bit entropy");
+        let recipient = [0x44; 32];
+        let transfer = UnsignedTransfer {
+            from: [0u8; 32],
+            to: recipient,
+            amount: 50,
+            fee: 1,
+            max_fee: 1,
+            priority_fee: 0,
+            nonce: 3,
+            timestamp_ms: 1,
+            chain_id: 45_261,
+        };
+        let sim = SimulationSnapshot {
+            chain_id: 45_261,
+            sender_nonce: 3,
+            block_height: 100,
+            state_epoch: 2,
+            quoted_min_out_atoms: 100,
+            expected_delegate: None,
+            approval_grant: None,
+        };
+        let mut live = LiveSignContext {
+            chain_id: 45_261,
+            current_nonce: 3,
+            current_height: 101,
+            current_epoch: 2,
+            tx_min_out_atoms: 100,
+            active_delegate: None,
+            max_simulation_age_blocks: 5,
+        };
+        let policy = AgentExecutionPolicy {
+            expires_at_height: 200,
+            per_tx_cap_atoms: 60,
+            epoch_cap_atoms: 80,
+            human_veto_above_atoms: 100,
+            allowed_targets: vec![recipient],
+        };
+        let mut guard = AgentSpendGuard::new(2);
+
+        let signed = signed_transfer_after_simulation(
+            &wallet,
+            &transfer,
+            &sim,
+            &live,
+            Some((&mut guard, &policy, false)),
+        )
+        .expect("fresh simulation within agent policy must sign");
+        assert!(signed.contains("\"signature_version\":5"));
+        assert_eq!(guard.epoch_spent_atoms(), 50);
+
+        // Second spend (50 + 50 = 100 > epoch_cap 80) must be refused before signing.
+        let err = signed_transfer_after_simulation(
+            &wallet,
+            &transfer,
+            &sim,
+            &live,
+            Some((&mut guard, &policy, false)),
+        )
+        .expect_err("epoch cap breach must refuse signing");
+        assert!(matches!(err, TxSafetyError::EpochCapExceeded { .. }));
+
+        // Self-transfer wash loop must be refused before signing.
+        let mut self_transfer = transfer.clone();
+        self_transfer.to = wallet.address();
+        assert!(matches!(
+            signed_transfer_after_simulation(&wallet, &self_transfer, &sim, &live, None),
+            Err(TxSafetyError::SelfTransferProhibited { .. })
+        ));
+
+        // Stale nonce must be refused even without agent policy.
+        live.current_nonce = 4;
+        assert!(matches!(
+            signed_transfer_after_simulation(&wallet, &transfer, &sim, &live, None),
+            Err(TxSafetyError::StaleNonce { .. })
+        ));
+    }
+
+    #[test]
+    fn walcore03_v7_and_header_transfers_reject_zero_recipient_zero_chain_bad_fees_and_zero_rnd() {
+        use crate::crypto::key_derivation::RootSecret;
+        let account = RootSecret::derive(&[7u8; 32], "")
+            .unwrap()
+            .user_account(0, 0)
+            .unwrap();
+        let valid = UnsignedTransfer {
+            from: [0u8; 32],
+            to: [0x22; 32],
+            amount: 5,
+            fee: 1,
+            max_fee: 2,
+            priority_fee: 1,
+            nonce: 0,
+            timestamp_ms: 1,
+            chain_id: 45_261,
+        };
+        assert!(signed_transfer_v7_json(&account, &valid, &[1u8; 32]).is_ok());
+
+        // 1. Zero recipient address must be refused.
+        let mut zero_to = valid.clone();
+        zero_to.to = [0u8; 32];
+        assert!(
+            signed_transfer_v7_json(&account, &zero_to, &[1u8; 32]).is_err(),
+            "zero recipient burn must be refused"
+        );
+
+        // 2. Zero chain_id must be refused.
+        let mut zero_chain = valid.clone();
+        zero_chain.chain_id = 0;
+        assert!(
+            signed_transfer_v7_json(&account, &zero_chain, &[1u8; 32]).is_err(),
+            "chain_id == 0 must be refused"
+        );
+
+        // 3. max_fee < fee must be refused.
+        let mut bad_max = valid.clone();
+        bad_max.fee = 10;
+        bad_max.max_fee = 5;
+        assert!(
+            signed_transfer_v7_json(&account, &bad_max, &[1u8; 32]).is_err(),
+            "max_fee < fee must be refused"
+        );
+
+        // 4. priority_fee > max_fee must be refused.
+        let mut bad_prio = valid.clone();
+        bad_prio.priority_fee = 3;
+        bad_prio.max_fee = 2;
+        assert!(
+            signed_transfer_v7_json(&account, &bad_prio, &[1u8; 32]).is_err(),
+            "priority_fee > max_fee must be refused"
+        );
+
+        // 5. amount + max_fee u64 overflow must be refused.
+        let mut overflow = valid.clone();
+        overflow.amount = u64::MAX;
+        overflow.fee = 1;
+        overflow.max_fee = 1;
+        assert!(
+            signed_transfer_v7_json(&account, &overflow, &[1u8; 32]).is_err(),
+            "amount + max_fee overflow must be refused"
+        );
+
+        // 6. All-zero hedged signing randomness `rnd` must be refused.
+        assert!(
+            signed_transfer_v7_json(&account, &valid, &[0u8; 32]).is_err(),
+            "all-zero rnd must be refused"
+        );
+
+        // 7. Header-anchored BNS transfer constructor must enforce the same chain_id/fee/overflow invariants.
+        use crate::bns::{
+            compute_bns_leaf_digest, compute_bns_registry_root, fold_bns_merkle_branch,
+            HeaderSource, WalletBnsProof,
+        };
+        struct TestHeader {
+            height: u64,
+            root: [u8; 32],
+            epoch: u64,
+        }
+        impl HeaderSource for TestHeader {
+            fn bns_root_at(&self, height: u64) -> Option<([u8; 32], u64)> {
+                (height == self.height).then_some((self.root, self.epoch))
+            }
+            fn latest_height(&self) -> u64 {
+                self.height
+            }
+        }
+        let owner = [0x11u8; 32];
+        let meta = [0x33u8; 32];
+        let sib = [0x44u8; 32];
+        let mut h = sha2::Sha256::new();
+        {
+            use sha2::Digest as _;
+            h.update(b"BDLM_BNS_EXTRAS_V3");
+            h.update([0u8; 5]);
+            h.update(0u64.to_le_bytes());
+            h.update(0u64.to_le_bytes());
+        }
+        let extras_digest: [u8; 32] = {
+            use sha2::Digest as _;
+            h.finalize().into()
+        };
+        let leaf = compute_bns_leaf_digest("kaya.bud", &owner, 50, None, None, &extras_digest);
+        let names_root = fold_bns_merkle_branch("kaya.bud", leaf, &[sib]).unwrap();
+        let root = compute_bns_registry_root(&meta, &names_root);
+        let proof = WalletBnsProof {
+            name: "kaya.bud".to_string(),
+            owner,
+            expires_at: 50,
+            content_binding: None,
+            storage_root: None,
+            extras_digest,
+            extras_preimage: None,
+            meta_digest: meta,
+            siblings: vec![sib],
+            header_height: 9,
+        };
+        let headers = TestHeader {
+            height: 9,
+            root,
+            epoch: 12,
+        };
+        assert!(UnsignedTransfer::to_verified_bud_recipient_from_header(
+            [0x01; 32], "kaya.bud", &owner, &proof, &headers, 5, 1, 1, 0, 0, 1, 0
+        )
+        .is_err());
+        assert!(UnsignedTransfer::to_verified_bud_recipient_from_header(
+            [0x01; 32], "kaya.bud", &owner, &proof, &headers, 5, 10, 5, 0, 0, 1, 45_261
+        )
+        .is_err());
+        assert!(UnsignedTransfer::to_verified_bud_recipient_from_header(
+            [0x01; 32], "kaya.bud", &owner, &proof, &headers, 5, 1, 2, 3, 0, 1, 45_261
+        )
+        .is_err());
+        assert!(UnsignedTransfer::to_verified_bud_recipient_from_header(
+            [0x01; 32],
+            "kaya.bud",
+            &owner,
+            &proof,
+            &headers,
+            u64::MAX,
+            1,
+            1,
+            0,
+            0,
+            1,
+            45_261
+        )
+        .is_err());
     }
 }
