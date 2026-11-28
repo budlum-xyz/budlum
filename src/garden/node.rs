@@ -2177,6 +2177,17 @@ impl Node {
             .await;
             return;
         }
+        // Batches are held in memory until the set is complete, so a
+        // deposit this node has no room for is refused before any of it
+        // is held rather than after the last batch arrives.
+        if !self.store.can_fit(declared) {
+            self.respond(
+                channel,
+                GardenResponse::Refused("there is no room here for an object that size".into()),
+            )
+            .await;
+            return;
+        }
         let fresh = !self.arriving.contains_key(&content_id);
         if fresh && self.arriving.len() >= MAX_ARRIVING {
             self.respond(
