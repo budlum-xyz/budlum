@@ -543,6 +543,8 @@ message ProtoBlockHeader {
     // Hash of the claim frame of the block. Empty when the block carries no
     // frame.
     bytes frame_hash = 22;
+    bytes uel_execution_root = 23;
+    bytes uel_receipts_root = 24;
 }
 
 // The seats whose precommits for `checkpoint` the proposer collected. The
@@ -591,6 +593,9 @@ message ProtoBlock {
     // The claim frame in its canonical encoding. Empty when the block
     // carries none.
     bytes claim_frame = 26;
+    bytes uel_execution_root = 27;
+    bytes uel_receipts_root = 28;
+    repeated bytes uel_transactions = 29;
 }
 
 

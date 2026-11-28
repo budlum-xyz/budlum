@@ -909,6 +909,9 @@ impl GenesisConfig {
                 self.chain_id,
             ),
             claim_frame: None,
+            uel_execution_root: None,
+            uel_receipts_root: None,
+            uel_transactions: Vec::new(),
         };
 
         block.tx_root = block.calculate_tx_root();

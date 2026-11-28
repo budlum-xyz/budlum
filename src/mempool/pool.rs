@@ -345,6 +345,36 @@ impl Mempool {
     ///
     /// exposed for: proposer block assembly ( slice 2/2).
     #[must_use]
+    /// Admit a signed native [`crate::execution::coordinator::UelTx`] into the isolated `Local` lane.
+    pub fn submit_uel_tx(
+        &mut self,
+        tx: &crate::execution::coordinator::UelTx,
+        now_unix_s: u64,
+    ) -> Result<[u8; 32], crate::mempool::lanes::LaneAdmissionError> {
+        let raw_bytes = bincode::serialize(tx).map_err(|_| {
+            crate::mempool::lanes::LaneAdmissionError::Unfunded("UEL tx serialization failed")
+        })?;
+        let entry = crate::mempool::lanes::LaneEntry {
+            tx_hash: tx.tx_hash,
+            lane: crate::mempool::lanes::LaneKind::Local,
+            replay: crate::mempool::lanes::LaneReplayRule::AccountNonce {
+                sender: *tx.sender.as_bytes(),
+                nonce: tx.nonce,
+            },
+            gas_limit_bgu: tx.gas_limit_bgu,
+            max_fee_per_bgu_atto: tx.max_fee_per_bgu_attos,
+            max_priority_fee_per_bgu_atto: tx.max_priority_fee_per_bgu_attos,
+            raw_bytes,
+        };
+        self.lanes.admit(entry, now_unix_s)?;
+        Ok(tx.tx_hash)
+    }
+
+    /// Evict committed UEL envelope hashes from the multi-lane mempool.
+    pub fn evict_committed_uel(&mut self, committed: &[[u8; 32]]) {
+        self.lanes.evict_committed(committed);
+    }
+
     pub fn select_lane_envelopes(
         &self,
         block_bgu_limit: u64,
