@@ -2877,12 +2877,14 @@ impl Transaction {
             },
             TransactionType::Settlement(_) => schedule.contract_call_gas * 2,
             // A mint, an unlock and a relay proof verify an inclusion proof
-            // against a committed root before they move value; the asset
+            // against a committed root before they move value, and a prover
+            // double-root report verifies two signature pairs; the asset
             // registration, the lock and the burn are bridge state writes.
             TransactionType::Bridge(
                 crate::cross_domain::bridge_tx::BridgeTx::Mint(_)
                 | crate::cross_domain::bridge_tx::BridgeTx::Unlock(_)
-                | crate::cross_domain::bridge_tx::BridgeTx::RelayProof { .. },
+                | crate::cross_domain::bridge_tx::BridgeTx::RelayProof { .. }
+                | crate::cross_domain::bridge_tx::BridgeTx::ReportProverDoubleRoot { .. },
             ) => schedule.contract_call_gas * 3 + schedule.gas_per_signature,
             TransactionType::Bridge(_) => schedule.contract_call_gas * 2,
         };
@@ -4452,6 +4454,38 @@ fn encode_bridge_tx(tx: &crate::cross_domain::bridge_tx::BridgeTx, out: &mut Vec
             put_fixed(out, message_id);
             put_u32(out, *source_domain);
             encode_merkle_proof(proof, out);
+        }
+        BridgeTx::ReportProverDoubleRoot {
+            domain,
+            domain_height,
+            state_root_a,
+            ed25519_sig_a,
+            pq_sig_a,
+            state_root_b,
+            ed25519_sig_b,
+            pq_sig_b,
+        } => {
+            put_u8(out, 6);
+            put_u32(out, *domain);
+            put_u64(out, *domain_height);
+            put_fixed(out, state_root_a);
+            put_bytes(out, ed25519_sig_a);
+            put_bytes(out, pq_sig_a);
+            put_fixed(out, state_root_b);
+            put_bytes(out, ed25519_sig_b);
+            put_bytes(out, pq_sig_b);
+        }
+        BridgeTx::ConfigureProverGuard {
+            domain,
+            prover_ed25519_pubkey,
+            prover_pq_pubkey,
+            bond_atoms,
+        } => {
+            put_u8(out, 7);
+            put_u32(out, *domain);
+            put_fixed(out, prover_ed25519_pubkey);
+            put_bytes(out, prover_pq_pubkey);
+            put_u64(out, *bond_atoms);
         }
     }
 }
@@ -6535,6 +6569,112 @@ mod v29_signing_tests {
                 },
             }),
         ]);
+
+        // A prover double-root report: every field is evidence, so flipping
+        // any one of them must move the signing hash.
+        let report = BridgeTx::ReportProverDoubleRoot {
+            domain: 1,
+            domain_height: 10,
+            state_root_a: [1u8; 32],
+            ed25519_sig_a: vec![1u8; 64],
+            pq_sig_a: vec![2u8; 8],
+            state_root_b: [3u8; 32],
+            ed25519_sig_b: vec![4u8; 64],
+            pq_sig_b: vec![5u8; 8],
+        };
+        let mut reports = vec![report.clone()];
+        let flips: [fn(&mut BridgeTx); 8] = [
+            |r| {
+                if let BridgeTx::ReportProverDoubleRoot { domain, .. } = r {
+                    *domain = 2;
+                }
+            },
+            |r| {
+                if let BridgeTx::ReportProverDoubleRoot { domain_height, .. } = r {
+                    *domain_height += 1;
+                }
+            },
+            |r| {
+                if let BridgeTx::ReportProverDoubleRoot { state_root_a, .. } = r {
+                    state_root_a[0] ^= 1;
+                }
+            },
+            |r| {
+                if let BridgeTx::ReportProverDoubleRoot { ed25519_sig_a, .. } = r {
+                    ed25519_sig_a[0] ^= 1;
+                }
+            },
+            |r| {
+                if let BridgeTx::ReportProverDoubleRoot { pq_sig_a, .. } = r {
+                    pq_sig_a.push(9);
+                }
+            },
+            |r| {
+                if let BridgeTx::ReportProverDoubleRoot { state_root_b, .. } = r {
+                    state_root_b[0] ^= 1;
+                }
+            },
+            |r| {
+                if let BridgeTx::ReportProverDoubleRoot { ed25519_sig_b, .. } = r {
+                    ed25519_sig_b[0] ^= 1;
+                }
+            },
+            |r| {
+                if let BridgeTx::ReportProverDoubleRoot { pq_sig_b, .. } = r {
+                    pq_sig_b.push(9);
+                }
+            },
+        ];
+        for flip in flips {
+            let mut flipped = report.clone();
+            flip(&mut flipped);
+            reports.push(flipped);
+        }
+        distinct(reports.into_iter().map(hash_of).collect());
+
+        // A prover pin: the domain, both keys and the bond each move the hash.
+        let pin = BridgeTx::ConfigureProverGuard {
+            domain: 1,
+            prover_ed25519_pubkey: [1u8; 32],
+            prover_pq_pubkey: vec![2u8; 8],
+            bond_atoms: 1_000,
+        };
+        let mut pins = vec![pin.clone()];
+        let pin_flips: [fn(&mut BridgeTx); 4] = [
+            |p| {
+                if let BridgeTx::ConfigureProverGuard { domain, .. } = p {
+                    *domain = 2;
+                }
+            },
+            |p| {
+                if let BridgeTx::ConfigureProverGuard {
+                    prover_ed25519_pubkey,
+                    ..
+                } = p
+                {
+                    prover_ed25519_pubkey[0] ^= 1;
+                }
+            },
+            |p| {
+                if let BridgeTx::ConfigureProverGuard {
+                    prover_pq_pubkey, ..
+                } = p
+                {
+                    prover_pq_pubkey.push(9);
+                }
+            },
+            |p| {
+                if let BridgeTx::ConfigureProverGuard { bond_atoms, .. } = p {
+                    *bond_atoms += 1;
+                }
+            },
+        ];
+        for flip in pin_flips {
+            let mut flipped = pin.clone();
+            flip(&mut flipped);
+            pins.push(flipped);
+        }
+        distinct(pins.into_iter().map(hash_of).collect());
     }
 
     /// Every field an identity transaction carries must reach the signing

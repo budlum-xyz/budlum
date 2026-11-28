@@ -106,6 +106,36 @@ pub enum BridgeTx {
         source_domain: DomainId,
         proof: MerkleProof,
     },
+    /// Report that `domain`'s authorized prover signed two different state
+    /// roots for one domain height. Anyone may send it: the door verifies both
+    /// signatures against the keys the domain's economic guard pins, slashes
+    /// the prover bond, pays the sender the finder's reward and freezes the
+    /// domain. The fields are the evidence itself, flat, so the signing
+    /// preimage commits every byte a relaying node could rewrite.
+    ReportProverDoubleRoot {
+        domain: DomainId,
+        domain_height: u64,
+        state_root_a: [u8; 32],
+        ed25519_sig_a: Vec<u8>,
+        pq_sig_a: Vec<u8>,
+        state_root_b: [u8; 32],
+        ed25519_sig_b: Vec<u8>,
+        pq_sig_b: Vec<u8>,
+    },
+    /// Pin the prover whose state statements `domain` stands behind, and
+    /// escrow `bond_atoms` of the sender's own spendable balance as that
+    /// prover's slashable bond. Only the domain operator may send it, and the
+    /// operator is the bonded prover. The rest of the guard's policy is not
+    /// the transaction's to set: haircuts and the flow window stay at the
+    /// protocol defaults, the backing comes from verified proofs and the
+    /// pinned adapter from governance, and a re-pin keeps what the record
+    /// already holds. A zero bond pins the keys and leaves no bond.
+    ConfigureProverGuard {
+        domain: DomainId,
+        prover_ed25519_pubkey: [u8; 32],
+        prover_pq_pubkey: Vec<u8>,
+        bond_atoms: u64,
+    },
 }
 
 /// Equality by wire encoding: the payloads carry event and proof types that
@@ -1343,6 +1373,80 @@ pub fn execute_bridge_tx(
             .map(|_| ())
             .map_err(refused)
         }
+        BridgeTx::ReportProverDoubleRoot {
+            domain,
+            domain_height,
+            state_root_a,
+            ed25519_sig_a,
+            pq_sig_a,
+            state_root_b,
+            ed25519_sig_b,
+            pq_sig_b,
+        } => {
+            // No role is required: a contradiction is proven by the prover's
+            // own signatures, and the guard refuses evidence that does not
+            // verify, names an unguarded domain, or was already consumed.
+            let evidence =
+                crate::cross_domain::economic_guard::ContradictionEvidence::SignedProverDoubleRoot {
+                    domain_height: *domain_height,
+                    state_root_a: *state_root_a,
+                    ed25519_sig_a: ed25519_sig_a.clone(),
+                    pq_sig_a: pq_sig_a.clone(),
+                    state_root_b: *state_root_b,
+                    ed25519_sig_b: ed25519_sig_b.clone(),
+                    pq_sig_b: pq_sig_b.clone(),
+                };
+            report_bridge_contradiction(state, *domain, &evidence, ctx.sender, ctx.height)
+                .map(|_| ())
+                .map_err(refused)
+        }
+        BridgeTx::ConfigureProverGuard {
+            domain,
+            prover_ed25519_pubkey,
+            prover_pq_pubkey,
+            bond_atoms,
+        } => {
+            let operator = state
+                .settlement
+                .domains
+                .get(*domain)
+                .ok_or_else(|| refused(format!("Domain {domain} not found")))?
+                .operator;
+            if operator != Some(ctx.sender) {
+                return Err(BridgeTxError::NotTheOperator(*domain));
+            }
+            // The policy a transaction may touch is the prover pin alone. The
+            // haircuts, the window, the backing and the pinned adapter come
+            // from the protocol defaults or from verified proofs, and a
+            // re-pin keeps what the record already holds.
+            let mut policy = state
+                .bridge_state
+                .economic_guard
+                .record(*domain)
+                .map_or_else(
+                    crate::cross_domain::economic_guard::DomainCeilingPolicy::default,
+                    |record| record.policy.clone(),
+                );
+            policy.prover_ed25519_pubkey = Some(*prover_ed25519_pubkey);
+            policy.prover_pq_pubkey = prover_pq_pubkey.clone();
+            let bond = (*bond_atoms > 0).then(|| {
+                let atoms = u128::from(*bond_atoms);
+                crate::cross_domain::external::prover::ProverBond {
+                    prover: ctx.sender,
+                    bond_atoms: atoms,
+                    // The window ceiling this bond backs under the policy's
+                    // haircut, recorded with the bond so a later haircut
+                    // change is visible against what was posted.
+                    ceiling_atoms: atoms * u128::from(policy.bond_haircut_bps) / 10_000,
+                    slashed_atoms: 0,
+                    slashings: Vec::new(),
+                    accepted: 0,
+                    refused: 0,
+                }
+            });
+            configure_domain_economic_guard(state, &ctx.sender, *domain, policy, bond)
+                .map_err(refused)
+        }
     }
 }
 
@@ -1413,6 +1517,301 @@ mod tests {
                 siblings: vec![],
             },
         }
+    }
+
+    /// Guard domain 1 with a prover whose keys the guard pins and a 1_000-atom
+    /// bond escrowed from the prover's own balance. Returns the prover's
+    /// address and both signing keys.
+    fn guarded_prover(
+        state: &mut AccountState,
+    ) -> (
+        Address,
+        crate::crypto::primitives::KeyPair,
+        crate::crypto::primitives::PqKeyPair,
+    ) {
+        use crate::cross_domain::economic_guard::DomainCeilingPolicy;
+        use crate::cross_domain::external::prover::ProverBond;
+        use crate::crypto::primitives::{KeyPair, PqKeyPair};
+
+        let ed_kp = KeyPair::from_seed(&[0x51; 32]).expect("ed25519 key");
+        let pq_kp = PqKeyPair::generate();
+        let prover = Address::from([0x5A; 32]);
+        state.add_balance(&prover, 1_000);
+        configure_domain_economic_guard(
+            state,
+            &prover,
+            1,
+            DomainCeilingPolicy {
+                prover_ed25519_pubkey: Some(ed_kp.public_key_bytes()),
+                prover_pq_pubkey: pq_kp.public_key_bytes().to_vec(),
+                ..DomainCeilingPolicy::default()
+            },
+            Some(ProverBond {
+                prover,
+                bond_atoms: 1_000,
+                ceiling_atoms: 10_000,
+                slashed_atoms: 0,
+                slashings: Vec::new(),
+                accepted: 0,
+                refused: 0,
+            }),
+        )
+        .expect("guard domain 1 with a bonded prover");
+        assert_eq!(state.external_bond_escrow.get(&prover), Some(&1_000));
+        (prover, ed_kp, pq_kp)
+    }
+
+    /// The prover's signatures over two different roots for one height, as
+    /// the transaction a challenger sends.
+    fn double_root_report(
+        domain: DomainId,
+        domain_height: u64,
+        ed_kp: &crate::crypto::primitives::KeyPair,
+        pq_kp: &crate::crypto::primitives::PqKeyPair,
+        root_a: Hash32,
+        root_b: Hash32,
+    ) -> BridgeTx {
+        use crate::cross_domain::economic_guard::contradiction_statement_bytes;
+        let stmt_a = contradiction_statement_bytes(domain, domain_height, &root_a);
+        let stmt_b = contradiction_statement_bytes(domain, domain_height, &root_b);
+        BridgeTx::ReportProverDoubleRoot {
+            domain,
+            domain_height,
+            state_root_a: root_a,
+            ed25519_sig_a: ed_kp.sign(&stmt_a).to_vec(),
+            pq_sig_a: pq_kp
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt_a)
+                .expect("pq sign a"),
+            state_root_b: root_b,
+            ed25519_sig_b: ed_kp.sign(&stmt_b).to_vec(),
+            pq_sig_b: pq_kp
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt_b)
+                .expect("pq sign b"),
+        }
+    }
+
+    #[test]
+    fn a_prover_double_root_report_slashes_the_bond_pays_the_challenger_and_freezes_the_domain() {
+        use crate::cross_domain::economic_guard::DomainGuardStatus;
+
+        let (mut state, _) = bridged();
+        let (prover, ed_kp, pq_kp) = guarded_prover(&mut state);
+        let challenger = Address::from([0x70; 32]);
+        state.add_balance(&challenger, FEE);
+
+        execute_bridge_tx(
+            &mut state,
+            &ctx(challenger),
+            &double_root_report(1, 10, &ed_kp, &pq_kp, [0xA1; 32], [0xA2; 32]),
+        )
+        .expect("a proven contradiction is accepted from anyone");
+
+        // The whole bond left escrow; the finder's share (10% by default)
+        // reached the challenger, and the domain is frozen for good.
+        assert_eq!(
+            state
+                .external_bond_escrow
+                .get(&prover)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(state.get_balance(&challenger), FEE + 100);
+        let record = state
+            .bridge_state
+            .economic_guard
+            .record(1)
+            .expect("the guard record survives the freeze");
+        assert!(matches!(
+            record.status,
+            DomainGuardStatus::FrozenByContradiction { .. }
+        ));
+    }
+
+    #[test]
+    fn a_consumed_double_root_report_is_refused_and_changes_nothing() {
+        let (mut state, _) = bridged();
+        let (prover, ed_kp, pq_kp) = guarded_prover(&mut state);
+        let challenger = Address::from([0x70; 32]);
+        state.add_balance(&challenger, FEE);
+        let report = double_root_report(1, 10, &ed_kp, &pq_kp, [0xA1; 32], [0xA2; 32]);
+        execute_bridge_tx(&mut state, &ctx(challenger), &report).expect("first report lands");
+        let escrow_after_first = state.external_bond_escrow.get(&prover).copied();
+        let balance_after_first = state.get_balance(&challenger);
+
+        let second = Address::from([0x71; 32]);
+        let refused = execute_bridge_tx(&mut state, &ctx(second), &report);
+        assert!(
+            matches!(refused, Err(BridgeTxError::Refused(_))),
+            "{refused:?}"
+        );
+        assert_eq!(
+            state.external_bond_escrow.get(&prover).copied(),
+            escrow_after_first
+        );
+        assert_eq!(state.get_balance(&challenger), balance_after_first);
+        assert_eq!(state.get_balance(&second), 0);
+    }
+
+    #[test]
+    fn a_double_root_report_with_a_forged_signature_is_refused() {
+        use crate::cross_domain::economic_guard::DomainGuardStatus;
+
+        let (mut state, _) = bridged();
+        let (prover, ed_kp, pq_kp) = guarded_prover(&mut state);
+        let challenger = Address::from([0x70; 32]);
+        let mut forged = double_root_report(1, 10, &ed_kp, &pq_kp, [0xA1; 32], [0xA2; 32]);
+        if let BridgeTx::ReportProverDoubleRoot { ed25519_sig_b, .. } = &mut forged {
+            ed25519_sig_b[0] ^= 0x01;
+        }
+
+        let refused = execute_bridge_tx(&mut state, &ctx(challenger), &forged);
+        assert!(
+            matches!(refused, Err(BridgeTxError::Refused(_))),
+            "{refused:?}"
+        );
+        assert_eq!(state.external_bond_escrow.get(&prover), Some(&1_000));
+        assert_eq!(state.get_balance(&challenger), 0);
+        assert!(matches!(
+            state
+                .bridge_state
+                .economic_guard
+                .record(1)
+                .map(|r| &r.status),
+            Some(DomainGuardStatus::Active)
+        ));
+    }
+
+    #[test]
+    fn a_double_root_report_against_an_unguarded_domain_is_refused() {
+        let (mut state, _) = bridged();
+        let (_, ed_kp, pq_kp) = guarded_prover(&mut state);
+        let challenger = Address::from([0x70; 32]);
+        let refused = execute_bridge_tx(
+            &mut state,
+            &ctx(challenger),
+            &double_root_report(2, 10, &ed_kp, &pq_kp, [0xA1; 32], [0xA2; 32]),
+        );
+        assert!(
+            matches!(refused, Err(BridgeTxError::Refused(_))),
+            "{refused:?}"
+        );
+        assert_eq!(state.get_balance(&challenger), 0);
+    }
+
+    #[test]
+    fn only_the_domain_operator_pins_its_prover_and_bond() {
+        let (mut state, _) = bridged();
+        let stranger = Address::from([0xEE; 32]);
+        state.add_balance(&stranger, 5_000);
+        let refused = execute_bridge_tx(
+            &mut state,
+            &ctx(stranger),
+            &BridgeTx::ConfigureProverGuard {
+                domain: 1,
+                prover_ed25519_pubkey: [7u8; 32],
+                prover_pq_pubkey: Vec::new(),
+                bond_atoms: 1_000,
+            },
+        );
+        assert!(
+            matches!(refused, Err(BridgeTxError::NotTheOperator(1))),
+            "{refused:?}"
+        );
+        assert!(state.bridge_state.economic_guard.record(1).is_none());
+        assert_eq!(state.external_bond_escrow.get(&stranger), None);
+        assert_eq!(state.get_balance(&stranger), 5_000);
+    }
+
+    #[test]
+    fn a_prover_bond_the_operator_cannot_pay_changes_nothing() {
+        let (mut state, operator) = bridged();
+        state.add_balance(&operator, 999);
+        let refused = execute_bridge_tx(
+            &mut state,
+            &ctx(operator),
+            &BridgeTx::ConfigureProverGuard {
+                domain: 1,
+                prover_ed25519_pubkey: [7u8; 32],
+                prover_pq_pubkey: Vec::new(),
+                bond_atoms: 1_000,
+            },
+        );
+        assert!(
+            matches!(refused, Err(BridgeTxError::Refused(_))),
+            "{refused:?}"
+        );
+        assert!(state.bridge_state.economic_guard.record(1).is_none());
+        assert_eq!(state.external_bond_escrow.get(&operator), None);
+        assert_eq!(state.get_balance(&operator), 999);
+    }
+
+    #[test]
+    fn the_operator_pins_its_prover_escrows_the_bond_and_the_report_door_slashes_it() {
+        use crate::cross_domain::economic_guard::{DomainGuardStatus, DEFAULT_BOND_HAIRCUT_BPS};
+        use crate::crypto::primitives::{KeyPair, PqKeyPair};
+
+        let (mut state, operator) = bridged();
+        let ed_kp = KeyPair::from_seed(&[0x52; 32]).expect("ed25519 key");
+        let pq_kp = PqKeyPair::generate();
+        state.add_balance(&operator, 1_000 + FEE);
+        execute_bridge_tx(
+            &mut state,
+            &ctx(operator),
+            &BridgeTx::ConfigureProverGuard {
+                domain: 1,
+                prover_ed25519_pubkey: ed_kp.public_key_bytes(),
+                prover_pq_pubkey: pq_kp.public_key_bytes().to_vec(),
+                bond_atoms: 1_000,
+            },
+        )
+        .expect("the operator pins its prover and posts the bond");
+        assert_eq!(state.get_balance(&operator), FEE);
+        assert_eq!(state.external_bond_escrow.get(&operator), Some(&1_000));
+        let record = state
+            .bridge_state
+            .economic_guard
+            .record(1)
+            .expect("the pin creates the guard record");
+        assert_eq!(
+            record.policy.prover_ed25519_pubkey,
+            Some(ed_kp.public_key_bytes())
+        );
+        assert_eq!(record.policy.bond_haircut_bps, DEFAULT_BOND_HAIRCUT_BPS);
+        assert_eq!(
+            record
+                .prover_bond
+                .as_ref()
+                .map(|b| (b.prover, b.bond_atoms)),
+            Some((operator, 1_000))
+        );
+
+        // The pinned prover contradicts itself: the report door slashes the
+        // bond the operator posted through the pin door.
+        let challenger = Address::from([0x70; 32]);
+        execute_bridge_tx(
+            &mut state,
+            &ctx(challenger),
+            &double_root_report(1, 10, &ed_kp, &pq_kp, [0xB1; 32], [0xB2; 32]),
+        )
+        .expect("the pinned prover's contradiction slashes through the door");
+        assert_eq!(
+            state
+                .external_bond_escrow
+                .get(&operator)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(state.get_balance(&challenger), 100);
+        assert!(matches!(
+            state
+                .bridge_state
+                .economic_guard
+                .record(1)
+                .map(|r| &r.status),
+            Some(DomainGuardStatus::FrozenByContradiction { .. })
+        ));
     }
 
     #[test]
