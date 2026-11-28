@@ -54,10 +54,10 @@ import network.budlum.validator.R
  */
 
 /** The panel radius, 16 px in the file at 3x density. */
-internal val SHEET_RADIUS = 6.dp
+internal val SHEET_RADIUS = 16.dp
 
 /** The control radius the buttons and word boxes use. */
-internal val CONTROL_RADIUS = 4.dp
+internal val CONTROL_RADIUS = 8.dp
 
 /** The portrait square beside a name, 100 px in the wallet sheets. */
 internal val PORTRAIT = 34.dp
@@ -236,40 +236,28 @@ fun WordCell(
     modifier: Modifier = Modifier,
     masked: Boolean = false,
 ) {
+    // One box per word, number inside it: the seed frame draws a single thin
+    // chip with the position in front, not a number plate beside a field.
     Row(
-        modifier = modifier,
+        modifier = modifier
+            .height(28.dp)
+            .border(1.dp, skin.surfaceRule, RoundedCornerShape(CONTROL_RADIUS))
+            .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .width(30.dp)
-                .height(34.dp)
-                .border(1.dp, skin.surfaceRule, RoundedCornerShape(CONTROL_RADIUS)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                "$number.",
-                style = MaterialTheme.typography.labelSmall,
-                color = skin.surfaceMuted,
-            )
-        }
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .height(34.dp)
-                .border(1.dp, skin.surfaceRule, RoundedCornerShape(CONTROL_RADIUS))
-                .padding(horizontal = 8.dp),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            Text(
-                text = if (masked) "******" else word,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (masked) skin.surfaceMuted else skin.surfaceInk,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
+        Text(
+            "$number.",
+            style = MaterialTheme.typography.labelSmall,
+            color = skin.surfaceMuted,
+        )
+        Text(
+            text = if (masked) "******" else word,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (masked) skin.surfaceMuted else skin.surfaceInk,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
