@@ -47,12 +47,24 @@ fn is_open_default(line: &str) -> bool {
     .any(|p| t.contains(p))
 }
 
-fn collect_files(root: &Path) -> Vec<(std::path::PathBuf, String)> {
+/// Walk every declared root.
+///
+/// A declared root that is not a directory is an *error*, not a skip: skipping
+/// it turns the gate off for a whole tree while the run stays green.
+///
+/// # Errors
+///
+/// Names the missing root, or the directory it cannot read.
+fn collect_files(root: &Path) -> Result<Vec<(std::path::PathBuf, String)>, String> {
     let mut files = Vec::new();
     for scan_root in SCAN_ROOTS {
         let base = root.join(scan_root);
         if !base.is_dir() {
-            continue;
+            return Err(format!(
+                "scan root `{scan_root}` is not a directory under {}: the gate would \
+                 skip that tree without a word",
+                root.display()
+            ));
         }
         let mut stack = vec![base];
         while let Some(dir) = stack.pop() {
@@ -86,14 +98,14 @@ fn collect_files(root: &Path) -> Vec<(std::path::PathBuf, String)> {
             }
         }
     }
-    files
+    Ok(files)
 }
 
 /// # Errors
 ///
 /// Returns a finding per offending lock site.
 pub fn run(root: &Path) -> Result<String, String> {
-    let files = collect_files(root);
+    let files = collect_files(root)?;
     if files.is_empty() {
         return Err(format!(
             "no production .rs files found under {}",
@@ -173,9 +185,11 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// Returns a finding when a defect fixture passes.
 pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-lf")?;
-    let _ = std::fs::create_dir_all(dir.join("src"));
-    let _ = std::fs::create_dir_all(dir.join("budzero"));
-    let _ = std::fs::create_dir_all(dir.join("wallet-core"));
+    // Every declared root is created: with a fail-closed walk a partial tree
+    // would turn the good canary into an error of its own.
+    for scan_root in SCAN_ROOTS {
+        let _ = std::fs::create_dir_all(dir.join(scan_root));
+    }
 
     let good = "impl Node {\n    fn admit(&self) -> bool {\n        self.peer_manager_lock().can_admit()\n    }\n    fn peer_manager_lock(&self) -> MutexGuard<'_, PeerManager> {\n        self.peer_manager.lock().unwrap_or_else(|p| p.into_inner())\n    }\n}\n";
     std::fs::write(dir.join("src/lib.rs"), good).map_err(|e| e.to_string())?;
@@ -246,6 +260,22 @@ mod tests {
             assert!(is_open_default(l), "{l}");
         }
         assert!(!is_open_default("x.lock().unwrap_or(false)"));
+    }
+
+    /// A declared root that is gone must be a red, not a silent shrink.
+    #[test]
+    fn a_missing_root_is_an_error_not_a_skip() {
+        let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-lf-missing")
+            .expect("scratch dir");
+        let _ = std::fs::create_dir_all(dir.join("src"));
+        std::fs::write(dir.join("src/lib.rs"), "fn a() { m.lock().unwrap_or(false); }\n")
+            .expect("write");
+        let err = collect_files(&dir).expect_err("a missing declared root must be an error");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            err.contains("budzero"),
+            "the error names the first missing root: {err}"
+        );
     }
 
     #[test]

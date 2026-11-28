@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: a8dce3d1b412472b095ca242c2838e15f9938f2ac01e321380941dcba0345df8
+digest: e46f0be5ea0f14a1c6a4779584331226123fba879f87d3d25ceb7c645471ec25
 files: 197
 Cargo.lock	7e8ca4b31fc0795bb139134686126f1d552e1e75e9ffbc2089fbc52944a48a1f
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
@@ -94,7 +94,7 @@ src/gates/indexing_is_not_new.rs	5183aa52053c2cb67d4166d557c3a40e0b16638339c4727
 src/gates/kani.rs	be30de801bb0f4809a948490f1af7a70e2ef837033f377a630699091b6cd0da6
 src/gates/launch_matrix_tests_exist.rs	5fa24d8d26fab5e2defdd69acd5c41b94fc3f6a25ee4adeece38ffde188fdc70
 src/gates/license_consistency.rs	76923c1a0f580b583039da581c2fd79e2ba03f86fe0b0b77238bea85ff8148db
-src/gates/lock_failures.rs	f4fe0756f9aa88563d9b9a023dcf9e461d876203f0323ac206c2df38f88a1563
+src/gates/lock_failures.rs	1f1c889066f7e48890723f6c0693a5969b88359eae5c7bec078212695ef93928
 src/gates/logup_multipliers.rs	9e0024599d1478a641e6ce45f21965b7350f8978440c4a5e0e9f110714d4df38
 src/gates/master_derivation.rs	3bc8f319b69f4fd6fcafb496c920108ad6198f7ed5b033757f83c5582716dece
 src/gates/md_referenced_paths_exist.rs	f00e2517ba2fa0e4c29ead14a2f54729688924c42347a9614711786985bb6154
