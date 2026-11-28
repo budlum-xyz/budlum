@@ -12,6 +12,7 @@ pub mod bridge_lifecycle;
 pub mod conformance_locks;
 #[cfg(test)]
 pub mod global_header_sequence;
+pub mod quantum_account_register_door;
 pub mod regression_canaries;
 // State-machine sharding (Whitepaper v1.3): block-level shards commitment
 // production/validation and atomic cross-shard transfers.

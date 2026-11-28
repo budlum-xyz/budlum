@@ -117,7 +117,7 @@ pub(crate) mod big_array_vec {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QuantumAccount {
     pub address: [u8; 32],
     #[serde(with = "big_array")]

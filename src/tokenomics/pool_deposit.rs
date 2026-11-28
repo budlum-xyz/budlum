@@ -44,6 +44,9 @@ pub enum SharedPool {
     ContentOffer,
     /// Live note commitments in the L1 privacy pool.
     PrivacyNote,
+    /// Registered post-quantum wallet accounts in the account-abstraction
+    /// registry.
+    QuantumAccount,
 }
 
 /// How a locked deposit comes back - the type IS the policy.
@@ -157,6 +160,15 @@ pub const fn policy_of(pool: SharedPool) -> PoolDepositPolicy {
         SharedPool::PrivacyNote => PoolDepositPolicy {
             class: PoolDepositClass::ShieldedBalance,
             deposit: 10 * POOL_DEPOSIT_ATOM,
+        },
+        // A quantum account is a permanent identity: same renewal-not-TTL
+        // reading and the same K as a DID record, because the pool it
+        // occupies has the same shape and the same squatting economics.
+        SharedPool::QuantumAccount => PoolDepositPolicy {
+            class: PoolDepositClass::OwnerRefundable {
+                ttl_blocks: crate::registry::params::MAX_DURATION,
+            },
+            deposit: 1_000 * POOL_DEPOSIT_ATOM,
         },
     }
 }

@@ -154,6 +154,9 @@ enum ProtoTransactionType {
     BNS_SET_SUBDOMAIN_CONTENT = 79;
     // Phase 5 split-STARK verification transaction (`verify_algebra` against `AirRegistry`).
     VERIFY_STARK = 80;
+    // Registers an ML-DSA-87 quantum account (record + pact set + registry
+    // root + possession signature) into the account-abstraction registry.
+    QUANTUM_ACCOUNT_REGISTER = 81;
 }
 
 message ProtoTransaction {
@@ -227,6 +230,7 @@ message ProtoTransaction {
         ProtoValidatorTx validator = 71;
         ProtoStorageV3Tx storage_v3 = 72;
         ProtoVerifyStarkTx verify_stark = 73;
+        ProtoQuantumAccountRegisterTx quantum_account_register = 74;
     }
     // ML-DSA-87 (FIPS 204) public key for V5 user transactions.
     // For V4 transactions this is empty.
@@ -678,6 +682,13 @@ message ProtoStorageV3Tx {
 // A Phase 5 split-STARK verification transaction: the bincode encoding of
 // `VerifyStarkTx` (commitments, public values, opened values; zero FRI proof).
 message ProtoVerifyStarkTx {
+    bytes data = 1;
+}
+
+// A quantum-account registration: the bincode encoding of
+// `QuantumAccountRegisterTx` (account record, pact rows, registry root,
+// possession signature).
+message ProtoQuantumAccountRegisterTx {
     bytes data = 1;
 }
 
