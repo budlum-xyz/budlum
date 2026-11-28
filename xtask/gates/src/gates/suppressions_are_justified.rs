@@ -51,6 +51,24 @@ struct Budget {
 /// The measured inventory. Counted, not typed.
 const BUDGETS: &[Budget] = &[
     Budget {
+        file: "src/domain/finality_proof_model.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "the allow sits on `mod decision_tests`, a `#[cfg(test)]` module, so no production expression can unwrap; that module holds the family-profile table to its own rows, and a failing unwrap there is a failing test, which is the channel a test failure is meant to use",
+    },
+    Budget {
+        file: "src/domain/finality_proof_model.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "same test module: `family(f).expect(..)` names the invariant that broke when a family has no row, and a test that cannot fail this way cannot hold the table",
+    },
+    Budget {
+        file: "src/domain/finality_proof_model.rs",
+        lint: "clippy::panic",
+        count: 1,
+        reason: "same test module, for the assertion macros the table tests use; the production paths in this file refuse with `ExternalShapeError` rather than panicking, which the profile-mismatch arms show",
+    },
+    Budget {
         file: "src/chain/blockchain.rs",
         lint: "clippy::expect_used",
         count: 1,
