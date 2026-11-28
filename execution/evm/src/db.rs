@@ -144,10 +144,20 @@ fn read_code_from_host(host: &dyn HostRead, code_hash: B256) -> Result<Bytecode,
     }
     let ns_code = ns(NS_EVM_CODE)?;
     let Some(bytes) = host.read(&ns_code, code_hash.as_slice())? else {
-        return Ok(Bytecode::default());
+        return Err(HostDbError(format!(
+            "missing bytecode in ee/evm/code for non-empty code_hash {code_hash}"
+        )));
     };
     if bytes.is_empty() {
-        return Ok(Bytecode::default());
+        return Err(HostDbError(format!(
+            "empty bytecode in ee/evm/code for non-empty code_hash {code_hash}"
+        )));
+    }
+    let computed = revm::primitives::keccak256(&bytes);
+    if computed != code_hash {
+        return Err(HostDbError(format!(
+            "corrupt ee/evm/code bytecode: keccak256 {computed} != {code_hash}"
+        )));
     }
     let raw = Bytes::from(bytes);
     Ok(Bytecode::new_raw_checked(raw.clone()).unwrap_or_else(|_| Bytecode::new_legacy(raw)))
@@ -317,7 +327,14 @@ pub fn commit_evm_state(
             .get(&addr)
             .copied()
             .unwrap_or(U256::ZERO);
-        let orig_bal = u256_to_u128_clamped(acc.original_info().balance.saturating_sub(settled))?;
+        let remaining_orig = acc
+            .original_info()
+            .balance
+            .checked_sub(settled)
+            .ok_or_else(|| {
+                HostError::Invalid("host_settled_debits exceeds original EVM balance".into())
+            })?;
+        let orig_bal = u256_to_u128_clamped(remaining_orig)?;
         let curr_bal = u256_to_u128_clamped(acc.info.balance)?;
         if curr_bal < orig_bal {
             debits.push((addr, orig_bal - curr_bal));
