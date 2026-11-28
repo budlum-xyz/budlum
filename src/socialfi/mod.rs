@@ -88,6 +88,9 @@ impl NftRegistry {
         epoch: u64,
         name: Option<String>,
     ) -> Result<u64, NftError> {
+        if owner == Address::zero() || cid.0 == [0u8; 32] {
+            return Err(NftError::InvalidName);
+        }
         if name.as_ref().is_some_and(|n| {
             n.trim().is_empty()
                 || n.len() > MAX_AUTHOR_NAME_BYTES
@@ -176,6 +179,9 @@ impl NftRegistry {
     ///
     /// Returns an error if the operation fails.
     pub fn transfer(&mut self, id: u64, from: &Address, to: Address) -> Result<(), NftError> {
+        if to == Address::zero() {
+            return Err(NftError::NotOwner);
+        }
         let nft_owner = self.nfts.get(&id).ok_or(NftError::NotFound)?.owner;
         if &nft_owner != from {
             return Err(NftError::NotOwner);

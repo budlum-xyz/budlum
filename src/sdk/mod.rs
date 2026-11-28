@@ -110,10 +110,40 @@ impl BudlumToml {
             path: path.to_path_buf(),
             source: e,
         })?;
-        toml::from_str(&content).map_err(|e| BudlumTomlError::Parse {
+        let cfg: Self = toml::from_str(&content).map_err(|e| BudlumTomlError::Parse {
             path: path.to_path_buf(),
             source: e,
-        })
+        })?;
+        cfg.validate_metadata(path)?;
+        Ok(cfg)
+    }
+
+    fn validate_metadata(&self, path: &std::path::Path) -> Result<(), BudlumTomlError> {
+        let valid_field = |s: &str| {
+            !s.trim().is_empty()
+                && s.len() <= 128
+                && !s.contains("..")
+                && !s.contains('/')
+                && !s.contains('\\')
+                && s.bytes().all(|b| !b.is_ascii_control())
+        };
+        if !valid_field(&self.project.name)
+            || !valid_field(&self.project.version)
+            || self
+                .project
+                .budlum_version
+                .as_deref()
+                .is_some_and(|v| !valid_field(v))
+        {
+            return Err(BudlumTomlError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid project metadata field in budlum.toml",
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Returns the default project configuration, for scaffolding a new project.
@@ -134,6 +164,7 @@ impl BudlumToml {
     ///
     /// Returns `Serialize` when serialization fails, `Io` when the write fails.
     pub fn save(&self, path: &std::path::Path) -> Result<(), BudlumTomlError> {
+        self.validate_metadata(path)?;
         let content = toml::to_string_pretty(self).map_err(|e| BudlumTomlError::Serialize {
             path: path.to_path_buf(),
             source: e,
