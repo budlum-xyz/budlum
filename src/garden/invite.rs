@@ -189,40 +189,39 @@ impl GardenInvite {
             if reachable.contains("/p2p/") {
                 return Err(format!("invite peer {peer} names more than one peer id"));
             }
-            let (parsed, _) = if reachable.contains("/quic") {
-                let parsed: libp2p::Multiaddr = format!("{reachable}/p2p/{peer_id}")
+            let parsed: libp2p::Multiaddr = if reachable.contains("/quic") {
+                let whole = format!("{reachable}/p2p/{peer_id}");
+                let parsed: libp2p::Multiaddr = whole
                     .parse()
                     .map_err(|e| format!("invite peer {peer} is not a multiaddr: {e}"))?;
-                let mut parts = parsed.iter();
-                let host_ok = matches!(
-                    parts.next(),
-                    Some(
-                        libp2p::multiaddr::Protocol::Ip4(_)
-                            | libp2p::multiaddr::Protocol::Ip6(_)
-                            | libp2p::multiaddr::Protocol::Dns4(_)
+                let host_ok = {
+                    let mut parts = parsed.iter();
+                    matches!(
+                        parts.next(),
+                        Some(
+                            libp2p::multiaddr::Protocol::Ip4(_)
+                                | libp2p::multiaddr::Protocol::Ip6(_)
+                                | libp2p::multiaddr::Protocol::Dns4(_)
+                        )
                     )
-                );
+                };
                 if !host_ok {
                     return Err(format!(
                         "invite peer {peer} is refused: a dialable host comes first"
                     ));
                 }
-                (parsed, peer_id.to_string())
+                parsed
             } else {
                 dial_address(&format!("{reachable}/p2p/{peer_id}"))
                     .map_err(|e| format!("invite peer {peer} is refused: {e}"))?
+                    .0
             };
             // The line names one validator, and the id must be one libp2p can
             // actually use: a well-formed multihash naming no key type parses
             // happily and then fails at the handshake, after somebody joined.
-            match libp2p::PeerId::from_str(peer_id) {
-                Ok(_) => {}
-                Err(_) => {
-                    return Err(format!(
-                        "invite peer {peer} does not end in a peer id a node can hold"
-                    ))
-                }
-            }
+            libp2p::PeerId::from_str(peer_id).map_err(|_| {
+                format!("invite peer {peer} does not end in a peer id a node can hold")
+            })?;
             match parsed.iter().next() {
                 Some(libp2p::multiaddr::Protocol::Ip4(ip)) => {
                     if ip.is_unspecified()
