@@ -137,3 +137,22 @@ jobs:
             echo "_Posted by the diff-surface workflow; it reports reasons only._"
           } > /tmp/comment.md
           cat /tmp/comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      # The job summary is readable in the browser only; the check-run API
+      # exposes neither it nor step outputs. A sandbox that dispatched this
+      # workflow for a snapshot (the one-job alternative to a 44-job CI run)
+      # could see the job end `success` and learn nothing, because the three
+      # collectors run under `set +e` and the job succeeds whatever they found.
+      # An annotation is the one surface the API does return
+      # (`check-runs/{id}/annotations`), so the verdict and the measured lib
+      # test count are written as one. Still not a gate: the conclusion stays
+      # `success` and no verdict changes.
+      - name: Publish the surfaces as an annotation the API can read
+        env:
+          FMT_CLEAN: ${{ steps.fmt.outputs.clean }}
+          CLIPPY_CLEAN: ${{ steps.clippy.outputs.clean }}
+          TESTS_CLEAN: ${{ steps.tests.outputs.clean }}
+        run: |
+          summary=$(grep -E '^test result:' /tmp/tests.txt | grep -E '[0-9]{3,} passed' | tail -n 1)
+          [ -n "$summary" ] || summary="no libtest summary line with 100+ passed tests found"
+          echo "::notice title=diff-surface::fmt_clean=$FMT_CLEAN clippy_clean=$CLIPPY_CLEAN tests_clean=$TESTS_CLEAN lib=$summary"
