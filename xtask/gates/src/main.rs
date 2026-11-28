@@ -184,10 +184,10 @@ mod gates {
     pub mod refusals_no_mutate;
     pub mod rehearsal_and_field_matrix;
     pub mod rejection_tests;
-    pub mod required_contexts_are_produced;
     pub mod relay;
     pub mod release_profile_pins;
     pub mod repair_fires;
+    pub mod required_contexts_are_produced;
     pub mod required_tests;
     pub mod rust_literals;
     pub mod rust_syntax_is_parseable;

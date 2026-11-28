@@ -122,7 +122,9 @@ pub struct MergeRequest {
 
 /// True when `s` is exactly forty hexadecimal characters.
 fn is_sha(s: &str) -> bool {
-    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()) && !s.bytes().any(|b| b.is_ascii_uppercase())
+    s.len() == 40
+        && s.bytes().all(|b| b.is_ascii_hexdigit())
+        && !s.bytes().any(|b| b.is_ascii_uppercase())
 }
 
 fn text<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -132,7 +134,8 @@ fn text<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 /// Read the payload. Every absent or malformed field is named in the error,
 /// because "the payload is wrong" without the field is not actionable.
 pub fn read_payload(payload: &str) -> Result<MergeRequest, String> {
-    let root = json::parse(payload).map_err(|e| format!("{CONTEXT}: event payload is not JSON: {e}"))?;
+    let root =
+        json::parse(payload).map_err(|e| format!("{CONTEXT}: event payload is not JSON: {e}"))?;
     let pr = root
         .get("pull_request")
         .ok_or_else(|| format!("{CONTEXT}: event payload has no `pull_request` object"))?;
@@ -174,7 +177,10 @@ pub fn read_payload(payload: &str) -> Result<MergeRequest, String> {
     let base_repo = text(repo, "full_name")
         .ok_or_else(|| format!("{CONTEXT}: `repository.full_name` is missing"))?
         .to_owned();
-    let head_repo = head.get("repo").and_then(|r| text(r, "full_name")).map(str::to_owned);
+    let head_repo = head
+        .get("repo")
+        .and_then(|r| text(r, "full_name"))
+        .map(str::to_owned);
     let number = pr
         .get("number")
         .and_then(Value::as_u64)
@@ -273,10 +279,10 @@ pub fn decide(
         }
         Some(head) if head != req.base_repo => {
             return Decision::deny(format!(
-                "{CONTEXT}: pull request #{} comes from fork `{head}`, not `{}`. Fork pull requests \
+            "{CONTEXT}: pull request #{} comes from fork `{head}`, not `{}`. Fork pull requests \
                  do not merge into the default branch.",
-                req.number, req.base_repo
-            ))
+            req.number, req.base_repo
+        ))
         }
         Some(_) => {}
     }
@@ -404,7 +410,10 @@ pub fn self_test() -> Result<String, String> {
         String::from("NOTES.md"),
         String::from("*_PLAN.md"),
     ];
-    let clean = vec![String::from("src/lib.rs"), String::from("xtask/tools/src/main.rs")];
+    let clean = vec![
+        String::from("src/lib.rs"),
+        String::from("xtask/tools/src/main.rs"),
+    ];
     let base = MergeRequest {
         base_sha: "0".repeat(40),
         head_sha: "1".repeat(40),
@@ -442,7 +451,11 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // 4. A forbidden path is denied, by prefix, by basename and by suffix.
-    for path in ["review-notes/2026-11-27-x.md", "docs/NOTES.md", "docs/FUTURE_PLAN.md"] {
+    for path in [
+        "review-notes/2026-11-27-x.md",
+        "docs/NOTES.md",
+        "docs/FUTURE_PLAN.md",
+    ] {
         let changed = vec![String::from(path)];
         if decide(&base, &branches, &forbidden, &changed).allowed {
             return Err(format!("canary: `{path}` must be denied as a product path"));
@@ -454,7 +467,12 @@ pub fn self_test() -> Result<String, String> {
     let mut stacked = base.clone();
     stacked.base_ref = String::from("testnet-50");
     stacked.head_ref = String::from("someone/scratch");
-    let ok = decide(&stacked, &branches, &forbidden, &[String::from("review-notes/x.md")]);
+    let ok = decide(
+        &stacked,
+        &branches,
+        &forbidden,
+        &[String::from("review-notes/x.md")],
+    );
     if !ok.allowed || !ok.detail.contains("not the default branch") {
         return Err(format!(
             "canary: a non-default base must be allowed with its reason stated, got {ok:?}"
@@ -525,13 +543,23 @@ mod tests {
 
     #[test]
     fn default_branch_merge_from_a_declared_branch_is_allowed() {
-        let d = decide(&req("consensus-of-consensuses"), &[String::from("testnet-50")], &[], &[]);
+        let d = decide(
+            &req("consensus-of-consensuses"),
+            &[String::from("testnet-50")],
+            &[],
+            &[],
+        );
         assert!(d.allowed, "{d:?}");
     }
 
     #[test]
     fn an_undeclared_branch_is_denied_and_named() {
-        let d = decide(&req("consensus-of-consensuses"), &[String::from("other")], &[], &[]);
+        let d = decide(
+            &req("consensus-of-consensuses"),
+            &[String::from("other")],
+            &[],
+            &[],
+        );
         assert!(!d.allowed);
         assert!(d.detail.contains("testnet-50"), "{}", d.detail);
     }
@@ -544,12 +572,20 @@ mod tests {
             &[],
             &[],
         );
-        assert!(!d.allowed, "a prefix of a declared branch is not the branch");
+        assert!(
+            !d.allowed,
+            "a prefix of a declared branch is not the branch"
+        );
     }
 
     #[test]
     fn a_stacked_pull_request_is_allowed_with_its_reason() {
-        let d = decide(&req("testnet-50"), &[], &[], &[String::from("review-notes/x.md")]);
+        let d = decide(
+            &req("testnet-50"),
+            &[],
+            &[],
+            &[String::from("review-notes/x.md")],
+        );
         assert!(d.allowed);
         assert!(d.detail.contains("not the default branch"));
     }
@@ -572,7 +608,12 @@ mod tests {
     fn a_deleted_planning_document_is_not_an_offence() {
         // `changed_paths` filters deletions, so the pure decision never sees
         // one; this asserts the reason the filter exists is stated in code.
-        let d = decide(&req("consensus-of-consensuses"), &[String::from("testnet-50")], &[], &[]);
+        let d = decide(
+            &req("consensus-of-consensuses"),
+            &[String::from("testnet-50")],
+            &[],
+            &[],
+        );
         assert!(d.allowed);
     }
 

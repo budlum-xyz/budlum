@@ -184,7 +184,10 @@ pub fn findings_for(claim: &Claim, workflows: &[(String, String)]) -> Vec<String
         ));
         return findings;
     }
-    if !producers.iter().any(|(_, src)| fires_on(src, &claim.branch)) {
+    if !producers
+        .iter()
+        .any(|(_, src)| fires_on(src, &claim.branch))
+    {
         let names: Vec<&str> = producers.iter().map(|(n, _)| n.as_str()).collect();
         findings.push(format!(
             "context `{}` is produced by {} but none of them triggers on `pull_request` into \
@@ -201,13 +204,15 @@ pub fn findings_for(claim: &Claim, workflows: &[(String, String)]) -> Vec<String
 pub fn read_workflows(root: &Path) -> Result<Vec<(String, String)>, String> {
     let dir = root.join(".github/workflows");
     let mut paths: Vec<_> = std::fs::read_dir(&dir)
-        .map_err(|e| format!("required-contexts-are-produced: {} is unreadable: {e}", dir.display()))?
+        .map_err(|e| {
+            format!(
+                "required-contexts-are-produced: {} is unreadable: {e}",
+                dir.display()
+            )
+        })?
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
-                .is_some_and(|e| e == "yml" || e == "yaml")
-        })
+        .filter(|p| p.extension().is_some_and(|e| e == "yml" || e == "yaml"))
         .collect();
     paths.sort();
     let mut out: Vec<(String, String)> = Vec::new();
@@ -341,7 +346,9 @@ pub fn self_test() -> Result<String, String> {
 
     // An unreadable claim shape is refused, not guessed.
     if parse_claims("merge-block-default-branch\n").is_ok() {
-        return Err(String::from("canary: a claim without a branch must be refused"));
+        return Err(String::from(
+            "canary: a claim without a branch must be refused",
+        ));
     }
     if parse_claims("# empty\n\n").is_ok() {
         return Err(String::from("canary: an empty claim file must be refused"));

@@ -298,7 +298,10 @@ impl GardenRecord {
     pub fn to_link(&self) -> String {
         let body = base64url_encode(&self.to_bytes());
         if self.peers_total > self.peers.len() as u16 {
-            format!("{RECORD_LINK_PREFIX}{body}&peers_total={}", self.peers_total)
+            format!(
+                "{RECORD_LINK_PREFIX}{body}&peers_total={}",
+                self.peers_total
+            )
         } else {
             format!("{RECORD_LINK_PREFIX}{body}")
         }
@@ -666,7 +669,11 @@ mod tests {
         record.peers_total = 30;
         let link = record.to_link();
         let read = GardenRecord::parse(&link).unwrap();
-        assert_eq!(read.peers.len(), 1, "the line still carries the peers it can");
+        assert_eq!(
+            read.peers.len(),
+            1,
+            "the line still carries the peers it can"
+        );
         assert_eq!(read.peers_total, 30, "the count survives the trip");
         let mut inflated = read.clone();
         inflated.peers_total = 31;
@@ -678,10 +685,16 @@ mod tests {
         // record names, or more validators than a Garden can hold.
         let mut too_few = read.clone();
         too_few.peers_total = 0;
-        assert!(too_few.check(NOW).is_ok(), "no count is the old, honest shape");
+        assert!(
+            too_few.check(NOW).is_ok(),
+            "no count is the old, honest shape"
+        );
         let mut nonsense = read.clone();
         nonsense.peers_total = MAX_RECORD_PEERS_TOTAL + 1;
-        assert!(nonsense.check(NOW).is_err(), "an impossible count was accepted");
+        assert!(
+            nonsense.check(NOW).is_err(),
+            "an impossible count was accepted"
+        );
         // A record that carries no count writes the link it always wrote.
         let plain = issued(vec![short_peer(1)]);
         assert!(
