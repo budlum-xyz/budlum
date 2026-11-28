@@ -25,6 +25,7 @@ fn private_transfer_fee_market_gates_inclusion() {
         nullifier_proofs: vec![budlum_note_packing::hash_from_field(0xA11CE)],
         authorization_sig: vec![0u8; 64],
         public_digest: [0u8; 32],
+        proof_bundle: None,
     };
     assert!(sub.validate_shape().is_ok());
 

@@ -699,6 +699,7 @@ mod tests {
             nullifier_proofs: vec![proof],
             authorization_sig: vec![0u8; len],
             public_digest: PrivateTransferSubmit::compute_public_digest(&nullifiers, &outputs),
+            proof_bundle: None,
         }
     }
 
@@ -825,6 +826,7 @@ mod tests {
             nullifier_proofs: vec![p2],
             authorization_sig: vec![0u8; ED25519_AUTH_SIG_LEN],
             public_digest: PrivateTransferSubmit::compute_public_digest(&nf2, &out2),
+            proof_bundle: None,
         };
         assert!(other
             .verify_hiding_transfer(chain_id, &pkg, &pi, &prog)
@@ -899,6 +901,7 @@ mod tests {
             nullifier_proofs: vec![p0, p1],
             authorization_sig: vec![0u8; ED25519_AUTH_SIG_LEN],
             public_digest: PrivateTransferSubmit::compute_public_digest(&nullifiers, &outs),
+            proof_bundle: None,
         };
         let err = multi
             .prove_confidential_bundle(chain_id, &salt, 500, 500)

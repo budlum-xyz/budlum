@@ -88,6 +88,25 @@ fn privacy_closed_refusal(chain_id: u64, mainnet_message: &'static str) -> Budlu
     }
 }
 
+/// The door a private transfer meets when it carries no zero-knowledge bundle.
+///
+/// The bundle is optional on the wire for transfers built before it was part
+/// of the transaction, but a chain where privacy transfers are enabled must
+/// never settle one: without it there is no ownership proof, no value
+/// conservation proof and no nullifier freshness proof, and the nullifier and
+/// output lists alone let a spender mint any amount. The refusal has its own
+/// code so an operator can tell "the wallet sent an old transfer" from "the
+/// proof itself was wrong", and so the tests can pin the door rather than the
+/// proof backend behind it.
+fn no_proof_bundle_refusal() -> BudlumError {
+    BudlumError::validation(
+        "private_transfer_no_proof_bundle",
+        "private transfer carries no zero-knowledge proof bundle; without it \
+         neither ownership, value conservation nor nullifier freshness can be \
+         verified",
+    )
+}
+
 /// Whether the on-chain AI inference layer may execute on this chain.
 /// Public networks remain closed until the lottery and commit-reveal
 /// mechanisms are wired to execution. Devnet remains available.
@@ -3459,29 +3478,11 @@ impl Executor {
                 }
                 sub.validate_shape()
                     .map_err(|e| BudlumError::validation("private_transfer_shape", e))?;
-                // The zero-knowledge bundle is what makes this a *transfer* and
-                // not a spend tag the spender invented. It carries the ownership
-                // proof (this spender owns each note), the value conservation
-                // proof (outputs sum to inputs) and the nullifier freshness
-                // proof (each nullifier really derives from its note).
-                //
-                // Without it, `apply_transfer_for_owner` can only check one
-                // thing: that `output_commitments.len() == spent_commitments.len()`.
-                // That is a count, not an amount. Three 1-atom notes can become
-                // three 1,000,000-atom notes and the registry has no way to see
-                // it. `verify_confidential_bundle` was written for exactly this
-                // check; its only caller was `process_confidential_transfer_bundle`,
-                // which nothing called.
-                let proof_bundle = sub.proof_bundle.as_ref().ok_or_else(|| {
-                    BudlumError::validation(
-                        "private_transfer_no_proof_bundle",
-                        "private transfer carries no zero-knowledge proof bundle; \
-                         without it neither ownership, value conservation nor \
-                         nullifier freshness can be verified",
-                    )
-                })?;
-                sub.verify_confidential_bundle(proof_bundle, tx.chain_id)
-                    .map_err(|e| BudlumError::validation("private_transfer_zk_proof", e))?;
+                // The digest is the only thing the authorization signature is
+                // asked to cover, so it has to be checked first: a signature
+                // that verifies over an inconsistent digest would authorize a
+                // transfer whose nullifiers and outputs are not the ones the
+                // sender saw.
                 if !sub.verify_digest_matches() {
                     return Err(BudlumError::validation(
                         "private_transfer_digest",
@@ -3563,6 +3564,26 @@ impl Executor {
                         "authorization_sig invalid for tx.from",
                     ));
                 }
+                // The bundle is checked last of the three doors, and before any
+                // note moves. Shape, digest and authorization are cheap and
+                // account-bound: a malformed or unsigned transfer is refused
+                // without ever reaching a STARK verifier. The bundle is the
+                // expensive, decisive gate, and it is what makes this a
+                // *transfer* rather than a spend tag the spender invented.
+                //
+                // It carries the ownership proof (this spender owns each note),
+                // the value conservation proof (outputs sum to inputs) and the
+                // nullifier freshness proof (each nullifier really derives from
+                // its note). Without it `apply_transfer_for_owner` can only
+                // check one thing: that `output_commitments.len()` equals
+                // `spent_commitments.len()`. That is a count, not an amount -
+                // three 1-atom notes can become three 1,000,000-atom notes and
+                // the registry has no way to see it. `verify_confidential_bundle`
+                // was written for exactly this check; its only caller used to be
+                // `process_confidential_transfer_bundle`, which nothing called.
+                let proof_bundle = sub.proof_bundle.as_ref().ok_or_else(no_proof_bundle_refusal)?;
+                sub.verify_confidential_bundle(proof_bundle, tx.chain_id)
+                    .map_err(|e| BudlumError::validation("private_transfer_zk_proof", e))?;
                 let displaced = state
                     .note_registry
                     .apply_transfer_for_owner(
@@ -6267,6 +6288,7 @@ mod tests {
             nullifier_proofs: vec![budlum_note_packing::hash_from_field(14)],
             authorization_sig: vec![0u8; 64],
             public_digest: [0u8; 32],
+            proof_bundle: None,
         };
         let tx_devnet = Transaction::new_with_chain_id(
             who,
@@ -6278,9 +6300,14 @@ mod tests {
             devnet,
             TransactionType::PrivateTransferSubmit(sub.clone()),
         );
-        let err_devnet = Executor::apply_transaction_checked(&mut state, &tx_devnet)
-            .expect_err("unsigned placeholder must fail proof/auth, not devnet gate");
-        assert_ne!(err_devnet.code(), "privacy_testnet_closed");
+        let err_devnet = Executor::apply_transaction_checked(&mut state, &tx_devnet).expect_err(
+            "a bundle-less placeholder must fail at the bundle door, not the devnet gate",
+        );
+        assert_eq!(
+            err_devnet.code(),
+            "private_transfer_no_proof_bundle",
+            "the bundle door is what a bundle-less transfer meets on devnet"
+        );
 
         let tx_mainnet = Transaction::new_with_chain_id(
             who,

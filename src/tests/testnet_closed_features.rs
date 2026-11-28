@@ -33,6 +33,7 @@ fn private_transfer_is_closed_on_testnet() {
             nullifier_proofs: vec![],
             authorization_sig: vec![],
             public_digest: [0; 32],
+            proof_bundle: None,
         },
     ));
 }

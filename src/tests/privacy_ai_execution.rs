@@ -66,6 +66,7 @@ fn private_transfer_with_composite_authorization_executes() {
         nullifier_proofs: vec![proof],
         authorization_sig,
         public_digest: digest,
+        proof_bundle: None,
     };
 
     let mut tx = Transaction::new_with_chain_id(
@@ -87,10 +88,22 @@ fn private_transfer_with_composite_authorization_executes() {
     .unwrap();
 
     assert!(tx.verify_in(&state.scheme_registry));
-    Executor::apply_transaction(&mut state, &tx).expect("composite-authorized transfer");
-    assert!(!state.note_registry.contains_commitment(&commitment));
-    assert!(state.note_registry.contains_commitment(&output));
-    assert!(state.note_registry.is_nullifier_spent(&nullifier));
+    // The composite authorization itself is accepted - the executor reaches
+    // past shape, digest and signature - and then stops at the bundle door.
+    // `prove_confidential_bundle` cannot open YK1..YK4 yet (the predicate
+    // opcodes are gated: `ActivationClosed(Yk1Ownership)`), so a transfer that
+    // really carries a verifying bundle does not exist on this tree. The test
+    // therefore pins the door a composite-authorized, bundle-less transfer
+    // meets, instead of asserting a settlement the proofs cannot support.
+    let err = Executor::apply_transaction_checked(&mut state, &tx)
+        .expect_err("a composite-authorized transfer with no bundle must be refused");
+    assert_eq!(err.code(), "private_transfer_no_proof_bundle", "{err}");
+    assert!(
+        state.note_registry.contains_commitment(&commitment),
+        "a refusal must not spend the note"
+    );
+    assert!(!state.note_registry.contains_commitment(&output));
+    assert!(!state.note_registry.is_nullifier_spent(&nullifier));
 }
 
 #[test]
@@ -123,6 +136,7 @@ fn private_transfer_submit_spend_and_create() {
         nullifier_proofs: vec![budlum_note_packing::hash_from_field(0xA11CE)],
         authorization_sig: sig,
         public_digest: digest,
+        proof_bundle: None,
     };
     assert!(sub.verify_digest_matches());
 
@@ -137,10 +151,14 @@ fn private_transfer_submit_spend_and_create() {
         TransactionType::PrivateTransferSubmit(sub),
     );
     tx.sign(&kp);
-    Executor::apply_transaction(&mut state, &tx).expect("apply private transfer");
-    assert!(!state.note_registry.contains_commitment(&c_in));
-    assert!(state.note_registry.contains_commitment(&c_out));
-    assert!(state.note_registry.is_nullifier_spent(&n1));
+    // Shape, digest and authorization all pass; the bundle door is what the
+    // transfer meets, because YK1..YK4 cannot be proved on this tree.
+    let err = Executor::apply_transaction_checked(&mut state, &tx)
+        .expect_err("a bundle-less transfer must not settle");
+    assert_eq!(err.code(), "private_transfer_no_proof_bundle", "{err}");
+    assert!(state.note_registry.contains_commitment(&c_in));
+    assert!(!state.note_registry.contains_commitment(&c_out));
+    assert!(!state.note_registry.is_nullifier_spent(&n1));
 }
 
 #[test]
@@ -170,6 +188,7 @@ fn private_transfer_double_spend_fails() {
         nullifier_proofs: vec![budlum_note_packing::hash_from_field(0xA11CE)],
         authorization_sig: kp.sign(&auth_msg).to_vec(),
         public_digest: digest,
+        proof_bundle: None,
     };
     let mut tx = Transaction::new_with_chain_id(
         from,
@@ -182,7 +201,16 @@ fn private_transfer_double_spend_fails() {
         TransactionType::PrivateTransferSubmit(sub.clone()),
     );
     tx.sign(&kp);
-    Executor::apply_transaction(&mut state, &tx).unwrap();
+    // The first transfer is refused at the bundle door (YK1..YK4 cannot be
+    // proved on this tree), so nothing is spent and the nullifier is still
+    // fresh. The double-spend boundary therefore lives one layer down, in the
+    // registry, where it is reachable today: the same nullifier may not be
+    // recorded twice, and the second attempt must not move the note.
+    let err = Executor::apply_transaction_checked(&mut state, &tx)
+        .expect_err("a bundle-less transfer must not settle");
+    assert_eq!(err.code(), "private_transfer_no_proof_bundle", "{err}");
+    assert!(state.note_registry.contains_commitment(&c_in));
+    assert!(!state.note_registry.is_nullifier_spent(&n1));
     // Reuse nullifier with new note
     let c2 = hash_from_field(6);
     let c_out2 = hash_from_field(5);
@@ -201,6 +229,7 @@ fn private_transfer_double_spend_fails() {
         nullifier_proofs: vec![budlum_note_packing::hash_from_field(0xA11CE)],
         authorization_sig: kp.sign(&auth_msg2).to_vec(),
         public_digest: digest2,
+        proof_bundle: None,
     };
     let mut tx2 = Transaction::new_with_chain_id(
         from,
@@ -213,7 +242,25 @@ fn private_transfer_double_spend_fails() {
         TransactionType::PrivateTransferSubmit(sub2),
     );
     tx2.sign(&kp);
-    assert!(Executor::apply_transaction(&mut state, &tx2).is_err());
+    let err2 = Executor::apply_transaction_checked(&mut state, &tx2)
+        .expect_err("the second attempt must be refused too");
+    assert_eq!(err2.code(), "private_transfer_no_proof_bundle", "{err2}");
+    assert!(
+        state.note_registry.contains_commitment(&c2),
+        "no note moves"
+    );
+
+    // The registry's own double-spend door, reached directly.
+    state
+        .note_registry
+        .apply_transfer_for_owner(&from, &[c_in], &[n1], &[c_out], &[proof])
+        .expect("the first spend of a fresh nullifier is recorded");
+    assert!(state.note_registry.is_nullifier_spent(&n1));
+    let twice = state
+        .note_registry
+        .apply_transfer_for_owner(&from, &[c2], &[n1], &[c_out2], &[proof])
+        .expect_err("a nullifier may not be spent twice");
+    assert!(twice.contains("already spent"), "got: {twice}");
 }
 
 #[test]
@@ -391,6 +438,7 @@ fn transfer_fixture(
         nullifier_proofs: vec![proof],
         authorization_sig: kp.sign(&auth_msg).to_vec(),
         public_digest: digest,
+        proof_bundle: None,
     };
     (sub, c_in, c_out)
 }
@@ -443,6 +491,7 @@ fn private_transfer_admission_and_execution_are_closed_on_public_chains() {
             nullifier_proofs: vec![proof],
             authorization_sig,
             public_digest: digest,
+            proof_bundle: None,
         };
         let mut tx = Transaction::new_with_chain_id(
             from,
@@ -644,16 +693,27 @@ fn private_transfer_is_open_on_devnet() {
         nullifier_proofs: vec![proof],
         authorization_sig: kp.sign(&auth_msg).to_vec(),
         public_digest: digest,
+        proof_bundle: None,
     };
     let tx_devnet = signed_tx(
         &kp,
         devnet,
         TransactionType::PrivateTransferSubmit(sub.clone()),
     );
-    crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_devnet)
-        .expect("devnet 45262 executes private transfers");
-    assert!(!state.note_registry.contains_commitment(&c_in));
-    assert!(state.note_registry.contains_commitment(&c_out));
+    // Devnet admits the transfer - the gate that refuses it on mainnet and
+    // testnet is gone - and then the bundle door refuses it, because a
+    // bundle-less transfer must not settle on any chain where the feature is
+    // on. That is the boundary this test pins: "open" means "past the launch
+    // gate", not "settles unproven".
+    let err =
+        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_devnet)
+            .expect_err("devnet admits the transfer but refuses it without a bundle");
+    assert_eq!(err.code(), "private_transfer_no_proof_bundle", "{err}");
+    assert!(
+        state.note_registry.contains_commitment(&c_in),
+        "no note moves"
+    );
+    assert!(!state.note_registry.contains_commitment(&c_out));
 
     let tx_mainnet = signed_tx(&kp, mainnet, TransactionType::PrivateTransferSubmit(sub));
     let err =
@@ -918,6 +978,7 @@ fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
         nullifier_proofs: vec![chosen_proof],
         authorization_sig: attacker_kp.sign(&auth_msg).to_vec(),
         public_digest: digest,
+        proof_bundle: None,
     };
     let steal_tx = signed_tx(
         &attacker_kp,
@@ -926,9 +987,23 @@ fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
             .value(),
         TransactionType::PrivateTransferSubmit(steal_sub),
     );
-    let err = Executor::apply_transaction(&mut state, &steal_tx)
+    let err = Executor::apply_transaction_checked(&mut state, &steal_tx)
         .expect_err("attacker must not spend victim's note");
-    assert!(err.contains("does not own note"), "got: {err}");
+    // The executor stops the transfer at the bundle door, and the ownership
+    // door behind it is pinned directly: the attacker's address is folded into
+    // the note commitment, so no proof it can present makes the note its own.
+    assert_eq!(err.code(), "private_transfer_no_proof_bundle", "{err}");
+    let own_err = state
+        .note_registry
+        .apply_transfer_for_owner(
+            &attacker,
+            &[victim_note],
+            &[n_att],
+            &[stolen_out],
+            &[chosen_proof],
+        )
+        .expect_err("the attacker must not spend a note it does not own");
+    assert!(own_err.contains("does not own note"), "got: {own_err}");
     assert!(state.note_registry.contains_commitment(&victim_note));
     assert!(!state.note_registry.contains_commitment(&stolen_out));
 
@@ -953,6 +1028,7 @@ fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
         nullifier_proofs: vec![owner_proof],
         authorization_sig: victim_kp.sign(&inf_auth).to_vec(),
         public_digest: inf_digest,
+        proof_bundle: None,
     };
     let inflate_tx = signed_tx(
         &victim_kp,
@@ -961,13 +1037,32 @@ fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
             .value(),
         TransactionType::PrivateTransferSubmit(inflate_sub),
     );
-    let inf_err = Executor::apply_transaction(&mut state, &inflate_tx)
+    // The executor refuses the bundle-less transfer before any note moves, so
+    // the count check is reached one layer down, in the registry.
+    let inf_err = Executor::apply_transaction_checked(&mut state, &inflate_tx)
+        .expect_err("unconserved 1->2 output inflation must be refused");
+    assert_eq!(
+        inf_err.code(),
+        "private_transfer_no_proof_bundle",
+        "{inf_err}"
+    );
+    let registry_err = state
+        .note_registry
+        .apply_transfer_for_owner(
+            &victim,
+            &[victim_note],
+            &[n_own],
+            &[out1, out2],
+            &[owner_proof],
+        )
         .expect_err("unconserved 1->2 output inflation must be refused");
     assert!(
-        inf_err.contains("value conservation failed"),
-        "got: {inf_err}"
+        registry_err.contains("value conservation failed"),
+        "got: {registry_err}"
     );
     assert!(state.note_registry.contains_commitment(&victim_note));
+    assert!(!state.note_registry.contains_commitment(&out1));
+    assert!(!state.note_registry.contains_commitment(&out2));
 }
 
 #[test]
@@ -993,6 +1088,7 @@ fn privacy_confidential_bundle_refuses_unbound_yk1_on_testnet() {
         nullifier_proofs: vec![proof_note],
         authorization_sig: sender_kp.sign(&auth_msg).to_vec(),
         public_digest: digest,
+        proof_bundle: None,
     };
 
     let salt = [0x42u8; 32];
@@ -1282,6 +1378,7 @@ fn a_transfer_rides_the_displaced_deposit_claim_to_the_spender() {
         nullifier_proofs: vec![secret],
         authorization_sig: sig,
         public_digest: digest,
+        proof_bundle: None,
     };
     let mut tx_spend = Transaction::new_with_chain_id(
         spender,
