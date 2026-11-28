@@ -5303,6 +5303,78 @@ mod rpc_tests {
         assert_eq!(refused.code(), -32602);
     }
 
+    /// A listed object's metadata is not a back door around its paywall.
+    ///
+    /// `bud_storageGetContent` refuses listed content twice, once on the
+    /// commitment and once on the digest known only after decode. That guard
+    /// is worth nothing if `bud_storageGetObject` hands the same object's
+    /// metadata to anyone who asks, because the digest of a sealed object is
+    /// a keyed HMAC: publishing it is publishing the identifier an offline
+    /// guess is checked against. The metadata door must stay closed for the
+    /// object itself and say why.
+    #[tokio::test]
+    async fn storage_get_object_refuses_metadata_of_listed_content() {
+        use crate::consensus::pow::PoWEngine;
+        use crate::pollen::data_rights::DataAsset;
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::prepare_sealed_upload;
+        use crate::storage::bud3::seal::SEAL_SALT_LEN;
+        use crate::storage::content_id::ContentId;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let uploaded = prepare_sealed_upload(
+            b"sealed bytes behind a paywall",
+            &crate::storage::bud3::content_id::ContentKey([0x31u8; 32]),
+            [0x41u8; SEAL_SALT_LEN],
+            &profile,
+            &Bud3Limits::default(),
+            8,
+        )
+        .expect("a sealed upload prepares");
+        let commitment = uploaded.record.commitment;
+        let owner = Address::from([0xA1u8; 32]);
+
+        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        blockchain
+            .state
+            .bud3_registry
+            .register_object(owner.0, uploaded.record.clone(), Vec::new(), 0, 50)
+            .expect("the object registers");
+        let asset = DataAsset::new(
+            owner,
+            ContentId(uploaded.record.content_id.digest),
+            [0x91u8; 32],
+            true,
+        );
+        let asset_id = blockchain
+            .state
+            .marketplace
+            .register_data_asset(asset)
+            .expect("the asset registers");
+        blockchain
+            .state
+            .marketplace
+            .bind_content_to_asset(ContentId(uploaded.record.content_id.digest), asset_id, owner)
+            .expect("the asset owns the manifest");
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+
+        let refused = server
+            .storage_get_object(format!("0x{}", hex::encode(commitment)))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), -32004);
+
+        // Unlisted objects still answer: the guard is the listing, not the door.
+        let unknown = server.storage_get_object(test_address(0x5c)).await;
+        assert!(unknown.is_ok(), "an unlisted commitment is still answerable");
+    }
+
     /// The B.U.D. 3.0 upload doors: a session opens for a declared length and
     /// chunks append to it, and both refuse a request that could only be a
     /// mistake rather than starting a session nobody can finish.

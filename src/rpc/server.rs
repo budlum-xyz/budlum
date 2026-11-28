@@ -9862,10 +9862,41 @@ impl BudlumApiServer for RpcServer {
         commitment: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let key = parse_hex32_field(&commitment, "object commitment")?;
-        self.chain
+        let answer = self
+            .chain
             .bud3(crate::storage::bud3::registry::Bud3Query::Object(key))
             .await
-            .map_err(|_| bud3_actor_unavailable())
+            .map_err(|_| bud3_actor_unavailable())?;
+        // Metadata is not a way around the paywall. `bud_storageGetContent`
+        // refuses listed content on both the commitment and the digest, and
+        // the digest of a sealed object is a keyed HMAC: answering it here
+        // would hand out the identifier an offline guess is checked against.
+        // The door therefore withholds the whole answer for a listed object
+        // rather than trimming fields, so a field added later cannot leak.
+        if let Some(digest) = answer
+            .get("content_digest")
+            .and_then(|v| v.as_str())
+            .filter(|hex_digest| hex_digest.len() == 64)
+            .and_then(|hex_digest| {
+                let mut bytes = [0u8; 32];
+                hex::decode_to_slice(hex_digest, &mut bytes).ok()?;
+                Some(bytes)
+            })
+        {
+            if self
+                .content_is_listed(crate::storage::ContentId(digest))
+                .await
+            {
+                return Err(listed_content_grant_required());
+            }
+        }
+        if self
+            .content_is_listed(crate::storage::ContentId(key))
+            .await
+        {
+            return Err(listed_content_grant_required());
+        }
+        Ok(answer)
     }
 
     async fn storage_get_custody(
