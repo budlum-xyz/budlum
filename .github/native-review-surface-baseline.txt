@@ -2,8 +2,8 @@
 # The surface is enumerated from the tree; growth and silent removal
 # both fail the gate. Re-measure in the same change that moves it:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- native-security-review --print-surface
-digest: 919bda8f8b3dd02392c069c64ec11ada3cb5f35dd17c576efb235cdb83bb5d73
-entries: 106
+digest: 5c705058c9cfa084ec2a9da573946db172775235c3980235b07fed1b6f0c254b
+entries: 107
 bin	src/bin/bud-migrate.rs
 bin	src/bin/bud.rs
 bin	src/bin/budlum-domain-producer.rs
@@ -71,6 +71,7 @@ manifest	xtask/tools/Cargo.toml
 workflow	.github/workflows/air-mutants-nightly.yml
 workflow	.github/workflows/audit-guard.yml
 workflow	.github/workflows/benchmark.yml
+workflow	.github/workflows/binary-size-nightly.yml
 workflow	.github/workflows/cargo-vet.yml
 workflow	.github/workflows/churn-nightly.yml
 workflow	.github/workflows/ci.yml
