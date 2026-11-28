@@ -38,25 +38,29 @@ pub const MAX_COMMITTED_CHUNKS_PER_OPERATOR: u64 = 1_000_000_000;
 /// Convenience: hard upper bound on blocks between storage challenges (~30 days).
 pub const MAX_STORAGE_CHALLENGE_INTERVAL: u64 = 2_592_000;
 
-/// Minimum operator bond for a storage deal opened in a block.
+/// Minimum operator bond binding for a storage deal.
 ///
-/// A block carries no domain parameters, so the in-block path uses this
-/// protocol constant. It equals the default `min_operator_bond`.
-///
-/// WIRING: the in-block deal-open executor passes this as the bond floor to
-/// `deal_open::open_deal_escrowed`; that step follows this one.
+/// It equals the default `min_operator_bond` of `StorageDomainParams`. The
+/// in-block path reads the registered domain's own statement from the
+/// settlement registry (`domain::storage_tx::registered_storage_params`) —
+/// the block carries the domain's parameters under the registered root — so
+/// this constant is the binding for direct escrow callers
+/// (`deal_open::open_deal_escrowed` and the reallocation-state machinery),
+/// which carry no block-level domain lookup.
 pub const STORAGE_MIN_OPERATOR_BOND: u64 = 1_000_000;
 
-/// Whether the in-block deal doors demand a `VerifyMerkle` proof envelope
-/// and a `storage_root` at open/accept time.
+/// The default `require_merkle_proof` binding: whether the deal doors demand
+/// a `VerifyMerkle` proof envelope and a `storage_root` at open/accept time.
 ///
-/// The gate is the network's activation schedule, stated per domain. Every
-/// checked-in profile ships `require_merkle_proof = false` until the 64-depth
-/// Merkle verifier exists (requiring a blob the node cannot verify protects
-/// nothing), so the in-block doors state the same `false` here - the same
-/// pattern as the bond floor constant above. The flag is threaded through
-/// the doors so the day the schedule flips, this one constant moves and both
-/// doors enforce it. The registry-level gate itself is live and tested under
+/// The gate is the domain's activation statement, stated per domain in its
+/// registration. Every checked-in profile ships `require_merkle_proof =
+/// false` until the 64-depth Merkle verifier exists (requiring a blob the
+/// node cannot verify protects nothing), so this default states the same
+/// `false`. The in-block doors read the registered domain instead
+/// (`domain::storage_tx::registered_storage_params`), and the gate is sealed
+/// into the registry leaf with the rest of the domain's rules, so the day
+/// the schedule flips, the domain registration moves and both doors enforce
+/// it. The registry-level gate itself is live and tested under
 /// `storage_deal::tests::deal_open_rejects_missing_merkle_proof`.
 pub const STORAGE_REQUIRE_MERKLE_PROOF: bool = false;
 
@@ -163,15 +167,18 @@ impl Default for StorageDomainParams {
 /// (vision).
 ///
 /// Field order is fixed and domain-tagged so it is unambiguous in the
-/// Presence of a future enum-variant addition.
+/// Presence of a future enum-variant addition. The verify-merkle gate is
+/// the closing byte: the leaf commits every rule the domain enforces, so an
+/// open domain and a closed domain can never share a registered root.
 #[must_use]
 pub fn storage_params_bytes(params: &StorageDomainParams) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4 + 8 + 8 + 8 + 8);
-    out.extend_from_slice(b"BDLM_STORAGE_V1");
+    let mut out = Vec::with_capacity(14 + 8 + 8 + 8 + 8 + 1);
+    out.extend_from_slice(b"BDLM_STORAGE_V2");
     out.extend_from_slice(&params.chunk_size.to_le_bytes());
     out.extend_from_slice(&params.max_committed_chunks.to_le_bytes());
     out.extend_from_slice(&params.challenge_interval.to_le_bytes());
     out.extend_from_slice(&params.min_operator_bond.to_le_bytes());
+    out.extend_from_slice(&[params.require_merkle_proof as u8]);
     out
 }
 
@@ -242,7 +249,14 @@ mod tests {
         let a = storage_params_bytes(&good_params());
         let b = storage_params_bytes(&good_params());
         assert_eq!(a, b);
-        assert!(a.starts_with(b"BDLM_STORAGE_V1"));
+        assert!(a.starts_with(b"BDLM_STORAGE_V2"));
+        // The canonical layout is the 15-byte tag, a 4-byte chunk size,
+        // three 8-byte LE integers, then the one-byte verify-merkle gate.
+        assert_eq!(a.len(), 15 + 4 + 8 + 8 + 8 + 1);
+        assert_eq!(
+            &a[15 + 4 + 8 + 8 + 8..],
+            &[good_params().require_merkle_proof as u8]
+        );
     }
 
     #[test]
@@ -252,6 +266,21 @@ mod tests {
         assert_ne!(
             storage_params_bytes(&good_params()),
             storage_params_bytes(&p2)
+        );
+    }
+
+    #[test]
+    fn params_bytes_cover_the_verify_merkle_gate() {
+        // The gate is the domain's activation statement. A commitment that
+        // leaves it out cannot tell an open domain from a closed one, so the
+        // registered root stops describing the rules the domain enforces.
+        let closed = good_params();
+        let mut open = good_params();
+        open.require_merkle_proof = true;
+        assert_ne!(
+            storage_params_bytes(&closed),
+            storage_params_bytes(&open),
+            "the require_merkle_proof gate must be inside the params commitment"
         );
     }
 
