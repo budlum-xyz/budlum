@@ -962,18 +962,52 @@ mod tests {
         /// Held together: a port released and asked for again can be handed
         /// back, and two nodes listening on one port is a failure that looks
         /// like a sentry policy refusal.
-        fn pick_free_ports() -> [u16; 4] {
-            let listeners: Vec<std::net::TcpListener> = (0..4)
-                .map(|_| {
-                    std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-                        .expect("bind ephemeral port")
-                })
-                .collect();
-            let mut ports = [0u16; 4];
-            for (port, listener) in ports.iter_mut().zip(&listeners) {
-                *port = listener.local_addr().expect("local addr").port();
+        /// A port held by its listener until the node that will own it binds.
+        ///
+        /// A port released and asked for again can be handed to a neighbouring
+        /// test first (the swarm then fails a bind that looks like a sentry
+        /// policy refusal), so the reservation is kept until the last moment
+        /// and a stolen port is re-picked instead of asserted over.
+        struct PortHold {
+            port: u16,
+            listener: Option<std::net::TcpListener>,
+        }
+
+        impl PortHold {
+            fn grab() -> Self {
+                let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                    .expect("bind ephemeral port");
+                let port = listener.local_addr().expect("local addr").port();
+                PortHold {
+                    port,
+                    listener: Some(listener),
+                }
             }
-            ports
+
+            /// Release the reservation, bind the node, and return the port the
+            /// node actually owns (it can differ if the first was stolen).
+            fn listen_held(&mut self, node: &mut Node, ip: IpAddr) -> u16 {
+                drop(self.listener.take());
+                for attempt in 0..25u32 {
+                    match node.listen_on(ip, self.port) {
+                        Ok(()) => return self.port,
+                        Err(e) => {
+                            if attempt == 24 {
+                                panic!("listen on {ip}:{} failed after re-picks: {e}", self.port);
+                            }
+                            let stolen = PortHold::grab();
+                            self.port = stolen.port;
+                            self.listener = stolen.listener;
+                            drop(self.listener.take());
+                        }
+                    }
+                }
+                unreachable!("the loop either returns or panics");
+            }
+        }
+
+        fn pick_free_ports() -> [PortHold; 4] {
+            std::array::from_fn(|_| PortHold::grab())
         }
 
         fn make_chain() -> crate::chain::chain_actor::ChainHandle {
@@ -985,23 +1019,17 @@ mod tests {
         }
 
         // Start Sentry A and Sentry B plus an unauthorized public attacker node.
-        let [port_a, port_b, port_att, port_val] = pick_free_ports();
+        let mut ports = pick_free_ports();
         let mut sentry_a = Node::new(make_chain()).expect("sentry A");
         let sentry_a_id = sentry_a.peer_id;
-        sentry_a
-            .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_a)
-            .expect("listen sentry A");
+        let port_a = ports[0].listen_held(&mut sentry_a, IpAddr::V4(Ipv4Addr::LOCALHOST));
 
         let mut sentry_b = Node::new(make_chain()).expect("sentry B");
         let sentry_b_id = sentry_b.peer_id;
-        sentry_b
-            .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_b)
-            .expect("listen sentry B");
+        let port_b = ports[1].listen_held(&mut sentry_b, IpAddr::V4(Ipv4Addr::LOCALHOST));
 
         let mut attacker = Node::new(make_chain()).expect("attacker");
-        attacker
-            .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_att)
-            .expect("listen attacker");
+        let port_att = ports[2].listen_held(&mut attacker, IpAddr::V4(Ipv4Addr::LOCALHOST));
 
         let sentry_a_addr = format!("/ip4/127.0.0.1/tcp/{port_a}/p2p/{sentry_a_id}");
         let sentry_b_addr = format!("/ip4/127.0.0.1/tcp/{port_b}/p2p/{sentry_b_id}");
@@ -1019,9 +1047,7 @@ mod tests {
             .expect("validator")
             .with_sentry_policy(val_policy);
         let validator_id = validator.peer_id;
-        validator
-            .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_val)
-            .expect("listen validator");
+        let port_val = ports[3].listen_held(&mut validator, IpAddr::V4(Ipv4Addr::LOCALHOST));
         let validator_addr = format!("/ip4/127.0.0.1/tcp/{port_val}/p2p/{validator_id}");
 
         // Validator MUST refuse dialing the unauthorized attacker.
@@ -1062,23 +1088,55 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(connected_a, "validator should connect to Sentry A");
-        // Attacker must NOT remain connected to the shielded validator.
-        assert_eq!(
-            val_client
+        // Attacker must NOT remain connected to the shielded validator. The
+        // attacker's refusal can still be sitting in the swarm queue when the
+        // sentry link is already up, so the count is waited on, not sampled:
+        // a single observation of 2 is a timing artifact, a settled 2 is a bug.
+        let mut last_peer_count = None;
+        let mut peers_settled = false;
+        for _ in 0..SENTRY_FAILOVER_WAIT_STEPS {
+            let n = val_client
                 .peer_count
-                .load(std::sync::atomic::Ordering::SeqCst),
-            1
+                .load(std::sync::atomic::Ordering::SeqCst);
+            last_peer_count = Some(n);
+            if n == 1 {
+                peers_settled = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            peers_settled,
+            "validator should settle at exactly one peer (Sentry A); last peer_count: {last_peer_count:?}"
         );
 
         // Sentry A reports 1 connected private validator while keeping its ID
-        // hidden from Kademlia and public status.
-        let sa_status = sa_client
-            .admin_sentry_status()
-            .await
-            .expect("sentry A status");
-        assert_eq!(sa_status.role, SentryRole::Sentry);
-        assert_eq!(sa_status.private_peer_count, 1);
-        assert_eq!(sa_status.connected_private_peer_count, 1);
+        // hidden from Kademlia and public status. The sentry side sees the
+        // handshake a tick after the validator does, so this is waited on too.
+        let mut last_sa_status = None;
+        let mut sa_seen = false;
+        for _ in 0..SENTRY_FAILOVER_WAIT_STEPS {
+            let st = sa_client
+                .admin_sentry_status()
+                .await
+                .expect("sentry A status");
+            if st.role == SentryRole::Sentry
+                && st.private_peer_count == 1
+                && st.connected_private_peer_count == 1
+            {
+                last_sa_status = Some(st);
+                sa_seen = true;
+                break;
+            }
+            last_sa_status = Some(st);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            sa_seen,
+            "sentry A should report one connected private peer; last status: {:?}",
+            last_sa_status
+                .map(|st| (st.role, st.private_peer_count, st.connected_private_peer_count))
+        );
 
         // LIVE SENTRY ROTATION: swap Sentry A -> Sentry B without restart!
         let diff = val_client
@@ -1111,11 +1169,28 @@ mod tests {
             "validator should fail over live to Sentry B; last status: {:?}",
             last_status.map(|st| (st.configured_sentries, st.connected_sentries))
         );
-        let sb_status = sb_client
-            .admin_sentry_status()
-            .await
-            .expect("sentry B status");
-        assert_eq!(sb_status.connected_private_peer_count, 1);
+        // Sentry B's view lands a tick after the validator's failover: wait
+        // for it the same way, with the last snapshot on failure.
+        let mut last_sb_status = None;
+        let mut sb_seen = false;
+        for _ in 0..SENTRY_FAILOVER_WAIT_STEPS {
+            let st = sb_client
+                .admin_sentry_status()
+                .await
+                .expect("sentry B status");
+            if st.connected_private_peer_count == 1 {
+                last_sb_status = Some(st);
+                sb_seen = true;
+                break;
+            }
+            last_sb_status = Some(st);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            sb_seen,
+            "sentry B should report one connected private peer; last status: {:?}",
+            last_sb_status.map(|st| (st.role, st.connected_private_peer_count))
+        );
 
         h_val.abort();
         h_sa.abort();
