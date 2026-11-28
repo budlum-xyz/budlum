@@ -106,6 +106,17 @@ pub enum BridgeTx {
         source_domain: DomainId,
         proof: MerkleProof,
     },
+    /// Post, raise or replace the prover bond behind a domain's bridge
+    /// ceiling policy, from the sender's own spendable balance. The ceiling
+    /// policy itself arrives by governance vote; without one the bond is
+    /// refused, because a bond cannot open a domain nobody priced. Only the
+    /// recorded bond's owner may displace it, and the stake credit a
+    /// slashable signature set earns is admitted through this bond and
+    /// never above the bond's haircut.
+    BondCeilingProver {
+        domain_id: DomainId,
+        bond_atoms: u64,
+    },
 }
 
 /// Equality by wire encoding: the payloads carry event and proof types that
@@ -1325,6 +1336,41 @@ pub fn execute_bridge_tx(
         BridgeTx::Unlock(proven) => {
             ensure_carrier(state, &ctx.sender)?;
             unlock_from_verified_event(state, proven, ctx.height).map_err(refused)
+        }
+        BridgeTx::BondCeilingProver {
+            domain_id,
+            bond_atoms,
+        } => {
+            if *bond_atoms == 0 {
+                return Err(refused("a zero bond backs nothing"));
+            }
+            // The policy is the governance's; the bond is the sender's. A
+            // bond for a domain with no ceiling policy is refused: it would
+            // be collateral behind a door nobody has priced.
+            let policy = state
+                .bridge_state
+                .economic_guard
+                .record(*domain_id)
+                .map(|record| record.policy.clone())
+                .ok_or_else(|| {
+                    refused(format!(
+                        "domain {domain_id} has no bridge ceiling policy; a governance vote installs one"
+                    ))
+                })?;
+            let bond = crate::cross_domain::external::prover::ProverBond {
+                prover: ctx.sender,
+                bond_atoms: u128::from(*bond_atoms),
+                // The guard's bond covers the window the policy prices, not a
+                // routing ceiling of its own; the haircut is applied in
+                // effective_ceiling_atoms.
+                ceiling_atoms: u128::from(*bond_atoms),
+                slashed_atoms: 0,
+                slashings: Vec::new(),
+                accepted: 0,
+                refused: 0,
+            };
+            configure_domain_economic_guard(state, &ctx.sender, *domain_id, policy, Some(bond))
+                .map_err(refused)
         }
         BridgeTx::RelayProof {
             message_id,

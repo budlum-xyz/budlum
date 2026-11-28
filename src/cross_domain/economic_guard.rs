@@ -3383,6 +3383,93 @@ mod tests {
         );
     }
 
+    /// The bond door: a sender posts the bond behind a domain's ceiling policy
+    /// from its own balance, only where a policy already stands, only above
+    /// zero, and only the recorded owner may displace it. Under a slashable
+    /// signature set the bond is what admits stake credit, so the window
+    /// opens with the bond and stays shut without it.
+    #[test]
+    fn the_bond_door_posts_collateral_behind_a_priced_domain_and_refuses_the_rest() {
+        use crate::core::account::AccountState;
+        use crate::cross_domain::bridge_tx::{execute_bridge_tx, BridgeTx, BridgeTxContext};
+
+        let mut state = AccountState::new();
+        state
+            .bridge_state
+            .economic_guard
+            .set_require_configured_domains(true);
+        let prover = Address::from([0x71; 32]);
+        let other = Address::from([0x72; 32]);
+        state.add_balance(&prover, 10_000);
+        state.add_balance(&other, 10_000);
+        let ctx = |sender: Address| BridgeTxContext {
+            sender,
+            fee: 1,
+            height: 5,
+        };
+        let post = |atoms: u64| BridgeTx::BondCeilingProver {
+            domain_id: 31,
+            bond_atoms: atoms,
+        };
+
+        // No policy yet: the bond is refused and nothing is escrowed.
+        let err = execute_bridge_tx(&mut state, &ctx(prover), &post(2_000)).unwrap_err();
+        assert!(
+            err.to_string().contains("no bridge ceiling policy"),
+            "got {err}"
+        );
+        assert_eq!(state.spendable_balance(&prover), 10_000);
+
+        // Governance prices the domain: a slashable set whose credit arrives
+        // only through the bond.
+        state
+            .bridge_state
+            .economic_guard
+            .configure_domain(31, signature_set_policy(3_000, 100), None)
+            .expect("valid policy");
+        assert_eq!(
+            effective_ceiling_atoms(state.bridge_state.economic_guard.record(31).unwrap()),
+            0,
+            "stake credit without a bond is nothing"
+        );
+
+        let zero = execute_bridge_tx(&mut state, &ctx(prover), &post(0)).unwrap_err();
+        assert!(zero.to_string().contains("zero bond"), "got {zero}");
+
+        execute_bridge_tx(&mut state, &ctx(prover), &post(2_000)).expect("the bond posts");
+        assert_eq!(
+            state.spendable_balance(&prover),
+            8_000,
+            "the bond leaves the sender's spendable balance"
+        );
+        assert_eq!(
+            effective_ceiling_atoms(state.bridge_state.economic_guard.record(31).unwrap()),
+            999,
+            "with the bond (haircut 1_800) the stake cap 999 is the window"
+        );
+
+        // A stranger cannot displace the recorded bond.
+        let evict = execute_bridge_tx(&mut state, &ctx(other), &post(5_000)).unwrap_err();
+        assert!(
+            evict.to_string().contains("recorded bond owner"),
+            "got {evict}"
+        );
+        assert_eq!(state.spendable_balance(&other), 10_000);
+
+        // The owner may raise it; the old escrow comes back first.
+        execute_bridge_tx(&mut state, &ctx(prover), &post(3_000)).expect("the owner raises");
+        assert_eq!(state.spendable_balance(&prover), 7_000);
+        assert_eq!(
+            state
+                .bridge_state
+                .economic_guard
+                .record(31)
+                .and_then(|r| r.prover_bond.as_ref())
+                .map(|b| b.live_atoms()),
+            Some(3_000)
+        );
+    }
+
     #[test]
     fn strict_production_guard_and_external_roots_fail_closed_on_unconfigured_domains() {
         use crate::core::account::AccountState;

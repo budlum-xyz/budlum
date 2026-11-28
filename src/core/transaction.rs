@@ -4403,6 +4403,14 @@ fn encode_bridge_tx(tx: &crate::cross_domain::bridge_tx::BridgeTx, out: &mut Vec
             put_u32(out, *source_domain);
             encode_merkle_proof(proof, out);
         }
+        BridgeTx::BondCeilingProver {
+            domain_id,
+            bond_atoms,
+        } => {
+            put_u8(out, 6);
+            put_u32(out, *domain_id);
+            put_u64(out, *bond_atoms);
+        }
     }
 }
 
@@ -7184,6 +7192,18 @@ mod v29_signing_tests {
                     leaf: [9u8; 32],
                     ..proof
                 },
+            }),
+            hash_of(BridgeTx::BondCeilingProver {
+                domain_id: 1,
+                bond_atoms: 10,
+            }),
+            hash_of(BridgeTx::BondCeilingProver {
+                domain_id: 2,
+                bond_atoms: 10,
+            }),
+            hash_of(BridgeTx::BondCeilingProver {
+                domain_id: 1,
+                bond_atoms: 11,
             }),
         ]);
     }
