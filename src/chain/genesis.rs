@@ -471,7 +471,8 @@ impl GenesisConfig {
     pub fn validate_pq_scheme(&self) -> Result<(), String> {
         let Some(chain_scheme) = self.pq_scheme.as_deref() else {
             // Chain predates the field. Nothing to compare against; the
-            // operator gets no false assurance either way.
+            // operator gets no false assurance either way. Ceremonies for
+            // shipped networks require Some(..) via `validate_consensus_ceremony`.
             return Ok(());
         };
         let build_scheme = crate::crypto::primitives::PQ_SCHEME_ID;
@@ -694,6 +695,15 @@ impl GenesisConfig {
     /// Returns an error if the operation fails.
     pub fn validate_consensus_ceremony(&self, network: Network) -> Result<(), String> {
         self.validate_aggregation()?;
+        if self
+            .pq_scheme
+            .as_deref()
+            .is_none_or(|s| s.trim().is_empty())
+        {
+            return Err(format!(
+                "Genesis for {network} must explicitly pin `pq_scheme` (missing or empty)"
+            ));
+        }
         self.validate_pq_scheme()?;
         self.validate_anchor_ledger()?;
         self.validate_reward_pool_flag()?;

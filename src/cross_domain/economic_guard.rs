@@ -1603,7 +1603,14 @@ impl BridgeEconomicGuard {
         self.check_and_record_flow_inner(domain_id, amount_atoms, current_height, false)
     }
 
-    fn check_and_record_flow_inner(
+    /// Direct gate helper for timelock-scoped vs standard flow checks.
+    ///
+    /// Convenience: exposed for regression tests pinning `check_and_record_flow_inner` fail-closed behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EconomicGuardError`] when paused, frozen, unknown under strict mode, or breaching ceilings.
+    pub fn check_and_record_flow_inner(
         &mut self,
         domain_id: DomainId,
         amount_atoms: u128,

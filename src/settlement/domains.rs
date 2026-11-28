@@ -2436,7 +2436,12 @@ fn execute_object_layer_tx(
 /// - Cumulative outflow `prior_outflow_atoms + amount_atoms` on each covered
 ///   domain must stay within `EconomicSecurityBound::safe_value_outflow_ceiling_atoms`
 ///   derived directly from that domain's certificate row.
-fn enforce_relayer_route_finality_and_ceiling(
+/// Convenience: exposed for K4-C relayer route finality and ceiling regression tests.
+///
+/// # Errors
+///
+/// Returns [`SettlementTxError::Refused`] if any covered leg is pending, refuted, non-admissible, or over ceiling.
+pub fn enforce_relayer_route_finality_and_ceiling(
     state: &AccountState,
     source_domain: u32,
     target_domain: u32,

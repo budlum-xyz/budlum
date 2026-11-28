@@ -369,7 +369,13 @@ fn compute_seized_collateral(
 }
 
 /// Validate the liquidation parameters are well-formed.
-fn validate_liquidation_params(
+///
+/// Convenience: exposed for liquidation parameter guard regression tests.
+///
+/// # Errors
+///
+/// Returns [`LiquidationError`] when non-empty positions exceed [`MAX_BATCH_SIZE`] or observations are malformed.
+pub fn validate_liquidation_params(
     observations: &[AmmReserveSnapshot],
     positions: &[LiquidationPosition],
 ) -> Result<(), LiquidationError> {

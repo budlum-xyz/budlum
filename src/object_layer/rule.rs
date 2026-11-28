@@ -175,7 +175,14 @@ fn is_set(slice: &ClassSlice, field: &Option<String>) -> bool {
 
 const MAX_PROGRAM_PROOF_BYTES: usize = 256 * 1024;
 
-fn verify_program_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
+/// Verify a `ClassRule::Program` bytecode and optional proof envelope in `class_slice`.
+///
+/// Convenience: exposed for object-layer rule regression tests.
+///
+/// # Errors
+///
+/// Returns [`RuleRefusal`] on orphan proofs, malformed bytecode, VM failure, or invalid proof envelope.
+pub fn verify_program_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
     let Some(raw_code) = class_slice.get("program_bytecode") else {
         if class_slice.contains_key("program_proof") {
             return Err(RuleRefusal::WrongShape);
