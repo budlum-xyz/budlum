@@ -201,7 +201,7 @@ pub fn reward_for_epoch(
     let mut validators: Vec<(Address, u64)> = active_validator_stakes
         .iter()
         .copied()
-        .filter(|(_, stake)| *stake > 0)
+        .filter(|(addr, stake)| *stake > 0 && *addr != Address::zero())
         .collect();
     validators.sort_by_key(|(addr, _)| *addr);
     // One address, one share. A repeated row used to be
