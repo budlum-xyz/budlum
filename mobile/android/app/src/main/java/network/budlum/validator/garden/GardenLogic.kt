@@ -43,10 +43,48 @@ object GardenLogic {
         Person,
     }
 
+    /** The signed body of an invite, whether it arrives bare or inside a link. */
+    fun inviteBody(record: String): String {
+        val trimmed = record.trim()
+        return if (trimmed.contains("#")) trimmed.substringAfter("#") else trimmed
+    }
+
+    /** A group on the floor: the Garden itself, and how many work in it. */
+    data class Group(val title: String, val members: Int)
+
+    /**
+     * The groups a status names.
+     *
+     * Today a Garden *is* a group - one validator made of the people in it - so
+     * this reads the one the phone is seated in, with the count the status
+     * reports. It is a list rather than a title so that a build which carries
+     * more than one Garden does not have to change the screen.
+     */
+    fun groupsIn(statusJson: String): List<Group> {
+        val root = parseObject(statusJson) ?: return emptyList()
+        val garden = root.optJSONObject("garden") ?: return emptyList()
+        val title = garden.optString("title").ifBlank { garden.optString("name") }
+        if (title.isBlank()) return emptyList()
+        val members = garden.optInt("active_validators", 0).coerceAtLeast(1)
+        return listOf(Group(title, members))
+    }
+
     /** The link form of an invite, carrying what the code is for. */
     fun inviteLink(record: String, purpose: InvitePurpose): String = when (purpose) {
-        InvitePurpose.Garden -> "budlum://garden/join#$record"
-        InvitePurpose.Person -> "budlum://garden/dm#$record"
+        InvitePurpose.Garden -> "budlum://garden/join#" + inviteBody(record)
+        InvitePurpose.Person -> "budlum://garden/dm#" + inviteBody(record)
+    }
+
+    /**
+     * The join form of a link, whatever door it names.
+     *
+     * The core's join takes the garden door; a person-to-person code differs only
+     * in what this app does once the seat exists, so the link is normalised
+     * before it is handed over and the intent is kept on this side.
+     */
+    fun joinForm(record: String): String {
+        val body = inviteBody(record)
+        return if (body.isEmpty()) record.trim() else "budlum://garden/join#" + body
     }
 
     /** Which door a link opens. Anything unreadable is a Garden invite. */

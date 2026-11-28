@@ -88,6 +88,35 @@ fun PeopleScreen(model: GardenModel) {
                 )
             }
         }
+        // Groups first: a Garden is a group of people working as one validator,
+        // and the people under it are the ones a person can also talk to alone.
+        val groups = remember(state.status) { GardenLogic.groupsIn(state.status) }
+        if (groups.isNotEmpty()) {
+            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                Label(stringResource(R.string.g_groups), skin = skin, color = skin.muted)
+                groups.forEach { group ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = group.title,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = skin.surfaceInk,
+                        )
+                        Label(
+                            text = stringResource(R.string.g_group_members, group.members),
+                            skin = skin,
+                            color = skin.surfaceMuted,
+                        )
+                    }
+                }
+            }
+            Rule(skin = skin, color = skin.rule)
+        }
         if (state.people.isEmpty()) {
             Label(
                 text = stringResource(R.string.g_nobody_yet),
