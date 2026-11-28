@@ -914,6 +914,11 @@ impl GhostdagPowAdapter {
                 accepted: GHOSTDAG_EVIDENCE_VERSION.to_string(),
             });
         }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "ghostdag network identifier cannot be empty".into(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -1281,6 +1286,10 @@ impl GhostdagPowAdapter {
 impl ExternalFinalityAdapter for GhostdagPowAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned.is_some()
     }
 
     fn verify(
@@ -1792,6 +1801,32 @@ mod tests {
                 &slash_policy,
             ),
             Err(AdapterError::UnslashableBacking)
+        ));
+    }
+
+    #[test]
+    fn ghostdag_reports_pinned_anchor_and_refuses_blank_network() {
+        let pinned = test_anchor(3, 2);
+        let pinned_adapter = GhostdagPowAdapter::new(NETWORK, Some(pinned.clone()));
+        assert!(
+            pinned_adapter.has_pinned_trust_anchor(),
+            "pinned GhostDAG PoW adapter must advertise has_pinned_trust_anchor=true"
+        );
+        assert!(!GhostdagPowAdapter::new(NETWORK, None).has_pinned_trust_anchor());
+
+        let blank_adapter = GhostdagPowAdapter::new("   ", Some(pinned));
+        let raw = RawConsensusEvidence {
+            adapter: blank_adapter.descriptor().id,
+            evidence_version: GHOSTDAG_EVIDENCE_VERSION,
+            network: "   ".to_string(),
+            payload: PAYLOAD_MAGIC.to_vec(),
+            declared_height: 1_001,
+            declared_root: [0x11; 32],
+            submitter: Address::from([0x01; 32]),
+        };
+        assert!(matches!(
+            blank_adapter.verify(&raw, &VerificationPolicy::strict(1_700_000_050)),
+            Err(AdapterError::ConsensusRule { .. })
         ));
     }
 }

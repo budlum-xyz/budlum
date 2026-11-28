@@ -358,6 +358,13 @@ fn validate_bp_table(
                 rule: "duplicate Ed25519 pubkey in NEAR block_producers".into(),
             });
         }
+        if !bp.pq_pubkey.is_empty() {
+            crate::crypto::pq::validate_public_key(SchemeId::ML_DSA_65, &bp.pq_pubkey).map_err(
+                |_| AdapterError::ConsensusRule {
+                    rule: "invalid ML-DSA-65 public key in NEAR block_producers".into(),
+                },
+            )?;
+        }
         total_stake =
             total_stake
                 .checked_add(bp.stake)
@@ -692,6 +699,25 @@ pub fn verify_near_approval_slash(
     pinned: &PinnedNearEpoch,
     proof: &NearApprovalSlashProof,
 ) -> Result<(String, u128, NearSlashKind), AdapterError> {
+    if network.trim().is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "NEAR approval slash network identifier cannot be empty".into(),
+        });
+    }
+    if pinned.epoch_id == [0u8; 32]
+        || pinned.next_epoch_id == [0u8; 32]
+        || pinned.next_bp_hash == [0u8; 32]
+        || bool::from(
+            pinned
+                .epoch_id
+                .as_slice()
+                .ct_eq(pinned.next_epoch_id.as_slice()),
+        )
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule: "pinned NEAR epoch has zero or self-referential epoch identifiers".into(),
+        });
+    }
     let (bp_map, _) = validate_bp_table(&pinned.block_producers)?;
     if !bool::from(
         proof
@@ -908,6 +934,10 @@ impl NearDoomslugAdapter {
 impl ExternalFinalityAdapter for NearDoomslugAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned.is_some()
     }
 
     fn verify(
@@ -1442,5 +1472,69 @@ mod tests {
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
         );
+    }
+
+    #[test]
+    fn near_reports_pinned_anchor_validates_bp_pq_keys_and_slash_pin_policy() {
+        let fx = build_near_fixture();
+        let pinned_adapter = NearDoomslugAdapter::new(NET, Some(fx.pinned.clone()));
+        assert!(
+            pinned_adapter.has_pinned_trust_anchor(),
+            "pinned NEAR Doomslug adapter must advertise has_pinned_trust_anchor=true"
+        );
+        assert!(!NearDoomslugAdapter::new(NET, None).has_pinned_trust_anchor());
+
+        // Malformed non-empty ML-DSA-65 public key in block_producers must be rejected
+        // by validate_bp_table so epoch rotation cannot brick future finality.
+        let mut corrupt_bp = fx.pinned.block_producers.clone();
+        corrupt_bp[0].pq_pubkey = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        assert!(matches!(
+            validate_bp_table(&corrupt_bp),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // verify_near_approval_slash must refuse empty network and malformed pinned epoch IDs.
+        let double_proof = NearApprovalSlashProof {
+            inner_a: NearApprovalInner::Endorsement {
+                parent_hash: [0x11; 32],
+                parent_height: 10,
+            },
+            target_a: 11,
+            sig_a: sign_approval(
+                &fx.ed_keys[0],
+                &fx.pq_keys[0],
+                &fx.pinned.epoch_id,
+                &NearApprovalInner::Endorsement {
+                    parent_hash: [0x11; 32],
+                    parent_height: 10,
+                },
+                11,
+            ),
+            inner_b: NearApprovalInner::Endorsement {
+                parent_hash: [0x22; 32],
+                parent_height: 10,
+            },
+            target_b: 11,
+            sig_b: sign_approval(
+                &fx.ed_keys[0],
+                &fx.pq_keys[0],
+                &fx.pinned.epoch_id,
+                &NearApprovalInner::Endorsement {
+                    parent_hash: [0x22; 32],
+                    parent_height: 10,
+                },
+                11,
+            ),
+        };
+        assert!(matches!(
+            verify_near_approval_slash("   ", &fx.pinned, &double_proof),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+        let mut zero_epoch_pinned = fx.pinned;
+        zero_epoch_pinned.next_epoch_id = [0u8; 32];
+        assert!(matches!(
+            verify_near_approval_slash(NET, &zero_epoch_pinned, &double_proof),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
     }
 }
