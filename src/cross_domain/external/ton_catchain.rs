@@ -615,6 +615,15 @@ fn verify_shard_proof(shard: &TonShardProof, mc_shard_root: &Hash32) -> Result<(
         }
     }
 
+    if (!shard.co_active_prefixes.is_empty()
+        || matches!(shard.topology_step, SplitMergeTransition::SplitFrom { .. }))
+        && shard.merkle_siblings.is_empty()
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule: "multi-shard TON workchain proof requires a non-empty ShardHashes Merkle branch"
+                .into(),
+        });
+    }
     if shard.merkle_siblings.len() < 64 && (shard.leaf_index >> shard.merkle_siblings.len()) != 0 {
         return Err(AdapterError::ConsensusRule {
             rule: "TON ShardHashes leaf_index out of bounds for proof depth".into(),
@@ -918,6 +927,11 @@ impl TonCatchainAdapter {
                 accepted: EVIDENCE_VERSION.to_string(),
             });
         }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "TON network identifier cannot be empty".into(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -1143,6 +1157,10 @@ impl TonCatchainAdapter {
 impl ExternalFinalityAdapter for TonCatchainAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned.is_some()
     }
 
     fn verify(
@@ -1580,5 +1598,47 @@ mod tests {
             ),
             "future-dated Masterchain seqno above policy.now must fail closed when max_age > 0"
         );
+    }
+
+    #[test]
+    fn ton_reports_pinned_anchor_and_refuses_zero_depth_split_shard_and_blank_network() {
+        let (pinned, _gen1, _bundle, ev) = build_rotated_shard_fixture();
+        let pinned_adapter = TonCatchainAdapter::new("ton-mainnet", Some(pinned.clone()));
+        assert!(
+            pinned_adapter.has_pinned_trust_anchor(),
+            "pinned TON Catchain adapter must advertise has_pinned_trust_anchor=true"
+        );
+        assert!(!TonCatchainAdapter::new("ton-mainnet", None).has_pinned_trust_anchor());
+
+        // Split shard or non-empty co-active sibling shard list implies >= 2 leaves in
+        // ShardHashes; an empty `merkle_siblings` vector (single-leaf tree) must fail closed.
+        let bad_shard = TonShardProof {
+            workchain_id: 0,
+            shard_prefix: 0x4000_0000_0000_0000,
+            shard_seqno: 10,
+            state_root: [0x11; 32],
+            tx_root: [0x22; 32],
+            event_root: [0x33; 32],
+            file_hash: [0x44; 32],
+            leaf_index: 0,
+            merkle_siblings: Vec::new(),
+            co_active_prefixes: vec![0xC000_0000_0000_0000],
+            topology_step: SplitMergeTransition::SplitFrom {
+                parent_prefix: SHARD_PREFIX_FULL,
+            },
+        };
+        let fake_mc_root = shard_descr_leaf(&bad_shard);
+        assert!(matches!(
+            verify_shard_proof(&bad_shard, &fake_mc_root),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        let blank_adapter = TonCatchainAdapter::new("   ", Some(pinned));
+        let mut blank_ev = ev;
+        blank_ev.network = "   ".to_string();
+        assert!(matches!(
+            blank_adapter.verify(&blank_ev, &VerificationPolicy::strict(2_010)),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
     }
 }
