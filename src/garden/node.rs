@@ -2236,13 +2236,13 @@ impl Node {
         channel: ResponseChannel<BudgetedFrame>,
     ) {
         let now = Instant::now();
+        let max_bytes = u64::from(self.limits().max_object_bytes)
+            .saturating_mul(4)
+            .max(u64::try_from(MAX_RESPONSE_BYTES).unwrap_or(u64::MAX));
         let budget = self.object_budget.entry(peer).or_insert((now, 0, 0));
         if now.duration_since(budget.0) >= OBJECT_RATE_WINDOW {
             *budget = (now, 0, 0);
         }
-        let max_bytes = u64::from(self.limits().max_object_bytes)
-            .saturating_mul(4)
-            .max(u64::try_from(MAX_RESPONSE_BYTES).unwrap_or(u64::MAX));
         if budget.1 >= MAX_OBJECT_REQS_PER_WINDOW || budget.2 >= max_bytes {
             self.respond(
                 channel,
@@ -2726,13 +2726,17 @@ impl Node {
                 }
             }
             _ => {
+                // A symbol answer is taken whole, so the response is only
+                // taken apart once it is known not to be one.
+                if let Some(content_id) = self.coded_tags.remove(&tag) {
+                    self.on_coded_answer(peer, content_id, response).await;
+                    return;
+                }
                 let bytes = match response {
                     Ok(GardenResponse::Object(Some(bytes))) => Some(bytes),
                     _ => None,
                 };
-                if let Some(content_id) = self.coded_tags.remove(&tag) {
-                    self.on_coded_answer(peer, content_id, response).await;
-                } else if let Some(job) = self.relay_tags.remove(&tag) {
+                if let Some(job) = self.relay_tags.remove(&tag) {
                     self.on_relay_answer(job, bytes).await;
                 } else if let Some(content_id) = self.fetch_tags.remove(&tag) {
                     self.on_fetch_answer(content_id, bytes);
@@ -5042,7 +5046,7 @@ mod tests {
                 symbols.len()
             );
             assert!(
-                total as usize > SYMBOLS_PER_FRAME,
+                usize::try_from(total).unwrap_or(usize::MAX) > SYMBOLS_PER_FRAME,
                 "this object is supposed to need more than one frame"
             );
             have = have.saturating_add(u32::try_from(symbols.len()).unwrap());
