@@ -2177,6 +2177,17 @@ impl Node {
             .await;
             return;
         }
+        // Batches are held in memory until the set is complete, so a
+        // deposit this node has no room for is refused before any of it
+        // is held rather than after the last batch arrives.
+        if !self.store.can_fit(declared) {
+            self.respond(
+                channel,
+                GardenResponse::Refused("there is no room here for an object that size".into()),
+            )
+            .await;
+            return;
+        }
         let fresh = !self.arriving.contains_key(&content_id);
         if fresh && self.arriving.len() >= MAX_ARRIVING {
             self.respond(
@@ -6005,7 +6016,12 @@ mod tests {
                 continue;
             };
             let (response, votes) = match request {
-                GardenRequest::GetObject { content_id, .. } => {
+                // This peer holds bytes it never coded, so it answers a
+                // request for symbols with the bytes. That is the fallback
+                // a reader has to accept, and exercising it here is the
+                // only place it is covered.
+                GardenRequest::GetObject { content_id, .. }
+                | GardenRequest::GetCoded { content_id, .. } => {
                     let found = (content_id == id_of(&pulled)).then(|| pulled.clone());
                     (GardenResponse::Object(found), Vec::new())
                 }
