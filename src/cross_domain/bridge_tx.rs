@@ -472,6 +472,9 @@ pub fn mint_from_verified_event(
     if message.kind != MessageKind::BridgeLock {
         return Err("Verified event message is not a bridge lock message".into());
     }
+    if !message.verify_id() {
+        return Err("Verified bridge lock message id is invalid".into());
+    }
     if verified.event.payload_hash != message.payload_hash {
         return Err("Verified bridge event payload hash mismatch".into());
     }
@@ -818,6 +821,17 @@ pub fn submit_relay_proof(
         if !domain.bridge_enabled {
             return Err(format!("Bridge relay disabled for domain {source_domain}"));
         }
+        let gate = match &pending.source_event.kind {
+            DomainEventKind::BridgeLocked => {
+                crate::settlement::finality_gate::ValueGate::BridgeMint
+            }
+            DomainEventKind::BridgeBurned => {
+                crate::settlement::finality_gate::ValueGate::BridgeUnlock
+            }
+            other => {
+                return Err(format!("Unsupported relay source event kind: {other:?}"));
+            }
+        };
         ensure_domain_class_intake(state, source_domain, source_height)?;
         let commitment = state
             .settlement
@@ -843,6 +857,19 @@ pub fn submit_relay_proof(
                 "conflicting commitments recorded for domain {source_domain} at height {source_height}; refusing ambiguous relay"
             ));
         }
+        crate::settlement::finality_gate::enforce_domain_not_refuted(
+            &state.settlement,
+            height,
+            gate,
+            source_domain,
+        )
+        .map_err(|e| e.to_string())?;
+        crate::settlement::finality_gate::enforce_sentry_circuit_clear(
+            &state.bridge_state.consensus_sentry,
+            gate,
+            source_domain,
+        )
+        .map_err(|e| e.to_string())?;
         if source_height > domain.last_committed_height {
             return Err(format!(
                 "Bridge source commitment at height {source_height} is not on the applied domain chain (tip {})",
@@ -896,6 +923,22 @@ fn apply_relay_effects(
 ) -> Result<(), String> {
     match message.kind {
         MessageKind::BridgeLock => {
+            if !message.verify_id() {
+                return Err("Relayed bridge lock message id is invalid".into());
+            }
+            crate::settlement::finality_gate::enforce_domain_not_refuted(
+                &state.settlement,
+                height,
+                crate::settlement::finality_gate::ValueGate::BridgeMint,
+                message.source_domain,
+            )
+            .map_err(|e| e.to_string())?;
+            crate::settlement::finality_gate::enforce_sentry_circuit_clear(
+                &state.bridge_state.consensus_sentry,
+                crate::settlement::finality_gate::ValueGate::BridgeMint,
+                message.source_domain,
+            )
+            .map_err(|e| e.to_string())?;
             let transfer = state
                 .bridge_state
                 .get_transfer(&message.message_id)
@@ -946,6 +989,22 @@ fn apply_relay_effects(
                 .map_err(|e| format!("Bridge relay mint fee (relayer): {e}"))?;
         }
         MessageKind::BridgeBurn => {
+            if !message.verify_id() {
+                return Err("Relayed bridge burn message id is invalid".into());
+            }
+            crate::settlement::finality_gate::enforce_domain_not_refuted(
+                &state.settlement,
+                height,
+                crate::settlement::finality_gate::ValueGate::BridgeUnlock,
+                message.source_domain,
+            )
+            .map_err(|e| e.to_string())?;
+            crate::settlement::finality_gate::enforce_sentry_circuit_clear(
+                &state.bridge_state.consensus_sentry,
+                crate::settlement::finality_gate::ValueGate::BridgeUnlock,
+                message.source_domain,
+            )
+            .map_err(|e| e.to_string())?;
             // The burn message has its own id; the transfer lives under the
             // lock message id the burn correlates to, so the correlation id
             // is mandatory.
@@ -2479,6 +2538,158 @@ mod tests {
         assert!(
             err.contains("conflicting") || err.contains("ambiguous"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn submit_relay_proof_and_mint_enforce_refutation_sentry_and_message_id() {
+        use crate::cross_domain::event_tree::DomainEventTree;
+        use crate::domain::types::DomainCommitment;
+        use crate::settlement::domains::accept_verified_commitment;
+
+        let mut state = AccountState::new();
+        let d10 = default_domain(10, ConsensusKind::PoW, 45280, POW_HEADER_CHAIN_ADAPTER, 1);
+        let d11 = default_domain(11, ConsensusKind::PoW, 45281, POW_HEADER_CHAIN_ADAPTER, 1);
+        crate::settlement::domains::register_domain(&mut state, d10).unwrap();
+        crate::settlement::domains::register_domain(&mut state, d11).unwrap();
+        register_asset(&mut state, ASSET, 10).unwrap();
+
+        let owner = Address::from([0x81; 32]);
+        let recipient = Address::from([0x82; 32]);
+        let relayer = Address::from([0x83; 32]);
+        state.add_balance(&owner, 1_000 + FEE);
+
+        let (_, lock_ev) = lock(
+            &mut state,
+            owner,
+            &LockRequest {
+                source_domain: 10,
+                target_domain: 11,
+                source_height: 1,
+                event_index: 0,
+                asset_id: ASSET,
+                recipient,
+                amount: 1_000,
+                expiry_height: 500,
+            },
+            FEE,
+            1,
+        )
+        .unwrap();
+        let lock_id = lock_ev.message.as_ref().unwrap().message_id;
+        let mut tree = DomainEventTree::new();
+        tree.push(lock_ev.clone());
+        let proof = tree.proof(0).unwrap();
+        let comm = DomainCommitment {
+            domain_id: 10,
+            domain_height: 1,
+            domain_block_hash: [0xC1; 32],
+            parent_domain_block_hash: [0u8; 32],
+            state_root: [0x11; 32],
+            tx_root: [0u8; 32],
+            event_root: tree.root(),
+            validator_set_hash: [0u8; 32],
+            consensus_kind: ConsensusKind::PoW,
+            finality_proof_hash: [0x21; 32],
+            timestamp_ms: 1_000,
+            sequence: 0,
+            producer: None,
+            state_updates: std::collections::BTreeMap::new(),
+        };
+        accept_verified_commitment(&mut state, comm).unwrap();
+
+        // 1. Sentry circuit breaker on BridgeMint for domain 10 refuses submit_relay_proof.
+        let mut halted_sentry_state = state.clone();
+        halted_sentry_state.refresh_consensus_sentry(1_000);
+        halted_sentry_state.refresh_consensus_sentry(10_000);
+        let sentry_err =
+            submit_relay_proof(&mut halted_sentry_state, lock_id, relayer, &proof, 10, 2)
+                .expect_err("tripped sentry circuit must block submit_relay_proof");
+        assert!(
+            sentry_err.to_lowercase().contains("sentry")
+                || sentry_err.to_lowercase().contains("halted"),
+            "unexpected sentry refusal: {sentry_err}"
+        );
+        assert_eq!(halted_sentry_state.get_balance(&recipient), 0);
+        assert!(halted_sentry_state
+            .settlement
+            .relayer
+            .pending_relay(&lock_id)
+            .is_some());
+
+        // 2. Pending/unanchored/frozen domain in universal finality certificate blocks submit_relay_proof.
+        let mut unanchored_state = state.clone();
+        unanchored_state
+            .settlement
+            .domains
+            .get_mut(10)
+            .expect("domain 10")
+            .last_committed_hash = [0u8; 32];
+        let pending_err =
+            submit_relay_proof(&mut unanchored_state, lock_id, relayer, &proof, 10, 3)
+                .expect_err("unanchored domain must be refused by finality certificate gate");
+        assert!(
+            pending_err.contains("pending in the finality certificate")
+                || pending_err.to_lowercase().contains("refut"),
+            "unexpected finality-certificate refusal: {pending_err}"
+        );
+        assert_eq!(unanchored_state.get_balance(&recipient), 0);
+
+        let mut frozen_state = state.clone();
+        frozen_state
+            .settlement
+            .domains
+            .get_mut(10)
+            .expect("domain 10")
+            .status = crate::domain::types::DomainStatus::Frozen;
+        let frozen_err = submit_relay_proof(&mut frozen_state, lock_id, relayer, &proof, 10, 3)
+            .expect_err("frozen/refuted domain must block submit_relay_proof");
+        assert!(
+            frozen_err.contains("Frozen") || frozen_err.to_lowercase().contains("refut"),
+            "unexpected frozen refusal: {frozen_err}"
+        );
+        assert_eq!(frozen_state.get_balance(&recipient), 0);
+
+        // 3. Forged message_id inside a BridgeLock event is rejected by mint_from_verified_event.
+        let mut forged_ev = lock_ev;
+        forged_ev.domain_height = 2;
+        let mut bad_msg = forged_ev.message.clone().unwrap();
+        bad_msg.message_id[0] ^= 0xFF;
+        forged_ev.message = Some(bad_msg);
+        forged_ev.payload_hash = forged_ev.message.as_ref().unwrap().payload_hash;
+        let mut bad_tree = DomainEventTree::new();
+        bad_tree.push(forged_ev.clone());
+        let bad_proof = bad_tree.proof(0).unwrap();
+        let bad_comm = DomainCommitment {
+            domain_id: 10,
+            domain_height: 2,
+            domain_block_hash: [0xC2; 32],
+            parent_domain_block_hash: [0xC1; 32],
+            state_root: [0x12; 32],
+            tx_root: [0u8; 32],
+            event_root: bad_tree.root(),
+            validator_set_hash: [0u8; 32],
+            consensus_kind: ConsensusKind::PoW,
+            finality_proof_hash: [0x22; 32],
+            timestamp_ms: 2_000,
+            sequence: 0,
+            producer: None,
+            state_updates: std::collections::BTreeMap::new(),
+        };
+        accept_verified_commitment(&mut state, bad_comm).unwrap();
+        let verified_forged = ProvenBridgeEvent {
+            domain: 10,
+            height: 2,
+            sequence: 0,
+            expected_block_hash: [0xC2; 32],
+            event: forged_ev,
+            proof: bad_proof,
+        };
+        let id_err = mint_from_verified_event(&mut state, &verified_forged, relayer, 5)
+            .expect_err("forged message_id must be rejected by mint_from_verified_event");
+        assert!(
+            id_err.contains("match its id") || id_err.contains("message id"),
+            "got: {id_err}"
         );
     }
 }

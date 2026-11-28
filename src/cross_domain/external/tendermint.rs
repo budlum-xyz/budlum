@@ -2013,6 +2013,19 @@ impl ExternalFinalityAdapter for TendermintFinalityAdapter {
         self.pinned_validator_set.is_some()
     }
 
+    fn attested_parent(&self, evidence: &RawConsensusEvidence) -> Option<[u8; 32]> {
+        let policy = VerificationPolicy {
+            min_depth: 0,
+            require_declared_match: false,
+            max_age: 0,
+            now: 0,
+            require_slashable: false,
+        };
+        self.verify(evidence, &policy).ok()?;
+        let decoded = TendermintCommitEvidence::decode(&evidence.payload).ok()?;
+        (decoded.last_block_hash != [0u8; 32]).then_some(decoded.last_block_hash)
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,
@@ -4686,5 +4699,86 @@ mod tests {
         assert!(height_within_pinned_era(PIN, PIN - MAX_HEIGHT_DRIFT));
         assert!(!height_within_pinned_era(PIN, PIN - MAX_HEIGHT_DRIFT - 1));
         assert!(!height_within_pinned_era(u64::MAX, 0));
+    }
+
+    #[test]
+    fn tendermint_attested_parent_is_authenticated_and_drives_falsity_adjudication() {
+        use crate::cross_domain::external::falsity::{
+            adjudicate, BookSlot, Refusal, Ruling, SuccessorView,
+        };
+        use std::collections::BTreeSet;
+
+        let commit = noble_commit();
+        let vset_hash = validator_set_hash(&commit.validators);
+        let pinned_adapter =
+            TendermintFinalityAdapter::new_pinned("noble", "noble-1", Some(vset_hash));
+        assert!(pinned_adapter.has_pinned_trust_anchor());
+
+        let ev = evidence_for(&pinned_adapter, &commit);
+        assert_eq!(
+            pinned_adapter.attested_parent(&ev),
+            Some(commit.last_block_hash)
+        );
+
+        let mut forged_sig = commit.clone();
+        forged_sig.signatures[0].signature[0] ^= 0xFF;
+        assert_eq!(
+            pinned_adapter.attested_parent(&evidence_for(&pinned_adapter, &forged_sig)),
+            None
+        );
+
+        let mut wrong_chain = commit.clone();
+        wrong_chain.chain_id = "cosmoshub-4".to_string();
+        assert_eq!(
+            pinned_adapter.attested_parent(&evidence_for(&pinned_adapter, &wrong_chain)),
+            None
+        );
+
+        let mut tampered_header = commit.clone();
+        tampered_header.app_hash[0] ^= 0xFF;
+        assert_eq!(
+            pinned_adapter.attested_parent(&evidence_for(&pinned_adapter, &tampered_header)),
+            None
+        );
+
+        let att = pinned_adapter
+            .verify(&ev, &policy())
+            .expect("pinned noble commit verifies");
+        let carrier_a = Address([0x11; 32]);
+        let carrier_b = Address([0x22; 32]);
+        let challenger = Address([0x33; 32]);
+        let decided = BTreeSet::new();
+
+        let honest_pred = BookSlot {
+            domain: att.domain,
+            adapter: att.adapter,
+            height: att.height - 1,
+            evidence_version: att.evidence_version,
+            evidence_digest: [0x44; 32],
+            carrier: carrier_a,
+            attested_block_hash: Some(commit.last_block_hash),
+        };
+        let successor = SuccessorView {
+            domain: att.domain,
+            adapter: att.adapter,
+            height: att.height,
+            evidence_version: att.evidence_version,
+            evidence_digest: att.evidence_digest,
+            carrier: carrier_b,
+            attested_parent: pinned_adapter.attested_parent(&ev),
+        };
+        assert_eq!(
+            adjudicate(&successor, &honest_pred, challenger, &decided),
+            Ruling::Refused(Refusal::NoContradiction)
+        );
+
+        let lying_pred = BookSlot {
+            attested_block_hash: Some([0xAB; 32]),
+            ..honest_pred
+        };
+        assert!(matches!(
+            adjudicate(&successor, &lying_pred, challenger, &decided),
+            Ruling::Refuted { carrier, .. } if carrier == carrier_a
+        ));
     }
 }

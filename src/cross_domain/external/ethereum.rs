@@ -2097,6 +2097,44 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
     fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
         self.golden.clone()
     }
+
+    fn attested_parent(&self, evidence: &RawConsensusEvidence) -> Option<[u8; 32]> {
+        use crate::cross_domain::external::ethereum_ssz as ssz;
+
+        let policy = VerificationPolicy {
+            min_depth: 0,
+            require_declared_match: false,
+            max_age: 0,
+            now: 0,
+            require_slashable: false,
+        };
+        self.verify(evidence, &policy).ok()?;
+        match evidence.evidence_version {
+            4 => {
+                let pin = self.ssz_pin.as_ref()?;
+                let payload = evidence.payload.as_slice();
+                let committee_len = payload
+                    .get(..4)
+                    .and_then(|raw| raw.try_into().ok())
+                    .map(u32::from_le_bytes)? as usize;
+                let update_bytes = payload.get(4 + committee_len..)?;
+                let update = ssz::parse_finality_update(update_bytes, &pin.fork_schedule).ok()?;
+                let parent_hash: [u8; 32] =
+                    update.finalized.execution.get(..32)?.try_into().ok()?;
+                (parent_hash != [0u8; 32]).then_some(parent_hash)
+            }
+            3 => {
+                let v3 = parse_execution_update_v3(&evidence.payload).ok()?;
+                let parent = v3.execution_payload.parent_hash;
+                (parent != [0u8; 32]).then_some(parent)
+            }
+            2 => {
+                let update = parse_update(&evidence.payload).ok()?;
+                (update.finalized_parent_root != [0u8; 32]).then_some(update.finalized_parent_root)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Builds a bitvector with the first `count` bits set. Used by the boundary
@@ -2912,5 +2950,133 @@ mod slashable_policy_tests {
              a signer summing to the pinned aggregate while abstaining from one derived key \
              would otherwise forge partial-quorum finality"
         );
+    }
+
+    #[test]
+    fn ethereum_attested_parent_v3_and_falsity_adjudication() {
+        use crate::cross_domain::evm::sync_committee::{
+            sync_committee_hash_tree_root, ExecutionPayloadHeader, FINALIZED_ROOT_GINDEX_DENEB,
+            LOGS_BLOOM_BYTES,
+        };
+        use crate::cross_domain::external::falsity::{
+            adjudicate, BookSlot, Refusal, Ruling, SuccessorView,
+        };
+        use bls12_381::{G1Affine, G1Projective, Scalar};
+        use std::collections::BTreeSet;
+
+        let mut pks = Vec::with_capacity(SYNC_COMMITTEE_SIZE as usize);
+        let mut full_pk = G1Projective::identity();
+        for idx in 0..SYNC_COMMITTEE_SIZE {
+            let pk = G1Projective::generator() * Scalar::from(idx + 23);
+            full_pk += pk;
+            pks.push(G1Affine::from(pk).to_compressed());
+        }
+        let agg = G1Affine::from(full_pk).to_compressed();
+        let mut padded_agg = vec![0u8; 96];
+        padded_agg[..48].copy_from_slice(&agg);
+        let pks_arr: [[u8; 48]; 512] = pks.clone().try_into().expect("512 members");
+        let pin = PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: padded_agg,
+            next_committee_root: sync_committee_hash_tree_root(&pks_arr, &agg),
+        };
+        let adapter =
+            EthereumSyncAdapter::new("mainnet", Some(pin.clone()), Some(Box::new(AcceptAllBls)))
+                .with_member_pubkeys(pks)
+                .expect("pin roster");
+
+        let exec = ExecutionPayloadHeader {
+            parent_hash: [0x14; 32],
+            fee_recipient: [0x20; 20],
+            state_root: [0x30; 32],
+            receipts_root: [0x40; 32],
+            logs_bloom: vec![0u8; LOGS_BLOOM_BYTES],
+            prev_randao: [0x50; 32],
+            block_number: 20_000_000,
+            gas_limit: 30_000_000,
+            gas_used: 15_000_000,
+            timestamp: 1_720_000_000,
+            extra_data: b"parent-bind".to_vec(),
+            base_fee_per_gas: [0x07; 32],
+            block_hash: [0x60; 32],
+            transactions_root: [0x70; 32],
+            withdrawals_root: [0x80; 32],
+            blob_gas_used: 0,
+            excess_blob_gas: 0,
+        };
+        let exec_branch = [[0xA1; 32], [0xA2; 32], [0xA3; 32], [0xA4; 32]];
+        let raw_v3 = build_execution_update_payload_v3(&ExecutionUpdateV3Params {
+            finalized_slot: 128,
+            attested_slot: 192,
+            period: 0,
+            finalized_root_gindex: FINALIZED_ROOT_GINDEX_DENEB,
+            committee: &pin,
+            signature: &[0u8; 96],
+            participation_bits: &bits_for(400),
+            beacon_state_root: [0xB1; 32],
+            execution_branch: exec_branch,
+            execution_payload: &exec,
+        })
+        .expect("build v3");
+        let ev = RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            network: "mainnet".to_string(),
+            evidence_version: 3,
+            declared_height: 128,
+            declared_root: exec.state_root,
+            payload: raw_v3,
+            submitter: crate::core::address::Address([0x05; 32]),
+        };
+
+        assert_eq!(adapter.attested_parent(&ev), Some(exec.parent_hash));
+
+        // Corrupting execution_branch breaks SSZ proof -> None.
+        let mut tampered = ev.clone();
+        tampered.payload[layout::LEN] ^= 0xFF;
+        assert_eq!(adapter.attested_parent(&tampered), None);
+
+        // Missing or rejecting BLS verifier must also return None from attested_parent.
+        let unverified = EthereumSyncAdapter::new("mainnet", Some(pin), None)
+            .with_member_pubkeys(adapter.member_pubkeys.clone().expect("roster"))
+            .expect("pin roster");
+        assert_eq!(unverified.attested_parent(&ev), None);
+
+        let att = adapter
+            .verify(&ev, &VerificationPolicy::strict(300))
+            .expect("v3 verifies");
+        let carrier_a = crate::core::address::Address([0x11; 32]);
+        let carrier_b = crate::core::address::Address([0x22; 32]);
+        let challenger = crate::core::address::Address([0x33; 32]);
+        let decided = BTreeSet::new();
+        let pred = BookSlot {
+            domain: att.domain,
+            adapter: att.adapter,
+            height: att.height - 1,
+            evidence_version: att.evidence_version,
+            evidence_digest: [0x55; 32],
+            carrier: carrier_a,
+            attested_block_hash: Some(exec.parent_hash),
+        };
+        let succ = SuccessorView {
+            domain: att.domain,
+            adapter: att.adapter,
+            height: att.height,
+            evidence_version: att.evidence_version,
+            evidence_digest: att.evidence_digest,
+            carrier: carrier_b,
+            attested_parent: adapter.attested_parent(&ev),
+        };
+        assert_eq!(
+            adjudicate(&succ, &pred, challenger, &decided),
+            Ruling::Refused(Refusal::NoContradiction)
+        );
+        let lying = BookSlot {
+            attested_block_hash: Some([0xEF; 32]),
+            ..pred
+        };
+        assert!(matches!(
+            adjudicate(&succ, &lying, challenger, &decided),
+            Ruling::Refuted { carrier, .. } if carrier == carrier_a
+        ));
     }
 }
