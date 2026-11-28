@@ -21,6 +21,9 @@ use crate::domain::types::{DomainId, Hash32};
 
 /// Ticks an object waits for a transaction the node has not seen yet.
 const MAX_WAIT_TICKS: u8 = 2;
+/// Ticks a valid ready object may wait before anti-censorship aging promotes
+/// it ahead of newer fee-bidding objects (and protects it from eviction).
+pub const ANTI_CENSORSHIP_WAIT_TICKS: u64 = 10;
 /// Ticks in a row an object may fail to prove before it is dropped.
 const MAX_PROVE_FAILURES: u8 = 2;
 /// Object ids the pool remembers, so an object it has judged is not judged
@@ -130,6 +133,8 @@ struct Ready {
     fee: u64,
     bytes: usize,
     failures: u8,
+    /// Number of ticks this valid ready object has waited without inclusion.
+    wait_ticks: u64,
 }
 
 /// An object whose transaction is not known yet. It is not verified.
@@ -341,6 +346,7 @@ impl ObjectPool {
                 fee: tx.fee,
                 bytes,
                 failures: 0,
+                wait_ticks: 0,
             },
         );
         Ok(())
@@ -349,8 +355,10 @@ impl ObjectPool {
     /// Plan the room for an object of `bytes` bytes that pays `fee`: the
     /// objects to drop so the pool stays within its budget, the ones that
     /// pay the least per byte first. A waiting object pays nothing and goes
-    /// first. When the incoming object itself pays the least it is the one
-    /// refused, and nothing is dropped for it.
+    /// first. Ready objects that reached `ANTI_CENSORSHIP_WAIT_TICKS` are
+    /// protected from fee-bidding eviction so valid objects cannot be starved.
+    /// When the incoming object itself pays the least it is the one refused,
+    /// and nothing is dropped for it.
     fn plan_room(&self, fee: u64, bytes: usize) -> Result<Vec<Hash32>, Rejection> {
         let budget = self.params.pool_max_bytes;
         if bytes > budget {
@@ -363,7 +371,12 @@ impl ObjectPool {
             .waiting
             .iter()
             .map(|(id, w)| (id, 0, w.bytes))
-            .chain(self.ready.iter().map(|(id, r)| (id, r.fee, r.bytes)))
+            .chain(
+                self.ready
+                    .iter()
+                    .filter(|(_, r)| r.wait_ticks < ANTI_CENSORSHIP_WAIT_TICKS)
+                    .map(|(id, r)| (id, r.fee, r.bytes)),
+            )
             .collect();
         cheapest.sort_unstable_by(|a, b| {
             if pays_less(a.1, a.2, b.1, b.2) {
@@ -413,11 +426,15 @@ impl ObjectPool {
         }
     }
 
-    /// Start a tick: every sender gets its limit back, and each waiting
-    /// object is admitted if its transaction arrived, kept if it may still
-    /// wait, and dropped otherwise.
+    /// Start a tick: every sender gets its limit back, each ready object that
+    /// is still waiting ages by one tick (for anti-censorship promotion at
+    /// `ANTI_CENSORSHIP_WAIT_TICKS`), and each waiting object is admitted if its
+    /// transaction arrived, kept if it may still wait, and dropped otherwise.
     pub fn begin_tick(&mut self, txs: &impl TxLookup, registry: &SchemeStatusRegistry) {
         self.sender_counts.clear();
+        for ready in self.ready.values_mut() {
+            ready.wait_ticks = ready.wait_ticks.saturating_add(1);
+        }
         let waiting = std::mem::take(&mut self.waiting);
         for (object_id, mut entry) in waiting {
             self.bytes = self.bytes.saturating_sub(entry.bytes);
@@ -434,19 +451,39 @@ impl ObjectPool {
         }
     }
 
-    /// The next objects to prove: at most `tick_max_objects`, the ones that
-    /// pay the most per byte first. They stay in the pool until the caller
-    /// reports the outcome.
+    /// The next objects to prove: at most `tick_max_objects`. Objects that
+    /// have waited at least `ANTI_CENSORSHIP_WAIT_TICKS` ticks are promoted
+    /// ahead of newer fee-bidding objects (oldest wait first), preventing
+    /// indefinite fee-per-byte starvation; remaining slots order by fee per
+    /// byte descending. Objects stay in the pool until the caller reports the
+    /// outcome.
     #[must_use]
     pub fn next_items(&self) -> Vec<PoolItem> {
         let mut order: Vec<&Ready> = self.ready.values().collect();
         order.sort_by(|a, b| {
-            if pays_less(b.fee, b.bytes, a.fee, a.bytes) {
-                std::cmp::Ordering::Less
-            } else if pays_less(a.fee, a.bytes, b.fee, b.bytes) {
-                std::cmp::Ordering::Greater
-            } else {
-                a.digest.cmp(&b.digest)
+            let a_aged = a.wait_ticks >= ANTI_CENSORSHIP_WAIT_TICKS;
+            let b_aged = b.wait_ticks >= ANTI_CENSORSHIP_WAIT_TICKS;
+            match (a_aged, b_aged) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                (true, true) => b.wait_ticks.cmp(&a.wait_ticks).then_with(|| {
+                    if pays_less(b.fee, b.bytes, a.fee, a.bytes) {
+                        std::cmp::Ordering::Less
+                    } else if pays_less(a.fee, a.bytes, b.fee, b.bytes) {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        a.digest.cmp(&b.digest)
+                    }
+                }),
+                (false, false) => {
+                    if pays_less(b.fee, b.bytes, a.fee, a.bytes) {
+                        std::cmp::Ordering::Less
+                    } else if pays_less(a.fee, a.bytes, b.fee, b.bytes) {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        a.digest.cmp(&b.digest)
+                    }
+                }
             }
         });
         order
