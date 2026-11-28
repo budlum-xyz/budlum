@@ -5,8 +5,8 @@ use super::{
     compute_next_work_required_with_limit, median_time_past_floor, meets_target, sha256d,
     target_from_bits, verify_spv_tx_inclusion, ChainWork256, VerifiedBitcoinChain,
     VerifiedBitcoinHeader, VerifiedSpvTransaction, DIFFICULTY_ADJUSTMENT_INTERVAL,
-    FORBIDDEN_INNER_NODE_TX_BYTES, MAINNET_POW_LIMIT_BITS, MAX_HEADERS, MAX_STRIPPED_TX_BYTES,
-    REGTEST_POW_LIMIT_BITS,
+    FORBIDDEN_INNER_NODE_TX_BYTES, MAINNET_POW_LIMIT_BITS, MAX_ACTUAL_TIMESPAN_SECS, MAX_HEADERS,
+    MAX_STRIPPED_TX_BYTES, MIN_ACTUAL_TIMESPAN_SECS, REGTEST_POW_LIMIT_BITS,
 };
 use crate::cross_domain::external::spec::{AdapterError, DomainKey, SecurityBacking, TimeUnit};
 
@@ -100,26 +100,56 @@ fn verify_single_header_step(
         });
     }
     if hdr.height.is_multiple_of(DIFFICULTY_ADJUSTMENT_INTERVAL) {
-        if let Ok(epoch_span) = usize::try_from(DIFFICULTY_ADJUSTMENT_INTERVAL) {
-            if idx >= epoch_span {
-                if let (Some(first_hdr), Some(last_hdr)) =
-                    (headers.get(idx - epoch_span), headers.get(idx - 1))
-                {
-                    let expected_bits = compute_next_work_required_with_limit(
-                        first_hdr.timestamp,
-                        last_hdr.timestamp,
-                        *active_bits,
-                        pow_limit_bits,
-                    )?;
-                    if hdr.bits != expected_bits {
-                        return Err(AdapterError::ConsensusRule {
-                            rule: format!(
-                                "Bitcoin retarget at height {} expected nBits {expected_bits:08x}, found {:08x}",
-                                hdr.height, hdr.bits
-                            ),
-                        });
-                    }
-                }
+        let epoch_span = usize::try_from(DIFFICULTY_ADJUSTMENT_INTERVAL).map_err(|_| {
+            AdapterError::ConsensusRule {
+                rule: "Bitcoin DIFFICULTY_ADJUSTMENT_INTERVAL overflows usize".to_string(),
+            }
+        })?;
+        if idx >= epoch_span {
+            let (Some(first_hdr), Some(last_hdr)) =
+                (headers.get(idx - epoch_span), headers.get(idx - 1))
+            else {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "Bitcoin retarget boundary missing in-slice epoch boundary headers"
+                        .to_string(),
+                });
+            };
+            let expected_bits = compute_next_work_required_with_limit(
+                first_hdr.timestamp,
+                last_hdr.timestamp,
+                *active_bits,
+                pow_limit_bits,
+            )?;
+            if hdr.bits != expected_bits {
+                return Err(AdapterError::ConsensusRule {
+                    rule: format!(
+                        "Bitcoin retarget at height {} expected nBits {expected_bits:08x}, found {:08x}",
+                        hdr.height, hdr.bits
+                    ),
+                });
+            }
+        } else {
+            let hardest_bits = compute_next_work_required_with_limit(
+                0,
+                MIN_ACTUAL_TIMESPAN_SECS,
+                *active_bits,
+                pow_limit_bits,
+            )?;
+            let easiest_bits = compute_next_work_required_with_limit(
+                0,
+                MAX_ACTUAL_TIMESPAN_SECS,
+                *active_bits,
+                pow_limit_bits,
+            )?;
+            let min_target = target_from_bits(hardest_bits)?;
+            let max_target = target_from_bits(easiest_bits)?;
+            if hdr_target < min_target || hdr_target > max_target {
+                return Err(AdapterError::ConsensusRule {
+                    rule: format!(
+                        "Bitcoin retarget at height {} nBits {:08x} violates 4x adjustment clamp [{hardest_bits:08x}, {easiest_bits:08x}]",
+                        hdr.height, hdr.bits
+                    ),
+                });
             }
         }
         *active_bits = hdr.bits;
@@ -663,6 +693,23 @@ mod rejection_tests {
         assert!(
             matches!(err_dom, AdapterError::ConsensusRule { .. }),
             "got {err_dom:?}"
+        );
+
+        // Retarget boundary (`height = 2016`, `idx = 0 < 2016`) must still enforce
+        // Bitcoin's 4x difficulty adjustment clamp rather than accepting an
+        // unauthenticated jump from `0x1c00ffff` all the way to `REGTEST_POW_LIMIT_BITS`.
+        let (mut unclamped_retarget, _) = sample_six_block_chain(&tx);
+        unclamped_retarget.anchor_height = 2015;
+        unclamped_retarget.anchor_bits = 0x1c00_ffff;
+        for (step, h) in unclamped_retarget.headers.iter_mut().enumerate() {
+            h.height = 2016 + step as u64;
+        }
+        unclamped_retarget.attestation.height = 2021;
+        let retarget_verdict =
+            unclamped_retarget.verify_confirmed_payment(&block_hash, &tx, 0, &[], true, 6);
+        assert!(
+            matches!(retarget_verdict, Err(AdapterError::ConsensusRule { .. })),
+            "unauthenticated >4x difficulty drop across height 2016 must fail closed, got: {retarget_verdict:?}"
         );
     }
 }
