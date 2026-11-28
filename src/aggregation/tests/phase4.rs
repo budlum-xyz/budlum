@@ -430,6 +430,16 @@ fn phase4_domain_transition_finalizes_through_master_proof() {
         FinalityStatus::Finalized
     );
 
+    let mut empty_allowlist = ext_domain.clone();
+    empty_allowlist.zk_program_allowlist.clear();
+    let without_authority = adapter
+        .verify_finality(&empty_allowlist, &commitment, &proof)
+        .expect("an empty allowlist is a rejection, not a verifier error");
+    assert!(
+        matches!(without_authority, FinalityStatus::Rejected(_)),
+        "a registered program bypassed an empty domain allowlist: {without_authority:?}"
+    );
+
     // Negative checks on ClaimedDomainFinalityAdapter:
     // 1. Tampered commitment state_root must be rejected.
     let tampered_commitment = test_commitment(11, [0x98; 32]);
