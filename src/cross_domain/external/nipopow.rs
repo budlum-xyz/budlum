@@ -1053,6 +1053,11 @@ mod tests {
             .verify_observed(&golden, &policy, &mut facts)
             .unwrap();
         assert_eq!(att.height, 16_385);
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("NIPoPoW shape");
         assert_eq!(att.state_root, bundle.suffix[0].state_root);
         assert_eq!(facts.count(ObservedScheme::Proof(AssumptionClass::Hash)), 1);
         match att.security {

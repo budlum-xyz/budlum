@@ -1304,6 +1304,11 @@ mod tests {
             .verify_observed(&raw, &policy, &mut obs)
             .expect("verify bitvm");
         assert_eq!(att.height, ANCHOR_HEIGHT + 1);
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("BitVM2 shape");
         assert_eq!(att.state_root, bundle.claim.state_root);
         assert_eq!(att.attested_tx_root, Some(bundle.claim.tx_root));
         assert_eq!(att.attested_event_root, Some(bundle.claim.event_root));

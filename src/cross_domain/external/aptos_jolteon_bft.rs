@@ -1020,7 +1020,15 @@ mod tests {
 
     #[test]
     fn aptos_jolteon_2chain_adapter_passes_full_selftest_admission() {
-        let (_, _, adapter, _) = sample_adapter_with_round_skip_tc();
+        let (_, _, adapter, ev) = sample_adapter_with_round_skip_tc();
+        let att = adapter
+            .verify(&ev, &VerificationPolicy::strict(0))
+            .expect("golden verifies");
+        crate::domain::finality_proof_model::FinalityProofShape::from_external_attestation(
+            &adapter.descriptor(),
+            &att,
+        )
+        .expect("Jolteon shape");
         let report = admit(&adapter, &VerificationPolicy::strict(0));
         assert!(report.admitted, "selftest failed: {report:?}");
         assert_eq!(report.probes.len(), 8);
