@@ -1478,6 +1478,59 @@ impl BridgeEconomicGuard {
         Ok(())
     }
 
+    /// Take the backing the external-domain intake just verified for
+    /// `domain_id`. The intake is the one place evidence is verified; the
+    /// guard reads what it accepted rather than verifying a second time.
+    /// A domain with no ceiling policy is not an error here - it has
+    /// nothing to update and routes nothing anyway - and a frozen domain
+    /// keeps its freeze: a fresh backing is not a verdict on the contradiction.
+    ///
+    /// # Errors
+    ///
+    /// [`EconomicGuardError::DomainFrozen`] when the domain is frozen.
+    pub fn adopt_intake_backing(
+        &mut self,
+        domain_id: DomainId,
+        backing: SecurityBacking,
+    ) -> Result<(), EconomicGuardError> {
+        let Some(record) = self.domains.get_mut(&domain_id) else {
+            return Ok(());
+        };
+        if let DomainGuardStatus::FrozenByContradiction {
+            evidence_digest, ..
+        } = record.status
+        {
+            return Err(EconomicGuardError::DomainFrozen {
+                domain_id,
+                evidence_digest,
+            });
+        }
+        record.policy.backing = backing;
+        Ok(())
+    }
+
+    /// Freeze `domain_id` on a contradiction the external-domain intake
+    /// proved and slashed. The intake verified the conflicting proof and
+    /// took the carrier's bond; the guard's part is to stop the window, so
+    /// no value routes on a domain whose finality was shown false. A second
+    /// freeze for the same domain is idempotent, and a domain with no
+    /// ceiling policy has no window to stop.
+    pub fn freeze_from_intake_contradiction(
+        &mut self,
+        domain_id: DomainId,
+        evidence_digest: Hash32,
+        height: u64,
+    ) {
+        if let Some(record) = self.domains.get_mut(&domain_id) {
+            if matches!(record.status, DomainGuardStatus::Active) {
+                record.status = DomainGuardStatus::FrozenByContradiction {
+                    frozen_at_height: height,
+                    evidence_digest,
+                };
+            }
+        }
+    }
+
     /// Verify a raw external consensus evidence bundle through one of the
     /// supported consensus adapters and update `domain_id`'s [`SecurityBacking`].
     ///

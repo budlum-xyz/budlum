@@ -480,14 +480,49 @@ fn submit_evidence(
     }
     let bls = bls_for(&entry.spec, ctx);
     let before = intake.clone();
-    match intake.submit_evidence(evidence, bls) {
-        // Accepted, or entered a quorum round that has not decided yet: both
-        // are recorded states.
-        Ok(_) | Err(IntakeError::RoundPending) => Ok(()),
+    let verdict = intake.submit_evidence(evidence, bls);
+    // Whether the registry recorded a refusal: an accepted transaction even
+    // when the evidence was not. Read before the intake borrow ends, so the
+    // accepted arm below may reach the rest of the state.
+    let recorded_refusal = verdict.is_err() && *intake != before;
+    match verdict {
+        Ok(attestation) => {
+            // The intake accepted; the bridge guard reads the backing it
+            // verified for every settlement domain bound to this key. A
+            // domain the guard does not price is left alone, and a frozen
+            // one keeps its freeze.
+            for domain_id in settlement_domains_bound_to(state, &key) {
+                let _ = state
+                    .bridge_state
+                    .economic_guard
+                    .adopt_intake_backing(domain_id, attestation.security);
+            }
+            Ok(())
+        }
+        // Entered a quorum round that has not decided yet: a recorded state.
+        Err(IntakeError::RoundPending) => Ok(()),
         // The registry recorded the refusal: an accepted transaction.
-        Err(_) if *intake != before => Ok(()),
+        Err(_) if recorded_refusal => Ok(()),
         Err(e) => Err(e.into()),
     }
+}
+
+/// The settlement domains whose finality is supplied by the external
+/// framework under `key`: a `Custom` domain bound to the external adapter
+/// carries the key as its `config_hash` (the binding the in-block verifier
+/// checks in `settlement::domains`).
+fn settlement_domains_bound_to(state: &AccountState, key: &DomainKey) -> Vec<u32> {
+    state
+        .settlement
+        .domains
+        .active_domains()
+        .filter(|domain| {
+            domain.finality_adapter
+                == crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER
+                && domain.config_hash == *key.as_bytes()
+        })
+        .map(|domain| domain.id)
+        .collect()
 }
 
 fn challenge_contradiction(
@@ -517,6 +552,19 @@ fn challenge_contradiction(
         .settlement
         .external_intake
         .slash_on_contradiction(evidence, ctx.sender, bls)?;
+    // The intake proved the contradiction and faulted the domain; the bridge
+    // guard stops the window of every settlement domain bound to this key,
+    // so no value routes on a finality shown false.
+    for domain_id in settlement_domains_bound_to(state, &key) {
+        state
+            .bridge_state
+            .economic_guard
+            .freeze_from_intake_contradiction(
+                domain_id,
+                outcome.contradicted_digest,
+                state.current_block_height,
+            );
+    }
     let slashed = match u64::try_from(outcome.slashed_atoms) {
         Ok(v) => v,
         Err(_) => {
@@ -1256,6 +1304,95 @@ mod tests {
         let err = execute_external_domain_tx(&mut state, &ctx(poster), &tx).unwrap_err();
         assert!(matches!(err, ExternalDomainTxError::Fork(_)), "{err}");
         assert_eq!(state.settlement.root(), before);
+    }
+
+    /// The intake is the one place evidence is verified and contradictions
+    /// are slashed; the bridge guard reads it. A settlement domain bound to
+    /// the external key and priced by a ceiling policy sees the accepted
+    /// attestation's backing arrive in its policy, and sees its window stop
+    /// the moment the intake proves the attestation false.
+    #[test]
+    fn the_bridge_guard_reads_the_intake_backing_and_freezes_on_its_contradiction() {
+        use crate::cross_domain::economic_guard::{
+            effective_ceiling_atoms, DomainCeilingPolicy, DomainGuardStatus,
+        };
+        use crate::cross_domain::external::spec::SecurityBacking;
+        use crate::domain::ConsensusKind;
+
+        let (mut state, key, poster) = registered();
+        let mut domain = crate::domain::plugin::default_domain(
+            91,
+            ConsensusKind::Custom("external".into()),
+            9_191,
+            crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER,
+            1,
+        );
+        domain.plugin_code_hash = Some([7; 32]);
+        domain.config_hash = *key.as_bytes();
+        state
+            .settlement
+            .domains
+            .register(domain)
+            .expect("the bound domain registers");
+        state
+            .bridge_state
+            .economic_guard
+            .configure_domain(
+                91,
+                DomainCeilingPolicy {
+                    window_blocks: 100,
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .expect("a valid policy");
+        let record = |state: &AccountState| {
+            state
+                .bridge_state
+                .economic_guard
+                .record(91)
+                .cloned()
+                .expect("the priced domain keeps its record")
+        };
+        assert_eq!(record(&state).policy.backing, SecurityBacking::None);
+
+        // Accepted at the intake: the guard's backing is what the adapter attested.
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster),
+            &ExternalDomainTx::SubmitEvidence(Box::new(evidence(poster, 200, [0xAA; 32]))),
+        )
+        .expect("the evidence is accepted");
+        assert!(
+            matches!(
+                record(&state).policy.backing,
+                SecurityBacking::SignatureSet { .. }
+            ),
+            "the guard must read the sync-committee backing the intake verified, got {:?}",
+            record(&state).policy.backing
+        );
+        assert!(matches!(record(&state).status, DomainGuardStatus::Active));
+
+        // Proven false at the intake: the guard's window stops.
+        let challenger = addr(42);
+        state.add_balance(&challenger, 10_000);
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::ChallengeContradiction(Box::new(evidence(
+                challenger, 200, [0xBB; 32],
+            ))),
+        )
+        .expect("the contradiction is proven");
+        assert!(
+            matches!(
+                record(&state).status,
+                DomainGuardStatus::FrozenByContradiction { .. }
+            ),
+            "got {:?}",
+            record(&state).status
+        );
+        assert_eq!(effective_ceiling_atoms(&record(&state)), 0);
     }
 
     #[test]
