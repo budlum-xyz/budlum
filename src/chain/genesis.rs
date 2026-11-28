@@ -919,6 +919,12 @@ impl GenesisConfig {
     #[must_use]
     pub fn build_state(&self) -> AccountState {
         let mut state = AccountState::new();
+        // The bridge economic guard follows the chain: mainnet and the public
+        // testnet require an explicit guard record for every domain a bridge
+        // flow names, development chains stay permissive. The mode sits in
+        // the guard root, which every block end writes into the state root,
+        // so every node replaying the same genesis commits the same mode.
+        crate::cross_domain::bridge_tx::enable_chain_economic_guard_mode(&mut state, self.chain_id);
         // TESTNET-DEFAULT: fee rates belong to genesis state, not
         // a node-local config overlay, so every testnet replay commits the same
         // economic profile. Mainnet and development chains keep their explicit
@@ -1748,6 +1754,65 @@ mod tests {
             .validate_consensus_ceremony(Network::Mainnet)
             .unwrap_err()
             .contains("complete consensus-key records"));
+    }
+
+    /// The bridge economic guard's strict mode is a genesis decision keyed on
+    /// the chain id: a flow from a domain without a guard record is refused
+    /// on mainnet and the public testnet and passes on a development chain.
+    /// The mode sits in the guard root, which the block end writes into the
+    /// state root, so every node replaying the same genesis commits it.
+    #[test]
+    fn the_genesis_bridge_guard_mode_follows_the_chain() {
+        let testnet = GenesisConfig {
+            chain_id: Network::Testnet.chain_id().value(),
+            ..GenesisConfig::default()
+        };
+        let mainnet = GenesisConfig {
+            chain_id: Network::Mainnet.chain_id().value(),
+            ..GenesisConfig::default()
+        };
+        let devnet = GenesisConfig::default();
+        assert_eq!(devnet.chain_id, Network::Devnet.chain_id().value());
+
+        let strict = testnet.build_state();
+        assert!(
+            strict
+                .bridge_state
+                .economic_guard
+                .requires_configured_domains(),
+            "the public testnet genesis must fail closed on unguarded bridge domains"
+        );
+        assert!(mainnet
+            .build_state()
+            .bridge_state
+            .economic_guard
+            .requires_configured_domains());
+        assert!(!devnet
+            .build_state()
+            .bridge_state
+            .economic_guard
+            .requires_configured_domains());
+
+        // An unguarded domain's flow is refused on the strict genesis state
+        // and admitted on the permissive one.
+        let mut strict_guard = strict.bridge_state.economic_guard.clone();
+        assert!(strict_guard.check_and_record_flow(99, 1, 1).is_err());
+        let mut permissive_guard = devnet.build_state().bridge_state.economic_guard.clone();
+        assert!(permissive_guard.check_and_record_flow(99, 1, 1).is_ok());
+
+        // The mode is committed through the bridge root a block end writes
+        // into the state root (`apply_block_end_roots` sets
+        // `state.bridge_root = state.bridge_state.root()`): refresh it the
+        // same way, clear the mode, refresh again - the state roots differ.
+        let mut committed = testnet.build_state();
+        committed.bridge_root = committed.bridge_state.root();
+        let root_strict = committed.calculate_state_root();
+        committed
+            .bridge_state
+            .economic_guard
+            .set_require_configured_domains(false);
+        committed.bridge_root = committed.bridge_state.root();
+        assert_ne!(root_strict, committed.calculate_state_root());
     }
 
     #[test]

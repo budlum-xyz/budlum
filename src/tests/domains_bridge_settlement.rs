@@ -487,7 +487,12 @@ fn app_binding_is_open_on_devnet() {
 /// committed `DomainEventTree` proofs and exact supply conservation.
 #[test]
 fn bridge_e2e_lock_mint_burn_unlock() {
-    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, TESTNET_CHAIN_ID, None);
+    // The bridge mechanics on a development chain: the public testnet's
+    // genesis runs the strict economic guard, which refuses a mint from a
+    // domain nobody has pinned and bonded (see
+    // `chain::genesis::tests::the_genesis_bridge_guard_mode_follows_the_chain`),
+    // and these domains are neither.
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, DEVNET_CHAIN_ID, None);
     let op1 = addr(0x41);
     let op2 = addr(0x42);
     for (id, op) in [(1u32, op1), (2u32, op2)] {
