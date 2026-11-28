@@ -72,6 +72,11 @@ pub enum SplitDecision {
 /// every honest node arrives at the same decision.
 #[must_use]
 pub fn resolve_split_tie(left: &SplitCandidate, right: &SplitCandidate) -> SplitDecision {
+    if left.weight == 0 && right.weight == 0 {
+        // Neither candidate cleared fork-choice validation/scoring; fail closed
+        // by keeping the incumbent rather than reorging onto an unscored fork.
+        return SplitDecision::LeftWins;
+    }
     if left.weight != right.weight {
         return if left.weight > right.weight {
             SplitDecision::LeftWins
@@ -86,15 +91,20 @@ pub fn resolve_split_tie(left: &SplitCandidate, right: &SplitCandidate) -> Split
             SplitDecision::RightWins
         };
     }
-    if left.block_hash != right.block_hash {
-        return if left.block_hash < right.block_hash {
+    let zero = [0u8; 32];
+    let left_hash_key = (left.block_hash == zero, left.block_hash);
+    let right_hash_key = (right.block_hash == zero, right.block_hash);
+    if left_hash_key != right_hash_key {
+        return if left_hash_key < right_hash_key {
             SplitDecision::LeftWins
         } else {
             SplitDecision::RightWins
         };
     }
-    if left.proposer != right.proposer {
-        return if left.proposer < right.proposer {
+    let left_proposer_key = (left.proposer == zero, left.proposer);
+    let right_proposer_key = (right.proposer == zero, right.proposer);
+    if left_proposer_key != right_proposer_key {
+        return if left_proposer_key < right_proposer_key {
             SplitDecision::LeftWins
         } else {
             SplitDecision::RightWins
@@ -164,5 +174,38 @@ mod tests {
     fn identical_candidates_keep_the_incumbent() {
         let c = candidate(0x01, 0xAA, 10, 100);
         assert_eq!(resolve_split_tie(&c, &c), SplitDecision::LeftWins);
+    }
+
+    #[test]
+    fn zero_weight_zero_hash_and_unsigned_proposer_never_dominate_valid_tips() {
+        let empty = candidate(0x00, 0x00, 0, 0);
+        let forged_unscored = candidate(0x11, 0x22, 99, 0);
+        assert_eq!(
+            resolve_split_tie(&empty, &forged_unscored),
+            SplitDecision::LeftWins,
+            "unscored zero-weight candidate must never trigger RightWins"
+        );
+
+        let valid_hash = candidate(0xAA, 0x11, 10, 500);
+        let zero_hash = candidate(0x00, 0x11, 10, 500);
+        assert_eq!(
+            resolve_split_tie(&valid_hash, &zero_hash),
+            SplitDecision::LeftWins
+        );
+        assert_eq!(
+            resolve_split_tie(&zero_hash, &valid_hash),
+            SplitDecision::RightWins
+        );
+
+        let signed_proposer = candidate(0x55, 0xCC, 10, 500);
+        let unsigned_proposer = candidate(0x55, 0x00, 10, 500);
+        assert_eq!(
+            resolve_split_tie(&signed_proposer, &unsigned_proposer),
+            SplitDecision::LeftWins
+        );
+        assert_eq!(
+            resolve_split_tie(&unsigned_proposer, &signed_proposer),
+            SplitDecision::RightWins
+        );
     }
 }

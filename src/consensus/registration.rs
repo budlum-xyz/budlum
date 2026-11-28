@@ -81,6 +81,11 @@ pub fn verify_registration(
     {
         return Err(RegistrationError::BadAddress);
     }
+    if registration.pq_public_key.is_empty() || registration.pq_public_key.iter().all(|&b| b == 0) {
+        return Err(RegistrationError::PqSignature(
+            "empty or all-zero ML-DSA-65 public key".into(),
+        ));
+    }
     if !registry
         .scheme_status(SchemeId::ED25519)
         .is_some_and(crate::crypto::scheme::SchemeStatus::verifies)
@@ -209,5 +214,20 @@ mod tests {
             verify_registration(&statuses, 7, &reg).is_err(),
             "disabled Ed25519 scheme must refuse registration verification"
         );
+
+        let mut empty_pq = registration(7);
+        empty_pq.pq_public_key.clear();
+        empty_pq.ed25519_signature = vec![0; 64];
+        assert!(matches!(
+            verify_registration(&SchemeStatusRegistry::genesis(), 7, &empty_pq),
+            Err(RegistrationError::PqSignature(ref msg)) if msg.contains("empty or all-zero")
+        ));
+
+        let mut zero_pq = registration(7);
+        zero_pq.pq_public_key.fill(0);
+        assert!(matches!(
+            verify_registration(&SchemeStatusRegistry::genesis(), 7, &zero_pq),
+            Err(RegistrationError::PqSignature(ref msg)) if msg.contains("empty or all-zero")
+        ));
     }
 }

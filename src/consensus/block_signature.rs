@@ -47,8 +47,13 @@ pub fn sign_with_context(
     message: &[u8],
     rnd: &[u8; 32],
 ) -> Result<Vec<u8>, CompositeError> {
-    if context.is_empty() {
+    if context.is_empty() || context.len() > 255 {
         return Err(CompositeError::BadContext);
+    }
+    if message.is_empty() || message.iter().all(|&b| b == 0) {
+        return Err(CompositeError::BadEncoding(
+            "empty or all-zero message digest",
+        ));
     }
     if keypair.public_key()?.suite != SuiteId::VALIDATOR {
         return Err(CompositeError::SuiteMismatch);
@@ -210,9 +215,17 @@ pub fn verify_with_context(
     block_hash: &[u8; 32],
     signature: &[u8],
 ) -> Result<(), BlockSignatureError> {
-    if context.is_empty() {
+    if context.is_empty() || context.len() > 255 {
         return Err(BlockSignatureError::Malformed(
-            "signature context must be non-empty".into(),
+            "signature context must be 1 to 255 bytes".into(),
+        ));
+    }
+    if producer == &[0u8; 32] {
+        return Err(BlockSignatureError::WrongProducer);
+    }
+    if block_hash == &[0u8; 32] {
+        return Err(BlockSignatureError::Malformed(
+            "message digest must be non-zero".into(),
         ));
     }
     let public = CompositePublicKey::decode(public_key)
@@ -355,6 +368,55 @@ mod tests {
         assert!(
             sign_block(&user_kp, &[9u8; 32], &[0u8; 32]).is_err(),
             "non-validator composite suite must be refused by sign_block"
+        );
+        assert!(
+            sign_block(&kp, &[0u8; 32], &[0u8; 32]).is_err(),
+            "all-zero digest must be refused when signing"
+        );
+        assert!(
+            sign_with_context(&kp, ctx::BLOCK_V6, b"", &[0u8; 32]).is_err(),
+            "empty message must be refused when signing"
+        );
+        let oversized_ctx = vec![b'C'; 256];
+        assert!(
+            sign_with_context(&kp, &oversized_ctx, &[9u8; 32], &[0u8; 32]).is_err(),
+            "oversized >255-byte FIPS 204 context must be refused when signing"
+        );
+        assert!(
+            verify_block(
+                &SchemeStatusRegistry::genesis(),
+                &[0u8; 32],
+                &public.encode(),
+                &[9u8; 32],
+                &valid_sig,
+            )
+            .is_err(),
+            "all-zero producer must be refused when verifying"
+        );
+        assert!(
+            verify_block(
+                &SchemeStatusRegistry::genesis(),
+                &public.ed,
+                &public.encode(),
+                &[0u8; 32],
+                &valid_sig,
+            )
+            .is_err(),
+            "all-zero digest must be refused when verifying"
+        );
+        assert!(
+            matches!(
+                verify_with_context(
+                    &SchemeStatusRegistry::genesis(),
+                    &public.ed,
+                    &public.encode(),
+                    &oversized_ctx,
+                    &[9u8; 32],
+                    &valid_sig,
+                ),
+                Err(BlockSignatureError::Malformed(_))
+            ),
+            "oversized >255-byte context must be refused when verifying"
         );
     }
 }
