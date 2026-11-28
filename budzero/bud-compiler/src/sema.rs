@@ -310,6 +310,10 @@ impl SemanticAnalyzer {
             }
         }
 
+        // 1c. Reject cyclic struct definitions (BudL structs are value-laid-out
+        // with no heap indirection or optional pointers).
+        self.check_struct_cycles(&mut errors);
+
         // 2. Register functions
         for f in &contract.functions {
             let mut params = Vec::new();
@@ -751,6 +755,47 @@ impl SemanticAnalyzer {
                 self.analyze_expr(expr, env, errors);
             }
         }
+    }
+
+    fn check_struct_cycles(&self, errors: &mut Vec<CompileError>) {
+        // 0 = unvisited, 1 = visiting (on active stack), 2 = done
+        let mut names: Vec<&String> = self.structs.keys().collect();
+        names.sort();
+        let mut state: HashMap<&str, u8> = HashMap::new();
+        for name in names {
+            if state.get(name.as_str()).copied().unwrap_or(0) == 0 {
+                self.dfs_struct_cycle(name.as_str(), &mut state, errors);
+            }
+        }
+    }
+
+    fn dfs_struct_cycle<'a>(
+        &'a self,
+        name: &'a str,
+        state: &mut HashMap<&'a str, u8>,
+        errors: &mut Vec<CompileError>,
+    ) {
+        state.insert(name, 1);
+        if let Some(fields) = self.structs.get(name) {
+            let mut field_names: Vec<&String> = fields.keys().collect();
+            field_names.sort();
+            for fname in field_names {
+                if let Some(Type::Struct(target)) = fields.get(fname) {
+                    if self.structs.contains_key(target.as_str()) {
+                        match state.get(target.as_str()).copied().unwrap_or(0) {
+                            1 => {
+                                errors.push(CompileError::SemanticError(format!(
+                                    "cyclic struct definition: '{name}' contains '{target}'"
+                                )));
+                            }
+                            0 => self.dfs_struct_cycle(target.as_str(), state, errors),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        state.insert(name, 2);
     }
 
     fn analyze_expr(

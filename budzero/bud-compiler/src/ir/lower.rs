@@ -535,6 +535,14 @@ impl<'a> Lowerer<'a> {
     ) -> Result<Option<(ValueId, IrType)>, LoweringError> {
         match expr {
             Expr::Int(v) => {
+                const GOLDILOCKS_P: u64 = 18_446_744_069_414_584_321;
+                if *v >= GOLDILOCKS_P {
+                    return Err(LoweringError::UnsupportedNode(format!(
+                        "integer literal {} exceeds the Goldilocks field modulus (max {})",
+                        v,
+                        GOLDILOCKS_P - 1
+                    )));
+                }
                 let val = ctx.push_value_instr(Instruction::Const {
                     ty: IrType::U64,
                     value: *v,
