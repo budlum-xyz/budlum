@@ -319,10 +319,16 @@ impl Vm {
     /// held node becomes the leaf (group 0), the compression of the node and the
     /// buffer ordered by the key bit (groups 1 to 64), or stays (the root group,
     /// whose rows compare the held node with the root words).
-    fn merkle_walk(&self, path_addr: usize) -> Option<MerkleWalk> {
-        let end = path_addr.checked_add(8 * MERKLE_WINDOW_WORDS)?;
+    fn checked_jump_target(cur_pc: usize, imm: i32) -> Option<usize> {
+        cur_pc.checked_add_signed(imm as isize)
+    }
+
+    fn merkle_walk(&self, path_addr: usize) -> Result<Option<MerkleWalk>, VmError> {
+        let Some(end) = path_addr.checked_add(8 * MERKLE_WINDOW_WORDS) else {
+            return Ok(None);
+        };
         if end > self.memory.len() {
-            return None;
+            return Ok(None);
         }
         let key = self.memory_word(path_addr);
         let mut rows = Vec::with_capacity(MERKLE_ROUNDS);
@@ -332,6 +338,12 @@ impl Vm {
         for round in 0..MERKLE_ROUNDS {
             let addr = path_addr + 8 + 8 * round;
             let word = self.memory_word(addr);
+            // Every leaf, sibling, and root word enters the AIR as a Goldilocks
+            // field element (`word mod P`), whereas this VM compares raw `u64`.
+            // Refuse any word >= GOLDILOCKS_P so VM and AIR never diverge.
+            if word >= GOLDILOCKS_P {
+                return Err(VmError::InvalidMemoryAccess);
+            }
             let lane = round % 4;
             let group = round / 4;
             buffer[lane] = word;
@@ -358,7 +370,7 @@ impl Vm {
                 }
             }
         }
-        Some(MerkleWalk { key, rows, matches })
+        Ok(Some(MerkleWalk { key, rows, matches }))
     }
 
     pub fn step(&mut self, program: &[u64]) -> Result<(), VmError> {
@@ -543,13 +555,22 @@ impl Vm {
                 (0, cur_pc + 1)
             }
             Opcode::Jmp => {
-                let target = (cur_pc as i64 + inst.imm as i64) as usize;
+                let Some(target) = Self::checked_jump_target(cur_pc, inst.imm) else {
+                    self.halted = true;
+                    self.error = Some(VmError::InvalidPc);
+                    return Err(VmError::InvalidPc);
+                };
                 self.pc = target;
                 (0, target)
             }
             Opcode::Jnz => {
                 let target = if src1_val != 0 {
-                    (cur_pc as i64 + inst.imm as i64) as usize
+                    let Some(t) = Self::checked_jump_target(cur_pc, inst.imm) else {
+                        self.halted = true;
+                        self.error = Some(VmError::InvalidPc);
+                        return Err(VmError::InvalidPc);
+                    };
+                    t
                 } else {
                     cur_pc + 1
                 };
@@ -562,7 +583,11 @@ impl Vm {
                     self.error = Some(VmError::StackOverflow);
                     return Err(VmError::StackOverflow);
                 }
-                let target = (cur_pc as i64 + inst.imm as i64) as usize;
+                let Some(target) = Self::checked_jump_target(cur_pc, inst.imm) else {
+                    self.halted = true;
+                    self.error = Some(VmError::InvalidPc);
+                    return Err(VmError::InvalidPc);
+                };
                 self.stack.push((cur_pc + 1) as u64);
                 self.pc = target;
                 ((cur_pc + 1) as u64, target)
@@ -654,10 +679,14 @@ impl Vm {
                     constant_storage_slot(inst.imm)
                 };
                 if slot >= GOLDILOCKS_P {
+                    self.halted = true;
+                    self.error = Some(VmError::InvalidMemoryAccess);
                     return Err(VmError::InvalidMemoryAccess);
                 }
                 let val = *self.storage.get(&slot).unwrap_or(&0);
                 if val >= GOLDILOCKS_P {
+                    self.halted = true;
+                    self.error = Some(VmError::InvalidMemoryAccess);
                     return Err(VmError::InvalidMemoryAccess);
                 }
                 self.registers[dst_idx as usize] = val;
@@ -671,6 +700,8 @@ impl Vm {
                     constant_storage_slot(inst.imm)
                 };
                 if slot >= GOLDILOCKS_P || src1_val >= GOLDILOCKS_P {
+                    self.halted = true;
+                    self.error = Some(VmError::InvalidMemoryAccess);
                     return Err(VmError::InvalidMemoryAccess);
                 }
                 self.storage.insert(slot, src1_val);
@@ -725,7 +756,14 @@ impl Vm {
                 // `checked_add`: `inst.imm` is program supplied, and an address
                 // within the window length of `usize::MAX` must be refused, not
                 // wrapped into a small number that passes the bound.
-                let walk = self.merkle_walk(path_addr);
+                let walk = match self.merkle_walk(path_addr) {
+                    Ok(w) => w,
+                    Err(err) => {
+                        self.halted = true;
+                        self.error = Some(err.clone());
+                        return Err(err);
+                    }
+                };
                 let result = match &walk {
                     Some(w) => {
                         // The key is read from memory like any other word, so it
