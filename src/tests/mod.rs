@@ -38,6 +38,7 @@ pub mod bridge_negatives;
 pub mod bud_e2e;
 #[cfg(test)]
 pub mod byzantine_settlement;
+pub mod finality_write_path;
 #[cfg(test)]
 pub mod chain_id_registry_locks;
 #[cfg(test)]

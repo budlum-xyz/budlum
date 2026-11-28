@@ -1033,6 +1033,17 @@ mod tests {
 
     #[test]
     fn production_is_granted_with_hsm_signers_a_ceremony_and_a_passing_self_test() {
+        // HARNESS NOTE (2026-11-24, Kurgu): this test was the cabin's stuck
+        // point - `cargo test --lib settlement::` sat here for >40 minutes at
+        // 168% CPU inside `WalletKeyPair::from_seed`/`sign`. That is the
+        // *token double*, not the code under test: every second spent proving
+        // an ML-DSA-87 software signature twice (three anchors + seal) is a
+        // second the same assertions spend checking the production gate. The
+        // assertions below are unchanged and the doubles still sign through
+        // the real `WalletKeyPair`; the cost is the cryptographic ceremony a
+        // TokenDouble exists to *simulate*. Do not "optimise" this by
+        // weakening the assertions - move the run to a release-profile
+        // harness if the cost matters, and say so in the evidence report.
         let ledger = software_ledger(DEVNET, 1);
         let cold = cold_committee();
         let record = ceremony(&ledger, &cold, 3);
