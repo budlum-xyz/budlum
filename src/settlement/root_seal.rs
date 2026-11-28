@@ -198,6 +198,28 @@ fn anchor_leaf(anchor: &PqAnchor) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+fn validate_period_anchors_meta(
+    chain_id: u64,
+    key_epoch: u32,
+    anchors: &[PqAnchor],
+) -> Result<(), SealError> {
+    for anchor in anchors {
+        if anchor.chain_id != chain_id {
+            return Err(SealError::WrongChain {
+                expected: chain_id,
+                got: anchor.chain_id,
+            });
+        }
+        if anchor.key_epoch != key_epoch {
+            return Err(SealError::StaleKeyEpoch {
+                seal_epoch: anchor.key_epoch,
+                current_epoch: key_epoch,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The Merkle root over the anchors of the period ending at `seal_height`.
 ///
 /// # Errors
@@ -223,6 +245,9 @@ pub fn period_anchors_root(
             presented: anchors.len(),
         });
     }
+    let expected_chain = anchors[0].chain_id;
+    let expected_epoch = anchors[0].key_epoch;
+    validate_period_anchors_meta(expected_chain, expected_epoch, anchors)?;
     let period_start = seal_height - ROOT_SEAL_INTERVAL;
     let mut previous: Option<u64> = None;
     let mut leaves = Vec::with_capacity(anchors.len());
@@ -386,6 +411,26 @@ pub fn build_root_seal(
     signer: &dyn SealSigner,
 ) -> Result<RootSeal, SealError> {
     let (anchors_root, anchor_count) = period_anchors_root(seal_height, period_anchors)?;
+    validate_period_anchors_meta(chain_id, key_epoch, period_anchors)?;
+    if let Some(prev) = previous {
+        if prev.chain_id != chain_id {
+            return Err(SealError::WrongChain {
+                expected: chain_id,
+                got: prev.chain_id,
+            });
+        }
+        if !seal_due(prev.seal_height) {
+            return Err(SealError::HeightNotOnBoundary {
+                height: prev.seal_height,
+            });
+        }
+        if seal_height <= prev.seal_height {
+            return Err(SealError::NotNewer {
+                seal_height,
+                latest: prev.seal_height,
+            });
+        }
+    }
     let previous_seal = previous.map_or(GENESIS_SEAL_LINK, RootSeal::digest);
     let payload = root_seal_payload(
         chain_id,
@@ -446,6 +491,19 @@ pub fn verify_root_seal(
             height: seal.seal_height,
         });
     }
+    if seal.anchor_count == 0 {
+        return Err(SealError::NoAnchors);
+    }
+    let presented_count = usize::try_from(seal.anchor_count).unwrap_or(usize::MAX);
+    if presented_count > MAX_SEAL_ANCHORS {
+        return Err(SealError::TooManyAnchors {
+            max: MAX_SEAL_ANCHORS,
+            presented: presented_count,
+        });
+    }
+    if seal.anchors_root == [0u8; 32] {
+        return Err(SealError::AnchorsMismatch);
+    }
     if seal.key_epoch != current_key_epoch {
         return Err(SealError::StaleKeyEpoch {
             seal_epoch: seal.key_epoch,
@@ -464,6 +522,7 @@ pub fn verify_root_seal(
         });
     }
     if let Some(anchors) = anchors {
+        validate_period_anchors_meta(chain_id, current_key_epoch, anchors)?;
         let (root, count) = period_anchors_root(seal.seal_height, anchors)?;
         if root != seal.anchors_root || count != seal.anchor_count {
             return Err(SealError::AnchorsMismatch);
@@ -807,5 +866,58 @@ mod tests {
         ] {
             assert_ne!(base, other);
         }
+    }
+
+    #[test]
+    fn root_seal_enforces_anchor_meta_monotonic_prev_and_bounded_counts() {
+        let (signer, _, first) = fixture();
+        let mut foreign = anchor(360);
+        foreign.chain_id = 999;
+        assert_eq!(
+            build_root_seal(CHAIN, 3_600, &[foreign], None, 1, 0, signer)
+                .unwrap_err()
+                .kind(),
+            "seal-wrong-chain"
+        );
+        let mut stale = anchor(360);
+        stale.key_epoch = 9;
+        assert_eq!(
+            build_root_seal(CHAIN, 3_600, &[stale], None, 1, 0, signer)
+                .unwrap_err()
+                .kind(),
+            "seal-stale-key-epoch"
+        );
+        let second =
+            build_root_seal(CHAIN, 7_200, &period(7_200), Some(first), 1, 0, signer).unwrap();
+        assert_eq!(
+            build_root_seal(CHAIN, 3_600, &period(3_600), Some(&second), 1, 0, signer)
+                .unwrap_err()
+                .kind(),
+            "seal-not-newer"
+        );
+        let mut zero_count = first.clone();
+        zero_count.anchor_count = 0;
+        assert_eq!(
+            verify_root_seal(&zero_count, CHAIN, &keys(), 1, None)
+                .unwrap_err()
+                .kind(),
+            "seal-no-anchors"
+        );
+        let mut over_count = first.clone();
+        over_count.anchor_count = (MAX_SEAL_ANCHORS as u32) + 1;
+        assert_eq!(
+            verify_root_seal(&over_count, CHAIN, &keys(), 1, None)
+                .unwrap_err()
+                .kind(),
+            "seal-too-many-anchors"
+        );
+        let mut zero_root = first.clone();
+        zero_root.anchors_root = [0u8; 32];
+        assert_eq!(
+            verify_root_seal(&zero_root, CHAIN, &keys(), 1, None)
+                .unwrap_err()
+                .kind(),
+            "seal-anchors-mismatch"
+        );
     }
 }
