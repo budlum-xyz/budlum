@@ -452,6 +452,8 @@ pub enum UnificationExecutionError {
     Composition(#[from] CompositionError),
     #[error("storage fabric transition failed: {0}")]
     Storage(#[from] StorageFabricError),
+    #[error("settlement refused by the universal finality certificate: {0}")]
+    PaymentFinalityRefused(String),
 }
 
 /// Deterministic, finality-gated, all-or-nothing in-block unification ledger.
@@ -615,6 +617,62 @@ impl UnificationLedger {
         bonded_quotes: &[BondedLiquidityQuote],
         now_unix_secs: u64,
     ) -> Result<UniversalPaymentReceipt, UnificationExecutionError> {
+        self.execute_finality_gated_payment_checked(
+            intent,
+            balances,
+            bonded_quotes,
+            now_unix_secs,
+            None,
+        )
+    }
+
+    /// Execute the same settlement, but only when a universal finality
+    /// certificate admits every leg through the [`ValueGate::UniversalPayment`]
+    /// gate.
+    ///
+    /// `execute_finality_gated_payment` decides from the ledger's own per-domain
+    /// anchors. Those anchors are a local cache: a settlement that never saw a
+    /// certificate can still move value if the cache says a domain is healthy.
+    /// This entry point closes that gap for callers that hold the certificate
+    /// (the single decision point is `settlement::finality_gate`), and it runs
+    /// before any staging so a refused settlement cannot debit even a clone.
+    ///
+    /// # Errors
+    ///
+    /// Everything `execute_finality_gated_payment` returns, plus
+    /// [`UnificationExecutionError::PaymentFinalityRefused`] when the
+    /// certificate's seal does not re-derive or a leg's route is not admitted.
+    pub fn execute_finality_gated_payment_checked(
+        &mut self,
+        intent: &UniversalPaymentIntent,
+        balances: &mut [DomainTokenBalance],
+        bonded_quotes: &[BondedLiquidityQuote],
+        now_unix_secs: u64,
+        certificate: Option<&crate::settlement::GlobalFinalityCertificate>,
+    ) -> Result<UniversalPaymentReceipt, UnificationExecutionError> {
+        if let Some(cert) = certificate {
+            // One rule, one place: the gate re-derives the certificate's own
+            // seal before it reads a single row, so this call refuses a forged
+            // certificate and an unadmitted route with the same door.
+            let mut sources: std::collections::BTreeSet<u32> = bonded_quotes
+                .iter()
+                .map(|bq| bq.quote.source_domain)
+                .collect();
+            sources.insert(intent.target_domain);
+            for source_domain in sources {
+                crate::settlement::finality_gate::check_certificate_value_gate(
+                    cert,
+                    crate::settlement::finality_gate::ValueGate::UniversalPayment,
+                    source_domain,
+                    Some(intent.target_domain),
+                )
+                .map_err(|err| {
+                    UnificationExecutionError::PaymentFinalityRefused(format!(
+                        "domain {source_domain} is not admitted by the certificate: {err}"
+                    ))
+                })?;
+            }
+        }
         let target_anchor = self
             .domains
             .get(&intent.target_domain)
