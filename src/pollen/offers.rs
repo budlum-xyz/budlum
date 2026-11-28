@@ -2330,10 +2330,9 @@ mod tests {
         let seller = addr(1);
         let cid = ContentId([0xEE; 32]);
         reg.next_offer_id = u64::MAX;
-        let id = reg.create_offer(seller, cid, 50, 7).unwrap();
-        assert_eq!(id, u64::MAX);
-        assert_eq!(reg.next_offer_id, u64::MAX);
         assert!(reg.create_offer(seller, cid, 50, 7).is_err());
+        assert_eq!(reg.next_offer_id, u64::MAX);
+        assert!(reg.offers.is_empty());
 
         for v in 1..=(MAX_ENCRYPTION_POLICIES as u32) {
             reg.set_encryption_policy(EncryptionPolicy::post_quantum(v, 100, None))
