@@ -3,7 +3,12 @@
 // aderyn-fp-next-line(push-zero-opcode)
 pragma solidity 0.8.26;
 
-import {FinalityMode, IBudlumFinality} from "../external-domain/BudlumFinalityVerifier.sol";
+import {
+    FinalityMode,
+    IBudlumFinality,
+    IBudlumQuantumAlert,
+    QuantumAlertLevel
+} from "../external-domain/BudlumFinalityVerifier.sol";
 import {BudlumHash} from "../lib/BudlumHash.sol";
 
 /// @notice A Budlum AppBinding payment as `AppBindingPayment` (src/settlement/app_binding.rs).
@@ -170,6 +175,9 @@ abstract contract BudlumPaymentReceiver {
         if (mode == FinalityMode.None) {
             return "checkpoint not final";
         }
+        if (mode == FinalityMode.ClassicalOnly && _alertActive()) {
+            return "quantum alert: classical halted";
+        }
         if (_requiresHybridFinality() && mode != FinalityMode.Hybrid) {
             return "hybrid finality required";
         }
@@ -185,6 +193,18 @@ abstract contract BudlumPaymentReceiver {
             return "state root opening";
         }
         return "";
+    }
+
+    function _alertActive() internal view returns (bool) {
+        (bool ok, bytes memory data) = address(finality).staticcall(abi.encodeCall(IBudlumQuantumAlert.alertLevel, ()));
+        if (!ok) {
+            return false;
+        }
+        if (data.length != 32) {
+            return true;
+        }
+        uint256 level = abi.decode(data, (uint256));
+        return level != uint256(QuantumAlertLevel.Open);
     }
 
     function paymentLeaf(AppBindingPayment calldata p) public pure returns (bytes32) {
