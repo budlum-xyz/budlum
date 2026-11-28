@@ -5325,10 +5325,17 @@ impl AccountState {
                 "bond of {amount} exceeds the poster's spendable balance of {spendable}"
             ));
         }
+        let new_balance = balance
+            .checked_sub(amount)
+            .ok_or_else(|| format!("bond of {amount} exceeds the poster's balance of {balance}"))?;
+        let held = self.external_bond_escrow.get(poster).copied().unwrap_or(0);
+        let new_escrow = held.checked_add(amount).ok_or_else(|| {
+            format!("escrowing {amount} overflows the poster's external bond balance of {held}")
+        })?;
         let account = self.get_or_create(poster);
-        account.balance = balance - amount;
+        account.balance = new_balance;
         self.dirty_accounts.insert(*poster);
-        *self.external_bond_escrow.entry(*poster).or_insert(0) += amount;
+        self.external_bond_escrow.insert(*poster, new_escrow);
         Ok(())
     }
 
@@ -8765,6 +8772,26 @@ mod c3_validator_readiness_tests {
         // Nothing escrowed, nothing moved.
         assert_eq!(state.get_balance(&poster), 50);
         assert!(state.external_bond_escrow.is_empty());
+    }
+
+    #[test]
+    fn lock_external_bond_refuses_escrow_overflow_before_balance_debit() {
+        let mut state = AccountState::new();
+        let poster = Address::from([0x7bu8; 32]);
+        state.add_balance(&poster, 50);
+        state.external_bond_escrow.insert(poster, u64::MAX - 10);
+        state.dirty_accounts.clear();
+
+        let err = state
+            .lock_external_bond(&poster, 20)
+            .expect_err("escrow overflow must fail before debiting balance");
+        assert!(err.contains("overflow"), "unexpected error: {err}");
+        assert_eq!(state.get_balance(&poster), 50);
+        assert_eq!(
+            state.external_bond_escrow.get(&poster),
+            Some(&(u64::MAX - 10))
+        );
+        assert!(state.dirty_accounts.is_empty());
     }
 
     #[test]

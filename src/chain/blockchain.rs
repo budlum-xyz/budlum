@@ -10007,8 +10007,10 @@ impl Blockchain {
     }
 
     /// Keep a vote whose round has not started (or has no prevote quorum)
-    /// yet, bounded and de-duplicated by (voter, epoch, height): a re-delivered
-    /// or repeated gossip of the same vote must not fill the buffer.
+    /// yet, bounded and de-duplicated by `(voter, epoch, height, hash)`: a
+    /// re-delivered gossip of the same vote must not fill the buffer, while a
+    /// conflicting vote for a different checkpoint hash is preserved so replay
+    /// can emit equivocation evidence.
     fn keep_early_prevote(&mut self, vote: Prevote) {
         const MAX_EARLY_VOTES_PER_VOTER: usize = 2;
         let votes = &mut self.early_finality_votes.prevotes;
@@ -10016,6 +10018,7 @@ impl Blockchain {
             kept.voter_id == vote.voter_id
                 && kept.epoch == vote.epoch
                 && kept.checkpoint_height == vote.checkpoint_height
+                && kept.checkpoint_hash == vote.checkpoint_hash
         }) {
             return;
         }
@@ -10040,6 +10043,7 @@ impl Blockchain {
             kept.voter_id == vote.voter_id
                 && kept.epoch == vote.epoch
                 && kept.checkpoint_height == vote.checkpoint_height
+                && kept.checkpoint_hash == vote.checkpoint_hash
         }) {
             return;
         }
@@ -10058,19 +10062,23 @@ impl Blockchain {
     }
 
     /// Offer the kept prevotes to the round that just started. Votes for
-    /// another (epoch, height, hash) stay kept - a node that is one round
-    /// behind votes at a height this node has already moved past, and the
-    /// next round may still be the one they belong to.
+    /// another `(epoch, height)` stay kept, while all votes matching
+    /// `(epoch, height)` (canonical first, conflicting second) are replayed so
+    /// early equivocations produce slashing evidence.
     fn replay_early_prevotes(&mut self, epoch: u64, checkpoint_height: u64, checkpoint_hash: &str) {
         let kept = std::mem::take(&mut self.early_finality_votes.prevotes);
+        let mut matching = Vec::new();
+        let mut conflicting = Vec::new();
         for vote in kept {
-            if vote.epoch != epoch
-                || vote.checkpoint_height != checkpoint_height
-                || vote.checkpoint_hash != checkpoint_hash
-            {
+            if vote.epoch != epoch || vote.checkpoint_height != checkpoint_height {
                 self.keep_early_prevote(vote);
-                continue;
+            } else if vote.checkpoint_hash == checkpoint_hash {
+                matching.push(vote);
+            } else {
+                conflicting.push(vote);
             }
+        }
+        for vote in matching.into_iter().chain(conflicting) {
             if let Err(e) = self.handle_prevote(vote) {
                 tracing::debug!("kept prevote not admitted when its round started: {e}");
             }
@@ -10092,14 +10100,18 @@ impl Blockchain {
             return;
         };
         let kept = std::mem::take(&mut self.early_finality_votes.precommits);
+        let mut matching = Vec::new();
+        let mut conflicting = Vec::new();
         for vote in kept {
-            if vote.epoch != epoch
-                || vote.checkpoint_height != checkpoint_height
-                || vote.checkpoint_hash != checkpoint_hash
-            {
+            if vote.epoch != epoch || vote.checkpoint_height != checkpoint_height {
                 self.keep_early_precommit(vote);
-                continue;
+            } else if vote.checkpoint_hash == checkpoint_hash {
+                matching.push(vote);
+            } else {
+                conflicting.push(vote);
             }
+        }
+        for vote in matching.into_iter().chain(conflicting) {
             if let Err(e) = self.handle_precommit(vote) {
                 tracing::debug!("kept precommit not admitted when the quorum came in: {e}");
             }
@@ -13873,6 +13885,169 @@ mod tests {
         assert!(
             bc.early_finality_votes.precommits.is_empty(),
             "the kept precommit was replayed into its own round"
+        );
+    }
+
+    #[test]
+    fn early_conflicting_votes_produce_equivocation_reports_on_replay() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let voter_id = Address::from([0x5au8; 32]);
+        let bls = register_signed_early_voter(&mut bc, voter_id);
+        let pq_kp = crate::crypto::primitives::PqKeyPair::generate();
+        if let Some(v) = bc.state.get_validator_mut(&voter_id) {
+            v.vrf_public_key = vec![0x11; 32];
+            v.pq_public_key = pq_kp.public_key_bytes().to_vec();
+        }
+        // Add two peer validators so `voter_id` alone does not trip the 2/3 prevote quorum,
+        // and use the first peer for an independent precommit equivocation in step 2.
+        let peer_a = Address::from([0x5bu8; 32]);
+        let peer_a_bls = register_signed_early_voter(&mut bc, peer_a);
+        let peer_a_pq = crate::crypto::primitives::PqKeyPair::generate();
+        if let Some(v) = bc.state.get_validator_mut(&peer_a) {
+            v.vrf_public_key = vec![0x5bu8; 32];
+            v.pq_public_key = peer_a_pq.public_key_bytes().to_vec();
+        }
+        let peer_b = Address::from([0x5cu8; 32]);
+        let _peer_b_bls = register_signed_early_voter(&mut bc, peer_b);
+        let peer_b_pq = crate::crypto::primitives::PqKeyPair::generate();
+        if let Some(v) = bc.state.get_validator_mut(&peer_b) {
+            v.vrf_public_key = vec![0x5cu8; 32];
+            v.pq_public_key = peer_b_pq.public_key_bytes().to_vec();
+        }
+        bc.current_epoch_snapshot_cache = None;
+
+        let checkpoint_height =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
+        for height in 1..=checkpoint_height {
+            bc.chain.push(crate::core::block::Block::new_with_chain_id(
+                height,
+                "0".repeat(64),
+                Vec::new(),
+                45262,
+            ));
+        }
+        let hash_a = "a".repeat(64);
+        let hash_b = "b".repeat(64);
+
+        // 1) Two conflicting prevotes arrive before start_prevote_task.
+        let pv_a = sign_early_prevote(
+            &bls,
+            Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                epoch: 0,
+                checkpoint_height,
+                checkpoint_hash: hash_a.clone(),
+                voter_id,
+                sig_bls: Vec::new(),
+                auth_sig: Vec::new(),
+            },
+        );
+        let pv_b = sign_early_prevote(
+            &bls,
+            Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                epoch: 0,
+                checkpoint_height,
+                checkpoint_hash: hash_b.clone(),
+                voter_id,
+                sig_bls: Vec::new(),
+                auth_sig: Vec::new(),
+            },
+        );
+        assert!(bc.handle_prevote(pv_a).is_err());
+        assert!(bc.handle_prevote(pv_b).is_err());
+        assert_eq!(
+            bc.early_finality_votes.prevotes.len(),
+            2,
+            "both conflicting early prevotes must be kept"
+        );
+
+        bc.start_prevote_task(checkpoint_height, hash_a.clone());
+        assert!(
+            bc.early_finality_votes.prevotes.is_empty(),
+            "all prevotes for (epoch, checkpoint_height) must replay"
+        );
+        assert!(
+            !bc.pending_registry_slashing_reports.is_empty(),
+            "replaying conflicting early prevotes must enqueue a SlashingReport"
+        );
+
+        // 2) Two conflicting precommits from `peer_a` arrive before prevote_quorum_reached.
+        bc.pending_registry_slashing_reports.clear();
+        let peer_a_index = u32::try_from(
+            bc.finality_aggregator
+                .as_ref()
+                .expect("round")
+                .validator_snapshot
+                .validator_index(&peer_a)
+                .expect("peer_a index"),
+        )
+        .expect("u32 validator index");
+        let pq_msg_a =
+            crate::consensus::qc::pq_signing_message(0, checkpoint_height, &hash_a, peer_a_index);
+        let pq_sig_a = peer_a_pq
+            .sign(crate::crypto::ctx::QC_V2, &pq_msg_a)
+            .expect("pq sign a");
+        let pq_msg_b =
+            crate::consensus::qc::pq_signing_message(0, checkpoint_height, &hash_b, peer_a_index);
+        let pq_sig_b = peer_a_pq
+            .sign(crate::crypto::ctx::QC_V2, &pq_msg_b)
+            .expect("pq sign b");
+        let pc_a = sign_early_precommit(
+            &peer_a_bls,
+            Precommit {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                epoch: 0,
+                checkpoint_height,
+                checkpoint_hash: hash_a,
+                voter_id: peer_a,
+                sig_bls: Vec::new(),
+                auth_sig: Vec::new(),
+                pq_sig: pq_sig_a,
+            },
+        );
+        let pc_b = sign_early_precommit(
+            &peer_a_bls,
+            Precommit {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                epoch: 0,
+                checkpoint_height,
+                checkpoint_hash: hash_b,
+                voter_id: peer_a,
+                sig_bls: Vec::new(),
+                auth_sig: Vec::new(),
+                pq_sig: pq_sig_b,
+            },
+        );
+        let err_a = bc.handle_precommit(pc_a).expect_err("no prevote quorum");
+        assert!(
+            err_a.contains("Cannot precommit before prevote quorum"),
+            "{err_a}"
+        );
+        let err_b = bc.handle_precommit(pc_b).expect_err("no prevote quorum");
+        assert!(
+            err_b.contains("Cannot precommit before prevote quorum"),
+            "{err_b}"
+        );
+        assert_eq!(
+            bc.early_finality_votes.precommits.len(),
+            2,
+            "both conflicting early precommits must be kept"
+        );
+
+        bc.finality_aggregator
+            .as_mut()
+            .expect("round")
+            .prevote_quorum_reached = true;
+        bc.replay_early_precommits();
+        assert!(
+            bc.early_finality_votes.precommits.is_empty(),
+            "all precommits for (epoch, checkpoint_height) must replay"
+        );
+        assert!(
+            !bc.pending_registry_slashing_reports.is_empty(),
+            "replaying conflicting early precommits must enqueue a SlashingReport"
         );
     }
 
