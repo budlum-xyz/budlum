@@ -203,7 +203,7 @@ pub(crate) fn check_transaction_features(
 ) -> BudlumResult<()> {
     if matches!(
         tx_type,
-        TransactionType::PrivateTransferSubmit(Box::new(_)) | TransactionType::PrivacyNoteInsert(_)
+        TransactionType::PrivateTransferSubmit(_) | TransactionType::PrivacyNoteInsert(_)
     ) && !privacy_transfers_enabled(chain_id)
     {
         return Err(privacy_closed_refusal(
@@ -3469,7 +3469,7 @@ impl Executor {
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
-            TransactionType::PrivateTransferSubmit(Box::new(sub)) => {
+            TransactionType::PrivateTransferSubmit(sub) => {
                 if !privacy_transfers_enabled(tx.chain_id) {
                     return Err(privacy_closed_refusal(
                         tx.chain_id,

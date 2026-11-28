@@ -683,7 +683,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
-            TransactionType::PrivateTransferSubmit(Box::new(sub)) => (
+            TransactionType::PrivateTransferSubmit(sub) => (
                 pb::ProtoTransactionType::PrivateTransferSubmit as i32,
                 Some(pb::proto_transaction::TypePayload::PrivateTransferSubmit(
                     pb::ProtoPrivateTransferSubmit {
