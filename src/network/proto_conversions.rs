@@ -683,7 +683,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
-            TransactionType::PrivateTransferSubmit(sub) => (
+            TransactionType::PrivateTransferSubmit(Box::new(sub)) => (
                 pb::ProtoTransactionType::PrivateTransferSubmit as i32,
                 Some(pb::proto_transaction::TypePayload::PrivateTransferSubmit(
                     pb::ProtoPrivateTransferSubmit {
@@ -1978,21 +1978,23 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     .iter()
                     .map(|c| to32(c, "proof"))
                     .collect();
-                TransactionType::PrivateTransferSubmit(crate::privacy::PrivateTransferSubmit {
-                    spent_commitments: spent?,
-                    nullifiers: nulls?,
-                    output_commitments: outs?,
-                    nullifier_proofs: proofs?,
-                    authorization_sig: payload.authorization_sig,
-                    public_digest: to32(&payload.public_digest, "digest")?,
-                    // The protobuf schema predates the bundle. A transfer
-                    // decoded from the wire therefore carries none, and the
-                    // executor refuses it on a privacy-enabled chain rather
-                    // than settling it unverified. Adding the field to the
-                    // .proto is the next step; refusing is the safe state
-                    // until then.
-                    proof_bundle: None,
-                })
+                TransactionType::PrivateTransferSubmit(Box::new(
+                    crate::privacy::PrivateTransferSubmit {
+                        spent_commitments: spent?,
+                        nullifiers: nulls?,
+                        output_commitments: outs?,
+                        nullifier_proofs: proofs?,
+                        authorization_sig: payload.authorization_sig,
+                        public_digest: to32(&payload.public_digest, "digest")?,
+                        // The protobuf schema predates the bundle. A transfer
+                        // decoded from the wire therefore carries none, and the
+                        // executor refuses it on a privacy-enabled chain rather
+                        // than settling it unverified. Adding the field to the
+                        // .proto is the next step; refusing is the safe state
+                        // until then.
+                        proof_bundle: None,
+                    },
+                ))
             }
             pb::ProtoTransactionType::PrivacyNoteInsert => {
                 let payload = match proto.type_payload {

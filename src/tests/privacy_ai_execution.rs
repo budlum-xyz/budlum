@@ -77,7 +77,7 @@ fn private_transfer_with_composite_authorization_executes() {
         0,
         vec![],
         chain_id,
-        TransactionType::PrivateTransferSubmit(submit),
+        TransactionType::PrivateTransferSubmit(Box::new(submit)),
     );
     tx.sign_v7(
         &state.scheme_registry,
@@ -148,7 +148,7 @@ fn private_transfer_submit_spend_and_create() {
         0,
         vec![],
         crate::core::transaction::DEFAULT_CHAIN_ID,
-        TransactionType::PrivateTransferSubmit(sub),
+        TransactionType::PrivateTransferSubmit(Box::new(sub)),
     );
     tx.sign(&kp);
     // Shape, digest and authorization all pass; the bundle door is what the
@@ -198,7 +198,7 @@ fn private_transfer_double_spend_fails() {
         0,
         vec![],
         crate::core::transaction::DEFAULT_CHAIN_ID,
-        TransactionType::PrivateTransferSubmit(sub.clone()),
+        TransactionType::PrivateTransferSubmit(Box::new(sub.clone())),
     );
     tx.sign(&kp);
     // The first transfer is refused at the bundle door (YK1..YK4 cannot be
@@ -239,7 +239,7 @@ fn private_transfer_double_spend_fails() {
         1,
         vec![],
         crate::core::transaction::DEFAULT_CHAIN_ID,
-        TransactionType::PrivateTransferSubmit(sub2),
+        TransactionType::PrivateTransferSubmit(Box::new(sub2)),
     );
     tx2.sign(&kp);
     let err2 = Executor::apply_transaction_checked(&mut state, &tx2)
@@ -504,7 +504,7 @@ fn private_transfer_admission_and_execution_are_closed_on_public_chains() {
             0,
             vec![],
             chain_id,
-            TransactionType::PrivateTransferSubmit(sub),
+            TransactionType::PrivateTransferSubmit(Box::new(sub)),
         );
         tx.sign_v7(
             &state.scheme_registry,
@@ -582,7 +582,7 @@ fn private_transfer_with_a_bad_authorization_signature_is_refused() {
     let tx = signed_tx(
         &kp,
         crate::core::transaction::DEFAULT_CHAIN_ID,
-        TransactionType::PrivateTransferSubmit(sub),
+        TransactionType::PrivateTransferSubmit(Box::new(sub)),
     );
     let err = Executor::apply_transaction(&mut state, &tx).expect_err("a foreign signature");
     assert!(err.contains("authorization_sig invalid"), "got: {err}");
@@ -600,7 +600,7 @@ fn private_transfer_with_a_mismatched_public_digest_is_refused() {
     let tx = signed_tx(
         &kp,
         crate::core::transaction::DEFAULT_CHAIN_ID,
-        TransactionType::PrivateTransferSubmit(sub),
+        TransactionType::PrivateTransferSubmit(Box::new(sub)),
     );
     let err = Executor::apply_transaction(&mut state, &tx).expect_err("a digest mismatch");
     assert!(err.contains("public_digest does not match"), "got: {err}");
@@ -617,7 +617,7 @@ fn private_transfer_spending_an_unregistered_commitment_is_refused() {
     let tx = signed_tx(
         &kp,
         crate::core::transaction::DEFAULT_CHAIN_ID,
-        TransactionType::PrivateTransferSubmit(sub),
+        TransactionType::PrivateTransferSubmit(Box::new(sub)),
     );
     assert!(Executor::apply_transaction(&mut state, &tx).is_err());
     assert!(!state.note_registry.contains_commitment(&c_in));
@@ -636,7 +636,7 @@ fn private_transfer_replayed_under_another_nonce_or_bare_digest_is_refused() {
     let bare_tx = signed_tx(
         &kp,
         crate::core::transaction::DEFAULT_CHAIN_ID,
-        TransactionType::PrivateTransferSubmit(bare_sub.clone()),
+        TransactionType::PrivateTransferSubmit(Box::new(bare_sub.clone())),
     );
     let err = Executor::apply_transaction(&mut state, &bare_tx)
         .expect_err("bare public_digest signature must be rejected");
@@ -659,7 +659,7 @@ fn private_transfer_replayed_under_another_nonce_or_bare_digest_is_refused() {
         1,
         vec![],
         crate::core::transaction::DEFAULT_CHAIN_ID,
-        TransactionType::PrivateTransferSubmit(bare_sub),
+        TransactionType::PrivateTransferSubmit(Box::new(bare_sub)),
     );
     replayed_tx.sign(&kp);
     let err = Executor::apply_transaction(&mut state, &replayed_tx)
@@ -701,7 +701,7 @@ fn private_transfer_is_open_on_devnet() {
     let tx_devnet = signed_tx(
         &kp,
         devnet,
-        TransactionType::PrivateTransferSubmit(sub.clone()),
+        TransactionType::PrivateTransferSubmit(Box::new(sub.clone())),
     );
     // Devnet admits the transfer - the gate that refuses it on mainnet and
     // testnet is gone - and then the bundle door refuses it, because a
@@ -718,7 +718,11 @@ fn private_transfer_is_open_on_devnet() {
     );
     assert!(!state.note_registry.contains_commitment(&c_out));
 
-    let tx_mainnet = signed_tx(&kp, mainnet, TransactionType::PrivateTransferSubmit(sub));
+    let tx_mainnet = signed_tx(
+        &kp,
+        mainnet,
+        TransactionType::PrivateTransferSubmit(Box::new(sub)),
+    );
     let err =
         crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_mainnet)
             .expect_err("mainnet must keep the legacy privacy surface closed");
@@ -988,7 +992,7 @@ fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
         crate::core::chain_config::Network::Devnet
             .chain_id()
             .value(),
-        TransactionType::PrivateTransferSubmit(steal_sub),
+        TransactionType::PrivateTransferSubmit(Box::new(steal_sub)),
     );
     let err = Executor::apply_transaction_checked(&mut state, &steal_tx)
         .expect_err("attacker must not spend victim's note");
@@ -1038,7 +1042,7 @@ fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
         crate::core::chain_config::Network::Devnet
             .chain_id()
             .value(),
-        TransactionType::PrivateTransferSubmit(inflate_sub),
+        TransactionType::PrivateTransferSubmit(Box::new(inflate_sub)),
     );
     // The executor refuses the bundle-less transfer before any note moves, so
     // the count check is reached one layer down, in the registry.
@@ -1391,7 +1395,7 @@ fn a_transfer_rides_the_displaced_deposit_claim_to_the_spender() {
         0,
         vec![],
         chain_id,
-        TransactionType::PrivateTransferSubmit(sub),
+        TransactionType::PrivateTransferSubmit(Box::new(sub)),
     );
     tx_spend.sign(&spender_kp);
     Executor::apply_transaction_checked(&mut state, &tx_spend).expect("the bound spender spends");

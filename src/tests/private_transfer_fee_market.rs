@@ -45,7 +45,7 @@ fn private_transfer_fee_market_gates_inclusion() {
         authorization: None,
         chain_id: DEFAULT_CHAIN_ID,
         signature_version: SIGNATURE_VERSION_V5,
-        tx_type: TransactionType::PrivateTransferSubmit(sub),
+        tx_type: TransactionType::PrivateTransferSubmit(Box::new(sub)),
         auth_claim: None,
         claim_refs: Vec::new(),
     };

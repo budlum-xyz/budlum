@@ -25,7 +25,7 @@ fn refused_without_mutation(kind: TransactionType) {
 
 #[test]
 fn private_transfer_is_closed_on_testnet() {
-    refused_without_mutation(TransactionType::PrivateTransferSubmit(
+    refused_without_mutation(TransactionType::PrivateTransferSubmit(Box::new(
         PrivateTransferSubmit {
             spent_commitments: vec![],
             nullifiers: vec![],
@@ -35,7 +35,7 @@ fn private_transfer_is_closed_on_testnet() {
             public_digest: [0; 32],
             proof_bundle: None,
         },
-    ));
+    )));
 }
 
 #[test]

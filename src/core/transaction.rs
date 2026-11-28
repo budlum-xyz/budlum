@@ -646,7 +646,13 @@ pub enum TransactionType {
     AiAgentPaymentReclaim([u8; 32]),
     /// Submit private transfer (note commitments + nullifiers).
     /// Mainnet opcode activation is separate; chain registry updates here.
-    PrivateTransferSubmit(crate::privacy::PrivateTransferSubmit),
+    /// Boxed: the zero-knowledge bundle inside it is the largest payload of
+    /// any transaction type by a wide margin (clippy measures 2392 bytes
+    /// against AI's 472), and every `TransactionType` is that large on the
+    /// stack wherever one is built or matched. The `Box` costs an allocation
+    /// on a path that already runs four STARK verifiers; the variant no
+    /// longer costs every other transaction 1.9 KB of enum width.
+    PrivateTransferSubmit(Box<crate::privacy::PrivateTransferSubmit>),
     /// Faucet/test helper - insert a live note commitment (governance/tests).
     PrivacyNoteInsert([u8; 32]),
     /// AI execution layer: attach `BudZKVM` execution proof to a result

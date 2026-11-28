@@ -203,7 +203,7 @@ pub(crate) fn check_transaction_features(
 ) -> BudlumResult<()> {
     if matches!(
         tx_type,
-        TransactionType::PrivateTransferSubmit(_) | TransactionType::PrivacyNoteInsert(_)
+        TransactionType::PrivateTransferSubmit(Box::new(_)) | TransactionType::PrivacyNoteInsert(_)
     ) && !privacy_transfers_enabled(chain_id)
     {
         return Err(privacy_closed_refusal(
@@ -3469,7 +3469,7 @@ impl Executor {
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
-            TransactionType::PrivateTransferSubmit(sub) => {
+            TransactionType::PrivateTransferSubmit(Box::new(sub)) => {
                 if !privacy_transfers_enabled(tx.chain_id) {
                     return Err(privacy_closed_refusal(
                         tx.chain_id,
@@ -6298,7 +6298,7 @@ mod tests {
             0,
             vec![],
             devnet,
-            TransactionType::PrivateTransferSubmit(sub.clone()),
+            TransactionType::PrivateTransferSubmit(Box::new(sub.clone())),
         );
         let err_devnet = Executor::apply_transaction_checked(&mut state, &tx_devnet).expect_err(
             "a bundle-less placeholder must fail at the bundle door, not the devnet gate",
@@ -6317,7 +6317,7 @@ mod tests {
             0,
             vec![],
             mainnet,
-            TransactionType::PrivateTransferSubmit(sub),
+            TransactionType::PrivateTransferSubmit(Box::new(sub)),
         );
         let err = Executor::apply_transaction_checked(&mut state, &tx_mainnet)
             .expect_err("a private transfer must remain refused on mainnet");
