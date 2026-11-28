@@ -13,7 +13,10 @@
 //!    - Slashable [`SecurityBacking::SignatureSet`] is divided by
 //!      `max(1, shared_consumer_count)` (over-leverage haircut) and scaled by
 //!      `stake_haircut_bps / 10_000` (default `3_333` bps, matching the `1/3`
-//!      Byzantine corruption lower bound).
+//!      Byzantine corruption lower bound), and that credit is admitted only
+//!      through an attached [`ProverBond`], never above the bond's haircut:
+//!      `total_weight` is the external protocol's unit, not atoms, and no
+//!      conversion exists yet. Without a bond the set earns `0`.
 //!    - Unslashable [`SecurityBacking::SignatureSet`] (such as Ethereum Altair
 //!      sync committees), [`SecurityBacking::Work`], and [`SecurityBacking::Zk`]
 //!      never earn validator-stake credit; they are strictly bounded by
@@ -1059,10 +1062,18 @@ pub fn effective_ceiling_atoms(record: &DomainEconomicRecord) -> u128 {
             slashable: true,
             ..
         } => {
+            // `total_weight` is the external protocol's own unit - a sync
+            // committee counts signers, a Tendermint set sums voting power,
+            // a Solana set sums lamports - and nothing here converts it to
+            // atoms. Read as atoms it priced one chain's window at nothing
+            // and another's at more than exists. Until a governance-pinned
+            // unit lands, stake credit is admitted only through a bond and
+            // never above the bond's haircut; without a bond the set earns
+            // what an unslashable set earns: nothing.
             let consumers = u128::from(policy.shared_consumer_count.max(1));
             let dedicated_stake = total_weight / consumers;
             let stake_cap = mul_bps_floor(dedicated_stake, policy.stake_haircut_bps);
-            bond_cap.map_or(stake_cap, |bc| stake_cap.min(bc))
+            bond_cap.map_or(0, |bc| stake_cap.min(bc))
         }
         SecurityBacking::Work { difficulty_bits } => {
             let work_cap = if *difficulty_bits >= policy.min_work_difficulty_bits {
@@ -2770,7 +2781,18 @@ mod tests {
             window_blocks: 100,
             ..DomainCeilingPolicy::default()
         };
-        guard.configure_domain(12, slashable, None).unwrap();
+        // Bondless, the set earns nothing: its weight is not in atoms.
+        guard.configure_domain(12, slashable.clone(), None).unwrap();
+        assert_eq!(effective_ceiling_atoms(guard.record(12).unwrap()), 0);
+        // With a bond whose haircut (20_000 * 90% = 18_000) clears the stake
+        // cap, the stake cap is the window: 9_999.
+        guard
+            .configure_domain(
+                12,
+                slashable,
+                Some(make_bond(Address::from([0xB2; 32]), 20_000)),
+            )
+            .unwrap();
         assert_eq!(effective_ceiling_atoms(guard.record(12).unwrap()), 9_999);
 
         guard.check_and_record_flow(12, 6_000, 10).unwrap();
@@ -4526,10 +4548,10 @@ mod tests {
     fn the_window_breach_sweep_names_only_the_domains_whose_last_flow_was_refused() {
         let mut guard = BridgeEconomicGuard::new();
         guard
-            .configure_domain(21, signature_set_policy(3_000, 100), None)
+            .configure_domain(21, signature_set_policy(3_000, 100), Some(stake_bond()))
             .expect("valid policy for the breached domain");
         guard
-            .configure_domain(22, signature_set_policy(3_000, 100), None)
+            .configure_domain(22, signature_set_policy(3_000, 100), Some(stake_bond()))
             .expect("valid policy for the quiet domain");
 
         assert!(
@@ -4547,6 +4569,12 @@ mod tests {
         assert_eq!(breaches[0].0, 21);
         assert_eq!(breaches[0].1.requested_atoms, 2_000);
         assert_eq!(breaches[0].1.ceiling_atoms, 999);
+    }
+
+    /// A bond whose 90% haircut (1_800) clears the 999-atom stake cap these
+    /// tests use, so the stake cap stays the window they measure.
+    fn stake_bond() -> ProverBond {
+        make_bond(Address::from([0xB3; 32]), 2_000)
     }
 
     fn signature_set_policy(total_weight: u128, window_blocks: u64) -> DomainCeilingPolicy {
@@ -4569,7 +4597,7 @@ mod tests {
         let mut guard = BridgeEconomicGuard::new();
         // 3_000 weight at the 33.33% stake haircut -> 999 atoms per window.
         guard
-            .configure_domain(11, signature_set_policy(3_000, 100), None)
+            .configure_domain(11, signature_set_policy(3_000, 100), Some(stake_bond()))
             .expect("valid signature-set policy");
 
         // A flow that fits leaves no breach behind: ordinary traffic is not an
@@ -4640,7 +4668,7 @@ mod tests {
     ) {
         let mut guard = BridgeEconomicGuard::new();
         guard
-            .configure_domain(12, signature_set_policy(3_000, 100), None)
+            .configure_domain(12, signature_set_policy(3_000, 100), Some(stake_bond()))
             .expect("valid signature-set policy");
 
         guard
@@ -4674,7 +4702,7 @@ mod tests {
     fn a_certificate_row_that_refuses_a_flow_also_witnesses_the_breach() {
         let mut guard = BridgeEconomicGuard::new();
         guard
-            .configure_domain(13, signature_set_policy(3_000, 100), None)
+            .configure_domain(13, signature_set_policy(3_000, 100), Some(stake_bond()))
             .expect("valid signature-set policy");
         // A Pending row holds the domain's effective ceiling at strictly zero
         // for the block, so any non-zero flow is refused there. The row is
