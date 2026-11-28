@@ -816,6 +816,11 @@ impl HeterogeneousMultiProverAdapter {
                 accepted: EVIDENCE_VERSION.to_string(),
             });
         }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "MultiProver network identifier cannot be empty".into(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -840,7 +845,13 @@ impl HeterogeneousMultiProverAdapter {
                 return Err(AdapterError::DeclarationMismatch { field: "root" });
             }
         }
-        if policy.max_age > 0 && policy.now > bundle.claim.batch_timestamp_secs {
+        if policy.max_age > 0 {
+            if bundle.claim.batch_timestamp_secs > policy.now {
+                return Err(AdapterError::Stale {
+                    age: bundle.claim.batch_timestamp_secs - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now - bundle.claim.batch_timestamp_secs;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -939,6 +950,10 @@ impl HeterogeneousMultiProverAdapter {
 impl ExternalFinalityAdapter for HeterogeneousMultiProverAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned.is_some()
     }
 
     fn verify(
@@ -1405,5 +1420,53 @@ mod tests {
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
         );
+    }
+
+    #[test]
+    fn multiprover_reports_pinned_anchor_and_refuses_future_timestamp_and_blank_network() {
+        let fx = make_fixture();
+        let pinned_adapter = HeterogeneousMultiProverAdapter::new(NET, Some(fx.pinned.clone()));
+        assert!(
+            pinned_adapter.has_pinned_trust_anchor(),
+            "pinned MultiProver adapter must advertise has_pinned_trust_anchor=true"
+        );
+        assert!(!HeterogeneousMultiProverAdapter::new(NET, None).has_pinned_trust_anchor());
+
+        let fault = sign_fault_leg(&fx, fx.claim.post_state_root, fx.claim.withdrawal_root);
+        let committee = sign_committee_leg(&fx, fx.claim.post_state_root, fx.claim.withdrawal_root);
+        let bundle = MultiProverEvidence {
+            claim: fx.claim.clone(),
+            stark_leg: None,
+            fault_leg: Some(fault),
+            committee_leg: Some(committee),
+        };
+        let raw = RawConsensusEvidence {
+            adapter: AdapterId::from_name(ADAPTER_NAME),
+            network: NET.into(),
+            evidence_version: EVIDENCE_VERSION,
+            declared_height: fx.claim.batch_index,
+            declared_root: fx.claim.post_state_root,
+            payload: encode_multiprover_evidence(&bundle).unwrap(),
+            submitter: crate::core::address::Address([0x09; 32]),
+        };
+
+        // Future batch_timestamp_secs > policy.now when max_age > 0 must fail closed as Stale.
+        let mut future_policy = VerificationPolicy::proven(fx.claim.batch_timestamp_secs - 5);
+        future_policy.max_age = 30;
+        assert!(matches!(
+            pinned_adapter.verify(&raw, &future_policy),
+            Err(AdapterError::Stale {
+                age: 5,
+                max_age: 30
+            })
+        ));
+
+        let blank_adapter = HeterogeneousMultiProverAdapter::new("   ", Some(fx.pinned));
+        let mut blank_raw = raw;
+        blank_raw.network = "   ".into();
+        assert!(matches!(
+            blank_adapter.verify(&blank_raw, &VerificationPolicy::proven(2_000_000)),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
     }
 }

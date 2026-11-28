@@ -84,6 +84,13 @@ pub fn fold_segment_tree(segments: &[SegmentBoundary]) -> Result<RecursiveAggreg
         if seg.row_count == 0 || seg.row_count > MAX_SEGMENT_ROWS {
             return Err("segment row_count outside 1..=2^20 bound");
         }
+        if seg.program_hash == [0u8; 32]
+            || seg.inner_proof_digest == [0u8; 32]
+            || seg.pre_state_root == [0u8; 32]
+            || seg.post_state_root == [0u8; 32]
+        {
+            return Err("segment carries all-zero program_hash, state_root, or inner_proof_digest");
+        }
         if usize::try_from(seg.segment_index).ok() != Some(pos) {
             return Err("non-contiguous segment_index");
         }
@@ -236,6 +243,7 @@ impl BlockBatchProof {
         if inner_proof_digests.is_empty()
             || inner_proof_digests.len() > MAX_BATCH_INNER_PROOFS
             || proven_height < start_height
+            || inner_proof_digests.contains(&[0u8; 32])
         {
             return Err("invalid BlockBatchProof height range or inner proof count");
         }
@@ -272,6 +280,7 @@ impl BlockBatchProof {
         !self.inner_proof_digests.is_empty()
             && self.inner_proof_digests.len() <= MAX_BATCH_INNER_PROOFS
             && self.proven_height >= self.start_height
+            && !self.inner_proof_digests.contains(&[0u8; 32])
             && ct_eq_hash32(
                 &Self::compute_root(
                     self.start_height,
@@ -305,6 +314,9 @@ pub fn evaluate_phase_a_dual(
     zkvm_result: Option<(bool, Hash32)>,
 ) -> PhaseAVerdict {
     let (native_ok, native_root) = native_result;
+    if native_ok && native_root == [0u8; 32] {
+        return PhaseAVerdict::FreezeAndAlarm { domain_id };
+    }
     let Some((zk_ok, zk_root)) = zkvm_result else {
         return PhaseAVerdict::AuthoritativeNativeOnly {
             accepted: native_ok,
@@ -438,5 +450,44 @@ mod tests {
         assert_eq!(odd_agg.last_segment, 2);
         assert_eq!(odd_agg.final_state_root, [0x04; 32]);
         assert_ne!(odd_agg.aggregate_digest, s2.commitment());
+    }
+
+    #[test]
+    fn phase_a_refuses_zero_segment_digests_zero_batch_digests_and_zero_accepted_root() {
+        let zero_prog_seg = SegmentBoundary {
+            program_hash: [0u8; 32],
+            segment_index: 0,
+            row_count: 16,
+            start_pc: 0,
+            next_pc: 10,
+            pre_state_root: [0x01; 32],
+            post_state_root: [0x02; 32],
+            inner_proof_digest: [0xA0; 32],
+        };
+        assert!(
+            fold_segment_tree(&[zero_prog_seg]).is_err(),
+            "zero program_hash segment must fail closed"
+        );
+
+        let zero_inner_seg = SegmentBoundary {
+            program_hash: [0x11; 32],
+            inner_proof_digest: [0u8; 32],
+            ..zero_prog_seg
+        };
+        assert!(
+            fold_segment_tree(&[zero_inner_seg]).is_err(),
+            "zero inner_proof_digest segment must fail closed"
+        );
+
+        assert!(
+            BlockBatchProof::seal(10, 12, vec![[0x21; 32], [0u8; 32]]).is_err(),
+            "BlockBatchProof containing an all-zero inner proof digest must fail closed"
+        );
+
+        // Accepted native finality with an all-zero state_root is degenerate and must freeze/alarm.
+        assert_eq!(
+            evaluate_phase_a_dual(9, (true, [0u8; 32]), None),
+            PhaseAVerdict::FreezeAndAlarm { domain_id: 9 }
+        );
     }
 }
