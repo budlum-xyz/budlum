@@ -102,6 +102,7 @@ const MAX_EVIDENCE_DATA_LEN: usize = 4096;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvidenceError {
     ZeroOffender,
+    EmptyBlockHash,
     NonConflictingHashes,
     MissingSignature,
     ImpossibleLivenessWindow,
@@ -120,6 +121,12 @@ impl std::fmt::Display for EvidenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EvidenceError::ZeroOffender => write!(f, "offender is the zero address"),
+            EvidenceError::EmptyBlockHash => {
+                write!(
+                    f,
+                    "double-sign proof has an empty block hash or zero height"
+                )
+            }
             EvidenceError::NonConflictingHashes => {
                 write!(f, "double-sign proof references identical block hashes")
             }
@@ -212,15 +219,20 @@ impl SlashingReport {
         }
         match &self.proof {
             SlashingProof::DoubleSign {
+                height,
                 block_hash_1,
                 block_hash_2,
                 signature_1,
                 signature_2,
-                ..
             } => {
+                let h1 = canonical_hash(block_hash_1);
+                let h2 = canonical_hash(block_hash_2);
+                if *height == 0 || h1.is_empty() || h2.is_empty() {
+                    return Err(EvidenceError::EmptyBlockHash);
+                }
                 // The same hash in another spelling ("AA", "aa",
                 // "0xaa") is still the same block, not a conflict.
-                if canonical_hash(block_hash_1) == canonical_hash(block_hash_2) {
+                if h1 == h2 {
                     return Err(EvidenceError::NonConflictingHashes);
                 }
                 if signature_1.is_empty() || signature_2.is_empty() {

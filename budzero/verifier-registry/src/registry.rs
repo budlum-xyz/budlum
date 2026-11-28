@@ -134,6 +134,7 @@ impl Registration {
 /// Errors surfaced by the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryError {
+    ZeroAddress,
     InsufficientStake {
         required: u64,
         provided: u64,
@@ -170,6 +171,9 @@ pub enum RegistryError {
 impl std::fmt::Display for RegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            RegistryError::ZeroAddress => {
+                write!(f, "zero address cannot register a bonded role")
+            }
             RegistryError::InsufficientStake { required, provided } => {
                 write!(
                     f,
@@ -352,6 +356,9 @@ impl VerifierRegistry {
         stake: u64,
         current_epoch: u64,
     ) -> Result<(), RegistryError> {
+        if account == Address::zero() {
+            return Err(RegistryError::ZeroAddress);
+        }
         if stake < self.params.min_stake {
             return Err(RegistryError::InsufficientStake {
                 required: self.params.min_stake,
@@ -456,6 +463,9 @@ impl VerifierRegistry {
         total_stake: u64,
         current_epoch: u64,
     ) {
+        if account == Address::zero() || total_stake > MAX_VERIFIER_PARAM_AMOUNT {
+            return;
+        }
         let key = (role, account);
         match self.registrations.get_mut(&key) {
             Some(reg) => {
@@ -693,7 +703,7 @@ impl VerifierRegistry {
             }
             match (window_key, offence_identity_window(&record.report.proof)) {
                 (Some(a), Some(b)) => a == b,
-                _ => record.report == *report,
+                _ => record.report.proof == report.proof,
             }
         });
         if in_history {
