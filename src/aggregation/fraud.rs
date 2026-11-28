@@ -42,7 +42,7 @@
 //! `ChallengeOutcome`, `UnbackedSegmentChallenge`, `SegmentFraudReason`, and
 //! `SegmentFraudReport` provide the watchtower and consensus fraud-proof doors.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use zeroize::Zeroizing;
 
@@ -81,6 +81,19 @@ pub const SEGMENT_CHALLENGE_WINDOW_BLOCKS: u64 = 64;
 
 /// Maximum simultaneously open challenges in [`SegmentChallengeBook`].
 pub const MAX_OPEN_SEGMENT_CHALLENGES: usize = 4_096;
+
+/// Maximum settled challenge identifiers retained in [`SegmentChallengeBook`]
+/// before FIFO eviction of the oldest settled entry.
+pub const MAX_SETTLED_SEGMENT_CHALLENGES: usize = 16_384;
+
+fn verify_chain_claim_domain(chain_id: u64, domain: DomainId) -> Result<(), String> {
+    if super::chain::claim_domain(chain_id) != Some(domain) {
+        return Err(format!(
+            "aggregator fraud: claim domain {domain} does not match chain_id {chain_id}"
+        ));
+    }
+    Ok(())
+}
 
 /// Specific violation proven against an attested aggregation [`Segment`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -495,6 +508,7 @@ pub fn slash_unbacked_segment(
     registry: &SchemeStatusRegistry,
     challenge: &UnbackedSegmentChallenge<'_>,
 ) -> Result<SegmentFraudReport, String> {
+    verify_chain_claim_domain(challenge.chain_id, challenge.domain)?;
     let outcome = verify_segment_backing(
         registry,
         challenge.domain,
@@ -597,6 +611,7 @@ pub fn slash_conflicting_segment_attestation(
     evidence: &ContradictingSegmentEvidence<'_>,
     whistleblower: Address,
 ) -> Result<SegmentFraudReport, String> {
+    verify_chain_claim_domain(chain_id, domain)?;
     let first = evidence.first_segment;
     let second = evidence.second_segment;
     if first.aggregator != second.aggregator {
@@ -604,6 +619,10 @@ pub fn slash_conflicting_segment_attestation(
     }
     if first.count == 0 || second.count == 0 {
         return Err("aggregator fraud: empty segment cannot carry a contradicting claim".into());
+    }
+    let max_claims = u32::try_from(WIRE_FRAME_LIMITS.max_claims).unwrap_or(u32::MAX);
+    if first.count > max_claims || second.count > max_claims {
+        return Err("aggregator fraud: segment claim count exceeds wire frame limit".into());
     }
     if evidence.first_proof.segment_count != first.count
         || evidence.second_proof.segment_count != second.count
@@ -703,6 +722,7 @@ struct PendingSegmentChallenge {
 pub struct SegmentChallengeBook {
     open: BTreeMap<Hash32, PendingSegmentChallenge>,
     settled: BTreeSet<Hash32>,
+    settled_order: VecDeque<Hash32>,
 }
 
 impl SegmentChallengeBook {
@@ -717,6 +737,27 @@ impl SegmentChallengeBook {
     #[must_use]
     pub fn pending_len(&self) -> usize {
         self.open.len()
+    }
+
+    /// Number of retained settled challenge identifiers.
+    #[cfg(test)]
+    #[must_use]
+    pub fn settled_len(&self) -> usize {
+        self.settled.len()
+    }
+
+    fn record_settled(&mut self, id: Hash32) {
+        if self.settled.insert(id) {
+            while self.settled.len() > MAX_SETTLED_SEGMENT_CHALLENGES {
+                let Some(oldest) = self.settled_order.pop_front() else {
+                    break;
+                };
+                if oldest != id {
+                    self.settled.remove(&oldest);
+                }
+            }
+            self.settled_order.push_back(id);
+        }
     }
 
     /// Deterministic identifier for a segment challenge `(chain_id, domain, tick_pi)`.
@@ -746,6 +787,7 @@ impl SegmentChallengeBook {
         registry: &SchemeStatusRegistry,
         req: &SegmentChallengeRequest<'_>,
     ) -> Result<Hash32, String> {
+        verify_chain_claim_domain(req.chain_id, req.domain)?;
         if self.open.len() >= MAX_OPEN_SEGMENT_CHALLENGES {
             return Err("aggregator fraud: challenge book is at capacity".into());
         }
@@ -835,7 +877,7 @@ impl SegmentChallengeBook {
         )?;
         // Past every refusal: commit removal and settlement atomically.
         self.open.remove(&req.challenge_id);
-        self.settled.insert(req.challenge_id);
+        self.record_settled(req.challenge_id);
         match evaluate_claim_backing(registry, entry.domain, &entry.claims, req.backing_envelopes) {
             Ok(()) => {
                 let candidate = u64::try_from(
@@ -907,7 +949,7 @@ impl SegmentChallengeBook {
         }
         // Past every refusal: commit removal and settlement atomically.
         self.open.remove(challenge_id);
-        self.settled.insert(*challenge_id);
+        self.record_settled(*challenge_id);
         refund_challenger_bond(state, &entry.challenger, entry.challenger_bond_atoms);
         if let Ok(report) = apply_aggregator_slash(
             state,
@@ -925,5 +967,210 @@ impl SegmentChallengeBook {
                 bond: entry.challenger_bond_atoms,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aggregation::merkle::prove_claim_inclusion;
+
+    const MAINNET_CHAIN_ID: u64 = 45_260;
+    const DEVNET_CHAIN_ID: u64 = 45_262;
+    const DEVNET_DOMAIN: DomainId = 45_262;
+
+    #[test]
+    fn cross_chain_attestation_replay_is_rejected_across_all_slashing_doors() {
+        let registry = SchemeStatusRegistry::genesis();
+        let agg_seed = Zeroizing::new([0x41u8; 32]);
+        let forged_claim = Claim::Sig {
+            scheme: SchemeId::ML_DSA_87,
+            signer: Address::from([0xAB; 32]),
+            msg_hash: [0xCD; 32],
+        };
+        let devnet_frame =
+            ClaimFrame::tick(DEVNET_DOMAIN, &agg_seed, vec![forged_claim], Vec::new())
+                .expect("devnet tick");
+        let devnet_seg = devnet_frame.segments.first().expect("segment");
+        let agg_addr = devnet_seg.aggregator;
+        let devnet_resp =
+            sign_backing_response(&agg_seed, DEVNET_DOMAIN, devnet_seg, &[]).expect("resp sig");
+
+        let watcher = Address::from([0x99; 32]);
+        let mut mainnet_state = AccountState::new();
+        let floor = mainnet_state.validator_stake_floor(MAINNET_CHAIN_ID);
+        mainnet_state.add_validator_with_floor(agg_addr, floor * 2, floor);
+        mainnet_state.add_balance(&watcher, floor);
+
+        assert!(slash_unbacked_segment(
+            &mut mainnet_state,
+            &registry,
+            &UnbackedSegmentChallenge {
+                chain_id: MAINNET_CHAIN_ID,
+                domain: DEVNET_DOMAIN,
+                frame: &devnet_frame,
+                segment_index: 0,
+                backing_envelopes: &[],
+                aggregator_response_sig: &devnet_resp,
+                whistleblower: watcher,
+            },
+        )
+        .is_err());
+
+        let mut book = SegmentChallengeBook::new();
+        assert!(book
+            .open_challenge(
+                &mut mainnet_state,
+                &registry,
+                &SegmentChallengeRequest {
+                    chain_id: MAINNET_CHAIN_ID,
+                    domain: DEVNET_DOMAIN,
+                    frame: &devnet_frame,
+                    segment_index: 0,
+                    challenger: watcher,
+                    opened_height: 50,
+                },
+            )
+            .is_err());
+
+        let c1 = Claim::Prog {
+            program_hash: [0x11; 32],
+            input_hash: [0x22; 32],
+            output_hash: [0x01; 32],
+        };
+        let c2 = Claim::Prog {
+            program_hash: [0x11; 32],
+            input_hash: [0x22; 32],
+            output_hash: [0x02; 32],
+        };
+        let f1 = ClaimFrame::tick(DEVNET_DOMAIN, &agg_seed, vec![c1.clone()], Vec::new()).unwrap();
+        let f2 = ClaimFrame::tick(DEVNET_DOMAIN, &agg_seed, vec![c2.clone()], Vec::new()).unwrap();
+        let p1 = prove_claim_inclusion(&[c1.digest(DEVNET_DOMAIN)], 0).unwrap();
+        let p2 = prove_claim_inclusion(&[c2.digest(DEVNET_DOMAIN)], 0).unwrap();
+        assert!(slash_conflicting_segment_attestation(
+            &mut mainnet_state,
+            &registry,
+            MAINNET_CHAIN_ID,
+            DEVNET_DOMAIN,
+            &ContradictingSegmentEvidence {
+                first_segment: f1.segments.first().unwrap(),
+                first_claim: &c1,
+                first_proof: &p1,
+                second_segment: f2.segments.first().unwrap(),
+                second_claim: &c2,
+                second_proof: &p2,
+            },
+            watcher,
+        )
+        .is_err());
+        assert_eq!(
+            mainnet_state.get_validator(&agg_addr).unwrap().stake,
+            floor * 2
+        );
+
+        // Matching `(DEVNET_CHAIN_ID, DEVNET_DOMAIN)` legitimately slashes.
+        let mut devnet_state = AccountState::new();
+        let dev_floor = devnet_state.validator_stake_floor(DEVNET_CHAIN_ID);
+        devnet_state.add_validator_with_floor(agg_addr, dev_floor, dev_floor);
+        let report = slash_conflicting_segment_attestation(
+            &mut devnet_state,
+            &registry,
+            DEVNET_CHAIN_ID,
+            DEVNET_DOMAIN,
+            &ContradictingSegmentEvidence {
+                first_segment: f1.segments.first().unwrap(),
+                first_claim: &c1,
+                first_proof: &p1,
+                second_segment: f2.segments.first().unwrap(),
+                second_claim: &c2,
+                second_proof: &p2,
+            },
+            watcher,
+        )
+        .expect("matching chain and domain must slash conflicting attestations");
+        assert_eq!(report.slashed_atoms, dev_floor);
+    }
+
+    #[test]
+    fn conflicting_attestation_rejects_oversized_count_and_settled_book_stays_bounded() {
+        let registry = SchemeStatusRegistry::genesis();
+        let agg_seed = Zeroizing::new([0x42u8; 32]);
+        let oversized_len = WIRE_FRAME_LIMITS.max_claims + 1;
+        let mut claims_a = Vec::with_capacity(oversized_len);
+        let mut claims_b = Vec::with_capacity(oversized_len);
+        let c1 = Claim::Prog {
+            program_hash: [0x31; 32],
+            input_hash: [0x32; 32],
+            output_hash: [0x01; 32],
+        };
+        let c2 = Claim::Prog {
+            program_hash: [0x31; 32],
+            input_hash: [0x32; 32],
+            output_hash: [0x02; 32],
+        };
+        claims_a.push(c1.clone());
+        claims_b.push(c2.clone());
+        for i in 1..oversized_len {
+            let mut out = [0u8; 32];
+            out[0..4].copy_from_slice(&(i as u32).to_le_bytes());
+            out[31] = 0xEE;
+            let filler = Claim::Prog {
+                program_hash: [0x99; 32],
+                input_hash: [0x98; 32],
+                output_hash: out,
+            };
+            claims_a.push(filler.clone());
+            claims_b.push(filler);
+        }
+        let f1 = ClaimFrame::tick(DEVNET_DOMAIN, &agg_seed, claims_a, Vec::new()).unwrap();
+        let f2 = ClaimFrame::tick(DEVNET_DOMAIN, &agg_seed, claims_b, Vec::new()).unwrap();
+        let digests1: Vec<Hash32> = f1.claims.iter().map(|c| c.digest(DEVNET_DOMAIN)).collect();
+        let digests2: Vec<Hash32> = f2.claims.iter().map(|c| c.digest(DEVNET_DOMAIN)).collect();
+        let idx1 = digests1
+            .iter()
+            .position(|d| *d == c1.digest(DEVNET_DOMAIN))
+            .unwrap();
+        let idx2 = digests2
+            .iter()
+            .position(|d| *d == c2.digest(DEVNET_DOMAIN))
+            .unwrap();
+        let p1 = prove_claim_inclusion(&digests1, idx1).unwrap();
+        let p2 = prove_claim_inclusion(&digests2, idx2).unwrap();
+
+        let watcher = Address::from([0x77; 32]);
+        let mut state = AccountState::new();
+        let floor = state.validator_stake_floor(DEVNET_CHAIN_ID);
+        state.add_validator_with_floor(f1.segments[0].aggregator, floor, floor);
+        assert!(slash_conflicting_segment_attestation(
+            &mut state,
+            &registry,
+            DEVNET_CHAIN_ID,
+            DEVNET_DOMAIN,
+            &ContradictingSegmentEvidence {
+                first_segment: &f1.segments[0],
+                first_claim: &c1,
+                first_proof: &p1,
+                second_segment: &f2.segments[0],
+                second_claim: &c2,
+                second_proof: &p2,
+            },
+            watcher,
+        )
+        .is_err());
+
+        let mut book = SegmentChallengeBook::new();
+        let total = MAX_SETTLED_SEGMENT_CHALLENGES + 128;
+        for idx in 0..total {
+            let mut cid = [0u8; 32];
+            cid[0..8].copy_from_slice(&(idx as u64).to_le_bytes());
+            book.record_settled(cid);
+        }
+        assert_eq!(book.settled_len(), MAX_SETTLED_SEGMENT_CHALLENGES);
+        let mut oldest = [0u8; 32];
+        oldest[0..8].copy_from_slice(&0u64.to_le_bytes());
+        assert!(!book.settled.contains(&oldest));
+        let mut newest = [0u8; 32];
+        newest[0..8].copy_from_slice(&((total - 1) as u64).to_le_bytes());
+        assert!(book.settled.contains(&newest));
     }
 }

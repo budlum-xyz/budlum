@@ -48,7 +48,7 @@ use crate::crypto::facts::{AssumptionClass, ObservedScheme};
 use crate::domain::finality_adapter::{
     DomainFinalityAdapter, FinalityError, FinalityProof, FinalityStatus,
 };
-use crate::domain::types::{ConsensusDomain, DomainCommitment, DomainId, Hash32};
+use crate::domain::types::{ConsensusDomain, DomainCommitment, DomainId, DomainStatus, Hash32};
 
 /// Domain tag for the pre-state input commitment of a domain transition claim.
 pub const TAG_DOMAIN_TRANSITION_IN: &[u8] = b"BDLM_DOM_TRANS_IN_V1";
@@ -56,6 +56,9 @@ pub const TAG_DOMAIN_TRANSITION_IN: &[u8] = b"BDLM_DOM_TRANS_IN_V1";
 pub const TAG_DOMAIN_TRANSITION_OUT: &[u8] = b"BDLM_DOM_TRANS_OUT_V1";
 /// Domain tag for the in-circuit state-root transition commitment.
 pub const TAG_DOMAIN_TRANSITION_STEP: &[u8] = b"BDLM_DOM_TRANS_STEP_V1";
+/// Maximum verified `Claim::Prog` digests retained in [`ClaimedDomainFinalityAdapter`]
+/// before deterministic eviction of the oldest/smallest unpinned entry.
+pub const MAX_VERIFIED_PROG_DIGESTS: usize = 16_384;
 
 /// Number of 32-bit little-endian limbs encoding `timestamp_ms: u128`.
 const TIMESTAMP_LIMBS: usize = 4;
@@ -588,14 +591,30 @@ impl ClaimedDomainFinalityAdapter {
     }
 
     /// Registers the canonical state-transition `program_hash` for `domain_id`.
+    /// Zero hashes are ignored so an uninitialized digest can never authorize transitions.
     pub fn register_domain_program(&mut self, domain_id: DomainId, program_hash: Hash32) {
+        if program_hash == [0u8; 32] {
+            return;
+        }
         self.registered_programs.insert(domain_id, program_hash);
     }
 
     /// Pins or advances the known finalized `(height, state_root)` tip for
     /// `domain_id`. Subsequent [`DomainFinalityAdapter::verify_finality`] calls
     /// require `(prev_height, prev_state_root)` to connect directly to this tip.
+    /// Zero roots, height regressions, and conflicting roots at an already-finalized
+    /// height are ignored.
     pub fn record_finalized_tip(&mut self, domain_id: DomainId, height: u64, state_root: Hash32) {
+        if state_root == [0u8; 32] {
+            return;
+        }
+        if let Some(&(existing_height, existing_root)) = self.finalized_tips.get(&domain_id) {
+            if height < existing_height
+                || (height == existing_height && existing_root != state_root)
+            {
+                return;
+            }
+        }
         self.finalized_tips.insert(domain_id, (height, state_root));
     }
 
@@ -670,20 +689,24 @@ impl ClaimedDomainFinalityAdapter {
         use crate::crypto::facts::QuantumClass;
         use crate::settlement::universal_finality::{FinalityReversibility, FINALITY_BINDS_ALL};
 
-        if let Some(c) = commitment {
-            if self.has_certified_claim(domain.id, c.domain_height, c.state_root) {
-                base.reversibility = FinalityReversibility::CryptographicValidity;
-                base.quantum_posture = QuantumClass::Hash;
-                base.attestation = FINALITY_BINDS_ALL;
-                if base.fault_tolerance_bps == 0 {
-                    base.fault_tolerance_bps = 10_000;
+        if domain.status == DomainStatus::Active {
+            if let Some(c) = commitment {
+                if c.domain_id == domain.id
+                    && self.has_certified_claim(domain.id, c.domain_height, c.state_root)
+                {
+                    base.reversibility = FinalityReversibility::CryptographicValidity;
+                    base.quantum_posture = QuantumClass::Hash;
+                    base.attestation = FINALITY_BINDS_ALL;
+                    if base.fault_tolerance_bps == 0 {
+                        base.fault_tolerance_bps = 10_000;
+                    }
+                    return base;
                 }
-                return base;
             }
         }
-        // Fail-closed: a domain configured for aggregated program claims cannot
-        // claim CryptographicValidity without a matching verified Claim::Prog.
-        if domain.finality_adapter == self.adapter_name()
+        // Fail-closed: a non-active domain or an aggregated-claim domain lacking
+        // a matching verified Claim::Prog cannot claim CryptographicValidity.
+        if (domain.status != DomainStatus::Active || domain.finality_adapter == self.adapter_name())
             && base.reversibility == FinalityReversibility::CryptographicValidity
         {
             base.reversibility = FinalityReversibility::DeterministicQuorum;
@@ -715,13 +738,32 @@ impl ClaimedDomainFinalityAdapter {
             )?;
         }
         backend.verify(frame, self.claim_domain)?;
+        let pinned: BTreeSet<Hash32> = self
+            .certified_commitments
+            .values()
+            .map(|&(_, _, digest)| digest)
+            .collect();
         let mut added = 0usize;
         for claim in &frame.claims {
-            if matches!(claim, Claim::Prog { .. })
-                && self
+            if !matches!(claim, Claim::Prog { .. }) {
+                continue;
+            }
+            let digest = claim.digest(self.claim_domain);
+            if self.verified_prog_digests.contains(&digest) {
+                continue;
+            }
+            if self.verified_prog_digests.len() >= MAX_VERIFIED_PROG_DIGESTS {
+                let victim = self
                     .verified_prog_digests
-                    .insert(claim.digest(self.claim_domain))
-            {
+                    .iter()
+                    .find(|cand| !pinned.contains(*cand))
+                    .copied();
+                let Some(evict) = victim else {
+                    break;
+                };
+                self.verified_prog_digests.remove(&evict);
+            }
+            if self.verified_prog_digests.insert(digest) {
                 added += 1;
             }
         }
@@ -752,11 +794,39 @@ impl DomainFinalityAdapter for ClaimedDomainFinalityAdapter {
             ));
         };
 
+        if domain.status != DomainStatus::Active {
+            return Ok(FinalityStatus::Rejected(format!(
+                "domain {} is not Active (status {:?})",
+                domain.id, domain.status
+            )));
+        }
+
         if commitment.domain_id != domain.id {
             return Ok(FinalityStatus::Rejected(format!(
                 "commitment domain_id {} does not match registered domain {}",
                 commitment.domain_id, domain.id
             )));
+        }
+
+        if *program_hash == [0u8; 32] {
+            return Ok(FinalityStatus::Rejected(
+                "transition program_hash must be non-zero".into(),
+            ));
+        }
+
+        if *prev_state_root == [0u8; 32]
+            || commitment.state_root == [0u8; 32]
+            || commitment.domain_block_hash == [0u8; 32]
+        {
+            return Ok(FinalityStatus::Rejected(
+                "domain transition commitment roots and block hash must be non-zero".into(),
+            ));
+        }
+
+        if commitment.domain_block_hash == commitment.parent_domain_block_hash {
+            return Ok(FinalityStatus::Rejected(
+                "domain_block_hash must differ from parent_domain_block_hash".into(),
+            ));
         }
 
         if commitment.domain_height <= *prev_height {
@@ -771,6 +841,22 @@ impl DomainFinalityAdapter for ClaimedDomainFinalityAdapter {
                 return Ok(FinalityStatus::Rejected(format!(
                     "AggregatedProg predecessor (height {prev_height}) does not connect to finalized domain tip (height {tip_height})"
                 )));
+            }
+        } else {
+            if *prev_height != domain.last_committed_height {
+                return Ok(FinalityStatus::Rejected(format!(
+                    "AggregatedProg prev_height {prev_height} does not match domain.last_committed_height {}",
+                    domain.last_committed_height
+                )));
+            }
+            if domain.last_committed_height == 0
+                && domain.genesis_state_root != [0u8; 32]
+                && *prev_state_root != domain.genesis_state_root
+            {
+                return Ok(FinalityStatus::Rejected(
+                    "AggregatedProg genesis prev_state_root does not match domain.genesis_state_root"
+                        .into(),
+                ));
             }
         }
 
@@ -823,5 +909,310 @@ impl DomainFinalityAdapter for ClaimedDomainFinalityAdapter {
         } else {
             Vec::new()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aggregation::backend::TickCtx;
+    use crate::aggregation::frame::FrameLimits;
+    use crate::aggregation::pool::PoolItem;
+    use crate::core::account::AccountState;
+    use crate::crypto::facts::QuantumClass;
+    use crate::domain::types::{ConsensusKind, RootScheme};
+    use crate::settlement::universal_finality::{
+        FinalityGuarantee, FinalityReversibility, FINALITY_BINDS_ALL,
+    };
+    use zeroize::Zeroizing;
+
+    const TEST_CLAIM_DOMAIN: DomainId = 45_262;
+
+    struct StructuralTestBackend;
+    impl AggBackend for StructuralTestBackend {
+        fn prove_tick(&self, _ctx: &TickCtx, _items: &[PoolItem]) -> Result<ClaimFrame, AggError> {
+            Err(AggError::MalformedProof)
+        }
+        fn prove_merge(
+            &self,
+            _left: &ClaimFrame,
+            _right: &ClaimFrame,
+        ) -> Result<Vec<u8>, AggError> {
+            Err(AggError::MalformedProof)
+        }
+        fn verify(&self, frame: &ClaimFrame, domain: DomainId) -> Result<(), AggError> {
+            frame.check_structure(
+                domain,
+                &FrameLimits {
+                    max_claims: 65_536,
+                    max_proof_bytes: 16 * 1024 * 1024,
+                },
+            )?;
+            Ok(())
+        }
+    }
+
+    fn test_domain(program_hash: Hash32) -> ConsensusDomain {
+        ConsensusDomain {
+            id: 77,
+            kind: ConsensusKind::Zk,
+            status: DomainStatus::Active,
+            domain_chain_id: 42_161,
+            operator: None,
+            operator_bond: 0,
+            config_hash: [0x55; 32],
+            validator_set_hash: [0x66; 32],
+            finality_adapter: "agg-claimed-program-finality".into(),
+            min_confirmations: 1,
+            bridge_enabled: true,
+            block_hash_scheme: RootScheme::Sha256,
+            state_root_scheme: RootScheme::Sha256,
+            tx_root_scheme: RootScheme::Sha256,
+            last_committed_height: 10,
+            last_committed_hash: [0x11; 32],
+            pow_parameters: None,
+            zk_program_allowlist: vec![program_hash],
+            plugin_code_hash: None,
+            genesis_state_root: [0x11; 32],
+        }
+    }
+
+    fn test_commitment(height: u64, state_root: Hash32) -> DomainCommitment {
+        DomainCommitment {
+            domain_id: 77,
+            domain_height: height,
+            domain_block_hash: [0x44; 32],
+            parent_domain_block_hash: [0x43; 32],
+            state_root,
+            tx_root: [0x22; 32],
+            event_root: [0x33; 32],
+            finality_proof_hash: [0x55; 32],
+            consensus_kind: ConsensusKind::Zk,
+            validator_set_hash: [0x66; 32],
+            timestamp_ms: 1_750_000_000_000,
+            sequence: height,
+            producer: None,
+            state_updates: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn non_active_domains_cannot_finalize_or_claim_cryptographic_validity() {
+        let mut adapter = ClaimedDomainFinalityAdapter::new(TEST_CLAIM_DOMAIN);
+        let prog_hash = [0xAB; 32];
+        let mut domain = test_domain(prog_hash);
+        adapter.register_domain_program(domain.id, prog_hash);
+        let prev_height = 10u64;
+        let prev_root = [0x11; 32];
+        let commitment = test_commitment(11, [0x22; 32]);
+        let claim =
+            domain_transition_claim(prog_hash, &domain, prev_height, &prev_root, &commitment);
+        let claim_digest = claim.digest(TEST_CLAIM_DOMAIN);
+        let agg_seed = Zeroizing::new([0x51u8; 32]);
+        let frame =
+            ClaimFrame::tick(TEST_CLAIM_DOMAIN, &agg_seed, vec![claim], Vec::new()).unwrap();
+        adapter
+            .admit_verified_frame(&AccountState::new(), &StructuralTestBackend, &frame)
+            .unwrap();
+
+        let proof = FinalityProof::AggregatedProg {
+            program_hash: prog_hash,
+            prev_height,
+            prev_state_root: prev_root,
+            claim_digest,
+        };
+        for status in [DomainStatus::Frozen, DomainStatus::Retired] {
+            domain.status = status;
+            assert!(matches!(
+                adapter
+                    .verify_finality(&domain, &commitment, &proof)
+                    .unwrap(),
+                FinalityStatus::Rejected(_)
+            ));
+            assert!(adapter
+                .verify_and_certify_commitment(&domain, &commitment, &proof)
+                .is_err());
+        }
+
+        domain.status = DomainStatus::Active;
+        adapter
+            .verify_and_certify_commitment(&domain, &commitment, &proof)
+            .expect("active domain certifies");
+        let base = FinalityGuarantee {
+            reversibility: FinalityReversibility::CryptographicValidity,
+            quantum_posture: QuantumClass::Hash,
+            attestation: FINALITY_BINDS_ALL,
+            slashable_backing: true,
+            fault_tolerance_bps: 10_000,
+        };
+        assert_eq!(
+            adapter
+                .certify_guarantee_for_domain(&domain, Some(&commitment), base)
+                .reversibility,
+            FinalityReversibility::CryptographicValidity
+        );
+
+        domain.status = DomainStatus::Frozen;
+        assert_eq!(
+            adapter
+                .certify_guarantee_for_domain(&domain, Some(&commitment), base)
+                .reversibility,
+            FinalityReversibility::DeterministicQuorum
+        );
+    }
+
+    #[test]
+    fn zero_hashes_self_parent_historical_replay_and_tip_regressions_are_rejected() {
+        let mut adapter = ClaimedDomainFinalityAdapter::new(TEST_CLAIM_DOMAIN);
+        let zero = [0u8; 32];
+        adapter.register_domain_program(77, zero);
+        assert!(adapter.is_empty());
+
+        let mut domain = test_domain(zero);
+        let prev_root = [0x11; 32];
+        let mut bad_comm = test_commitment(11, [0x22; 32]);
+        let agg_seed = Zeroizing::new([0x52u8; 32]);
+
+        let zclaim = domain_transition_claim(zero, &domain, 10, &prev_root, &bad_comm);
+        let zdigest = zclaim.digest(TEST_CLAIM_DOMAIN);
+        let zframe =
+            ClaimFrame::tick(TEST_CLAIM_DOMAIN, &agg_seed, vec![zclaim], Vec::new()).unwrap();
+        adapter
+            .admit_verified_frame(&AccountState::new(), &StructuralTestBackend, &zframe)
+            .unwrap();
+        assert!(matches!(
+            adapter
+                .verify_finality(
+                    &domain,
+                    &bad_comm,
+                    &FinalityProof::AggregatedProg {
+                        program_hash: zero,
+                        prev_height: 10,
+                        prev_state_root: prev_root,
+                        claim_digest: zdigest,
+                    },
+                )
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+
+        let prog = [0x77; 32];
+        domain.zk_program_allowlist = vec![prog];
+        adapter.register_domain_program(77, prog);
+
+        // Self-parent block hash cycle rejected.
+        bad_comm.parent_domain_block_hash = bad_comm.domain_block_hash;
+        let c_cycle = domain_transition_claim(prog, &domain, 10, &prev_root, &bad_comm);
+        let d_cycle = c_cycle.digest(TEST_CLAIM_DOMAIN);
+        let f_cycle =
+            ClaimFrame::tick(TEST_CLAIM_DOMAIN, &agg_seed, vec![c_cycle], Vec::new()).unwrap();
+        adapter
+            .admit_verified_frame(&AccountState::new(), &StructuralTestBackend, &f_cycle)
+            .unwrap();
+        assert!(matches!(
+            adapter
+                .verify_finality(
+                    &domain,
+                    &bad_comm,
+                    &FinalityProof::AggregatedProg {
+                        program_hash: prog,
+                        prev_height: 10,
+                        prev_state_root: prev_root,
+                        claim_digest: d_cycle,
+                    },
+                )
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+
+        // Historical transition replay (`prev_height = 2` on `last_committed_height = 10`) rejected.
+        let hist_comm = test_commitment(3, [0xDD; 32]);
+        let c_hist = domain_transition_claim(prog, &domain, 2, &prev_root, &hist_comm);
+        let d_hist = c_hist.digest(TEST_CLAIM_DOMAIN);
+        let f_hist =
+            ClaimFrame::tick(TEST_CLAIM_DOMAIN, &agg_seed, vec![c_hist], Vec::new()).unwrap();
+        adapter
+            .admit_verified_frame(&AccountState::new(), &StructuralTestBackend, &f_hist)
+            .unwrap();
+        assert!(matches!(
+            adapter
+                .verify_finality(
+                    &domain,
+                    &hist_comm,
+                    &FinalityProof::AggregatedProg {
+                        program_hash: prog,
+                        prev_height: 2,
+                        prev_state_root: prev_root,
+                        claim_digest: d_hist,
+                    },
+                )
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+
+        // Height regression and same-height root overwrite in `record_finalized_tip` ignored.
+        adapter.record_finalized_tip(77, 15, [0xAA; 32]);
+        adapter.record_finalized_tip(77, 15, zero);
+        adapter.record_finalized_tip(77, 15, [0xBB; 32]);
+        adapter.record_finalized_tip(77, 5, [0xBB; 32]);
+        assert_eq!(adapter.finalized_tips.get(&77), Some(&(15, [0xAA; 32])));
+    }
+
+    #[test]
+    fn verified_prog_digests_stays_bounded_and_preserves_certified_commitments() {
+        let mut adapter = ClaimedDomainFinalityAdapter::new(TEST_CLAIM_DOMAIN);
+        let prog = [0x99; 32];
+        let domain = test_domain(prog);
+        adapter.register_domain_program(domain.id, prog);
+        let prev_root = [0x11; 32];
+        let cert_comm = test_commitment(11, [0x22; 32]);
+        let cert_claim = domain_transition_claim(prog, &domain, 10, &prev_root, &cert_comm);
+        let cert_digest = cert_claim.digest(TEST_CLAIM_DOMAIN);
+        let agg_seed = Zeroizing::new([0x53u8; 32]);
+        let cert_frame =
+            ClaimFrame::tick(TEST_CLAIM_DOMAIN, &agg_seed, vec![cert_claim], Vec::new()).unwrap();
+        adapter
+            .admit_verified_frame(&AccountState::new(), &StructuralTestBackend, &cert_frame)
+            .unwrap();
+        adapter
+            .verify_and_certify_commitment(
+                &domain,
+                &cert_comm,
+                &FinalityProof::AggregatedProg {
+                    program_hash: prog,
+                    prev_height: 10,
+                    prev_state_root: prev_root,
+                    claim_digest: cert_digest,
+                },
+            )
+            .expect("certify commitment");
+
+        for batch in 0u32..5 {
+            let mut claims = Vec::with_capacity(4_000);
+            for i in 0u32..4_000 {
+                let mut out = [0u8; 32];
+                out[0..4].copy_from_slice(&batch.to_le_bytes());
+                out[4..8].copy_from_slice(&i.to_le_bytes());
+                out[31] = 1;
+                claims.push(Claim::Prog {
+                    program_hash: prog,
+                    input_hash: [0x88; 32],
+                    output_hash: out,
+                });
+            }
+            let frame = ClaimFrame::tick(TEST_CLAIM_DOMAIN, &agg_seed, claims, Vec::new()).unwrap();
+            adapter
+                .admit_verified_frame(&AccountState::new(), &StructuralTestBackend, &frame)
+                .unwrap();
+        }
+
+        assert_eq!(
+            adapter.verified_prog_digests.len(),
+            MAX_VERIFIED_PROG_DIGESTS
+        );
+        assert!(
+            adapter.has_certified_claim(domain.id, 11, [0x22; 32]),
+            "pinned certified commitment digest must survive bounded eviction"
+        );
     }
 }
