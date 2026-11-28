@@ -909,11 +909,7 @@ pub fn effective_ceiling_from_certificate_row(
         entry.bond_atoms,
         entry.bond_atoms,
     );
-    if cert_bound.safe_value_outflow_ceiling_atoms > 0 {
-        policy_cap.min(cert_bound.safe_value_outflow_ceiling_atoms)
-    } else {
-        policy_cap
-    }
+    policy_cap.min(cert_bound.safe_value_outflow_ceiling_atoms)
 }
 
 /// Consensus-deterministic adaptive escrow ceiling and contradiction slashing
@@ -1035,6 +1031,17 @@ impl BridgeEconomicGuard {
     ) -> Result<(), EconomicGuardError> {
         validate_policy(&policy)?;
         if let Some(existing) = self.domains.get_mut(&domain_id) {
+            if let DomainGuardStatus::FrozenByContradiction {
+                evidence_digest, ..
+            } = existing.status
+            {
+                if prover_bond != existing.prover_bond {
+                    return Err(EconomicGuardError::DomainFrozen {
+                        domain_id,
+                        evidence_digest,
+                    });
+                }
+            }
             existing.policy = policy;
             existing.prover_bond = prover_bond;
             return Ok(());
@@ -1186,6 +1193,12 @@ impl BridgeEconomicGuard {
         }
         let win_len = rec.policy.window_blocks.max(1);
         let window_idx = current_height / win_len;
+        if window_idx < rec.active_window {
+            return Err(EconomicGuardError::InvalidEvidence(format!(
+                "domain {domain_id} bridge flow height {current_height} (window {window_idx}) precedes active window {}",
+                rec.active_window
+            )));
+        }
         let used = if window_idx == rec.active_window {
             rec.window_used_atoms
         } else {
@@ -1266,8 +1279,19 @@ impl BridgeEconomicGuard {
                 evidence_digest,
             });
         }
+        certificate.verify_integrity().map_err(|e| {
+            EconomicGuardError::InvalidEvidence(format!(
+                "global finality certificate integrity verification failed: {e:?}"
+            ))
+        })?;
         let win_len = rec.policy.window_blocks.max(1);
         let window_idx = current_height / win_len;
+        if window_idx < rec.active_window {
+            return Err(EconomicGuardError::InvalidEvidence(format!(
+                "domain {domain_id} bridge flow height {current_height} (window {window_idx}) precedes active window {}",
+                rec.active_window
+            )));
+        }
         let used = if window_idx == rec.active_window {
             rec.window_used_atoms
         } else {
@@ -1786,6 +1810,20 @@ impl BridgeEconomicGuard {
             }
         };
 
+        if let Some(existing) = self.domains.get(&domain_id) {
+            if let DomainGuardStatus::FrozenByContradiction {
+                evidence_digest: frozen_digest,
+                ..
+            } = existing.status
+            {
+                if bool::from(frozen_digest.ct_eq(&evidence_digest)) {
+                    return Err(EconomicGuardError::DuplicateEvidence(evidence_digest));
+                }
+            }
+        }
+        if self.consumed_evidence.contains(&evidence_digest) {
+            return Err(EconomicGuardError::DuplicateEvidence(evidence_digest));
+        }
         let current_epoch = at_height / GUARD_REPLAY_EPOCH_BLOCKS;
         if current_epoch < self.replay_pruned_before_epoch {
             return Err(EconomicGuardError::InvalidEvidence(
