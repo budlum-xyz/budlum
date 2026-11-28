@@ -201,8 +201,15 @@ impl EpochStake {
                 self.signers.len()
             )));
         }
+        let mut seen_keys = std::collections::BTreeSet::new();
         let mut total: u128 = 0;
         for signer in &self.signers {
+            if signer.public_key == [0u8; ED25519_PUBLIC_KEY_LEN] {
+                return Err(rule("the epoch carries an all-zero signer public key"));
+            }
+            if !seen_keys.insert(signer.public_key) {
+                return Err(rule("the epoch carries a duplicate signer public key"));
+            }
             total = total
                 .checked_add(signer.stake)
                 .ok_or_else(|| rule("the registered stake total overflows"))?;
@@ -515,7 +522,8 @@ impl PraosEquivocationProof {
         crate::core::hash::hash_fields_bytes(&[&acc])
     }
 
-    /// Check the proof with nothing but the proof: two different messages, two
+    /// Check the proof with nothing but the proof: two distinct canonical Praos
+    /// block-vote messages for the same producer and the same slot, two
     /// signatures that verify under the named key over their own message, and
     /// a digest that matches its own fields.
     ///
@@ -526,6 +534,20 @@ impl PraosEquivocationProof {
         if self.first_message == self.second_message {
             return Err("the two blocks sign one message: not an equivocation".to_string());
         }
+        let (prod_a, slot_a, height_a, root_a) = parse_praos_vote_fields(&self.first_message)?;
+        let (prod_b, slot_b, height_b, root_b) = parse_praos_vote_fields(&self.second_message)?;
+        if prod_a != self.producer || prod_b != self.producer {
+            return Err("equivocation vote message producer mismatches declared producer".into());
+        }
+        if slot_a != self.slot || slot_b != self.slot {
+            return Err("equivocation vote messages do not both commit to declared slot".into());
+        }
+        if height_a != self.first_height || height_b != self.second_height {
+            return Err("equivocation vote message heights mismatch declared heights".into());
+        }
+        if (height_a, root_a) == (height_b, root_b) {
+            return Err("equivocation vote messages commit to the same block header".into());
+        }
         verify_signature(&self.first_message, &self.first_signature, &self.producer)
             .map_err(|e| format!("first block: {e}"))?;
         verify_signature(&self.second_message, &self.second_signature, &self.producer)
@@ -535,6 +557,48 @@ impl PraosEquivocationProof {
         }
         Ok(())
     }
+}
+
+fn parse_praos_vote_fields(
+    msg: &[u8],
+) -> Result<([u8; ED25519_PUBLIC_KEY_LEN], u64, u64, [u8; 32]), String> {
+    let expected_len = PRAOS_VOTE_TAG.len() + ED25519_PUBLIC_KEY_LEN + 8 * 3 + 32;
+    if msg.len() != expected_len {
+        return Err(format!(
+            "Praos vote message length {} != {expected_len}",
+            msg.len()
+        ));
+    }
+    let tag_end = PRAOS_VOTE_TAG.len();
+    if msg.get(..tag_end) != Some(PRAOS_VOTE_TAG) {
+        return Err("Praos vote message missing canonical domain tag".into());
+    }
+    let prod_end = tag_end + ED25519_PUBLIC_KEY_LEN;
+    let producer: [u8; ED25519_PUBLIC_KEY_LEN] = msg
+        .get(tag_end..prod_end)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| "Praos vote message truncated at producer".to_string())?;
+    let slot_end = prod_end + 8;
+    let slot_bytes: [u8; 8] = msg
+        .get(prod_end..slot_end)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| "Praos vote message truncated at slot".to_string())?;
+    let height_end = slot_end + 8;
+    let height_bytes: [u8; 8] = msg
+        .get(slot_end..height_end)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| "Praos vote message truncated at height".to_string())?;
+    let root_end = height_end + 32;
+    let state_root: [u8; 32] = msg
+        .get(height_end..root_end)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| "Praos vote message truncated at state_root".to_string())?;
+    Ok((
+        producer,
+        u64::from_le_bytes(slot_bytes),
+        u64::from_le_bytes(height_bytes),
+        state_root,
+    ))
 }
 
 /// The Praos + Mithril finality adapter for one Cardano network.
@@ -856,6 +920,10 @@ impl OuroborosMithrilAdapter {
 impl ExternalFinalityAdapter for OuroborosMithrilAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        !self.epochs.is_empty()
     }
 
     fn verify(
@@ -1522,5 +1590,58 @@ mod tests {
             producer_address(&public_of(1)),
             producer_address(&public_of(2))
         );
+    }
+
+    #[test]
+    fn praos_equivocation_refuses_cross_slot_honest_blocks_and_epoch_stake_refuses_duplicates() {
+        assert!(
+            adapter().has_pinned_trust_anchor(),
+            "pinned Ouroboros Mithril adapter must advertise has_pinned_trust_anchor=true"
+        );
+        assert!(!OuroborosMithrilAdapter::new(NETWORK, CHAIN_ID).has_pinned_trust_anchor());
+
+        // Framing attempt: take two HONEST blocks signed by producer 1 in DIFFERENT slots
+        // (slot 50 and slot 51) and stuff them into a PraosEquivocationProof claiming slot 50!
+        let kp = keypair(1);
+        let producer = public_of(1);
+        let honest_slot_50 = praos_vote_message(&producer, 50, 100, &[0xA1; 32], 12);
+        let honest_slot_51 = praos_vote_message(&producer, 51, 101, &[0xB2; 32], 14);
+        let sig_50 = kp.sign(&honest_slot_50).to_vec();
+        let sig_51 = kp.sign(&honest_slot_51).to_vec();
+        let mut forged_framing = PraosEquivocationProof {
+            producer,
+            slot: 50,
+            first_message: honest_slot_50,
+            second_message: honest_slot_51,
+            first_signature: sig_50,
+            second_signature: sig_51,
+            first_height: 100,
+            second_height: 101,
+            proof_digest: [0u8; 32],
+        };
+        forged_framing.proof_digest = forged_framing.recomputed_digest();
+        assert!(
+            forged_framing.check().is_err(),
+            "two honest blocks from distinct slots must never pass PraosEquivocationProof::check"
+        );
+
+        // Duplicate signer keys or zero keys in EpochStake must fail closed.
+        let dup_epoch = EpochStake {
+            epoch: EPOCH,
+            signers: vec![
+                EpochSigner {
+                    public_key: public_of(1),
+                    stake: 1_000,
+                },
+                EpochSigner {
+                    public_key: public_of(1),
+                    stake: 1_000,
+                },
+            ],
+        };
+        assert!(matches!(
+            dup_epoch.total(),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
     }
 }
