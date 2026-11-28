@@ -480,6 +480,16 @@ impl ConsensusEngine for PoWEngine {
             return Ok(());
         }
         if let Some(prev_block) = chain.last() {
+            let expected_index = prev_block
+                .index
+                .checked_add(1)
+                .ok_or_else(|| ConsensusError("PoW parent block index overflows u64".into()))?;
+            if block.index != expected_index {
+                return Err(ConsensusError(format!(
+                    "PoW block index {} does not follow parent index {} (expected {expected_index})",
+                    block.index, prev_block.index
+                )));
+            }
             if block.previous_hash != prev_block.hash {
                 return Err(ConsensusError(format!(
                     "Previous hash mismatch. Expected: {}, Got: {}",
@@ -570,8 +580,47 @@ impl ConsensusEngine for PoWEngine {
     }
 
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
-        let current_work = self.accumulated_work(current);
-        let candidate_work = self.accumulated_work(candidate);
+        let verified_work = |chain: &[Block]| -> U256 {
+            let Some(first) = chain.first() else {
+                return U256::ZERO;
+            };
+            if first.hash.is_empty() || first.hash != first.calculate_hash() {
+                return U256::ZERO;
+            }
+            let interval = self.config.adjustment_interval as usize;
+            let mut difficulty = self.config.difficulty;
+            let mut next_boundary = interval;
+            let mut score = U256::ZERO;
+            let mut prev = first;
+            for (offset, blk) in chain.iter().enumerate().skip(1) {
+                if Some(blk.index) != prev.index.checked_add(1)
+                    || blk.previous_hash != prev.hash
+                    || blk.hash.is_empty()
+                    || blk.hash != blk.calculate_hash()
+                {
+                    return U256::ZERO;
+                }
+                if interval > 0 {
+                    while next_boundary < offset {
+                        difficulty = self.fold_retarget_boundary(difficulty, chain, next_boundary);
+                        next_boundary = next_boundary.saturating_add(interval);
+                    }
+                }
+                if !Self::meets_difficulty_at(&blk.hash, difficulty) {
+                    return U256::ZERO;
+                }
+                let work = U256::pow2(
+                    u32::try_from(difficulty)
+                        .unwrap_or(u32::MAX)
+                        .saturating_mul(4),
+                );
+                score = score.saturating_add(work);
+                prev = blk;
+            }
+            score
+        };
+        let current_work = verified_work(current);
+        let candidate_work = verified_work(candidate);
         if candidate_work != current_work {
             return candidate_work > current_work;
         }
