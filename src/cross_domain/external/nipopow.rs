@@ -270,6 +270,39 @@ pub struct PinnedNipopowGenesis {
     pub min_suffix_k: u32,
 }
 
+impl PinnedNipopowGenesis {
+    /// Refuse a pin that is the shape of a trust root but not one.
+    ///
+    /// A genesis id or difficulty target of all zeroes is not a chain
+    /// anybody can anchor to, and a zero `m`, `mu` or `k` turns the KMZ
+    /// predicate into a statement that is vacuously true. The adapter
+    /// refuses each of these at verification time too; this check exists so
+    /// the governance door can refuse the same pin before it reaches
+    /// consensus state.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the first zero field.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.genesis_id == [0u8; 32] {
+            return Err("the pinned NIPoPoW genesis id is all zeroes".into());
+        }
+        if self.pow_target == [0u8; 32] {
+            return Err("the pinned NIPoPoW difficulty target is all zeroes".into());
+        }
+        if self.min_superblocks_m == 0 {
+            return Err("the pinned NIPoPoW min_superblocks_m is zero".into());
+        }
+        if self.min_superblock_level == 0 {
+            return Err("the pinned NIPoPoW min_superblock_level is zero".into());
+        }
+        if self.min_suffix_k == 0 {
+            return Err("the pinned NIPoPoW min_suffix_k is zero".into());
+        }
+        Ok(())
+    }
+}
+
 /// Encode a `NipopowEvidence` bundle with canonical magic prefix.
 ///
 /// Convenience: exposed for relayers and admission self-test builders.
@@ -976,5 +1009,266 @@ mod tests {
         assert_eq!(superblock_level(&lvl3, &target), Some(3));
         assert_eq!(superblock_level(&fail, &target), None);
         assert_eq!(superblock_level(&[0u8; 32], &[0u8; 32]), None);
+    }
+
+    #[test]
+    fn pinned_genesis_refuses_every_zero_security_field() {
+        let (pinned, _, _) = make_golden_fixture();
+        pinned.validate().expect("the fixture pin is valid");
+
+        let mut zero_genesis = pinned.clone();
+        zero_genesis.genesis_id = [0u8; 32];
+        assert!(zero_genesis.validate().is_err());
+
+        let mut zero_target = pinned.clone();
+        zero_target.pow_target = [0u8; 32];
+        assert!(zero_target.validate().is_err());
+
+        let mut zero_m = pinned.clone();
+        zero_m.min_superblocks_m = 0;
+        assert!(zero_m.validate().is_err());
+
+        let mut zero_level = pinned.clone();
+        zero_level.min_superblock_level = 0;
+        assert!(zero_level.validate().is_err());
+
+        let mut zero_k = pinned;
+        zero_k.min_suffix_k = 0;
+        assert!(zero_k.validate().is_err());
+    }
+
+    #[test]
+    fn governance_anchor_door_installs_and_reads_back_a_nipopow_pin() {
+        use crate::cross_domain::external::intake::{AnchorFamily, PinnedExternalAnchor};
+        use crate::cross_domain::external::IntakeState;
+
+        let (pinned, _, _) = make_golden_fixture();
+        let anchor = PinnedExternalAnchor::Nipopow(pinned.clone());
+        assert_eq!(anchor.family(), AnchorFamily::Nipopow);
+        anchor.validate().expect("the fixture pin validates");
+
+        let mut state = IntakeState::default();
+        state.install_pinned_anchor(NET, anchor.clone());
+        assert_eq!(
+            state.pinned_anchor(AnchorFamily::Nipopow, NET),
+            Some(anchor)
+        );
+        assert_eq!(
+            state.pinned_nipopow_anchors.get(NET),
+            Some(&pinned),
+            "the install must land in the family map the registration door reads"
+        );
+    }
+
+    #[test]
+    fn nipopow_spec_registers_only_against_the_governance_pin() {
+        use crate::core::address::Address;
+        use crate::cross_domain::external::intake::IntakeError;
+        use crate::cross_domain::external::{
+            AdapterId, AdapterSpec, DomainKey, IntakeState, RegistrationRequest,
+            VerificationPolicy, VersionPolicy,
+        };
+
+        let (pinned, bundle, golden) = make_golden_fixture();
+        let policy = VerificationPolicy {
+            min_depth: 4,
+            max_age: 100,
+            now: bundle.suffix[0].height + 4,
+            require_declared_match: true,
+            require_slashable: false,
+        };
+        let request = |anchor: Option<PinnedNipopowGenesis>| RegistrationRequest {
+            spec: AdapterSpec::Nipopow {
+                network: NET.to_string(),
+                anchor,
+            },
+            policy: policy.clone(),
+            economics: IntakeState::conservative_economics(1_000_000),
+            versions: VersionPolicy::single(
+                AdapterId::from_name(ADAPTER_NAME),
+                EVIDENCE_VERSION,
+                0,
+            ),
+            bond_atoms: 100_000,
+            poster: Address([0x07; 32]),
+            golden: golden.clone(),
+        };
+
+        // 1. No pin installed: the door refuses before any proof is read.
+        let mut state = IntakeState::default();
+        let err = state
+            .register_domain(request(Some(pinned.clone())), None)
+            .expect_err("an unpinned network must refuse registration");
+        assert!(matches!(err, IntakeError::CommitteeNotPinned), "{err:?}");
+
+        // 2. A pin the registrant invented is not the governance pin.
+        let mut state = IntakeState::default();
+        let mut other = pinned.clone();
+        other.genesis_id[0] ^= 0xFF;
+        state.pin_nipopow_anchor(NET, pinned.clone());
+        let err = state
+            .register_domain(request(Some(other)), None)
+            .expect_err("a foreign pin must refuse registration");
+        assert!(matches!(err, IntakeError::CommitteeNotPinned), "{err:?}");
+
+        // 3. The closed admission shape (`anchor: None`) is refused too.
+        let mut state = IntakeState::default();
+        state.pin_nipopow_anchor(NET, pinned.clone());
+        let err = state
+            .register_domain(request(None), None)
+            .expect_err("a spec without a pin must refuse registration");
+        assert!(matches!(err, IntakeError::CommitteeNotPinned), "{err:?}");
+
+        // 4. The governance pin and the spec pin agree: registration admits.
+        let key = state
+            .register_domain(request(Some(pinned)), None)
+            .expect("the pinned NIPoPoW domain must register");
+        assert_eq!(
+            key,
+            DomainKey::from_parts(&AdapterId::from_name(ADAPTER_NAME), NET)
+        );
+        assert!(state.entries.contains_key(&key));
+    }
+
+    /// The point of registering a family is that its evidence actually moves
+    /// the settlement state. A registration that admits a domain the intake
+    /// can never accept evidence for is a door that opens onto a wall: the
+    /// height, the root and the work backing the rest of the tree reads would
+    /// never have a source. This test walks the production path - governance
+    /// pin, registration, evidence submission - and then reads what the
+    /// registry now holds.
+    #[test]
+    fn a_pinned_nipopow_domain_takes_evidence_and_reports_the_buried_block() {
+        use crate::core::address::Address;
+        use crate::cross_domain::external::intake::{AnchorFamily, PinnedExternalAnchor};
+        use crate::cross_domain::external::{
+            AdapterId, AdapterSpec, IntakeState, RegistrationRequest, VersionPolicy,
+        };
+
+        let (pinned, bundle, golden) = make_golden_fixture();
+        let buried = &bundle.suffix[0];
+        let mut state = IntakeState::default();
+        // The governance door is the only writer of the anchor map; the
+        // registration below must read the value this line installed.
+        state.install_pinned_anchor(NET, PinnedExternalAnchor::Nipopow(pinned.clone()));
+        assert!(state.pinned_anchor(AnchorFamily::Nipopow, NET).is_some());
+
+        let key = state
+            .register_domain(
+                RegistrationRequest {
+                    spec: AdapterSpec::Nipopow {
+                        network: NET.to_string(),
+                        anchor: Some(pinned.clone()),
+                    },
+                    policy: VerificationPolicy {
+                        min_depth: 4,
+                        max_age: 0,
+                        now: 0,
+                        require_declared_match: true,
+                        require_slashable: false,
+                    },
+                    economics: IntakeState::conservative_economics(1_000_000),
+                    versions: VersionPolicy::single(
+                        AdapterId::from_name(ADAPTER_NAME),
+                        EVIDENCE_VERSION,
+                        0,
+                    ),
+                    bond_atoms: 100_000,
+                    poster: Address([0x07; 32]),
+                    golden: golden.clone(),
+                },
+                None,
+            )
+            .expect("the pinned NIPoPoW domain must register");
+
+        let attestation = state
+            .submit_evidence(&golden, None)
+            .expect("governance-pinned evidence on the production path must be accepted");
+
+        // The attestation must describe the block the proof buries, not the
+        // proof's tip: `suffix[0]` is what the `k`-deep suffix finalizes.
+        assert_eq!(attestation.height, buried.height);
+        assert_eq!(attestation.state_root, buried.state_root);
+        assert_eq!(
+            attestation.attested_block_hash,
+            Some(buried.block_id),
+            "the attestation must name the block it finalized"
+        );
+        assert_eq!(attestation.adapter, AdapterId::from_name(ADAPTER_NAME));
+        assert_eq!(
+            attestation.domain,
+            DomainKey::from_parts(&AdapterId::from_name(ADAPTER_NAME), NET)
+        );
+
+        // Work is the security backing of a proof-of-work family; a
+        // signature-set backing here would claim slashing power that does not
+        // exist on the external chain.
+        match attestation.security {
+            SecurityBacking::Work { difficulty_bits } => assert!(
+                difficulty_bits > 0,
+                "a verified superchain must report non-zero work"
+            ),
+            other => panic!("NIPoPoW must back finality with work, got {other:?}"),
+        }
+
+        let profile = state
+            .registry
+            .domain(&key)
+            .expect("the registry must hold the domain it admitted");
+        assert_eq!(
+            profile.attestations.get(&(buried.height, EVIDENCE_VERSION)),
+            Some(&attestation),
+            "the accepted attestation must be stored under its (height, version) slot"
+        );
+    }
+
+    /// A domain that admits evidence must be a domain the settlement state
+    /// can see. Before the anchor map was part of the presence check, a chain
+    /// that had pinned a trust root but not yet registered a domain hashed
+    /// like a chain that never heard of external domains, and a
+    /// `GlobalBlockHeader` could carry an empty intake root while a live pin
+    /// sat in consensus state.
+    #[test]
+    fn a_nipopow_pin_alone_moves_the_external_intake_presence_flag() {
+        use crate::cross_domain::external::intake::PinnedExternalAnchor;
+        use crate::cross_domain::external::IntakeState;
+
+        let (pinned, _, _) = make_golden_fixture();
+        let mut state = IntakeState::default();
+        let registries =
+            |intake: IntakeState| crate::settlement::registries::SettlementRegistries {
+                external_intake: intake,
+                ..Default::default()
+            };
+        assert!(
+            !registries(state.clone()).has_external_intake(),
+            "a fresh intake is empty, which is what the header presence tag reads"
+        );
+
+        state.install_pinned_anchor(NET, PinnedExternalAnchor::Nipopow(pinned.clone()));
+        assert!(
+            registries(state.clone()).has_external_intake(),
+            "a governance-pinned NIPoPoW anchor is external intake state"
+        );
+        assert_ne!(
+            state.state_digest().expect("the digest must serialize"),
+            IntakeState::default()
+                .state_digest()
+                .expect("the digest must serialize"),
+            "the pin must move the intake digest the header commits to"
+        );
+
+        // The goodness bound is part of the trust root: two pins that differ
+        // in `m` accept different proof sets, so a node that installed one
+        // must not compute the other's digest.
+        let mut looser = pinned;
+        looser.min_superblocks_m = looser.min_superblocks_m.saturating_add(1);
+        let mut other = IntakeState::default();
+        other.install_pinned_anchor(NET, PinnedExternalAnchor::Nipopow(looser));
+        assert_ne!(
+            state.state_digest().expect("the digest must serialize"),
+            other.state_digest().expect("the digest must serialize"),
+            "the KMZ goodness bound must be inside the intake state digest"
+        );
     }
 }
