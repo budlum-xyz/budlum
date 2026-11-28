@@ -25,7 +25,7 @@ name: Grype
 
 on:
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, agg/phase-5-pcs-claims]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden]
   push:
     branches: [main]
   schedule:

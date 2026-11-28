@@ -10,7 +10,7 @@ name: Dependency Review (PR security gate)
 # Enable Dependency graph in repository settings for this check.
 on:
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, agg/phase-5-pcs-claims]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden]
   # On demand, for manual gate verification: joins the same per-ref
   # concurrency group as pull_request runs and resolves base_ref/head_ref
   # from inputs, the open branch review target, or the parent commit.

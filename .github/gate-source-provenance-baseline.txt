@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: 2072ef7c18c2eab0b776a54e22cb5632b8d0873f572fd5c71fad77f7315ead5e
+digest: a1bf5af5f4e51ce73f093431284599c896a14af941162ff433336220bcad3a8b
 files: 205
 Cargo.lock	7a2830ec9206a455ad5bbaef19dcedd3e88df2aa4eedaca3b5861a2107138856
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
@@ -208,5 +208,5 @@ src/gates/zkvm_refuses_untrusted_proofs.rs	dfca412c7a6bbc72aba195ebaffcd9f759406
 src/main.rs	54c13f4c88140d829b096e66485908b31ca5a2ed9028ea106dc05e90b4c82e88
 src/sha256.rs	b43ece6c2d4936308d742266930a3d598dfd3175722856b7e4924f5439d35eb5
 tests/full_battery_parity.rs	45d4d61e77587d6ea4a73a5f4d90e5d6d1ed9ce70558fbd7ed93afb1766e227d
-tests/repository_locks.rs	6407d19d002bbc52a8bbf186bec015129fb12c609a507ca88534dc3b4fdca721
+tests/repository_locks.rs	92f88b86d1a8e330b34c4fc8aca04c3668de5b2fbdeaefa1c54123b7c5f2132f
 
