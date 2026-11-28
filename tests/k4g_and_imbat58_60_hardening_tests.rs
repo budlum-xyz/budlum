@@ -166,14 +166,23 @@ fn imbat58_59_checked_counters_refuse_u64_max_overwrite_and_grace_overflow() {
         Err(SocialFiBud3Error::FolderLimitExceeded)
     );
 
-    // 2. Pollen MarketplaceRegistry refuses u64::MAX next_offer_id instead of saturating.
+    // 2. Pollen MarketplaceRegistry issues the last `u64::MAX` offer id once and
+    //    refuses any second mint at the saturated id instead of overwriting it.
     let mut market = MarketplaceRegistry::new();
     market.next_offer_id = u64::MAX;
     let cid = ContentId([0x44; 32]);
-    let offer_err = market.create_offer(addr(0x22), cid, 1_000, 10);
+    assert_eq!(
+        market.create_offer(addr(0x22), cid, 1_000, 10),
+        Ok(u64::MAX)
+    );
+    let offer_err = market.create_offer(addr(0x23), cid, 2_000, 11);
     assert!(
         offer_err.is_err(),
-        "u64::MAX next_offer_id must fail closed"
+        "second mint at saturated u64::MAX next_offer_id must fail closed without overwriting"
+    );
+    assert_eq!(
+        market.offers.get(&u64::MAX).map(|o| o.seller),
+        Some(addr(0x22))
     );
 
     // 3. BNS renew refuses expires_at + GRACE_PERIOD overflow near u64::MAX.
