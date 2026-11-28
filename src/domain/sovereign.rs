@@ -19,7 +19,12 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 pub const MAX_AUDIT_EXPORT_SPAN_BLOCKS: u64 = 1_000_000;
-pub const MAX_SOVEREIGN_DOMAIN_TEMPLATES: usize = 1_024;
+/// One template per registered domain, so the template ceiling is the domain
+/// ceiling. A smaller number here would let the first registrants take every
+/// template slot and silently shut later domains out of a layer the domain
+/// registry already admitted them to.
+pub const MAX_SOVEREIGN_DOMAIN_TEMPLATES: usize = crate::domain::registry::MAX_REGISTERED_DOMAINS;
+const _: () = assert!(MAX_SOVEREIGN_DOMAIN_TEMPLATES == crate::domain::registry::MAX_REGISTERED_DOMAINS);
 
 fn nonzero_hash(value: &Hash32) -> bool {
     *value != [0u8; 32]
@@ -509,6 +514,27 @@ mod tests {
             evidence(),
             DomainLifecycleState::Draft,
         )
+    }
+
+    /// Every domain the domain registry can admit also gets a template slot:
+    /// the two ceilings are one number, and the first registrants cannot use
+    /// the template layer to shut later domains out.
+    #[test]
+    fn every_registered_domain_can_hold_a_template() {
+        let mut sovereign = SovereignDomainRegistry::new();
+        let cap = crate::domain::registry::MAX_REGISTERED_DOMAINS;
+        for id in 1..=cap {
+            let id = u32::try_from(id).expect("domain ids fit u32");
+            sovereign
+                .register_template(template_for(id, ConsensusKind::PoA, addr(9), true))
+                .expect("a template per admitted domain must fit");
+        }
+        assert_eq!(sovereign.templates.len(), cap);
+        let beyond = u32::try_from(cap + 1).expect("fits u32");
+        let err = sovereign
+            .register_template(template_for(beyond, ConsensusKind::PoA, addr(9), true))
+            .expect_err("the ceiling is the domain ceiling, not above it");
+        assert!(err.contains("template limit"), "{err}");
     }
 
     /// A template that matches its domain must register.
