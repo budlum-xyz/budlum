@@ -420,6 +420,29 @@ fn queue_gossip_item(
     queue.push_back(item);
 }
 
+/// Take the queued presence signals ahead of the rest of the queue.
+///
+/// Presence is the one item that renews on a clock: a node that misses the
+/// host's signals for `host_timeout_ms` reads the Garden as frozen, whatever
+/// the host is actually doing. The queue is capped and drops its oldest item
+/// when full, and a busy publication makes presence the oldest item over and
+/// over, so serving the queue strictly first in first out starves the signal
+/// that keeps the Garden open. Presence is small and bounded, so it leaves
+/// first and the content follows in the same batch.
+fn take_presence(queue: &mut VecDeque<GardenGossip>) -> Vec<GardenGossip> {
+    let mut presence = Vec::new();
+    let mut rest = VecDeque::with_capacity(queue.len());
+    while let Some(item) = queue.pop_front() {
+        if matches!(item, GardenGossip::Presence(_)) {
+            presence.push(item);
+        } else {
+            rest.push_back(item);
+        }
+    }
+    *queue = rest;
+    presence
+}
+
 /// Drain the next outbound gossip batch from `queue` without crossing either
 /// `max_items`, `max_bytes`, or the wire request frame limit.
 fn drain_gossip_batch(
@@ -428,8 +451,8 @@ fn drain_gossip_batch(
     max_bytes: usize,
 ) -> Vec<GardenGossip> {
     const FRAME_OVERHEAD: u64 = 64;
-    let mut batch = Vec::new();
-    let mut batch_bytes = 0usize;
+    let mut batch = take_presence(queue);
+    let mut batch_bytes: usize = batch.iter().map(gossip_bytes).sum();
     let mut wire_bytes = FRAME_OVERHEAD;
     while batch.len() < max_items {
         let Some(front) = queue.front() else {

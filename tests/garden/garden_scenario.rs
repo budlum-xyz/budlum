@@ -812,9 +812,6 @@ const STEPS: usize = 11;
 type Step = fn(&mut Scenario) -> Result<(), String>;
 
 fn run_scenario() -> Vec<Result<(), String>> {
-    let _guard = NETWORK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut results: Vec<Result<(), String>> = Vec::new();
     let mut scenario = match Node::start("host").and_then(step_01) {
         Ok(scenario) => {
@@ -852,6 +849,13 @@ fn run_scenario() -> Vec<Result<(), String>> {
 /// The result of acceptance step `number` (1 based).
 fn step(number: usize) -> Result<(), String> {
     static RESULTS: OnceLock<Vec<Result<(), String>>> = OnceLock::new();
+    // The whole scenario is one Garden on one box. The harness runs the
+    // tests on one thread already, but a caller that runs them in parallel
+    // would put two Gardens on the same cores and read the second one as a
+    // frozen host, so the lock is taken here as well.
+    let _guard = NETWORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     RESULTS
         .get_or_init(run_scenario)
         .get(number.saturating_sub(1))
