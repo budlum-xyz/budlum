@@ -368,10 +368,69 @@ async fn encoding_evm_planner_relayer_and_probe_replay_endpoints_succeed_and_ref
         )
         .expect("register pinned Tendermint external domain");
 
+    // Two locally registered domains with active object-layer charters: the
+    // chain-state catalog derives their execution environments (EVM, Move)
+    // from the charters, which is what makes a cross-VM call encodable.
+    {
+        use crate::object_layer::charter::{CharterStatus, DataPolicy, DomainCharter};
+        use crate::object_layer::family::HomeVmFamily;
+        for (id, family, reference) in [
+            (7_001u32, HomeVmFamily::Evm, "eip155:7001"),
+            (7_002u32, HomeVmFamily::Move, "aptos:7002"),
+        ] {
+            bc.state
+                .settlement
+                .domains
+                .register(crate::domain::plugin::default_domain(
+                    id,
+                    crate::domain::ConsensusKind::Bft,
+                    4_000 + u64::from(id),
+                    "bft-quorum-commit",
+                    1,
+                ))
+                .expect("register chartered local domain");
+            bc.state.settlement.object_layer.charters.insert(
+                id,
+                DomainCharter {
+                    vm_family: family,
+                    chain_reference: reference.to_string(),
+                    address_prefix: String::new(),
+                    endpoint: vec![0xAA; 20],
+                    endpoint_code_hash: [0x11; 32],
+                    verifier: vec![0xBB; 20],
+                    verifier_code_hash: [0x22; 32],
+                    upgrade_notice: 100,
+                    silence_window: 1_000,
+                    data_policy: DataPolicy::Public,
+                    status: CharterStatus::Active,
+                    operator: None,
+                },
+            );
+        }
+    }
+
     let (server, _chain) = setup_with_blockchain(bc);
 
-    // 1. bud_encodeCrossVmCall: verified canonical encoding success.
+    // 1. bud_encodeCrossVmCall: success between two registered, chartered
+    //    domains (EVM -> Move) read from chain state.
     let cross_vm_ok = server
+        .encode_cross_vm_call(serde_json::json!({
+            "source_domain": 7_001,
+            "target_domain": 7_002,
+            "source_language": "solidity",
+            "target_language": "move",
+            "method": "router::settle",
+            "args": [{"name": "amount", "value": {"kind": "u128", "value": 9_000}}],
+            "nonce": 17,
+        }))
+        .await
+        .expect("encode valid cross-VM call between chartered domains");
+    assert_eq!(cross_vm_ok["target_encoding"].as_str(), Some("bcs_le"));
+
+    //    Template ids that this chain never registered are refused: the
+    //    encoder reads the chain-state catalog, never the static ecosystem
+    //    list nobody registered on-chain.
+    let cross_vm_refused = server
         .encode_cross_vm_call(serde_json::json!({
             "source_domain": 3,
             "target_domain": 7,
@@ -382,8 +441,13 @@ async fn encoding_evm_planner_relayer_and_probe_replay_endpoints_succeed_and_ref
             "nonce": 17,
         }))
         .await
-        .expect("encode valid cross-VM call");
-    assert_eq!(cross_vm_ok["target_encoding"].as_str(), Some("bcs_le"));
+        .expect_err("template-only domains are not registered on this chain");
+    assert_eq!(cross_vm_refused.code(), -32602);
+    assert!(
+        cross_vm_refused.message().contains("unknown domain"),
+        "{}",
+        cross_vm_refused.message()
+    );
 
     // 2. bud_encodeExternalEvidence: success on raw Tendermint payload + refusal without version.
     let encode_ok_req = serde_json::json!({

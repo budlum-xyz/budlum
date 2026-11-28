@@ -4304,7 +4304,23 @@ mod rpc_tests {
             Some("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
         );
 
-        // 5. bud_encodeCrossVmCall (refusal + answer)
+        // 5. bud_encodeCrossVmCall reads the same live chain-state catalog as
+        //    bud_getUniversalDomains: unregistered ecosystem templates (3 =
+        //    Ethereum, 7 = Sui in the static preset list) are not registered
+        //    domains on this chain, so the encoder refuses them as unknown
+        //    instead of answering from the template list.
+        let registered_ids: Vec<u64> = domains["domains"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|d| d["domain_id"].as_u64())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            !registered_ids.contains(&3) && !registered_ids.contains(&7),
+            "fixture chain must not have registered the template ids: {registered_ids:?}"
+        );
         assert!(server
             .encode_cross_vm_call(serde_json::json!({
                 "source_domain": 3,
@@ -4317,7 +4333,7 @@ mod rpc_tests {
             }))
             .await
             .is_err());
-        let envelope = server
+        let template_pair = server
             .encode_cross_vm_call(serde_json::json!({
                 "source_domain": 3,
                 "target_domain": 7,
@@ -4330,11 +4346,13 @@ mod rpc_tests {
                 "nonce": 11,
             }))
             .await
-            .unwrap();
-        assert_eq!(envelope["target_encoding"].as_str(), Some("bcs_le"));
-        assert!(envelope["encoded_payload"]
-            .as_array()
-            .is_some_and(|a| !a.is_empty()));
+            .expect_err("template-only domains are not registered and must be refused");
+        assert_eq!(template_pair.code(), -32602);
+        assert!(
+            template_pair.message().contains("domain"),
+            "refusal must name the unknown domain: {}",
+            template_pair.message()
+        );
 
         // 6. bud_verifyUniversalBundle (answer + refusal on tampered root)
         let verified = server

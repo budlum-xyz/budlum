@@ -5970,7 +5970,10 @@ impl BudlumApiServer for RpcServer {
                     None::<()>,
                 )
             })?;
-        let catalog = crate::unification::UniversalDomainCatalog::with_canonical_ecosystems();
+        // The catalog is the chain's registered-domain view, never the static
+        // ecosystem template list: a call can only be encoded between domains
+        // that are actually registered in state (D-2; read-only RPC rule).
+        let catalog = self.chain.get_universal_domains().await;
         let envelope = crate::unification::CrossVmBridge::encode_call(&catalog, &req)
             .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
         crate::unification::CrossVmBridge::verify_envelope(&envelope)

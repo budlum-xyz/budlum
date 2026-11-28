@@ -26,6 +26,20 @@ const _: () = assert!(MAX_UNIVERSAL_DOMAINS == crate::domain::registry::MAX_REGI
 /// Maximum capabilities declared by a single domain record.
 pub const MAX_DOMAIN_CAPABILITIES: usize = 16;
 
+/// The execution environment a registered domain exposes through its active
+/// object-layer charter. Derived from on-chain state, never self-declared: a
+/// domain whose charter is retired loses its execution environment in the same
+/// block, exactly like its `ObjectLayerCustody` capability.
+#[must_use]
+pub const fn execution_env_for_family(family: HomeVmFamily) -> EeId {
+    match family {
+        HomeVmFamily::Evm => EeId::EVM,
+        HomeVmFamily::CosmWasm => EeId::WASM,
+        HomeVmFamily::Svm => EeId::SVM,
+        HomeVmFamily::Move => EeId::MOVE,
+    }
+}
+
 /// Capabilities a registered domain offers to Budlum's unification fabric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -228,7 +242,7 @@ impl UniversalDomainCatalog {
                 name: format!("Domain-{}", domain.id),
                 caip2_reference,
                 consensus_kind: domain.kind.clone(),
-                execution_env_id: None,
+                execution_env_id: active_charter.map(|c| execution_env_for_family(c.vm_family).0),
                 object_layer_family: active_charter.map(|c| c.vm_family),
                 native_symbol: if domain.id == 0 {
                     "BUD".to_string()
@@ -938,6 +952,12 @@ mod tests {
             .capabilities
             .contains(&DomainCapability::ObjectLayerCustody));
         assert_eq!(rec3.caip2_reference, "eip155:777");
+        assert_eq!(
+            rec3.execution_env_id,
+            Some(EeId::EVM.0),
+            "an active EVM charter is the domain's execution environment"
+        );
+        assert_eq!(rec3.execution_env(), Some(EeId::EVM));
 
         state
             .settlement
@@ -951,6 +971,18 @@ mod tests {
         assert!(!rec4
             .capabilities
             .contains(&DomainCapability::ObjectLayerCustody));
+        assert_eq!(
+            rec4.execution_env_id, None,
+            "a retired charter takes the execution environment with it"
+        );
+    }
+
+    #[test]
+    fn every_charter_family_maps_to_its_native_execution_environment() {
+        assert_eq!(execution_env_for_family(HomeVmFamily::Evm), EeId::EVM);
+        assert_eq!(execution_env_for_family(HomeVmFamily::CosmWasm), EeId::WASM);
+        assert_eq!(execution_env_for_family(HomeVmFamily::Svm), EeId::SVM);
+        assert_eq!(execution_env_for_family(HomeVmFamily::Move), EeId::MOVE);
     }
     #[test]
     fn single_merkle_proof_verifies_registered_domain_and_rejects_tampered_record() {
