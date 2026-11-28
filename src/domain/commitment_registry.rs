@@ -105,6 +105,31 @@ impl DomainCommitmentRegistry {
         self.commitments.values().cloned().collect()
     }
 
+    /// Commitments that had been accepted at or before `checkpoint_height`.
+    ///
+    /// A finality certificate for height `H` must not be backed by a commitment
+    /// that only arrived at `H + k`: otherwise a checkpoint could be described
+    /// as final the instant before the evidence that made it final existed, and
+    /// its digest would change afterwards (two different certificates for one
+    /// height). Rows whose acceptance height is unknown - registries persisted
+    /// before `accepted_at_height` existed - are kept, because a missing record
+    /// is not proof of lateness.
+    #[must_use]
+    pub fn commitments_accepted_at_or_before(
+        &self,
+        checkpoint_height: u64,
+    ) -> Vec<DomainCommitment> {
+        self.commitments
+            .iter()
+            .filter(|(key, _)| {
+                self.accepted_at_height
+                    .get(*key)
+                    .map_or(true, |&h| h <= checkpoint_height)
+            })
+            .map(|(_, c)| c.clone())
+            .collect()
+    }
+
     #[must_use]
     pub fn get(
         &self,
@@ -387,5 +412,57 @@ mod tests {
         assert!(registry.get(1, 12, 2).is_none());
         assert!(registry.get(1, 13, 3).is_none());
         assert!(registry.get(1, 11, 1).is_some());
+    }
+}
+
+#[cfg(test)]
+mod late_evidence_tests {
+    use super::*;
+    use crate::domain::types::DomainCommitment;
+
+    fn commitment(height: u64, seq: u64, state_root: [u8; 32]) -> DomainCommitment {
+        DomainCommitment {
+            domain_id: 77,
+            domain_height: height,
+            sequence: seq,
+            domain_block_hash: [height as u8; 32],
+            state_root,
+            finality_proof_hash: [seq as u8; 32],
+            parent_domain_block_hash: [0u8; 32],
+            tx_root: [0u8; 32],
+            event_root: [0u8; 32],
+            consensus_kind: crate::domain::types::ConsensusKind::PoS,
+            validator_set_hash: [0u8; 32],
+            timestamp_ms: 0,
+            producer: None,
+            state_updates: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// A checkpoint may only be finalised by evidence that already existed when
+    /// it was sealed. The registry used to hand the certificate builder every
+    /// commitment it had ever seen, so a commitment accepted at height 9 could
+    /// settle a checkpoint taken at height 5, and the digest of checkpoint 5
+    /// changed after the fact.
+    #[test]
+    fn a_commitment_accepted_after_the_checkpoint_cannot_finalise_it() {
+        let mut regs = DomainCommitmentRegistry::new();
+        regs.insert_at_height(commitment(3, 0, [0xAA; 32]), 9)
+            .expect("late commitment stored");
+
+        assert!(
+            regs.commitments_accepted_at_or_before(5).is_empty(),
+            "evidence accepted at height 9 must not describe checkpoint 5"
+        );
+        assert_eq!(
+            regs.commitments_accepted_at_or_before(9).len(),
+            1,
+            "the same evidence is available once the checkpoint reaches it"
+        );
+        assert_eq!(
+            regs.commitments_for_global_block().len(),
+            1,
+            "the registry still holds the row; only the view is filtered"
+        );
     }
 }

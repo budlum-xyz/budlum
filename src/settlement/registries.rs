@@ -234,7 +234,13 @@ impl SettlementRegistries {
         if self.domains.is_empty() {
             return None;
         }
-        let all_commitments = self.commitments.commitments_for_global_block();
+        // Only evidence that already existed at this checkpoint may finalise
+        // it. Reading the whole map let a later commitment settle an earlier
+        // height, so the same checkpoint could carry different certificates
+        // over time.
+        let all_commitments = self
+            .commitments
+            .commitments_accepted_at_or_before(checkpoint_height);
         let mut entries = Vec::new();
         for domain in self.domains.domains() {
             let pq_attested = matches!(
@@ -355,6 +361,9 @@ impl SettlementRegistries {
         if self.commitments.is_empty() || self.domains.is_empty() {
             return Vec::new();
         }
+        // `ulp_domains_root` answers "what is known now", not "what was known
+        // at height H": it has no checkpoint to filter against, so it keeps
+        // reading every commitment the registry holds.
         let all_commitments = self.commitments.commitments_for_global_block();
         let mut snapshots = Vec::new();
         for domain in self.domains.active_domains() {
