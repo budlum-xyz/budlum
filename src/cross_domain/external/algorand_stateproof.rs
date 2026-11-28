@@ -841,8 +841,32 @@ pub fn verify_algorand_equivocation(
     pinned: &PinnedAlgorandVerifier,
     proof: &AlgorandEquivocationProof,
 ) -> Result<u128, AdapterError> {
+    if network.trim().is_empty() {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Algorand equivocation network identifier cannot be empty".into(),
+        });
+    }
+    if pinned.genesis_hash == [0u8; 32]
+        || pinned.voters_commitment == [0u8; 32]
+        || pinned.voter_count == 0
+        || pinned.total_weight == 0
+        || pinned.first_round == 0
+        || pinned.first_round > pinned.last_round
+        || !(MIN_THRESHOLD_BPS..=MAX_THRESHOLD_BPS).contains(&pinned.threshold_bps)
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule:
+                "pinned Algorand StateProof verifier has zero, inverted, or sub-quorum parameters"
+                    .into(),
+        });
+    }
     let a = &proof.message_a;
     let b = &proof.message_b;
+    if a.block_headers_commitment == [0u8; 32] || b.block_headers_commitment == [0u8; 32] {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Algorand equivocation message has zero block_headers_commitment".into(),
+        });
+    }
     if !bool::from(
         a.genesis_hash
             .as_slice()
@@ -1115,6 +1139,10 @@ impl AlgorandStateProofAdapter {
 impl ExternalFinalityAdapter for AlgorandStateProofAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned.is_some()
     }
 
     fn verify(
@@ -1653,6 +1681,87 @@ mod tests {
             (u128::MAX / 3) * 2,
             u128::MAX,
             6_667
+        ));
+    }
+
+    #[test]
+    fn algorand_reports_pinned_anchor_and_equivocation_refuses_invalid_pin_and_zero_headers_root() {
+        let fx = build_fixture();
+        let pinned_adapter = AlgorandStateProofAdapter::new(NET, Some(fx.pinned.clone()));
+        assert!(
+            pinned_adapter.has_pinned_trust_anchor(),
+            "pinned Algorand adapter must advertise has_pinned_trust_anchor=true"
+        );
+        assert!(!AlgorandStateProofAdapter::new(NET, None).has_pinned_trust_anchor());
+
+        let (pinned, proof, _weight) = equivocation_support::conflicting_voter_fixture(NET);
+
+        // Empty network string must fail closed.
+        assert!(matches!(
+            verify_algorand_equivocation("   ", &pinned, &proof),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // Sub-2/3 threshold_bps or zero genesis_hash in pinned verifier must fail closed.
+        let mut weak_pinned = pinned.clone();
+        weak_pinned.threshold_bps = 100;
+        assert!(matches!(
+            verify_algorand_equivocation(NET, &weak_pinned, &proof),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // Zero block_headers_commitment in an equivocation message is structurally invalid
+        // and must be refused even if signed.
+        let keys_zero = PqKeyPair::generate();
+        let voter_zero = AlgorandVoterLeaf {
+            position: 0,
+            lower_weight: 0,
+            upper_weight: 1_000,
+            key_first_round: 10_000,
+            key_last_round: 10_255,
+            pubkey_commitment: algorand_pubkey_commitment(keys_zero.public_key_bytes()),
+        };
+        let (vc_zero, path_zero) = build_voters_commitment(&[voter_zero.clone()], Some(0));
+        let pin_zero = PinnedAlgorandVerifier {
+            genesis_hash: [0xA1; 32],
+            interval_index: 40,
+            first_round: 10_000,
+            last_round: 10_255,
+            voters_commitment: vc_zero,
+            voter_count: 1,
+            total_weight: 1_000,
+            threshold_bps: 7_000,
+        };
+        let mut msg_zero_hdr = proof.message_a.clone();
+        msg_zero_hdr.block_headers_commitment = [0u8; 32];
+        let zero_hdr_proof = AlgorandEquivocationProof {
+            reveal_a: AlgorandVoterReveal {
+                position: 0,
+                lower_weight: 0,
+                upper_weight: 1_000,
+                key_first_round: 10_000,
+                key_last_round: 10_255,
+                mldsa65_pubkey: keys_zero.public_key_bytes().to_vec(),
+                mldsa65_sig: keys_zero
+                    .sign(
+                        crate::crypto::ctx::CROSS_DOMAIN_V1,
+                        &stateproof_sign_digest(NET, &msg_zero_hdr),
+                    )
+                    .expect("sign a"),
+                merkle_path: path_zero,
+            },
+            sig_b: keys_zero
+                .sign(
+                    crate::crypto::ctx::CROSS_DOMAIN_V1,
+                    &stateproof_sign_digest(NET, &proof.message_b),
+                )
+                .expect("sign b"),
+            message_a: msg_zero_hdr,
+            message_b: proof.message_b,
+        };
+        assert!(matches!(
+            verify_algorand_equivocation(NET, &pin_zero, &zero_hdr_proof),
+            Err(AdapterError::ConsensusRule { .. })
         ));
     }
 }

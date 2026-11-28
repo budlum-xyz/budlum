@@ -190,7 +190,12 @@ impl ArweaveSpOraEvidence {
     /// Canonical domain-separated digest of the complete evidence envelope.
     #[must_use]
     pub fn digest(&self) -> Hash32 {
-        let signing = self.signing_digest("");
+        self.digest_for_network("")
+    }
+
+    #[must_use]
+    fn digest_for_network(&self, network: &str) -> Hash32 {
+        let signing = self.signing_digest(network);
         hash_fields_bytes(&[
             b"BDLM_ARWEAVE_SPORA_V1",
             b"bundle",
@@ -448,11 +453,22 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
         }
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned_operator.is_some()
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, AdapterError> {
+        let desc = self.descriptor();
+        if evidence.adapter != desc.id {
+            return Err(AdapterError::WrongAdapter {
+                expected: desc.name,
+                found: hex::encode(evidence.adapter.as_bytes()),
+            });
+        }
         if evidence.evidence_version != EVIDENCE_VERSION {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -491,8 +507,14 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
             });
         }
 
-        if policy.max_age > 0 && policy.now > ev.block_height {
-            let age = policy.now.saturating_sub(ev.block_height);
+        if policy.max_age > 0 {
+            if ev.block_height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: ev.block_height - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - ev.block_height;
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
                     age,
@@ -519,7 +541,7 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
             return Err(AdapterError::UnslashableBacking);
         }
 
-        let digest = ev.digest();
+        let digest = ev.digest_for_network(&evidence.network);
         let backing = SecurityBacking::SignatureSet {
             scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
             signers: 1,
@@ -839,5 +861,68 @@ mod tests {
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
         );
+    }
+
+    #[test]
+    fn arweave_refuses_wrong_adapter_future_height_and_separates_network_digests() {
+        let (ev_main, op) = sample_evidence_with_operator("arweave-mainnet");
+        let pinned_adapter = ArweaveSpOraAdapter::new("arweave-mainnet")
+            .with_pinned_operator(op.ed.public_key_bytes(), op.pq.public_key_bytes().to_vec());
+        assert!(
+            pinned_adapter.has_pinned_trust_anchor(),
+            "pinned Arweave adapter must advertise has_pinned_trust_anchor=true"
+        );
+        assert!(!ArweaveSpOraAdapter::new("arweave-mainnet").has_pinned_trust_anchor());
+
+        let wrong_adapter_raw = RawConsensusEvidence {
+            adapter: AdapterId::from_name("foreign-adapter-v1"),
+            evidence_version: EVIDENCE_VERSION,
+            network: "arweave-mainnet".to_string(),
+            payload: encode_arweave_spora_evidence(&ev_main),
+            declared_height: ev_main.block_height,
+            declared_root: ev_main.weave_root,
+            submitter: crate::core::address::Address([0; 32]),
+        };
+        assert!(matches!(
+            pinned_adapter.verify(&wrong_adapter_raw, &VerificationPolicy::strict(0)),
+            Err(AdapterError::WrongAdapter { .. })
+        ));
+
+        let valid_raw = RawConsensusEvidence {
+            adapter: pinned_adapter.descriptor().id,
+            ..wrong_adapter_raw
+        };
+        let mut future_policy = VerificationPolicy::strict(ev_main.block_height - 4);
+        future_policy.max_age = 20;
+        assert!(matches!(
+            pinned_adapter.verify(&valid_raw, &future_policy),
+            Err(AdapterError::Stale {
+                age: 4,
+                max_age: 20
+            })
+        ));
+
+        // Attestation evidence_digest must bind the verified network name so
+        // identical weave chunks across testnet and mainnet never collide.
+        let mut ev_test = ev_main.clone();
+        op.sign("arweave-testnet", &mut ev_test);
+        let test_adapter = ArweaveSpOraAdapter::new("arweave-testnet")
+            .with_pinned_operator(op.ed.public_key_bytes(), op.pq.public_key_bytes().to_vec());
+        let test_raw = RawConsensusEvidence {
+            adapter: test_adapter.descriptor().id,
+            evidence_version: EVIDENCE_VERSION,
+            network: "arweave-testnet".to_string(),
+            payload: encode_arweave_spora_evidence(&ev_test),
+            declared_height: ev_test.block_height,
+            declared_root: ev_test.weave_root,
+            submitter: crate::core::address::Address([0; 32]),
+        };
+        let att_main = pinned_adapter
+            .verify(&valid_raw, &VerificationPolicy::strict(0))
+            .expect("mainnet verify");
+        let att_test = test_adapter
+            .verify(&test_raw, &VerificationPolicy::strict(0))
+            .expect("testnet verify");
+        assert_ne!(att_main.evidence_digest, att_test.evidence_digest);
     }
 }
