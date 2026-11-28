@@ -33,7 +33,7 @@
 //! to the same accounts under different structures.
 
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 const TRIE_DEPTH: usize = 256;
@@ -74,7 +74,13 @@ impl MerkleProof {
             };
             current = combine_nodes(&left, &right);
         }
-        &finalize_root(&current) == expected_root
+        !bool::from(subtle::ConstantTimeEq::ct_eq(
+            expected_root.as_slice(),
+            &[0u8; 32],
+        )) && bool::from(subtle::ConstantTimeEq::ct_eq(
+            finalize_root(&current).as_slice(),
+            expected_root.as_slice(),
+        ))
     }
 }
 
@@ -93,7 +99,7 @@ pub struct MerkleTrie {
 #[derive(Debug, Clone, Default)]
 struct NodeIndex {
     root: [u8; 32],
-    nodes: HashMap<(usize, [u8; 32]), [u8; 32]>,
+    nodes: BTreeMap<(usize, [u8; 32]), [u8; 32]>,
 }
 
 impl MerkleTrie {
@@ -108,7 +114,7 @@ impl MerkleTrie {
     fn node_index(&self) -> &NodeIndex {
         self.index.get_or_init(|| {
             let leaves: Vec<_> = self.leaves.iter().map(|(a, (b, n))| (*a, *b, *n)).collect();
-            let mut nodes = HashMap::new();
+            let mut nodes = BTreeMap::new();
             let root = index_subtree(&leaves, 0, &mut nodes);
             NodeIndex { root, nodes }
         })
@@ -243,7 +249,10 @@ impl AccountProofBundle {
             }
             [0u8; 32]
         };
-        if self.proof.leaf_hash != expected_leaf {
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            self.proof.leaf_hash.as_slice(),
+            expected_leaf.as_slice(),
+        )) {
             return false;
         }
         self.proof.verify(&self.root)
@@ -407,7 +416,7 @@ fn node_key(address: &[u8; 32], bits: usize) -> (usize, [u8; 32]) {
 fn index_subtree(
     leaves: &[([u8; 32], u64, u64)],
     from_bit: usize,
-    nodes: &mut HashMap<(usize, [u8; 32]), [u8; 32]>,
+    nodes: &mut BTreeMap<(usize, [u8; 32]), [u8; 32]>,
 ) -> [u8; 32] {
     let Some(&(first, first_balance, first_nonce)) = leaves.first() else {
         return [0u8; 32];

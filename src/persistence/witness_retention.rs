@@ -37,8 +37,10 @@ pub fn may_prune(
     match kind {
         NodeKind::Archive => false,
         NodeKind::Normal => {
-            witness_height <= finalized_height
-                && witness_height <= tip_height
+            witness_height > 0
+                && retention_blocks > 0
+                && finalized_height <= tip_height
+                && witness_height <= finalized_height
                 && tip_height - witness_height >= retention_blocks
         }
     }
