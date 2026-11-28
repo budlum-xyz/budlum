@@ -51,6 +51,7 @@ pub enum DataMarketError {
     NotObjectOwner,
     InvalidContentRef(ContentRefError),
     UnknownListing,
+    DuplicateListing,
     InactiveListing,
     ChainIdMismatch { signed: u64, expected: u64 },
     InvalidBuyerSignature,
@@ -193,9 +194,12 @@ impl DataMarketRegistry {
             return Err(DataMarketError::ZeroSellerOrPrice);
         }
         let (content_id, object_commitment, nft_id) = target;
-        let obj = bud3
-            .object(&object_commitment)
+        let (live_commitment, obj) = bud3
+            .resolve_live_object(&object_commitment)
             .ok_or(DataMarketError::UnknownObject)?;
+        if live_commitment != object_commitment {
+            return Err(DataMarketError::UnknownObject);
+        }
         if obj.record.content_id != content_id {
             return Err(DataMarketError::ContentIdMismatch);
         }
@@ -212,9 +216,10 @@ impl DataMarketRegistry {
             &object_commitment,
             &nft_id,
         ]);
-        if !self.listings.contains_key(&listing_id)
-            && self.listings.len() >= MAX_DATA_MARKET_LISTINGS
-        {
+        if self.listings.contains_key(&listing_id) {
+            return Err(DataMarketError::DuplicateListing);
+        }
+        if self.listings.len() >= MAX_DATA_MARKET_LISTINGS {
             return Err(DataMarketError::CapacityExceeded);
         }
         let listing = DataMarketListing {
@@ -686,6 +691,32 @@ mod tests {
                 3,
             ),
             Err(DataMarketError::InactiveListing)
+        );
+
+        // Re-creating a listing with the same (seller, cid, obj_key, nft_id) must fail closed
+        // instead of silently overwriting price_atoms or reactivating a deactivated listing.
+        assert_eq!(
+            market.create_listing(&bud3, seller, (cid, obj_key, nft_id), 99, 20),
+            Err(DataMarketError::DuplicateListing)
+        );
+        assert_eq!(
+            market
+                .listings
+                .get(&listing.listing_id)
+                .unwrap()
+                .price_atoms,
+            25
+        );
+        assert!(!market.listings.get(&listing.listing_id).unwrap().active);
+
+        // Once an object's last NFT reference is burned and it is tombstoned,
+        // create_listing must refuse it via resolve_live_object().
+        assert!(bud3
+            .burn_reference(&nft_id, &seller.0, 2)
+            .expect("burn last ref"));
+        assert_eq!(
+            market.create_listing(&bud3, seller, (cid, obj_key, nft_id), 25, 10),
+            Err(DataMarketError::UnknownObject)
         );
     }
 }

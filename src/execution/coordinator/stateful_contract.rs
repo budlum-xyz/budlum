@@ -246,6 +246,9 @@ pub fn execute_stateful_contract_tx(
     state: &mut AccountState,
     policy: &DeployPolicy,
 ) -> Result<Option<Address>, String> {
+    if tx.from == Address::zero() {
+        return Err("stateful BudZero tx requires non-zero sender".into());
+    }
     let env = StatefulContractEnvelope::decode(&tx.data)?;
     match env {
         StatefulContractEnvelope::Deploy { code, init_slots } => {
@@ -262,17 +265,24 @@ pub fn execute_stateful_contract_tx(
                 return Err("contract address already occupied".into());
             }
 
+            let mut seen_init = std::collections::BTreeSet::new();
+            for &(slot, val) in &init_slots {
+                if slot >= bud_vm::GOLDILOCKS_P || val >= bud_vm::GOLDILOCKS_P {
+                    return Err(format!(
+                        "init slot ({slot}, {val}) is out of canonical field range"
+                    ));
+                }
+                if !seen_init.insert(slot) {
+                    return Err(format!("duplicate init storage slot {slot}"));
+                }
+            }
+
             let cache = BlockReadCache::new();
             let mut overlay = TxOverlay::new(state, EeId::BUDZERO, DEFAULT_CONTRACT_GAS_LIMIT);
             overlay
                 .write(NS_BUDZERO_PROGRAM, &contract_addr.0, Some(&code))
                 .map_err(|e| e.to_string())?;
             for (slot, val) in init_slots {
-                if slot >= bud_vm::GOLDILOCKS_P || val >= bud_vm::GOLDILOCKS_P {
-                    return Err(format!(
-                        "init slot ({slot}, {val}) is out of canonical field range"
-                    ));
-                }
                 let key = storage_slot_key(&contract_addr, slot);
                 overlay
                     .write(NS_BUDZERO_STORAGE, &key, Some(&val.to_le_bytes()))
@@ -290,7 +300,10 @@ pub fn execute_stateful_contract_tx(
             call_inputs,
             gas_limit,
         } => {
-            let capped_limit = gas_limit.clamp(1, DEFAULT_CONTRACT_GAS_LIMIT);
+            if gas_limit == 0 {
+                return Err("stateful BudZero call requires positive gas_limit".into());
+            }
+            let capped_limit = gas_limit.min(DEFAULT_CONTRACT_GAS_LIMIT);
             let cache = BlockReadCache::new();
             let mut overlay = TxOverlay::new(state, EeId::BUDZERO, capped_limit);
             let code_bytes = overlay
@@ -333,11 +346,15 @@ pub fn execute_stateful_contract_tx(
                 }
             }
 
+            let mut seen_declared = std::collections::BTreeSet::new();
             for &slot in &declared_slots {
                 if slot >= bud_vm::GOLDILOCKS_P {
                     return Err(format!(
                         "declared storage slot {slot} is out of canonical field range"
                     ));
+                }
+                if !seen_declared.insert(slot) {
+                    return Err(format!("duplicate declared storage slot {slot}"));
                 }
                 let key = storage_slot_key(&contract, slot);
                 if let Some(raw) = overlay
@@ -357,11 +374,15 @@ pub fn execute_stateful_contract_tx(
                     vm.storage.insert(slot, val);
                 }
             }
+            let mut seen_inputs = std::collections::BTreeSet::new();
             for (slot, val) in call_inputs {
                 if slot >= bud_vm::GOLDILOCKS_P || val >= bud_vm::GOLDILOCKS_P {
                     return Err(format!(
                         "call input ({slot}, {val}) is out of canonical field range"
                     ));
+                }
+                if !seen_inputs.insert(slot) {
+                    return Err(format!("duplicate call input storage slot {slot}"));
                 }
                 let key = storage_slot_key(&contract, slot);
                 let collides_committed = declared_slots.contains(&slot)
@@ -613,5 +634,82 @@ mod tests {
             "unexpected error: {err_omit}"
         );
         assert_eq!(read_budzero_contract_slot(&state, &contract, 0), Some(42));
+
+        // 7. Zero sender, zero gas_limit, and duplicate slot keys fail closed.
+        let mut zero_sender_deploy = Transaction::new(
+            Address::zero(),
+            Address::zero(),
+            0,
+            StatefulContractEnvelope::Deploy {
+                code: code.clone(),
+                init_slots: vec![(0, 1)],
+            }
+            .encode(),
+        );
+        zero_sender_deploy.nonce = 1;
+        assert!(
+            execute_stateful_contract_tx(&zero_sender_deploy, &mut state, &policy)
+                .unwrap_err()
+                .contains("zero sender"),
+            "zero sender deploy must fail closed"
+        );
+
+        let mut dup_init_deploy = Transaction::new(
+            alice,
+            Address::zero(),
+            0,
+            StatefulContractEnvelope::Deploy {
+                code,
+                init_slots: vec![(0, 1), (0, 2)],
+            }
+            .encode(),
+        );
+        dup_init_deploy.nonce = 7;
+        assert!(
+            execute_stateful_contract_tx(&dup_init_deploy, &mut state, &policy)
+                .unwrap_err()
+                .contains("duplicate"),
+            "duplicate init_slots must fail closed"
+        );
+
+        let mut zero_gas_call = Transaction::new(
+            alice,
+            contract,
+            0,
+            StatefulContractEnvelope::Call {
+                contract,
+                declared_slots: vec![0],
+                call_inputs: Vec::new(),
+                gas_limit: 0,
+            }
+            .encode(),
+        );
+        zero_gas_call.nonce = 7;
+        assert!(
+            execute_stateful_contract_tx(&zero_gas_call, &mut state, &policy)
+                .unwrap_err()
+                .contains("gas_limit"),
+            "zero gas_limit call must fail closed"
+        );
+
+        let mut dup_call_input = Transaction::new(
+            alice,
+            contract,
+            0,
+            StatefulContractEnvelope::Call {
+                contract,
+                declared_slots: vec![0],
+                call_inputs: vec![(9, 1), (9, 2)],
+                gas_limit: 500_000,
+            }
+            .encode(),
+        );
+        dup_call_input.nonce = 8;
+        assert!(
+            execute_stateful_contract_tx(&dup_call_input, &mut state, &policy)
+                .unwrap_err()
+                .contains("duplicate"),
+            "duplicate call_inputs must fail closed"
+        );
     }
 }

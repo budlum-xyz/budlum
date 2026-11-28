@@ -53,6 +53,12 @@ impl EscrowCommittee {
     ///
     /// Returns [`ThresholdEscrowError`] if committee shape or member keys are invalid.
     pub fn validate(&self) -> Result<(), ThresholdEscrowError> {
+        if self.escrow_id == [0u8; 32] {
+            return Err(ThresholdEscrowError::ZeroEscrowParameter("escrow_id"));
+        }
+        if self.chain_id == 0 {
+            return Err(ThresholdEscrowError::ZeroEscrowParameter("chain_id"));
+        }
         if self.members.len() != THRESHOLD_ESCROW_N {
             return Err(ThresholdEscrowError::InvalidCommitteeSize {
                 got: self.members.len(),
@@ -288,6 +294,11 @@ impl ThresholdEscrow {
                 max: THRESHOLD_ESCROW_N,
             });
         }
+        if self.amount_commitment == [0u8; 32] {
+            return Err(ThresholdEscrowError::ZeroEscrowParameter(
+                "amount_commitment",
+            ));
+        }
         self.committee.validate()?;
         if quorum_proof.statement.chain_id != self.committee.chain_id {
             return Err(ThresholdEscrowError::WrongQuorumChain {
@@ -437,5 +448,69 @@ mod tests {
         let rcpt_a = a.unlock(&recipient, &shares_a, &proof).unwrap();
         let rcpt_b = b.unlock(&recipient, &shares_b, &proof).unwrap();
         assert_ne!(rcpt_a, rcpt_b);
+    }
+
+    #[test]
+    fn threshold_escrow_rejects_zero_escrow_parameters_even_on_deserialized_struct() {
+        let (base, seeds) = make_escrow();
+        let recipient = Address([0x55; 32]);
+
+        // Zero escrow_id bypassed ThresholdEscrow::open() via direct construction/deserialization.
+        let mut zero_id = base.clone();
+        zero_id.committee.escrow_id = [0u8; 32];
+        assert_eq!(
+            zero_id.committee.validate(),
+            Err(ThresholdEscrowError::ZeroEscrowParameter("escrow_id"))
+        );
+        let proof_id = zero_id.prove_quorum_predicate(4, &recipient).unwrap();
+        let shares_id: Vec<_> = (0..4u8)
+            .map(|i| {
+                zero_id
+                    .sign_share(i, &seeds[usize::from(i)], &recipient)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            zero_id.unlock(&recipient, &shares_id, &proof_id),
+            Err(ThresholdEscrowError::ZeroEscrowParameter("escrow_id"))
+        );
+
+        // Zero chain_id bypassed open().
+        let mut zero_chain = base.clone();
+        zero_chain.committee.chain_id = 0;
+        assert_eq!(
+            zero_chain.committee.validate(),
+            Err(ThresholdEscrowError::ZeroEscrowParameter("chain_id"))
+        );
+        let proof_chain = zero_chain.prove_quorum_predicate(4, &recipient).unwrap();
+        let shares_chain: Vec<_> = (0..4u8)
+            .map(|i| {
+                zero_chain
+                    .sign_share(i, &seeds[usize::from(i)], &recipient)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            zero_chain.unlock(&recipient, &shares_chain, &proof_chain),
+            Err(ThresholdEscrowError::ZeroEscrowParameter("chain_id"))
+        );
+
+        // Zero amount_commitment bypassed open().
+        let mut zero_amt = base;
+        zero_amt.amount_commitment = [0u8; 32];
+        let proof_amt = zero_amt.prove_quorum_predicate(4, &recipient).unwrap();
+        let shares_amt: Vec<_> = (0..4u8)
+            .map(|i| {
+                zero_amt
+                    .sign_share(i, &seeds[usize::from(i)], &recipient)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            zero_amt.unlock(&recipient, &shares_amt, &proof_amt),
+            Err(ThresholdEscrowError::ZeroEscrowParameter(
+                "amount_commitment"
+            ))
+        );
     }
 }
