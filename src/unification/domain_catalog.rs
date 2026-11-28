@@ -244,6 +244,16 @@ impl UniversalDomainCatalog {
 
         // 2. Registered external intake domains (live on-chain external adapters).
         for (key, entry) in &state.settlement.external_intake.entries {
+            let intake_network = entry.golden.network.as_str();
+            if state
+                .settlement
+                .domains
+                .domain_id_by_caip2(intake_network)
+                .is_some()
+                || catalog.by_caip2.contains_key(intake_network)
+            {
+                continue;
+            }
             let mut candidate =
                 u32::from_le_bytes([key.0[0], key.0[1], key.0[2], key.0[3]]) | 0x8000_0000;
             while catalog.domains.contains_key(&candidate) {

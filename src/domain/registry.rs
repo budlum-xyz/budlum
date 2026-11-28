@@ -234,9 +234,15 @@ impl ConsensusDomainRegistry {
             return Vec::new();
         }
         let stale: Vec<DomainId> = self
-            .last_activity_block
+            .domains
             .iter()
-            .filter_map(|(&id, &last_seen)| {
+            .filter_map(|(&id, domain)| {
+                // Root settlement domain 0 and Frozen domains (pending fraud or
+                // slashing investigation) are never deleted by passive inactivity.
+                if id == 0 || domain.status == DomainStatus::Frozen {
+                    return None;
+                }
+                let last_seen = self.last_activity_block.get(&id).copied().unwrap_or(0);
                 if current_block_height.saturating_sub(last_seen) >= inactivity_window {
                     Some(id)
                 } else {
@@ -350,14 +356,17 @@ impl ConsensusDomainRegistry {
         }
         if require_active {
             if let Some(op) = domain.operator {
+                // Count every leaf still occupying `self.domains` (including Retired
+                // leaves awaiting reclamation), because retired leaves still count
+                // against `MAX_REGISTERED_DOMAINS` and per-block root hashing.
                 let held = self
                     .domains
                     .values()
-                    .filter(|d| d.operator == Some(op) && d.status != DomainStatus::Retired)
+                    .filter(|d| d.operator == Some(op))
                     .count();
                 if held >= MAX_ACTIVE_DOMAINS_PER_OPERATOR {
                     return Err(format!(
-                        "Domain {} rejected: operator already holds {held} active domains                          (quota {MAX_ACTIVE_DOMAINS_PER_OPERATOR}); retire an unused domain first",
+                        "Domain {} rejected: operator already holds {held} domains                          (quota {MAX_ACTIVE_DOMAINS_PER_OPERATOR}); reclaim unused slots first",
                         domain.id
                     ));
                 }
