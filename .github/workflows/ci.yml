@@ -473,25 +473,28 @@ jobs:
         run: |
           set -euo pipefail
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- clippy-extra --self-test
-          # `|| true` is unavoidable here - clippy exits non-zero precisely when
-          # it has warnings to report, which is the normal state of a ratchet -
-          # but on its own it also swallows clippy DYING. An empty or absent
+          # A non-zero exit means the measurement did not complete. An empty
+          # or absent
           # JSON then reaches the ratchet as "0 pedantic warnings", i.e. the
           # best score this gate can print, produced by a tool that never ran.
           # A ratchet that reports its baseline as beaten when the compiler
           # crashes is worse than no ratchet, so the output is checked before
           # it is counted.
-          # clippy exits non-zero precisely when it has warnings to report,
-          # which is the normal state of a ratchet - so the exit code is
-          # CAPTURED rather than discarded, and the two non-zero reasons are
-          # separated: warnings (expected) versus a compiler that died (a
-          # missing measurement). The emptiness check stays as a second,
-          # independent guard.
+          # Capture and check the exit code before counting: ordinary warnings
+          # do not make this `-W` command fail, but a compiler error does.
+          # The emptiness check stays as a second, independent guard.
           set +e
           cargo clippy --all-targets --message-format=json -- -W clippy::pedantic -W clippy::nursery > /tmp/clippy-extra.json 2>/tmp/clippy-extra.err
           clippy_status=$?
           set -e
-          echo "CLIPPY_EXTRA_EXIT: $clippy_status (non-zero is normal: it means warnings were reported)"
+          echo "CLIPPY_EXTRA_EXIT: $clippy_status"
+          if [ "$clippy_status" -ne 0 ]; then
+            echo "::error::clippy did not complete successfully (exit $clippy_status); the warning count is not a complete measurement."
+            if [ -s /tmp/clippy-extra.err ]; then
+              tail -n 20 /tmp/clippy-extra.err >&2
+            fi
+            exit 1
+          fi
           if [ ! -s /tmp/clippy-extra.json ]; then
             echo "::error::clippy produced no JSON at all - the pedantic ratchet would read this as zero warnings, its best possible score, from a tool that did not run."
             if [ -s /tmp/clippy-extra.err ]; then
