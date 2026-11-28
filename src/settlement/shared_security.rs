@@ -744,7 +744,7 @@ fn observe(
 
 /// Verify ICS-07 `CometBFT` misbehaviour and slash culpable restaked operators.
 ///
-/// Runs full IBC ICS-07 misbehaviour verification through a pinned
+/// Runs full IBC ICS-07 misbehaviour verification through a consensus-pinned
 /// [`crate::cross_domain::external::tendermint::TendermintLightClient`],
 /// transitions every culpable `CosmosIcs { domain_id: domain_key }` operator to
 /// [`RestakeStatus::Slashed`], zeroes its `allocated_units` and live
@@ -754,8 +754,11 @@ fn observe(
 /// # Errors
 ///
 /// Returns [`SettlementTxError::Refused`] if shared security is disabled, the
-/// domain is unregistered or inactive, the ICS-07 proof fails verification, or
-/// no proven culprit holds an active `CosmosIcs` allocation on `domain_key`.
+/// domain is unregistered, inactive, or lacks a matching consensus-pinned
+/// Tendermint anchor in `external_intake`, a single-header lunatic claim is
+/// supplied without an authenticated parent commit, the commit timestamp lies
+/// outside the trusting window, the ICS-07 proof fails verification, or no
+/// proven culprit holds an active `CosmosIcs` allocation on `domain_key`.
 ///
 /// Convenience: kept for the CLI and IBC Interchain Security slash relayers.
 pub fn execute_tendermint_misbehaviour_slash(
@@ -770,6 +773,7 @@ pub fn execute_tendermint_misbehaviour_slash(
     use crate::cross_domain::external::tendermint::{
         validator_set_hash, TendermintLightClient, TendermintLightParams,
     };
+    use subtle::ConstantTimeEq;
 
     let params = crate::core::chain_config::shared_security_for_chain_id(ctx.chain_id);
     if !params.enabled {
@@ -789,9 +793,120 @@ pub fn execute_tendermint_misbehaviour_slash(
             "Tendermint slash requires an active Tendermint/BFT settlement domain",
         ));
     }
+    if bool::from(domain.config_hash.ct_eq(&[0u8; 32])) {
+        return Err(refused(
+            "Tendermint slash domain carries no pinned external intake DomainKey",
+        ));
+    }
+
+    let intake_key = crate::cross_domain::external::DomainKey(domain.config_hash);
+    let (pinned_chain_id, pinned_set_hash): (&str, [u8; 32]) =
+        if let Some(entry) = state.settlement.external_intake.entries.get(&intake_key) {
+            let crate::cross_domain::external::AdapterSpec::TendermintCommit {
+                network,
+                chain_id,
+                validator_set_hash: Some(spec_hash),
+            } = &entry.spec
+            else {
+                return Err(refused(
+                    "Tendermint slash domain intake entry is not a pinned TendermintCommit spec",
+                ));
+            };
+            let Some(pinned) = state
+                .settlement
+                .external_intake
+                .pinned_tendermint_anchors
+                .get(network)
+            else {
+                return Err(refused(
+                    "Tendermint slash domain network has no governance-pinned Tendermint anchor",
+                ));
+            };
+            if pinned.chain_id.trim().is_empty()
+                || pinned.chain_id != *chain_id
+                || bool::from(pinned.validator_set_hash.ct_eq(&[0u8; 32]))
+                || !bool::from(pinned.validator_set_hash.ct_eq(spec_hash))
+            {
+                return Err(refused(
+                    "Tendermint slash domain intake entry disagrees with pinned Tendermint anchor",
+                ));
+            }
+            (pinned.chain_id.as_str(), pinned.validator_set_hash)
+        } else {
+            let matched = state
+                .settlement
+                .external_intake
+                .pinned_tendermint_anchors
+                .iter()
+                .find(|(network, _)| {
+                    let adapter_id = crate::cross_domain::external::AdapterId::from_name(&format!(
+                        "tendermint-commit-{network}"
+                    ));
+                    let candidate =
+                        crate::cross_domain::external::DomainKey::from_parts(&adapter_id, network);
+                    bool::from(candidate.as_bytes().ct_eq(&domain.config_hash))
+                });
+            let Some((_, pinned)) = matched else {
+                return Err(refused(
+                    "Tendermint slash domain has no consensus-pinned Tendermint anchor",
+                ));
+            };
+            if pinned.chain_id.trim().is_empty()
+                || bool::from(pinned.validator_set_hash.ct_eq(&[0u8; 32]))
+            {
+                return Err(refused(
+                    "Tendermint slash domain pinned anchor is empty or all-zero",
+                ));
+            }
+            (pinned.chain_id.as_str(), pinned.validator_set_hash)
+        };
+
     let _ = TendermintLightParams::standard_for_unbonding(light_params.unbonding_period_secs)
         .map_err(|e| refused(format!("Tendermint unbonding period rejected: {e}")))?;
     let anchor_root = validator_set_hash(&trusted.validators);
+    if trusted.chain_id != pinned_chain_id {
+        return Err(refused(
+            "trusted Tendermint state chain_id does not match pinned domain anchor",
+        ));
+    }
+    if !bool::from(anchor_root.ct_eq(&pinned_set_hash)) {
+        return Err(refused(
+            "trusted Tendermint validator set does not match pinned validator_set_hash",
+        ));
+    }
+
+    // PinnedTendermintAnchor commits `(chain_id, validator_set_hash)` without an
+    // authenticated `(height, next_validators_hash)` header; accepting a
+    // single-header LunaticHeader claim (`header_2 == None`) would let an
+    // unprivileged caller forge `trusted.next_validators_hash` and slash honest
+    // validators over a valid canonical block.
+    let Some(h2) = misbehaviour.header_2.as_ref() else {
+        return Err(refused(
+            "single-header Tendermint lunatic proof requires an authenticated parent commit; supply conflicting commits",
+        ));
+    };
+
+    let max_trusting =
+        crate::cross_domain::external::IntakeState::MAX_TENDERMINT_TRUSTING_PERIOD_SECS;
+    let effective_trusting = trusted
+        .trusting_period_secs
+        .min(light_params.trusting_period_secs)
+        .min(max_trusting);
+    if effective_trusting == 0 {
+        return Err(refused("Tendermint trusting period must be positive"));
+    }
+    let earliest_commit_time = misbehaviour.header_1.commit_time.min(h2.commit_time);
+    if trusted.time_secs > earliest_commit_time {
+        return Err(refused(
+            "trusted Tendermint state timestamp cannot postdate misbehaviour commit_time",
+        ));
+    }
+    if now_secs.saturating_sub(earliest_commit_time) >= effective_trusting {
+        return Err(refused(
+            "Tendermint misbehaviour commit_time has expired past the trusting window",
+        ));
+    }
+
     let mut client =
         TendermintLightClient::new(trusted.clone(), anchor_root, anchor_root, *light_params)
             .map_err(|e| refused(format!("Tendermint trusted anchor rejected: {e}")))?;
@@ -1984,38 +2099,13 @@ mod tests {
     #[test]
     fn cosmos_ics_misbehaviour_slashes_only_culprit_and_quarantines_reentry() {
         use crate::cross_domain::external::tendermint::{
-            validator_address_of, validator_set_hash, vote_sign_bytes, TendermintCommitEvidence,
-            TendermintLightParams, TendermintMisbehaviour, TendermintMisbehaviourKind,
-            TendermintSignature, TendermintValidator, TrustedTendermintState,
+            validator_address_of, validator_set_hash, vote_sign_bytes, PinnedTendermintAnchor,
+            TendermintCommitEvidence, TendermintLightParams, TendermintMisbehaviour,
+            TendermintMisbehaviourKind, TendermintSignature, TendermintValidator,
+            TrustedTendermintState,
         };
+        use crate::cross_domain::external::{AdapterId, DomainKey};
         use crate::crypto::primitives::KeyPair;
-
-        let dom_id = 777u32;
-        let dom_op = Address::from([0x41; 32]);
-        let carrier = Address::from([0x42; 32]);
-        let mut state = AccountState::new();
-        let mut domain = crate::domain::plugin::default_domain(
-            dom_id,
-            crate::domain::ConsensusKind::Custom("tendermint-bft".to_string()),
-            777_001,
-            crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER,
-            1,
-        );
-        domain.operator = Some(dom_op);
-        domain.plugin_code_hash = Some([0x77; 32]);
-        state.add_balance(&dom_op, domain.operator_bond.saturating_add(FEE));
-        crate::settlement::domains::register_domain(&mut state, domain).expect("tm domain");
-
-        let ics_reg = [0xCCu8; 20];
-        execute_shared_security_tx(
-            &mut state,
-            &ctx(dom_op, devnet()),
-            &SharedSecurityTx::SetRegistrar {
-                domain_key: dom_id,
-                registrar: ics_reg.to_vec(),
-            },
-        )
-        .expect("ics registrar");
 
         // 4 CometBFT provider validators (keys 0..4, 100 power each).
         let keys: Vec<KeyPair> = (60u8..=63)
@@ -2032,6 +2122,48 @@ mod tests {
                 }
             })
             .collect();
+        let chain_id = "provider-ics-1";
+        let network = "ics-provider";
+        let set_hash = validator_set_hash(&tm_vals);
+        let intake_key = DomainKey::from_parts(
+            &AdapterId::from_name(&format!("tendermint-commit-{network}")),
+            network,
+        );
+
+        let dom_id = 777u32;
+        let dom_op = Address::from([0x41; 32]);
+        let carrier = Address::from([0x42; 32]);
+        let mut state = AccountState::new();
+        let mut domain = crate::domain::plugin::default_domain(
+            dom_id,
+            crate::domain::ConsensusKind::Custom("tendermint-bft".to_string()),
+            777_001,
+            crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER,
+            1,
+        );
+        domain.operator = Some(dom_op);
+        domain.plugin_code_hash = Some([0x77; 32]);
+        domain.config_hash = intake_key.0;
+        state.add_balance(&dom_op, domain.operator_bond.saturating_add(FEE));
+        crate::settlement::domains::register_domain(&mut state, domain).expect("tm domain");
+        state.settlement.external_intake.pin_tendermint_anchor(
+            network,
+            PinnedTendermintAnchor {
+                chain_id: chain_id.to_string(),
+                validator_set_hash: set_hash,
+            },
+        );
+
+        let ics_reg = [0xCCu8; 20];
+        execute_shared_security_tx(
+            &mut state,
+            &ctx(dom_op, devnet()),
+            &SharedSecurityTx::SetRegistrar {
+                domain_key: dom_id,
+                registrar: ics_reg.to_vec(),
+            },
+        )
+        .expect("ics registrar");
 
         // Register two CosmosIcs allocations:
         // - honest_val backed by tm_vals[0] (signs only fork A -> MUST STAY ACTIVE!)
@@ -2083,13 +2215,14 @@ mod tests {
 
         // Construct two conflicting CometBFT commits at height 900:
         // Fork A signed by [0, 1, 2], Fork B signed by [1, 2, 3].
-        let chain_id = "provider-ics-1";
-        let set_hash = validator_set_hash(&tm_vals);
-        let mk_fork = |app_hash: [u8; 32], signers: &[usize]| -> TendermintCommitEvidence {
-            let ts = 1_790_000_600u64;
+        let mk_fork_at = |cid: &str,
+                          ts: u64,
+                          app_hash: [u8; 32],
+                          signers: &[usize]|
+         -> TendermintCommitEvidence {
             let parts = [app_hash[0]; 32];
             let mut c = TendermintCommitEvidence {
-                chain_id: chain_id.to_string(),
+                chain_id: cid.to_string(),
                 height: 900,
                 round: 0,
                 block_hash: [0u8; 32],
@@ -2118,7 +2251,7 @@ mod tests {
                 .iter()
                 .map(|&i| {
                     let msg = vote_sign_bytes(
-                        chain_id,
+                        cid,
                         900,
                         0,
                         &c.block_hash,
@@ -2136,6 +2269,9 @@ mod tests {
                 .collect();
             c
         };
+        let mk_fork = |app_hash: [u8; 32], signers: &[usize]| -> TendermintCommitEvidence {
+            mk_fork_at(chain_id, 1_790_000_600, app_hash, signers)
+        };
         let light_params = TendermintLightParams::standard_for_unbonding(1_814_400).unwrap();
         let trusted = TrustedTendermintState {
             chain_id: chain_id.to_string(),
@@ -2145,6 +2281,107 @@ mod tests {
             validators: tm_vals.clone(),
             next_validators_hash: set_hash,
         };
+
+        // 1. Foreign chain_id must be refused against pinned provider-ics-1.
+        let foreign_trusted = TrustedTendermintState {
+            chain_id: "foreign-devnet-9".to_string(),
+            ..trusted.clone()
+        };
+        let foreign_misb = TendermintMisbehaviour {
+            header_1: mk_fork_at("foreign-devnet-9", 1_790_000_600, [0xA1; 32], &[0, 1, 2]),
+            header_2: Some(mk_fork_at(
+                "foreign-devnet-9",
+                1_790_000_600,
+                [0xB2; 32],
+                &[1, 2, 3],
+            )),
+        };
+        assert!(matches!(
+            execute_tendermint_misbehaviour_slash(
+                &mut state,
+                &ctx(carrier, devnet()),
+                dom_id,
+                &foreign_trusted,
+                &light_params,
+                &foreign_misb,
+                1_790_001_000,
+            ),
+            Err(SettlementTxError::Refused(_))
+        ));
+
+        // 2. Single-header LunaticHeader framing over an honest block with forged
+        //    next_validators_hash must be refused (zero private keys needed).
+        let lunatic_trusted = TrustedTendermintState {
+            height: 899,
+            time_secs: 1_790_000_590,
+            next_validators_hash: [0xFF; 32],
+            ..trusted.clone()
+        };
+        let lunatic_framing = TendermintMisbehaviour {
+            header_1: mk_fork([0xA1; 32], &[0, 1, 2]),
+            header_2: None,
+        };
+        assert!(matches!(
+            execute_tendermint_misbehaviour_slash(
+                &mut state,
+                &ctx(carrier, devnet()),
+                dom_id,
+                &lunatic_trusted,
+                &light_params,
+                &lunatic_framing,
+                1_790_001_000,
+            ),
+            Err(SettlementTxError::Refused(_))
+        ));
+
+        // 3a. Trusted checkpoint postdating commit_time inside the window must be refused.
+        let postdated_trusted = TrustedTendermintState {
+            time_secs: 1_790_000_900,
+            ..trusted.clone()
+        };
+        let fresh_misb = TendermintMisbehaviour {
+            header_1: mk_fork([0xA1; 32], &[0, 1, 2]),
+            header_2: Some(mk_fork([0xB2; 32], &[1, 2, 3])),
+        };
+        assert!(matches!(
+            execute_tendermint_misbehaviour_slash(
+                &mut state,
+                &ctx(carrier, devnet()),
+                dom_id,
+                &postdated_trusted,
+                &light_params,
+                &fresh_misb,
+                1_790_001_000,
+            ),
+            Err(SettlementTxError::Refused(_))
+        ));
+
+        // 3b. Expired commit_time beyond the 14-day consensus trusting ceiling must be refused
+        //     even when light_params carries a wider unbonding window.
+        let ancient_ts = 1_788_000_000u64;
+        let wide_params = TendermintLightParams::standard_for_unbonding(90 * 86_400).unwrap();
+        let stale_trusted = TrustedTendermintState {
+            time_secs: ancient_ts,
+            trusting_period_secs: wide_params.trusting_period_secs,
+            ..trusted.clone()
+        };
+        let stale_misb = TendermintMisbehaviour {
+            header_1: mk_fork_at(chain_id, ancient_ts, [0xA1; 32], &[0, 1, 2]),
+            header_2: Some(mk_fork_at(chain_id, ancient_ts, [0xB2; 32], &[1, 2, 3])),
+        };
+        assert!(matches!(
+            execute_tendermint_misbehaviour_slash(
+                &mut state,
+                &ctx(carrier, devnet()),
+                dom_id,
+                &stale_trusted,
+                &wide_params,
+                &stale_misb,
+                1_790_001_000,
+            ),
+            Err(SettlementTxError::Refused(_))
+        ));
+
         let misbehaviour = TendermintMisbehaviour {
             header_1: mk_fork([0xA1; 32], &[0, 1, 2]),
             header_2: Some(mk_fork([0xB2; 32], &[1, 2, 3])),
