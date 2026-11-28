@@ -419,6 +419,44 @@ pub fn check_ingest_garden_domain_reservation(
 ///
 /// A shape rule, a `PoA` admission set on a non-`PoA` kind, or a registry
 /// refusal (duplicate id, bond, lifecycle, ceiling).
+/// Put a freshly registered domain in front of the Sentry immediately.
+///
+/// The Sentry is otherwise refreshed at block end
+/// (`AccountState::refresh_consensus_sentry`), but a domain registered by a
+/// transaction can move value in that same block. Registering here means those
+/// doors see a real record instead of none, with the same conservative posture
+/// the block-end pass would choose for an unobserved domain.
+fn seed_sentry_for_registered_domain(state: &mut AccountState, domain: &ConsensusDomain) {
+    use crate::cross_domain::external::sentry::{
+        ConsensusSentry, DomainQuantumPosture, SentryDomainPolicy, DEFAULT_MAX_RESTAKE_SHARE_PPM,
+    };
+    let key = ConsensusSentry::domain_key_for_id(domain.id);
+    if state.bridge_state.consensus_sentry.domain(&key).is_some() {
+        return;
+    }
+    let posture = match domain.kind {
+        crate::domain::types::ConsensusKind::PoW | crate::domain::types::ConsensusKind::Zk => {
+            DomainQuantumPosture::PurePostQuantum
+        }
+        _ => DomainQuantumPosture::ClassicalOnly,
+    };
+    // A full Sentry or a malformed key is reported by the block-end refresh;
+    // a Sentry capacity limit must not turn into a registration failure.
+    let _ = state.bridge_state.consensus_sentry.register_domain(
+        key,
+        SentryDomainPolicy {
+            consensus_family: "registered-domain".into(),
+            quantum_posture: posture,
+            max_finality_stall_secs: 3_600,
+            min_trusting_window_secs: 600,
+            max_reorg_blocks: 6,
+            max_consecutive_proof_failures: 3,
+            max_restake_share_ppm: DEFAULT_MAX_RESTAKE_SHARE_PPM,
+            recovery_cooldown_secs: 3_600,
+        },
+    );
+}
+
 pub fn register_domain(state: &mut AccountState, domain: ConsensusDomain) -> Result<(), String> {
     validate_domain_registration(&domain)?;
     // The other half of the admission gate in `AccountState::execute_proposal`:
@@ -465,6 +503,16 @@ pub fn register_domain(state: &mut AccountState, domain: ConsensusDomain) -> Res
         .settlement
         .domains
         .note_activity(id, state.current_block_height);
+
+    if let Some(registered) = state
+        .settlement
+        .domains
+        .domains()
+        .into_iter()
+        .find(|d| d.id == id)
+    {
+        seed_sentry_for_registered_domain(state, &registered);
+    }
     Ok(())
 }
 
@@ -3010,6 +3058,60 @@ fn execute_proof_market_tx(
             })?;
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod same_block_sentry_tests {
+    use super::*;
+    use crate::cross_domain::external::sentry::ConsensusSentry;
+
+    /// A domain registered by a transaction must be watched by the Sentry
+    /// before the next transaction in the same block can move value for it.
+    ///
+    /// The Sentry is otherwise refreshed at block end, so registration used to
+    /// leave a whole block in which every value door read "no record" as a
+    /// clear circuit.
+    #[test]
+    fn registration_puts_the_domain_in_front_of_the_sentry_at_once() {
+        let mut state = AccountState::new();
+        let domain_id = 4242u32;
+        assert!(
+            state
+                .bridge_state
+                .consensus_sentry
+                .domain(&ConsensusSentry::domain_key_for_id(domain_id))
+                .is_none(),
+            "fixture precondition: the Sentry does not know this domain yet"
+        );
+
+        let domain = crate::domain::plugin::default_domain(
+            domain_id,
+            crate::domain::types::ConsensusKind::PoS,
+            u64::from(domain_id),
+            "pos",
+            0,
+        );
+        state.settlement.domains.register(domain).expect("register");
+        // The registration door is what a transaction calls; run the same
+        // seeding step it runs.
+        let domain = state
+            .settlement
+            .domains
+            .domains()
+            .into_iter()
+            .find(|d| d.id == domain_id)
+            .expect("registered domain");
+        seed_sentry_for_registered_domain(&mut state, &domain);
+
+        assert!(
+            state
+                .bridge_state
+                .consensus_sentry
+                .domain(&ConsensusSentry::domain_key_for_id(domain_id))
+                .is_some(),
+            "a domain registered in this block must be watched before value moves"
+        );
     }
 }
 
