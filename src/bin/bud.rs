@@ -5813,6 +5813,7 @@ mod rpc_auth_tests {
             finality_proof_hash: [0x11; 32],
             guarantee_backing_hash: [0x22; 32],
             bond_atoms: 1_000_000,
+            staleness: 0,
             guarantee: FinalityGuarantee {
                 reversibility: FinalityReversibility::ProbabilisticWork { confirmations: 6 },
                 quantum_posture: QuantumClass::Hash,
@@ -5880,6 +5881,7 @@ mod finality_anchor_tests {
             finality_proof_hash: [0x11; 32],
             guarantee_backing_hash: [0x22; 32],
             bond_atoms: 1_000_000,
+            staleness: 0,
             guarantee: FinalityGuarantee {
                 reversibility: FinalityReversibility::ProbabilisticWork { confirmations: 6 },
                 quantum_posture: QuantumClass::Hash,

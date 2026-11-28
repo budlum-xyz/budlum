@@ -3451,6 +3451,7 @@ mod tests {
             finality_proof_hash: [0x22; 32],
             guarantee_backing_hash: [0x33; 32],
             bond_atoms: 300_000,
+            staleness: 0,
             guarantee: FinalityGuarantee {
                 reversibility: FinalityReversibility::DeterministicQuorum,
                 quantum_posture: QuantumClass::Hash,

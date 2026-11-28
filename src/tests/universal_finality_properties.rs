@@ -41,6 +41,7 @@ fn sample_entry(
         finality_proof_hash: [tag.wrapping_add(1); 32],
         guarantee_backing_hash: [tag.wrapping_add(2); 32],
         bond_atoms: 1_000_000_000,
+        staleness: 0,
         guarantee,
         verdict,
     }
