@@ -5,6 +5,15 @@ on:
   schedule:
     - cron: '0 0 * * 1' # Monday 00:00 UTC; owns the first weekly heavy window
 
+# Measured 2026-11-28: this sweep has run eighteen times and produced no
+# verdict. Seventeen were cancelled, and the two that reached a test both died
+# on the same thing - `rpc::tests::rpc_tests::test_storage_economics_rpc_reports_chain_actor_state`
+# aborting under Miri on an `aws-lc-rs` FFI call. The test is named `storage` in
+# its module path but it is an RPC economics test, and the enumeration filter
+# below selects by name, so it must be named in `ffi_skip` like the 43 others
+# this file already excludes. A shard that cannot pass is not a hard week; it
+# is a measurement that never existed.
+
 concurrency:
   group: miri-storage-weekly-${{ github.ref }}
   cancel-in-progress: false
@@ -108,6 +117,17 @@ jobs:
             pruning_witnesses_keeps_the_block_hash_and_happens_once
             qc_blob_binary_storage_and_legacy_bincode_are_readable
             qc_blob_storage_rejects_corruption_and_cross_height_rows
+            # Not a storage state machine: it builds a chain actor and an RPC
+            # handle, and the first thing that handle does is generate an EC
+            # key through `aws-lc-rs` FFI. Miri says so in as many words -
+            # `unsupported operation: can't call foreign function
+            # aws_lc_0_46_0_EVP_PKEY_CTX_new_id on OS linux` - and "does not
+            # indicate a bug in the program". It was missing from this list
+            # while sitting in the `rpc::tests` name space, so it matched the
+            # `storage` enumeration filter, was handed to whichever shard its
+            # stride landed on, and took that shard down with it: the weekly
+            # sweep has never once completed (18 runs, 0 verdicts).
+            test_storage_economics_rpc_reports_chain_actor_state
             corrupted_local_bytes_are_refused
             honest_local_bytes_are_returned
             # RPC server tests construct TLS/rcgen fixtures via C `aws-lc-sys`

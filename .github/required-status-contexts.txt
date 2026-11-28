@@ -13,6 +13,13 @@
 # `consensus-of-consensuses` while no workflow in the repository declared a job
 # with that name - thirty-nine workflow files, zero producers. The delivery pull
 # request #215 therefore sat blocked with seventy-nine green checks beside a
-# context GitHub was still waiting for. The gate that produces it lives in
-# `.github/workflows/merge-gate.yml`, and this file is what keeps that true.
+# context GitHub was still waiting for.
+#
+# The job that produces it is `merge-block-default-branch` in
+# `.github/workflows/audit-guard.yml`, next to the review boundary whose rules it
+# reads. This line used to name `.github/workflows/merge-gate.yml`, a file that
+# never existed in any commit: the pointer was a promise about a workflow, and
+# the workflow was never written. The context is still produced, because the job
+# landed in `audit-guard.yml`; the comment is corrected here so the next reader
+# looks in the file that really reports it.
 merge-block-default-branch	consensus-of-consensuses

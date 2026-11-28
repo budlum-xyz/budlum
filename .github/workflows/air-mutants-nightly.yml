@@ -10,6 +10,17 @@ name: AIR Mutants Weekly
 on:
   schedule:
     - cron: "15 0 * * 6"   # Saturday 00:15 UTC; isolated from the deep fuzz sweep
+  # The sharded rewrite of this file (32 shards, `max-parallel: 4`) has never
+  # run. The job was one 350-minute step, it hit `timeout-minutes: 350` and
+  # ended `cancelled` on every weekly firing, and there was no other way to ask
+  # for it: a schedule only fires on the default branch, so a branch that fixes
+  # the job could not execute the fix without waiting a week. With a `push`
+  # trigger limited to this file, a change to it proves itself in the same
+  # push that makes it, and no other push pays for it.
+  push:
+    branches: [main, consensus-of-consensuses, testnet-50, garden]
+    paths:
+      - ".github/workflows/air-mutants-nightly.yml"
   workflow_dispatch:
 
 concurrency:
