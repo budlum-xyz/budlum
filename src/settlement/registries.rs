@@ -227,7 +227,7 @@ impl SettlementRegistries {
         use crate::domain::types::DomainStatus;
         use crate::settlement::universal_finality::{
             compose, DomainFinalityEntry, FinalityGuarantee, FinalityPendingReason,
-            FinalityVerdict, FINALITY_BINDS_ALL,
+            FinalityVerdict, FINALITY_BINDS_ALL, FINALITY_TRUST_PERIOD_BLOCKS,
         };
 
         if self.domains.is_empty() {
@@ -255,6 +255,17 @@ impl SettlementRegistries {
                 .map_or(([0u8; 32], [0u8; 32]), |c| {
                     (c.state_root, c.finality_proof_hash)
                 });
+            // Settlement blocks since the commitment this row stands on was
+            // accepted. A commitment the registry cannot date is as old as the
+            // chain: the row then carries the full checkpoint height and falls
+            // past the trust period instead of passing as fresh.
+            let staleness = latest_commitment.map_or(checkpoint_height, |c| {
+                self.commitments
+                    .earliest_accepted_height(c.domain_id, c.domain_height)
+                    .map_or(checkpoint_height, |accepted| {
+                        checkpoint_height.saturating_sub(accepted)
+                    })
+            });
             let verdict = match domain.status {
                 DomainStatus::Frozen => FinalityVerdict::Refuted { code: 1 },
                 DomainStatus::Retired => FinalityVerdict::Pending {
@@ -269,6 +280,13 @@ impl SettlementRegistries {
                         } else if guarantee.fault_tolerance_bps == 0 {
                             FinalityVerdict::Pending {
                                 reason: FinalityPendingReason::RuleNotSatisfied,
+                            }
+                        } else if staleness > FINALITY_TRUST_PERIOD_BLOCKS {
+                            // The domain stopped bringing evidence: its last
+                            // established row keeps its counter but no longer
+                            // carries value.
+                            FinalityVerdict::Pending {
+                                reason: FinalityPendingReason::EvidenceMissing,
                             }
                         } else {
                             FinalityVerdict::Established
@@ -294,6 +312,7 @@ impl SettlementRegistries {
                 finality_proof_hash,
                 guarantee_backing_hash,
                 bond_atoms: u128::from(domain.operator_bond),
+                staleness,
                 guarantee,
                 verdict,
             });
@@ -749,5 +768,122 @@ mod tests {
         assert_eq!(p3.bucket, FinalityBucket::Refuted);
         assert_eq!(p3.entry.verdict, FinalityVerdict::Refuted { code: 1 });
         assert!(p3.verify(&cert.refuted_root));
+    }
+
+    #[test]
+    fn a_domain_silent_past_the_trust_period_falls_back_to_evidence_missing() {
+        use crate::core::address::Address;
+        use crate::crypto::facts::{AssumptionClass, CryptoFacts, ObservedScheme};
+        use crate::domain::types::{
+            ConsensusDomain, ConsensusKind, DomainCommitment, DomainStatus, RootScheme,
+        };
+        use crate::settlement::finality_gate::{
+            enforce_domain_not_refuted, ValueGate, ValueGateRefusal,
+        };
+        use crate::settlement::universal_finality::FINALITY_TRUST_PERIOD_BLOCKS;
+        use crate::settlement::{FinalityBucket, FinalityPendingReason, FinalityVerdict};
+
+        let accepted_at: u64 = 1_000;
+        let mut registries = SettlementRegistries::new();
+        registries
+            .domains
+            .restore_persisted(ConsensusDomain {
+                id: 9,
+                kind: ConsensusKind::AiInference,
+                status: DomainStatus::Active,
+                domain_chain_id: 7_009,
+                operator: Some(Address::from([1u8; 32])),
+                operator_bond: crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND,
+                config_hash: [0xAA; 32],
+                validator_set_hash: [0xBB; 32],
+                finality_adapter: "tendermint-v1".into(),
+                min_confirmations: 1,
+                bridge_enabled: true,
+                block_hash_scheme: RootScheme::Sha256,
+                state_root_scheme: RootScheme::Sha256,
+                tx_root_scheme: RootScheme::Sha256,
+                last_committed_height: 15,
+                last_committed_hash: [0x15; 32],
+                pow_parameters: None,
+                zk_program_allowlist: Vec::new(),
+                plugin_code_hash: None,
+                genesis_state_root: [0u8; 32],
+            })
+            .expect("register domain 9");
+        let mut facts = CryptoFacts::new();
+        facts.record(ObservedScheme::Proof(AssumptionClass::Hash));
+        registries.domains.record_observed(9, &facts);
+        registries
+            .commitments
+            .insert_at_height(
+                DomainCommitment {
+                    domain_id: 9,
+                    domain_height: 15,
+                    domain_block_hash: [0x15; 32],
+                    parent_domain_block_hash: [0x14; 32],
+                    state_root: [0x30; 32],
+                    tx_root: [0x31; 32],
+                    event_root: [0x32; 32],
+                    finality_proof_hash: [0x33; 32],
+                    consensus_kind: ConsensusKind::AiInference,
+                    validator_set_hash: [0xBB; 32],
+                    timestamp_ms: 1_000,
+                    sequence: 1,
+                    producer: None,
+                    state_updates: std::collections::BTreeMap::new(),
+                },
+                accepted_at,
+            )
+            .expect("accept the commitment at settlement height 1000");
+
+        // Fresh: the commitment landed in this very checkpoint.
+        let fresh = registries
+            .universal_finality_certificate(accepted_at)
+            .expect("certificate");
+        let row = fresh.prove_domain(9).expect("row");
+        assert_eq!(row.entry.staleness, 0);
+        assert_eq!(row.entry.verdict, FinalityVerdict::Established);
+
+        // At the bound: still established, and the counter says how old it is.
+        let at_bound = accepted_at + FINALITY_TRUST_PERIOD_BLOCKS;
+        let cert = registries
+            .universal_finality_certificate(at_bound)
+            .expect("certificate");
+        let row = cert.prove_domain(9).expect("row");
+        assert_eq!(row.entry.staleness, FINALITY_TRUST_PERIOD_BLOCKS);
+        assert_eq!(row.bucket, FinalityBucket::Established);
+        assert_eq!(
+            enforce_domain_not_refuted(&registries, at_bound, ValueGate::BridgeMint, 9),
+            Ok(())
+        );
+
+        // One block past the trust period: the row falls back to
+        // "pending: evidence missing" and stops carrying value.
+        let stale = at_bound + 1;
+        let cert = registries
+            .universal_finality_certificate(stale)
+            .expect("a stale domain still yields a certificate");
+        assert_eq!(cert.verify_integrity(), Ok(()));
+        let row = cert.prove_domain(9).expect("row");
+        assert_eq!(row.entry.staleness, FINALITY_TRUST_PERIOD_BLOCKS + 1);
+        assert_eq!(row.bucket, FinalityBucket::Pending);
+        assert_eq!(
+            row.entry.verdict,
+            FinalityVerdict::Pending {
+                reason: FinalityPendingReason::EvidenceMissing,
+            }
+        );
+        assert_eq!(cert.established_count, 0);
+        assert_eq!(
+            enforce_domain_not_refuted(&registries, stale, ValueGate::BridgeMint, 9),
+            Err(ValueGateRefusal::DomainPending {
+                domain_id: 9,
+                reason: FinalityPendingReason::EvidenceMissing,
+            })
+        );
+
+        // The certificate digest moves with the counter, so two nodes that
+        // disagree on the age of a row cannot agree on the header.
+        assert_ne!(fresh.certificate_digest, cert.certificate_digest);
     }
 }
