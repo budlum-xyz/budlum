@@ -1181,6 +1181,11 @@ pub(crate) mod decision {
     /// The trust model a profile accepts, without the `set_size` payload: a
     /// built-in family never depends on how large the certified set is, only
     /// on whether honesty of that set is the assumption.
+    ///
+    /// WIRING: read inside this file today, by `Profile::accepts`, which
+    /// `verify_descriptor` calls. The door that reads it from outside is the
+    /// adapter registry, which asks a family for its profile before a foreign
+    /// certificate is admitted.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Trust {
         /// Anybody with the evidence can check it.
@@ -1190,6 +1195,10 @@ pub(crate) mod decision {
     }
 
     /// The backing shapes that occur in the tree, as one small set.
+    ///
+    /// WIRING: read inside this file today, by the rows of `FAMILY_PROFILES`
+    /// and by `Profile::accepts_backing`, which the attestation path calls. The
+    /// door that reads it from outside is the adapter registry.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Backings {
         Work,
@@ -1214,6 +1223,10 @@ pub(crate) mod decision {
     }
 
     /// The security backing an attestation carries.
+    ///
+    /// WIRING: mapped from an attestation's security backing inside
+    /// `from_external_attestation`, so a row can decide whether that backing may
+    /// carry the family. No other reader today.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Backing {
         SignatureSet,
@@ -1225,6 +1238,9 @@ pub(crate) mod decision {
     impl Profile {
         /// Which security backings this family's attestation may carry.
         ///
+        /// WIRING: the attestation path asks this before a foreign certificate is
+        /// admitted; see [`Profile`].
+        ///
         /// This is the second half of the family profile. The first half
         /// (finality kind, trust model, time unit) lives in [`Profile`]; the
         /// pairing between the two - "a family that declares `Trustless` must
@@ -1232,14 +1248,14 @@ pub(crate) mod decision {
         /// point and is now read from [`FamilyProfile::backings`].
         #[must_use]
         pub fn accepts_backing(&self, backing: Backing) -> bool {
-            let b = match self.backings {
-                Backings::Work => &[Backing::Work][..],
-                Backings::SignatureSet => &[Backing::SignatureSet][..],
-                Backings::WorkOrSignatureSet => &[Backing::Work, Backing::SignatureSet][..],
-                Backings::Zk => &[Backing::Zk][..],
-                Backings::ZkOrSignatureSet => &[Backing::Zk, Backing::SignatureSet][..],
+            let accepted: &[Backing] = match self.backings {
+                Backings::Work => &[Backing::Work],
+                Backings::SignatureSet => &[Backing::SignatureSet],
+                Backings::WorkOrSignatureSet => &[Backing::Work, Backing::SignatureSet],
+                Backings::Zk => &[Backing::Zk],
+                Backings::ZkOrSignatureSet => &[Backing::Zk, Backing::SignatureSet],
             };
-            b.contains(&backing)
+            accepted.contains(&backing)
         }
 
         /// Does this profile accept the descriptor's three profile fields?
@@ -1286,23 +1302,51 @@ pub(crate) mod decision {
         }
     }
 
-    /// The backing set the tree's previous `allowed` match asserted for each
-    /// family, kept here as the one place the pairing is written.
+    /// The backing set each family may present. Every one of the 32 families is
+    /// named, and there is no `_` arm: a family added to the enum does not compile
+    /// until somebody decides what may back it, and a family whose backing is
+    /// widened by editing this match turns the profile gate red.
+    ///
+    /// WIRING: read inside this file today, by the rows of `FAMILY_PROFILES` and
+    /// by the profile test that holds each family to its answer. The door that
+    /// reads it from outside is the adapter registry, which asks a family which
+    /// backing may carry it before a foreign certificate is admitted.
     #[must_use]
     pub const fn backings_of(family: ExternalVerifierFamily) -> Backings {
         match family {
+            ExternalVerifierFamily::BitVmCovenant
+            | ExternalVerifierFamily::BitcoinNakamotoPow
+            | ExternalVerifierFamily::GhostdagPow
+            | ExternalVerifierFamily::NipopowSuperblock => Backings::Work,
+            ExternalVerifierFamily::BudZkVmExecution
+            | ExternalVerifierFamily::MinaSuccinctRecursive
+            | ExternalVerifierFamily::StarkValidityRollup => Backings::Zk,
             ExternalVerifierFamily::AuxPowPop | ExternalVerifierFamily::PoSpaceVdf => {
                 Backings::WorkOrSignatureSet
             }
             ExternalVerifierFamily::HeterogeneousMultiProver => Backings::ZkOrSignatureSet,
-            ExternalVerifierFamily::StarkValidityRollup
-            | ExternalVerifierFamily::MinaSuccinctRecursive
-            | ExternalVerifierFamily::BudZkVmExecution => Backings::Zk,
-            ExternalVerifierFamily::BitcoinNakamotoPow
-            | ExternalVerifierFamily::BitVmCovenant
-            | ExternalVerifierFamily::GhostdagPow
-            | ExternalVerifierFamily::NipopowSuperblock => Backings::Work,
-            _ => Backings::SignatureSet,
+            ExternalVerifierFamily::AlgorandStateProof
+            | ExternalVerifierFamily::AptosJolteonBft
+            | ExternalVerifierFamily::ArweaveSpOra
+            | ExternalVerifierFamily::BabylonEots
+            | ExternalVerifierFamily::BasedPreconf
+            | ExternalVerifierFamily::BullsharkDagBft
+            | ExternalVerifierFamily::CasperFfg
+            | ExternalVerifierFamily::CelestiaDas
+            | ExternalVerifierFamily::ChainKeyNiDkg
+            | ExternalVerifierFamily::EthereumGasperSync
+            | ExternalVerifierFamily::HoneyBadgerBft
+            | ExternalVerifierFamily::HotStuffChainedBft
+            | ExternalVerifierFamily::MysticetiDag
+            | ExternalVerifierFamily::NearDoomslugBft
+            | ExternalVerifierFamily::OuroborosMithril
+            | ExternalVerifierFamily::RestakingAvs
+            | ExternalVerifierFamily::SimplexBft
+            | ExternalVerifierFamily::SolanaTowerBft
+            | ExternalVerifierFamily::StellarScp
+            | ExternalVerifierFamily::SymbioticVault
+            | ExternalVerifierFamily::TendermintBft
+            | ExternalVerifierFamily::TonCatchainBft => Backings::SignatureSet,
         }
     }
 
@@ -1314,6 +1358,11 @@ pub(crate) mod decision {
     const MAJORITY: Trust = Trust::HonestMajority;
 
     /// The canonical profile of every built-in family.
+    ///
+    /// WIRING: read inside this file today, by `decision::family`, which both
+    /// finality decision paths call. The door that reads it from outside is the
+    /// adapter registry, which asks a family for its profile before a foreign
+    /// certificate is admitted.
     ///
     /// One row per family, in the family's own discriminant order. The gate
     /// checks that the rows cover `0..=31` exactly once and that each row

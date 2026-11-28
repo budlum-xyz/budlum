@@ -77,6 +77,7 @@ mod gates {
     pub mod cargo_vet;
     pub mod chain_id_is_not_hardcoded;
     pub mod ci_concurrency_scope;
+    pub mod finality_family_profiles;
     pub mod ci_fanout_budget;
     pub mod ci_jobs_end_on_cancel;
     pub mod ci_trigger_coverage;
@@ -544,6 +545,14 @@ const GATES: &[Gate] = &[
         run: gates::ci_fanout_budget::run,
         run_args: Some(gates::ci_fanout_budget::run_args),
         self_test: gates::ci_fanout_budget::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "finality-family-profiles",
+        replaces: None,
+        run: gates::finality_family_profiles::run,
+        run_args: None,
+        self_test: gates::finality_family_profiles::self_test,
         run_log: None,
     },
     Gate {

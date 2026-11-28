@@ -2,8 +2,8 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: f9ca5d2d480d1bd6ab869a1863e77c57ecf4c3ca14e85593a4e5bd42f7c0c7ac
-files: 200
+digest: 462eefa8793c9a9c09aced64458833057166c61cf9abd84a5242ce03b9efaf48
+files: 201
 Cargo.lock	7a2830ec9206a455ad5bbaef19dcedd3e88df2aa4eedaca3b5861a2107138856
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
 pins/budzero-tree.pins	d648198be582cacf34db53593df49cc7adae746edb0d7d537d3cfb3540ecedea
@@ -69,6 +69,7 @@ src/gates/evidence_provenance.rs	68c9d4a6bd85f6ee31f13641158658d887fa856114c4ef6
 src/gates/exact_named_tests.rs	5d06b1cfdae90e6866d4189d95aacea8c642a770856acd071d4c52afc8e6e298
 src/gates/explorer_parity.rs	12d664eaebb46a2dc484197d4d2b99477b82a6e3ddb6d8e57de05bb0cba25f90
 src/gates/explorer_patchset.rs	21f40d70534cb98a9741b516b07a822c3efadea913130d95b83ba4736107e233
+src/gates/finality_family_profiles.rs	7daf0ea31add1267060544f51f16a1585b231cf71e02f069abdacf06c1ec872a
 src/gates/fixture_integrity.rs	5a78c66a7907b0b48492cf9db521c687fd636ef41525d0b428cd77a0dce525ab
 src/gates/forgery_tests.rs	a858fb319c8dde7e002e9fb9f7ebcda2861064e90f5a664786a9958e120cce88
 src/gates/fork_choice_gate.rs	6271b7d077801fd39698c6b8f7ed3259ef1fd8aedcd2f9acb919d30c819df5a7
@@ -201,7 +202,7 @@ src/gates/zero_storage_frozen.rs	3185f6028c58c7bfb87f3da9da66298e584dbe35316d218
 src/gates/zero_tests_witness.rs	5979c6d1308c86119d83bc1997c3165579e29cc10603637a7b1b748860f18f35
 src/gates/zizmor.rs	ce74e736b69d80d711a9c8a61b79f357a0a278a56201af8a19f7dc6f3b5ccbe9
 src/gates/zkvm_refuses_untrusted_proofs.rs	dfca412c7a6bbc72aba195ebaffcd9f759406bfca4531ab535ae60748af88520
-src/main.rs	00883d3f5b648c81d5f1146784dbeff43ecc85ec9d12d5a0696182cbd38f3172
+src/main.rs	04c08307d9cbec12fe0e1004dae725eb469c54e9a977a538dc5ab77e9c48fc50
 src/sha256.rs	b43ece6c2d4936308d742266930a3d598dfd3175722856b7e4924f5439d35eb5
 tests/repository_locks.rs	6407d19d002bbc52a8bbf186bec015129fb12c609a507ca88534dc3b4fdca721
 
