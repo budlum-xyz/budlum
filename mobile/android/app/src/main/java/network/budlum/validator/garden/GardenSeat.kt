@@ -24,6 +24,16 @@ object GardenSeat {
     fun away(statusJson: String): Boolean =
         garden(statusJson)?.optString("status") == "Away"
 
+    /**
+     * Whether this phone is in the Garden but has not been admitted yet.
+     *
+     * A Garden object exists before a seat does, so "there is a garden here"
+     * is not the same question as "this phone is validating". Home read only
+     * the first one and drew a waiting phone as if it were working.
+     */
+    fun waiting(statusJson: String): Boolean =
+        garden(statusJson)?.optString("status") == "Waiting"
+
     /** Whether this leave answer kept the way back open. */
     fun canReturn(leaveJson: String): Boolean =
         runCatching { JSONObject(leaveJson).optBoolean("can_return", false) }

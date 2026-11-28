@@ -222,7 +222,22 @@ private fun HomeScreen(model: GardenModel, onInvite: () -> Unit) {
                 )
             }
         }
-        if (garden != null) {
+        // A Garden object exists before a seat does: the core answers one
+        // while this phone is still waiting for the host. Reading only "is
+        // there a garden object" made a waiting phone look seated, and the
+        // sentence that says otherwise was never drawn on this screen.
+        val waiting = garden != null && GardenSeat.waiting(model.state.status)
+        if (garden != null && waiting) {
+            GardenPanel(outlined = true) {
+                GardenLabel("NOT SEATED YET")
+                GardenBody(gardenSentence(garden.optString("status")))
+                GardenBody(
+                    "Nothing is wrong with this phone: it is in the Garden and " +
+                        "the host has not admitted it yet.",
+                )
+            }
+        }
+        if (garden != null && !waiting) {
             GardenPanel {
                 GardenLabel("WORK")
                 GardenStat("Parts held", workLong(garden, "parts_held").toString())
@@ -272,7 +287,16 @@ private fun DataScreen(model: GardenModel) {
                 GardenBody("This phone holds nothing: it is in no Garden.")
             } else {
                 GardenStat("Objects", garden.optInt("objects", 0).toString())
-                GardenStat("Wanted here", garden.optInt("objects_wanted_here", 0).toString())
+                // The core answers `objects_wanted_here`. When the answer does
+                // not carry the field at all, the screen does not print a
+                // zero: a zero and an unknown count look identical on a screen
+                // and mean opposite things.
+                if (garden.has("objects_wanted_here")) {
+                    GardenStat(
+                        "Wanted here",
+                        garden.optInt("objects_wanted_here", 0).toString(),
+                    )
+                }
                 GardenStat("Bytes stored", garden.optLong("stored_object_bytes", 0).toString())
                 GardenStat("Parts held", workLong(garden, "parts_held").toString())
             }
