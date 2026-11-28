@@ -92,7 +92,7 @@ fn contains_encoded_traversal_or_nul(path: &str) -> bool {
             [b'%', a, b]
                 if matches!(
                     &[a.to_ascii_lowercase(), b.to_ascii_lowercase()],
-                    b"2e" | b"2f" | b"5c" | b"00"
+                    b"2e" | b"2f" | b"5c" | b"00" | b"25"
                 )
         )
     })
@@ -105,10 +105,14 @@ fn contains_encoded_traversal_or_nul(path: &str) -> bool {
 /// bytes, any `.`/`..` segment, and any empty segment other than the single
 /// trailing slash. A query string is not part of the path and must already have
 /// been stripped by the caller.
+const MAX_ROUTE_PATH_BYTES: usize = 1_024;
+
 fn is_well_formed_path(path: &str) -> bool {
     if !path.starts_with('/')
-        || path.contains('\0')
-        || path.contains('\\')
+        || path.len() > MAX_ROUTE_PATH_BYTES
+        || path
+            .bytes()
+            .any(|b| b.is_ascii_control() || b == b'\\' || b == b'?' || b == b'#')
         || contains_encoded_traversal_or_nul(path)
     {
         return false;
@@ -165,7 +169,10 @@ impl SiteManifest {
             return Err(RouteError::Malformed);
         }
         let lookup = if path == "/" {
-            self.index.as_str()
+            if !is_well_formed_path(&self.index) || self.index == "/" {
+                return Err(RouteError::Malformed);
+            }
+            self.index.strip_suffix('/').unwrap_or(self.index.as_str())
         } else {
             path.strip_suffix('/').unwrap_or(path)
         };

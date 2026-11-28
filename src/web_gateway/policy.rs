@@ -152,14 +152,31 @@ fn is_valid_narrowing_directive(name: &str, values: &[String]) -> bool {
 /// resolution answers with whatever the record says at the current height, so
 /// it is short lived. Caching a resolution for a year would serve a site whose
 /// name has changed hands.
+const SVG_SANDBOX_CSP: &str = "default-src 'none'; sandbox; frame-ancestors 'none'";
+
+fn sanitize_header_value(raw: &str, fallback: &str) -> String {
+    if raw.is_empty() || raw.bytes().any(|b| b.is_ascii_control()) {
+        fallback.to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
 #[must_use]
 fn content_headers(mime: &str, cache_control: &str) -> Vec<(String, String)> {
+    let clean_mime = sanitize_header_value(mime, "application/octet-stream");
+    let clean_cache = sanitize_header_value(cache_control, "no-store");
+    let baseline_csp = if clean_mime.eq_ignore_ascii_case("image/svg+xml") {
+        SVG_SANDBOX_CSP
+    } else {
+        DEFAULT_CSP
+    };
     vec![
-        ("content-type".to_string(), mime.to_string()),
-        ("cache-control".to_string(), cache_control.to_string()),
+        ("content-type".to_string(), clean_mime),
+        ("cache-control".to_string(), clean_cache),
         (
             "content-security-policy".to_string(),
-            DEFAULT_CSP.to_string(),
+            baseline_csp.to_string(),
         ),
         ("x-content-type-options".to_string(), "nosniff".to_string()),
         ("referrer-policy".to_string(), "no-referrer".to_string()),
@@ -189,8 +206,13 @@ pub fn content_headers_with_csp(
     site_csp: Option<&str>,
 ) -> Vec<(String, String)> {
     let mut headers = content_headers(mime, cache_control);
+    let floor_csp = if mime.trim().eq_ignore_ascii_case("image/svg+xml") {
+        SVG_SANDBOX_CSP
+    } else {
+        DEFAULT_CSP
+    };
     if let Some(site) = site_csp {
-        if csp_is_at_least_as_strict(site, DEFAULT_CSP) {
+        if csp_is_at_least_as_strict(site, floor_csp) {
             for (name, value) in &mut headers {
                 if name == "content-security-policy" {
                     *value = site.to_string();
