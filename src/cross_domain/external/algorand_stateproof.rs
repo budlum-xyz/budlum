@@ -1117,6 +1117,12 @@ impl ExternalFinalityAdapter for AlgorandStateProofAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned.as_ref().is_some_and(|p| {
+            p.voter_count > 0 && p.total_weight > 0 && p.voters_commitment != [0u8; 32]
+        })
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,

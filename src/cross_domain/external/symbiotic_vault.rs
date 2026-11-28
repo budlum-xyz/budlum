@@ -534,6 +534,12 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
         }
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned_committee_roots
+            .as_ref()
+            .is_some_and(|(c, pq)| *c != [0u8; 32] && *pq != [0u8; 32])
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,

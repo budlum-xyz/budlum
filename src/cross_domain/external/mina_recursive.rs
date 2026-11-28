@@ -531,6 +531,9 @@ impl SuccinctRecursiveAdapter {
                     .into(),
             });
         }
+        if policy.require_slashable {
+            return Err(AdapterError::UnslashableBacking);
+        }
         if policy.max_age > 0 {
             if tip.blockchain_length > policy.now {
                 return Err(AdapterError::Stale {
@@ -651,6 +654,14 @@ impl SuccinctRecursiveAdapter {
 impl ExternalFinalityAdapter for SuccinctRecursiveAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned.as_ref().is_some_and(|p| {
+            p.genesis_state_hash != [0u8; 32]
+                && p.step_program_hash != [0u8; 32]
+                && !p.aggregator_pq_pubkey.is_empty()
+        })
     }
 
     fn verify(
@@ -901,6 +912,14 @@ mod tests {
             "succinct-recursive selftest failed: {:?}",
             report.probes
         );
+        assert!(adapter.has_pinned_trust_anchor());
+        assert!(!SuccinctRecursiveAdapter::new("mina-stark-1", None).has_pinned_trust_anchor());
+        let mut slash_policy = policy;
+        slash_policy.require_slashable = true;
+        assert!(matches!(
+            adapter.verify(&golden, &slash_policy),
+            Err(AdapterError::UnslashableBacking)
+        ));
     }
 
     #[test]

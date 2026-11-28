@@ -858,6 +858,10 @@ impl ExternalFinalityAdapter for OuroborosMithrilAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.epochs.iter().any(|e| !e.signers.is_empty())
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,

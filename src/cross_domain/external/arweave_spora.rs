@@ -448,6 +448,12 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
         }
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.pinned_operator
+            .as_ref()
+            .is_some_and(|(ed, pq)| *ed != [0u8; ED25519_PK_LEN] && !pq.is_empty())
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,
