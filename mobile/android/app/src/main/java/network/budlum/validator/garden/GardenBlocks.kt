@@ -1,38 +1,3 @@
-                    .pointerInput(block.id) {
-                        detectTapGestures { onTap(block.id) }
-                    }
-                    .pointerInput(block.id, rowsDrawn, floorWidth, floorHeight) {
-                        detectDragGestures(
-                            onDragStart = {
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                held = block.id
-                                carry = Offset.Zero
-                            },
-                            onDrag = { change, amount ->
-                                change.consume()
-                                carry += amount
-                            },
-                            onDragEnd = {
-                                val home = Offset(block.column * cellPx, clampedRow * cellPx)
-                                val want = (taken[block.id] ?: Offset.Zero) + carry
-                                val minX = -home.x
-                                val minY = -home.y
-                                val topX = floorWidth - cellPx - home.x
-                                val topY = floorHeight - cellPx - home.y
-                                taken[block.id] = Offset(
-                                    want.x.coerceIn(minX, maxOf(minX, topX)),
-                                    want.y.coerceIn(minY, maxOf(minY, topY)),
-                                )
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                held = null
-                                carry = Offset.Zero
-                            },
-                            onDragCancel = {
-                                held = null
-                                carry = Offset.Zero
-                            },
-                        )
-                    },
 package network.budlum.validator.garden
 
 import androidx.compose.foundation.clickable
@@ -284,7 +249,6 @@ fun BlockField(
         // CubeFloor already lays down instead of on a second grid.
         val cell = TILE * SPAN
         val cellPx = with(density) { TILE.toPx() }
-        val columns = (with(density) { maxWidth.toPx() } / cellPx).toInt().coerceAtLeast(1)
         val rowsDrawn = (with(density) { maxHeight.toPx() } / cellPx).toInt().coerceAtLeast(1)
 
         val floorWidth = with(density) { maxWidth.toPx() }
@@ -339,8 +303,11 @@ fun BlockField(
                             }
                         }
                     }
-                    .pointerInput(block.id, rowsDrawn) {
-                        detectDragGesturesAfterLongPress(
+                    .pointerInput(block.id) {
+                        detectTapGestures { onTap(block.id) }
+                    }
+                    .pointerInput(block.id, rowsDrawn, floorWidth, floorHeight) {
+                        detectDragGestures(
                             onDragStart = {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                 held = block.id
@@ -351,23 +318,17 @@ fun BlockField(
                                 carry += amount
                             },
                             onDragEnd = {
-                                val live = blocks.getOrNull(index)
-                                if (live != null) {
-                                    val baseRow = live.row.coerceIn(0, (rowsDrawn - SPAN).coerceAtLeast(0))
-                                    val wantColumn = (live.column + (carry.x / cellPx).roundToInt())
-                                        .coerceIn(0, (columns - SPAN).coerceAtLeast(0))
-                                    val wantRow = (baseRow + (carry.y / cellPx).roundToInt())
-                                        .coerceIn(0, (rowsDrawn - SPAN).coerceAtLeast(0))
-                                    val taken = blocks.any {
-                                        it.id != live.id &&
-                                            kotlin.math.abs(it.column - wantColumn) < SPAN &&
-                                            kotlin.math.abs(it.row - wantRow) < SPAN
-                                    }
-                                    if (!taken) {
-                                        blocks[index] = live.copy(column = wantColumn, row = wantRow)
-                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                    }
-                                }
+                                val home = Offset(block.column * cellPx, clampedRow * cellPx)
+                                val want = (taken[block.id] ?: Offset.Zero) + carry
+                                val minX = -home.x
+                                val minY = -home.y
+                                val topX = floorWidth - cellPx - home.x
+                                val topY = floorHeight - cellPx - home.y
+                                taken[block.id] = Offset(
+                                    want.x.coerceIn(minX, maxOf(minX, topX)),
+                                    want.y.coerceIn(minY, maxOf(minY, topY)),
+                                )
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 held = null
                                 carry = Offset.Zero
                             },
