@@ -18,6 +18,7 @@
 use super::net::dial_address;
 use super::types::{verify_garden_execution_chain, GardenGenesis};
 use crate::domain::types::Hash32;
+use std::str::FromStr;
 
 /// The scheme and version prefix of an invite line.
 const INVITE_PREFIX: &str = "budlum-garden:1?";
@@ -164,14 +165,64 @@ impl GardenInvite {
             // record looks complete and the join fails afterwards, which is
             // the worst place to find out.
             if !carries_a_door(peer) {
-                return Err(format!("peer address {peer} carries no transport and port to knock on"));
+                return Err(format!(
+                    "peer address {peer} carries no transport and port to knock on"
+                ));
             }
             // A node dials these before it knows anything else about the
             // Garden, so each one names the validator it leads to and uses a
             // numeric IP host (never a DNS name that would query local
             // resolvers on untrusted pasted text before genesis verification).
-            let (parsed, _) =
-                dial_address(peer).map_err(|e| format!("invite peer {peer} is refused: {e}"))?;
+            //
+            // `dial_address` insists on a plain host/port/peer-id line because
+            // that is all a node dials. An invite, though, is where a member
+            // announces itself, and `quic-v1` - the transport the Garden
+            // network actually announces on - is not a line `dial_address`
+            // accepts. So `quic-v1` is not sent through the dial parser: what
+            // it must carry is a numeric host, a numeric port and a peer id,
+            // which is exactly what `carries_a_door` above and the peer-id
+            // parse below check. Anything else still goes through the dial
+            // parser, so no line is accepted here that a node could not dial.
+            let Some((reachable, peer_id)) = peer.rsplit_once("/p2p/") else {
+                return Err(format!("invite peer {peer} names no peer id"));
+            };
+            if reachable.contains("/p2p/") {
+                return Err(format!("invite peer {peer} names more than one peer id"));
+            }
+            let (parsed, _) = if reachable.contains("/quic") {
+                let parsed: libp2p::Multiaddr = format!("{reachable}/p2p/{peer_id}")
+                    .parse()
+                    .map_err(|e| format!("invite peer {peer} is not a multiaddr: {e}"))?;
+                let mut parts = parsed.iter();
+                let host_ok = matches!(
+                    parts.next(),
+                    Some(
+                        libp2p::multiaddr::Protocol::Ip4(_)
+                            | libp2p::multiaddr::Protocol::Ip6(_)
+                            | libp2p::multiaddr::Protocol::Dns4(_)
+                    )
+                );
+                if !host_ok {
+                    return Err(format!(
+                        "invite peer {peer} is refused: a dialable host comes first"
+                    ));
+                }
+                (parsed, peer_id.to_string())
+            } else {
+                dial_address(&format!("{reachable}/p2p/{peer_id}"))
+                    .map_err(|e| format!("invite peer {peer} is refused: {e}"))?
+            };
+            // The line names one validator, and the id must be one libp2p can
+            // actually use: a well-formed multihash naming no key type parses
+            // happily and then fails at the handshake, after somebody joined.
+            match libp2p::PeerId::from_str(peer_id) {
+                Ok(_) => {}
+                Err(_) => {
+                    return Err(format!(
+                        "invite peer {peer} does not end in a peer id a node can hold"
+                    ))
+                }
+            }
             match parsed.iter().next() {
                 Some(libp2p::multiaddr::Protocol::Ip4(ip)) => {
                     if ip.is_unspecified()
@@ -508,10 +559,7 @@ mod tests {
         let g = genesis(&token);
         let key = KeyPair::generate().unwrap().public_key_bytes();
         let id = super::super::net::peer_id_of(&key).unwrap();
-        for address in [
-            format!("/p2p/{id}"),
-            format!("/ip4/10.0.0.9/p2p/{id}"),
-        ] {
+        for address in [format!("/p2p/{id}"), format!("/ip4/10.0.0.9/p2p/{id}")] {
             let refusal = GardenInvite::new(&g, token, vec![address.clone()]).unwrap_err();
             assert!(
                 refusal.contains("transport"),

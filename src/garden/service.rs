@@ -821,7 +821,7 @@ mod tests {
             .map(|n| format!("/ip4/10.0.0.{n}/tcp/4001/p2p/peer{n}"))
             .collect();
         let mut record = GardenRecord::issue(
-            7,
+            0x4741_0000_0000_0007,
             [0x11; 32],
             [0x22; 32],
             key.public_key_bytes(),
