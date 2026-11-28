@@ -1100,4 +1100,571 @@ fn external_registry_readmit_requires_probes_and_height_is_monotonic() {
         err_ver,
         ExternalRegistryError::AdmissionEvidenceVersionMismatch { .. }
     ));
+
+    uol_inbound_and_stipend_gates_refuse_sentry_halted_or_refuted_domains();
+    uol_audit_custody_freezes_high_u128_deficit_and_saturates_recorded_custody();
+}
+
+fn uol_inbound_and_stipend_gates_refuse_sentry_halted_or_refuted_domains() {
+    use crate::core::hash::hash_fields_bytes;
+    use crate::execution::coordinator::foreign::home_key_stipend_digest;
+    use crate::object_layer::charter::{CharterStatus, DataPolicy, DomainCharter};
+    use crate::object_layer::family::{
+        class_ref_bytes, fixture_for, ArriveSpec, AssetKind, HomeVmFamily, RawEndpointEvent,
+    };
+    use crate::object_layer::ids::{AssetClassId, DepartureId, HomeIdentity};
+    use crate::object_layer::registry::{
+        AssetClass, Call, ClassStatus, Departure, HomeEventProof, Location, Phase, UniqueAsset,
+        MAX_HOME_STIPEND_ATTOS,
+    };
+    use crate::object_layer::rule::{
+        ClassRule, ClassSlice, Holder, TemplateId, TemplateParams, Verb,
+    };
+    use crate::object_layer::tx::{
+        home_stipend_action_digest, HomeKeyScheme, HomeKeyStipendAuth, ObjectLayerTx,
+    };
+    use crate::settlement::commitment_tree::merkle_root;
+    use k256::ecdsa::SigningKey as SecpSigningKey;
+
+    let mut state = AccountState::new();
+    let home_domain = 501u32;
+    let guest_domain = 502u32;
+    let home_height = 5u64;
+    let sequence = 1u64;
+    let home_block_hash = [0x51; 32];
+    let guest_block_hash = [0x52; 32];
+
+    let register_active_domain = |state: &mut AccountState, id: u32, block_hash: Hash32| {
+        let tag = u8::try_from(id & 0xFF).unwrap_or(1);
+        let mut dom = default_domain(
+            id,
+            ConsensusKind::PoA,
+            u64::from(id),
+            "poa-authority-quorum",
+            1,
+        );
+        dom.validator_set_hash = [tag; 32];
+        dom.operator = Some(addr(0x11));
+        dom.operator_bond = 10_000_000;
+        dom.last_committed_height = home_height;
+        dom.last_committed_hash = block_hash;
+        state
+            .settlement
+            .domains
+            .register(dom)
+            .expect("register active PoA domain");
+    };
+    register_active_domain(&mut state, home_domain, home_block_hash);
+    register_active_domain(&mut state, guest_domain, guest_block_hash);
+
+    let fx = fixture_for(HomeVmFamily::Evm);
+    let endpoint = fx.address(0xe0);
+    let verifier = fx.address(0xe2);
+    for (dom_id, chain_ref) in [(home_domain, "eip155:501"), (guest_domain, "eip155:502")] {
+        state.settlement.object_layer.charters.insert(
+            dom_id,
+            DomainCharter {
+                vm_family: HomeVmFamily::Evm,
+                chain_reference: String::from(chain_ref),
+                address_prefix: String::from("0x"),
+                endpoint: endpoint.clone(),
+                endpoint_code_hash: [0xc1; 32],
+                verifier: verifier.clone(),
+                verifier_code_hash: [0xc2; 32],
+                upgrade_notice: 100,
+                silence_window: 1_000,
+                data_policy: DataPolicy::Public,
+                status: CharterStatus::Active,
+                operator: Some(addr(0x11)),
+            },
+        );
+    }
+
+    let fungible_contract = fx.address(0x10);
+    let fungible_class = AssetClassId::derive(
+        home_domain,
+        &class_ref_bytes(AssetKind::Fungible, &fungible_contract),
+    );
+    let unique_contract = fx.address(0x12);
+    let unique_class = AssetClassId::derive(
+        home_domain,
+        &class_ref_bytes(AssetKind::Unique, &unique_contract),
+    );
+
+    for (class_id, kind, contract, tid) in [
+        (
+            fungible_class,
+            AssetKind::Fungible,
+            fungible_contract.clone(),
+            TemplateId::FungibleV1,
+        ),
+        (
+            unique_class,
+            AssetKind::Unique,
+            unique_contract.clone(),
+            TemplateId::UniqueV1,
+        ),
+    ] {
+        state.settlement.object_layer.classes.insert(
+            class_id,
+            AssetClass {
+                id: class_id,
+                home_domain,
+                kind,
+                contract,
+                rule: ClassRule::Template {
+                    id: tid,
+                    params: TemplateParams::default(),
+                },
+                slice: ClassSlice::new(),
+                upgrade_authority: None,
+                status: ClassStatus::Active,
+                registrant: addr(0x11),
+                bond: 1_000_000,
+                sample_commitment: [0u8; 32],
+            },
+        );
+    }
+
+    let eth_sk = [0x29u8; 32];
+    let secp = SecpSigningKey::from_bytes((&eth_sk).into()).expect("secp key");
+    let uncompressed = secp.verifying_key().to_sec1_point(false);
+    let pub_hash = <sha3::Keccak256 as sha3::Digest>::digest(&uncompressed.as_bytes()[1..]);
+    let eth_sender = pub_hash[12..32].to_vec();
+    let home_id = HomeIdentity::derive(home_domain, &eth_sender);
+    let recipient = Holder::Account(addr(0x77));
+    state
+        .settlement
+        .object_layer
+        .balances
+        .insert((fungible_class, Holder::Home(home_id)), 100);
+
+    // Seed one pending Departure for ConfirmDeparture and two UniqueAssets:
+    // one on ObjectLayer (for GuestPlace) and one on Guest (for GuestReturn).
+    let fungible_asset_id = crate::object_layer::ids::AssetId::derive(&fungible_class, &[]);
+    let dep_id = DepartureId::derive(&fungible_asset_id, 1);
+    state.settlement.object_layer.departures.insert(
+        dep_id,
+        Departure {
+            asset: fungible_asset_id,
+            class: fungible_class,
+            holder: recipient,
+            amount: 10,
+            home_to: eth_sender.to_vec(),
+            requested_at: 1,
+        },
+    );
+    let native_place = fx.native_id(1);
+    let place_asset_id = crate::object_layer::ids::AssetId::derive(&unique_class, &native_place);
+    state.settlement.object_layer.unique.insert(
+        place_asset_id,
+        UniqueAsset {
+            class: unique_class,
+            native_id: native_place.clone(),
+            location: Location::ObjectLayer,
+            holder: Some(Holder::Account(addr(0x77))),
+        },
+    );
+    let native_return = fx.native_id(2);
+    let return_asset_id = crate::object_layer::ids::AssetId::derive(&unique_class, &native_return);
+    let guest_holder = Holder::Home(HomeIdentity::derive(guest_domain, &eth_sender));
+    state.settlement.object_layer.unique.insert(
+        return_asset_id,
+        UniqueAsset {
+            class: unique_class,
+            native_id: native_return.clone(),
+            location: Location::Guest {
+                domain: guest_domain,
+                holder: guest_holder,
+            },
+            holder: Some(guest_holder),
+        },
+    );
+
+    let make_single_leaf_proof = |domain: u32,
+                                  height: u64,
+                                  seq: u64,
+                                  block_hash: Hash32,
+                                  event_id: &[u8],
+                                  raw: RawEndpointEvent| {
+        let event_bytes = bincode::serialize(&raw).expect("serialize raw event");
+        let leaf = hash_fields_bytes(&[
+            b"BDLM_UOL_HOME_EVENT_LEAF_V1",
+            &domain.to_le_bytes(),
+            &height.to_le_bytes(),
+            &block_hash,
+            event_id,
+            &event_bytes,
+        ]);
+        let event_root = merkle_root(&[leaf]);
+        let mp = MerkleProof {
+            leaf,
+            index: 0,
+            siblings: Vec::new(),
+        };
+        let inclusion = bincode::serialize(&(seq, mp)).expect("serialize inclusion");
+        let proof = HomeEventProof {
+            domain,
+            home_height: height,
+            home_block_hash: block_hash,
+            event_id: event_id.to_vec(),
+            event: raw,
+            phase: Phase::Final,
+            inclusion,
+        };
+        (proof, event_root)
+    };
+
+    let call_payload = postcard::to_allocvec(&vec![Call {
+        class: fungible_class,
+        native_id: Vec::new(),
+        verb: Verb::Transfer {
+            from: Holder::Home(home_id),
+            to: recipient,
+            amount: 20,
+        },
+    }])
+    .expect("postcard calls");
+    let raw_home_call = fx.call(&endpoint, &eth_sender, 1, &call_payload);
+    let hc_hash = [0x55; 32];
+    let (home_call_proof, root_home_call) =
+        make_single_leaf_proof(home_domain, 6, 2, hc_hash, b"ev-home-call", raw_home_call);
+
+    let released_hash = [0x53; 32];
+    let raw_released = fx.released(&endpoint, &dep_id);
+    let (confirm_dep_proof, root_released) = make_single_leaf_proof(
+        home_domain,
+        7,
+        3,
+        released_hash,
+        b"ev-released",
+        raw_released,
+    );
+
+    let adopt_hash = [0x54; 32];
+    let adopter = addr(0x88);
+    let raw_adopt = fx.call(&endpoint, &eth_sender, 1, adopter.as_bytes());
+    let (adopt_proof, root_adopt) =
+        make_single_leaf_proof(home_domain, 8, 4, adopt_hash, b"ev-adopt", raw_adopt);
+    let adopt_bytes = postcard::to_allocvec(&adopt_proof).expect("postcard adopt proof");
+
+    let raw_guest_ret = fx.arrive(
+        &endpoint,
+        ArriveSpec {
+            kind: AssetKind::Unique,
+            contract: &unique_contract,
+            native_id: &native_return,
+            amount: 1,
+            depositor: &eth_sender,
+            recipient: Some(addr(0x77)),
+        },
+    );
+    let (guest_ret_proof, root_guest_ret) = make_single_leaf_proof(
+        guest_domain,
+        5,
+        1,
+        guest_block_hash,
+        b"ev-guest-ret",
+        raw_guest_ret,
+    );
+
+    let put_commitment = |state: &mut AccountState,
+                          domain: u32,
+                          height: u64,
+                          seq: u64,
+                          block_hash: Hash32,
+                          event_root: Hash32| {
+        let tag = u8::try_from(domain & 0xFF).unwrap_or(1);
+        let mut comm = make_commitment(
+            domain,
+            height,
+            seq,
+            block_hash,
+            event_root,
+            ConsensusKind::PoA,
+        );
+        comm.validator_set_hash = [tag; 32];
+        state
+            .settlement
+            .commitments
+            .insert(comm)
+            .expect("insert commitment");
+        if let Some(dom) = state.settlement.domains.get_mut(domain) {
+            dom.last_committed_height = height;
+            dom.last_committed_hash = block_hash;
+        }
+    };
+    let _ = sequence;
+
+    let stipend_inner = ObjectLayerTx::Call {
+        calls: vec![Call {
+            class: fungible_class,
+            native_id: Vec::new(),
+            verb: Verb::Transfer {
+                from: Holder::Home(home_id),
+                to: recipient,
+                amount: 15,
+            },
+        }],
+    };
+    let act_digest = home_stipend_action_digest(&stipend_inner).expect("stipend digest");
+    let sig_digest = home_key_stipend_digest(
+        DEVNET_CHAIN_ID,
+        home_domain,
+        &eth_sender,
+        0,
+        MAX_HOME_STIPEND_ATTOS,
+        &act_digest,
+    );
+    let (sig, rec) = secp.sign_prehash_recoverable(&sig_digest);
+    let mut sig65 = Vec::with_capacity(65);
+    sig65.extend_from_slice(&sig.to_bytes());
+    sig65.push(rec.to_byte());
+    let stipend_tx = ObjectLayerTx::HomeStipendCall {
+        domain: home_domain,
+        auth: HomeKeyStipendAuth {
+            scheme: HomeKeyScheme::EthereumSecp256k1,
+            home_address: eth_sender.to_vec(),
+            signer_pubkey: Vec::new(),
+            signature: sig65,
+            nonce: 0,
+            requested_stipend_attos: MAX_HOME_STIPEND_ATTOS,
+        },
+        action: Box::new(stipend_inner),
+    };
+
+    // Seed height-5 commitments matching `last_committed_height = 5` on both
+    // active PoA domains so the Universal Finality Certificate is Established.
+    let pos_call_payload = postcard::to_allocvec(&vec![Call {
+        class: fungible_class,
+        native_id: Vec::new(),
+        verb: Verb::Transfer {
+            from: Holder::Home(home_id),
+            to: recipient,
+            amount: 5,
+        },
+    }])
+    .expect("postcard positive calls");
+    let raw_pos_call = fx.call(&endpoint, &eth_sender, 0, &pos_call_payload);
+    let (pos_call_proof, root_pos_call) = make_single_leaf_proof(
+        home_domain,
+        5,
+        1,
+        home_block_hash,
+        b"ev-pos-call",
+        raw_pos_call,
+    );
+    put_commitment(
+        &mut state,
+        home_domain,
+        5,
+        1,
+        home_block_hash,
+        root_pos_call,
+    );
+    put_commitment(
+        &mut state,
+        guest_domain,
+        5,
+        1,
+        guest_block_hash,
+        root_guest_ret,
+    );
+
+    // Positive control: while ConsensusSentry circuit is Open (t = 1_000),
+    // a proven HomeCall on the active PoA home domain succeeds.
+    state.refresh_consensus_sentry(1_000);
+    let pos_ctx = SettlementTxContext {
+        sender: addr(0x77),
+        chain_id: DEVNET_CHAIN_ID,
+        fee: 0,
+        bls: || Box::new(AcceptTestBls),
+    };
+    execute_settlement_tx(
+        &mut state,
+        &pos_ctx,
+        &SettlementTx::ObjectLayer(Box::new(ObjectLayerTx::HomeCall(pos_call_proof))),
+    )
+    .expect("HomeCall succeeds while ConsensusSentry is Open");
+    assert_eq!(
+        state
+            .settlement
+            .object_layer
+            .balance(&fungible_class, &recipient),
+        5
+    );
+
+    // Escalate ConsensusSentry to HALTED on both domains via stall timeout.
+    state.refresh_consensus_sentry(10_000);
+
+    let ctx = SettlementTxContext {
+        sender: addr(0x77),
+        chain_id: DEVNET_CHAIN_ID,
+        fee: 0,
+        bls: || Box::new(AcceptTestBls),
+    };
+
+    // 1. HomeCall must be refused while Sentry is HALTED.
+    put_commitment(&mut state, home_domain, 6, 2, hc_hash, root_home_call);
+    let err1 = execute_settlement_tx(
+        &mut state,
+        &ctx,
+        &SettlementTx::ObjectLayer(Box::new(ObjectLayerTx::HomeCall(home_call_proof.clone()))),
+    )
+    .expect_err("HomeCall from Sentry-halted domain must fail closed");
+    assert!(
+        format!("{err1:?}").contains("consensus sentry circuit"),
+        "{err1:?}"
+    );
+
+    // 2. ConfirmDeparture must be refused while Sentry is HALTED.
+    put_commitment(&mut state, home_domain, 7, 3, released_hash, root_released);
+    let err2 = execute_settlement_tx(
+        &mut state,
+        &ctx,
+        &SettlementTx::ObjectLayer(Box::new(ObjectLayerTx::ConfirmDeparture(
+            confirm_dep_proof.clone(),
+        ))),
+    )
+    .expect_err("ConfirmDeparture from Sentry-halted domain must fail closed");
+    assert!(
+        format!("{err2:?}").contains("consensus sentry circuit"),
+        "{err2:?}"
+    );
+
+    // 3. GuestPlace onto Sentry-halted guest_domain must be refused.
+    let err3 = execute_settlement_tx(
+        &mut state,
+        &ctx,
+        &SettlementTx::ObjectLayer(Box::new(ObjectLayerTx::GuestPlace {
+            class: unique_class,
+            native_id: native_place.clone(),
+            guest_domain,
+            guest_holder,
+        })),
+    )
+    .expect_err("GuestPlace onto Sentry-halted guest domain must fail closed");
+    assert!(
+        format!("{err3:?}").contains("consensus sentry circuit"),
+        "{err3:?}"
+    );
+
+    // 4. GuestReturn from Sentry-halted guest_domain must be refused.
+    let err4 = execute_settlement_tx(
+        &mut state,
+        &ctx,
+        &SettlementTx::ObjectLayer(Box::new(ObjectLayerTx::GuestReturn {
+            class: unique_class,
+            native_id: native_return.clone(),
+            proof: guest_ret_proof.clone(),
+            recipient: Holder::Account(addr(0x77)),
+        })),
+    )
+    .expect_err("GuestReturn from Sentry-halted guest domain must fail closed");
+    assert!(
+        format!("{err4:?}").contains("consensus sentry circuit"),
+        "{err4:?}"
+    );
+
+    // 5. Adopt(HomeEventProof) from Sentry-halted domain must be refused.
+    put_commitment(&mut state, home_domain, 8, 4, adopt_hash, root_adopt);
+    let ctx_adopter = SettlementTxContext {
+        sender: adopter,
+        chain_id: DEVNET_CHAIN_ID,
+        fee: 0,
+        bls: || Box::new(AcceptTestBls),
+    };
+    let err5 = execute_settlement_tx(
+        &mut state,
+        &ctx_adopter,
+        &SettlementTx::ObjectLayer(Box::new(ObjectLayerTx::Adopt {
+            home: adopt_bytes.clone(),
+        })),
+    )
+    .expect_err("Adopt with HomeEventProof from Sentry-halted domain must fail closed");
+    assert!(
+        format!("{err5:?}").contains("consensus sentry circuit"),
+        "{err5:?}"
+    );
+
+    // 6. HomeStipendCall on Sentry-halted domain must be refused.
+    let err6 = execute_settlement_tx(
+        &mut state,
+        &ctx,
+        &SettlementTx::ObjectLayer(Box::new(stipend_tx.clone())),
+    )
+    .expect_err("HomeStipendCall on Sentry-halted domain must fail closed");
+    assert!(
+        format!("{err6:?}").contains("consensus sentry circuit"),
+        "{err6:?}"
+    );
+    assert_eq!(
+        state
+            .settlement
+            .object_layer
+            .balance(&fungible_class, &recipient),
+        5,
+        "no additional tokens may move while home domain is halted by ConsensusSentry"
+    );
+}
+
+fn uol_audit_custody_freezes_high_u128_deficit_and_saturates_recorded_custody() {
+    use crate::object_layer::family::AssetKind;
+    use crate::object_layer::ids::AssetClassId;
+    use crate::object_layer::registry::{
+        AssetClass, ClassStatus, FreezeReason, ObjectLayerRegistry,
+    };
+    use crate::object_layer::rule::{ClassRule, ClassSlice, Holder, TemplateId, TemplateParams};
+
+    let mut reg = ObjectLayerRegistry::default();
+    let registrant = addr(0x11);
+    let class_id = AssetClassId::derive(501, b"high-supply-token");
+    reg.classes.insert(
+        class_id,
+        AssetClass {
+            id: class_id,
+            home_domain: 501,
+            kind: AssetKind::Fungible,
+            contract: b"high-supply-token".to_vec(),
+            rule: ClassRule::Template {
+                id: TemplateId::FungibleV1,
+                params: TemplateParams::default(),
+            },
+            slice: ClassSlice::new(),
+            upgrade_authority: None,
+            status: ClassStatus::Active,
+            registrant,
+            bond: 1_000_000,
+            sample_commitment: [0u8; 32],
+        },
+    );
+
+    let i128_max_u128 = u128::try_from(i128::MAX).expect("i128::MAX fits u128");
+    let above_i128_max = i128_max_u128 + 1_000;
+    reg.balances
+        .insert((class_id, Holder::Account(addr(0x01))), above_i128_max);
+
+    // Home custody is `i128::MAX as u128`, which is 1,000 units LESS than `recorded`.
+    let audit = reg
+        .audit_custody(registrant, class_id, i128_max_u128)
+        .expect("audit_custody succeeds");
+    assert_eq!(audit.recorded, above_i128_max);
+    assert_eq!(
+        audit.delta, -1_000,
+        "deficit above i128::MAX must report negative delta instead of clamping both sides to 0"
+    );
+    assert_eq!(
+        reg.classes.get(&class_id).expect("class").status,
+        ClassStatus::Frozen(FreezeReason::CustodyDeficit),
+        "custody deficit above i128::MAX must freeze the asset class"
+    );
+
+    // Adding a second balance exceeding u128::MAX must saturate rather than panic.
+    reg.balances
+        .insert((class_id, Holder::Account(addr(0x02))), u128::MAX);
+    assert_eq!(reg.recorded_custody(&class_id), u128::MAX);
+    let audit_sat = reg
+        .audit_custody(registrant, class_id, u128::MAX - 7)
+        .expect("audit_custody at u128::MAX saturates without panicking");
+    assert_eq!(audit_sat.delta, -7);
 }

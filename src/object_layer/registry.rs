@@ -1208,7 +1208,7 @@ impl ObjectLayerRegistry {
                 .iter()
                 .filter(|((c, _), _)| c == class)
                 .map(|(_, v)| *v)
-                .sum(),
+                .fold(0u128, u128::saturating_add),
             None => 0,
         };
         let departing: u128 = self
@@ -1216,8 +1216,8 @@ impl ObjectLayerRegistry {
             .values()
             .filter(|d| d.class == *class)
             .map(|d| d.amount)
-            .sum();
-        placed + departing
+            .fold(0u128, u128::saturating_add);
+        placed.saturating_add(departing)
     }
 
     /// `ObjectLayerTx::AuditCustody`: compare the proven home custody with
@@ -1241,10 +1241,14 @@ impl ObjectLayerRegistry {
         }
         self.atomic(|r| {
             let recorded = r.recorded_custody(&class);
-            let delta = i128::try_from(home_custody).unwrap_or(i128::MAX)
-                - i128::try_from(recorded).unwrap_or(i128::MAX);
+            let delta = if home_custody >= recorded {
+                i128::try_from(home_custody - recorded).unwrap_or(i128::MAX)
+            } else {
+                let deficit = recorded - home_custody;
+                i128::try_from(deficit).map_or(i128::MIN, |d| -d)
+            };
             let entry = r.classes.get_mut(&class).ok_or(Refusal::UnknownClass)?;
-            if delta < 0 {
+            if home_custody < recorded {
                 entry.status = ClassStatus::Frozen(FreezeReason::CustodyDeficit);
             }
             Ok(CustodyAudit {
