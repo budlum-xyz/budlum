@@ -272,7 +272,11 @@ impl CrossDomainMessage {
 
     #[must_use]
     pub fn verify_id(&self) -> bool {
-        self.message_id == self.calculate_message_id()
+        let expected = self.calculate_message_id();
+        bool::from(subtle::ConstantTimeEq::ct_eq(
+            self.message_id.as_slice(),
+            expected.as_slice(),
+        ))
     }
 }
 
@@ -311,6 +315,20 @@ pub fn register_cross_domain_on_state(
         return Err(
             "Cross-domain message ID does not match canonical preimage (potential forgery)".into(),
         );
+    }
+    if message.source_domain == 0 || message.target_domain == 0 {
+        return Err("Cross-domain message source_domain and target_domain must be non-zero".into());
+    }
+    if message.sender == Address::zero() || message.recipient == Address::zero() {
+        return Err("Cross-domain message sender and recipient must be non-zero".into());
+    }
+    if let MessageKind::Custom(ref kind_bytes) = message.kind {
+        if kind_bytes.is_empty() || kind_bytes.len() > 256 {
+            return Err(format!(
+                "Cross-domain Custom message kind length {} outside 1..=256 bytes",
+                kind_bytes.len()
+            ));
+        }
     }
     if message.source_domain == message.target_domain {
         return Err(format!(

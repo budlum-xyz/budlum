@@ -440,6 +440,24 @@ pub fn genesis_allocations(
             BUD_TOTAL_SUPPLY
         ));
     }
+    let slots = [
+        addrs.community,
+        addrs.liquidity,
+        addrs.ecosystem,
+        addrs.team,
+        addrs.burn_reserve,
+    ];
+    let mut distinct = std::collections::BTreeSet::new();
+    for addr in slots {
+        if addr == Address::zero() {
+            return Err("tokenomics genesis allocation address must be non-zero".to_string());
+        }
+        if !distinct.insert(addr) {
+            return Err(
+                "tokenomics genesis allocation addresses must be pairwise distinct".to_string(),
+            );
+        }
+    }
     Ok(vec![
         (addrs.community, params.community),
         (addrs.liquidity, params.liquidity),
