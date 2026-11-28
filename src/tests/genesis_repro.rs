@@ -35,6 +35,26 @@ use crate::core::chain_config::Network;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+/// Canonical SHA-256 digest over the deterministic genesis observation vector
+/// across Mainnet (`45260`), Testnet (`45261`), Devnet (`45262`), and the
+/// fallback `GenesisConfig::new(9999)` path.
+///
+/// Pinning this value inside `genesis_hash_deterministic` binds every target
+/// architecture (`x86_64`, `aarch64`, `macos-arm64`, `windows`) and every build
+/// profile to the exact same genesis state root, block hash, validator-set
+/// hash, transaction root, account count, and circulating supply. Any
+/// architecture-dependent divergence (chain-split risk) fails on the diverging
+/// runner even when CI jobs execute each architecture independently.
+const PINNED_GENESIS_REPRO_DIGEST: &str =
+    "fa435bc8613807ddfe3470c809ee5d2d56c0936f2570cabfcc000d9e52b6f22e";
+
+/// Canonical Devnet block-0 hash shared with `DEVNET_GENESIS_HASH` in
+/// `xtask/tools/src/docker_smoke.rs`, asserted here so the cross-arch matrix
+/// in `security-audit.yml` verifies the Devnet header preimage on `aarch64` as
+/// well as `x86_64`.
+const PINNED_DEVNET_GENESIS_BLOCK_HASH: &str =
+    "ba194aa08eb23a094c04cc1f005266e43f961aa2d8fd127f91cfec1c9f262484";
+
 /// The genesis observation vector for one `chain_id`. It mirrors the resolution
 /// path inside `Blockchain::new_with_genesis`: `for_network` when the network is
 /// known,
@@ -139,6 +159,14 @@ mod tests {
             observations.len() >= chain_ids.len() * 10,
             "genesis observation vector too short: {}",
             observations.len()
+        );
+        assert_eq!(
+            devnet.hash, PINNED_DEVNET_GENESIS_BLOCK_HASH,
+            "devnet genesis block hash drifted from canonical cross-arch pin"
+        );
+        assert_eq!(
+            digest, PINNED_GENESIS_REPRO_DIGEST,
+            "genesis reproducibility digest drifted from canonical cross-arch pin"
         );
     }
 }
