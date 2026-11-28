@@ -51,6 +51,9 @@ pub const MAX_SEAL_KEYS: usize = 4;
 /// The longest vendor label.
 pub const MAX_VENDOR_LABEL_BYTES: usize = 64;
 
+/// Maximum signature entries accepted per anchor during equivocation checks.
+pub const MAX_EQUIVOCATION_SIGNATURES: usize = ANCHOR_KEY_COUNT * 4;
+
 /// One key of the ledger: its slot, the HSM vendor behind it and the public key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerKey {
@@ -384,30 +387,41 @@ impl AnchorKeyLedger {
         if first.key_epoch != self.key_epoch {
             return Err(LedgerError::NotEquivocation("not-the-current-key-epoch"));
         }
+        if first.signatures.len() > MAX_EQUIVOCATION_SIGNATURES
+            || second.signatures.len() > MAX_EQUIVOCATION_SIGNATURES
+        {
+            return Err(LedgerError::NotEquivocation("too-many-signatures"));
+        }
         let first_payload = first.payload();
         let second_payload = second.payload();
         if first_payload == second_payload {
             return Err(LedgerError::NotEquivocation("same-payload"));
         }
-        let mut slots = Vec::new();
-        for a in &first.signatures {
-            let Some(b) = second
-                .signatures
-                .iter()
-                .find(|s| s.key_index == a.key_index)
-            else {
+        let mut valid_first = BTreeSet::new();
+        for sig in &first.signatures {
+            if valid_first.contains(&sig.key_index) {
+                continue;
+            }
+            let Some(public_key) = self.anchor_key(sig.key_index) else {
                 continue;
             };
-            let Some(public_key) = self.anchor_key(a.key_index) else {
-                continue;
-            };
-            if verify_one(public_key, &first_payload, &a.signature).is_ok()
-                && verify_one(public_key, &second_payload, &b.signature).is_ok()
-                && !slots.contains(&a.key_index)
-            {
-                slots.push(a.key_index);
+            if verify_one(public_key, &first_payload, &sig.signature).is_ok() {
+                valid_first.insert(sig.key_index);
             }
         }
+        let mut valid_second = BTreeSet::new();
+        for sig in &second.signatures {
+            if valid_second.contains(&sig.key_index) || !valid_first.contains(&sig.key_index) {
+                continue;
+            }
+            let Some(public_key) = self.anchor_key(sig.key_index) else {
+                continue;
+            };
+            if verify_one(public_key, &second_payload, &sig.signature).is_ok() {
+                valid_second.insert(sig.key_index);
+            }
+        }
+        let slots: Vec<u8> = valid_first.intersection(&valid_second).copied().collect();
         if slots.is_empty() {
             return Err(LedgerError::NoCommonSigner);
         }
@@ -423,7 +437,6 @@ impl AnchorKeyLedger {
                 key_epoch: first.key_epoch,
             });
         }
-        slots.sort_unstable();
         Ok(slots)
     }
 
@@ -692,5 +705,56 @@ pub(crate) mod test_support {
             .install_rotated_keys(2, keys, seals)
             .expect("epoch 2 follows epoch 1");
         assert_eq!(ledger.key_epoch, 2);
+    }
+
+    #[test]
+    fn equivocation_cannot_be_masked_by_prepended_forged_signature_and_rejects_flood() {
+        let mut ledger = software_ledger(1, 1);
+        let mut first = PqAnchor {
+            chain_id: 1,
+            height: 360,
+            aggregate_root: [0x11; 32],
+            stark_root: None,
+            crossdomain_root: None,
+            key_epoch: 1,
+            signatures: Vec::new(),
+        };
+        let mut second = PqAnchor {
+            chain_id: 1,
+            height: 360,
+            aggregate_root: [0x22; 32],
+            stark_root: None,
+            crossdomain_root: None,
+            key_epoch: 1,
+            signatures: Vec::new(),
+        };
+        let sig_first = signer(0).sign(&first.payload()).expect("key 0 signs first");
+        let sig_second = signer(0)
+            .sign(&second.payload())
+            .expect("key 0 signs second");
+        let mut decoy = sig_second.clone();
+        decoy.signature[0] ^= 0xFF;
+
+        first.signatures.push(decoy.clone());
+        first.signatures.push(sig_first);
+        // Prepending a corrupted signature for key_index 0 before the real equivocating
+        // signature in `second` must NOT mask the double-signer from suspension.
+        second.signatures.push(decoy.clone());
+        second.signatures.push(sig_second);
+
+        let suspended = ledger
+            .apply_equivocation(&first, &second)
+            .expect("prepended forged decoy must not shield equivocating anchor key");
+        assert_eq!(suspended, vec![0]);
+        assert!(ledger.is_suspended(KeyFamily::Anchor, 0, 1));
+
+        // Oversized signature flood must fail closed before verification work.
+        let mut flooded = second.clone();
+        flooded.signatures = (0..64).map(|_| decoy.clone()).collect();
+        let mut fresh_ledger = software_ledger(1, 1);
+        assert_eq!(
+            fresh_ledger.apply_equivocation(&first, &flooded),
+            Err(LedgerError::NotEquivocation("too-many-signatures"))
+        );
     }
 }

@@ -480,6 +480,7 @@ fn index_standard_quorum<'a>(
         });
     }
     let mut by_key = BTreeMap::new();
+    let mut seen_pq: BTreeSet<&[u8]> = BTreeSet::new();
     let mut total = 0u128;
     for member in members {
         if bool::from(member.ed25519_pubkey.ct_eq(&[0u8; 32])) {
@@ -498,6 +499,11 @@ fn index_standard_quorum<'a>(
                     rule: format!("invalid ML-DSA-65 public key in {label} quorum"),
                 }
             })?;
+            if !seen_pq.insert(member.pq_pubkey.as_slice()) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: format!("duplicate member ML-DSA-65 pubkey in {label} quorum"),
+                });
+            }
         }
         if by_key
             .insert(
@@ -552,6 +558,7 @@ fn index_restaked_quorum(
         });
     }
     let mut by_key = BTreeMap::new();
+    let mut seen_pq: BTreeSet<&[u8]> = BTreeSet::new();
     let mut total = 0u128;
     for op in ops {
         if bool::from(op.ed25519_pubkey.ct_eq(&[0u8; 32])) {
@@ -585,6 +592,11 @@ fn index_restaked_quorum(
                     rule: "invalid ML-DSA-65 public key in restaked operator set".into(),
                 }
             })?;
+            if !seen_pq.insert(op.pq_pubkey.as_slice()) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "duplicate operator ML-DSA-65 pubkey in restaked AVS quorum".into(),
+                });
+            }
         }
         if by_key
             .insert(op.ed25519_pubkey, (eff, op.pq_pubkey.as_slice()))
@@ -736,6 +748,9 @@ pub fn verify_restaking_slashing(
 ) -> Result<VerifiedRestakingSlash, AdapterError> {
     let _ = index_standard_quorum(&pinned.native_validators, "restaking-avs native")?;
     let (restaked_idx, _) = index_restaked_quorum(pinned)?;
+    if !pinned.eots_providers.is_empty() {
+        let _ = index_standard_quorum(&pinned.eots_providers, "restaking-avs EOTS")?;
+    }
 
     match proof {
         RestakingSlashingProof::RestakedEquivocation {
@@ -755,11 +770,10 @@ pub fn verify_restaking_slashing(
             }
             if bool::from(batch_digest_a.ct_eq(&[0u8; 32]))
                 || bool::from(batch_digest_b.ct_eq(&[0u8; 32]))
-                || bool::from(batch_digest_a.ct_eq(batch_digest_b))
+                || (bool::from(batch_digest_a.ct_eq(batch_digest_b)) && horizon_a == horizon_b)
             {
                 return Err(AdapterError::ConsensusRule {
-                    rule: "restaked equivocation requires two distinct non-zero batch digests"
-                        .into(),
+                    rule: "restaked equivocation requires non-zero batch digests and distinct (batch_digest, horizon) commitments".into(),
                 });
             }
             let msg_a =
@@ -962,6 +976,11 @@ impl RestakingAvsAdapter {
             return Err(AdapterError::UnsupportedEvidenceVersion {
                 version: evidence.evidence_version,
                 accepted: EVIDENCE_VERSION.to_string(),
+            });
+        }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "restaking-avs adapter network must be non-empty".into(),
             });
         }
         if evidence.network != self.network {
@@ -1180,6 +1199,16 @@ impl RestakingAvsAdapter {
 impl ExternalFinalityAdapter for RestakingAvsAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        !self.network.trim().is_empty()
+            && self.pinned.as_ref().is_some_and(|p| {
+                index_standard_quorum(&p.native_validators, "restaking-avs native").is_ok()
+                    && index_restaked_quorum(p).is_ok()
+                    && (p.eots_providers.is_empty()
+                        || index_standard_quorum(&p.eots_providers, "restaking-avs EOTS").is_ok())
+            })
     }
 
     fn verify(
@@ -1621,5 +1650,79 @@ mod tests {
             sigs_b: vec![forged_sig],
         };
         assert!(verify_restaking_slashing(NET, &fx.pinned, &forged_e).is_err());
+    }
+
+    #[test]
+    fn restaking_avs_refuses_duplicate_pq_pubkey_within_quorum_and_catches_horizon_equivocation() {
+        let fx = build_fixture();
+        let policy = VerificationPolicy::strict(500);
+
+        // 1. Duplicate ML-DSA-65 pubkey within native, restaked, or EOTS quorum must fail closed.
+        let mut dup_native = fx.pinned.clone();
+        dup_native.native_validators[1].pq_pubkey =
+            dup_native.native_validators[0].pq_pubkey.clone();
+        assert!(
+            matches!(
+                RestakingAvsAdapter::new(NET, Some(dup_native)).verify(&fx.raw, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "duplicate ML-DSA-65 pubkey in native quorum must fail closed"
+        );
+
+        let mut dup_restaked = fx.pinned.clone();
+        dup_restaked.restaked_operators[1].pq_pubkey =
+            dup_restaked.restaked_operators[0].pq_pubkey.clone();
+        assert!(
+            matches!(
+                RestakingAvsAdapter::new(NET, Some(dup_restaked)).verify(&fx.raw, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "duplicate ML-DSA-65 pubkey in restaked quorum must fail closed"
+        );
+
+        let mut dup_eots = fx.pinned.clone();
+        dup_eots.eots_providers[1].pq_pubkey = dup_eots.eots_providers[0].pq_pubkey.clone();
+        assert!(
+            matches!(
+                RestakingAvsAdapter::new(NET, Some(dup_eots)).verify(&fx.raw, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "duplicate ML-DSA-65 pubkey in EOTS quorum must fail closed"
+        );
+
+        // 2. Conflicting unbonding horizons signed for the same batch_digest at the
+        //    same (epoch, height) is slashable equivocation and swap-invariant.
+        let digest = [0x44; 32];
+        let msg_h1 = restake_vote_sign_bytes(NET, 5, 420, 600, &digest);
+        let msg_h2 = restake_vote_sign_bytes(NET, 5, 420, 520, &digest);
+        let proof_ab = RestakingSlashingProof::RestakedEquivocation {
+            epoch: 5,
+            height: 420,
+            horizon_a: 600,
+            batch_digest_a: digest,
+            sigs_a: vec![fx.restaked[0].sign(&msg_h1)],
+            horizon_b: 520,
+            batch_digest_b: digest,
+            sigs_b: vec![fx.restaked[0].sign(&msg_h2)],
+        };
+        let proof_ba = RestakingSlashingProof::RestakedEquivocation {
+            epoch: 5,
+            height: 420,
+            horizon_a: 520,
+            batch_digest_a: digest,
+            sigs_a: vec![fx.restaked[0].sign(&msg_h2)],
+            horizon_b: 600,
+            batch_digest_b: digest,
+            sigs_b: vec![fx.restaked[0].sign(&msg_h1)],
+        };
+        let slash_ab = verify_restaking_slashing(NET, &fx.pinned, &proof_ab)
+            .expect("conflicting unbonding horizons at same height must slash offender");
+        let slash_ba = verify_restaking_slashing(NET, &fx.pinned, &proof_ba)
+            .expect("swapped conflicting unbonding horizons must also slash");
+        assert_eq!(slash_ab.slashed_effective_weight, 600);
+        assert_eq!(slash_ab.evidence_digest, slash_ba.evidence_digest);
+        assert!(RestakingAvsAdapter::new(NET, Some(fx.pinned.clone())).has_pinned_trust_anchor());
+        assert!(!RestakingAvsAdapter::new("   ", Some(fx.pinned)).has_pinned_trust_anchor());
+        assert!(!RestakingAvsAdapter::new(NET, None).has_pinned_trust_anchor());
     }
 }

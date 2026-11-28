@@ -34,12 +34,14 @@
 //! 5. **Transparent hash-STARK verification**: `step_program` is non-trivial,
 //!    matches `pinned.step_program_hash`, and `bud_proof::DefaultAdapter`
 //!    verifies `envelope` against `inputs` with `exit_code == 0`,
-//!    `block_height == tip.blockchain_length`, `final_state_root ==
-//!    tip.snarked_ledger_root`, and `state_writes_digest ==
-//!    tip.protocol_state_hash`.
+//!    `chain_id == expected_succinct_chain_id(network, pinned)`,
+//!    `block_height == tip.blockchain_length`, and full 256-bit
+//!    `final_state_root == state_writes_digest == published_writes_digest_many(
+//!    [tip.protocol_state_hash, tip.snarked_ledger_root, epoch_chain_digest])`.
 //! 6. **Post-quantum ML-DSA-65 binding**: `pinned.aggregator_pq_pubkey` signs
-//!    the canonical binding of `(network, protocol_state_hash,
-//!    public_inputs_hash)` under `CROSS_DOMAIN_V1`.
+//!    the canonical binding of `(network, genesis_state_hash,
+//!    protocol_state_hash, epoch_chain_digest, public_inputs_hash)` under
+//!    `CROSS_DOMAIN_V1`.
 //!
 //! WIRING: implements `ExternalFinalityAdapter` for `ExternalDomainRegistry`
 //! over `bud_proof::DefaultAdapter`; `AdapterSpec` tag append joins `intake.rs`
@@ -193,10 +195,42 @@ struct SuccinctRecursiveEvidence {
 }
 
 #[must_use]
+fn expected_succinct_chain_id(network: &str, pinned: &PinnedSuccinctGenesis) -> u64 {
+    let digest = crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_MINA_PIN_V1",
+        b"chain-id",
+        network.as_bytes(),
+        &pinned.genesis_state_hash,
+        &pinned.genesis_staking_ledger_root,
+    ]);
+    digest
+        .get(0..8)
+        .and_then(|s| <[u8; 8]>::try_from(s).ok())
+        .map_or(1, u64::from_le_bytes)
+        .max(1)
+}
+
+#[must_use]
+fn epoch_chain_commitment(pinned: &PinnedSuccinctGenesis, chain: &[EpochLedgerStep]) -> Hash32 {
+    let count_le = u64::try_from(chain.len()).unwrap_or(u64::MAX).to_le_bytes();
+    let mut fields: Vec<&[u8]> = Vec::with_capacity(chain.len().saturating_add(5));
+    fields.push(b"BDLM_MINA_EPOCH_V1");
+    fields.push(b"chain");
+    fields.push(&pinned.genesis_state_hash);
+    fields.push(&pinned.genesis_staking_ledger_root);
+    fields.push(&count_le);
+    for step in chain {
+        fields.push(&step.transition_digest);
+    }
+    crate::core::hash::hash_fields_bytes(&fields)
+}
+
+#[must_use]
 fn recursive_attest_sign_bytes(
     network: &str,
     genesis_state_hash: &Hash32,
     protocol_state_hash: &Hash32,
+    epoch_chain_digest: &Hash32,
     public_inputs_hash: &Hash32,
 ) -> Hash32 {
     crate::core::hash::hash_fields_bytes(&[
@@ -204,6 +238,7 @@ fn recursive_attest_sign_bytes(
         network.as_bytes(),
         genesis_state_hash,
         protocol_state_hash,
+        epoch_chain_digest,
         public_inputs_hash,
     ])
 }
@@ -383,6 +418,20 @@ impl SuccinctRecursiveAdapter {
                 rule: "pinned Samasika slot geometry is degenerate".into(),
             });
         }
+        let max_window = pinned
+            .slots_per_sub_window
+            .checked_mul(SAMASIKA_SUB_WINDOWS as u64)
+            .ok_or_else(|| AdapterError::ConsensusRule {
+                rule: "pinned Samasika window density geometry overflow".into(),
+            })?;
+        if max_window > pinned.slots_per_epoch
+            || pinned.min_window_density_slots == 0
+            || pinned.min_window_density_slots > max_window
+        {
+            return Err(AdapterError::ConsensusRule {
+                rule: "pinned Samasika window density bounds exceed epoch geometry".into(),
+            });
+        }
         crate::crypto::pq::validate_public_key(SchemeId::ML_DSA_65, &pinned.aggregator_pq_pubkey)
             .map_err(|_| AdapterError::ConsensusRule {
             rule: "pinned succinct aggregator_pq_pubkey is not a valid ML-DSA-65 key".into(),
@@ -394,7 +443,7 @@ impl SuccinctRecursiveAdapter {
         pinned: &PinnedSuccinctGenesis,
         tip: &SuccinctProtocolState,
         chain: &[EpochLedgerStep],
-    ) -> Result<(), AdapterError> {
+    ) -> Result<Hash32, AdapterError> {
         if chain.len() > MAX_EPOCH_TRANSITIONS {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -417,7 +466,7 @@ impl SuccinctRecursiveAdapter {
                     rule: "epoch 0 staking_ledger_root does not match pinned genesis ledger".into(),
                 });
             }
-            return Ok(());
+            return Ok(epoch_chain_commitment(pinned, chain));
         }
         if chain.len() as u64 != tip.epoch {
             return Err(AdapterError::ConsensusRule {
@@ -434,6 +483,7 @@ impl SuccinctRecursiveAdapter {
             let expected_epoch = (idx as u64).saturating_add(1);
             if step.epoch != expected_epoch
                 || step.next_staking_ledger_root == [0u8; 32]
+                || step.epoch_seed == [0u8; 32]
                 || !bool::from(step.prev_staking_ledger_root.ct_eq(&cur_ledger))
             {
                 return Err(AdapterError::ConsensusRule {
@@ -453,7 +503,7 @@ impl SuccinctRecursiveAdapter {
                 rule: "tip staking_ledger_root disagrees with verified epoch chain".into(),
             });
         }
-        Ok(())
+        Ok(epoch_chain_commitment(pinned, chain))
     }
 
     fn verify_inner(
@@ -471,6 +521,11 @@ impl SuccinctRecursiveAdapter {
             return Err(AdapterError::UnsupportedEvidenceVersion {
                 version: evidence.evidence_version,
                 accepted: EVIDENCE_VERSION.to_string(),
+            });
+        }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "succinct-recursive adapter network must be non-empty".into(),
             });
         }
         if evidence.network != self.network {
@@ -554,7 +609,7 @@ impl SuccinctRecursiveAdapter {
             });
         }
 
-        Self::verify_epoch_chain(pinned, tip, &decoded.epoch_chain)?;
+        let epoch_chain_digest = Self::verify_epoch_chain(pinned, tip, &decoded.epoch_chain)?;
         let _ = verify_samasika_density(pinned, tip)?;
 
         // Bind and verify the transparent hash-STARK recursive step proof.
@@ -573,6 +628,13 @@ impl SuccinctRecursiveAdapter {
                 rule: "recursive STARK step program does not match pinned step_program_hash".into(),
             });
         }
+        let expected_chain_id = expected_succinct_chain_id(&self.network, pinned);
+        let expected_writes_digest =
+            crate::aggregation::programs::agg_merge::published_writes_digest_many(&[
+                &tip.protocol_state_hash,
+                &tip.snarked_ledger_root,
+                &epoch_chain_digest,
+            ]);
         let expected_state_tag = tip
             .protocol_state_hash
             .get(0..8)
@@ -586,12 +648,26 @@ impl SuccinctRecursiveAdapter {
             .map_or(0, u64::from_le_bytes)
             & 0x7FFF_FFFF_FFFF_FFFF;
         if decoded.inputs.exit_code != 0
+            || decoded.inputs.chain_id != expected_chain_id
             || decoded.inputs.block_height != tip.blockchain_length
             || decoded.inputs.sender != expected_state_tag
             || decoded.inputs.nonce != expected_root_tag
+            || bool::from(expected_writes_digest.ct_eq(&[0u8; 32]))
+            || !bool::from(
+                decoded
+                    .inputs
+                    .final_state_root
+                    .ct_eq(&expected_writes_digest),
+            )
+            || !bool::from(
+                decoded
+                    .inputs
+                    .state_writes_digest
+                    .ct_eq(&expected_writes_digest),
+            )
         {
             return Err(AdapterError::ConsensusRule {
-                rule: "recursive STARK public inputs do not bind tip height, snarked_ledger_root, and protocol_state_hash".into(),
+                rule: "recursive STARK public inputs do not bind chain_id, tip height, and full 256-bit state/epoch commitments".into(),
             });
         }
 
@@ -604,7 +680,7 @@ impl SuccinctRecursiveAdapter {
             what: format!("recursive transparent STARK verification failed: {e:?}"),
         })?;
 
-        // Mandatory ML-DSA-65 post-quantum attestation binding proof to network and genesis.
+        // Mandatory ML-DSA-65 post-quantum attestation binding proof to network, genesis, and epoch chain.
         if decoded.aggregator_pq_sig.is_empty() {
             return Err(AdapterError::Crypto {
                 what: "missing mandatory ML-DSA-65 recursive attestation signature".into(),
@@ -614,6 +690,7 @@ impl SuccinctRecursiveAdapter {
             &self.network,
             &pinned.genesis_state_hash,
             &tip.protocol_state_hash,
+            &epoch_chain_digest,
             &decoded.envelope.public_inputs_hash,
         );
         crate::crypto::primitives::PqKeyPair::verify(
@@ -651,6 +728,14 @@ impl SuccinctRecursiveAdapter {
 impl ExternalFinalityAdapter for SuccinctRecursiveAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        !self.network.trim().is_empty()
+            && self
+                .pinned
+                .as_ref()
+                .is_some_and(|p| Self::validate_pin(p).is_ok())
     }
 
     fn verify(
@@ -748,8 +833,20 @@ mod tests {
     use bud_proof::ProverAdapter;
 
     fn recursive_step_program() -> Vec<u64> {
-        bud_vm::syscall_context::build_syscall_context_check_program()
-            .expect("canonical recursive step program")
+        use crate::aggregation::programs::asm::Asm;
+        use crate::aggregation::programs::prog_claim::emit_swrite_digest_cells;
+
+        let mut a = Asm::new();
+        // Publish full 256-bit (protocol_state_hash, snarked_ledger_root, epoch_chain_digest)
+        // from VM cells 1..25 into SWrite slots 0..24 so BudAir commits all 768 bits in-circuit.
+        emit_swrite_digest_cells(&mut a, 1, 0);
+        emit_swrite_digest_cells(&mut a, 9, 8);
+        emit_swrite_digest_cells(&mut a, 17, 16);
+        let mut code = a.finish().expect("canonical recursive step prefix").code;
+        let tail = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("canonical syscall context check tail");
+        code.extend(tail);
+        code
     }
 
     fn build_succinct_fixture(
@@ -761,6 +858,8 @@ mod tests {
         SuccinctRecursiveEvidence,
         RawConsensusEvidence,
     ) {
+        use crate::aggregation::programs::prog_claim::write_digest_cells;
+
         let net = "mina-stark-1";
         let pq = existing_pq.unwrap_or_else(PqKeyPair::generate);
         let program = recursive_step_program();
@@ -787,6 +886,8 @@ mod tests {
             transition_digest: [0; 32],
         };
         step1.transition_digest = step1.compute_digest(&genesis_hash);
+        let epoch_chain = vec![step1];
+        let epoch_chain_digest = epoch_chain_commitment(&pinned, &epoch_chain);
 
         // 11 sub-windows summing to 88 >= min_window_density 80 >= pinned floor 77.
         let mut tip = SuccinctProtocolState {
@@ -811,13 +912,23 @@ mod tests {
         let root_tag = u64::from_le_bytes(tip.snarked_ledger_root[0..8].try_into().unwrap())
             & 0x7FFF_FFFF_FFFF_FFFF;
         let mut vm = bud_vm::Vm::new(1024);
+        write_digest_cells(&mut vm, 1, &tip.protocol_state_hash);
+        write_digest_cells(&mut vm, 9, &tip.snarked_ledger_root);
+        write_digest_cells(&mut vm, 17, &epoch_chain_digest);
         vm.context.sender = state_tag;
         vm.context.nonce = root_tag;
         vm.context.block_height = tip.blockchain_length;
         let receipt = vm.run_receipt(&program);
         assert!(receipt.success);
+        let expected_writes =
+            crate::aggregation::programs::agg_merge::published_writes_digest_many(&[
+                &tip.protocol_state_hash,
+                &tip.snarked_ledger_root,
+                &epoch_chain_digest,
+            ]);
+        assert_eq!(receipt.state_writes_digest, expected_writes);
         let inputs = ExecutionPublicInputs {
-            chain_id: 1,
+            chain_id: expected_succinct_chain_id(net, &pinned),
             program_hash: prog_hash,
             initial_state_root: bud_proof::initial_state_root_of(
                 bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(
@@ -827,7 +938,7 @@ mod tests {
                     &vm.trace,
                 )),
             ),
-            final_state_root: [0; 32],
+            final_state_root: receipt.state_writes_digest,
             sender: vm.context.sender,
             nonce: vm.context.nonce,
             block_height: tip.blockchain_length,
@@ -836,13 +947,14 @@ mod tests {
             exit_code: 0,
             trace_len: vm.trace.len() as u64,
             event_digest: bud_proof::event_digest_from_events(&receipt.events),
-            state_writes_digest: [0; 32],
+            state_writes_digest: receipt.state_writes_digest,
         };
         let envelope = bud_proof::DefaultAdapter::prove(&vm.trace, &inputs, &program).unwrap();
         let pq_msg = recursive_attest_sign_bytes(
             net,
             &genesis_hash,
             &tip.protocol_state_hash,
+            &epoch_chain_digest,
             &envelope.public_inputs_hash,
         );
         let pq_sig = pq
@@ -851,7 +963,7 @@ mod tests {
 
         let bundle = SuccinctRecursiveEvidence {
             tip,
-            epoch_chain: vec![step1],
+            epoch_chain,
             envelope,
             inputs,
             step_program: program,
@@ -1033,5 +1145,155 @@ mod tests {
             .unwrap()
             .attestations
             .contains_key(&(120, EVIDENCE_VERSION)));
+    }
+
+    #[test]
+    fn unauthenticated_epoch_chain_mutation_and_foreign_chain_id_and_zero_stark_writes_fail_closed()
+    {
+        let (pinned, _, bundle, _) = build_succinct_fixture([0x77; 32], None);
+        let adapter = SuccinctRecursiveAdapter::new("mina-stark-1", Some(pinned.clone()));
+        let policy = VerificationPolicy::proven(130);
+
+        // 1. Rewriting an unauthenticated epoch-chain transition (epoch_seed)
+        //    without re-proving the STARK or re-signing with ML-DSA-65 must fail closed.
+        let mut forged_epoch = bundle.clone();
+        forged_epoch.epoch_chain[0].epoch_seed = [0xFE; 32];
+        forged_epoch.epoch_chain[0].transition_digest =
+            forged_epoch.epoch_chain[0].compute_digest(&pinned.genesis_state_hash);
+        let ev_forged_epoch = RawConsensusEvidence {
+            adapter: AdapterId::from_name(ADAPTER_NAME),
+            evidence_version: EVIDENCE_VERSION,
+            network: "mina-stark-1".into(),
+            payload: encode_recursive_evidence(&forged_epoch).unwrap(),
+            declared_height: 120,
+            declared_root: [0x77; 32],
+            submitter: Address::from([0x05; 32]),
+        };
+        assert!(
+            adapter.verify(&ev_forged_epoch, &policy).is_err(),
+            "unauthenticated epoch_chain mutation must fail closed"
+        );
+
+        // 2. A proof proved for a foreign chain_id (or leaving final_state_root /
+        //    state_writes_digest all-zero instead of binding full 256-bit roots) must fail closed.
+        let legacy_program = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("legacy syscall context program");
+        let legacy_prog_hash = bud_proof::canonical_set::program_hash_of(&legacy_program);
+        let mut vm = bud_vm::Vm::new(1024);
+        vm.context.sender = bundle.inputs.sender;
+        vm.context.nonce = bundle.inputs.nonce;
+        vm.context.block_height = bundle.tip.blockchain_length;
+        let receipt = vm.run_receipt(&legacy_program);
+        assert!(receipt.success);
+        let foreign_inputs = ExecutionPublicInputs {
+            chain_id: 999_999,
+            program_hash: legacy_prog_hash,
+            initial_state_root: bud_proof::initial_state_root_of(
+                bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(
+                    &vm.trace,
+                )),
+                bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0; 32],
+            sender: vm.context.sender,
+            nonce: vm.context.nonce,
+            block_height: bundle.tip.blockchain_length,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: bud_proof::event_digest_from_events(&receipt.events),
+            state_writes_digest: [0; 32],
+        };
+        let foreign_env =
+            bud_proof::DefaultAdapter::prove(&vm.trace, &foreign_inputs, &legacy_program).unwrap();
+        let (_, pq_fresh, _, _) = build_succinct_fixture([0x77; 32], None);
+        let mut foreign_pin = pinned.clone();
+        foreign_pin.step_program_hash = legacy_prog_hash;
+        foreign_pin.aggregator_pq_pubkey = pq_fresh.public_key_bytes().to_vec();
+        let foreign_epoch_digest = epoch_chain_commitment(&foreign_pin, &bundle.epoch_chain);
+        let pq_msg = recursive_attest_sign_bytes(
+            "mina-stark-1",
+            &foreign_pin.genesis_state_hash,
+            &bundle.tip.protocol_state_hash,
+            &foreign_epoch_digest,
+            &foreign_env.public_inputs_hash,
+        );
+        let foreign_bundle = SuccinctRecursiveEvidence {
+            tip: bundle.tip.clone(),
+            epoch_chain: bundle.epoch_chain.clone(),
+            envelope: foreign_env,
+            inputs: foreign_inputs,
+            step_program: legacy_program,
+            aggregator_pq_sig: pq_fresh
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &pq_msg)
+                .unwrap(),
+        };
+        let ev_foreign = RawConsensusEvidence {
+            adapter: AdapterId::from_name(ADAPTER_NAME),
+            evidence_version: EVIDENCE_VERSION,
+            network: "mina-stark-1".into(),
+            payload: encode_recursive_evidence(&foreign_bundle).unwrap(),
+            declared_height: 120,
+            declared_root: [0x77; 32],
+            submitter: Address::from([0x05; 32]),
+        };
+        let foreign_adapter = SuccinctRecursiveAdapter::new("mina-stark-1", Some(foreign_pin));
+        assert!(
+            foreign_adapter.verify(&ev_foreign, &policy).is_err(),
+            "foreign chain_id and zero 256-bit STARK state_writes_digest must fail closed"
+        );
+    }
+
+    #[test]
+    fn pinned_zero_or_overflow_window_density_fails_closed() {
+        let (mut zero_pin, _, _, ev) = build_succinct_fixture([0x77; 32], None);
+        zero_pin.min_window_density_slots = 0;
+        let zero_adapter = SuccinctRecursiveAdapter::new("mina-stark-1", Some(zero_pin));
+        let policy = VerificationPolicy::proven(130);
+        assert!(
+            matches!(
+                zero_adapter.verify(&ev, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "pinned min_window_density_slots == 0 must be refused by validate_pin"
+        );
+
+        let (mut overflow_pin, _, _, ev2) = build_succinct_fixture([0x77; 32], None);
+        overflow_pin.min_window_density_slots = overflow_pin.slots_per_epoch + 1;
+        let overflow_adapter = SuccinctRecursiveAdapter::new("mina-stark-1", Some(overflow_pin));
+        assert!(
+            matches!(
+                overflow_adapter.verify(&ev2, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "pinned min_window_density_slots > slots_per_epoch must be refused by validate_pin"
+        );
+
+        let (mut bad_geom_pin, _, _, ev3) = build_succinct_fixture([0x77; 32], None);
+        bad_geom_pin.slots_per_sub_window = 20;
+        bad_geom_pin.slots_per_epoch = 110;
+        let bad_geom_adapter = SuccinctRecursiveAdapter::new("mina-stark-1", Some(bad_geom_pin));
+        assert!(
+            !bad_geom_adapter.has_pinned_trust_anchor(),
+            "degenerate pinned geometry must not report a valid trust anchor"
+        );
+        assert!(
+            matches!(
+                bad_geom_adapter.verify(&ev3, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "pinned slots_per_sub_window * 11 > slots_per_epoch must be refused by validate_pin"
+        );
+
+        let (valid_pin, _, _, _) = build_succinct_fixture([0x77; 32], None);
+        assert!(
+            SuccinctRecursiveAdapter::new("mina-stark-1", Some(valid_pin.clone()))
+                .has_pinned_trust_anchor()
+        );
+        assert!(!SuccinctRecursiveAdapter::new("   ", Some(valid_pin)).has_pinned_trust_anchor());
+        assert!(!SuccinctRecursiveAdapter::new("mina-stark-1", None).has_pinned_trust_anchor());
     }
 }

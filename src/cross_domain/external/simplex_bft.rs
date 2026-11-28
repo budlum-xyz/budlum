@@ -472,6 +472,7 @@ fn index_simplex_committee<'a>(
         });
     }
     let mut by_key = BTreeMap::new();
+    let mut seen_pq: BTreeSet<&[u8]> = BTreeSet::new();
     let mut total = 0u128;
     for v in validators {
         if bool::from(v.ed25519_pubkey.ct_eq(&[0u8; 32])) {
@@ -490,6 +491,11 @@ fn index_simplex_committee<'a>(
                     rule: format!("invalid ML-DSA-65 public key in {label}"),
                 }
             })?;
+            if !seen_pq.insert(v.pq_pubkey.as_slice()) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: format!("duplicate validator ML-DSA-65 pubkey in {label}"),
+                });
+            }
         }
         if by_key
             .insert(v.ed25519_pubkey, (v.stake_weight, v.pq_pubkey.as_slice()))
@@ -679,7 +685,6 @@ pub fn verify_simplex_slashing(
             }
             let epoch_le = epoch.to_le_bytes();
             let view_le = view.to_le_bytes();
-            let height_le = height.to_le_bytes();
             let (lo_block, hi_block) = if block_digest_a <= block_digest_b {
                 (block_digest_a, block_digest_b)
             } else {
@@ -688,13 +693,15 @@ pub fn verify_simplex_slashing(
             let count_le = u64::try_from(offenders.len())
                 .unwrap_or(u64::MAX)
                 .to_le_bytes();
-            let mut fields: Vec<&[u8]> = Vec::with_capacity(offenders.len().saturating_add(9));
+            // `notarize_sign_bytes` binds (network, epoch, view, block_digest) and not
+            // height, so `evidence_digest` omits the unsigned height to prevent replay
+            // across caller-chosen height values.
+            let mut fields: Vec<&[u8]> = Vec::with_capacity(offenders.len().saturating_add(8));
             fields.push(b"BDLM_SIMPLEX_SLASH_V1");
             fields.push(&[1u8]);
             fields.push(network.as_bytes());
             fields.push(&epoch_le);
             fields.push(&view_le);
-            fields.push(&height_le);
             fields.push(lo_block);
             fields.push(hi_block);
             fields.push(&count_le);
@@ -746,17 +753,17 @@ pub fn verify_simplex_slashing(
             }
             let epoch_le = epoch.to_le_bytes();
             let view_le = view.to_le_bytes();
-            let height_le = height.to_le_bytes();
             let count_le = u64::try_from(offenders.len())
                 .unwrap_or(u64::MAX)
                 .to_le_bytes();
-            let mut fields: Vec<&[u8]> = Vec::with_capacity(offenders.len().saturating_add(8));
+            // `finalize_sign_bytes` and `skip_sign_bytes` bind (network, epoch, view, ...)
+            // and not height, so `evidence_digest` omits the unsigned height.
+            let mut fields: Vec<&[u8]> = Vec::with_capacity(offenders.len().saturating_add(7));
             fields.push(b"BDLM_SIMPLEX_SLASH_V1");
             fields.push(&[2u8]);
             fields.push(network.as_bytes());
             fields.push(&epoch_le);
             fields.push(&view_le);
-            fields.push(&height_le);
             fields.push(block_digest);
             fields.push(&count_le);
             for pk in &offenders {
@@ -869,6 +876,11 @@ impl SimplexBftAdapter {
                 accepted: EVIDENCE_VERSION.to_string(),
             });
         }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "simplex-bft adapter network must be non-empty".into(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -957,6 +969,13 @@ impl SimplexBftAdapter {
                     &pinned_idx,
                     "simplex-bft boundary block",
                 )?;
+                if block.height == tr.boundary_block.height.saturating_add(1)
+                    && !bool::from(block.parent_hash.ct_eq(&tr.boundary_block.digest))
+                {
+                    return Err(AdapterError::ConsensusRule {
+                        rule: "simplex-bft immediate epoch successor parent_hash must equal boundary block digest".into(),
+                    });
+                }
                 let (next_idx, next_total) = index_simplex_committee(
                     &tr.next_validators,
                     "simplex-bft successor committee",
@@ -1143,6 +1162,14 @@ impl SimplexBftAdapter {
 impl ExternalFinalityAdapter for SimplexBftAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         self.descriptor.clone()
+    }
+
+    fn has_pinned_trust_anchor(&self) -> bool {
+        !self.network.trim().is_empty()
+            && self
+                .pinned
+                .as_ref()
+                .is_some_and(|p| index_simplex_committee(&p.validators, "simplex-bft").is_ok())
     }
 
     fn verify(
@@ -1580,5 +1607,224 @@ mod tests {
             skip_sigs: vec![vals[3].sign(&sm)],
         };
         assert!(verify_simplex_slashing(NET, &pinned, &disjoint).is_err());
+    }
+
+    #[test]
+    fn simplex_slashing_digest_is_invariant_to_unsigned_height_and_blocks_replay() {
+        use crate::cross_domain::economic_guard::{
+            BridgeEconomicGuard, ContradictionEvidence, DomainCeilingPolicy, EconomicGuardError,
+            GuardedExternalAdapter,
+        };
+        use crate::cross_domain::external::ProverBond;
+
+        let (vals, pinned, _, _) = build_gap_fixture();
+        let da = [0xAA; 32];
+        let db = [0xBB; 32];
+
+        // 1. DoubleNotarize signatures do not cover height; mutating height must
+        //    produce the exact same canonical evidence_digest.
+        let na = notarize_sign_bytes(NET, 3, 13, &da);
+        let nb = notarize_sign_bytes(NET, 3, 13, &db);
+        let dn_h1 = SimplexSlashingProof::DoubleNotarize {
+            epoch: 3,
+            view: 13,
+            height: 1_500,
+            block_digest_a: da,
+            sigs_a: vec![vals[2].sign(&na)],
+            block_digest_b: db,
+            sigs_b: vec![vals[2].sign(&nb)],
+        };
+        let dn_h2 = SimplexSlashingProof::DoubleNotarize {
+            epoch: 3,
+            view: 13,
+            height: 1_501,
+            block_digest_a: da,
+            sigs_a: vec![vals[2].sign(&na)],
+            block_digest_b: db,
+            sigs_b: vec![vals[2].sign(&nb)],
+        };
+        let res_dn1 = verify_simplex_slashing(NET, &pinned, &dn_h1).unwrap();
+        let res_dn2 = verify_simplex_slashing(NET, &pinned, &dn_h2).unwrap();
+        assert_eq!(
+            res_dn1.evidence_digest, res_dn2.evidence_digest,
+            "DoubleNotarize evidence_digest must not depend on unsigned height"
+        );
+
+        // 2. FinalizeAndSkip signatures do not cover height either.
+        let fm = finalize_sign_bytes(NET, 3, 13, &da);
+        let sm = skip_sign_bytes(NET, 3, 13);
+        let fs_h1 = SimplexSlashingProof::FinalizeAndSkip {
+            epoch: 3,
+            view: 13,
+            height: 1_500,
+            block_digest: da,
+            finalize_sigs: vec![vals[0].sign(&fm)],
+            skip_sigs: vec![vals[0].sign(&sm)],
+        };
+        let fs_h2 = SimplexSlashingProof::FinalizeAndSkip {
+            epoch: 3,
+            view: 13,
+            height: 9_999,
+            block_digest: da,
+            finalize_sigs: vec![vals[0].sign(&fm)],
+            skip_sigs: vec![vals[0].sign(&sm)],
+        };
+        let res_fs1 = verify_simplex_slashing(NET, &pinned, &fs_h1).unwrap();
+        let res_fs2 = verify_simplex_slashing(NET, &pinned, &fs_h2).unwrap();
+        assert_eq!(
+            res_fs1.evidence_digest, res_fs2.evidence_digest,
+            "FinalizeAndSkip evidence_digest must not depend on unsigned height"
+        );
+
+        // 3. End-to-end BridgeEconomicGuard replay test: replaying the exact same
+        //    DoubleNotarize signatures with a different unsigned height must be rejected.
+        let mut guard = BridgeEconomicGuard::production();
+        let domain_id = 83u32;
+        let prover = crate::core::address::Address::from([0x71; 32]);
+        let challenger = crate::core::address::Address::from([0x72; 32]);
+        guard
+            .configure_domain(
+                domain_id,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::SimplexBft {
+                        network: NET.into(),
+                        pinned: pinned.clone(),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(ProverBond {
+                    prover,
+                    bond_atoms: 50_000,
+                    ceiling_atoms: 500_000,
+                    slashed_atoms: 0,
+                    slashings: Vec::new(),
+                    accepted: 0,
+                    refused: 0,
+                }),
+            )
+            .unwrap();
+        let first = guard
+            .submit_contradiction(
+                domain_id,
+                &ContradictionEvidence::SimplexFault {
+                    network: NET.into(),
+                    pinned: pinned.clone(),
+                    proof: Box::new(dn_h1),
+                },
+                challenger,
+                100,
+            )
+            .unwrap();
+        assert_eq!(first.external_slashed_weight, 250);
+        let replay = guard.submit_contradiction(
+            domain_id,
+            &ContradictionEvidence::SimplexFault {
+                network: NET.into(),
+                pinned,
+                proof: Box::new(dn_h2),
+            },
+            challenger,
+            101,
+        );
+        assert_eq!(
+            replay,
+            Err(EconomicGuardError::DuplicateEvidence(first.evidence_digest)),
+            "mutating unsigned height must not bypass BridgeEconomicGuard replay protection"
+        );
+    }
+
+    #[test]
+    fn simplex_committee_refuses_duplicate_pq_pubkey_and_unlinked_epoch_handoff() {
+        let (vals, mut dup_pin, _, raw) = build_gap_fixture();
+        // Distinct Ed25519 keys sharing a single ML-DSA-65 public key collapse PQ quorum independence.
+        dup_pin.validators[1].pq_pubkey = dup_pin.validators[0].pq_pubkey.clone();
+        let adapter = SimplexBftAdapter::new(NET, Some(dup_pin));
+        let policy = VerificationPolicy::strict(1_600);
+        assert!(
+            matches!(
+                adapter.verify(&raw, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "duplicate ML-DSA-65 public key across distinct validators must fail closed"
+        );
+
+        // Immediate epoch-handoff successor block (height == boundary.height + 1)
+        // must link parent_hash to boundary.digest.
+        let (_, pinned, _, _) = build_gap_fixture();
+        let next_vals = [
+            ValSigner::new(11, 400),
+            ValSigner::new(12, 400),
+            ValSigner::new(13, 400),
+            ValSigner::new(14, 400),
+        ];
+        let next_committee: Vec<SimplexValidator> =
+            next_vals.iter().map(ValSigner::as_validator).collect();
+        let next_hash = simplex_committee_hash(NET, 4, &next_committee);
+        let mut boundary = SimplexBlockHeader {
+            epoch: 3,
+            view: 20,
+            parent_view: 19,
+            height: 1_510,
+            proposer: vals[0].ed.public_key_bytes(),
+            timestamp_ms: 1_750_200_010_000,
+            parent_hash: [0x90; 32],
+            state_root: [0x91; 32],
+            tx_root: [0x92; 32],
+            event_root: [0u8; 32],
+            next_committee_hash: next_hash,
+            digest: [0u8; 32],
+        };
+        boundary.digest = boundary.compute_digest(NET);
+        let bf_msg = finalize_sign_bytes(NET, 3, 20, &boundary.digest);
+
+        let mut unlinked = SimplexBlockHeader {
+            epoch: 4,
+            view: 1,
+            parent_view: 0,
+            height: 1_511,
+            proposer: next_vals[0].ed.public_key_bytes(),
+            timestamp_ms: 1_750_200_011_000,
+            parent_hash: [0xEE; 32],
+            state_root: [0x93; 32],
+            tx_root: [0x94; 32],
+            event_root: [0x95; 32],
+            next_committee_hash: [0u8; 32],
+            digest: [0u8; 32],
+        };
+        unlinked.digest = unlinked.compute_digest(NET);
+        let e4_n = notarize_sign_bytes(NET, 4, 1, &unlinked.digest);
+        let e4_f = finalize_sign_bytes(NET, 4, 1, &unlinked.digest);
+        let rotated = SimplexBftEvidence {
+            block: unlinked.clone(),
+            notarize_sigs: next_vals[..3].iter().map(|v| v.sign(&e4_n)).collect(),
+            finalize_sigs: next_vals[..3].iter().map(|v| v.sign(&e4_f)).collect(),
+            skip_certs: vec![],
+            nec: None,
+            epoch_transition: Some(SimplexEpochTransition {
+                boundary_block: boundary,
+                finalize_sigs: vals[..3].iter().map(|v| v.sign(&bf_msg)).collect(),
+                next_validators: next_committee,
+            }),
+        };
+        let rotated_raw = RawConsensusEvidence {
+            adapter: AdapterId::from_name(ADAPTER_NAME),
+            evidence_version: EVIDENCE_VERSION,
+            network: NET.into(),
+            declared_height: unlinked.height,
+            declared_root: unlinked.state_root,
+            payload: encode_simplex_evidence(&rotated).unwrap(),
+            submitter: crate::core::address::Address::from([0x33; 32]),
+        };
+        let handoff_adapter = SimplexBftAdapter::new(NET, Some(pinned.clone()));
+        assert!(handoff_adapter.has_pinned_trust_anchor());
+        assert!(!SimplexBftAdapter::new("   ", Some(pinned)).has_pinned_trust_anchor());
+        assert!(!SimplexBftAdapter::new(NET, None).has_pinned_trust_anchor());
+        assert!(
+            matches!(
+                handoff_adapter.verify(&rotated_raw, &policy),
+                Err(AdapterError::ConsensusRule { .. })
+            ),
+            "immediate epoch successor block with parent_hash != boundary.digest must fail closed"
+        );
     }
 }
