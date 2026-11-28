@@ -106,6 +106,7 @@ mod gates {
     pub mod fork_choice_gate;
     pub mod fsf_import_boundaries;
     pub mod fuzz_targets_wired;
+    pub mod garden_acceptance;
     pub mod garden_apk;
     pub mod garden_nat;
     pub mod garden_scenario;
@@ -1814,6 +1815,18 @@ const GATES: &[Gate] = &[
         run_log: Some(gates::garden_scenario::run),
         run_args: None,
         self_test: gates::garden_scenario::self_test,
+    },
+    Gate {
+        name: "garden-acceptance",
+        replaces: None,
+        run: |_| {
+            Err(String::from(
+                "garden-acceptance reads a cargo test log; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::garden_acceptance::run),
+        run_args: None,
+        self_test: gates::garden_acceptance::self_test,
     },
     Gate {
         name: "garden-apk",

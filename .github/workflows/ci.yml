@@ -3720,3 +3720,12 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --test garden_acceptance -- --test-threads=1 2>&1 | tee /tmp/garden-acceptance.txt
+      # The gate proves the nine directive names really ran. Its canary proves
+      # the gate can fail at all, so "green" is a measurement and not a suite
+      # that quietly lost a test and printed a pass count.
+      - name: Garden acceptance gate canary (proof it is not vacuous)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- garden-acceptance --self-test
+      - name: Garden acceptance gate (the nine section 11.1 names)
+        run: |
+          set -euo pipefail
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- garden-acceptance /tmp/garden-acceptance.txt
