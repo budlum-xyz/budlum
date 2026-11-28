@@ -56,6 +56,15 @@ pub fn verify_in(
     outgoing: &[HandoffMember],
     epoch_randomness: [u8; 32],
 ) -> Result<(), HandoffError> {
+    if cert.chain_id == 0 {
+        return Err(HandoffError::Chain {
+            expected: 1,
+            got: 0,
+        });
+    }
+    if epoch_randomness == [0u8; 32] {
+        return Err(HandoffError::Randomness);
+    }
     cert.verify_with(outgoing, epoch_randomness, |pk, message, signature| {
         crate::crypto::pq::verify_in(
             registry,
@@ -85,6 +94,12 @@ pub fn follow_handoffs<'a>(
     steps: &'a [(HandoffCertificate, Vec<HandoffMember>)],
     epoch_randomness: &dyn Fn(u64) -> [u8; 32],
 ) -> Result<(u64, &'a [HandoffMember]), HandoffError> {
+    if chain_id == 0 {
+        return Err(HandoffError::Chain {
+            expected: 1,
+            got: 0,
+        });
+    }
     if !member_set_is_valid(trusted) {
         return Err(HandoffError::OutgoingSet);
     }
@@ -402,5 +417,49 @@ mod tests {
             [5; 32],
         ));
         assert_eq!(cert.chain_id, 45_261);
+    }
+
+    #[test]
+    fn verify_in_and_follow_handoffs_refuse_zero_chain_id_and_zero_randomness() {
+        let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        let keys: Vec<_> = (0..3)
+            .map(|_| crate::crypto::primitives::PqKeyPair::generate())
+            .collect();
+        let outgoing = members(&keys);
+
+        assert!(matches!(
+            follow_handoffs(&registry, 0, 1, &outgoing, &[], &|_| [3; 32]),
+            Err(HandoffError::Chain {
+                expected: 1,
+                got: 0
+            })
+        ));
+
+        let mut zero_chain = HandoffCertificate::unsigned(0, 1, &outgoing, &outgoing, [3; 32]);
+        let msg = zero_chain.signing_message();
+        for (i, key) in keys.iter().enumerate() {
+            let sig = key.sign(crate::crypto::ctx::HANDOFF_V1, &msg).expect("sig");
+            zero_chain.insert_signature(u32::try_from(i).unwrap_or(0), sig);
+        }
+        assert!(matches!(
+            verify_in(&zero_chain, &registry, &outgoing, [3; 32]),
+            Err(HandoffError::Chain {
+                expected: 1,
+                got: 0
+            })
+        ));
+
+        let mut zero_rand = HandoffCertificate::unsigned(7, 1, &outgoing, &outgoing, [0; 32]);
+        let msg2 = zero_rand.signing_message();
+        for (i, key) in keys.iter().enumerate() {
+            let sig = key
+                .sign(crate::crypto::ctx::HANDOFF_V1, &msg2)
+                .expect("sig");
+            zero_rand.insert_signature(u32::try_from(i).unwrap_or(0), sig);
+        }
+        assert_eq!(
+            verify_in(&zero_rand, &registry, &outgoing, [0; 32]),
+            Err(HandoffError::Randomness)
+        );
     }
 }

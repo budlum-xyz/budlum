@@ -40,5 +40,6 @@ mod tests {
     #[test]
     fn zk_qc_fault_proof_verifier_refuses_empty_proof() {
         assert!(verify_zk_qc_fault_proof(&[], "").is_err());
+        assert!(verify_zk_qc_fault_proof(&[0u8; 4096], &"0".repeat(64)).is_err());
     }
 }

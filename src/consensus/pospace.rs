@@ -541,10 +541,13 @@ impl PoSpaceEngine {
         if bool::from(plot_id.ct_eq(&[0u8; 32])) {
             return Err(ConsensusError("PoSpace plot_id cannot be zero".into()));
         }
-        if size_bytes < self.config.min_plot_size_bytes || size_bytes > MAX_PLOT_SIZE_BYTES {
+        if size_bytes == 0
+            || size_bytes < self.config.min_plot_size_bytes
+            || size_bytes > MAX_PLOT_SIZE_BYTES
+        {
             return Err(ConsensusError(format!(
                 "PoSpace plot size {size_bytes} outside permitted range [{}, {MAX_PLOT_SIZE_BYTES}]",
-                self.config.min_plot_size_bytes
+                self.config.min_plot_size_bytes.max(1)
             )));
         }
         let reg_chal = registration_challenge(address, &plot_id, size_bytes);
@@ -564,6 +567,13 @@ impl PoSpaceEngine {
             .plots
             .write()
             .map_err(|_| ConsensusError("PoSpace plot registry lock poisoned".into()))?;
+        if plots.iter().any(|(existing_addr, rec)| {
+            existing_addr != address && bool::from(rec.plot_id.ct_eq(&plot_id))
+        }) {
+            return Err(ConsensusError(
+                "PoSpace plot_id is already registered under a distinct miner identity".into(),
+            ));
+        }
         if !plots.contains_key(address) && plots.len() >= MAX_POSPACE_PLOTS {
             return Err(ConsensusError(
                 "PoSpace plot registry capacity ceiling reached".into(),
@@ -689,9 +699,30 @@ impl ConsensusEngine for PoSpaceEngine {
     fn validate_block(
         &self,
         block: &Block,
-        _chain: &[Block],
+        chain: &[Block],
         _state: &AccountState,
     ) -> Result<(), ConsensusError> {
+        if block.index == 0 {
+            return Err(ConsensusError(
+                "PoSpace validate_block refuses height 0 genesis blocks".into(),
+            ));
+        }
+        if block.previous_hash.trim().is_empty() {
+            return Err(ConsensusError(
+                "PoSpace block previous_hash cannot be empty".into(),
+            ));
+        }
+        if let Some(parent) = chain.last() {
+            let expected_index = parent
+                .index
+                .checked_add(1)
+                .ok_or_else(|| ConsensusError("PoSpace block height overflow".into()))?;
+            if block.index != expected_index || block.previous_hash != parent.hash {
+                return Err(ConsensusError(
+                    "PoSpace block does not link contiguously to canonical chain tip".into(),
+                ));
+            }
+        }
         let calculated_hash = block.calculate_hash();
         if block.hash != calculated_hash {
             return Err(ConsensusError(format!(
@@ -701,12 +732,14 @@ impl ConsensusEngine for PoSpaceEngine {
         }
 
         let witness = decode_pospace_witness(block)?;
-        if witness.size_bytes < self.config.min_plot_size_bytes
+        if witness.size_bytes == 0
+            || witness.size_bytes < self.config.min_plot_size_bytes
             || witness.size_bytes > MAX_PLOT_SIZE_BYTES
         {
             return Err(ConsensusError(format!(
                 "PoSpace proof plot size {} outside permitted range [{}, {MAX_PLOT_SIZE_BYTES}]",
-                witness.size_bytes, self.config.min_plot_size_bytes
+                witness.size_bytes,
+                self.config.min_plot_size_bytes.max(1)
             )));
         }
 
@@ -808,8 +841,11 @@ impl ConsensusEngine for PoSpaceEngine {
     }
 
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
-        let current_score = self.fork_choice_score(current);
         let candidate_score = self.fork_choice_score(candidate);
+        if candidate_score == 0 {
+            return false;
+        }
+        let current_score = self.fork_choice_score(current);
         if candidate_score != current_score {
             return candidate_score > current_score;
         }
@@ -860,6 +896,10 @@ pub fn passes_plot_filter(
     signage_index: u32,
     filter_bits: u8,
 ) -> bool {
+    let zero = [0u8; 32];
+    if bool::from(plot_id.ct_eq(&zero)) || bool::from(challenge.ct_eq(&zero)) {
+        return false;
+    }
     if filter_bits == 0 {
         return true;
     }
@@ -1092,6 +1132,11 @@ pub fn verify_space_time_delay(
     if bool::from(proof.plot_id.ct_eq(&[0u8; 32])) {
         return Err(ConsensusError(
             "PoSpace delay proof has zero plot_id".into(),
+        ));
+    }
+    if bool::from(expected_challenge.ct_eq(&[0u8; 32])) {
+        return Err(ConsensusError(
+            "PoSpace delay proof expected_challenge cannot be zero".into(),
         ));
     }
     if !bool::from(proof.challenge.ct_eq(expected_challenge)) {
@@ -1488,5 +1533,49 @@ mod tests {
             verify_space_time_delay(&bad_out, &challenge, 1024 * 1024, filter_bits, 100, 256)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn pospace_refuses_sybil_duplicate_plot_zero_filter_unlinked_parent_and_zero_score_reorg() {
+        let leaves = sample_leaves(0x5A, 8);
+        let engine = PoSpaceEngine::new(PoSpaceConfig::default());
+        let plot_id = engine
+            .register_committed_plot("miner-alpha", 4 * 1024 * 1024, leaves.clone())
+            .expect("register alpha");
+        assert!(
+            engine
+                .register_committed_plot("miner-sybil", 4 * 1024 * 1024, leaves)
+                .is_err(),
+            "distinct miner identity cannot re-register an existing plot_id"
+        );
+        assert!(!passes_plot_filter(&[0u8; 32], &[0x44; 32], 0, 0));
+        assert!(!passes_plot_filter(&plot_id, &[0u8; 32], 0, 0));
+
+        let mut b1 = make_block(1, &"0".repeat(64));
+        engine
+            .prepare_block(&mut b1, &AccountState::new())
+            .expect("b1");
+        let mut b2_unlinked = make_block(2, &"f".repeat(64));
+        engine
+            .prepare_block(&mut b2_unlinked, &AccountState::new())
+            .expect("b2");
+        assert!(engine
+            .validate_block(
+                &b2_unlinked,
+                std::slice::from_ref(&b1),
+                &AccountState::new()
+            )
+            .is_err());
+
+        let mut b0 = make_block(0, &"0".repeat(64));
+        engine
+            .prepare_block(&mut b0, &AccountState::new())
+            .expect("b0");
+        assert!(engine
+            .validate_block(&b0, &[], &AccountState::new())
+            .is_err());
+
+        let empty_observer = PoSpaceEngine::new(PoSpaceConfig::default());
+        assert!(!empty_observer.is_better_chain(&[], &[b1]));
     }
 }
