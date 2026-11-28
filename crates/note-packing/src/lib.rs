@@ -50,7 +50,10 @@
 pub mod digest4;
 pub mod poseidon;
 
-pub use digest4::{Digest4, HashSuiteId, SuiteTaggedCommitment};
+pub use digest4::{
+    note_commitment_v2, note_nullifier_v2, Digest4, HashSuiteId, SuiteTaggedCommitment,
+    DOMAIN_NOTE_COMMIT_V2, DOMAIN_NOTE_NULLIFIER_V2,
+};
 
 /// A packed note hash: commitment or nullifier, as stored on chain.
 pub type NoteHash = [u8; 32];

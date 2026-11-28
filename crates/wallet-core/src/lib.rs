@@ -71,7 +71,8 @@ pub mod wallet_v3;
 
 pub use privacy_crypto::{
     address_to_recipient_tag, field_from_hash, hash_from_field, is_packed, poseidon4_hash,
-    poseidon4_hash3, privacy_commit, privacy_nullifier, DOMAIN_NULLIFIER,
+    poseidon4_hash3, privacy_commit, privacy_commit_v2, privacy_nullifier, privacy_nullifier_v2,
+    Digest4, HashSuiteId, SuiteTaggedCommitment, DOMAIN_NULLIFIER,
 };
 pub use privacy_transfer::{
     derive_blinding, derive_spend_secret, PrivateNoteInput, PrivateNoteOutput,

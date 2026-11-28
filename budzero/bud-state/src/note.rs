@@ -51,7 +51,10 @@ pub struct PrivacyNote {
 // one definition left. The wallet computes the nullifier the chain looks up;
 // if the two ever packed differently the lookup would miss and the note would
 // be spendable twice, which no test inside either crate could see.
-pub use budlum_note_packing::{field_from_hash, hash_from_field, is_packed};
+pub use budlum_note_packing::{
+    field_from_hash, hash_from_field, is_packed, note_commitment_v2, note_nullifier_v2, Digest4,
+    HashSuiteId, SuiteTaggedCommitment,
+};
 
 impl PrivacyNote {
     /// Construct from VM/AIR field elements (Poseidon outputs).
@@ -61,6 +64,52 @@ impl PrivacyNote {
             commitment: hash_from_field(commitment_fe),
             nullifier: hash_from_field(nullifier_fe),
         }
+    }
+
+    /// Construct a V2 256-bit privacy note from suite-tagged Poseidon
+    /// commitments, refusing unknown/non-Poseidon suites, all-zero digests,
+    /// non-canonical limbs, or 64-bit single-limb truncated digests.
+    pub fn from_suite_tagged(
+        commitment: &SuiteTaggedCommitment,
+        nullifier: &SuiteTaggedCommitment,
+    ) -> Result<Self, String> {
+        if commitment.suite != HashSuiteId::PoseidonG12V1
+            || nullifier.suite != HashSuiteId::PoseidonG12V1
+        {
+            return Err("V2 privacy note requires PoseidonG12V1 commitments".into());
+        }
+        let c_d4 = Digest4::from_bytes_checked(&commitment.digest)
+            .ok_or_else(|| "V2 commitment contains non-canonical Goldilocks limb".to_string())?;
+        if c_d4.is_zero() || c_d4.is_single_limb_truncated() {
+            return Err("V2 commitment must be a full non-zero 256-bit Digest4".into());
+        }
+        let n_d4 = Digest4::from_bytes_checked(&nullifier.digest)
+            .ok_or_else(|| "V2 nullifier contains non-canonical Goldilocks limb".to_string())?;
+        if n_d4.is_zero() || n_d4.is_single_limb_truncated() {
+            return Err("V2 nullifier must be a full non-zero 256-bit Digest4".into());
+        }
+        if commitment.digest == nullifier.digest {
+            return Err("V2 commitment and nullifier must be distinct".into());
+        }
+        Ok(Self {
+            commitment: commitment.digest,
+            nullifier: nullifier.digest,
+        })
+    }
+
+    /// Derive a V2 256-bit privacy note using the single shared
+    /// `budlum-note-packing` commitment and nullifier functions.
+    pub fn derive_v2(
+        amount: u64,
+        blinding: [u64; 2],
+        recipient: &[u8; 32],
+        spend_secret: [u64; 4],
+    ) -> Result<Self, String> {
+        let commitment = note_commitment_v2(amount, blinding, recipient)
+            .ok_or_else(|| "invalid inputs for V2 note commitment".to_string())?;
+        let nullifier = note_nullifier_v2(spend_secret, &commitment)
+            .ok_or_else(|| "invalid inputs for V2 note nullifier".to_string())?;
+        Self::from_suite_tagged(&commitment, &nullifier)
     }
 }
 
@@ -269,5 +318,47 @@ mod tests {
         assert!(!r.is_spent(attacker.nullifier));
         assert!(r.spend(victim.nullifier, victim.commitment).is_ok());
         assert!(r.is_spent(victim.nullifier));
+    }
+
+    #[test]
+    fn v2_256bit_note_lifecycle_and_fail_closed_refusals() {
+        let recipient = [0x42u8; 32];
+        let blinding = [101, 202];
+        let secret = [7, 8, 9, 10];
+        let note = PrivacyNote::derive_v2(500, blinding, &recipient, secret)
+            .expect("valid V2 256-bit note");
+
+        // Must match the exact shared `budlum-note-packing` derivation.
+        let expected_c = note_commitment_v2(500, blinding, &recipient).unwrap();
+        let expected_n = note_nullifier_v2(secret, &expected_c).unwrap();
+        assert_eq!(note.commitment, expected_c.digest);
+        assert_eq!(note.nullifier, expected_n.digest);
+
+        let mut reg = NoteRegistry::new();
+        reg.insert(&note).unwrap();
+        assert!(reg.contains(note.commitment));
+        reg.spend(note.nullifier, note.commitment).unwrap();
+        assert!(reg.is_spent(note.nullifier));
+        assert!(reg.spend(note.nullifier, note.commitment).is_err());
+
+        // All-zero, truncated 64-bit, and non-Poseidon suite commitments must fail closed.
+        let zero = SuiteTaggedCommitment {
+            suite: HashSuiteId::PoseidonG12V1,
+            digest: [0u8; 32],
+        };
+        assert!(PrivacyNote::from_suite_tagged(&zero, &expected_n).is_err());
+
+        let truncated = SuiteTaggedCommitment {
+            suite: HashSuiteId::PoseidonG12V1,
+            digest: hash_from_field(42),
+        };
+        assert!(PrivacyNote::from_suite_tagged(&truncated, &expected_n).is_err());
+
+        let wrong_suite = SuiteTaggedCommitment {
+            suite: HashSuiteId::Sha3_256V1,
+            digest: expected_c.digest,
+        };
+        assert!(PrivacyNote::from_suite_tagged(&wrong_suite, &expected_n).is_err());
+        assert!(PrivacyNote::derive_v2(500, [0, 0], &recipient, secret).is_err());
     }
 }

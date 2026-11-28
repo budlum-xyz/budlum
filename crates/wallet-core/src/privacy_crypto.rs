@@ -61,7 +61,10 @@ pub fn privacy_nullifier(secret: u64) -> u64 {
 // by exactly these bytes, so the wallet must not hold its own copy of the
 // rule: a one-byte divergence produces a nullifier the chain never recorded,
 // and the spend it was meant to prevent goes through.
-pub use budlum_note_packing::{field_from_hash, hash_from_field, is_packed};
+pub use budlum_note_packing::{
+    field_from_hash, hash_from_field, is_packed, note_commitment_v2 as privacy_commit_v2,
+    note_nullifier_v2 as privacy_nullifier_v2, Digest4, HashSuiteId, SuiteTaggedCommitment,
+};
 
 /// Map a 32-byte Budlum address into a Goldilocks field tag (first 8 LE bytes
 /// Reduced mod P). Used as PrivacyCommit recipient limb when full address
@@ -134,5 +137,28 @@ mod tests {
         assert_eq!(poseidon::FULL_ROUNDS, 8);
         assert_eq!(poseidon::PARTIAL_ROUNDS, 22);
         assert_eq!(poseidon::ROUNDS, 30);
+    }
+
+    /// V2 256-bit note commitment and nullifier use the single shared
+    /// `budlum-note-packing` definition and bind all 32 recipient bytes.
+    #[test]
+    fn v2_256bit_commit_and_nullifier_share_canonical_note_packing_rule() {
+        let recipient = [0x42u8; 32];
+        let mut alt_recipient = recipient;
+        alt_recipient[31] ^= 0x80;
+        let blinding = [101, 202];
+        let secret = [7, 8, 9, 10];
+
+        let c1 = privacy_commit_v2(500, blinding, &recipient).expect("v2 commitment");
+        let c2 = privacy_commit_v2(500, blinding, &alt_recipient).expect("v2 commitment alt");
+        assert_ne!(c1.digest, c2.digest);
+        assert_eq!(c1.suite, HashSuiteId::PoseidonG12V1);
+
+        let n1 = privacy_nullifier_v2(secret, &c1).expect("v2 nullifier");
+        let n2 = privacy_nullifier_v2(secret, &c2).expect("v2 nullifier alt");
+        assert_ne!(n1.digest, n2.digest);
+
+        let d4 = Digest4::from_bytes_checked(&c1.digest).expect("4 canonical limbs");
+        assert!(!d4.is_zero() && !d4.is_single_limb_truncated());
     }
 }
