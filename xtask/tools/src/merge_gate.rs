@@ -122,7 +122,9 @@ pub struct MergeRequest {
 
 /// True when `s` is exactly forty hexadecimal characters.
 fn is_sha(s: &str) -> bool {
-    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()) && !s.bytes().any(|b| b.is_ascii_uppercase())
+    s.len() == 40
+        && s.bytes().all(|b| b.is_ascii_hexdigit())
+        && !s.bytes().any(|b| b.is_ascii_uppercase())
 }
 
 fn text<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -132,7 +134,8 @@ fn text<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 /// Read the payload. Every absent or malformed field is named in the error,
 /// because "the payload is wrong" without the field is not actionable.
 pub fn read_payload(payload: &str) -> Result<MergeRequest, String> {
-    let root = json::parse(payload).map_err(|e| format!("{CONTEXT}: event payload is not JSON: {e}"))?;
+    let root =
+        json::parse(payload).map_err(|e| format!("{CONTEXT}: event payload is not JSON: {e}"))?;
     let pr = root
         .get("pull_request")
         .ok_or_else(|| format!("{CONTEXT}: event payload has no `pull_request` object"))?;
@@ -174,7 +177,10 @@ pub fn read_payload(payload: &str) -> Result<MergeRequest, String> {
     let base_repo = text(repo, "full_name")
         .ok_or_else(|| format!("{CONTEXT}: `repository.full_name` is missing"))?
         .to_owned();
-    let head_repo = head.get("repo").and_then(|r| text(r, "full_name")).map(str::to_owned);
+    let head_repo = head
+        .get("repo")
+        .and_then(|r| text(r, "full_name"))
+        .map(str::to_owned);
     let number = pr
         .get("number")
         .and_then(Value::as_u64)
@@ -218,6 +224,58 @@ pub fn read_list(text: &str, path: &str) -> Result<Vec<String>, String> {
         ));
     }
     Ok(out)
+}
+
+/// Read a claim file **at a commit of the merge target**, never from the
+/// working tree.
+///
+/// The working tree of the pull request is the thing being judged, so a list
+/// read from it is a permission the judged party writes for itself: measured
+/// 2026-11-28, appending one line to `.github/merge-gate-branches.txt` in the
+/// head commit made an undeclared branch (`evil/scratch`) pass this gate. The
+/// same file read at `base.sha` cannot be reached by the pull request at all,
+/// and a file that is missing there denies instead of permitting.
+///
+/// # Errors
+///
+/// Fails when git cannot show the file at that commit (an unfetched target is a
+/// merge this gate cannot evaluate) and when `read_list` rejects its contents.
+pub fn read_list_at(root: &Path, commit: &str, path: &str) -> Result<Vec<String>, String> {
+    let spec = format!("{commit}:{path}");
+    let text = git(root, &["show", &spec]).map_err(|e| {
+        format!("{CONTEXT}: {path} is unreadable at the merge target {commit}: {e}")
+    })?;
+    read_list(&text, path)
+}
+
+/// The claim list for a merge into the default branch.
+///
+/// Read at the merge target first, because that copy cannot be reached by the
+/// pull request being judged. The one exception is the pull request that
+/// *introduces* the file: the merge target has no copy yet, and a gate that
+/// refuses to bootstrap itself can never land, which is how the required
+/// context ends up missing for everyone. In that one case - the file is absent
+/// at the target and this pull request adds it - the head's copy is read and
+/// the decision says so. Once the first merge lands, the target always has the
+/// file and the head can no longer speak for itself.
+fn claim_list(
+    root: &Path,
+    req: &MergeRequest,
+    changed: &[String],
+    rel: &str,
+) -> Result<(Vec<String>, bool), String> {
+    if let Ok(list) = read_list_at(root, &req.base_sha, rel) {
+        return Ok((list, false));
+    }
+    if !changed.iter().any(|path| path == rel) {
+        return Err(format!(
+            "{CONTEXT}: {rel} is absent at the merge target {} and this pull request does not \
+             introduce it, so there is nothing to read the rule from",
+            req.base_sha
+        ));
+    }
+    let list = read_list_at(root, &req.head_sha, rel)?;
+    Ok((list, true))
 }
 
 /// True when `path` is unacceptable in the product tree.
@@ -273,10 +331,10 @@ pub fn decide(
         }
         Some(head) if head != req.base_repo => {
             return Decision::deny(format!(
-                "{CONTEXT}: pull request #{} comes from fork `{head}`, not `{}`. Fork pull requests \
+            "{CONTEXT}: pull request #{} comes from fork `{head}`, not `{}`. Fork pull requests \
                  do not merge into the default branch.",
-                req.number, req.base_repo
-            ))
+            req.number, req.base_repo
+        ))
         }
         Some(_) => {}
     }
@@ -367,27 +425,48 @@ pub fn run(root: &Path) -> Result<String, String> {
     })?;
     let payload = std::fs::read_to_string(&path)
         .map_err(|e| format!("{CONTEXT}: event payload {path} is unreadable: {e}"))?;
-    let req = read_payload(&payload)?;
-    let branches = read_list(
-        &std::fs::read_to_string(root.join(BRANCHES_REL))
-            .map_err(|e| format!("{CONTEXT}: {BRANCHES_REL} is unreadable: {e}"))?,
-        BRANCHES_REL,
-    )?;
-    let forbidden = read_list(
-        &std::fs::read_to_string(root.join(FORBIDDEN_REL))
-            .map_err(|e| format!("{CONTEXT}: {FORBIDDEN_REL} is unreadable: {e}"))?,
-        FORBIDDEN_REL,
-    )?;
-    // The diff is only read when the merge target is the default branch: the
-    // other inputs are already enough to answer for a stacked pull request, and
-    // running git for a decision that cannot change is work with no witness.
-    let changed = if req.base_ref == req.default_branch {
+    run_payload(root, &payload)
+}
+
+/// The decision for a given event payload, without touching the environment.
+///
+/// Split out of `run` so the payload path can be exercised by a test that owns
+/// a temporary repository: a gate whose only entry point reads `GITHUB_EVENT_PATH`
+/// can only be tested by mutating the process environment, which is a shared
+/// resource and makes the test order-dependent.
+///
+/// # Errors
+///
+/// Fails when the payload is not a pull-request event, when a claim file is
+/// unreadable at the merge target, when the diff cannot be read, or when the
+/// decision is a denial.
+pub fn run_payload(root: &Path, payload: &str) -> Result<String, String> {
+    let req = read_payload(payload)?;
+    // A stacked pull request merges into another delivery branch, not into the
+    // default branch: `decide` answers for it before it reads either list, so
+    // the lists are neither needed nor read.
+    let merging_into_default = req.base_ref == req.default_branch;
+    let changed = if merging_into_default {
         changed_paths(root, &req)?
     } else {
         Vec::new()
     };
+    let (branches, forbidden, bootstrapped) = if merging_into_default {
+        let (branches, branch_bootstrap) = claim_list(root, &req, &changed, BRANCHES_REL)?;
+        let (forbidden, forbidden_bootstrap) = claim_list(root, &req, &changed, FORBIDDEN_REL)?;
+        (branches, forbidden, branch_bootstrap || forbidden_bootstrap)
+    } else {
+        (Vec::new(), Vec::new(), false)
+    };
     let decision = decide(&req, &branches, &forbidden, &changed);
     if decision.allowed {
+        if bootstrapped {
+            return Ok(format!(
+                "{}; the claim list is read from this pull request's own tree because the merge \
+                 target has no copy yet - this allowance ends with the first merge",
+                decision.detail
+            ));
+        }
         Ok(decision.detail)
     } else {
         Err(decision.detail)
@@ -404,7 +483,10 @@ pub fn self_test() -> Result<String, String> {
         String::from("NOTES.md"),
         String::from("*_PLAN.md"),
     ];
-    let clean = vec![String::from("src/lib.rs"), String::from("xtask/tools/src/main.rs")];
+    let clean = vec![
+        String::from("src/lib.rs"),
+        String::from("xtask/tools/src/main.rs"),
+    ];
     let base = MergeRequest {
         base_sha: "0".repeat(40),
         head_sha: "1".repeat(40),
@@ -442,7 +524,11 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // 4. A forbidden path is denied, by prefix, by basename and by suffix.
-    for path in ["review-notes/2026-11-27-x.md", "docs/NOTES.md", "docs/FUTURE_PLAN.md"] {
+    for path in [
+        "review-notes/2026-11-27-x.md",
+        "docs/NOTES.md",
+        "docs/FUTURE_PLAN.md",
+    ] {
         let changed = vec![String::from(path)];
         if decide(&base, &branches, &forbidden, &changed).allowed {
             return Err(format!("canary: `{path}` must be denied as a product path"));
@@ -454,7 +540,12 @@ pub fn self_test() -> Result<String, String> {
     let mut stacked = base.clone();
     stacked.base_ref = String::from("testnet-50");
     stacked.head_ref = String::from("someone/scratch");
-    let ok = decide(&stacked, &branches, &forbidden, &[String::from("review-notes/x.md")]);
+    let ok = decide(
+        &stacked,
+        &branches,
+        &forbidden,
+        &[String::from("review-notes/x.md")],
+    );
     if !ok.allowed || !ok.detail.contains("not the default branch") {
         return Err(format!(
             "canary: a non-default base must be allowed with its reason stated, got {ok:?}"
@@ -504,6 +595,166 @@ pub fn cli(args: &[&str], root: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git must be available for this test");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A repository whose merge target declares `alpha` and whose head commit
+    /// appends `intruder` to the same claim file: the shape of a pull request
+    /// that writes its own permission slip.
+    fn repository_where_the_head_declares_itself(tag: &str) -> (PathBuf, String, String) {
+        // The tag keeps two tests that need this fixture from sharing one
+        // directory: a shared path makes the pair order-dependent, which is the
+        // flakiness the refactor above exists to avoid.
+        let root = std::env::temp_dir().join(format!(
+            "merge-gate-self-declaring-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".github")).expect("temporary repository");
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.name", "Merge Gate Test"]);
+        run_git(
+            &root,
+            &["config", "user.email", "merge-gate@example.invalid"],
+        );
+        std::fs::write(root.join(BRANCHES_REL), "# claim\nalpha\n").expect("claim file");
+        std::fs::write(root.join(FORBIDDEN_REL), "# forbidden\ndocs/plan/\n")
+            .expect("forbidden file");
+        run_git(&root, &["add", "-A"]);
+        run_git(&root, &["commit", "-q", "-m", "base"]);
+        let base = git(&root, &["rev-parse", "HEAD"])
+            .expect("base sha")
+            .trim()
+            .to_owned();
+        std::fs::write(root.join(BRANCHES_REL), "# claim\nalpha\nintruder\n").expect("claim file");
+        run_git(&root, &["add", "-A"]);
+        run_git(&root, &["commit", "-q", "-m", "head"]);
+        let head = git(&root, &["rev-parse", "HEAD"])
+            .expect("head sha")
+            .trim()
+            .to_owned();
+        (root, base, head)
+    }
+
+    fn payload(base: &str, head: &str, head_ref: &str) -> String {
+        format!(
+            concat!(
+                r#"{{"number":1,"pull_request":{{"number":1,"#,
+                r#""base":{{"sha":"{base}","ref":"main","repo":{{"full_name":"o/r"}}}},"#,
+                r#""head":{{"sha":"{head}","ref":"{head_ref}","repo":{{"full_name":"o/r"}}}}}},"#,
+                r#""repository":{{"full_name":"o/r","default_branch":"main"}}}}"#
+            ),
+            base = base,
+            head = head,
+            head_ref = head_ref
+        )
+    }
+
+    #[test]
+    fn the_claim_list_is_read_at_the_merge_target() {
+        let (root, base, head) = repository_where_the_head_declares_itself("target");
+        let at_base =
+            read_list_at(&root, &base, BRANCHES_REL).expect("the base commit has the list");
+        let at_head =
+            read_list_at(&root, &head, BRANCHES_REL).expect("the head commit has the list");
+        assert_eq!(
+            at_base,
+            vec![String::from("alpha")],
+            "the target declares one branch"
+        );
+        assert!(
+            at_head.contains(&String::from("intruder")),
+            "the fixture must really add the line to the head, or this test proves nothing"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A repository whose merge target has no claim file at all: the state the
+    /// first pull request that carries the gate lands in.
+    fn repository_without_a_claim_file(tag: &str, head_adds_it: bool) -> (PathBuf, String, String) {
+        let root =
+            std::env::temp_dir().join(format!("merge-gate-bootstrap-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".github")).expect("temporary repository");
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.name", "Merge Gate Test"]);
+        run_git(
+            &root,
+            &["config", "user.email", "merge-gate@example.invalid"],
+        );
+        std::fs::write(root.join("README.md"), "product\n").expect("readme");
+        run_git(&root, &["add", "-A"]);
+        run_git(&root, &["commit", "-q", "-m", "base"]);
+        let base = git(&root, &["rev-parse", "HEAD"])
+            .expect("base sha")
+            .trim()
+            .to_owned();
+        std::fs::write(root.join("README.md"), "product, changed\n").expect("readme");
+        if head_adds_it {
+            std::fs::write(root.join(BRANCHES_REL), "# claim\nalpha\n").expect("claim file");
+            std::fs::write(root.join(FORBIDDEN_REL), "# forbidden\ndocs/plan/\n")
+                .expect("forbidden file");
+        }
+        run_git(&root, &["add", "-A"]);
+        run_git(&root, &["commit", "-q", "-m", "head"]);
+        let head = git(&root, &["rev-parse", "HEAD"])
+            .expect("head sha")
+            .trim()
+            .to_owned();
+        (root, base, head)
+    }
+
+    #[test]
+    fn a_pull_request_that_introduces_the_claim_file_can_bootstrap() {
+        let (root, base, head) = repository_without_a_claim_file("introduces", true);
+        let detail = run_payload(&root, &payload(&base, &head, "alpha"))
+            .expect("the pull request that introduces the file must be able to land");
+        assert!(
+            detail.contains("own tree"),
+            "the allowance must be stated in the decision: {detail}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_missing_claim_file_is_not_read_from_a_stale_working_tree() {
+        let (root, base, head) = repository_without_a_claim_file("stale", false);
+        // A left-over file in the working tree is exactly what the old read saw.
+        std::fs::write(root.join(BRANCHES_REL), "# claim\nalpha\n").expect("stale claim file");
+        std::fs::write(root.join(FORBIDDEN_REL), "# forbidden\ndocs/plan/\n")
+            .expect("stale forbidden file");
+        let err = run_payload(&root, &payload(&base, &head, "alpha"))
+            .expect_err("a working-tree file must not stand in for the merge target");
+        assert!(
+            err.contains(BRANCHES_REL) && err.contains("absent at the merge target"),
+            "the denial must name the missing file: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_pull_request_that_declares_itself_is_denied() {
+        let (root, base, head) = repository_where_the_head_declares_itself("denied");
+        let err = run_payload(&root, &payload(&base, &head, "intruder"))
+            .expect_err("a head branch must not be able to declare itself");
+        assert!(
+            err.contains("intruder") && err.contains("not named by"),
+            "the denial must name the undeclared branch: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn req(base_ref: &str) -> MergeRequest {
         MergeRequest {
@@ -525,13 +776,23 @@ mod tests {
 
     #[test]
     fn default_branch_merge_from_a_declared_branch_is_allowed() {
-        let d = decide(&req("consensus-of-consensuses"), &[String::from("testnet-50")], &[], &[]);
+        let d = decide(
+            &req("consensus-of-consensuses"),
+            &[String::from("testnet-50")],
+            &[],
+            &[],
+        );
         assert!(d.allowed, "{d:?}");
     }
 
     #[test]
     fn an_undeclared_branch_is_denied_and_named() {
-        let d = decide(&req("consensus-of-consensuses"), &[String::from("other")], &[], &[]);
+        let d = decide(
+            &req("consensus-of-consensuses"),
+            &[String::from("other")],
+            &[],
+            &[],
+        );
         assert!(!d.allowed);
         assert!(d.detail.contains("testnet-50"), "{}", d.detail);
     }
@@ -544,12 +805,20 @@ mod tests {
             &[],
             &[],
         );
-        assert!(!d.allowed, "a prefix of a declared branch is not the branch");
+        assert!(
+            !d.allowed,
+            "a prefix of a declared branch is not the branch"
+        );
     }
 
     #[test]
     fn a_stacked_pull_request_is_allowed_with_its_reason() {
-        let d = decide(&req("testnet-50"), &[], &[], &[String::from("review-notes/x.md")]);
+        let d = decide(
+            &req("testnet-50"),
+            &[],
+            &[],
+            &[String::from("review-notes/x.md")],
+        );
         assert!(d.allowed);
         assert!(d.detail.contains("not the default branch"));
     }
@@ -572,7 +841,12 @@ mod tests {
     fn a_deleted_planning_document_is_not_an_offence() {
         // `changed_paths` filters deletions, so the pure decision never sees
         // one; this asserts the reason the filter exists is stated in code.
-        let d = decide(&req("consensus-of-consensuses"), &[String::from("testnet-50")], &[], &[]);
+        let d = decide(
+            &req("consensus-of-consensuses"),
+            &[String::from("testnet-50")],
+            &[],
+            &[],
+        );
         assert!(d.allowed);
     }
 
