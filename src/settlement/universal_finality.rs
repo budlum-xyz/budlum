@@ -1057,6 +1057,16 @@ fn keccak_cert_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+fn keccak_cert_bucket_root(leaf_count: u32, merkle_root: &[u8; 32]) -> [u8; 32] {
+    use sha3::{Digest as _, Keccak256};
+
+    let mut hasher = Keccak256::new();
+    hasher.update(b"BDLM_FINALITY_CERT_BUCKET_ROOT_V1");
+    hasher.update(leaf_count.to_le_bytes());
+    hasher.update(merkle_root);
+    hasher.finalize().into()
+}
+
 fn merkle_depth_for_count(leaf_count: usize) -> usize {
     if leaf_count <= 1 {
         return 0;
@@ -1091,7 +1101,8 @@ fn compute_bucket_merkle_root(rows: &[DomainFinalityEntry]) -> [u8; 32] {
         }
         level = next;
     }
-    level[0]
+    let leaf_count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+    keccak_cert_bucket_root(leaf_count, &level[0])
 }
 
 fn build_bucket_inclusion_proof(
@@ -1196,7 +1207,7 @@ impl DomainFinalityInclusionProof {
             cursor /= 2;
             width = width.div_ceil(2);
         }
-        acc == *expected_bucket_root
+        keccak_cert_bucket_root(self.leaf_count, &acc) == *expected_bucket_root
     }
 }
 
@@ -2419,6 +2430,38 @@ mod tests {
             !forged.verify(&cert.established_root),
             "a duplicated tail must not verify as a second position under an inflated leaf count"
         );
+    }
+
+    #[test]
+    fn a_forged_leaf_count_on_non_tail_leaf_cannot_reopen_a_bucket_root() {
+        for count in [3u32, 5u32] {
+            let entries: Vec<_> = (0u32..count)
+                .map(|id| {
+                    cert_entry(
+                        id,
+                        3_333,
+                        FinalityReversibility::DeterministicQuorum,
+                        FinalityVerdict::Established,
+                    )
+                })
+                .collect();
+            let cert = compose(&entries).expect("odd-count established domains compose");
+            for domain_id in 0u32..count {
+                let honest = cert
+                    .prove_domain(domain_id)
+                    .expect("honest inclusion proof");
+                assert!(honest.verify(&cert.established_root));
+
+                for forged_count in [count - 1, count + 1] {
+                    let mut forged = honest.clone();
+                    forged.leaf_count = forged_count;
+                    assert!(
+                        !forged.verify(&cert.established_root),
+                        "forged leaf_count={forged_count} on domain_id={domain_id} (actual={count}) must not verify"
+                    );
+                }
+            }
+        }
     }
 }
 

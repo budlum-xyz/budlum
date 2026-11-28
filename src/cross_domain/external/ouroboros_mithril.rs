@@ -297,18 +297,30 @@ pub fn max_threshold_for(stake: u128, total: u128) -> Result<u128, AdapterError>
         .map(|scaled| scaled / 1_000_000)
 }
 
-/// The message the Praos slot proof signs: the producer commits to the slot,
-/// the block height, the state root and the VRF number it claims.
+/// Maximum accepted length of a network label embedded in a signed Praos or
+/// Mithril message.
+const MAX_NETWORK_LABEL_BYTES: usize = 256;
+
+/// The message the Praos slot proof signs: the producer commits to the
+/// domain's `chain_id`, `network`, slot, block height, state root, and claimed
+/// VRF number.
 #[must_use]
 pub fn praos_vote_message(
+    chain_id: u64,
+    network: &str,
     producer: &[u8; ED25519_PUBLIC_KEY_LEN],
     slot: u64,
     height: u64,
     state_root: &[u8; 32],
     vrf_output: u64,
 ) -> Vec<u8> {
-    let mut message = Vec::with_capacity(PRAOS_VOTE_TAG.len() + 32 + 8 * 3 + 32);
+    let network_bytes = network.as_bytes();
+    let mut message =
+        Vec::with_capacity(PRAOS_VOTE_TAG.len() + 8 + 8 + network_bytes.len() + 32 + 8 * 3 + 32);
     message.extend_from_slice(PRAOS_VOTE_TAG);
+    message.extend_from_slice(&chain_id.to_le_bytes());
+    message.extend_from_slice(&(network_bytes.len() as u64).to_le_bytes());
+    message.extend_from_slice(network_bytes);
     message.extend_from_slice(producer);
     message.extend_from_slice(&slot.to_le_bytes());
     message.extend_from_slice(&height.to_le_bytes());
@@ -317,12 +329,96 @@ pub fn praos_vote_message(
     message
 }
 
-/// The message a Mithril certificate signs: the certified height, the state
-/// root, and the epoch whose stake distribution certified it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedPraosVote<'a> {
+    chain_id: u64,
+    network: &'a [u8],
+    producer: [u8; ED25519_PUBLIC_KEY_LEN],
+    slot: u64,
+    height: u64,
+    state_root: [u8; 32],
+    vrf_output: u64,
+}
+
+fn take_u64_le(cursor: &mut &[u8], what: &str) -> Result<u64, String> {
+    let (head, rest) = cursor
+        .split_at_checked(8)
+        .ok_or_else(|| format!("truncated {what} in Praos vote message"))?;
+    *cursor = rest;
+    let bytes: [u8; 8] = head
+        .try_into()
+        .map_err(|_| format!("invalid {what} width in Praos vote message"))?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn take_bytes32(cursor: &mut &[u8], what: &str) -> Result<[u8; 32], String> {
+    let (head, rest) = cursor
+        .split_at_checked(32)
+        .ok_or_else(|| format!("truncated {what} in Praos vote message"))?;
+    *cursor = rest;
+    head.try_into()
+        .map_err(|_| format!("invalid {what} width in Praos vote message"))
+}
+
+fn parse_praos_vote_message(message: &[u8]) -> Result<ParsedPraosVote<'_>, String> {
+    let Some(mut cursor) = message.strip_prefix(PRAOS_VOTE_TAG) else {
+        return Err("signed message does not carry PRAOS_VOTE_TAG".to_string());
+    };
+    let chain_id = take_u64_le(&mut cursor, "chain_id")?;
+    if chain_id == 0 {
+        return Err("signed Praos vote carries zero chain_id".to_string());
+    }
+    let net_len_u64 = take_u64_le(&mut cursor, "network_len")?;
+    let net_len = usize::try_from(net_len_u64)
+        .map_err(|_| "network length overflows usize in Praos vote message".to_string())?;
+    if net_len == 0 || net_len > MAX_NETWORK_LABEL_BYTES {
+        return Err(format!(
+            "network length {net_len} outside 1..={MAX_NETWORK_LABEL_BYTES} in Praos vote message"
+        ));
+    }
+    let (network, rest) = cursor
+        .split_at_checked(net_len)
+        .ok_or_else(|| "truncated network label in Praos vote message".to_string())?;
+    cursor = rest;
+    let producer = take_bytes32(&mut cursor, "producer")?;
+    let slot = take_u64_le(&mut cursor, "slot")?;
+    let height = take_u64_le(&mut cursor, "height")?;
+    let state_root = take_bytes32(&mut cursor, "state_root")?;
+    let vrf_output = take_u64_le(&mut cursor, "vrf_output")?;
+    if !cursor.is_empty() {
+        return Err(format!(
+            "Praos vote message has {} trailing bytes",
+            cursor.len()
+        ));
+    }
+    Ok(ParsedPraosVote {
+        chain_id,
+        network,
+        producer,
+        slot,
+        height,
+        state_root,
+        vrf_output,
+    })
+}
+
+/// The message a Mithril certificate signs: the domain's `chain_id`,
+/// `network`, certified epoch, block height, and state root.
 #[must_use]
-pub fn mithril_certificate_message(epoch: u64, height: u64, state_root: &[u8; 32]) -> Vec<u8> {
-    let mut message = Vec::with_capacity(MITHRIL_CERT_TAG.len() + 8 * 2 + 32);
+pub fn mithril_certificate_message(
+    chain_id: u64,
+    network: &str,
+    epoch: u64,
+    height: u64,
+    state_root: &[u8; 32],
+) -> Vec<u8> {
+    let network_bytes = network.as_bytes();
+    let mut message =
+        Vec::with_capacity(MITHRIL_CERT_TAG.len() + 8 + 8 + network_bytes.len() + 8 * 2 + 32);
     message.extend_from_slice(MITHRIL_CERT_TAG);
+    message.extend_from_slice(&chain_id.to_le_bytes());
+    message.extend_from_slice(&(network_bytes.len() as u64).to_le_bytes());
+    message.extend_from_slice(network_bytes);
     message.extend_from_slice(&epoch.to_le_bytes());
     message.extend_from_slice(&height.to_le_bytes());
     message.extend_from_slice(state_root);
@@ -470,10 +566,16 @@ impl MithrilEvidence {
         Ok(())
     }
 
-    /// The certificate message every signer signed.
+    /// The certificate message every signer signed for `network`.
     #[must_use]
-    pub fn certificate_message(&self) -> Vec<u8> {
-        mithril_certificate_message(self.epoch, self.height, &self.state_root)
+    pub fn certificate_message(&self, network: &str) -> Vec<u8> {
+        mithril_certificate_message(
+            self.chain_id,
+            network,
+            self.epoch,
+            self.height,
+            &self.state_root,
+        )
     }
 }
 
@@ -515,16 +617,44 @@ impl PraosEquivocationProof {
         crate::core::hash::hash_fields_bytes(&[&acc])
     }
 
-    /// Check the proof with nothing but the proof: two different messages, two
-    /// signatures that verify under the named key over their own message, and
-    /// a digest that matches its own fields.
+    /// Check the proof with nothing but the proof: two distinct, domain-tagged
+    /// Praos vote messages by the named producer for the same slot, chain id,
+    /// and network with conflicting block claims, two signatures that verify
+    /// under the named key, and a digest that matches its own fields.
     ///
     /// # Errors
     ///
     /// The reason the proof does not hold.
     pub fn check(&self) -> Result<(), String> {
+        if self.producer.iter().all(|b| *b == 0) {
+            return Err("the equivocation proof names an all-zero producer".to_string());
+        }
+        if self.first_height == 0 || self.second_height == 0 {
+            return Err("the equivocation proof claims height 0".to_string());
+        }
         if self.first_message == self.second_message {
             return Err("the two blocks sign one message: not an equivocation".to_string());
+        }
+        let first = parse_praos_vote_message(&self.first_message)
+            .map_err(|e| format!("first block: {e}"))?;
+        let second = parse_praos_vote_message(&self.second_message)
+            .map_err(|e| format!("second block: {e}"))?;
+        if first.producer != self.producer || second.producer != self.producer {
+            return Err("signed vote producer does not match proof producer".to_string());
+        }
+        if first.slot != self.slot || second.slot != self.slot {
+            return Err("the two blocks do not sign the same slot".to_string());
+        }
+        if first.chain_id != second.chain_id || first.network != second.network {
+            return Err("the two blocks were signed on different chains or networks".to_string());
+        }
+        if first.height != self.first_height || second.height != self.second_height {
+            return Err("declared heights do not match signed vote payloads".to_string());
+        }
+        if (first.height, first.state_root, first.vrf_output)
+            == (second.height, second.state_root, second.vrf_output)
+        {
+            return Err("the two votes agree on height, state_root, and vrf_output".to_string());
         }
         verify_signature(&self.first_message, &self.first_signature, &self.producer)
             .map_err(|e| format!("first block: {e}"))?;
@@ -619,7 +749,7 @@ impl OuroborosMithrilAdapter {
                 found: hex::encode(evidence.adapter.as_bytes()),
             });
         }
-        if evidence.network != self.network {
+        if evidence.network != self.network || self.network.is_empty() {
             return Err(AdapterError::WrongAdapter {
                 expected: self.network.clone(),
                 found: evidence.network.clone(),
@@ -753,6 +883,8 @@ impl OuroborosMithrilAdapter {
             )));
         }
         let message = praos_vote_message(
+            decoded.chain_id,
+            &self.network,
             &proof.producer,
             proof.slot,
             decoded.height,
@@ -781,7 +913,7 @@ impl OuroborosMithrilAdapter {
         decoded: &MithrilEvidence,
         stake: &EpochStake,
     ) -> Result<u128, AdapterError> {
-        let message = decoded.certificate_message();
+        let message = decoded.certificate_message(&self.network);
         let mut signed_stake: u128 = 0;
         let mut seen: Vec<[u8; ED25519_PUBLIC_KEY_LEN]> =
             Vec::with_capacity(decoded.signatures.len());
@@ -945,6 +1077,7 @@ fn signature_corruption(golden: &RawConsensusEvidence) -> Option<(usize, u8)> {
 pub fn slot_proof_digest(decoded: &MithrilEvidence) -> [u8; 32] {
     crate::core::hash::hash_fields_bytes(&[
         PRAOS_VOTE_TAG,
+        &decoded.chain_id.to_le_bytes(),
         &decoded.slot_proof.producer,
         &decoded.slot_proof.slot.to_le_bytes(),
         &decoded.height.to_le_bytes(),
@@ -962,8 +1095,8 @@ pub fn producer_address(public_key: &[u8; ED25519_PUBLIC_KEY_LEN]) -> Address {
     ]))
 }
 
-/// Pair two slot proofs by one producer in one slot into an equivocation
-/// proof, or `None` when they do not conflict.
+/// Pair two slot proofs by one producer in one slot on the same `chain_id` and
+/// `network` into an equivocation proof, or `None` when they do not conflict.
 ///
 /// Two envelopes are the wire shape for a double-signing leader in this tree:
 /// one block is one certificate. The registry keeps the recent proofs it has
@@ -973,12 +1106,18 @@ pub fn producer_address(public_key: &[u8; ED25519_PUBLIC_KEY_LEN]) -> Address {
 pub fn proof_of_equivocation(
     first: &MithrilEvidence,
     second: &MithrilEvidence,
+    network: &str,
 ) -> Option<PraosEquivocationProof> {
+    if first.chain_id == 0 || first.chain_id != second.chain_id || network.is_empty() {
+        return None;
+    }
     let producer = first.slot_proof.producer;
     if second.slot_proof.producer != producer || second.slot_proof.slot != first.slot_proof.slot {
         return None;
     }
     let first_message = praos_vote_message(
+        first.chain_id,
+        network,
         &producer,
         first.slot_proof.slot,
         first.height,
@@ -986,6 +1125,8 @@ pub fn proof_of_equivocation(
         first.slot_proof.vrf_output,
     );
     let second_message = praos_vote_message(
+        second.chain_id,
+        network,
         &producer,
         second.slot_proof.slot,
         second.height,
@@ -1074,15 +1215,22 @@ mod tests {
     /// A certificate signed by four of six equal signers: two thirds of the
     /// stake, 4e18 of 6e18.
     fn golden_evidence() -> RawConsensusEvidence {
-        let message = mithril_certificate_message(EPOCH, HEIGHT, &STATE_ROOT);
+        let message = mithril_certificate_message(CHAIN_ID, NETWORK, EPOCH, HEIGHT, &STATE_ROOT);
         let signatures = (1u8..=4)
             .map(|seed| sign_certificate(seed, &message))
             .collect();
         let producer_seed: u8 = 1;
         let producer = public_of(producer_seed);
         let vrf_output = 1_000_000u64;
-        let slot_message =
-            praos_vote_message(&producer, 92_113_004, HEIGHT, &STATE_ROOT, vrf_output);
+        let slot_message = praos_vote_message(
+            CHAIN_ID,
+            NETWORK,
+            &producer,
+            92_113_004,
+            HEIGHT,
+            &STATE_ROOT,
+            vrf_output,
+        );
         let payload = MithrilEvidence {
             chain_id: CHAIN_ID,
             epoch: EPOCH,
@@ -1207,7 +1355,7 @@ mod tests {
     #[test]
     fn a_repeated_signer_is_refused_rather_than_counted_twice() {
         let base = decoded(&golden_evidence());
-        let message = base.certificate_message();
+        let message = base.certificate_message(NETWORK);
         let repeated = sign_certificate(1, &message);
         let evidence = with_payload(&base, |copy| {
             copy.signatures = vec![repeated; 6];
@@ -1226,7 +1374,7 @@ mod tests {
     #[test]
     fn a_signature_by_an_unregistered_key_is_refused() {
         let base = decoded(&golden_evidence());
-        let message = base.certificate_message();
+        let message = base.certificate_message(NETWORK);
         let evidence = with_payload(&base, |copy| {
             copy.signatures.push(sign_certificate(42, &message));
         });
@@ -1281,6 +1429,8 @@ mod tests {
                 copy.slot_proof.vrf_output = output;
                 // Re-sign so only the lottery comparison can refuse.
                 let message = praos_vote_message(
+                    copy.chain_id,
+                    NETWORK,
                     &copy.slot_proof.producer,
                     copy.slot_proof.slot,
                     copy.height,
@@ -1331,6 +1481,8 @@ mod tests {
         let evidence = with_payload(&base, |copy| {
             copy.slot_proof.producer = stranger_key;
             let message = praos_vote_message(
+                copy.chain_id,
+                NETWORK,
                 &stranger_key,
                 copy.slot_proof.slot,
                 copy.height,
@@ -1353,7 +1505,8 @@ mod tests {
     #[test]
     fn a_certificate_for_an_unpinned_epoch_is_refused() {
         let base = decoded(&golden_evidence());
-        let message = mithril_certificate_message(EPOCH + 1, HEIGHT, &STATE_ROOT);
+        let message =
+            mithril_certificate_message(CHAIN_ID, NETWORK, EPOCH + 1, HEIGHT, &STATE_ROOT);
         let evidence = with_payload(&base, |copy| {
             copy.epoch = EPOCH + 1;
             copy.signatures = (1u8..=4)
@@ -1391,6 +1544,8 @@ mod tests {
         second.height = HEIGHT + 1;
         second.state_root = [0x52; 32];
         let message = praos_vote_message(
+            second.chain_id,
+            NETWORK,
             &second.slot_proof.producer,
             second.slot_proof.slot,
             second.height,
@@ -1399,21 +1554,21 @@ mod tests {
         );
         second.slot_proof.signature = PraosSlotProof::signature_field(keypair(1).sign(&message));
 
-        let proof =
-            proof_of_equivocation(&first, &second).expect("one producer, one slot, two blocks");
+        let proof = proof_of_equivocation(&first, &second, NETWORK)
+            .expect("one producer, one slot, two blocks");
         assert_eq!(proof.first_height, HEIGHT);
         assert_eq!(proof.second_height, HEIGHT + 1);
         proof.check().expect("the proof holds");
         // A proof that names one block twice is not a proof.
-        assert!(proof_of_equivocation(&first, &first).is_none());
+        assert!(proof_of_equivocation(&first, &first, NETWORK).is_none());
         // Nor is a pair by two different producers.
         let mut other_producer = second.clone();
         other_producer.slot_proof.producer = public_of(2);
-        assert!(proof_of_equivocation(&first, &other_producer).is_none());
+        assert!(proof_of_equivocation(&first, &other_producer, NETWORK).is_none());
         // Nor a pair in two different slots.
         let mut later_slot = second;
         later_slot.slot_proof.slot += 1;
-        assert!(proof_of_equivocation(&first, &later_slot).is_none());
+        assert!(proof_of_equivocation(&first, &later_slot, NETWORK).is_none());
         // And a tampered proof no longer holds together.
         let mut tampered = proof;
         tampered.second_message[PRAOS_VOTE_TAG.len()] ^= 0xFF;
@@ -1521,6 +1676,136 @@ mod tests {
         assert_ne!(
             producer_address(&public_of(1)),
             producer_address(&public_of(2))
+        );
+    }
+
+    #[test]
+    fn honest_blocks_in_distinct_slots_cannot_form_valid_praos_equivocation_proof() {
+        let producer = public_of(1);
+        let first_slot = 92_113_004u64;
+        let second_slot = 92_113_005u64;
+        let vrf_output = 1_000_000u64;
+        let first_message = praos_vote_message(
+            CHAIN_ID,
+            NETWORK,
+            &producer,
+            first_slot,
+            HEIGHT,
+            &STATE_ROOT,
+            vrf_output,
+        );
+        let second_message = praos_vote_message(
+            CHAIN_ID,
+            NETWORK,
+            &producer,
+            second_slot,
+            HEIGHT + 1,
+            &[0x52; 32],
+            vrf_output + 1,
+        );
+        let mut forged = PraosEquivocationProof {
+            producer,
+            slot: first_slot,
+            first_signature: PraosSlotProof::signature_field(keypair(1).sign(&first_message)),
+            second_signature: PraosSlotProof::signature_field(keypair(1).sign(&second_message)),
+            first_message,
+            second_message,
+            first_height: HEIGHT,
+            second_height: HEIGHT + 1,
+            proof_digest: [0u8; 32],
+        };
+        forged.proof_digest = forged.recomputed_digest();
+        assert!(
+            forged.check().is_err(),
+            "two honest blocks signed in distinct slots must not verify as equivocation"
+        );
+    }
+
+    #[test]
+    fn cross_network_honest_blocks_or_non_praos_messages_cannot_form_equivocation_proof() {
+        let producer = public_of(1);
+        let slot = 92_113_004u64;
+        let vrf_output = 1_000_000u64;
+
+        // Cross-chain_id / cross-network pair in the same slot must fail.
+        let first_message = praos_vote_message(
+            CHAIN_ID,
+            NETWORK,
+            &producer,
+            slot,
+            HEIGHT,
+            &STATE_ROOT,
+            vrf_output,
+        );
+        let cross_net_message = praos_vote_message(
+            CHAIN_ID,
+            "cardano-preprod",
+            &producer,
+            slot,
+            HEIGHT + 1,
+            &[0x52; 32],
+            vrf_output,
+        );
+        let mut cross_net_proof = PraosEquivocationProof {
+            producer,
+            slot,
+            first_signature: PraosSlotProof::signature_field(keypair(1).sign(&first_message)),
+            second_signature: PraosSlotProof::signature_field(keypair(1).sign(&cross_net_message)),
+            first_message: first_message.clone(),
+            second_message: cross_net_message,
+            first_height: HEIGHT,
+            second_height: HEIGHT + 1,
+            proof_digest: [0u8; 32],
+        };
+        cross_net_proof.proof_digest = cross_net_proof.recomputed_digest();
+        assert!(cross_net_proof.check().is_err());
+
+        // Non-Praos Mithril certificate message cannot pose as a Praos slot vote.
+        let cert_msg =
+            mithril_certificate_message(CHAIN_ID, NETWORK, EPOCH, HEIGHT + 1, &[0x52; 32]);
+        let mut mixed_tag_proof = PraosEquivocationProof {
+            producer,
+            slot,
+            first_signature: PraosSlotProof::signature_field(keypair(1).sign(&first_message)),
+            second_signature: PraosSlotProof::signature_field(keypair(1).sign(&cert_msg)),
+            first_message,
+            second_message: cert_msg,
+            first_height: HEIGHT,
+            second_height: HEIGHT + 1,
+            proof_digest: [0u8; 32],
+        };
+        mixed_tag_proof.proof_digest = mixed_tag_proof.recomputed_digest();
+        assert!(mixed_tag_proof.check().is_err());
+    }
+
+    #[test]
+    fn cross_network_signed_mithril_evidence_with_rewritten_chain_id_is_refused() {
+        let base = decoded(&golden_evidence());
+        let forged = with_payload(&base, |copy| {
+            copy.chain_id = 9_999_999;
+        });
+        let target_adapter = OuroborosMithrilAdapter::new(NETWORK, 9_999_999)
+            .with_epoch_stake(stake_distribution(EPOCH));
+        let err = target_adapter
+            .verify(&forged, &policy())
+            .expect_err("rewriting unsigned outer chain_id without re-signing must fail");
+        assert!(
+            matches!(err, AdapterError::Crypto { .. }),
+            "expected cryptographic refusal for cross-chain replay, got {err:?}"
+        );
+
+        // Also rewriting only envelope.network onto a sibling network adapter
+        // with identical chain_id and epoch stake must fail cryptographically.
+        let mut sibling_envelope = golden_evidence();
+        sibling_envelope.network = "cardano-preprod".to_string();
+        let sibling_adapter = OuroborosMithrilAdapter::new("cardano-preprod", CHAIN_ID)
+            .with_epoch_stake(stake_distribution(EPOCH));
+        let net_err = sibling_adapter
+            .verify(&sibling_envelope, &policy())
+            .expect_err("rewriting envelope network must fail cryptographic check");
+        assert!(
+            matches!(net_err, AdapterError::Crypto { .. }),
+            "expected cryptographic refusal for cross-network replay, got {net_err:?}"
         );
     }
 }

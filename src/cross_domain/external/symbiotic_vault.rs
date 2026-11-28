@@ -461,6 +461,7 @@ fn verify_pq_quorum(
 pub struct SymbioticVaultAdapter {
     network: String,
     pinned_committee_roots: Option<(Hash32, Hash32)>,
+    golden: Option<RawConsensusEvidence>,
 }
 
 impl SymbioticVaultAdapter {
@@ -470,6 +471,7 @@ impl SymbioticVaultAdapter {
         Self {
             network: network.into(),
             pinned_committee_roots: None,
+            golden: None,
         }
     }
 
@@ -486,6 +488,14 @@ impl SymbioticVaultAdapter {
         let c_root = key_set_commitment(b"classical-keys", classical_keys);
         let pq_root = key_set_commitment(b"pq-keys", pq_keys);
         self.pinned_committee_roots = Some((c_root, pq_root));
+        self
+    }
+
+    /// Attach a known-good golden evidence envelope so [`super::selftest::admit`]
+    /// verifies both admission acceptance and fault-probe refusals.
+    #[must_use]
+    pub fn with_golden(mut self, golden: RawConsensusEvidence) -> Self {
+        self.golden = Some(golden);
         self
     }
 
@@ -539,6 +549,13 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, AdapterError> {
+        let descriptor = self.descriptor();
+        if evidence.adapter != descriptor.id {
+            return Err(AdapterError::WrongAdapter {
+                expected: descriptor.name,
+                found: hex::encode(evidence.adapter.as_bytes()),
+            });
+        }
         if evidence.evidence_version != EVIDENCE_VERSION {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -605,7 +622,6 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
             return Err(AdapterError::UnslashableBacking);
         }
 
-        let digest = ev.digest();
         let backing = SecurityBacking::SignatureSet {
             scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
             signers: ev.pq_signatures.len() as u64,
@@ -623,7 +639,7 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
             state_root,
             ev.epoch,
             backing,
-            digest,
+            evidence.digest(),
         ))
     }
 
@@ -674,6 +690,10 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
                 expect: ExpectedRefusal::Any,
             },
         ]
+    }
+
+    fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
+        self.golden.clone()
     }
 }
 
@@ -830,6 +850,11 @@ mod tests {
         assert_eq!(att.state_root, [0xAB; 32]);
         assert_eq!(att.height, 100);
         assert_eq!(att.finalized_at, 100);
+        assert_eq!(
+            att.evidence_digest,
+            raw.digest(),
+            "attestation evidence_digest must match RawConsensusEvidence::digest() for ExternalDomainRegistry"
+        );
         assert!(facts
             .observed()
             .iter()
@@ -991,5 +1016,65 @@ mod tests {
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
         );
+    }
+
+    #[test]
+    fn external_domain_registry_admits_and_accepts_symbiotic_vault_evidence() {
+        use crate::cross_domain::external::prover::{ChallengeReward, DomainEconomics, ProverFee};
+        use crate::cross_domain::external::registry::ExternalDomainRegistry;
+        use crate::cross_domain::external::selftest::admit;
+        use crate::cross_domain::VersionPolicy;
+
+        let (ev, committee) = sample_evidence_with_committee("mainnet");
+        let submitter = crate::core::address::Address([0x4B; 32]);
+        let raw = RawConsensusEvidence {
+            adapter: AdapterId::from_name(ADAPTER_NAME),
+            evidence_version: EVIDENCE_VERSION,
+            network: "mainnet".to_string(),
+            payload: encode_symbiotic_evidence(&ev),
+            declared_height: ev.epoch,
+            declared_root: ev.collateral_root,
+            submitter,
+        };
+        let adapter = SymbioticVaultAdapter::new("mainnet")
+            .with_pinned_committee_keys(&committee.classical_pubkeys(), &committee.pq_pubkeys())
+            .with_golden(raw.clone());
+
+        let policy = default_policy();
+        let admission = admit(&adapter, &policy);
+        assert!(
+            admission.admitted,
+            "symbiotic admission must pass: {admission:?}"
+        );
+
+        let econ = DomainEconomics {
+            routing_ceiling_atoms: 1_000,
+            fee: ProverFee {
+                base_atoms: 1,
+                value_bps: 10,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 1_000,
+                floor_atoms: 5,
+            },
+            unbonding_heights: 100,
+        };
+        let mut registry = ExternalDomainRegistry::new();
+        registry
+            .register(
+                "mainnet",
+                adapter.descriptor(),
+                econ,
+                VersionPolicy::single(adapter.descriptor().id, EVIDENCE_VERSION, 100),
+                &admission,
+                econ.required_bond_atoms(),
+                submitter,
+            )
+            .expect("symbiotic domain registers");
+
+        let accepted = registry
+            .submit(&adapter, &raw, &policy)
+            .expect("ExternalDomainRegistry::submit must accept valid Symbiotic vault evidence");
+        assert_eq!(accepted.evidence_digest, raw.digest());
     }
 }

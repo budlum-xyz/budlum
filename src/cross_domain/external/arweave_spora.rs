@@ -385,6 +385,7 @@ fn verify_operator_signatures(
 pub struct ArweaveSpOraAdapter {
     network: String,
     pinned_operator: Option<([u8; ED25519_PK_LEN], Vec<u8>)>,
+    golden: Option<RawConsensusEvidence>,
 }
 
 impl ArweaveSpOraAdapter {
@@ -394,6 +395,7 @@ impl ArweaveSpOraAdapter {
         Self {
             network: network.into(),
             pinned_operator: None,
+            golden: None,
         }
     }
 
@@ -408,6 +410,14 @@ impl ArweaveSpOraAdapter {
         pq_pk: Vec<u8>,
     ) -> Self {
         self.pinned_operator = Some((ed25519_pk, pq_pk));
+        self
+    }
+
+    /// Attach a known-good golden evidence envelope so [`super::selftest::admit`]
+    /// verifies both admission acceptance and fault-probe refusals.
+    #[must_use]
+    pub fn with_golden(mut self, golden: RawConsensusEvidence) -> Self {
+        self.golden = Some(golden);
         self
     }
 
@@ -453,6 +463,13 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, AdapterError> {
+        let descriptor = self.descriptor();
+        if evidence.adapter != descriptor.id {
+            return Err(AdapterError::WrongAdapter {
+                expected: descriptor.name,
+                found: hex::encode(evidence.adapter.as_bytes()),
+            });
+        }
         if evidence.evidence_version != EVIDENCE_VERSION {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -519,7 +536,6 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
             return Err(AdapterError::UnslashableBacking);
         }
 
-        let digest = ev.digest();
         let backing = SecurityBacking::SignatureSet {
             scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
             signers: 1,
@@ -538,7 +554,7 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
             finalized_at: ev.block_height,
             time_unit: TimeUnit::Height,
             security: backing,
-            evidence_digest: digest,
+            evidence_digest: evidence.digest(),
             adapter_version: ADAPTER_VERSION,
             evidence_version: EVIDENCE_VERSION,
             attested_block_hash: Some(state_root),
@@ -594,6 +610,10 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
                 expect: ExpectedRefusal::Any,
             },
         ]
+    }
+
+    fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
+        self.golden.clone()
     }
 }
 
@@ -703,6 +723,11 @@ mod tests {
             .expect("full verify");
         assert_eq!(att.state_root, ev.weave_root);
         assert_eq!(att.height, 1_200_000);
+        assert_eq!(
+            att.evidence_digest,
+            raw.digest(),
+            "attestation evidence_digest must match RawConsensusEvidence::digest() for ExternalDomainRegistry"
+        );
         assert!(facts
             .observed()
             .iter()
@@ -839,5 +864,65 @@ mod tests {
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
         );
+    }
+
+    #[test]
+    fn external_domain_registry_admits_and_accepts_arweave_spora_evidence() {
+        use crate::cross_domain::external::prover::{ChallengeReward, DomainEconomics, ProverFee};
+        use crate::cross_domain::external::registry::ExternalDomainRegistry;
+        use crate::cross_domain::external::selftest::admit;
+        use crate::cross_domain::VersionPolicy;
+
+        let (ev, op) = sample_evidence_with_operator("arweave-mainnet");
+        let submitter = crate::core::address::Address([0x2A; 32]);
+        let raw = RawConsensusEvidence {
+            adapter: AdapterId::from_name(ADAPTER_NAME),
+            evidence_version: EVIDENCE_VERSION,
+            network: "arweave-mainnet".to_string(),
+            payload: encode_arweave_spora_evidence(&ev),
+            declared_height: ev.block_height,
+            declared_root: ev.weave_root,
+            submitter,
+        };
+        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet")
+            .with_pinned_operator(op.ed.public_key_bytes(), op.pq.public_key_bytes().to_vec())
+            .with_golden(raw.clone());
+
+        let policy = VerificationPolicy::strict(0);
+        let admission = admit(&adapter, &policy);
+        assert!(
+            admission.admitted,
+            "arweave admission must pass: {admission:?}"
+        );
+
+        let econ = DomainEconomics {
+            routing_ceiling_atoms: 1_000,
+            fee: ProverFee {
+                base_atoms: 1,
+                value_bps: 10,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 1_000,
+                floor_atoms: 5,
+            },
+            unbonding_heights: 100,
+        };
+        let mut registry = ExternalDomainRegistry::new();
+        registry
+            .register(
+                "arweave-mainnet",
+                adapter.descriptor(),
+                econ,
+                VersionPolicy::single(adapter.descriptor().id, EVIDENCE_VERSION, 100),
+                &admission,
+                econ.required_bond_atoms(),
+                submitter,
+            )
+            .expect("arweave domain registers");
+
+        let accepted = registry
+            .submit(&adapter, &raw, &policy)
+            .expect("ExternalDomainRegistry::submit must accept valid Arweave SPoRA evidence");
+        assert_eq!(accepted.evidence_digest, raw.digest());
     }
 }
