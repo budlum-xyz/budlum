@@ -235,6 +235,10 @@ pub fn merkle_rebuild_root(
     Some(cur)
 }
 
+/// The deepest sibling list a committed tree can produce. A longer list is
+/// malformed input, never a cheaper route to an arbitrary root.
+const MAX_MERKLE_PROOF_DEPTH: usize = 64;
+
 /// The root a verifier rebuilds from a proof alone: `leaf`, its index, and
 /// the sibling list (with [`odd_promotion_sentinel`] marking a promoted
 /// step), walked with the same ordering rule as
@@ -242,6 +246,14 @@ pub fn merkle_rebuild_root(
 ///
 /// This is the verifying half of [`merkle_proof`]: a verifier that holds no
 /// leaves at all reconstructs the root from exactly what the prover sent.
+///
+/// Promotion carries layer-shape information that a bare digest does not:
+/// the promoted node was the tail of its layer, so at the next layer it is
+/// the last node. It can be promoted again or paired with a left sibling,
+/// but it can never have a right sibling, and the layer it lands on cannot
+/// already be the root. Proofs that break either constraint, or that run
+/// past [`MAX_MERKLE_PROOF_DEPTH`], are refused rather than folded into a
+/// root that some honest tree also commits to.
 #[must_use]
 pub fn merkle_root_from_proof(
     leaf: &[u8; 32],
@@ -250,20 +262,33 @@ pub fn merkle_root_from_proof(
     combine: fn(&[u8; 32], &[u8; 32]) -> [u8; 32],
     promote: fn(&[u8; 32]) -> [u8; 32],
 ) -> Option<[u8; 32]> {
+    if siblings.len() > MAX_MERKLE_PROOF_DEPTH {
+        return None;
+    }
     let mut cur = *leaf;
     let mut idx = index;
-    for sibling in siblings {
+    let mut promoted = false;
+    for (step, sibling) in siblings.iter().enumerate() {
         cur = if sibling == &odd_promotion_sentinel() {
             // Only an even-positioned tail (`idx % 2 == 0`) can ever lack a
             // partner; an odd index always has a left sibling.
-            if !idx.is_multiple_of(2) {
+            if !idx.is_multiple_of(2) || step + 1 == siblings.len() {
                 return None;
             }
+            promoted = true;
             promote(&cur)
-        } else if idx.is_multiple_of(2) {
-            combine(&cur, sibling)
         } else {
-            combine(sibling, &cur)
+            // After a promotion the node is the last of its layer: an even
+            // index here would claim a right sibling that cannot exist.
+            if promoted && idx.is_multiple_of(2) {
+                return None;
+            }
+            promoted = false;
+            if idx.is_multiple_of(2) {
+                combine(&cur, sibling)
+            } else {
+                combine(sibling, &cur)
+            }
         };
         idx /= 2;
     }
@@ -486,6 +511,56 @@ mod tests {
         );
         assert_eq!(
             merkle_root_from_proof(&leaves[2], 3, &tail_proof, combine_sha3, promote_sha3),
+            None
+        );
+    }
+
+    /// A promoted node is the tail of its layer. Its parent layer therefore
+    /// has exactly one more node than its half-index, so the promoted node is
+    /// that layer's last node: it can be promoted again or paired on the
+    /// left, never paired on the right. A terminal promotion is impossible
+    /// too - an honest proof stops on the root layer, and a promotion is only
+    /// emitted while a parent layer still exists.
+    #[test]
+    fn merkle_root_from_proof_refuses_terminal_and_non_monotonic_promotions() {
+        let leaf = [7u8; 32];
+        let sentinel = odd_promotion_sentinel();
+        let sibling = [9u8; 32];
+
+        // Terminal promotion: no honest tree emits a proof that ends here.
+        assert_eq!(
+            merkle_root_from_proof(&leaf, 0, &[sentinel], combine_sha3, promote_sha3),
+            None
+        );
+
+        // Index 4 is the tail of a five-leaf layer; after promoting it the
+        // next index is 2, an even tail again. A real right sibling at that
+        // position cannot come from any honest layer shape.
+        assert_eq!(
+            merkle_root_from_proof(&leaf, 4, &[sentinel, sibling], combine_sha3, promote_sha3),
+            None
+        );
+
+        // The honest shape over five leaves promotes twice, then pairs on
+        // the left; it must remain accepted by the stricter verifier.
+        let leaves = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32]];
+        let proof = merkle_proof(&leaves, 4, combine_sha3, promote_sha3).unwrap();
+        assert_eq!(proof.len(), 3);
+        assert_eq!(proof[0], sentinel);
+        assert_eq!(proof[1], sentinel);
+        assert_eq!(
+            merkle_root_from_proof(&leaves[4], 4, &proof, combine_sha3, promote_sha3),
+            Some(merkle_root(&leaves, combine_sha3, promote_sha3))
+        );
+    }
+
+    /// A proof longer than any tree this protocol commits to is a malformed
+    /// input, not a cheap path to an arbitrary root.
+    #[test]
+    fn merkle_root_from_proof_refuses_a_path_beyond_the_depth_cap() {
+        let too_deep = vec![[3u8; 32]; 65];
+        assert_eq!(
+            merkle_root_from_proof(&[1u8; 32], 0, &too_deep, combine_sha3, promote_sha3),
             None
         );
     }

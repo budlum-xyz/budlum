@@ -998,12 +998,17 @@ impl QcBlobAssembler {
     }
 
     /// Stores chunk `index`. A repeated index is refused: a peer cannot
-    /// replace what it already sent.
+    /// replace what it already sent. An empty chunk is refused too: an
+    /// announced slot that carries no bytes is not a received chunk.
     ///
     /// # Errors
     ///
-    /// Out-of-range index, repeated index, or an oversize chunk.
+    /// Out-of-range index, repeated index, empty or oversize chunk, or a
+    /// byte counter that would overflow.
     pub fn push(&mut self, index: usize, chunk: Vec<u8>) -> Result<(), String> {
+        if chunk.is_empty() {
+            return Err("QcBlob chunk is empty".into());
+        }
         if chunk.len() > QC_CHUNK_BYTES {
             return Err("QcBlob chunk exceeds the chunk size".into());
         }
@@ -1014,7 +1019,10 @@ impl QcBlobAssembler {
         if slot.is_some() {
             return Err(format!("QcBlob chunk {index} arrived twice"));
         }
-        self.received_bytes += chunk.len();
+        self.received_bytes = self
+            .received_bytes
+            .checked_add(chunk.len())
+            .ok_or_else(|| "QcBlob byte counter overflow".to_string())?;
         *slot = Some(chunk);
         Ok(())
     }
@@ -1471,6 +1479,23 @@ mod tests {
         assert!(assembler.push(1, vec![0; QC_CHUNK_BYTES + 1]).is_err());
         assert!(!assembler.is_complete());
         assert!(assembler.finish().is_err());
+    }
+
+    /// An announced chunk must carry bytes. An empty final chunk would let a
+    /// sender pad the announced count without adding data, and the counter
+    /// that sizes `finish` must never wrap on a hostile sequence.
+    #[test]
+    fn qc_blob_assembler_refuses_empty_chunk() {
+        let blob = synthetic_blob(200);
+        let chunks = blob.to_chunks().unwrap();
+        assert!(chunks.len() > 1, "the fixture must span chunks");
+        let mut assembler = QcBlobAssembler::new(200, chunks.len()).unwrap();
+        assert!(assembler.push(0, vec![]).is_err());
+        assert!(assembler.push(0, chunks[0].clone()).is_ok());
+        for index in 1..chunks.len() {
+            assembler.push(index, chunks[index].clone()).unwrap();
+        }
+        assert!(assembler.finish().is_ok());
     }
 
     #[test]
