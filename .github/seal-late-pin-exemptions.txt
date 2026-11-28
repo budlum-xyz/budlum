@@ -14,3 +14,4 @@
 edba8a3c3e4a7861f319ab74e9c6bae4f3aa40229be54c990e720924c273c4b0 .github/gate-source-provenance-baseline.txt xtask/gates/ provenance re-measured one commit after the budzero re-pin moved the pins file
 495c19e6bcd553a57416111c3cfcda22c39db7191f7d3a9ea3d136550f4f7c58 xtask/gates/pins/budzero-tree.pins budzero/ budzero lock carried through the url 2.5.9 bump one commit after the lock changed
 e0f622ba0899c4f0afe577feba86c8f35c5a8cc4aa74fba2213b141bedd3519e xtask/gates/pins/budzero-tree.pins budzero/ budzero tree pin regenerated one commit after the manifest and lock moved in a shared history
+70782789c9a3392066f490c9dd010cd27f6a9f56602189f1c638948561e6c81f xtask/gates/pins/budzero-tree.pins budzero/ budzero pins regenerated one commit after the equality derives moved the proof sources
