@@ -705,6 +705,39 @@ impl ConsensusEngine for PoAEngine {
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
+        let Some(first) = chain.first() else {
+            return 0;
+        };
+        if first.hash.is_empty() || first.hash != first.calculate_hash() {
+            return 0;
+        }
+        let mut prev = first;
+        for blk in chain.iter().skip(1) {
+            if blk.hash.is_empty()
+                || blk.hash != blk.calculate_hash()
+                || Some(blk.index) != prev.index.checked_add(1)
+                || blk.previous_hash != prev.hash
+                || blk.timestamp < prev.timestamp.saturating_add(MIN_BLOCK_INTERVAL_MS)
+                || !blk.vrf_output.is_empty()
+                || !blk.vrf_proof.is_empty()
+                || blk.nonce > MAX_LEADER_ROUNDS
+            {
+                return 0;
+            }
+            let Some(ref producer) = blk.producer else {
+                return 0;
+            };
+            if !self.authorities.is_empty() && !self.authorities.contains(producer) {
+                return 0;
+            }
+            if !blk.verify_signature_with_pubkey_in(
+                &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+                producer,
+            ) {
+                return 0;
+            }
+            prev = blk;
+        }
         chain.len() as u128
     }
 
