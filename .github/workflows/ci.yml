@@ -39,10 +39,16 @@ concurrency:
   # read 86 queued, 6 in progress, 2 skipped and 1 success, so the suite never
   # produced a table to read. A queued run costs wall clock; a cancelled one
   # costs the measurement, and these two branches exist to produce one.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.run_attempt == '1' &&
-    github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' &&
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' &&
+    github.run_attempt == '1' &&
+    github.base_ref != 'testnet' &&
+    github.base_ref != 'ortak-teslim' &&
     github.base_ref != 'testnet-50' &&
-    github.base_ref != 'consensus-of-consensuses' }}
+    github.base_ref != 'consensus-of-consensuses' &&
+    github.ref != 'refs/heads/testnet' &&
+    github.ref != 'refs/heads/testnet-50' &&
+    github.ref != 'refs/heads/slice' &&
+    github.ref != 'refs/heads/consensus-of-consensuses' }}
 
 permissions:
   contents: read

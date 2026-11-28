@@ -35,9 +35,14 @@ concurrency:
   # `consensus-of-consensuses`. A queued run costs wall clock; a cancelled one
   # costs the measurement.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' &&
-    github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' &&
+    github.base_ref != 'testnet' &&
+    github.base_ref != 'ortak-teslim' &&
     github.base_ref != 'testnet-50' &&
-    github.base_ref != 'consensus-of-consensuses' }}
+    github.base_ref != 'consensus-of-consensuses' &&
+    github.ref != 'refs/heads/testnet' &&
+    github.ref != 'refs/heads/testnet-50' &&
+    github.ref != 'refs/heads/slice' &&
+    github.ref != 'refs/heads/consensus-of-consensuses' }}
 
 permissions:
   contents: read
