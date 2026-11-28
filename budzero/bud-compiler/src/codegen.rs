@@ -904,10 +904,28 @@ impl Codegen {
             }
             Expr::Call(name, args) => {
                 if name == "poseidon" {
+                    let (Some(arg0), Some(arg1)) = (args.first(), args.get(1)) else {
+                        if self.error.is_none() {
+                            self.error = Some(CompileError::CodegenError(format!(
+                                "poseidon expects 2 arguments, got {}",
+                                args.len()
+                            )));
+                        }
+                        return 0;
+                    };
+                    if args.len() != 2 {
+                        if self.error.is_none() {
+                            self.error = Some(CompileError::CodegenError(format!(
+                                "poseidon expects 2 arguments, got {}",
+                                args.len()
+                            )));
+                        }
+                        return 0;
+                    }
                     let saved1 = self.next_reg;
-                    let r1 = self.generate_expr(&args[0], scope, storage);
+                    let r1 = self.generate_expr(arg0, scope, storage);
                     let saved2 = self.next_reg;
-                    let r2 = self.generate_expr(&args[1], scope, storage);
+                    let r2 = self.generate_expr(arg1, scope, storage);
 
                     let res = if r1 >= saved1 {
                         r1
@@ -920,17 +938,26 @@ impl Codegen {
                     self.emit(Opcode::Poseidon, res, r1, r2, 0);
                     self.next_reg = std::cmp::max(res + 1, saved1);
                     res
-                } else if name == "msg::sender" {
+                } else if matches!(
+                    name.as_str(),
+                    "msg::sender" | "msg::nonce" | "block::number"
+                ) {
+                    if !args.is_empty() {
+                        if self.error.is_none() {
+                            self.error = Some(CompileError::CodegenError(format!(
+                                "{name} expects 0 arguments, got {}",
+                                args.len()
+                            )));
+                        }
+                        return 0;
+                    }
+                    let imm = match name.as_str() {
+                        "msg::sender" => 1,
+                        "block::number" => 2,
+                        _ => 3,
+                    };
                     let res = self.alloc_reg();
-                    self.emit(Opcode::Syscall, res, 0, 0, 1);
-                    res
-                } else if name == "msg::nonce" {
-                    let res = self.alloc_reg();
-                    self.emit(Opcode::Syscall, res, 0, 0, 3);
-                    res
-                } else if name == "block::number" {
-                    let res = self.alloc_reg();
-                    self.emit(Opcode::Syscall, res, 0, 0, 2);
+                    self.emit(Opcode::Syscall, res, 0, 0, imm);
                     res
                 } else if name == "verify_merkle_proof" {
                     // The VM's VerifyMerkle opcode takes only the address of the
@@ -942,7 +969,16 @@ impl Codegen {
                     // Reject dynamic expressions and out-of-range literals
                     // Explicitly instead of silently truncating a register
                     // Number (the old `r_path as i32` bug).
-                    let path_addr = match &args[0] {
+                    let (Some(arg0), true) = (args.first(), args.len() == 1) else {
+                        if self.error.is_none() {
+                            self.error = Some(CompileError::CodegenError(format!(
+                                "verify_merkle_proof expects 1 argument, got {}",
+                                args.len()
+                            )));
+                        }
+                        return 0;
+                    };
+                    let path_addr = match arg0 {
                         Expr::Int(v) => *v,
                         _ => {
                             if self.error.is_none() {
