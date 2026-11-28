@@ -6005,7 +6005,12 @@ mod tests {
                 continue;
             };
             let (response, votes) = match request {
-                GardenRequest::GetObject { content_id, .. } => {
+                // This peer holds bytes it never coded, so it answers a
+                // request for symbols with the bytes. That is the fallback
+                // a reader has to accept, and exercising it here is the
+                // only place it is covered.
+                GardenRequest::GetObject { content_id, .. }
+                | GardenRequest::GetCoded { content_id, .. } => {
                     let found = (content_id == id_of(&pulled)).then(|| pulled.clone());
                     (GardenResponse::Object(found), Vec::new())
                 }
