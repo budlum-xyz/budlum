@@ -204,7 +204,7 @@ pub enum PredicateError {
 }
 
 /// STARK-backed bundle proving a `PredicateStatement`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PredicateProof {
     pub statement: PredicateStatement,
     pub statement_digest: u64,

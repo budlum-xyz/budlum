@@ -985,11 +985,16 @@ impl LiquidationRequest {
     pub fn has_evidence(&self) -> bool {
         !self.certified_roots.is_empty() && !self.observations.is_empty()
     }
+}
+
+#[cfg(test)]
+mod certified_roots_tests {
+    use super::*;
 
     #[test]
     fn liquidation_request_certified_roots_serialize_as_string_keys() {
         let mut roots = std::collections::BTreeMap::new();
-        roots.insert((7u32, 12u64), Hash32([0xabu8; 32]));
+        roots.insert((7u32, 12u64), [0xabu8; 32]);
         let request = LiquidationRequest {
             position: LiquidationPosition {
                 position_id: 1,
@@ -1004,7 +1009,7 @@ impl LiquidationRequest {
                 debt_domain_id: 7,
                 repay_debt_x: 500,
                 bonus_bps: 100,
-                delivery_proof_root: Hash32([0u8; 32]),
+                delivery_proof_root: [0u8; 32],
             },
         };
         let json = serde_json::to_string(&request).unwrap();

@@ -37,7 +37,7 @@ pub struct HidingBinding {
 }
 
 /// Self-contained hiding STARK envelope.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HidingProofPackage {
     pub class: ProofClass,
     pub envelope: ProofEnvelope,
