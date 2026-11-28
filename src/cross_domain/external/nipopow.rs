@@ -419,6 +419,17 @@ impl NipopowAdapter {
                 accepted: EVIDENCE_VERSION.to_string(),
             });
         }
+        // Fail-closed: an adapter bound to an empty (or whitespace-only)
+        // network label is a configuration error. Without this guard the
+        // `evidence.network != self.network` comparison below would treat
+        // `"" == ""` as a match and accept any payload that also carries an
+        // empty network, silently turning the adapter into an
+        // accept-everything end. Reject every payload instead.
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "NipopowAdapter network identifier must not be empty".into(),
+            });
+        }
         if evidence.network != self.network {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -882,6 +893,31 @@ pub(crate) mod tests {
             submitter: crate::core::address::Address([0x07; 32]),
         };
         (pinned, bundle, raw)
+    }
+
+    #[test]
+    fn empty_network_adapter_refuses_evidence_fail_closed() {
+        // An adapter constructed with an empty network label is a
+        // configuration error. It must refuse every evidence payload
+        // fail-closed instead of accepting payloads that also carry an
+        // empty network (where `"" == ""` would otherwise match).
+        let adapter = NipopowAdapter::new("", None);
+        let raw = RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            evidence_version: EVIDENCE_VERSION,
+            network: String::new(),
+            payload: Vec::new(),
+            declared_height: 0,
+            declared_root: [0u8; 32],
+            submitter: crate::core::address::Address([0u8; 32]),
+        };
+        let err = adapter
+            .verify(&raw, &VerificationPolicy::strict(0))
+            .unwrap_err();
+        assert!(
+            matches!(&err, AdapterError::ConsensusRule { rule } if rule.contains("empty")),
+            "empty-network adapter must refuse fail-closed, got {err:?}"
+        );
     }
 
     #[test]
