@@ -51,6 +51,12 @@ struct Budget {
 /// The measured inventory. Counted, not typed.
 const BUDGETS: &[Budget] = &[
     Budget {
+        file: "src/cross_domain/economic_guard.rs",
+        lint: "clippy::too_many_lines",
+        count: 2,
+        reason: "`submit_contradiction` is one match arm per adapter family, and the verifier, the evidence digest and the offender replay key of a family have to be read together - a digest that does not commit what the verifier proved is the defect this function exists to prevent. The second is `pospace_double_signage_fault_slashes_the_bond_and_refuses_replay`, one scenario read top to bottom: the same signed pair is accepted once, refused on replay, refused under a pin the governor did not install, and refused when the pair is not actually a conflict, so splitting it would let the accept path be verified without the refusal that makes it meaningful",
+    },
+    Budget {
         file: "src/settlement/universal_finality.rs",
         lint: "clippy::too_many_lines",
         count: 1,
@@ -61,12 +67,6 @@ const BUDGETS: &[Budget] = &[
         lint: "clippy::too_many_lines",
         count: 1,
         reason: "the five admission-door tests share one function on purpose: each door's assertion block only means something next to the doorway it has to refuse relative to its neighbours, and five separate functions would make that comparison the file is about unreadable without cross-referencing; the test body itself has no branches beyond the assertions",
-    },
-    Budget {
-        file: "src/cross_domain/economic_guard.rs",
-        lint: "clippy::too_many_lines",
-        count: 1,
-        reason: "`submit_contradiction` is one match arm per adapter family, and the verifier, the evidence digest and the offender replay key of a family have to be read together - a digest that does not commit what the verifier proved is the defect this function exists to prevent, so an extracted arm would separate a statement from its proof",
     },
     Budget {
         file: "src/chain/blockchain.rs",

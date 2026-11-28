@@ -36,9 +36,16 @@
 //!    farmer or timelord signing two distinct block hashes at the exact same
 //!    `(network, sub_slot, signage_index)` for permissionless slashing.
 //!
-//! WIRING: unwired - implements [`ExternalFinalityAdapter`] for
-//! [`super::ExternalDomainRegistry`], verified by [`super::selftest::admit`];
-//! `AdapterSpec` variant joins `intake.rs` in the follow-up intake merge.
+//! WIRING: wired - `AdapterSpec::PoSpaceVdf { network, anchor }` (wire tag
+//! 23) builds this adapter from an intake registration, and
+//! `IntakeState::pinned_pospace_anchors` (written only by
+//! `GovernanceAction::PinExternalAnchor`) supplies the parameters. A
+//! Proof-of-Space segment is only a statement about elapsed space-time
+//! relative to a pinned genesis challenge, plot `k` and VDF window, so the
+//! intake refuses a registration that does not echo them exactly.
+//!
+//! Implements [`ExternalFinalityAdapter`] for
+//! [`super::ExternalDomainRegistry`], verified by [`super::selftest::admit`].
 
 use bincode::Options;
 use serde::{Deserialize, Serialize};
@@ -247,7 +254,11 @@ pub struct SignedPoSpaceSignage {
 }
 
 /// Verified double-signage equivocation record suitable for slasher execution.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serialized because it travels inside `ContradictionEvidence`, the value a
+/// challenger submits and a block carries: a proof a node cannot encode is a
+/// proof it cannot put into a block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoSpaceEquivocationProof {
     /// `SHA-256` identity digest of the equivocating ML-DSA-65 public key.
     pub offender_key_digest: Hash32,
@@ -1106,7 +1117,7 @@ pub(crate) mod tests {
     /// The intake registers a domain end to end and needs the same sample
     /// `selftest::admit` will verify against; exposing it here keeps one
     /// fixture rather than two that could drift.
-    pub(crate) fn pospace_fixture(
+    pub fn pospace_fixture(
         network: &str,
         require_pq: bool,
     ) -> (PinnedPoSpaceAnchor, RawConsensusEvidence) {

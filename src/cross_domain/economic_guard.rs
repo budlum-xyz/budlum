@@ -58,6 +58,10 @@ use crate::cross_domain::external::near_doomslug::{
     near_pin_digest, verify_near_approval_slash, NearApprovalSlashProof, NearDoomslugAdapter,
     PinnedNearEpoch,
 };
+use crate::cross_domain::external::pospace_vdf::{
+    verify_double_signage_equivocation, PinnedPoSpaceAnchor, PoSpaceVdfAdapter,
+    SignedPoSpaceSignage,
+};
 use crate::cross_domain::external::prover::{ProverBond, Slashing, BPS_DEN};
 use crate::cross_domain::external::restaking_avs::{
     verify_restaking_slashing, PinnedRestakingAvsSet, RestakingAvsAdapter, RestakingSlashingProof,
@@ -309,6 +313,13 @@ pub enum GuardedExternalAdapter {
         /// Governance-pinned epoch validator table.
         pinned: Box<PinnedNearEpoch>,
     },
+    /// Double signage at one `(sub_slot, signage_index)` (Proof-of-Space).
+    PoSpaceVdf {
+        /// External network identifier.
+        network: String,
+        /// Governance-pinned Proof-of-Space and hash-VDF parameters.
+        pinned: Box<PinnedPoSpaceAnchor>,
+    },
 }
 
 impl GuardedExternalAdapter {
@@ -326,6 +337,7 @@ impl GuardedExternalAdapter {
             Self::MinaRecursive { .. } => 8,
             Self::HoneyBadgerBft { .. } => 9,
             Self::NearDoomslug { .. } => 10,
+            Self::PoSpaceVdf { .. } => 11,
         }
     }
 
@@ -342,7 +354,8 @@ impl GuardedExternalAdapter {
             | Self::StellarScp { network, .. }
             | Self::MinaRecursive { network, .. }
             | Self::HoneyBadgerBft { network, .. }
-            | Self::NearDoomslug { network, .. } => network,
+            | Self::NearDoomslug { network, .. }
+            | Self::PoSpaceVdf { network, .. } => network,
         }
     }
 
@@ -364,6 +377,20 @@ impl GuardedExternalAdapter {
             Self::MinaRecursive { pinned, .. } => pinned.canonical_pin_digest(),
             Self::HoneyBadgerBft { pinned, .. } => pinned.canonical_pin_digest(),
             Self::NearDoomslug { pinned, .. } => near_pin_digest(pinned),
+            // The adapter's own pin validator is what makes the pin legal, so
+            // the digest commits the pinned parameters through the same encoder
+            // the verifier reads rather than a second, hand-rolled one.
+            Self::PoSpaceVdf { pinned, .. } => hash_fields_bytes(&[
+                b"BDLM_ECON_GUARD_POSPACE_PIN_V1",
+                &pinned.genesis_challenge,
+                &[pinned.min_plot_k],
+                &pinned.min_iterations_per_block.to_le_bytes(),
+                &pinned.max_iterations_per_block.to_le_bytes(),
+                &pinned.required_depth.to_le_bytes(),
+                &pinned.min_cumulative_weight.to_le_bytes(),
+                &[u8::from(pinned.require_pq_attestation)],
+                pinned.pq_attestor_pubkey.as_deref().unwrap_or(&[]),
+            ]),
         };
         hash_fields_bytes(&[
             b"BDLM_ECON_GUARD_PIN_V1",
@@ -478,6 +505,21 @@ pub enum ContradictionEvidence {
         pinned: Box<PinnedNearEpoch>,
         /// Cryptographic approval equivocation proof.
         proof: Box<NearApprovalSlashProof>,
+    },
+    /// Double signage at one `(sub_slot, signage_index)` (Proof-of-Space).
+    ///
+    /// The evidence is the two signed signage points themselves, not a summary
+    /// of them: the arm runs the adapter's own verifier over the pair, so a
+    /// challenger cannot submit a proof object it assembled by hand.
+    PoSpaceVdfFault {
+        /// External network name.
+        network: String,
+        /// Governance-pinned Proof-of-Space and hash-VDF parameters.
+        pinned: Box<PinnedPoSpaceAnchor>,
+        /// First signed signage statement.
+        first: Box<SignedPoSpaceSignage>,
+        /// Conflicting signed statement at the same signage point.
+        second: Box<SignedPoSpaceSignage>,
     },
 }
 
@@ -1150,6 +1192,10 @@ impl BridgeEconomicGuard {
             }
             GuardedExternalAdapter::NearDoomslug { network, pinned } => {
                 NearDoomslugAdapter::new(network.clone(), Some((**pinned).clone()))
+                    .verify(evidence, verification_policy)
+            }
+            GuardedExternalAdapter::PoSpaceVdf { network, pinned } => {
+                PoSpaceVdfAdapter::new(network.clone(), Some((**pinned).clone()))
                     .verify(evidence, verification_policy)
             }
         }
@@ -1909,6 +1955,62 @@ impl BridgeEconomicGuard {
                 )?;
                 (digest, incremental, keys)
             }
+            ContradictionEvidence::PoSpaceVdfFault {
+                network,
+                pinned,
+                first,
+                second,
+            } => {
+                let supplied = GuardedExternalAdapter::PoSpaceVdf {
+                    network: network.clone(),
+                    pinned: pinned.clone(),
+                };
+                verify_domain_adapter_pin(
+                    domain_id,
+                    rec.policy.pinned_adapter.as_ref(),
+                    &supplied,
+                )?;
+                // Both signatures are checked here: the pair is only evidence
+                // once the adapter has confirmed that one key signed two
+                // different block hashes at the same valid signage point.
+                let proof = verify_double_signage_equivocation(network, first, second)
+                    .map_err(|e| EconomicGuardError::InvalidEvidence(e.to_string()))?;
+                // A farmer that signed both is slashable once, and the replay
+                // key is that signage point under the pinned genesis so the
+                // same conflict cannot be submitted twice.
+                let weight = pinned.min_cumulative_weight;
+                let offender = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_POSPACE_OFFENDER_V1",
+                    &proof.offender_key_digest,
+                    &pinned.genesis_challenge,
+                ]);
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_EVIDENCE_V1",
+                    &[11u8],
+                    &domain_id.to_le_bytes(),
+                    &offender,
+                    &proof.first_block_hash,
+                    &proof.second_block_hash,
+                    &proof.sub_slot.to_le_bytes(),
+                    &[proof.signage_index],
+                ]);
+                let locus = hash_fields_bytes(&[
+                    b"BDLM_ECON_GUARD_OFFENDER_V1",
+                    &[11u8],
+                    &pinned.genesis_challenge,
+                    &offender,
+                ]);
+                let (incremental, keys) = compute_incremental_slash(
+                    &self.slashed_offenders,
+                    domain_id,
+                    11,
+                    &locus,
+                    &[offender],
+                    digest,
+                    |_| Some((weight, true)),
+                )?;
+                (digest, incremental, keys)
+            }
         };
 
         let current_epoch = at_height / GUARD_REPLAY_EPOCH_BLOCKS;
@@ -2413,6 +2515,170 @@ mod tests {
                 evidence_digest: out.evidence_digest,
             }
         );
+    }
+
+    // One scenario read top to bottom: the same signed pair is accepted once,
+    // refused on replay, refused under a pin the governor did not install, and
+    // refused when the pair is not actually a conflict. Splitting it would let
+    // the accept path be verified without the refusal that makes it meaningful.
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn pospace_double_signage_fault_slashes_the_bond_and_refuses_replay() {
+        use crate::cross_domain::external::pospace_vdf::{
+            pospace_signage_sign_bytes, SignedPoSpaceSignage,
+        };
+        use crate::crypto::primitives::PqKeyPair;
+
+        let farmer = PqKeyPair::generate();
+        let net = "chia-pq-mainnet";
+        let block_a = [0x11; 32];
+        let block_b = [0x22; 32];
+        let signage = |hash: [u8; 32]| SignedPoSpaceSignage {
+            network: net.to_string(),
+            sub_slot: 42,
+            signage_index: 7,
+            infusion_block_hash: hash,
+            signer_pq_pubkey: farmer.public_key_bytes().to_vec(),
+            signature: farmer
+                .sign(
+                    crate::crypto::ctx::CROSS_DOMAIN_V1,
+                    &pospace_signage_sign_bytes(net, 42, 7, &hash),
+                )
+                .unwrap(),
+        };
+        let (first, second) = (signage(block_a), signage(block_b));
+
+        let pinned = PinnedPoSpaceAnchor {
+            genesis_challenge: [0x77; 32],
+            min_plot_k: 32,
+            min_iterations_per_block: 32,
+            max_iterations_per_block: 1_024,
+            required_depth: 3,
+            min_cumulative_weight: 5_000,
+            require_pq_attestation: true,
+            pq_attestor_pubkey: Some(farmer.public_key_bytes().to_vec()),
+        };
+        let mut guard = BridgeEconomicGuard::new();
+        let adapter = GuardedExternalAdapter::PoSpaceVdf {
+            network: net.into(),
+            pinned: Box::new(pinned.clone()),
+        };
+        guard
+            .configure_domain(
+                41,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(adapter),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(make_bond(Address::from([0x93; 32]), 20_000)),
+            )
+            .unwrap();
+
+        // Built once, then cloned where the refusals need their own copy: the
+        // pairs below are the same statements, which is what makes the refusal
+        // cases mean something.
+        let fault = ContradictionEvidence::PoSpaceVdfFault {
+            network: net.into(),
+            pinned: Box::new(pinned.clone()),
+            first: Box::new(first),
+            second: Box::new(second),
+        };
+
+        let out = guard
+            .submit_contradiction(41, &fault, Address::from([0xCB; 32]), 310)
+            .expect("an equivocation the adapter verifies is slashable");
+        assert_eq!(out.external_slashed_weight, pinned.min_cumulative_weight);
+        assert_eq!(out.slashed_bond_atoms, 20_000);
+        assert_eq!(
+            guard.record(41).unwrap().status,
+            DomainGuardStatus::FrozenByContradiction {
+                frozen_at_height: 310,
+                evidence_digest: out.evidence_digest,
+            }
+        );
+
+        // The same double signage cannot be submitted twice.
+        assert_eq!(
+            guard.submit_contradiction(41, &fault, Address::from([0xCC; 32]), 311),
+            Err(EconomicGuardError::DomainFrozen {
+                domain_id: 41,
+                evidence_digest: out.evidence_digest,
+            })
+        );
+
+        // The pair is verified, not trusted: the same signed statement twice is
+        // not equivocation, and a signature the farmer did not make is not one.
+        let ContradictionEvidence::PoSpaceVdfFault { first, second, .. } = fault.clone() else {
+            unreachable!("the fault is a PoSpace double-signage proof");
+        };
+        let honest = ContradictionEvidence::PoSpaceVdfFault {
+            network: net.into(),
+            pinned: Box::new(pinned.clone()),
+            first: first.clone(),
+            second: first.clone(),
+        };
+        let mut impostor = (*second).clone();
+        impostor.signer_pq_pubkey = PqKeyPair::generate().public_key_bytes().to_vec();
+        let forged_sig = ContradictionEvidence::PoSpaceVdfFault {
+            network: net.into(),
+            pinned: Box::new(pinned.clone()),
+            first: first.clone(),
+            second: Box::new(impostor),
+        };
+
+        // A pin the governor did not install is not the pin this evidence is
+        // judged against, so a challenger cannot supply its own parameters.
+        let mut other = pinned.clone();
+        other.genesis_challenge = [0x78; 32];
+        let forged = ContradictionEvidence::PoSpaceVdfFault {
+            network: net.into(),
+            pinned: Box::new(other),
+            first,
+            second,
+        };
+        let mut fresh = BridgeEconomicGuard::new();
+        fresh
+            .configure_domain(
+                42,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::PoSpaceVdf {
+                        network: net.into(),
+                        pinned: Box::new(pinned.clone()),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(make_bond(Address::from([0x94; 32]), 20_000)),
+            )
+            .unwrap();
+        assert!(matches!(
+            fresh.submit_contradiction(42, &forged, Address::from([0xCD; 32]), 310),
+            Err(EconomicGuardError::AdapterPinMismatch { .. })
+        ));
+
+        // With the right pin, the same evidence is still refused when it is not
+        // actually a conflict.
+        let mut honest_guard = BridgeEconomicGuard::new();
+        honest_guard
+            .configure_domain(
+                43,
+                DomainCeilingPolicy {
+                    pinned_adapter: Some(GuardedExternalAdapter::PoSpaceVdf {
+                        network: net.into(),
+                        pinned: Box::new(pinned),
+                    }),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(make_bond(Address::from([0x95; 32]), 20_000)),
+            )
+            .unwrap();
+        assert!(matches!(
+            honest_guard.submit_contradiction(43, &honest, Address::from([0xCE; 32]), 310),
+            Err(EconomicGuardError::InvalidEvidence(_))
+        ));
+        assert!(matches!(
+            honest_guard.submit_contradiction(43, &forged_sig, Address::from([0xCF; 32]), 310),
+            Err(EconomicGuardError::InvalidEvidence(_))
+        ));
     }
 
     #[test]
