@@ -3459,6 +3459,29 @@ impl Executor {
                 }
                 sub.validate_shape()
                     .map_err(|e| BudlumError::validation("private_transfer_shape", e))?;
+                // The zero-knowledge bundle is what makes this a *transfer* and
+                // not a spend tag the spender invented. It carries the
+                // ownership proof (this spender owns each note), the value
+                // conservation proof (outputs sum to inputs) and the nullifier
+                // freshness proof (each nullifier really derives from its
+                // note).
+                //
+                // Without it, `apply_transfer_for_owner` can only check one
+                // thing: that `output_commitments.len() == spent_commitments.len()`.
+                // That is a count, not an amount. Three 1-atom notes can become
+                // three 1,000,000-atom notes and the registry has no way to see
+                // it. `verify_confidential_bundle` was written for exactly this
+                // check and had no caller.
+                let proof_bundle = sub.proof_bundle.as_ref().ok_or_else(|| {
+                    BudlumError::validation(
+                        "private_transfer_no_proof_bundle",
+                        "private transfer carries no zero-knowledge proof bundle; \
+                         without it neither ownership, value conservation nor \
+                         nullifier freshness can be verified",
+                    )
+                })?;
+                sub.verify_confidential_bundle(proof_bundle, tx.chain_id)
+                    .map_err(|e| BudlumError::validation("private_transfer_zk_proof", e))?;
                 if !sub.verify_digest_matches() {
                     return Err(BudlumError::validation(
                         "private_transfer_digest",

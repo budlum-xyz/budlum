@@ -106,6 +106,20 @@ pub struct PrivateTransferSubmit {
     pub authorization_sig: Vec<u8>,
     /// Echo of wallet `public_digest` for audit / light clients.
     pub public_digest: [u8; 32],
+    /// The zero-knowledge bundle the wallet produced alongside this transfer.
+    ///
+    /// Optional only for wire compatibility with transfers built before the
+    /// bundle was part of the transaction. A transfer that omits it is
+    /// **refused** by the executor on any chain where privacy transfers are
+    /// enabled: without the bundle there is no ownership proof, no value
+    /// conservation proof and no nullifier freshness proof, and `nullifiers`
+    /// plus `output_commitments` alone let a spender mint any amount.
+    ///
+    /// This is the field whose absence made the whole privacy path unverifiable:
+    /// `verify_confidential_bundle` was complete and nothing carried a bundle
+    /// to it.
+    #[serde(default)]
+    pub proof_bundle: Option<crate::privacy::ConfidentialTransferProofBundle>,
 }
 
 impl PrivateTransferSubmit {
@@ -645,7 +659,7 @@ impl PrivateTransferSubmit {
 
 /// Complete zero-knowledge witness bundle (`ProofClass::Hiding` + `YK1..YK4`
 /// STARK predicates) bound to a [`PrivateTransferSubmit`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfidentialTransferProofBundle {
     pub chain_id: u64,
     pub hiding_program: Vec<u64>,
