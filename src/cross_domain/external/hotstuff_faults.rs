@@ -300,6 +300,225 @@ mod tests {
 
         assert_blank_network_and_bad_pq_rejected(&ed, &pq, pub_ed, pub_pq);
         assert_committee_bounds_rejected(&classical_eq, &classical_tc, pub_ed);
+        assert_timeout_certificate_acceptance_and_refusals();
+        assert_equivocation_acceptance_and_refusals();
+    }
+
+    fn assert_timeout_certificate_acceptance_and_refusals() {
+        let net = "aptos-jolteon-1";
+        let ed1 = KeyPair::from_seed(&[0x51; 32]).expect("ed1");
+        let ed2 = KeyPair::from_seed(&[0x52; 32]).expect("ed2");
+        let ed3 = KeyPair::from_seed(&[0x53; 32]).expect("ed3");
+        let pq1 = PqKeyPair::generate();
+        let pq2 = PqKeyPair::generate();
+        let pq3 = PqKeyPair::generate();
+
+        // Total stake = 300 (100 + 101 + 99): signers 1+2 hold 201 > 200 (strict > 2/3),
+        // while signers 1+3 hold 199, and an exact 2/3 committee (100 + 100 + 100) holds 200.
+        let strict_committee = PinnedHotStuffCommittee {
+            epoch: 9,
+            members: vec![
+                HotStuffValidator {
+                    ed25519_pubkey: ed1.public_key_bytes(),
+                    voting_weight: 100,
+                    pq_pubkey: pq1.public_key_bytes().to_vec(),
+                },
+                HotStuffValidator {
+                    ed25519_pubkey: ed2.public_key_bytes(),
+                    voting_weight: 101,
+                    pq_pubkey: pq2.public_key_bytes().to_vec(),
+                },
+                HotStuffValidator {
+                    ed25519_pubkey: ed3.public_key_bytes(),
+                    voting_weight: 99,
+                    pq_pubkey: pq3.public_key_bytes().to_vec(),
+                },
+            ],
+        };
+        let d1 = hotstuff_timeout_sign_bytes(net, 9, 20, 17);
+        let d2 = hotstuff_timeout_sign_bytes(net, 9, 20, 19);
+        let v1 = HotStuffTimeoutVote {
+            signer_pubkey: ed1.public_key_bytes(),
+            high_qc_view: 17,
+            ed25519_sig: ed1.sign(&d1).to_vec(),
+            pq_sig: pq1.sign(ctx::CROSS_DOMAIN_V1, &d1).expect("pq1"),
+        };
+        let v2 = HotStuffTimeoutVote {
+            signer_pubkey: ed2.public_key_bytes(),
+            high_qc_view: 19,
+            ed25519_sig: ed2.sign(&d2).to_vec(),
+            pq_sig: pq2.sign(ctx::CROSS_DOMAIN_V1, &d2).expect("pq2"),
+        };
+
+        // 1. Acceptance: valid >2/3 PQ-enrolled TimeoutCertificate returns (19, 201, true).
+        let valid_tc = HotStuffTimeoutCertificate {
+            epoch: 9,
+            view: 20,
+            max_high_qc_view: 19,
+            votes: vec![v1.clone(), v2.clone()],
+        };
+        assert_eq!(
+            verify_hotstuff_timeout_certificate(net, &strict_committee, &valid_tc).expect("tc ok"),
+            (19, 201, true)
+        );
+
+        // 2. Rejection: exact 2/3 stake (200 of 300) fails strict >2/3 rule.
+        let equal_committee = PinnedHotStuffCommittee {
+            epoch: 9,
+            members: vec![
+                HotStuffValidator {
+                    ed25519_pubkey: ed1.public_key_bytes(),
+                    voting_weight: 100,
+                    pq_pubkey: pq1.public_key_bytes().to_vec(),
+                },
+                HotStuffValidator {
+                    ed25519_pubkey: ed2.public_key_bytes(),
+                    voting_weight: 100,
+                    pq_pubkey: pq2.public_key_bytes().to_vec(),
+                },
+                HotStuffValidator {
+                    ed25519_pubkey: ed3.public_key_bytes(),
+                    voting_weight: 100,
+                    pq_pubkey: pq3.public_key_bytes().to_vec(),
+                },
+            ],
+        };
+        assert!(matches!(
+            verify_hotstuff_timeout_certificate(net, &equal_committee, &valid_tc),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("2/3")
+        ));
+
+        // 3. Rejection: declared max_high_qc_view mismatching observed signed votes.
+        let mut wrong_max = valid_tc.clone();
+        wrong_max.max_high_qc_view = 18;
+        assert!(matches!(
+            verify_hotstuff_timeout_certificate(net, &strict_committee, &wrong_max),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("max_high_qc_view")
+        ));
+
+        // 4. Rejection: replayed / duplicate timeout vote by the same validator.
+        let mut replayed_vote = valid_tc.clone();
+        replayed_vote.votes = vec![v2.clone(), v2];
+        assert!(matches!(
+            verify_hotstuff_timeout_certificate(net, &strict_committee, &replayed_vote),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("duplicate signer")
+        ));
+
+        // 5. Rejection: foreign epoch mismatching pinned committee epoch.
+        let mut foreign_epoch_tc = valid_tc.clone();
+        foreign_epoch_tc.epoch = 10;
+        assert!(matches!(
+            verify_hotstuff_timeout_certificate(net, &strict_committee, &foreign_epoch_tc),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("epoch")
+        ));
+
+        // 6. Rejection: flipped Ed25519 signature byte in TC vote.
+        let mut bad_ed_tc = valid_tc.clone();
+        bad_ed_tc.votes[0].ed25519_sig[0] ^= 0x01;
+        assert!(matches!(
+            verify_hotstuff_timeout_certificate(net, &strict_committee, &bad_ed_tc),
+            Err(AdapterError::Crypto { .. })
+        ));
+
+        // 7. Rejection: stripped ML-DSA-65 PQ co-signature for PQ-enrolled validator.
+        let mut stripped_pq_tc = valid_tc;
+        stripped_pq_tc.votes[1].pq_sig.clear();
+        assert!(matches!(
+            verify_hotstuff_timeout_certificate(net, &strict_committee, &stripped_pq_tc),
+            Err(AdapterError::Crypto { ref what }) if what.contains("ML-DSA-65")
+        ));
+    }
+
+    fn assert_equivocation_acceptance_and_refusals() {
+        let net = "aptos-jolteon-1";
+        let ed1 = KeyPair::from_seed(&[0x61; 32]).expect("ed1");
+        let ed2 = KeyPair::from_seed(&[0x62; 32]).expect("ed2");
+        let pq1 = PqKeyPair::generate();
+        let pq2 = PqKeyPair::generate();
+
+        let committee = PinnedHotStuffCommittee {
+            epoch: 11,
+            members: vec![
+                HotStuffValidator {
+                    ed25519_pubkey: ed1.public_key_bytes(),
+                    voting_weight: 250,
+                    pq_pubkey: pq1.public_key_bytes().to_vec(),
+                },
+                HotStuffValidator {
+                    ed25519_pubkey: ed2.public_key_bytes(),
+                    voting_weight: 150,
+                    pq_pubkey: pq2.public_key_bytes().to_vec(),
+                },
+            ],
+        };
+
+        let msg_a = hotstuff_vote_sign_bytes(net, 11, 33, &[0x11; 32]);
+        let msg_b = hotstuff_vote_sign_bytes(net, 11, 33, &[0x22; 32]);
+        let valid_eq = HotStuffEquivocationProof {
+            epoch: 11,
+            view: 33,
+            block_hash_a: [0x11; 32],
+            block_hash_b: [0x22; 32],
+            vote_a: HotStuffVoteSig {
+                signer_pubkey: ed1.public_key_bytes(),
+                ed25519_sig: ed1.sign(&msg_a).to_vec(),
+                pq_sig: pq1.sign(ctx::CROSS_DOMAIN_V1, &msg_a).expect("pq_a"),
+            },
+            vote_b: HotStuffVoteSig {
+                signer_pubkey: ed1.public_key_bytes(),
+                ed25519_sig: ed1.sign(&msg_b).to_vec(),
+                pq_sig: pq1.sign(ctx::CROSS_DOMAIN_V1, &msg_b).expect("pq_b"),
+            },
+        };
+
+        // 8. Acceptance: valid PQ-enrolled equivocation returns (ed1_pubkey, 250).
+        assert_eq!(
+            verify_hotstuff_equivocation(net, &committee, &valid_eq).expect("equivocation ok"),
+            (ed1.public_key_bytes(), 250)
+        );
+
+        // 9. Rejection: identical block hashes (`block_hash_a == block_hash_b`) is not equivocation.
+        let mut same_block = valid_eq.clone();
+        same_block.block_hash_b = same_block.block_hash_a;
+        same_block.vote_b = same_block.vote_a.clone();
+        assert!(matches!(
+            verify_hotstuff_equivocation(net, &committee, &same_block),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("identical")
+        ));
+
+        // 10. Rejection: votes signed by two different validators in the same view.
+        let mut distinct_signers = valid_eq.clone();
+        distinct_signers.vote_b = HotStuffVoteSig {
+            signer_pubkey: ed2.public_key_bytes(),
+            ed25519_sig: ed2.sign(&msg_b).to_vec(),
+            pq_sig: pq2.sign(ctx::CROSS_DOMAIN_V1, &msg_b).expect("pq2_b"),
+        };
+        assert!(matches!(
+            verify_hotstuff_equivocation(net, &committee, &distinct_signers),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("different validators")
+        ));
+
+        // Foreign epoch, flipped Ed25519 byte, and stripped ML-DSA-65 co-sig on equivocation:
+        let mut foreign_eq = valid_eq.clone();
+        foreign_eq.epoch = 12;
+        assert!(matches!(
+            verify_hotstuff_equivocation(net, &committee, &foreign_eq),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("epoch")
+        ));
+
+        let mut bad_ed_eq = valid_eq.clone();
+        bad_ed_eq.vote_a.ed25519_sig[3] ^= 0x80;
+        assert!(matches!(
+            verify_hotstuff_equivocation(net, &committee, &bad_ed_eq),
+            Err(AdapterError::Crypto { .. })
+        ));
+
+        let mut stripped_pq_eq = valid_eq;
+        stripped_pq_eq.vote_b.pq_sig.clear();
+        assert!(matches!(
+            verify_hotstuff_equivocation(net, &committee, &stripped_pq_eq),
+            Err(AdapterError::Crypto { ref what }) if what.contains("ML-DSA-65")
+        ));
     }
 
     fn assert_committee_bounds_rejected(
