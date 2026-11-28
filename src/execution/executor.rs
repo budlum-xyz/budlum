@@ -6287,7 +6287,14 @@ mod tests {
             output_commitments: vec![c_out],
             nullifier_proofs: vec![budlum_note_packing::hash_from_field(14)],
             authorization_sig: vec![0u8; 64],
-            public_digest: [0u8; 32],
+            // The digest must cover the nullifiers and outputs above, or the
+            // digest door refuses before the bundle door is reached and this
+            // test pins the wrong refusal. It used to be `[0u8; 32]`, which is
+            // exactly the mistake the digest check exists to catch.
+            public_digest: crate::privacy::PrivateTransferSubmit::compute_public_digest(
+                &[budlum_note_packing::hash_from_field(13)],
+                &[c_out],
+            ),
             proof_bundle: None,
         };
         let tx_devnet = Transaction::new_with_chain_id(

@@ -1,4 +1,19 @@
-5858
+5867
+2026-11-28 - 5858 -> 5867. Measured 5867 on CI run 46180671775,
+  "Budlum Core quality" job 141090646064 (`clippy-extra: 5867 | baseline:
+  5858`, and identically on runs 46175145324 / 46178186852, i.e. the number
+  is stable across three heads and not a concurrency artefact). The base was
+  measured on 2026-11-20 for 324b652e; 103 commits of consensus-of-
+  consensuses (54352 insertions across 223 files) landed after it. The gate
+  refused the base in BOTH directions: this is the growth direction (+9 over
+  the pin), the same log also trips the stall rule (+0.15% does not reach
+  the 10% slack, so the raise is allowed to be paid here rather than hidden).
+  No single lint is responsible: the +29 per-file/-lint cells that grew are
+  topped by babylon_eots.rs redundant_pub_crate (+11), intake.rs
+  too_many_lines (+9) and ethereum_ssz.rs missing_errors_doc (+8), with
+  compensating falls elsewhere adding up to the net +9. Raising is the
+  ratchet's documented exception, not a softening: the pin now equals the
+  CI measurement with no margin, so the next warning is refused again.
 # ---------------------------------------------------------------------------
 # G2 pedantic/nursery ratchet baseline.
 # The FIRST bare-number line of this file is the baseline

@@ -566,7 +566,7 @@ mod tests {
             );
         }
         // The transport spelling the network actually announces still passes.
-        assert!(GardenInvite::new(&g, token, vec![peer("10.0.0.9", 4001)]).is_ok());
+        assert!(GardenInvite::new(&g, token, vec![peer("/ip4/10.0.0.9", 4001)]).is_ok());
         // A port is part of the address: `/tcp/` with nothing after it is not
         // somewhere to knock either. QUIC is a real transport here and is
         // not refused for this reason.
