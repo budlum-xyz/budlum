@@ -33,6 +33,7 @@ use std::collections::BTreeSet;
 use k256::ecdsa::signature::hazmat::PrehashVerifier;
 use k256::ecdsa::{Signature as SecpSignature, VerifyingKey as SecpVerifyingKey};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 use crate::core::hash::hash_fields_bytes;
 use crate::crypto::facts::{CryptoObserver, ObservedScheme};
@@ -226,7 +227,7 @@ fn validate_ascii_token(bytes: &[u8], max_len: usize, label: &str) -> Result<(),
             ),
         });
     }
-    if !bytes.iter().all(|b| b.is_ascii_graphic()) {
+    if !bytes.iter().all(u8::is_ascii_graphic) {
         return Err(AdapterError::ConsensusRule {
             rule: format!("Symbiotic {label} must contain printable ASCII without whitespace"),
         });
@@ -265,29 +266,43 @@ fn validate_evidence_fields(ev: &SymbioticVaultEvidence) -> Result<(), AdapterEr
     }
     validate_ascii_token(&ev.vault_id, MAX_VAULT_ID_LEN, "vault_id")?;
     validate_ascii_token(&ev.asset_symbol, MAX_ASSET_SYMBOL_LEN, "asset_symbol")?;
+    if ev.epoch == 0 {
+        return Err(AdapterError::ConsensusRule {
+            rule: "Symbiotic evidence epoch must be non-zero".into(),
+        });
+    }
     if ev.collateral_root == [0u8; 32] {
         return Err(AdapterError::ConsensusRule {
             rule: "Symbiotic collateral_root must be non-zero".into(),
         });
     }
-    if ev.classical_threshold < MIN_CLASSICAL_SIGNERS {
-        return Err(AdapterError::ConsensusRule {
-            rule: format!(
-                "Symbiotic classical_threshold {} below minimum {MIN_CLASSICAL_SIGNERS}",
-                ev.classical_threshold
-            ),
-        });
-    }
-    if ev.pq_threshold < MIN_PQ_SIGNERS {
-        return Err(AdapterError::ConsensusRule {
-            rule: format!(
-                "Symbiotic pq_threshold {} below minimum {MIN_PQ_SIGNERS}",
-                ev.pq_threshold
-            ),
-        });
-    }
     validate_distinct_keys(&ev.classical_signer_keys, "classical")?;
     validate_distinct_keys(&ev.pq_signer_keys, "pq")?;
+    let classical_n = ev.classical_signer_keys.len() as u64;
+    if ev.classical_threshold < MIN_CLASSICAL_SIGNERS
+        || ev.classical_threshold > classical_n
+        || u128::from(ev.classical_threshold).saturating_mul(3)
+            <= u128::from(classical_n).saturating_mul(2)
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule: format!(
+                "Symbiotic classical quorum threshold {} must strictly exceed 2/3 of {} signers",
+                ev.classical_threshold, classical_n
+            ),
+        });
+    }
+    let pq_n = ev.pq_signer_keys.len() as u64;
+    if ev.pq_threshold < MIN_PQ_SIGNERS
+        || ev.pq_threshold > pq_n
+        || u128::from(ev.pq_threshold).saturating_mul(3) <= u128::from(pq_n).saturating_mul(2)
+    {
+        return Err(AdapterError::ConsensusRule {
+            rule: format!(
+                "Symbiotic PQ quorum threshold {} must strictly exceed 2/3 of {} signers",
+                ev.pq_threshold, pq_n
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -483,9 +498,21 @@ impl SymbioticVaultAdapter {
         classical_keys: &[Vec<u8>],
         pq_keys: &[Vec<u8>],
     ) -> Self {
-        let c_root = key_set_commitment(b"classical-keys", classical_keys);
-        let pq_root = key_set_commitment(b"pq-keys", pq_keys);
-        self.pinned_committee_roots = Some((c_root, pq_root));
+        let valid_classical = validate_distinct_keys(classical_keys, "classical").is_ok()
+            && classical_keys
+                .iter()
+                .all(|k| k256::ecdsa::VerifyingKey::from_sec1_bytes(k).is_ok());
+        let valid_pq = validate_distinct_keys(pq_keys, "pq").is_ok()
+            && pq_keys
+                .iter()
+                .all(|k| pq::validate_public_key(SchemeId::ML_DSA_65, k).is_ok());
+        if valid_classical && valid_pq {
+            let c_root = key_set_commitment(b"classical-keys", classical_keys);
+            let pq_root = key_set_commitment(b"pq-keys", pq_keys);
+            self.pinned_committee_roots = Some((c_root, pq_root));
+        } else {
+            self.pinned_committee_roots = None;
+        }
         self
     }
 
@@ -501,16 +528,24 @@ impl SymbioticVaultAdapter {
         &self,
         evidence: &SymbioticVaultEvidence,
     ) -> Result<u128, AdapterError> {
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Symbiotic vault adapter network must be non-empty".into(),
+            });
+        }
         validate_evidence_fields(evidence)?;
         let free = validate_contamination(evidence)?;
-        if let Some((expected_c, expected_pq)) = self.pinned_committee_roots {
-            let got_c = key_set_commitment(b"classical-keys", &evidence.classical_signer_keys);
-            let got_pq = key_set_commitment(b"pq-keys", &evidence.pq_signer_keys);
-            if got_c != expected_c || got_pq != expected_pq {
-                return Err(AdapterError::ConsensusRule {
-                    rule: "Symbiotic signer committee does not match pinned vault anchor".into(),
-                });
-            }
+        let Some((expected_c, expected_pq)) = self.pinned_committee_roots else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Symbiotic vault adapter has no pinned committee; admission is closed".into(),
+            });
+        };
+        let got_c = key_set_commitment(b"classical-keys", &evidence.classical_signer_keys);
+        let got_pq = key_set_commitment(b"pq-keys", &evidence.pq_signer_keys);
+        if !bool::from(got_c.ct_eq(&expected_c)) || !bool::from(got_pq.ct_eq(&expected_pq)) {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Symbiotic signer committee does not match pinned vault anchor".into(),
+            });
         }
         let msg = evidence.signing_digest(&self.network);
         verify_classical_quorum(evidence, &msg)?;
@@ -539,6 +574,17 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, AdapterError> {
+        if evidence.adapter != self.descriptor().id {
+            return Err(AdapterError::WrongAdapter {
+                expected: self.descriptor().name,
+                found: hex::encode(evidence.adapter.as_bytes()),
+            });
+        }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Symbiotic vault adapter network must be non-empty".into(),
+            });
+        }
         if evidence.evidence_version != EVIDENCE_VERSION {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -577,7 +623,13 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
             });
         }
 
-        if policy.max_age > 0 && policy.now > ev.epoch {
+        if policy.max_age > 0 {
+            if ev.epoch > policy.now {
+                return Err(AdapterError::Stale {
+                    age: ev.epoch.saturating_sub(policy.now),
+                    max_age: policy.max_age,
+                });
+            }
             let age = policy.now.saturating_sub(ev.epoch);
             if age > policy.max_age {
                 return Err(AdapterError::Stale {
@@ -605,7 +657,7 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
             return Err(AdapterError::UnslashableBacking);
         }
 
-        let digest = ev.digest();
+        let digest = ev.signing_digest(&self.network);
         let backing = SecurityBacking::SignatureSet {
             scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
             signers: ev.pq_signatures.len() as u64,
@@ -747,14 +799,14 @@ impl TestCommittee {
                 let raw: SecpSignature = self.secp_keys[i].sign_prehash(&msg).expect("secp sign");
                 let norm = raw.normalize_s();
                 SymbioticSignature {
-                    signer_index: i as u32,
+                    signer_index: u32::try_from(i).expect("signer index fits u32"),
                     signature: norm.to_bytes().to_vec(),
                 }
             })
             .collect();
         ev.pq_signatures = (0..count)
             .map(|i| SymbioticSignature {
-                signer_index: i as u32,
+                signer_index: u32::try_from(i).expect("signer index fits u32"),
                 signature: self.pq_keys[i]
                     .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &msg)
                     .expect("mldsa65 sign"),
@@ -842,22 +894,25 @@ mod tests {
 
     #[test]
     fn forged_classical_signature_and_forged_pq_signature_are_refused() {
-        let adapter = SymbioticVaultAdapter::new("mainnet");
-        let mut bad_secp = sample_evidence("mainnet");
+        let (base_ev, committee) = sample_evidence_with_committee("mainnet");
+        let adapter = SymbioticVaultAdapter::new("mainnet")
+            .with_pinned_committee_keys(&committee.classical_pubkeys(), &committee.pq_pubkeys());
+
+        let mut bad_secp = base_ev.clone();
         bad_secp.classical_signatures[0].signature[7] ^= 0x01;
         assert!(matches!(
             adapter.verify_collateral(&bad_secp).unwrap_err(),
             AdapterError::Crypto { .. }
         ));
 
-        let mut bad_pq = sample_evidence("mainnet");
+        let mut bad_pq = base_ev.clone();
         bad_pq.pq_signatures[1].signature[13] ^= 0x80;
         assert!(matches!(
             adapter.verify_collateral(&bad_pq).unwrap_err(),
             AdapterError::Crypto { .. }
         ));
 
-        let mut mutated_root = sample_evidence("mainnet");
+        let mut mutated_root = base_ev;
         mutated_root.collateral_root[0] ^= 0xFF;
         assert!(matches!(
             adapter.verify_collateral(&mutated_root).unwrap_err(),
@@ -878,12 +933,35 @@ mod tests {
         let foreign = sample_evidence("mainnet");
         let pin_err = adapter.verify_collateral(&foreign).unwrap_err();
         assert!(matches!(pin_err, AdapterError::ConsensusRule { rule } if rule.contains("pinned")));
+
+        let unpinned = SymbioticVaultAdapter::new("mainnet");
+        assert!(matches!(
+            unpinned.verify_collateral(&foreign),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("pinned")
+        ));
+        let empty_pin = SymbioticVaultAdapter::new("mainnet").with_pinned_committee_keys(&[], &[]);
+        assert!(matches!(
+            empty_pin.verify_collateral(&foreign),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("pinned")
+        ));
+
+        let mut downgraded = sample_evidence("mainnet");
+        downgraded.classical_threshold = 1;
+        downgraded.pq_threshold = 1;
+        downgraded.classical_signer_keys = committee.classical_pubkeys();
+        downgraded.pq_signer_keys = committee.pq_pubkeys();
+        committee.sign("mainnet", &mut downgraded, 1);
+        assert!(matches!(
+            adapter.verify_collateral(&downgraded),
+            Err(AdapterError::ConsensusRule { ref rule }) if rule.contains("quorum")
+        ));
     }
 
     #[test]
     fn contamination_above_cap_and_u128_overflow_fail_closed() {
-        let adapter = SymbioticVaultAdapter::new("mainnet");
         let (mut ev, committee) = sample_evidence_with_committee("mainnet");
+        let adapter = SymbioticVaultAdapter::new("mainnet")
+            .with_pinned_committee_keys(&committee.classical_pubkeys(), &committee.pq_pubkeys());
         ev.encumbered_collateral = 300_001;
         committee.sign("mainnet", &mut ev, 2);
         assert!(
@@ -905,21 +983,35 @@ mod tests {
 
     #[test]
     fn out_of_bounds_quorum_network_and_declared_mismatches_are_refused() {
-        let adapter = SymbioticVaultAdapter::new("mainnet");
-        let mut oob = sample_evidence("mainnet");
+        let (ev, committee) = sample_evidence_with_committee("mainnet");
+        let adapter = SymbioticVaultAdapter::new("mainnet")
+            .with_pinned_committee_keys(&committee.classical_pubkeys(), &committee.pq_pubkeys());
+        let mut oob = ev.clone();
         oob.classical_signatures[0].signer_index = 999;
         assert!(
             matches!(adapter.verify_collateral(&oob).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("signer_index"))
         );
 
-        let (mut short, committee) = sample_evidence_with_committee("mainnet");
+        let mut short = ev.clone();
         short.classical_threshold = 5;
         committee.sign("mainnet", &mut short, 2);
         assert!(
             matches!(adapter.verify_collateral(&short).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("quorum"))
         );
 
-        let ev = sample_evidence("mainnet");
+        let mut zero_epoch = ev.clone();
+        zero_epoch.epoch = 0;
+        committee.sign("mainnet", &mut zero_epoch, 2);
+        assert!(
+            matches!(adapter.verify_collateral(&zero_epoch).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("epoch"))
+        );
+
+        let empty_net = SymbioticVaultAdapter::new("   ")
+            .with_pinned_committee_keys(&committee.classical_pubkeys(), &committee.pq_pubkeys());
+        assert!(
+            matches!(empty_net.verify_collateral(&ev).unwrap_err(), AdapterError::ConsensusRule { rule } if rule.contains("network"))
+        );
+
         let payload = encode_symbiotic_evidence(&ev);
         let policy = default_policy();
 
@@ -991,5 +1083,23 @@ mod tests {
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
         );
+
+        let mut wrong_adapter = fresh_raw.clone();
+        wrong_adapter.adapter = AdapterId([0x99; 32]);
+        assert!(matches!(
+            adapter.verify(&wrong_adapter, &default_policy()),
+            Err(AdapterError::WrongAdapter { .. })
+        ));
+
+        let mut future_policy = default_policy();
+        future_policy.now = ev.epoch.saturating_sub(25);
+        future_policy.max_age = 10;
+        assert!(matches!(
+            adapter.verify(&fresh_raw, &future_policy),
+            Err(AdapterError::Stale {
+                age: 25,
+                max_age: 10
+            })
+        ));
     }
 }
