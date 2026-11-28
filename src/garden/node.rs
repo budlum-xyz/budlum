@@ -8302,7 +8302,7 @@ mod tests {
 
         let mut forged = full_invite.clone();
         forged.token = random_bytes();
-        let forged_err = tokio::time::timeout(
+        let Err(forged_err) = tokio::time::timeout(
             Duration::from_secs(20),
             spawn(
                 GardenEntry::Invite(forged),
@@ -8312,9 +8312,9 @@ mod tests {
             ),
         )
         .await
-        .expect("forged join timed out")
-        .err()
-        .expect("forged invite must be refused");
+        .expect("forged join timed out") else {
+            panic!("forged invite must be refused");
+        };
         assert!(
             !forged_err.contains("no seat"),
             "unauthenticated forged Hello leaked no-room/membership oracle: {forged_err}"
@@ -8324,7 +8324,7 @@ mod tests {
             "expected invite authentication refusal, got: {forged_err}"
         );
 
-        let genuine_err = tokio::time::timeout(
+        let Err(genuine_err) = tokio::time::timeout(
             Duration::from_secs(20),
             spawn(
                 GardenEntry::Invite(full_invite),
@@ -8334,9 +8334,9 @@ mod tests {
             ),
         )
         .await
-        .expect("genuine join timed out")
-        .err()
-        .expect("full Garden must refuse extra joiner");
+        .expect("genuine join timed out") else {
+            panic!("full Garden must refuse extra joiner");
+        };
         assert!(
             genuine_err.contains("no seat"),
             "genuine invite holder should still see clear capacity refusal: {genuine_err}"

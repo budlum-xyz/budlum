@@ -40,6 +40,8 @@ const STATUS_REQUEST_DEADLINE: Duration = Duration::from_secs(3);
 const MAX_DOOR_WORKERS: usize = 8;
 /// Maximum bytes read for the HTTP request line + headers.
 const MAX_HTTP_HEAD_BYTES: usize = 4_096;
+/// Named `u64` ceiling for `Read::take` on HTTP request heads.
+const MAX_HTTP_HEAD_READ_BYTES: u64 = (MAX_HTTP_HEAD_BYTES + 1) as u64;
 /// Maximum HTTP header lines accepted before rejecting with `431`.
 const MAX_HTTP_HEADER_LINES: usize = 64;
 /// Maximum JSON body bytes accepted on local `POST` commands.
@@ -559,7 +561,7 @@ struct ParsedHead {
 /// and a bounded wall-clock deadline so split or non-terminated headers fail
 /// closed (`400` / `431`) instead of truncating into partial dispatch.
 fn read_http_head<R: Read>(input: R, deadline: Instant) -> Result<ParsedHead, HeadReadError> {
-    let mut reader = BufReader::new(input.take((MAX_HTTP_HEAD_BYTES + 1) as u64));
+    let mut reader = BufReader::new(input.take(MAX_HTTP_HEAD_READ_BYTES));
     let mut first = String::new();
     match reader.read_line(&mut first) {
         Ok(0) => return Err(HeadReadError::SilentClose),

@@ -19,6 +19,7 @@
 //! Section 2.8 keeps message, post and trace queries out of the app, so
 //! they are not exported here even though the core has them.
 
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -172,7 +173,7 @@ impl GardenPhone {
             // network it is on - but a terminal driving this library can
             // name a address, which is how the founding path is exercised
             // somewhere other than a handset.
-            options.listen = Some(given);
+            options.listen = Some(validate_host_listen_multiaddr(&given)?);
             return answer(
                 self.runtime
                     .block_on(self.service.create(title, name, options)),
@@ -500,6 +501,79 @@ fn check_object_round_trip() -> SelfTestStep {
     }
 }
 
+fn ipv4_listen_is_dialable(ip: Ipv4Addr) -> bool {
+    !(ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast() || ip.is_link_local())
+}
+
+fn ipv6_listen_is_dialable(ip: Ipv6Addr) -> bool {
+    if ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+    if (ip.segments()[0] & 0xffc0) == 0xfe80 {
+        return false;
+    }
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return ipv4_listen_is_dialable(v4);
+    }
+    true
+}
+
+fn validate_host_listen_multiaddr(raw: &str) -> Result<String, GardenError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().any(char::is_whitespace)
+        || trimmed.chars().any(char::is_control)
+    {
+        return Err(GardenError::of(
+            "garden listen address must be a single /ip4 or /ip6 TCP multiaddr without whitespace or control characters",
+        ));
+    }
+    let Some(rest) = trimmed.strip_prefix('/') else {
+        return Err(GardenError::of(
+            "garden listen address must start with /ip4/ or /ip6/",
+        ));
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    let port_str = match parts.as_slice() {
+        ["ip4", ip_str, "tcp", port_str] => {
+            let ip: Ipv4Addr = ip_str
+                .parse()
+                .map_err(|_| GardenError::of("garden listen address has an invalid IPv4 host"))?;
+            if !ipv4_listen_is_dialable(ip) {
+                return Err(GardenError::of(
+                    "garden listen address IPv4 host is not dialable (unspecified, multicast, broadcast, or link-local)",
+                ));
+            }
+            *port_str
+        }
+        ["ip6", ip_str, "tcp", port_str] => {
+            let ip: Ipv6Addr = ip_str
+                .parse()
+                .map_err(|_| GardenError::of("garden listen address has an invalid IPv6 host"))?;
+            if !ipv6_listen_is_dialable(ip) {
+                return Err(GardenError::of(
+                    "garden listen address IPv6 host is not dialable (unspecified, multicast, or link-local)",
+                ));
+            }
+            *port_str
+        }
+        _ => {
+            return Err(GardenError::of(
+                "garden listen address must be /ip4/<addr>/tcp/<port> or /ip6/<addr>/tcp/<port>",
+            ));
+        }
+    };
+    let port: u16 = port_str
+        .parse()
+        .map_err(|_| GardenError::of("garden listen address has an invalid TCP port"))?;
+    if port != 0 && port < 1024 {
+        return Err(GardenError::of(
+            "garden listen address TCP port must be 0 or >= 1024",
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Inspect `/proc/net/fib_trie` (`Local:` table) on Linux to find an assigned
 /// non-loopback IPv4 interface address when the device has no default gateway.
 fn local_ipv4_from_fib_trie() -> Option<std::net::Ipv4Addr> {
@@ -714,5 +788,53 @@ mod tests {
 
         let _ = guest.leave();
         let _ = host.leave();
+    }
+
+    #[test]
+    fn phone_create_rejects_malformed_and_nondialable_addresses_and_trims_valid_one() {
+        let dir = temp_dir("create_addr");
+        let phone = GardenPhone::new(dir.0.to_string_lossy().into_owned()).unwrap();
+
+        for bad in [
+            "not-a-multiaddr",
+            "/ip4/0.0.0.0/tcp/0",
+            "/ip6/::/tcp/0",
+            "/ip4/224.0.0.1/tcp/0",
+            "/ip4/255.255.255.255/tcp/0",
+            "/ip4/169.254.1.2/tcp/0",
+            "/ip6/::ffff:0.0.0.0/tcp/0",
+            "/ip6/fe80::1/tcp/0",
+            "/ip4/127.0.0.1/tcp/80",
+            "/ip4/127.0.0.1/tcp/notaport",
+            "/ip4/127.0.0.1/udp/1234",
+            "/ip4/127.0.0.1/tcp/0/p2p/12D3KooWtest",
+            "/ip4/127.0.0.1\n/tcp/0",
+            "/ip4/127.0.0.1 /tcp/0",
+        ] {
+            let err = match phone.create("Room".into(), "Host".into(), Some(bad.into())) {
+                Ok(_) => panic!("bad listen address {bad:?} must be refused"),
+                Err(err) => err,
+            };
+            assert!(
+                matches!(err, GardenError::Refused { .. }),
+                "expected GardenError::Refused for {bad:?}"
+            );
+        }
+
+        let created = phone
+            .create(
+                "Trimmed Room".into(),
+                "Host".into(),
+                Some("  /ip4/127.0.0.1/tcp/0  ".into()),
+            )
+            .expect("whitespace-padded valid loopback multiaddr must succeed once trimmed");
+        let created_json: serde_json::Value = serde_json::from_str(&created.json).unwrap();
+        assert_eq!(
+            created_json
+                .pointer("/garden/me/member")
+                .and_then(|v| v.as_str()),
+            Some("Active")
+        );
+        let _ = phone.leave();
     }
 }
