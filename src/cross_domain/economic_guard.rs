@@ -169,6 +169,10 @@ pub struct DomainCeilingPolicy {
     pub bond_haircut_bps: u64,
     /// Challenger reward in basis points (`0..=10_000`) of slashed prover bond.
     pub finder_reward_bps: u64,
+    /// Optional absolute ceiling in atoms on the contradiction finder reward
+    /// (`None` leaves only [`Self::finder_reward_bps`] in force).
+    #[serde(default)]
+    pub max_finder_reward_atoms: Option<u128>,
     /// Optional explicit window cap for verified Proof-of-Work domains.
     pub work_window_cap_atoms: u128,
     /// Minimum `PoW` `difficulty_bits` required before `work_window_cap_atoms` applies.
@@ -197,6 +201,7 @@ impl Default for DomainCeilingPolicy {
             stake_haircut_bps: DEFAULT_STAKE_HAIRCUT_BPS,
             bond_haircut_bps: DEFAULT_BOND_HAIRCUT_BPS,
             finder_reward_bps: DEFAULT_FINDER_REWARD_BPS,
+            max_finder_reward_atoms: None,
             work_window_cap_atoms: 0,
             min_work_difficulty_bits: 1,
             zk_window_cap_atoms: 0,
@@ -891,11 +896,12 @@ pub fn effective_ceiling_from_certificate_row(
         entry.bond_atoms,
         entry.bond_atoms,
     );
-    if cert_bound.safe_value_outflow_ceiling_atoms > 0 {
-        policy_cap.min(cert_bound.safe_value_outflow_ceiling_atoms)
-    } else {
-        policy_cap
-    }
+    // The certificate-derived bound is authoritative: once `Established` and
+    // `admits_cross_domain_value()` hold, a zero `safe_value_outflow_ceiling_atoms`
+    // is a verdict (either a slashable row whose corruption cost is zero or a
+    // domain declaring zero routing capacity), not missing data, so outflows
+    // must clamp to zero rather than fall back to `policy_cap`.
+    policy_cap.min(cert_bound.safe_value_outflow_ceiling_atoms)
 }
 
 /// Consensus-deterministic adaptive escrow ceiling and contradiction slashing
@@ -1336,6 +1342,11 @@ impl BridgeEconomicGuard {
         challenger: Address,
         at_height: u64,
     ) -> Result<ContradictionOutcome, EconomicGuardError> {
+        if bool::from(challenger.as_bytes().ct_eq(&[0u8; 32])) {
+            return Err(EconomicGuardError::InvalidEvidence(
+                "challenger address cannot be all-zero".into(),
+            ));
+        }
         let Some(rec) = self.domains.get(&domain_id) else {
             return Err(EconomicGuardError::UnknownDomain(domain_id));
         };
@@ -1792,6 +1803,7 @@ impl BridgeEconomicGuard {
             };
         }
         let finder_bps = rec_mut.policy.finder_reward_bps;
+        let max_finder_atoms = rec_mut.policy.max_finder_reward_atoms;
         let (slashed_prover, slashed_bond_atoms, challenger_reward_atoms, burned_bond_atoms) =
             match rec_mut.prover_bond.as_mut() {
                 None => (None, 0u128, 0u128, 0u128),
@@ -1805,7 +1817,11 @@ impl BridgeEconomicGuard {
                         // freezes the domain and loses the bond, but it can
                         // never route the finder reward back to itself.
                         let reward_bps = if challenger == prover { 0 } else { finder_bps };
-                        let paid = mul_bps_floor(live, reward_bps).min(live);
+                        let bps_share = mul_bps_floor(live, reward_bps).min(live);
+                        let paid = match max_finder_atoms {
+                            Some(cap) if challenger != prover => bps_share.min(cap),
+                            _ => bps_share,
+                        };
                         bond.bond_atoms = bond.bond_atoms.saturating_sub(live);
                         bond.slashed_atoms = bond.slashed_atoms.saturating_add(live);
                         bond.slashings.push(Slashing {
@@ -1859,6 +1875,10 @@ impl BridgeEconomicGuard {
                 .pinned_adapter
                 .as_ref()
                 .map_or((0u8, [0u8; 32]), |pin| (1u8, pin.canonical_pin_digest()));
+            let (has_max_reward, max_reward_atoms) = rec
+                .policy
+                .max_finder_reward_atoms
+                .map_or((0u8, 0u128), |cap| (1u8, cap));
             domain_leaves.push(hash_fields_bytes(&[
                 b"BDLM_ECON_GUARD_DOMAIN_V1",
                 &domain_id.to_le_bytes(),
@@ -1867,6 +1887,8 @@ impl BridgeEconomicGuard {
                 &rec.policy.stake_haircut_bps.to_le_bytes(),
                 &rec.policy.bond_haircut_bps.to_le_bytes(),
                 &rec.policy.finder_reward_bps.to_le_bytes(),
+                &[has_max_reward],
+                &max_reward_atoms.to_le_bytes(),
                 &rec.policy.work_window_cap_atoms.to_le_bytes(),
                 &rec.policy.min_work_difficulty_bits.to_le_bytes(),
                 &rec.policy.zk_window_cap_atoms.to_le_bytes(),
@@ -3644,5 +3666,220 @@ mod tests {
             matches!(stale_err, EconomicGuardError::InvalidEvidence(_)),
             "pre-horizon epoch must be refused: {stale_err:?}"
         );
+    }
+
+    #[test]
+    fn a_zero_economic_bond_row_zeroes_the_bridge_ceiling_immediately() {
+        use crate::crypto::facts::QuantumClass;
+        use crate::settlement::universal_finality::{
+            compose, DomainFinalityEntry, FinalityGuarantee, FinalityReversibility,
+            FinalityVerdict, FINALITY_BINDS_ALL,
+        };
+
+        let mut guard = BridgeEconomicGuard::new();
+        let domain_id = 405u32;
+        guard
+            .configure_domain(
+                domain_id,
+                DomainCeilingPolicy {
+                    backing: SecurityBacking::SignatureSet {
+                        scheme: ObservedScheme::Secp256k1,
+                        signers: 4,
+                        required: 3,
+                        total_weight: 300_000,
+                        slashable: true,
+                    },
+                    stake_haircut_bps: 3_333,
+                    window_blocks: 100,
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .expect("configure domain");
+
+        let zero_bond_entry = DomainFinalityEntry {
+            domain_id,
+            height: 12,
+            checkpoint_height: 50,
+            state_root: [0x11; 32],
+            adapter_id: "cometbft-v1".to_owned(),
+            adapter_version: 1,
+            finality_proof_hash: [0x22; 32],
+            guarantee_backing_hash: [0x33; 32],
+            bond_atoms: 0,
+            guarantee: FinalityGuarantee {
+                reversibility: FinalityReversibility::DeterministicQuorum,
+                quantum_posture: QuantumClass::Hash,
+                attestation: FINALITY_BINDS_ALL,
+                slashable_backing: true,
+                fault_tolerance_bps: 3_333,
+            },
+            verdict: FinalityVerdict::Established,
+        };
+
+        let zero_cert = compose(&[zero_bond_entry]).expect("zero-bond established cert");
+        let rec = guard.record(domain_id).expect("record");
+        let proof = zero_cert.prove_domain(domain_id).expect("domain row");
+        assert_eq!(
+            effective_ceiling_from_certificate_row(rec, &proof.entry),
+            0,
+            "a zero-bond (zero corruption cost) Established row must clamp ceiling to 0, not fall back to policy_cap"
+        );
+
+        let root_before = guard.root();
+        let err = guard
+            .check_and_record_flow_with_certificate(domain_id, 1, 50, &zero_cert)
+            .expect_err("zero-bond certificate row must halt bridge outflows");
+        assert_eq!(
+            err,
+            EconomicGuardError::CeilingExceeded {
+                domain_id,
+                requested_atoms: 1,
+                window_used_atoms: 0,
+                ceiling_atoms: 0,
+            }
+        );
+        assert_eq!(guard.root(), root_before);
+    }
+
+    #[test]
+    fn an_all_zero_challenger_is_refused_before_any_state_changes() {
+        let prover_ed = KeyPair::from_seed(&[0x91; 32]).unwrap();
+        let prover_pq = PqKeyPair::generate();
+        let prover_addr = Address::from([0x92; 32]);
+        let domain_id = 406u32;
+
+        let mut guard = BridgeEconomicGuard::new();
+        guard
+            .configure_domain(
+                domain_id,
+                DomainCeilingPolicy {
+                    backing: SecurityBacking::SignatureSet {
+                        scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
+                        signers: 4,
+                        required: 3,
+                        total_weight: 1_000_000,
+                        slashable: true,
+                    },
+                    finder_reward_bps: DEFAULT_FINDER_REWARD_BPS,
+                    prover_ed25519_pubkey: Some(prover_ed.public_key_bytes()),
+                    prover_pq_pubkey: prover_pq.public_key_bytes().to_vec(),
+                    ..DomainCeilingPolicy::default()
+                },
+                Some(make_bond(prover_addr, 50_000)),
+            )
+            .expect("configure domain");
+
+        let root_a = [0xC1; 32];
+        let root_b = [0xD1; 32];
+        let stmt_a = contradiction_statement_bytes(domain_id, 900, &root_a);
+        let stmt_b = contradiction_statement_bytes(domain_id, 900, &root_b);
+        let valid = ContradictionEvidence::SignedProverDoubleRoot {
+            domain_height: 900,
+            state_root_a: root_a,
+            ed25519_sig_a: prover_ed.sign(&stmt_a).to_vec(),
+            pq_sig_a: prover_pq
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt_a)
+                .unwrap(),
+            state_root_b: root_b,
+            ed25519_sig_b: prover_ed.sign(&stmt_b).to_vec(),
+            pq_sig_b: prover_pq
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt_b)
+                .unwrap(),
+        };
+
+        let root_before = guard.root();
+        let err = guard
+            .submit_contradiction(domain_id, &valid, Address::from([0u8; 32]), 901)
+            .expect_err("all-zero challenger must be refused before mutating guard state");
+        assert!(
+            matches!(err, EconomicGuardError::InvalidEvidence(_)),
+            "expected InvalidEvidence, got {err:?}"
+        );
+        assert_eq!(
+            guard.root(),
+            root_before,
+            "refused zero-challenger submission must leave guard root unchanged"
+        );
+    }
+
+    #[test]
+    fn finder_reward_is_capped_by_policy_atoms_and_committed_to_root() {
+        let prover_ed = KeyPair::from_seed(&[0xA1; 32]).unwrap();
+        let prover_pq = PqKeyPair::generate();
+        let prover_addr = Address::from([0xA2; 32]);
+        let challenger_addr = Address::from([0xA3; 32]);
+        let domain_id = 407u32;
+
+        let base_policy = DomainCeilingPolicy {
+            backing: SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
+                signers: 4,
+                required: 3,
+                total_weight: 1_000_000,
+                slashable: true,
+            },
+            // 10% of 50_000 = 5_000 atoms without the absolute cap.
+            finder_reward_bps: DEFAULT_FINDER_REWARD_BPS,
+            max_finder_reward_atoms: None,
+            prover_ed25519_pubkey: Some(prover_ed.public_key_bytes()),
+            prover_pq_pubkey: prover_pq.public_key_bytes().to_vec(),
+            ..DomainCeilingPolicy::default()
+        };
+
+        let mut uncapped_guard = BridgeEconomicGuard::new();
+        uncapped_guard
+            .configure_domain(
+                domain_id,
+                base_policy.clone(),
+                Some(make_bond(prover_addr, 50_000)),
+            )
+            .expect("configure uncapped");
+
+        let mut capped_guard = BridgeEconomicGuard::new();
+        capped_guard
+            .configure_domain(
+                domain_id,
+                DomainCeilingPolicy {
+                    max_finder_reward_atoms: Some(1_250),
+                    ..base_policy
+                },
+                Some(make_bond(prover_addr, 50_000)),
+            )
+            .expect("configure capped");
+
+        assert_ne!(
+            uncapped_guard.root(),
+            capped_guard.root(),
+            "BridgeEconomicGuard::root must commit max_finder_reward_atoms"
+        );
+
+        let root_a = [0xE1; 32];
+        let root_b = [0xF1; 32];
+        let stmt_a = contradiction_statement_bytes(domain_id, 950, &root_a);
+        let stmt_b = contradiction_statement_bytes(domain_id, 950, &root_b);
+        let valid = ContradictionEvidence::SignedProverDoubleRoot {
+            domain_height: 950,
+            state_root_a: root_a,
+            ed25519_sig_a: prover_ed.sign(&stmt_a).to_vec(),
+            pq_sig_a: prover_pq
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt_a)
+                .unwrap(),
+            state_root_b: root_b,
+            ed25519_sig_b: prover_ed.sign(&stmt_b).to_vec(),
+            pq_sig_b: prover_pq
+                .sign(crate::crypto::ctx::CROSS_DOMAIN_V1, &stmt_b)
+                .unwrap(),
+        };
+
+        let outcome = capped_guard
+            .submit_contradiction(domain_id, &valid, challenger_addr, 951)
+            .expect("capped contradiction must slash bond and clamp finder reward");
+        assert_eq!(outcome.slashed_bond_atoms, 50_000);
+        assert_eq!(
+            outcome.challenger_reward_atoms, 1_250,
+            "finder reward must be clamped to max_finder_reward_atoms (1_250 < 5_000 bps share)"
+        );
+        assert_eq!(outcome.burned_bond_atoms, 48_750);
     }
 }
