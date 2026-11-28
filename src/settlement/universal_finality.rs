@@ -917,6 +917,17 @@ pub enum FinalityVerdict {
 /// ceiling (`4_096`).
 const MAX_CERTIFICATE_DOMAINS: usize = crate::domain::registry::MAX_REGISTERED_DOMAINS;
 
+/// Settlement blocks a domain may stay silent before its last established row
+/// stops carrying value: one hour of settlement slots at
+/// [`crate::core::chain_config::SLOT_MS`].
+///
+/// A row whose [`DomainFinalityEntry::staleness`] exceeds this bound is not
+/// `Established` any more; the derivation turns it back into
+/// `Pending { EvidenceMissing }` and [`compose`] refuses a hand-built row that
+/// claims otherwise. The bound counts settlement blocks, never wall-clock
+/// time, so every node that applied the same blocks reaches the same verdict.
+pub const FINALITY_TRUST_PERIOD_BLOCKS: u64 = 60 * 60 * 1_000 / crate::core::chain_config::SLOT_MS;
+
 /// Which of the three non-blocking certificate buckets holds a domain row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FinalityBucket {
@@ -960,6 +971,14 @@ pub struct DomainFinalityEntry {
     pub guarantee_backing_hash: [u8; 32],
     /// Escrowed slashable operator bond backing this domain (in atoms).
     pub bond_atoms: u128,
+    /// Settlement blocks between the acceptance of the commitment this row
+    /// stands on and the checkpoint that sealed the row. `0` means the
+    /// commitment landed in the checkpoint block itself; a value above
+    /// [`FINALITY_TRUST_PERIOD_BLOCKS`] means the domain went silent for
+    /// longer than its trust period and the row cannot be `Established`.
+    /// The field is mandatory on the wire: a row that omits it is a `V1` row
+    /// and fails to decode instead of passing as fresh.
+    pub staleness: u64,
     /// Exact finality guarantee derived strictly from consensus state.
     pub guarantee: FinalityGuarantee,
     /// Three-valued verdict of the domain's own finality rule.
@@ -968,16 +987,18 @@ pub struct DomainFinalityEntry {
 
 impl DomainFinalityEntry {
     /// Canonical Keccak-256 digest binding every field of this row with explicit
-    /// length-prefixing and domain separation (`BDLM_FINALITY_CERT_ROW_V1`).
+    /// length-prefixing and domain separation (`BDLM_FINALITY_CERT_ROW_V2`;
+    /// `V2` added the fixed-width staleness counter after the checkpoint height).
     #[must_use]
     pub fn row_digest(&self) -> [u8; 32] {
         use sha3::{Digest as _, Keccak256};
 
         let mut hasher = Keccak256::new();
-        hasher.update(b"BDLM_FINALITY_CERT_ROW_V1");
+        hasher.update(b"BDLM_FINALITY_CERT_ROW_V2");
         hasher.update(self.domain_id.to_be_bytes());
         hasher.update(self.height.to_be_bytes());
         hasher.update(self.checkpoint_height.to_be_bytes());
+        hasher.update(self.staleness.to_be_bytes());
         hasher.update(self.state_root);
         let adapter_bytes = self.adapter_id.as_bytes();
         let adapter_len = u64::try_from(adapter_bytes.len()).unwrap_or(u64::MAX);
@@ -1236,6 +1257,15 @@ pub enum FinalityComposeError {
     },
     /// More than `MAX_CERTIFICATE_DOMAINS` domains were supplied.
     TooManyDomains,
+    /// An `Established` row is older than [`FINALITY_TRUST_PERIOD_BLOCKS`]:
+    /// the derivation would have turned it back into
+    /// `Pending { EvidenceMissing }`, so the row did not come from the state.
+    StaleEstablished {
+        /// Offending domain identifier.
+        domain_id: u32,
+        /// Settlement blocks since the row's commitment was accepted.
+        staleness: u64,
+    },
     /// A serialized or externally supplied certificate does not match its recomputed digest/roots.
     IntegrityMismatch,
 }
@@ -1374,6 +1404,12 @@ pub fn compose(
                 {
                     return Err(FinalityComposeError::AttestationUnbound {
                         domain_id: entry.domain_id,
+                    });
+                }
+                if entry.staleness > FINALITY_TRUST_PERIOD_BLOCKS {
+                    return Err(FinalityComposeError::StaleEstablished {
+                        domain_id: entry.domain_id,
+                        staleness: entry.staleness,
                     });
                 }
                 established.push(entry.clone());
@@ -2002,6 +2038,7 @@ mod tests {
             finality_proof_hash: [0x11; 32],
             guarantee_backing_hash: [0x22; 32],
             bond_atoms: 1_000_000,
+            staleness: 0,
             guarantee: FinalityGuarantee {
                 reversibility,
                 quantum_posture: QuantumClass::Hash,
@@ -2011,6 +2048,54 @@ mod tests {
             },
             verdict,
         }
+    }
+
+    #[test]
+    fn an_established_row_past_the_trust_period_does_not_compose() {
+        let mut stale = cert_entry(
+            3,
+            4_999,
+            FinalityReversibility::DeterministicQuorum,
+            FinalityVerdict::Established,
+        );
+        stale.staleness = FINALITY_TRUST_PERIOD_BLOCKS + 1;
+        assert_eq!(
+            compose(&[stale]),
+            Err(FinalityComposeError::StaleEstablished {
+                domain_id: 3,
+                staleness: FINALITY_TRUST_PERIOD_BLOCKS + 1,
+            })
+        );
+
+        let mut at_the_bound = cert_entry(
+            3,
+            4_999,
+            FinalityReversibility::DeterministicQuorum,
+            FinalityVerdict::Established,
+        );
+        at_the_bound.staleness = FINALITY_TRUST_PERIOD_BLOCKS;
+        let cert = compose(&[at_the_bound]).expect("a row at the bound still composes");
+        assert_eq!(cert.established_count, 1);
+
+        let mut stale_pending = cert_entry(
+            3,
+            4_999,
+            FinalityReversibility::DeterministicQuorum,
+            FinalityVerdict::Pending {
+                reason: FinalityPendingReason::EvidenceMissing,
+            },
+        );
+        stale_pending.staleness = FINALITY_TRUST_PERIOD_BLOCKS + 1;
+        let cert = compose(&[stale_pending]).expect("a stale pending row composes");
+        assert_eq!(cert.pending_count, 1);
+    }
+
+    #[test]
+    fn the_trust_period_is_one_hour_of_settlement_slots() {
+        assert_eq!(
+            FINALITY_TRUST_PERIOD_BLOCKS * crate::core::chain_config::SLOT_MS,
+            60 * 60 * 1_000
+        );
     }
 
     #[test]
@@ -2259,6 +2344,9 @@ mod tests {
         let mut c = base.clone();
         c.bond_atoms += 1;
         cases.push(("bond_atoms", c));
+        let mut c = base.clone();
+        c.staleness += 1;
+        cases.push(("staleness", c));
         let mut c = base.clone();
         c.guarantee.reversibility = FinalityReversibility::ProbabilisticWork { confirmations: 100 };
         cases.push(("reversibility.confirmations", c));
