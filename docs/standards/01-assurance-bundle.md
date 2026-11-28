@@ -112,7 +112,7 @@ The bundle is **derived from consensus state**, never declared by the submitter:
 `FinalityGuarantee::for_domain` (internal domains), `for_proof` (validity proofs) and
 `for_external_spec_declared` (external adapters). The last one is the honest limit of
 this standard: an external adapter's bundle comes from its registered spec, so a
-mis-registered spec produces a wrong bundle that this layer cannot see. It is the reason
+misregistered spec produces a wrong bundle that this layer cannot see. It is the reason
 the settlement gate keeps `guarantee_backing_hash` in every row of standard 3 - the
 declaration is at least pinned, so a quiet change of terms is detectable after the fact.
 

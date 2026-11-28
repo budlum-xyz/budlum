@@ -496,7 +496,6 @@ src/core/account.rs	fn	total_staked_supply
 src/core/account.rs	fn	total_unbonding_supply
 src/core/account.rs	fn	with_balance
 src/core/account.rs	fn	with_storage
-src/core/block.rs	fn	mine
 src/core/chain_config.rs	const	EPOCH_LEN
 src/core/chain_config.rs	const	MAX_VOTES_PER_MSG
 src/core/chain_config.rs	const	PROTOCOL_VERSION
