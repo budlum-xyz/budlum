@@ -474,6 +474,37 @@ impl MultiLaneMempool {
         self.seen_duty_windows
             .retain(|(_, window_id)| *window_id >= min_window);
     }
+
+    /// Evict committed transaction hashes across all lanes after block inclusion.
+    pub fn evict_committed(&mut self, committed: &[[u8; 32]]) {
+        for hash in committed {
+            for lane in self.lanes.values_mut() {
+                if let Some(entry) = lane.entries.remove(hash) {
+                    lane.used_bytes = lane.used_bytes.saturating_sub(entry.raw_bytes.len());
+                    match entry.replay {
+                        LaneReplayRule::AccountNonce { sender, nonce } => {
+                            lane.sender_nonces.remove(&(sender, nonce, 0));
+                        }
+                        LaneReplayRule::AptosSequence {
+                            sender, sequence, ..
+                        } => {
+                            lane.sender_nonces.remove(&(sender, sequence, 0));
+                        }
+                        LaneReplayRule::CosmosSequence {
+                            sender,
+                            account_number,
+                            sequence,
+                        } => {
+                            lane.sender_nonces
+                                .remove(&(sender, sequence, account_number));
+                        }
+                        LaneReplayRule::SolanaWindow { .. } | LaneReplayRule::DutyWindow { .. } => {
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

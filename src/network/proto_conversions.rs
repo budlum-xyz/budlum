@@ -2176,6 +2176,8 @@ impl From<&BlockHeader> for pb::ProtoBlockHeader {
             witness_root: header.witness_root.map(Vec::from).unwrap_or_default(),
             seat_participation: encode_seat_participation(&header.seat_participation),
             frame_hash: header.frame_hash.map(Vec::from).unwrap_or_default(),
+            uel_execution_root: header.uel_execution_root.map(Vec::from).unwrap_or_default(),
+            uel_receipts_root: header.uel_receipts_root.map(Vec::from).unwrap_or_default(),
             producer_public_key: header.producer_public_key.clone(),
             slashing_reports: header
                 .slashing_reports
@@ -2260,6 +2262,14 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
                 "block header seat_participation",
             )?,
             frame_hash: decode_optional_hash32(proto.frame_hash, "block header frame_hash")?,
+            uel_execution_root: decode_optional_hash32(
+                proto.uel_execution_root,
+                "block header uel_execution_root",
+            )?,
+            uel_receipts_root: decode_optional_hash32(
+                proto.uel_receipts_root,
+                "block header uel_receipts_root",
+            )?,
         })
     }
 }
@@ -2304,6 +2314,13 @@ impl From<&Block> for pb::ProtoBlock {
                 .as_ref()
                 .map(crate::aggregation::frame::ClaimFrame::encode)
                 .unwrap_or_default(),
+            uel_execution_root: block.uel_execution_root.map(Vec::from).unwrap_or_default(),
+            uel_receipts_root: block.uel_receipts_root.map(Vec::from).unwrap_or_default(),
+            uel_transactions: block
+                .uel_transactions
+                .iter()
+                .filter_map(|utx| bincode::serialize(utx).ok())
+                .collect(),
             producer_public_key: block.producer_public_key.clone(),
             slashing_reports: block
                 .slashing_reports
@@ -2406,6 +2423,27 @@ impl TryFrom<pb::ProtoBlock> for Block {
             )?,
             frame_hash: decode_optional_hash32(proto.frame_hash, "block frame_hash")?,
             claim_frame: crate::aggregation::chain::decode_wire_frame(&proto.claim_frame)?,
+            uel_execution_root: decode_optional_hash32(
+                proto.uel_execution_root,
+                "block uel_execution_root",
+            )?,
+            uel_receipts_root: decode_optional_hash32(
+                proto.uel_receipts_root,
+                "block uel_receipts_root",
+            )?,
+            uel_transactions: {
+                if proto.uel_transactions.len() > crate::consensus::MAX_TRANSACTIONS_PER_BLOCK {
+                    return Err("Too many UEL transactions in block".into());
+                }
+                let mut decoded_uel = Vec::with_capacity(proto.uel_transactions.len());
+                for raw_utx in proto.uel_transactions {
+                    decoded_uel.push(
+                        decode_bounded_bincode(&raw_utx, 512 * 1024)
+                            .map_err(|e| format!("Invalid block UEL transaction: {e}"))?,
+                    );
+                }
+                decoded_uel
+            },
         })
     }
 }

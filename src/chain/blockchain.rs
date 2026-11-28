@@ -154,6 +154,9 @@ pub struct Blockchain {
         ),
     >,
     pub plugin_registry: DomainPluginRegistry,
+    pub execution_coordinator:
+        std::sync::Mutex<crate::execution::coordinator::ExecutionCoordinator>,
+    pub uer_receipt_batches: BTreeMap<u64, Vec<crate::execution::uer::UniversalExecutionReceipt>>,
     /// Node-local registry for sovereign, bridgeless `PoA` Garden domains.
     /// Kept outside `self.state` and outside the state root so a private
     /// Garden observed by one node never diverges Budlum's consensus state
@@ -1323,6 +1326,10 @@ impl Blockchain {
             global_header_openings,
             app_binding_payment_windows: BTreeMap::new(),
             plugin_registry: DomainPluginRegistry::new(),
+            execution_coordinator: std::sync::Mutex::new(
+                crate::execution::coordinator::ExecutionCoordinator::new(),
+            ),
+            uer_receipt_batches: BTreeMap::new(),
             garden_domains: ConsensusDomainRegistry::new(),
             garden_commitments: DomainCommitmentRegistry::new(),
             garden_commitment_keys: BTreeMap::new(),
@@ -5975,6 +5982,37 @@ impl Blockchain {
         preceding_chain: &[Block],
         aggregation: &crate::aggregation::params::AggParams,
     ) -> Result<(AccountState, Vec<DomainId>), String> {
+        let mut default_coord = crate::execution::coordinator::ExecutionCoordinator::new();
+        let (state, unfrozen, _) = Self::apply_block_effects_with_uel(
+            base_state,
+            block,
+            preceding_chain,
+            aggregation,
+            &mut default_coord,
+            false,
+        )?;
+        Ok((state, unfrozen))
+    }
+
+    fn apply_block_effects_with_uel(
+        base_state: &AccountState,
+        block: &Block,
+        preceding_chain: &[Block],
+        aggregation: &crate::aggregation::params::AggParams,
+        coordinator: &mut crate::execution::coordinator::ExecutionCoordinator,
+        enforce_header_uel_roots: bool,
+    ) -> Result<
+        (
+            AccountState,
+            Vec<DomainId>,
+            Option<(
+                [u8; 32],
+                [u8; 32],
+                Vec<crate::execution::uer::UniversalExecutionReceipt>,
+            )>,
+        ),
+        String,
+    > {
         // The claim fees of the block: who pays, which transaction fails and
         // who is paid. Empty for a block without a claim frame.
         let claim_fees = crate::aggregation::chain::settlement_of_with_accounts(
@@ -5995,6 +6033,73 @@ impl Blockchain {
             &claim_fees,
         )
         .map_err(|e| format!("Failed to apply block: {e}"))?;
+        let uel_outcome = if !block.uel_transactions.is_empty() {
+            let uel_ctx = budlum_uel_abi::BlockContext {
+                chain_id: block.chain_id,
+                height: block.index,
+                timestamp_ms: u64::try_from(block.timestamp).unwrap_or(u64::MAX),
+            };
+            let proposer = block.producer.unwrap_or_else(Address::zero);
+            let raw_receipts = next_state
+                .execute_uel_block(coordinator, uel_ctx, proposer, &block.uel_transactions)
+                .map_err(|e| format!("Failed to execute UEL block: {e}"))?;
+            let post_exec_root = next_state.execution_state.execution_root();
+            let mut uer_receipts = Vec::with_capacity(raw_receipts.len());
+            for (idx, (utx, rcpt)) in block
+                .uel_transactions
+                .iter()
+                .zip(raw_receipts.iter())
+                .enumerate()
+            {
+                let idx_u32 = u32::try_from(idx).unwrap_or(u32::MAX);
+                uer_receipts.push(
+                    crate::execution::uer::UniversalExecutionReceipt::from_uel_receipt(
+                        &uel_ctx,
+                        idx_u32,
+                        utx.ee,
+                        rcpt,
+                        post_exec_root,
+                        None,
+                    ),
+                );
+            }
+            let uer_batch_root = crate::execution::uer::compute_uer_batch_root(&uer_receipts)
+                .map_err(|e| format!("Failed to compute UER-1 batch root: {e}"))?;
+            if enforce_header_uel_roots {
+                if block.uel_execution_root != Some(post_exec_root) {
+                    return Err(format!(
+                        "UEL execution_root mismatch: header {:?}, computed {}",
+                        block.uel_execution_root.map(hex::encode),
+                        hex::encode(post_exec_root)
+                    ));
+                }
+                if block.uel_receipts_root != Some(uer_batch_root) {
+                    return Err(format!(
+                        "UER-1 receipts_root mismatch: header {:?}, computed {}",
+                        block.uel_receipts_root.map(hex::encode),
+                        hex::encode(uer_batch_root)
+                    ));
+                }
+            }
+            Some((post_exec_root, uer_batch_root, uer_receipts))
+        } else {
+            if enforce_header_uel_roots && block.uel_receipts_root.is_some() {
+                return Err("Block carries uel_receipts_root without UEL transactions".into());
+            }
+            if enforce_header_uel_roots {
+                if let Some(claimed_exec_root) = block.uel_execution_root {
+                    let actual_exec_root = next_state.execution_state.execution_root();
+                    if claimed_exec_root != actual_exec_root {
+                        return Err(format!(
+                            "UEL execution_root mismatch on empty-UEL block: expected {}, got {}",
+                            hex::encode(actual_exec_root),
+                            hex::encode(claimed_exec_root)
+                        ));
+                    }
+                }
+            }
+            None
+        };
         Self::apply_filiz_reveal(&mut next_state, block)?;
         Self::apply_system_effects(&mut next_state, block);
         Self::apply_block_slashing_reports_in_state(&mut next_state, block)?;
@@ -6104,7 +6209,7 @@ impl Blockchain {
         // Fee settlement has a single authority: Executor::apply_block_checked
         // Credits the producer exactly once with flat fee, metabolic burn.
 
-        Ok((next_state, unfrozen))
+        Ok((next_state, unfrozen, uel_outcome))
     }
 
     /// Coding audits for the block, after its transactions and the epoch
@@ -6200,6 +6305,69 @@ impl Blockchain {
                 Vec::new()
             }
         }
+    }
+
+    fn register_execution_worker(
+        &mut self,
+        endpoint: crate::execution::coordinator::worker::WorkerEndpoint,
+    ) {
+        if let Ok(mut coord) = self.execution_coordinator.lock() {
+            coord.register_worker(endpoint);
+        }
+    }
+
+    /// Configure external `budlum-ee-*` Unix-socket workers at node startup.
+    ///
+    /// When `is_validator` is `true`, any missing `required` worker binary or
+    /// socket fails closed before mutating coordinator registrations.
+    pub fn configure_execution_workers(
+        &mut self,
+        specs: &[crate::execution::coordinator::WorkerSocketSpec],
+        is_validator: bool,
+    ) -> Result<(), String> {
+        for spec in specs {
+            let bin_ok = spec.binary_path.as_ref().is_some_and(|p| p.is_file());
+            let sock_ok = spec.socket_path.exists();
+            if !bin_ok && !sock_ok && spec.required && is_validator {
+                return Err(format!(
+                    "validator refuses startup: required EE 0x{:02x} worker missing at {}",
+                    spec.ee.0,
+                    spec.socket_path.display()
+                ));
+            }
+        }
+        #[cfg(unix)]
+        for spec in specs {
+            let bin_ok = spec.binary_path.as_ref().is_some_and(|p| p.is_file());
+            let sock_ok = spec.socket_path.exists();
+            if bin_ok || sock_ok {
+                self.register_execution_worker(
+                    crate::execution::coordinator::worker::WorkerEndpoint::unix_socket(
+                        spec.ee,
+                        spec.socket_path.clone(),
+                        spec.binary_path.clone(),
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Construct a `UER-1` Merkle inclusion proof and committed batch root for `tx_hash`.
+    #[must_use]
+    /// Convenience: kept for RPC and light-client receipt proof endpoints.
+    pub fn prove_uel_receipt(
+        &self,
+        tx_hash: &[u8; 32],
+    ) -> Option<(crate::execution::uer::UerInclusionProof, [u8; 32])> {
+        for batch in self.uer_receipt_batches.values().rev() {
+            if let Some(pos) = batch.iter().position(|r| &r.tx_hash == tx_hash) {
+                let proof = crate::execution::uer::prove_uer_inclusion(batch, pos).ok()?;
+                let root = crate::execution::uer::compute_uer_batch_root(batch).ok()?;
+                return Some((proof, root));
+            }
+        }
+        None
     }
 
     pub fn produce_block(&mut self, producer_address: Address) -> Option<(Block, Vec<[u8; 32]>)> {
@@ -6303,6 +6471,21 @@ impl Blockchain {
                     node.drop_frame(frame);
                 }
                 return None;
+            }
+        }
+        {
+            let selected_lanes = self
+                .mempool
+                .select_lane_envelopes(crate::execution::coordinator::gas::BLOCK_BGU_LIMIT);
+            for lane_entry in selected_lanes {
+                if let Ok(utx) = bincode::deserialize::<crate::execution::coordinator::UelTx>(
+                    &lane_entry.raw_bytes,
+                ) {
+                    block.uel_transactions.push(utx);
+                }
+            }
+            if !block.uel_transactions.is_empty() {
+                block.tx_root = block.calculate_tx_root();
             }
         }
         block.witness_root = Some(block.calculate_witness_root());
@@ -6458,18 +6641,31 @@ impl Blockchain {
         let nft_burn_cids = Self::collect_nft_burn_cids_from_state(&self.state, &block);
 
         let ai_outcomes_before = self.state.ai_registry.outcomes.len();
-        let (mut committed_state, unfrozen_domains) = match Self::apply_block_effects_with_unfreezes(
-            &self.state,
-            &block,
-            &self.chain,
-            &self.aggregation_params(),
-        ) {
-            Ok(res) => res,
-            Err(error) => {
-                tracing::warn!("Local block effects failed: {error}");
-                return None;
+        let agg_params = self.aggregation_params();
+        let (mut committed_state, unfrozen_domains, uel_produced) = {
+            let mut coord_guard = match self.execution_coordinator.lock() {
+                Ok(g) => g,
+                Err(_) => return None,
+            };
+            match Self::apply_block_effects_with_uel(
+                &self.state,
+                &block,
+                &self.chain,
+                &agg_params,
+                &mut coord_guard,
+                false,
+            ) {
+                Ok(res) => res,
+                Err(error) => {
+                    tracing::warn!("Local block effects failed: {error}");
+                    return None;
+                }
             }
         };
+        if let Some((exec_root, uer_root, _)) = &uel_produced {
+            block.uel_execution_root = Some(*exec_root);
+            block.uel_receipts_root = Some(*uer_root);
+        }
 
         // The block carried slashing evidence and the state move above
         // applied it (same-chain only, exactly what apply_system_effects
@@ -6534,6 +6730,12 @@ impl Blockchain {
         // The deprecated liveness-slashing flag is intentionally irrelevant:
         // committed epoch close suspends absence and never cuts stake.
 
+        if let Some((_, _, uer_receipts)) = uel_produced {
+            let committed_hashes: Vec<[u8; 32]> =
+                block.uel_transactions.iter().map(|u| u.tx_hash).collect();
+            self.mempool.evict_committed_uel(&committed_hashes);
+            self.uer_receipt_batches.insert(block.index, uer_receipts);
+        }
         let frozen_before = Self::frozen_domain_ids(&self.state);
         self.state = committed_state;
         self.prune_unregistered_bud3_symbols();
@@ -7131,12 +7333,20 @@ impl Blockchain {
         let nft_burn_cids = Self::collect_nft_burn_cids_from_state(&self.state, &block);
 
         let ai_outcomes_before = self.state.ai_registry.outcomes.len();
-        let (mut commit_state, unfrozen_domains) = Self::apply_block_effects_with_unfreezes(
-            &self.state,
-            &block,
-            &self.chain,
-            &aggregation,
-        )?;
+        let (mut commit_state, unfrozen_domains, uel_validated) = {
+            let mut coord_guard = self
+                .execution_coordinator
+                .lock()
+                .map_err(|_| "Execution coordinator mutex poisoned".to_string())?;
+            Self::apply_block_effects_with_uel(
+                &self.state,
+                &block,
+                &self.chain,
+                &aggregation,
+                &mut coord_guard,
+                block.index > 0,
+            )?
+        };
 
         if let Some(ref m) = self.metrics {
             if let Some(evidences) = &block.slashing_evidence {
@@ -7192,6 +7402,12 @@ impl Blockchain {
         // Counts as "participated". Without this, `validate_and_add_block`
         // Would skip liveness accounting on a sync path.
 
+        if let Some((_, _, uer_receipts)) = uel_validated {
+            let committed_hashes: Vec<[u8; 32]> =
+                block.uel_transactions.iter().map(|u| u.tx_hash).collect();
+            self.mempool.evict_committed_uel(&committed_hashes);
+            self.uer_receipt_batches.insert(block.index, uer_receipts);
+        }
         let frozen_before = Self::frozen_domain_ids(&self.state);
         self.state = commit_state;
         self.prune_unregistered_bud3_symbols();
@@ -11014,6 +11230,10 @@ impl Clone for Blockchain {
             global_header_openings: self.global_header_openings.clone(),
             app_binding_payment_windows: self.app_binding_payment_windows.clone(),
             plugin_registry: DomainPluginRegistry::new(),
+            execution_coordinator: std::sync::Mutex::new(
+                crate::execution::coordinator::ExecutionCoordinator::new(),
+            ),
+            uer_receipt_batches: BTreeMap::new(),
             garden_domains: self.garden_domains.clone(),
             garden_commitments: self.garden_commitments.clone(),
             garden_commitment_keys: self.garden_commitment_keys.clone(),

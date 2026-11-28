@@ -1306,6 +1306,24 @@ async fn async_main() {
     .with_metrics(metrics.clone())
     .with_sharding(sharding_config);
 
+    if let Some(ref workers) = config.execution.workers {
+        let specs: Vec<budlum_core::execution::coordinator::WorkerSocketSpec> = workers
+            .iter()
+            .map(|w| budlum_core::execution::coordinator::WorkerSocketSpec {
+                ee: budlum_uel_abi::EeId(w.ee),
+                socket_path: PathBuf::from(&w.socket_path),
+                binary_path: w.binary_path.as_ref().map(PathBuf::from),
+                required: w.required.unwrap_or(true),
+            })
+            .collect();
+        let is_validator_role =
+            config.validator_key_file.is_some() || config.validator_address.is_some();
+        if let Err(e) = blockchain.configure_execution_workers(&specs, is_validator_role) {
+            eprintln!("CRITICAL: execution worker configuration refused: {e}");
+            std::process::exit(1);
+        }
+    }
+
     // PQ anchor emission: off unless the node says otherwise.
     match config.anchor.mode.as_deref().unwrap_or("off") {
         "off" => {}

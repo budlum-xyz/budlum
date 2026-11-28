@@ -78,6 +78,10 @@ pub struct BlockHeader {
     /// another chain.
     #[serde(default)]
     pub frame_hash: Option<[u8; 32]>,
+    #[serde(default)]
+    pub uel_execution_root: Option<[u8; 32]>,
+    #[serde(default)]
+    pub uel_receipts_root: Option<[u8; 32]>,
 }
 
 /// Stand-in bytes hashed when slashing evidence cannot be serialized.
@@ -111,6 +115,8 @@ struct BlockPreimage<'a> {
     witness_root: Option<&'a [u8; 32]>,
     seat_participation: Option<&'a crate::validators::committee::SeatParticipation>,
     frame_hash: Option<&'a [u8; 32]>,
+    uel_execution_root: Option<&'a [u8; 32]>,
+    uel_receipts_root: Option<&'a [u8; 32]>,
 }
 
 fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
@@ -212,6 +218,14 @@ fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
         fields.push(b"BDLM_BLOCK_FRAME_HASH_V1");
         fields.push(frame_hash.as_slice());
     }
+    if let Some(uel_exec_root) = &p.uel_execution_root {
+        fields.push(b"BDLM_UEL_EXEC_ROOT_V1");
+        fields.push(uel_exec_root.as_slice());
+    }
+    if let Some(uel_rcpt_root) = &p.uel_receipts_root {
+        fields.push(b"BDLM_UER_RECEIPTS_ROOT_V1");
+        fields.push(uel_rcpt_root.as_slice());
+    }
     hash_fields_bytes(&fields)
 }
 
@@ -241,6 +255,8 @@ impl BlockHeader {
             witness_root: block.witness_root,
             seat_participation: block.seat_participation.clone(),
             frame_hash: block.frame_hash,
+            uel_execution_root: block.uel_execution_root,
+            uel_receipts_root: block.uel_receipts_root,
         }
     }
 
@@ -272,6 +288,8 @@ impl BlockHeader {
             witness_root: self.witness_root.as_ref(),
             seat_participation: self.seat_participation.as_ref(),
             frame_hash: self.frame_hash.as_ref(),
+            uel_execution_root: self.uel_execution_root.as_ref(),
+            uel_receipts_root: self.uel_receipts_root.as_ref(),
         })
     }
 
@@ -366,6 +384,12 @@ pub struct Block {
     /// body; the header commits to it through `frame_hash`.
     #[serde(default)]
     pub claim_frame: Option<crate::aggregation::frame::ClaimFrame>,
+    #[serde(default)]
+    pub uel_execution_root: Option<[u8; 32]>,
+    #[serde(default)]
+    pub uel_receipts_root: Option<[u8; 32]>,
+    #[serde(default)]
+    pub uel_transactions: Vec<crate::execution::coordinator::UelTx>,
 }
 
 impl Block {
@@ -412,6 +436,9 @@ impl Block {
             seat_participation: None,
             frame_hash: None,
             claim_frame: None,
+            uel_execution_root: None,
+            uel_receipts_root: None,
+            uel_transactions: Vec::new(),
         };
         block.tx_root = block.calculate_tx_root();
         block.hash = block.calculate_hash();
@@ -526,6 +553,19 @@ impl Block {
             })
             .collect();
 
+        for uel_tx in &self.uel_transactions {
+            let uel_digest = hash_fields_bytes(&[
+                b"BDLM_UEL_TX_LEAF_V1",
+                &uel_tx.signing_message(self.chain_id),
+                &uel_tx.auth.public_key,
+                &uel_tx.auth.signature,
+            ]);
+            let mut leaf = Vec::with_capacity(1 + 32);
+            leaf.push(0x02);
+            leaf.extend_from_slice(&uel_digest);
+            tx_hashes.push(crate::core::hash::calculate_hash_bytes(&leaf));
+        }
+
         if tx_hashes.is_empty() {
             return "0".repeat(64);
         }
@@ -600,6 +640,8 @@ impl Block {
             witness_root: self.witness_root.as_ref(),
             seat_participation: self.seat_participation.as_ref(),
             frame_hash: self.frame_hash.as_ref(),
+            uel_execution_root: self.uel_execution_root.as_ref(),
+            uel_receipts_root: self.uel_receipts_root.as_ref(),
         })
     }
     pub fn sign(&mut self, keypair: &KeyPair) {
