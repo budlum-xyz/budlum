@@ -917,6 +917,17 @@ impl ExternalDomainRegistry {
             }));
         }
 
+        // 7. The caller's policy, against the backing the adapter attested.
+        //    Every adapter refuses an unslashable backing itself when the
+        //    policy demands one, and the registry repeats the rule here for
+        //    the reason it repeats the adapter binding in step 2: the
+        //    boundary stays fail-closed for an adapter that forgets. The rule
+        //    itself lives on the policy (`VerificationPolicy::admits_backing`)
+        //    so the adapters, the bridge and this door all read one text.
+        policy
+            .admits_backing(&attestation.security)
+            .map_err(RegistryError::Adapter)?;
+
         Ok((attestation, observed))
     }
 
@@ -1783,5 +1794,172 @@ mod tests {
             matches!(swapped, Err(RegistryError::AlreadySlashed { .. })),
             "swapped-order equivocation replay must be refused: {swapped:?}"
         );
+    }
+
+    /// The fixture adapter with the backing of the caller's choosing. It
+    /// ignores the policy exactly as [`Fix`] does, which is the point: it
+    /// stands in for an adapter that forgot the rule, so the test measures
+    /// what the registry does on its own.
+    struct FixBacked(crate::cross_domain::external::spec::SecurityBacking);
+
+    impl crate::cross_domain::external::spec::ExternalFinalityAdapter for FixBacked {
+        fn descriptor(&self) -> AdapterDescriptor {
+            Fix.descriptor()
+        }
+
+        fn verify(
+            &self,
+            evidence: &RawConsensusEvidence,
+            policy: &VerificationPolicy,
+        ) -> Result<FinalityAttestation, AdapterError> {
+            let mut attestation = Fix.verify(evidence, policy)?;
+            attestation.security = self.0;
+            Ok(attestation)
+        }
+
+        fn fault_probes(&self) -> Vec<FaultProbe> {
+            Fix.fault_probes()
+        }
+
+        fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
+            Fix.golden_evidence()
+        }
+    }
+
+    /// A registered domain with one bonded prover and no attestation yet, so
+    /// the golden evidence is still free to submit.
+    fn registered_empty() -> (ExternalDomainRegistry, DomainKey) {
+        let mut registry = ExternalDomainRegistry::new();
+        let admission = admit(&Fix, &VerificationPolicy::strict(10));
+        assert!(admission.admitted, "the fixture adapter must admit");
+        let econ = economics();
+        let bond = econ.required_bond_atoms();
+        let key = registry
+            .register(
+                "testnet",
+                Fix.descriptor(),
+                econ,
+                VersionPolicy::single(AdapterId::from_name("fix"), 1, 100),
+                &admission,
+                bond,
+                Address::from([7u8; 32]),
+            )
+            .expect("a fresh domain registers");
+        (registry, key)
+    }
+
+    fn slashable_policy() -> VerificationPolicy {
+        VerificationPolicy {
+            require_slashable: true,
+            ..VerificationPolicy::strict(10)
+        }
+    }
+
+    /// The caller demanded slashable backing; the adapter ignored the demand
+    /// and attested none. The registry must refuse on its own, record the
+    /// refusal, and store nothing - on both the commit path and the
+    /// verification-only path the quorum uses.
+    #[test]
+    fn the_registry_refuses_an_unslashable_backing_the_policy_forbids() {
+        use crate::cross_domain::external::spec::{ProofSystem, SecurityBacking};
+        use crate::crypto::facts::ObservedScheme;
+        use crate::crypto::scheme::SchemeId;
+
+        let unslashable = [
+            SecurityBacking::None,
+            SecurityBacking::Authority { count: 4 },
+            SecurityBacking::Work {
+                difficulty_bits: 80,
+            },
+            SecurityBacking::Zk {
+                system: ProofSystem::Stark,
+                public_inputs_digest: [3; 32],
+            },
+            SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG),
+                signers: 512,
+                required: 342,
+                total_weight: 512,
+                slashable: false,
+            },
+        ];
+        for backing in unslashable {
+            let (mut registry, key) = registered_empty();
+            let adapter = FixBacked(backing);
+            let golden = adapter.golden_evidence().expect("golden");
+            assert!(
+                adapter.verify(&golden, &slashable_policy()).is_ok(),
+                "the fixture must ignore the policy, or the test measures the adapter"
+            );
+
+            let err = registry
+                .evaluate(&adapter, &golden, &slashable_policy())
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    RegistryError::Adapter(AdapterError::UnslashableBacking)
+                ),
+                "evaluate must refuse {backing:?} under require_slashable, got: {err:?}"
+            );
+
+            let err = registry
+                .submit(&adapter, &golden, &slashable_policy())
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    RegistryError::Adapter(AdapterError::UnslashableBacking)
+                ),
+                "submit must refuse {backing:?} under require_slashable, got: {err:?}"
+            );
+            let reg = registry.domain(&key).expect("domain");
+            assert_eq!(reg.record.attestations_accepted, 0, "{backing:?}");
+            assert_eq!(reg.record.attestations_refused, 1, "{backing:?}");
+            assert!(reg.latest_attestation().is_none(), "{backing:?}");
+            assert_eq!(
+                reg.record.state,
+                DomainState::Admitted,
+                "a refusal is not a first acceptance ({backing:?})"
+            );
+        }
+    }
+
+    /// The same evidence under the same demand, with a backing that satisfies
+    /// it, and under no demand with a backing that would not: both accepted,
+    /// so the rule refuses exactly what the policy names and nothing else.
+    #[test]
+    fn the_registry_takes_the_backing_the_policy_admits() {
+        use crate::cross_domain::external::spec::SecurityBacking;
+        use crate::crypto::facts::ObservedScheme;
+        use crate::crypto::scheme::SchemeId;
+
+        let bonded = SecurityBacking::SignatureSet {
+            scheme: ObservedScheme::Scheme(SchemeId::ED25519),
+            signers: 100,
+            required: 67,
+            total_weight: 100,
+            slashable: true,
+        };
+        let (mut registry, key) = registered_empty();
+        let adapter = FixBacked(bonded);
+        let golden = adapter.golden_evidence().expect("golden");
+        let att = registry
+            .submit(&adapter, &golden, &slashable_policy())
+            .expect("a slashable signature set satisfies require_slashable");
+        assert_eq!(att.security, bonded);
+        let reg = registry.domain(&key).expect("domain");
+        assert_eq!(reg.record.attestations_accepted, 1);
+        assert_eq!(reg.record.attestations_refused, 0);
+        assert_eq!(reg.record.last_backing, Some(bonded));
+
+        let (mut registry, key) = registered_empty();
+        let golden = Fix.golden_evidence().expect("golden");
+        registry
+            .submit(&Fix, &golden, &VerificationPolicy::strict(10))
+            .expect("without the demand an empty backing is the adapter's business");
+        let reg = registry.domain(&key).expect("domain");
+        assert_eq!(reg.record.attestations_accepted, 1);
+        assert_eq!(reg.record.last_backing, Some(SecurityBacking::None));
     }
 }
