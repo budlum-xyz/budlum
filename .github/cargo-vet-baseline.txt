@@ -1,4 +1,4 @@
-405
+404
 # ---------------------------------------------------------------------------
 # cargo-vet ratchet baseline: the number of unvetted dependencies.
 # The FIRST bare-number line of this file is the baseline.
@@ -37,3 +37,10 @@
 # reports `unvetted dependencies: 405 | baseline: 405` with no slack. Tightened
 # on this branch and on the one it merges into together, so no branch carries a
 # ratchet sitting above the debt it measures.
+
+# 2026-11-26: 405 -> 404. Two version-exact exemptions (rand 0.10.4,
+# bls12_381 0.9.2) recorded after a measured `cargo vet diff`, so the count
+# fell below the baseline instead of the baseline being raised over the
+# count. The gate printed the improvement line itself; tightening here is
+# what that line asks for. Measured: `cargo-vet unvetted dependencies: 404 |
+# baseline: 404`.
