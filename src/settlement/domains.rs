@@ -1056,6 +1056,16 @@ impl CommitmentAttestation {
     /// finality profile derivation without loosening [`Self::for_domain`].
     #[must_use]
     pub fn for_proof(domain: &ConsensusDomain, proof: &FinalityProof) -> Self {
+        if matches!(proof, FinalityProof::Raw(_)) {
+            // Raw bytes are refused by every adapter and bind no commitment
+            // fields. Attestation must be fail-closed regardless of domain kind.
+            return Self {
+                state_root: false,
+                tx_root: false,
+                event_root: false,
+                parent: false,
+            };
+        }
         match (&domain.kind, proof) {
             (ConsensusKind::Dag, FinalityProof::Dag { .. } | FinalityProof::DagPq { .. })
             | (ConsensusKind::Poh, FinalityProof::Poh { .. } | FinalityProof::PohPq { .. })
@@ -5966,5 +5976,21 @@ mod tests {
             "unexpected err: {err}"
         );
         assert_eq!(state.get_balance(&funded), locked);
+    }
+
+    #[test]
+    fn commitment_attestation_for_raw_proof_is_fail_closed() {
+        let mut domain = default_domain(777, ConsensusKind::PoW, 7777, "pow-v1", 1);
+        // PoW non-Bitcoin-SPV normally attests state/tx/event/parent, but a Raw
+        // proof binds nothing and must not inherit that attestation.
+        let att = CommitmentAttestation::for_proof(&domain, &FinalityProof::Raw(vec![1, 2, 3]));
+        assert!(!att.state_root);
+        assert!(!att.tx_root);
+        assert!(!att.event_root);
+        assert!(!att.parent);
+
+        domain.kind = ConsensusKind::PoA;
+        let att_poa = CommitmentAttestation::for_proof(&domain, &FinalityProof::Raw(vec![9]));
+        assert!(!att_poa.state_root && !att_poa.tx_root && !att_poa.event_root && !att_poa.parent);
     }
 }
