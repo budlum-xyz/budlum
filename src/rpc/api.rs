@@ -1672,12 +1672,7 @@ pub trait BudlumApi {
     #[method(name = "bud_dataMarketPrepareListing")]
     async fn data_market_prepare_listing(
         &self,
-        seller: String,
-        content_id: serde_json::Value,
-        object_key: String,
-        nft_id: String,
-        price_atoms: u64,
-        grant_duration_epochs: u64,
+        request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a sealed Data Market purchase transaction without mutating state.
@@ -1689,15 +1684,7 @@ pub trait BudlumApi {
     #[method(name = "bud_dataMarketPreparePurchaseTx")]
     async fn data_market_prepare_purchase(
         &self,
-        buyer: String,
-        listing_id: String,
-        content_id: serde_json::Value,
-        price_atoms: u64,
-        buyer_ml_dsa_87_pk: String,
-        buyer_hpke_pk: String,
-        grant_nonce: String,
-        one_time_ml_dsa_65_pk: String,
-        sealed_key_package: String,
+        request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Compute a dry-run atomic multi-token split-tender payment quote across domains.

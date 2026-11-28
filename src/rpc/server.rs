@@ -5949,13 +5949,43 @@ impl BudlumApiServer for RpcServer {
 
     async fn data_market_prepare_listing(
         &self,
-        seller: String,
-        content_id: serde_json::Value,
-        object_key: String,
-        nft_id: String,
-        price_atoms: u64,
-        grant_duration_epochs: u64,
+        request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let field = |name: &str| {
+            request.get(name).cloned().ok_or_else(|| {
+                ErrorObjectOwned::owned(-32602, format!("missing `{name}`"), None::<()>)
+            })
+        };
+        let as_str = |name: &str| -> Result<String, ErrorObjectOwned> {
+            field(name)?
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("`{name}` must be a string"),
+                        None::<()>,
+                    )
+                })
+        };
+        let seller = as_str("seller")?;
+        let content_id = field("contentId")?;
+        let object_key = as_str("objectKey")?;
+        let nft_id = as_str("nftId")?;
+        let price_atoms = field("priceAtoms")?
+            .as_u64()
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(-32602, "`priceAtoms` must be a u64", None::<()>)
+            })?;
+        let grant_duration_epochs = field("grantDurationEpochs")?
+            .as_u64()
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    "`grantDurationEpochs` must be a u64",
+                    None::<()>,
+                )
+            })?;
         let clean_seller = seller.strip_prefix("0x").unwrap_or(&seller);
         let seller_addr = Address::from_hex(clean_seller).map_err(|e| {
             ErrorObjectOwned::owned(
@@ -6035,16 +6065,38 @@ impl BudlumApiServer for RpcServer {
 
     async fn data_market_prepare_purchase(
         &self,
-        buyer: String,
-        listing_id: String,
-        content_id: serde_json::Value,
-        price_atoms: u64,
-        buyer_ml_dsa_87_pk: String,
-        buyer_hpke_pk: String,
-        grant_nonce: String,
-        one_time_ml_dsa_65_pk: String,
-        sealed_key_package: String,
+        request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let field = |name: &str| {
+            request.get(name).cloned().ok_or_else(|| {
+                ErrorObjectOwned::owned(-32602, format!("missing `{name}`"), None::<()>)
+            })
+        };
+        let as_str = |name: &str| -> Result<String, ErrorObjectOwned> {
+            field(name)?
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("`{name}` must be a string"),
+                        None::<()>,
+                    )
+                })
+        };
+        let buyer = as_str("buyer")?;
+        let listing_id = as_str("listingId")?;
+        let content_id = field("contentId")?;
+        let price_atoms = field("priceAtoms")?
+            .as_u64()
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(-32602, "`priceAtoms` must be a u64", None::<()>)
+            })?;
+        let buyer_ml_dsa_87_pk = as_str("buyerMlDsa87Pk")?;
+        let buyer_hpke_pk = as_str("buyerHpkePk")?;
+        let grant_nonce = as_str("grantNonce")?;
+        let one_time_ml_dsa_65_pk = as_str("oneTimeMlDsa65Pk")?;
+        let sealed_key_package = as_str("sealedKeyPackage")?;
         let clean_buyer = buyer.strip_prefix("0x").unwrap_or(&buyer);
         let buyer_addr = Address::from_hex(clean_buyer).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid buyer address: {e}"), None::<()>)
@@ -9768,9 +9820,11 @@ impl BudlumApiServer for RpcServer {
                 bucket,
                 declared_len,
                 raw_flags,
-                lifetime_epochs,
                 pre_sealed,
-                now,
+                crate::storage::bud3::rpc::UploadTiming {
+                    lifetime_epochs,
+                    now_sec: now,
+                },
             )
             .map_err(|e| ErrorObjectOwned::owned(-32000, format!("{e:?}"), None::<()>))?;
         Ok(serde_json::json!({ "session_id": session_id }))

@@ -2448,7 +2448,7 @@ fn execute_three_nft(
                 )));
             }
             let _ = ctx;
-            state
+            let _ = state
                 .settlement
                 .three_nft
                 .pin(crate::storage::three_nft::PinRow {
@@ -2576,7 +2576,14 @@ fn execute_data_layer(
             )?,
         );
     }
-    let layers = state.settlement.data_layers.as_mut().expect("fitted above");
+    let Some(layers) = state.settlement.data_layers.as_mut() else {
+        // The block above either fitted a registry or returned; reaching here
+        // without one would be a logic error, and refusing is still better
+        // than a panic inside block execution.
+        return Err(SettlementTxError::Refused(String::from(
+            "data layer: registry missing after fit",
+        )));
+    };
 
     let result = match tx {
         DataLayerTx::ToPseudonymous {
@@ -2644,7 +2651,7 @@ fn execute_view_grant(
                     ctx.sender,
                     *grantee,
                     *key_id,
-                    policy.clone(),
+                    *policy,
                     state.epoch_index,
                 )
                 .map_err(|err: ViewGrantError| {

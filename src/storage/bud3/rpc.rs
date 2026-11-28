@@ -127,6 +127,18 @@ impl Default for Bud3RpcService {
     }
 }
 
+/// The two clocks an upload session needs: how long it may live, and when
+/// "now" is. Passed together because they always travel together and a
+/// seven-position list made the caller's `now` easy to swap with any other
+/// `u64`.
+#[derive(Debug, Clone, Copy)]
+pub struct UploadTiming {
+    /// How many epochs the session stays open.
+    pub lifetime_epochs: u64,
+    /// Wall clock in seconds at the moment of opening.
+    pub now_sec: u64,
+}
+
 impl Bud3RpcService {
     /// Open an upload session without a placement context.
     ///
@@ -147,17 +159,16 @@ impl Bud3RpcService {
         ip_bucket: [u8; 16],
         declared_len: u64,
         raw_flags: u8,
-        lifetime_epochs: u64,
         pre_sealed: bool,
-        now_sec: u64,
+        timing: UploadTiming,
     ) -> Result<u64, UploadError> {
         self.uploads.open_session(
             (account, ip_bucket),
             declared_len,
             raw_flags,
-            lifetime_epochs,
+            timing.lifetime_epochs,
             pre_sealed,
-            now_sec,
+            timing.now_sec,
         )
     }
 
