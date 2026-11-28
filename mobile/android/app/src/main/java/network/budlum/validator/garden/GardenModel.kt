@@ -9,6 +9,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import network.budlum.validator.R
 import org.json.JSONObject
 import uniffi.budlum_garden_ffi.GardenPhone
 import uniffi.budlum_garden_ffi.SelfTestStep
@@ -26,6 +27,8 @@ data class GardenState(
     val preview: String = "",
     /** The record the preview describes, so confirming joins that record. */
     val previewRecord: String = "",
+    /** Why an invite could not be read, shown where the preview card would stand. */
+    val previewRefusal: String = "",
     val message: String = "",
     val busy: Boolean = false,
     val selfTest: List<SelfTestStep> = emptyList(),
@@ -97,24 +100,39 @@ class GardenModel(
         readInvite(phone.invite())
     }
 
-    /** Show who is inviting before anybody agrees to anything. */
+    /**
+     * Show who is inviting before anybody agrees to anything.
+     *
+     * The card names the host, the validator, the expiry, and the peer count
+     * before a seat is taken. When the core refuses the record, the refusal
+     * is surfaced explicitly instead of leaving the screen silent.
+     */
     fun preview(record: String) {
         if (record.isBlank()) {
-            state = state.copy(preview = "", previewRecord = "")
+            state = state.copy(preview = "", previewRecord = "", previewRefusal = "")
             return
         }
         scope.launch {
-            val shown = withContext(Dispatchers.IO) {
+            val (shown, refusal) = withContext(Dispatchers.IO) {
                 runCatching {
                     val json = JSONObject(phone.readRecord(record.trim()).json)
+                    val host = json.optString("host").take(16)
                     val owner = json.optString("owner").take(16)
                     val until = stamp(json.optLong("expires_at_ms"))
-                    "validator " + owner + ", good until " + until
-                }.getOrElse { "" }
+                    val peers = json.optInt("peers", 0)
+                    Pair(
+                        "host " + host + ", validator " + owner + ", good until " + until +
+                            (if (peers > 0) ", " + peers + " peers" else ""),
+                        "",
+                    )
+                }.getOrElse {
+                    Pair("", app.getString(R.string.garden_invite_unreadable))
+                }
             }
             state = state.copy(
                 preview = shown,
                 previewRecord = if (shown.isEmpty()) "" else record.trim(),
+                previewRefusal = refusal,
             )
         }
     }
@@ -122,7 +140,7 @@ class GardenModel(
     fun join(record: String) = background {
         if (!selfTestPassed()) return@background
         val answer = phone.join(record.trim(), name)
-        state = state.copy(status = answer.json, preview = "", previewRecord = "")
+        state = state.copy(status = answer.json, preview = "", previewRecord = "", previewRefusal = "")
         readInvite(phone.invite())
         startValidating()
     }
@@ -140,7 +158,7 @@ class GardenModel(
      */
     fun returnToGarden() = background {
         val answer = phone.rejoin()
-        state = state.copy(status = answer.json, preview = "", previewRecord = "")
+        state = state.copy(status = answer.json, preview = "", previewRecord = "", previewRefusal = "")
         readInvite(phone.invite())
         startValidating()
     }
@@ -227,10 +245,12 @@ class GardenModel(
         )
     }
 
-    /** Section 5.12: a scanned invite joins without a second detour. */
+    /**
+     * Fail-closed QR flow: scanning previews who is inviting and waits for
+     * the one-tap confirmation on JoinScreen before joining.
+     */
     fun scanned(record: String) {
         preview(record)
-        join(record)
     }
 
     private fun selfTestPassed(): Boolean {

@@ -16,10 +16,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -424,18 +426,25 @@ fun GardenRail(
         marks.forEach { mark ->
             Box(
                 modifier = Modifier
-                    .size(40.dp)
-                    .background(
-                        if (mark == current) GardenDesignTokens.faint else Color.Transparent,
-                        RoundedCornerShape(GardenDesignTokens.controlRadius),
-                    )
+                    .minimumInteractiveComponentSize()
+                    .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                     ) { onChoose(mark) },
                 contentAlignment = Alignment.Center,
             ) {
-                GardenMarkIcon(mark = mark, selected = mark == current)
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(
+                            if (mark == current) GardenDesignTokens.faint else Color.Transparent,
+                            RoundedCornerShape(GardenDesignTokens.controlRadius),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    GardenMarkIcon(mark = mark, selected = mark == current)
+                }
             }
         }
     }

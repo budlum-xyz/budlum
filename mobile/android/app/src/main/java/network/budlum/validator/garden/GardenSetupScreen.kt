@@ -18,7 +18,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import network.budlum.validator.R
 
 /**
  * What this phone is about to become, and what it needs to do it.
@@ -50,7 +52,7 @@ fun SetupScreen(model: GardenModel, onReady: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(GardenDesignTokens.gap),
     ) {
         GardenPanel(outlined = true) {
-            GardenLabel("BUDLUM GARDEN")
+            GardenLabel(stringResource(R.string.garden_budlum_garden))
             GardenHeading("This phone becomes a validator")
             GardenBody(
                 "A Garden is a small chain that a group of phones runs together. " +
@@ -71,10 +73,10 @@ fun SetupScreen(model: GardenModel, onReady: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 GardenLabel("01")
                 Spacer(modifier = Modifier.width(10.dp))
-                GardenLabel("THIS PHONE CAN DO THE WORK", tone = GardenDesignTokens.ink)
+                GardenLabel(stringResource(R.string.garden_this_phone_can_do_the_work), tone = GardenDesignTokens.ink)
             }
             if (state.selfTest.isEmpty()) {
-                GardenCaption("Running...")
+                GardenCaption(stringResource(R.string.garden_running))
             } else {
                 state.selfTest.forEach { step ->
                     GardenStat(step.name, if (step.passed) "ok" else "failed")
@@ -87,7 +89,7 @@ fun SetupScreen(model: GardenModel, onReady: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 GardenLabel("02")
                 Spacer(modifier = Modifier.width(10.dp))
-                GardenLabel("NOTIFICATIONS", tone = GardenDesignTokens.ink)
+                GardenLabel(stringResource(R.string.garden_notifications), tone = GardenDesignTokens.ink)
             }
             GardenBody(
                 "The validator keeps running when you leave the app. Android only " +
@@ -100,13 +102,13 @@ fun SetupScreen(model: GardenModel, onReady: () -> Unit) {
                 Button(
                     onClick = { model.askForNotifications() },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Allow notifications") }
+                ) { Text(stringResource(R.string.garden_allow_notifications)) }
                 OutlinedButton(
                     onClick = {
                         context.startActivity(GardenReadiness.notificationSettings(context))
                     },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Open notification settings") }
+                ) { Text(stringResource(R.string.garden_open_notification_settings)) }
             }
         }
 
@@ -114,7 +116,7 @@ fun SetupScreen(model: GardenModel, onReady: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 GardenLabel("03")
                 Spacer(modifier = Modifier.width(10.dp))
-                GardenLabel("BATTERY", tone = GardenDesignTokens.ink)
+                GardenLabel(stringResource(R.string.garden_battery), tone = GardenDesignTokens.ink)
             }
             GardenBody(
                 "Android puts background apps to sleep to save power. A sleeping " +
@@ -131,14 +133,14 @@ fun SetupScreen(model: GardenModel, onReady: () -> Unit) {
             OutlinedButton(
                 onClick = { context.startActivity(GardenReadiness.batterySettings(context)) },
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Open battery settings") }
+            ) { Text(stringResource(R.string.garden_open_battery_settings)) }
         }
 
         GardenPanel {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 GardenLabel("04")
                 Spacer(modifier = Modifier.width(10.dp))
-                GardenLabel("CAMERA", tone = GardenDesignTokens.ink)
+                GardenLabel(stringResource(R.string.garden_camera), tone = GardenDesignTokens.ink)
             }
             GardenBody(
                 "Only for reading an invite QR code, and only at the moment you " +
@@ -215,9 +217,9 @@ fun ChooseScreen(
         verticalArrangement = Arrangement.spacedBy(GardenDesignTokens.gap),
     ) {
         Column(modifier = Modifier.padding(top = 4.dp)) {
-            GardenLabel("THIS PHONE IS READY")
+            GardenLabel(stringResource(R.string.garden_this_phone_is_ready))
             Text(
-                "Where do you want to validate?",
+                stringResource(R.string.garden_where_do_you_want_to_validate),
                 style = MaterialTheme.typography.headlineSmall,
                 color = GardenDesignTokens.ink,
             )
@@ -227,7 +229,7 @@ fun ChooseScreen(
         }
 
         GardenPanel(outlined = true) {
-            GardenLabel("GARDEN")
+            GardenLabel(stringResource(R.string.garden_label_garden))
             GardenHeading(
                 if (seated) "This phone already holds a seat" else "A small chain you run with others",
             )
@@ -242,21 +244,21 @@ fun ChooseScreen(
         }
 
         GardenPanel {
-            GardenLabel("TESTNET")
+            GardenLabel(stringResource(R.string.garden_testnet))
             GardenHeading("The public Budlum test network")
             GardenBody(
                 "This is the one with an account, a faucet and storage duties " +
                     "attached to it, which is why it is a choice and not the front door.",
             )
             OutlinedButton(onClick = onTestnet, modifier = Modifier.fillMaxWidth()) {
-                Text("Validate the testnet")
+                Text(stringResource(R.string.garden_validate_the_testnet))
             }
         }
 
         Button(
             onClick = onBack,
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("Back to the requirements") }
+        ) { Text(stringResource(R.string.garden_back_to_the_requirements)) }
         if (state.message.isNotEmpty()) {
             GardenMeta(listOf(state.message))
         }

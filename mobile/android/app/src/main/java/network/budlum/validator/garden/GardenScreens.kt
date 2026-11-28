@@ -36,10 +36,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
+import network.budlum.validator.R
 import org.json.JSONObject
 
 /**
@@ -79,7 +81,14 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
         }
     }
 
-    // Every step can be left the way it was entered. Before this the app
+    // Jump to Join whenever a scanned QR or deep link populates a preview
+    // or refusal, so the person sees who invited them and confirms in one tap.
+    LaunchedEffect(model.state.preview, model.state.previewRefusal) {
+        if (model.state.preview.isNotEmpty() || model.state.previewRefusal.isNotEmpty()) {
+            step = Step.Garden
+            mark = GardenMark.Join
+        }
+    }
     // went forward only: a person who reached the Garden screens had no
     // way back to the requirements, and the system gesture closed the app
     // instead of stepping back.
@@ -216,8 +225,8 @@ private fun HomeScreen(model: GardenModel, onInvite: () -> Unit) {
         if (garden != null) {
             GardenPanel {
                 GardenLabel("WORK")
-                GardenStat("Parts held", workLong(garden, "parts_held").toString())
-                GardenStat("Blocks checked", workLong(garden, "blocks_executed").toString())
+                GardenStat(stringResource(R.string.garden_parts_held), workLong(garden, "parts_held").toString())
+                GardenStat(stringResource(R.string.garden_blocks_checked), workLong(garden, "blocks_executed").toString())
                 GardenStat("Objects stored", garden.optInt("objects", 0).toString())
                 GardenStat("Pending", garden.optInt("pending_transactions", 0).toString())
             }
@@ -265,7 +274,7 @@ private fun DataScreen(model: GardenModel) {
                 GardenStat("Objects", garden.optInt("objects", 0).toString())
                 GardenStat("Wanted here", garden.optInt("objects_wanted_here", 0).toString())
                 GardenStat("Bytes stored", garden.optLong("stored_object_bytes", 0).toString())
-                GardenStat("Parts held", workLong(garden, "parts_held").toString())
+                GardenStat(stringResource(R.string.garden_parts_held), workLong(garden, "parts_held").toString())
             }
         }
         GardenPanel(outlined = true) {
@@ -305,7 +314,7 @@ private fun InviteScreen(model: GardenModel, onJoinInstead: () -> Unit) {
     ) {
         if (state.record.isEmpty()) {
             GardenPanel {
-                GardenLabel("WERE YOU INVITED?")
+                GardenLabel(stringResource(R.string.garden_were_you_invited))
                 GardenHeading("Then nothing here has to be named")
                 GardenBody(
                     "Scan the code you were sent or paste the invite. This phone joins " +
@@ -313,12 +322,12 @@ private fun InviteScreen(model: GardenModel, onJoinInstead: () -> Unit) {
                         "is named before you agree.",
                 )
                 OutlinedButton(onClick = onJoinInstead, modifier = Modifier.fillMaxWidth()) {
-                    Text("I have an invite")
+                    Text(stringResource(R.string.garden_i_have_an_invite))
                 }
             }
             var title by remember { mutableStateOf("") }
             GardenPanel(outlined = true) {
-                GardenLabel("OR START ONE")
+                GardenLabel(stringResource(R.string.garden_or_start_one))
                 GardenHeading("Name the group")
                 GardenBody(
                     "Starting one makes this phone its first validator and its host. " +
@@ -328,8 +337,8 @@ private fun InviteScreen(model: GardenModel, onJoinInstead: () -> Unit) {
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
-                    label = { Text("Garden name") },
-                    placeholder = { Text("Kitchen table") },
+                    label = { Text(stringResource(R.string.garden_name_label)) },
+                    placeholder = { Text(stringResource(R.string.garden_kitchen_table)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -383,13 +392,13 @@ private fun InviteScreen(model: GardenModel, onJoinInstead: () -> Unit) {
                             context.startActivity(Intent.createChooser(share, "Share the invite"))
                         },
                         modifier = Modifier.weight(1f),
-                    ) { Text("Share") }
+                    ) { Text(stringResource(R.string.garden_share)) }
                 }
                 TextButton(
                     onClick = { model.refreshInvite() },
                     enabled = !state.busy,
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Make a new invite") }
+                ) { Text(stringResource(R.string.garden_make_a_new_invite)) }
             }
         }
         if (state.message.isNotEmpty()) {
@@ -424,7 +433,7 @@ private fun JoinScreen(model: GardenModel) {
                 onClick = { model.scan() },
                 enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Scan a QR code") }
+            ) { Text(stringResource(R.string.garden_scan_a_qr_code)) }
         }
         GardenPanel {
             GardenLabel("OR PASTE")
@@ -434,11 +443,14 @@ private fun JoinScreen(model: GardenModel) {
                     pasted = it
                     model.preview(it)
                 },
-                label = { Text("Invite link or code") },
+                label = { Text(stringResource(R.string.garden_invite_link_or_code)) },
                 modifier = Modifier.fillMaxWidth(),
             )
             if (state.preview.isNotEmpty()) {
                 GardenMeta(listOf(state.preview))
+            }
+            if (state.preview.isEmpty() && state.previewRefusal.isNotEmpty()) {
+                GardenNote(state.previewRefusal)
             }
             if (state.previewRecord.isNotEmpty()) {
                 // Section 5.12: an invite that arrived by a deliberate act
@@ -447,7 +459,7 @@ private fun JoinScreen(model: GardenModel) {
                     onClick = { model.join(state.previewRecord) },
                     enabled = !state.busy,
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Join this Garden") }
+                ) { Text(stringResource(R.string.garden_join_this_garden)) }
             }
         }
         if (state.message.isNotEmpty()) {
@@ -479,7 +491,7 @@ private fun StatusScreen(model: GardenModel) {
         verticalArrangement = Arrangement.spacedBy(GardenDesignTokens.gap),
     ) {
         GardenPanel(outlined = garden == null) {
-            GardenLabel("GARDEN")
+            GardenLabel(stringResource(R.string.garden_label_garden))
             if (garden == null) {
                 GardenHeading("This phone is in no Garden")
                 GardenBody("Start one from Invite, or join one from Join.")
@@ -499,8 +511,8 @@ private fun StatusScreen(model: GardenModel) {
                 GardenStat("Block", garden.optLong("height", 0).toString())
                 GardenStat("Validators", garden.optInt("active_validators", 0).toString())
                 GardenStat("Connected", garden.optInt("connected_peers", 0).toString())
-                GardenStat("Parts held", workLong(garden, "parts_held").toString())
-                GardenStat("Blocks checked", workLong(garden, "blocks_executed").toString())
+                GardenStat(stringResource(R.string.garden_parts_held), workLong(garden, "parts_held").toString())
+                GardenStat(stringResource(R.string.garden_blocks_checked), workLong(garden, "blocks_executed").toString())
                 val me = garden.optJSONObject("me")
                 if (me != null) {
                     GardenStat(
@@ -514,9 +526,9 @@ private fun StatusScreen(model: GardenModel) {
             }
         }
         GardenPanel {
-            GardenLabel("SELF TEST")
+            GardenLabel(stringResource(R.string.garden_self_test))
             if (state.selfTest.isEmpty()) {
-                GardenCaption("Running...")
+                GardenCaption(stringResource(R.string.garden_running))
             } else {
                 state.selfTest.forEach { step ->
                     GardenStat(
@@ -544,12 +556,12 @@ private fun StatusScreen(model: GardenModel) {
                     onClick = { model.refreshStatus() },
                     enabled = !state.busy,
                     modifier = Modifier.weight(1f),
-                ) { Text("Refresh") }
+                ) { Text(stringResource(R.string.garden_refresh)) }
                 Button(
                     onClick = { askingToLeave = true },
                     enabled = !state.busy && garden != null,
                     modifier = Modifier.weight(1f),
-                ) { Text("Leave") }
+                ) { Text(stringResource(R.string.garden_leave)) }
             }
             // A phone that left keeps its seat until it leaves a second
             // time, and the answer says so. The way back belongs on the
@@ -559,7 +571,7 @@ private fun StatusScreen(model: GardenModel) {
                     onClick = { model.returnToGarden() },
                     enabled = !state.busy,
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Return to the Garden") }
+                ) { Text(stringResource(R.string.garden_return_to_the_garden)) }
             }
         }
         if (state.message.isNotEmpty()) {
@@ -569,7 +581,7 @@ private fun StatusScreen(model: GardenModel) {
     if (askingToLeave) {
         AlertDialog(
             onDismissRequest = { askingToLeave = false },
-            title = { Text("Leave this Garden?") },
+            title = { Text(stringResource(R.string.garden_leave_confirm_title)) },
             text = {
                 Text(
                     "The first leave keeps the seat, so this phone can come back. " +
@@ -582,10 +594,10 @@ private fun StatusScreen(model: GardenModel) {
                         askingToLeave = false
                         model.leave()
                     },
-                ) { Text("Leave") }
+                ) { Text(stringResource(R.string.garden_leave)) }
             },
             dismissButton = {
-                TextButton(onClick = { askingToLeave = false }) { Text("Stay") }
+                TextButton(onClick = { askingToLeave = false }) { Text(stringResource(R.string.garden_stay)) }
             },
         )
     }
@@ -606,14 +618,14 @@ private fun PermissionCard(model: GardenModel) {
     val ready = model.state.readiness
     if (ready.notifications && ready.batteryUnrestricted) {
         GardenPanel {
-            GardenLabel("ANDROID")
+            GardenLabel(stringResource(R.string.garden_android))
             GardenStat("Notifications", "allowed")
             GardenStat("Background work", "not restricted")
         }
         return
     }
     GardenPanel(outlined = true) {
-        GardenLabel("ANDROID IS IN THE WAY")
+        GardenLabel(stringResource(R.string.garden_android_is_in_the_way))
         if (!ready.notifications) {
             GardenBody(
                 "Notifications are off, so the validator cannot keep running once " +
@@ -622,7 +634,7 @@ private fun PermissionCard(model: GardenModel) {
             Button(
                 onClick = { model.askForNotifications() },
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Allow notifications") }
+            ) { Text(stringResource(R.string.garden_allow_notifications)) }
         }
         if (!ready.batteryUnrestricted) {
             GardenBody(
@@ -633,7 +645,7 @@ private fun PermissionCard(model: GardenModel) {
             OutlinedButton(
                 onClick = { context.startActivity(GardenReadiness.batterySettings(context)) },
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Open battery settings") }
+            ) { Text(stringResource(R.string.garden_open_battery_settings)) }
         }
     }
 }

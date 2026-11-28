@@ -18,13 +18,17 @@ import network.budlum.validator.R
  * Budlum's own surface, not Material's default one.
  *
  * Every colour here is a measured token from the design file
- * (Figma 7tASYNmfotWyIrXpJ4ktrW, by way of budlum.xyz `src/tokens.json`),
+ * (Figma 7tASYNmfotWyIrXpJ4ktrW): 19 frames, 13 interface colours,
  * carried over by value. Nothing was picked by eye and nothing was
  * invented: a colour that is not in the tokens is not in this file.
  *
+ * There is no error hue in the design - the measured palette has no red at
+ * all. Error is therefore said with ink on paper plus a word, never with a
+ * colour alone (WCAG 1.4.1).
+ *
  * The radii come from the same place, and they matter more than they
  * look: a panel is 16, measured on the chat shell in the file (`43:30406`,
- * `43:28885`, both 1080 wide with `r=16`), and a control or a chip is 8.
+ * `43:28885`, both 1080 wide with `r=16`), and larger shells sit at 32.
  * The role-named copy the Garden screens read lives in
  * [GardenDesignTokens]; this file keeps the Material scheme built from the
  * same values so a stock component cannot arrive in another palette.
@@ -34,8 +38,7 @@ private val Ground = Color(0xFF060705)
 private val Sage = Color(0xFF98AE89)
 private val Ink = Color(0xFF060705)
 private val Chalk = Color(0xFFFFFFFF)
-private val Flow = Color(0xFF8C0000)
-private val Mute = Color(0xFFBDBDBD)
+private val Line = Color(0xFF333333)
 private val Faint = Color(0xFFE6E6E6)
 
 private val budlumColors = lightColorScheme(
@@ -53,19 +56,19 @@ private val budlumColors = lightColorScheme(
     onSurface = Ink,
     surfaceVariant = Faint,
     onSurfaceVariant = Ink,
-    outline = Mute,
+    outline = Line,
     outlineVariant = Faint,
-    error = Flow,
+    error = Ground,
     onError = Chalk,
 )
 
-/** Panel 16, control and chip 8, and the shell that carries both. */
+/** Panel and control 16, outer shell 32, and the flat corner for chips. */
 private val budlumShapes = Shapes(
     extraSmall = RoundedCornerShape(0.dp),
-    small = RoundedCornerShape(8.dp),
-    medium = RoundedCornerShape(8.dp),
-    large = RoundedCornerShape(16.dp),
-    extraLarge = RoundedCornerShape(16.dp),
+    small = RoundedCornerShape(16.dp),
+    medium = RoundedCornerShape(16.dp),
+    large = RoundedCornerShape(32.dp),
+    extraLarge = RoundedCornerShape(32.dp),
 )
 
 private val budlum = FontFamily(Font(R.font.budlum_regular))
