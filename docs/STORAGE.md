@@ -62,8 +62,12 @@ is on the target path.
 | `fountain_golden_vectors_lock_crate_version` | The pinned `raptorq` version produces the recorded symbols |
 
 `bud3_fountain_acceptance` repeats each loss case `BUDLUM_BUD3_ACCEPTANCE_TRIALS`
-times. The default keeps an ordinary test run short; the nightly figure of
-10 000 trials is reached by setting that variable. `BUDLUM_BUD3_ACCEPTANCE_TRIALS=10000`.
+times. The default is one trial per case: the everyday suite keeps the sweep's
+shape (both loss models, every `k`) at a smoke cost, and the test
+`acceptance_default_trials_stay_cheap` refuses a default above two. The nightly
+figure of 10 000 trials is reached by setting the variable:
+`BUDLUM_BUD3_ACCEPTANCE_TRIALS=10000`. A malformed value falls closed to the
+default.
 
 The night-only cases the directive lists separately, T3 (64 MiB + 1 byte and
 4 GiB + 1 byte under a memory ceiling) and T4 (16 GiB), need a 16 GiB corpus and
