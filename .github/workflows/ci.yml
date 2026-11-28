@@ -31,7 +31,18 @@ concurrency:
   # `cancelled`. Cancelling a working branch's run costs nothing that is not
   # re-measured by the next push; cancelling the integration head's run costs
   # the verdict the branch exists to produce.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.run_attempt == '1' && github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
+  #
+  # `testnet-50` and `consensus-of-consensuses` are exempt for the same reason,
+  # measured on the Garden branch on 2026-11-27: of the last 100 runs on it, 59
+  # ended `cancelled`, and the last 40 CI runs carried only 4 distinct heads in
+  # 51 minutes (one every 13 minutes). This branch carries a pull request into
+  # `consensus-of-consensuses`, so the same rule applies here: a new head used
+  # to cancel the suite that was measuring the previous one, and the determinism
+  # jobs died that way twice in a row.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.run_attempt == '1' &&
+    github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' &&
+    github.base_ref != 'testnet-50' &&
+    github.base_ref != 'consensus-of-consensuses' }}
 
 permissions:
   contents: read
