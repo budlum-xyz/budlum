@@ -8,8 +8,8 @@
     <string name="security_tradeoff_note">Owner spend, staking, rotation and unbonding are unavailable. This phone holds a wallet and can sign with it, but no Keystore-backed biometric or PIN authorization guards that signature yet. Operator and BLS key wrapping alone does not make validator duties operational.</string>
     <string name="action_faucet_request">Submit faucet request (100 BUD)</string>
     <string name="faucet_endpoint">Faucet HTTPS origin (https://faucet.your-domain)</string>
-    <string name="faucet_own_wallet">This phone's own wallet: %1$s</string>
-    <string name="faucet_no_wallet">This phone holds no wallet yet, so there is nowhere to send test tokens. Make one first.</string>
+    <string name="faucet_own_wallet">Own wallet: %1$s</string>
+    <string name="faucet_no_wallet">No wallet on this phone yet: there is nowhere to send test tokens. Open a block first.</string>
     <string name="faucet_pending">Solving the faucet challenge and submitting request…</string>
     <string name="faucet_submitted">Transfer submitted, not yet confirmed. Check the transaction hash in a chain explorer before assuming any funds are available:</string>
     <string name="faucet_invalid_endpoint">Enter a valid HTTPS faucet origin, without a path, query or credentials.</string>

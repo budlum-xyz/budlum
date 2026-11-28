@@ -8,8 +8,8 @@
     <string name="security_tradeoff_note">Sahip harcaması, stake, anahtar döndürme ve çıkış bu sürümde kapalıdır. Bu telefon bir cüzdan tutar ve onunla imzalayabilir, ancak bu imzayı henüz Keystore destekli biyometrik veya PIN yetkisi korumaz. Görev anahtarlarının saklanması çalışan doğrulayıcı anlamına gelmez.</string>
     <string name="action_faucet_request">Musluk isteği gönder (100 BUD)</string>
     <string name="faucet_endpoint">Musluk HTTPS adresi (https://faucet.alan-adiniz)</string>
-    <string name="faucet_own_wallet">Bu telefonun kendi cüzdanı: %1$s</string>
-    <string name="faucet_no_wallet">Bu telefonda henüz cüzdan yok; test jetonu gönderilecek bir yer de yok. Önce bir cüzdan oluştur.</string>
+    <string name="faucet_own_wallet">Kendi cüzdanın: %1$s</string>
+    <string name="faucet_no_wallet">Bu telefonda henüz cüzdan yok: test jetonu gönderilecek bir yer de yok. Önce bir küpe dokun.</string>
     <string name="faucet_pending">Musluk görevi çözülüyor ve istek gönderiliyor…</string>
     <string name="faucet_submitted">Aktarım gönderildi, henüz onaylanmadı. Bakiyeyi kullanmadan önce işlem karmasını gezginde denetleyin:</string>
     <string name="faucet_invalid_endpoint">Yol, sorgu veya kimlik bilgisi içermeyen geçerli bir HTTPS musluk adresi girin.</string>
