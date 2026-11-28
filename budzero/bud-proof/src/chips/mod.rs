@@ -9,4 +9,5 @@ pub mod batch;
 pub mod fib;
 pub mod fold;
 pub mod keccak;
+pub mod merkle_path;
 pub mod mldsa_ntt;
