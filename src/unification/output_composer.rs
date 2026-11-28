@@ -1010,6 +1010,13 @@ fn resolve_bindings(
     let mut resolved = Vec::with_capacity(bindings.len());
     let mut seen_targets = std::collections::BTreeSet::new();
     for binding in bindings {
+        validate_safe_label("target_input", &binding.target_input, 64)
+            .map_err(CompositionError::InvalidInput)?;
+        if binding.target_input.contains('.') {
+            return Err(CompositionError::InvalidInput(String::from(
+                "target_input must not contain `.`",
+            )));
+        }
         if !seen_targets.insert((binding.to_step.as_str(), binding.target_input.as_str())) {
             return Err(CompositionError::InvalidInput(format!(
                 "duplicate binding targeting `{}.{}`",
@@ -1024,20 +1031,18 @@ fn resolve_bindings(
             .ok_or_else(|| CompositionError::UnknownStep(binding.to_step.clone()))?;
         let value = extract_selector_value(upstream, &binding.selector)
             .ok_or_else(|| CompositionError::MissingOutputValue(binding.from_step.clone()))?;
-        if binding.enforce_match {
-            if let Some(expected) = downstream.typed_values.get(&binding.target_input) {
-                if expected != &value {
-                    return Err(CompositionError::BindingMismatch {
-                        step: binding.to_step.clone(),
-                        input: binding.target_input.clone(),
-                    });
-                }
-            } else {
+        if let Some(expected) = downstream.typed_values.get(&binding.target_input) {
+            if expected != &value {
                 return Err(CompositionError::BindingMismatch {
                     step: binding.to_step.clone(),
                     input: binding.target_input.clone(),
                 });
             }
+        } else if binding.enforce_match {
+            return Err(CompositionError::BindingMismatch {
+                step: binding.to_step.clone(),
+                input: binding.target_input.clone(),
+            });
         }
         let value_hash = value.commitment_hash();
         resolved.push(ResolvedBinding {

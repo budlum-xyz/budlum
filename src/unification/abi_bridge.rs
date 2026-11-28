@@ -174,6 +174,16 @@ impl CrossVmBridge {
             .ok_or(AbiBridgeError::DomainNotExecutable(request.target_domain))?
             .0;
 
+        if request.source_domain == request.target_domain {
+            return Err(AbiBridgeError::InvalidArg(String::from(
+                "cross-VM call source_domain and target_domain must be distinct",
+            )));
+        }
+        if request.nonce == 0 {
+            return Err(AbiBridgeError::InvalidArg(String::from(
+                "cross-VM call nonce must be non-zero",
+            )));
+        }
         validate_language(&request.source_language)?;
         validate_language(&request.target_language)?;
         validate_method_name(&request.method)?;
@@ -226,6 +236,16 @@ impl CrossVmBridge {
         }
         if envelope.target_domain == 0 {
             return Err(AbiBridgeError::UnknownDomain(0));
+        }
+        if envelope.source_domain == envelope.target_domain {
+            return Err(AbiBridgeError::InvalidArg(String::from(
+                "cross-VM envelope source_domain and target_domain must be distinct",
+            )));
+        }
+        if envelope.nonce == 0 {
+            return Err(AbiBridgeError::InvalidArg(String::from(
+                "cross-VM envelope nonce must be non-zero",
+            )));
         }
         native_gas_to_bgu(EeId(envelope.source_ee_id), 0)
             .map_err(|_| AbiBridgeError::DomainNotExecutable(envelope.source_domain))?;
@@ -302,6 +322,37 @@ fn validate_args(args: &[CanonicalCallArg]) -> Result<(), AbiBridgeError> {
                 "argument '{}' exceeds {MAX_CROSS_VM_ARG_BYTES}-byte limit",
                 arg.name
             )));
+        }
+        match &arg.value {
+            CanonicalValue::Address { ee_id, raw } => {
+                native_gas_to_bgu(EeId(*ee_id), 0).map_err(|_| {
+                    AbiBridgeError::InvalidArg(format!(
+                        "argument '{}' carries unrecognized execution environment id {}",
+                        arg.name, ee_id
+                    ))
+                })?;
+                if raw.is_empty() || raw.len() > 64 || raw.iter().all(|&b| b == 0) {
+                    return Err(AbiBridgeError::InvalidArg(format!(
+                        "argument '{}' address bytes must be non-empty, <= 64 bytes, and non-zero",
+                        arg.name
+                    )));
+                }
+                if *ee_id == EeId::EVM.0 && raw.len() != 20 {
+                    return Err(AbiBridgeError::InvalidArg(format!(
+                        "argument '{}' EVM address must be exactly 20 bytes",
+                        arg.name
+                    )));
+                }
+            }
+            CanonicalValue::AssetAmount { asset_id, amount } => {
+                if *asset_id == [0u8; 32] || *amount == 0 {
+                    return Err(AbiBridgeError::InvalidArg(format!(
+                        "argument '{}' AssetAmount requires non-zero asset_id and positive amount",
+                        arg.name
+                    )));
+                }
+            }
+            _ => {}
         }
     }
     Ok(())
