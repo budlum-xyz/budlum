@@ -118,6 +118,16 @@ pub struct PrivateTransferSubmit {
     /// This is the field whose absence made the whole privacy path unverifiable:
     /// `verify_confidential_bundle` was complete and only reachable from
     /// `process_confidential_transfer_bundle`, which had no caller.
+    ///
+    /// SIGNING: excluded - the bundle is not signed by the sender, deliberately.
+    /// It is the evidence a relay carries to the executor, and the executor
+    /// refuses a transfer that arrives without it. What the sender signs is the
+    /// digest over the commitments and nullifiers it owns; signing the evidence
+    /// as well would make the sender vouch for data it has no way to verify, and
+    /// it would break callers that build the bundle after signing. What was
+    /// wrong on this path was the executor accepting a transfer with no bundle,
+    /// and that door now refuses on any chain where privacy transfers are
+    /// enabled.
     #[serde(default)]
     pub proof_bundle: Option<crate::privacy::ConfidentialTransferProofBundle>,
 }

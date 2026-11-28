@@ -32,3 +32,11 @@ budlum-universal
 diag-rehearsal-a
 diag-rehearsal-b
 ortak-teslim
+
+# Added 2026-11-27: `testnet-50` has been the base of an open pull request
+# (#221, the Garden slice) since 2026-11-25, and the delivery pull request
+# #215's head is the same branch. It was not claimed here, so a pull request
+# into it was covered by contract by nothing - the trigger list and the tree
+# disagreed and only the tree was measured. The stacked-continuation bases above
+# are the same shape; this line makes the claim match.
+testnet-50
