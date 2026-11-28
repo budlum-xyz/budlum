@@ -234,6 +234,24 @@ pub fn read_list(text: &str, path: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// True when `path` exists at `commit`. `git cat-file -e` answers presence
+/// without reading the contents, so an unreadable file is not mistaken for an
+/// absent one.
+///
+/// # Errors
+///
+/// Fails when git cannot be run at all, which is a merge this gate cannot
+/// evaluate.
+fn exists_at(root: &Path, commit: &str, path: &str) -> Result<bool, String> {
+    let spec = format!("{commit}:{path}");
+    let out = Command::new("git")
+        .args(["cat-file", "-e", &spec])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("{CONTEXT}: cannot run git: {e}"))?;
+    Ok(out.status.success())
+}
+
 /// Read a claim file **at a commit of the merge target**, never from the
 /// working tree.
 ///
@@ -272,8 +290,12 @@ fn claim_list(
     changed: &[String],
     rel: &str,
 ) -> Result<(Vec<String>, bool), String> {
-    if let Ok(list) = read_list_at(root, &req.base_sha, rel) {
-        return Ok((list, false));
+    // Absent and malformed are different answers. Only an absent file may be
+    // bootstrapped; a file that exists at the target and cannot be read is a
+    // denial, because otherwise a pull request could rewrite a broken rule into
+    // permission for itself.
+    if exists_at(root, &req.base_sha, rel)? {
+        return Ok((read_list_at(root, &req.base_sha, rel)?, false));
     }
     if !changed.iter().any(|path| path == rel) {
         return Err(format!(
@@ -739,6 +761,52 @@ mod tests {
             .trim()
             .to_owned();
         (root, base, head)
+    }
+
+    /// A repository whose merge target carries a **malformed** claim file and
+    /// whose head commit rewrites it, declaring itself in the process.
+    fn repository_with_a_malformed_claim_file() -> (PathBuf, String, String) {
+        let root =
+            std::env::temp_dir().join(format!("merge-gate-malformed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".github")).expect("temporary repository");
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.name", "Merge Gate Test"]);
+        run_git(
+            &root,
+            &["config", "user.email", "merge-gate@example.invalid"],
+        );
+        // Two names on one line: `read_list` refuses this, and it must not be
+        // mistaken for the file being absent.
+        std::fs::write(root.join(BRANCHES_REL), "# claim\nalpha beta\n").expect("claim file");
+        std::fs::write(root.join(FORBIDDEN_REL), "# forbidden\ndocs/plan/\n")
+            .expect("forbidden file");
+        run_git(&root, &["add", "-A"]);
+        run_git(&root, &["commit", "-q", "-m", "base"]);
+        let base = git(&root, &["rev-parse", "HEAD"])
+            .expect("base sha")
+            .trim()
+            .to_owned();
+        std::fs::write(root.join(BRANCHES_REL), "# claim\nintruder\n").expect("claim file");
+        run_git(&root, &["add", "-A"]);
+        run_git(&root, &["commit", "-q", "-m", "head"]);
+        let head = git(&root, &["rev-parse", "HEAD"])
+            .expect("head sha")
+            .trim()
+            .to_owned();
+        (root, base, head)
+    }
+
+    #[test]
+    fn a_malformed_claim_file_is_not_a_bootstrap() {
+        let (root, base, head) = repository_with_a_malformed_claim_file();
+        let err = run_payload(&root, &payload(&base, &head, "intruder"))
+            .expect_err("a broken rule at the target is a denial, not an invitation to rewrite it");
+        assert!(
+            err.contains("whitespace"),
+            "the denial must name the malformed entry: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
