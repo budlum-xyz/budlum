@@ -48,7 +48,8 @@ struct Cli {
             "poa_spec",
             "dag_spec",
             "poh_spec",
-            "pospace_spec"
+            "pospace_spec",
+            "sovereign_kit"
         ],
         conflicts_with_all = [
             "pow_spec",
@@ -57,49 +58,54 @@ struct Cli {
             "poa_spec",
             "dag_spec",
             "poh_spec",
-            "pospace_spec"
+            "pospace_spec",
+            "sovereign_kit"
         ]
     )]
     payload: Option<PathBuf>,
     /// JSON `PowChainSpec`: mine the header chain and build the payload.
     #[arg(
         long,
-        conflicts_with_all = ["bitcoin_spec", "bft_spec", "poa_spec", "dag_spec", "poh_spec", "pospace_spec"]
+        conflicts_with_all = ["bitcoin_spec", "bft_spec", "poa_spec", "dag_spec", "poh_spec", "pospace_spec", "sovereign_kit"]
     )]
     pow_spec: Option<PathBuf>,
     /// JSON `BitcoinSpvChainSpec`: mine the Bitcoin header window and build the payload.
     #[arg(
         long,
-        conflicts_with_all = ["bft_spec", "poa_spec", "dag_spec", "poh_spec", "pospace_spec"]
+        conflicts_with_all = ["bft_spec", "poa_spec", "dag_spec", "poh_spec", "pospace_spec", "sovereign_kit"]
     )]
     bitcoin_spec: Option<PathBuf>,
     /// JSON `BftJob`: sign the checkpoint with the BFT validators' keys.
     #[arg(
         long,
         requires = "quorum_keys",
-        conflicts_with_all = ["poa_spec", "dag_spec", "poh_spec", "pospace_spec"]
+        conflicts_with_all = ["poa_spec", "dag_spec", "poh_spec", "pospace_spec", "sovereign_kit"]
     )]
     bft_spec: Option<PathBuf>,
     /// JSON `PoaJob`: sign the block with the `PoA` authorities' keys.
     #[arg(
         long,
         requires = "quorum_keys",
-        conflicts_with_all = ["dag_spec", "poh_spec", "pospace_spec"]
+        conflicts_with_all = ["dag_spec", "poh_spec", "pospace_spec", "sovereign_kit"]
     )]
     poa_spec: Option<PathBuf>,
     /// JSON `DagJob`: derive the causal anchor and sign with DAG authorities' composite keys.
     #[arg(
         long,
         requires = "quorum_keys",
-        conflicts_with_all = ["poh_spec", "pospace_spec"]
+        conflicts_with_all = ["poh_spec", "pospace_spec", "sovereign_kit"]
     )]
     dag_spec: Option<PathBuf>,
     /// JSON `PohJob`: compute the sequential PoH hash ladder and sign with authorities' composite keys.
-    #[arg(long, requires = "quorum_keys", conflicts_with = "pospace_spec")]
+    #[arg(long, requires = "quorum_keys", conflicts_with_all = ["pospace_spec", "sovereign_kit"])]
     poh_spec: Option<PathBuf>,
     /// JSON `PospaceJob`: prove plot quality and sign with prover and authorities' composite keys.
-    #[arg(long, requires = "quorum_keys")]
+    #[arg(long, requires = "quorum_keys", conflicts_with = "sovereign_kit")]
     pospace_spec: Option<PathBuf>,
+    /// JSON `SovereignKitSpec`: bootstrap a sovereign `PoA` domain, template,
+    /// `Active` lifecycle transition, and first `PoAPq` finalized commitment in one command.
+    #[arg(long, requires = "quorum_keys")]
+    sovereign_kit: Option<PathBuf>,
     /// A mode-0600 JSON file with the signing seeds (`QuorumKeys`).
     #[arg(long)]
     quorum_keys: Option<PathBuf>,
@@ -244,6 +250,91 @@ struct PospaceJob {
 /// `pq_seeds` (32 bytes) align with the job's members. For `PoA`, `composite`
 /// holds one `[ml_dsa_65_seed, ed25519_seed]` pair (32 bytes each) per
 /// signing authority.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SovereignKitSpec {
+    domain_id: u32,
+    domain_chain_id: u64,
+    operator: Address,
+    class: budlum_core::domain::sovereign::SovereignDomainClass,
+    requires_kyc: bool,
+    policy_hash: [u8; 32],
+    jurisdiction_hash: [u8; 32],
+    audit_commitment: [u8; 32],
+    first_block_hash: [u8; 32],
+    first_state_root: [u8; 32],
+    first_tx_root: [u8; 32],
+    first_event_root: [u8; 32],
+    timestamp_ms: u64,
+}
+
+fn build_sovereign_kit_txs(cli: &Cli, path: &PathBuf) -> Result<Vec<SettlementTx>, String> {
+    let spec: SovereignKitSpec = read_json(path, "SovereignKitSpec")?;
+    let signers = load_composite_signers(cli)?;
+    if signers.is_empty() {
+        return Err("sovereign kit requires at least one composite authority key".into());
+    }
+    let mut authorities = Vec::with_capacity(signers.len());
+    for kp in &signers {
+        let pk = kp.public_key().map_err(|e| e.to_string())?;
+        authorities.push(budlum_core::domain::finality_adapter::PoAAuthorityKey {
+            authority: Address::from(pk.ed),
+            public_key: pk.encode(),
+        });
+    }
+    let mut domain = budlum_core::domain::default_domain(
+        spec.domain_id,
+        budlum_core::domain::ConsensusKind::PoA,
+        spec.domain_chain_id,
+        "poa-authority-quorum",
+        1,
+    );
+    domain.operator = Some(spec.operator);
+    domain.operator_bond = budlum_core::domain::registry::MIN_DOMAIN_OPERATOR_BOND;
+    let auth_hash =
+        budlum_core::domain::finality_adapter::poa_pq_authority_set_hash(&domain, &authorities)
+            .map_err(|e| e.to_string())?;
+    domain.validator_set_hash = auth_hash;
+
+    let evidence = budlum_core::domain::sovereign::ComplianceEvidence {
+        policy_hash: spec.policy_hash,
+        authority_set_hash: auth_hash,
+        jurisdiction_hash: spec.jurisdiction_hash,
+        audit_commitment: spec.audit_commitment,
+    };
+    let template = budlum_core::domain::sovereign::SovereignDomainTemplate::new(
+        spec.domain_id,
+        spec.class,
+        budlum_core::domain::ConsensusKind::PoA,
+        spec.operator,
+        spec.requires_kyc,
+        evidence,
+        budlum_core::domain::sovereign::DomainLifecycleState::Draft,
+    );
+    let block = budlum_core::domain::producer::QuorumBlockSpec {
+        domain: domain.clone(),
+        height: 1,
+        block_hash: spec.first_block_hash,
+        parent_hash: [0u8; 32],
+        state_root: spec.first_state_root,
+        tx_root: spec.first_tx_root,
+        event_root: spec.first_event_root,
+        sequence: 1,
+        producer: Some(spec.operator),
+        timestamp_ms: u128::from(spec.timestamp_ms),
+    };
+    let first_commitment =
+        budlum_core::domain::producer::build_poa_commitment(&block, &authorities, &signers)?;
+    Ok(vec![
+        SettlementTx::RegisterDomain(Box::new(domain)),
+        SettlementTx::RegisterSovereignTemplate(Box::new(template)),
+        SettlementTx::TransitionSovereignLifecycle {
+            domain_id: spec.domain_id,
+            next: budlum_core::domain::sovereign::DomainLifecycleState::Active,
+        },
+        SettlementTx::SubmitCommitment(Box::new(first_commitment)),
+    ])
+}
+
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct QuorumKeys {
     #[serde(default)]
@@ -486,6 +577,68 @@ fn http_client() -> Result<reqwest::Client, String> {
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
+    if let Some(kit_path) = &cli.sovereign_kit {
+        let txs = build_sovereign_kit_txs(&cli, kit_path)?;
+        if let Some(out_path) = &cli.write_payload {
+            let text = serde_json::to_string_pretty(&txs)
+                .map_err(|e| format!("sovereign kit serialization: {e}"))?;
+            std::fs::write(out_path, text)
+                .map_err(|e| format!("cannot write sovereign kit {}: {e}", out_path.display()))?;
+            println!("wrote sovereign PoA domain kit to {}", out_path.display());
+            return Ok(());
+        }
+        let key_file = cli
+            .key_file
+            .as_ref()
+            .ok_or_else(|| "--key-file is required to submit".to_string())?;
+        let key = budlum_core::wallet::open_key_file(key_file, cli.password_file.as_deref())?;
+        let client = http_client()?;
+        let requested_chain_id = cli.signing_chain_id.ok_or_else(|| {
+            "--signing-chain-id is required to submit a sovereign domain kit".to_string()
+        })?;
+        let chain_id = bind_signing_chain_id(
+            quantity(
+                &rpc_call(&client, &cli.rpc_url, "bud_chainId", serde_json::json!([])).await?,
+                "bud_chainId",
+            )?,
+            requested_chain_id,
+        )?;
+        let sender = key.address();
+        let base_nonce = quantity(
+            &rpc_call(
+                &client,
+                &cli.rpc_url,
+                "bud_getNonce",
+                serde_json::json!([sender.to_hex()]),
+            )
+            .await?,
+            "bud_getNonce",
+        )?;
+        for (offset, stx) in txs.into_iter().enumerate() {
+            let nonce = base_nonce
+                .checked_add(offset as u64)
+                .ok_or_else(|| "nonce overflow".to_string())?;
+            let mut transaction = Transaction::new_with_chain_id(
+                sender,
+                Address::zero(),
+                0,
+                cli.fee,
+                nonce,
+                Vec::new(),
+                chain_id,
+                TransactionType::Settlement(stx),
+            );
+            key.sign(&mut transaction)?;
+            let _ = rpc_call(
+                &client,
+                &cli.rpc_url,
+                "bud_sendRawTransaction",
+                serde_json::json!([transaction]),
+            )
+            .await?;
+        }
+        return Ok(());
+    }
     let payload = load_payload(&cli)?;
     if let Some(path) = &cli.write_payload {
         let text = serde_json::to_string_pretty(&payload)
@@ -597,6 +750,7 @@ mod tests {
             dag_spec: None,
             poh_spec: None,
             pospace_spec: None,
+            sovereign_kit: None,
             quorum_keys: Some(path.clone()),
             write_payload: Some(path.clone()),
             key_file: None,
@@ -637,6 +791,7 @@ mod tests {
             dag_spec: None,
             poh_spec: None,
             pospace_spec: None,
+            sovereign_kit: None,
             quorum_keys: None,
             write_payload: None,
             key_file: Some(files.key.clone()),
@@ -715,6 +870,7 @@ mod tests {
             dag_spec: None,
             poh_spec: None,
             pospace_spec: None,
+            sovereign_kit: None,
             quorum_keys: None,
             write_payload: None,
             key_file: None,
@@ -955,5 +1111,106 @@ mod tests {
         .await
         .expect_err("out-of-bounds prover_index must fail closed");
         assert!(err.contains("prover_index"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn sovereign_kit_cli_builds_and_executes_poa_launch_and_first_commitment_in_one_command()
+    {
+        use budlum_core::core::account::AccountState;
+        use budlum_core::core::chain_config::Network;
+        use budlum_core::cross_domain::external::IntakeState;
+        use budlum_core::domain::registry::MIN_DOMAIN_OPERATOR_BOND;
+        use budlum_core::domain::sovereign::{DomainLifecycleState, SovereignDomainClass};
+        use budlum_core::registry::role::roles;
+        use budlum_core::settlement::domains::{execute_settlement_tx, SettlementTxContext};
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let keys = QuorumKeys {
+            bls_seeds: Vec::new(),
+            pq_seeds: Vec::new(),
+            composite: vec![
+                [hex::encode([0x41u8; 32]), hex::encode([0x51u8; 32])],
+                [hex::encode([0x42u8; 32]), hex::encode([0x52u8; 32])],
+            ],
+        };
+        let keys_path = dir.path().join("quorum_keys.json");
+        std::fs::write(&keys_path, serde_json::to_vec(&keys).unwrap()).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&keys_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let operator = Address::from([0x77; 32]);
+        let kit_spec = SovereignKitSpec {
+            domain_id: 777,
+            domain_chain_id: 99_777,
+            operator,
+            class: SovereignDomainClass::EnterprisePoa,
+            requires_kyc: true,
+            policy_hash: [0x11; 32],
+            jurisdiction_hash: [0x22; 32],
+            audit_commitment: [0x33; 32],
+            first_block_hash: [0xAA; 32],
+            first_state_root: [0xBB; 32],
+            first_tx_root: [0xCC; 32],
+            first_event_root: [0xDD; 32],
+            timestamp_ms: 1_700_000_000_000,
+        };
+        let spec_path = dir.path().join("sovereign_kit.json");
+        let out_path = dir.path().join("sovereign_bundle.json");
+        std::fs::write(&spec_path, serde_json::to_vec(&kit_spec).unwrap()).unwrap();
+
+        super::run(
+            Cli::try_parse_from([
+                "budlum-domain-producer",
+                "--sovereign-kit",
+                spec_path.to_str().unwrap(),
+                "--quorum-keys",
+                keys_path.to_str().unwrap(),
+                "--write-payload",
+                out_path.to_str().unwrap(),
+            ])
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let txs: Vec<SettlementTx> =
+            serde_json::from_slice(&std::fs::read(&out_path).unwrap()).unwrap();
+        assert_eq!(txs.len(), 4);
+
+        let mut state = AccountState::default();
+        state.get_or_create(&operator).balance = MIN_DOMAIN_OPERATOR_BOND * 8;
+        let stake = state.registry.params().min_stake.max(10_000_000);
+        state
+            .registry
+            .register(operator, roles::RELAYER, stake, 0)
+            .unwrap();
+        let ctx = SettlementTxContext {
+            sender: operator,
+            chain_id: Network::Devnet.chain_id().value(),
+            fee: 0,
+            bls: IntakeState::production_bls,
+        };
+        for stx in &txs {
+            execute_settlement_tx(&mut state, &ctx, stx).unwrap();
+        }
+        assert_eq!(
+            state
+                .settlement
+                .domains
+                .get(777)
+                .unwrap()
+                .last_committed_height,
+            1
+        );
+        let loaded_template = state
+            .settlement
+            .sovereign
+            .templates
+            .values()
+            .find(|t| t.domain_id == 777)
+            .unwrap();
+        assert_eq!(loaded_template.lifecycle, DomainLifecycleState::Active);
     }
 }

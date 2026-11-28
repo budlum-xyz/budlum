@@ -106,6 +106,39 @@ pub enum SettlementTx {
 
     /// Universal Object Layer state write (closed by `ACTIVATION` until M7).
     ObjectLayer(Box<crate::object_layer::ObjectLayerTx>),
+    /// Advance a registered sovereign domain template through its lifecycle
+    /// (`Draft -> Active -> Suspended -> Active -> Retired`).
+    TransitionSovereignLifecycle {
+        domain_id: DomainId,
+        next: crate::domain::sovereign::DomainLifecycleState,
+    },
+    /// Anchor a closed Garden's final quorum-signed commitment on Budlum and
+    /// permanently retire its domain record so its final state root remains
+    /// provable on Budlum.
+    AnchorClosedGarden(Box<ClosedGardenSettlement>),
+    /// Unfreeze a domain frozen by conflicting commitments using an in-block
+    /// verified finality proof on the winning branch.
+    ResolveDomainFork(Box<ResolveDomainFork>),
+}
+
+/// Closing finality package for an ephemeral Garden domain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClosedGardenSettlement {
+    pub domain_chain_id: u64,
+    pub genesis_hash: Hash32,
+    pub operator: Address,
+    pub final_commitment: VerifiedDomainCommitment,
+}
+
+/// In-block fork resolution request carrying the cryptographically proven
+/// winning commitment for a frozen domain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveDomainFork {
+    pub domain_id: DomainId,
+    pub conflicting_height: u64,
+    pub head_a: Hash32,
+    pub head_b: Hash32,
+    pub winning: VerifiedDomainCommitment,
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -350,12 +383,13 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
                     domain.id
                 ));
             }
-            // A node-local plugin cannot decide a consensus block. The only
-            // in-block verifier for Custom domains is the rebuildable external
-            // adapter; accepting another name creates a domain that can never
-            // submit a final commitment (and may mislead its operator).
+            // A node-local plugin cannot decide a consensus block. In-block
+            // verification for a Custom domain is backed either by the
+            // rebuildable external adapter or by a pinned BudZKVM program
+            // (`zk-proof-verification` bound to `plugin_code_hash`).
             domain.finality_adapter
                 == crate::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER
+                || domain.finality_adapter == "zk-proof-verification"
         }
     };
 
@@ -366,15 +400,35 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
         ));
     }
 
-    // A Custom domain delegates its finality decision to a plugin, and a
-    // plugin is consensus code. The code hash is the only thing that binds a
-    // Custom domain's rule change to a committed value, so a Custom domain
-    // that declares no hash has no verifiable rule at all.
-    if matches!(domain.kind, ConsensusKind::Custom(_)) && domain.plugin_code_hash.is_none() {
-        return Err(format!(
-            "Custom domain {} must declare a plugin_code_hash",
-            domain.id
-        ));
+    // A Custom domain delegates its finality decision to a plugin or a
+    // BudZKVM program, and its code hash is the committed consensus rule.
+    if matches!(domain.kind, ConsensusKind::Custom(_)) {
+        let Some(code_hash) = domain.plugin_code_hash else {
+            return Err(format!(
+                "Custom domain {} must declare a plugin_code_hash",
+                domain.id
+            ));
+        };
+        if domain.finality_adapter == "zk-proof-verification" {
+            if code_hash == [0u8; 32] {
+                return Err(format!(
+                    "Custom ZK domain {} plugin_code_hash cannot be zero",
+                    domain.id
+                ));
+            }
+            if domain.zk_program_allowlist.as_slice() != [code_hash] {
+                return Err(format!(
+                    "Custom ZK domain {} must pin zk_program_allowlist to its plugin_code_hash",
+                    domain.id
+                ));
+            }
+            if domain.genesis_state_root.get(16..32) != Some([0u8; 16].as_slice()) {
+                return Err(format!(
+                    "Custom ZK domain {} genesis_state_root upper 16 bytes must be zero",
+                    domain.id
+                ));
+            }
+        }
     }
     if matches!(domain.kind, ConsensusKind::Zk)
         && domain.genesis_state_root.get(16..32) != Some([0u8; 16].as_slice())
@@ -472,16 +526,28 @@ fn validate_commitment_metadata<'a>(
     state: &'a AccountState,
     commitment: &DomainCommitment,
 ) -> Result<&'a ConsensusDomain, String> {
+    validate_commitment_metadata_mode(state, commitment, false)
+}
+
+fn validate_commitment_metadata_mode<'a>(
+    state: &'a AccountState,
+    commitment: &DomainCommitment,
+    allow_frozen: bool,
+) -> Result<&'a ConsensusDomain, String> {
     let domain = state
         .settlement
         .domains
         .get(commitment.domain_id)
         .ok_or_else(|| format!("Unknown consensus domain {}", commitment.domain_id))?;
-    if domain.status == DomainStatus::Frozen {
-        return Err(format!("Domain {} is frozen", commitment.domain_id));
-    }
-    if !domain.is_active() {
-        return Err(format!("Domain {} is not active", commitment.domain_id));
+    if !allow_frozen {
+        if domain.status == DomainStatus::Frozen {
+            return Err(format!("Domain {} is frozen", commitment.domain_id));
+        }
+        if !domain.is_active() {
+            return Err(format!("Domain {} is not active", commitment.domain_id));
+        }
+    } else if domain.status != DomainStatus::Frozen {
+        return Err(format!("Domain {} is not frozen", commitment.domain_id));
     }
     if domain.kind != commitment.consensus_kind {
         return Err(format!(
@@ -605,7 +671,18 @@ pub fn verify_commitment_finality_observed(
     bls: fn() -> Box<dyn BlsVerifier>,
     observer: &mut dyn crate::crypto::facts::CryptoObserver,
 ) -> Result<(), String> {
-    let domain = validate_commitment_metadata(state, commitment)?;
+    verify_commitment_finality_observed_mode(state, commitment, proof, bls, observer, false)
+}
+
+fn verify_commitment_finality_observed_mode(
+    state: &AccountState,
+    commitment: &DomainCommitment,
+    proof: &FinalityProof,
+    bls: fn() -> Box<dyn BlsVerifier>,
+    observer: &mut dyn crate::crypto::facts::CryptoObserver,
+    allow_frozen: bool,
+) -> Result<(), String> {
+    let domain = validate_commitment_metadata_mode(state, commitment, allow_frozen)?;
     // Domain authorities may attest their own domain, not authorize writes to
     // another native account. Permissionless registration makes that distinction
     // essential: even a correctly signed PoA/PoAPq commitment can be entirely
@@ -717,6 +794,37 @@ pub fn verify_commitment_finality_observed(
         ConsensusKind::Zk => {
             // The claim-bound verifier: a ZK domain finalizes only against
             // the root an accepted proof claim recorded.
+            let adapter = ZkFinalityAdapter;
+            ensure_adapter_name(domain, adapter.adapter_name())?;
+            let claim_key = ProofClaimKey {
+                domain_id: commitment.domain_id,
+                target_height: commitment.domain_height,
+            };
+            let accepted_root = state
+                .settlement
+                .proof_claims
+                .get(&claim_key)
+                .map(|c| c.final_state_root);
+            let verdict =
+                adapter.verify_finality_with_claim(domain, commitment, proof, accepted_root);
+            if let Ok(status) = &verdict {
+                adapter.observe_finalized(status, proof, observer);
+            }
+            verdict
+        }
+        ConsensusKind::Custom(_) if domain.finality_adapter == "zk-proof-verification" => {
+            let Some(pinned_program) = domain.plugin_code_hash.filter(|h| *h != [0u8; 32]) else {
+                return Err(format!(
+                    "Custom ZK domain {} is missing a non-zero plugin_code_hash",
+                    commitment.domain_id
+                ));
+            };
+            if domain.zk_program_allowlist.as_slice() != [pinned_program] {
+                return Err(format!(
+                    "Custom ZK domain {} allowlist drifted from pinned plugin_code_hash",
+                    commitment.domain_id
+                ));
+            }
             let adapter = ZkFinalityAdapter;
             ensure_adapter_name(domain, adapter.adapter_name())?;
             let claim_key = ProofClaimKey {
@@ -1038,6 +1146,10 @@ impl CommitmentAttestation {
                 event_root: false,
                 parent: true,
             }
+        } else if matches!(domain.kind, ConsensusKind::Custom(_))
+            && domain.finality_adapter == "zk-proof-verification"
+        {
+            Self::for_kind(&ConsensusKind::Zk)
         } else {
             Self::for_kind(&domain.kind)
         }
@@ -1496,10 +1608,19 @@ pub fn submit_zk_proof(
         .domains
         .get(claimed_domain)
         .ok_or_else(|| format!("unknown domain {claimed_domain}"))?;
-    if domain.kind != ConsensusKind::Zk {
+    let is_budzkvm_custom = matches!(domain.kind, ConsensusKind::Custom(_))
+        && domain.finality_adapter == "zk-proof-verification";
+    if domain.kind != ConsensusKind::Zk && !is_budzkvm_custom {
         return Err(format!(
-            "domain {claimed_domain} has consensus kind {:?}, not Zk",
+            "domain {claimed_domain} has consensus kind {:?}, not Zk or BudZKVM-backed Custom",
             domain.kind
+        ));
+    }
+    if is_budzkvm_custom
+        && domain.plugin_code_hash != Some(crate::prover::zk_program_hash(&submission.program))
+    {
+        return Err(format!(
+            "custom ZK domain {claimed_domain} only accepts proofs of its pinned plugin_code_hash"
         ));
     }
     if domain.status == DomainStatus::Frozen {
@@ -1887,14 +2008,19 @@ pub fn execute_settlement_tx(
             program,
             allow,
         } => {
-            let operator = state
-                .settlement
-                .domains
-                .get(*domain_id)
-                .ok_or_else(|| SettlementTxError::Refused(format!("Unknown domain {domain_id}")))?
-                .operator;
-            if operator != Some(ctx.sender) {
+            let dom =
+                state.settlement.domains.get(*domain_id).ok_or_else(|| {
+                    SettlementTxError::Refused(format!("Unknown domain {domain_id}"))
+                })?;
+            if dom.operator != Some(ctx.sender) {
                 return Err(SettlementTxError::NotTheOperator(*domain_id));
+            }
+            if matches!(dom.kind, ConsensusKind::Custom(_))
+                && dom.finality_adapter == "zk-proof-verification"
+            {
+                return Err(SettlementTxError::Refused(format!(
+                    "Custom ZK domain {domain_id} consensus rule is immutably pinned to plugin_code_hash"
+                )));
             }
             let domains = &mut state.settlement.domains;
             if *allow {
@@ -1923,13 +2049,433 @@ pub fn execute_settlement_tx(
         }
         SettlementTx::DeliverMessage(delivery) => deliver_message(state, ctx, delivery),
         SettlementTx::ObjectLayer(uol_tx) => execute_object_layer_tx(state, ctx, uol_tx),
+        SettlementTx::TransitionSovereignLifecycle { domain_id, next } => {
+            let operator = state
+                .settlement
+                .domains
+                .get(*domain_id)
+                .ok_or_else(|| SettlementTxError::Refused(format!("Unknown domain {domain_id}")))?
+                .operator;
+            if operator != Some(ctx.sender) {
+                return Err(SettlementTxError::NotTheOperator(*domain_id));
+            }
+            state
+                .settlement
+                .sovereign
+                .transition_lifecycle(*domain_id, next.clone())
+                .map_err(SettlementTxError::Refused)
+        }
+        SettlementTx::AnchorClosedGarden(closed) => {
+            execute_anchor_closed_garden(state, ctx, closed)
+        }
+        SettlementTx::ResolveDomainFork(resolution) => {
+            execute_resolve_domain_fork(state, ctx, resolution)
+        }
     }
+}
+
+fn execute_anchor_closed_garden(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    closed: &ClosedGardenSettlement,
+) -> Result<(), SettlementTxError> {
+    let _canonical = crate::garden::closing_settlement_from_parts(
+        closed.domain_chain_id,
+        closed.genesis_hash,
+        closed.operator,
+        closed.final_commitment.clone(),
+    )
+    .map_err(SettlementTxError::Refused)?;
+    if closed.operator != ctx.sender || ctx.sender == Address::zero() {
+        return Err(SettlementTxError::OperatorIsNotSender);
+    }
+    crate::garden::verify_garden_execution_chain(closed.domain_chain_id)
+        .map_err(SettlementTxError::Refused)?;
+    if closed.genesis_hash == [0u8; 32] {
+        return Err(SettlementTxError::Refused(
+            "closed Garden genesis_hash cannot be zero".into(),
+        ));
+    }
+    let domain_id = crate::garden::garden_domain_id(closed.domain_chain_id);
+    if state.settlement.domains.get(domain_id).is_some() {
+        return Err(SettlementTxError::Refused(format!(
+            "Garden domain {domain_id} is already registered"
+        )));
+    }
+    let com = &closed.final_commitment.commitment;
+    if com.domain_id != domain_id {
+        return Err(SettlementTxError::Refused(format!(
+            "closed Garden commitment domain_id {} does not match derived id {domain_id}",
+            com.domain_id
+        )));
+    }
+    if com.domain_height == 0 {
+        return Err(SettlementTxError::Refused(
+            "closed Garden final commitment height must be >= 1".into(),
+        ));
+    }
+    if com.consensus_kind != ConsensusKind::PoA || com.validator_set_hash == [0u8; 32] {
+        return Err(SettlementTxError::Refused(
+            "closed Garden commitment must carry PoA kind and a non-zero validator_set_hash".into(),
+        ));
+    }
+    if !com.state_updates.is_empty() {
+        return Err(SettlementTxError::Refused(
+            "bridgeless Garden closing commitment cannot carry account state_updates".into(),
+        ));
+    }
+    let host_signed = match &closed.final_commitment.proof {
+        FinalityProof::PoA { signatures, .. } => {
+            signatures.iter().any(|s| s.authority == closed.operator)
+        }
+        FinalityProof::PoAPq { signatures, .. } => {
+            signatures.iter().any(|s| s.authority == closed.operator)
+        }
+        _ => false,
+    };
+    if !host_signed {
+        return Err(SettlementTxError::Refused(
+            "closed Garden final certificate must include the Garden host signature".into(),
+        ));
+    }
+    refuse_classical_only_quorum_on_mainnet(ctx.chain_id, &closed.final_commitment.proof)?;
+
+    let bond = crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND;
+    let balance = state.spendable_balance(&ctx.sender);
+    let needed = bond
+        .checked_add(ctx.fee)
+        .ok_or_else(|| SettlementTxError::Refused("Garden bond plus fee overflows".into()))?;
+    if balance < needed {
+        return Err(SettlementTxError::BondUnfunded { needed, balance });
+    }
+    let held = state
+        .external_bond_escrow
+        .get(&ctx.sender)
+        .copied()
+        .unwrap_or(0);
+    held.checked_add(bond)
+        .ok_or_else(|| SettlementTxError::Refused("external bond escrow overflows".into()))?;
+
+    let expected_proof_hash = crate::domain::hash_finality_proof(&closed.final_commitment.proof)
+        .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+    if com.finality_proof_hash != expected_proof_hash {
+        return Err(SettlementTxError::Refused(
+            "closed Garden commitment finality_proof_hash does not match proof".into(),
+        ));
+    }
+
+    let garden_domain = ConsensusDomain {
+        id: domain_id,
+        kind: ConsensusKind::PoA,
+        status: DomainStatus::Active,
+        domain_chain_id: closed.domain_chain_id,
+        operator: Some(closed.operator),
+        operator_bond: bond,
+        config_hash: closed.genesis_hash,
+        validator_set_hash: com.validator_set_hash,
+        finality_adapter: "poa-authority-quorum".to_string(),
+        min_confirmations: 1,
+        bridge_enabled: false,
+        block_hash_scheme: crate::domain::types::RootScheme::Sha256,
+        state_root_scheme: crate::domain::types::RootScheme::Sha256,
+        tx_root_scheme: crate::domain::types::RootScheme::Sha256,
+        last_committed_height: 0,
+        last_committed_hash: closed.genesis_hash,
+        pow_parameters: None,
+        zk_program_allowlist: Vec::new(),
+        plugin_code_hash: None,
+        genesis_state_root: closed.genesis_hash,
+    };
+    validate_domain_registration(&garden_domain).map_err(SettlementTxError::Refused)?;
+
+    let mut observed = crate::crypto::facts::CryptoFacts::new();
+    let status = PoAFinalityAdapter::default()
+        .verify_finality_admitted_observed_in(
+            &state.scheme_registry,
+            &garden_domain,
+            com,
+            &closed.final_commitment.proof,
+            None,
+            &mut observed,
+        )
+        .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+    if status != FinalityStatus::Finalized {
+        return Err(SettlementTxError::Refused(format!(
+            "closed Garden commitment is not finalized: {status:?}"
+        )));
+    }
+
+    // Every check passed; apply state mutations atomically.
+    register_domain(state, garden_domain).map_err(SettlementTxError::Refused)?;
+    let budlum_height = state.current_block_height;
+    state
+        .settlement
+        .commitments
+        .insert_at_height(com.clone(), budlum_height)
+        .map_err(SettlementTxError::Refused)?;
+    if let Some(dom) = state.settlement.domains.get_mut(domain_id) {
+        dom.last_committed_height = com.domain_height;
+        dom.last_committed_hash = com.domain_block_hash;
+    }
+    state
+        .settlement
+        .domains
+        .record_observed(domain_id, &observed);
+    state
+        .settlement
+        .domains
+        .transition_status_checked(domain_id, DomainStatus::Frozen)
+        .map_err(SettlementTxError::Refused)?;
+    state
+        .settlement
+        .domains
+        .transition_status_checked(domain_id, DomainStatus::Retired)
+        .map_err(SettlementTxError::Refused)?;
+    state
+        .lock_external_bond(&ctx.sender, bond)
+        .map_err(SettlementTxError::Refused)
+}
+
+fn fork_candidate_for_verified(
+    domain: &ConsensusDomain,
+    verified: &VerifiedDomainCommitment,
+) -> Result<crate::domain::ForkCandidate, String> {
+    let com = &verified.commitment;
+    let cumulative_work = match (&domain.kind, &verified.proof) {
+        (ConsensusKind::PoW, FinalityProof::PoWHeaderChain { headers }) => {
+            let mut work = 0u128;
+            for h in headers {
+                let step = 1u128
+                    .checked_shl(h.difficulty_bits)
+                    .ok_or_else(|| "PoW difficulty_bits overflow".to_string())?;
+                work = work.saturating_add(step);
+            }
+            Some(work)
+        }
+        (ConsensusKind::PoW, FinalityProof::BitcoinSpv { headers }) => Some(headers.len() as u128),
+        (ConsensusKind::Pospace, _) => Some(u128::from(com.domain_height.max(1))),
+        _ => None,
+    };
+    let vote_weight = match (&domain.kind, &verified.proof) {
+        (
+            ConsensusKind::PoS,
+            FinalityProof::PoS {
+                validator_snapshot, ..
+            },
+        ) => Some(u128::from(validator_snapshot.total_stake.max(1))),
+        (ConsensusKind::PoS, _) => Some(1),
+        _ => None,
+    };
+    let qc_present = matches!(
+        domain.kind,
+        ConsensusKind::Bft | ConsensusKind::Dag | ConsensusKind::Poh
+    );
+    let authority_quorum = matches!(domain.kind, ConsensusKind::PoA);
+    Ok(crate::domain::ForkCandidate {
+        domain_id: domain.id,
+        head_hash: com.domain_block_hash,
+        parent_hash: com.parent_domain_block_hash,
+        height: com.domain_height,
+        cumulative_work,
+        vote_weight,
+        justified_checkpoint: Some(com.domain_block_hash),
+        finalized_checkpoint: Some(com.domain_block_hash),
+        proposer: com.producer,
+        qc_present,
+        authority_quorum,
+    })
+}
+
+fn execute_resolve_domain_fork(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    resolution: &ResolveDomainFork,
+) -> Result<(), SettlementTxError> {
+    if !state
+        .registry
+        .is_active(&ctx.sender, crate::registry::role::roles::RELAYER)
+    {
+        return Err(SettlementTxError::CarrierNotBonded);
+    }
+    if resolution.conflicting_height == 0
+        || resolution.head_a == [0u8; 32]
+        || resolution.head_b == [0u8; 32]
+        || resolution.head_a == resolution.head_b
+    {
+        return Err(SettlementTxError::Refused(
+            "fork resolution must name two distinct non-zero conflicting heads at height >= 1"
+                .into(),
+        ));
+    }
+    let com = &resolution.winning.commitment;
+    if com.domain_id != resolution.domain_id {
+        return Err(SettlementTxError::Refused(
+            "winning commitment domain_id does not match fork resolution domain_id".into(),
+        ));
+    }
+    if com.domain_height < resolution.conflicting_height {
+        return Err(SettlementTxError::Refused(
+            "winning commitment height cannot sit below conflicting_height".into(),
+        ));
+    }
+    let domain = state
+        .settlement
+        .domains
+        .get(resolution.domain_id)
+        .cloned()
+        .ok_or_else(|| {
+            SettlementTxError::Refused(format!("Unknown domain {}", resolution.domain_id))
+        })?;
+    if domain.status != DomainStatus::Frozen {
+        return Err(SettlementTxError::Refused(format!(
+            "domain {} is not frozen (status={:?})",
+            resolution.domain_id, domain.status
+        )));
+    }
+    if resolution.conflicting_height > domain.last_committed_height.saturating_add(1) {
+        return Err(SettlementTxError::Refused(
+            "conflicting_height is ahead of frozen domain tip window".into(),
+        ));
+    }
+    if domain.validator_set_hash != [0u8; 32] && com.validator_set_hash != domain.validator_set_hash
+    {
+        return Err(SettlementTxError::Refused(format!(
+            "Commitment validator set hash mismatch for domain {}",
+            domain.id
+        )));
+    }
+    if let Some(stored_conflict) = state
+        .settlement
+        .commitments
+        .find_by_height(domain.id, resolution.conflicting_height)
+    {
+        if stored_conflict.domain_block_hash != resolution.head_a
+            && stored_conflict.domain_block_hash != resolution.head_b
+        {
+            return Err(SettlementTxError::Refused(
+                "stored commitment at conflicting_height matches neither head_a nor head_b".into(),
+            ));
+        }
+    }
+    if com.domain_height > 1 {
+        if let Some(parent_com) = state
+            .settlement
+            .commitments
+            .find_by_height(domain.id, com.domain_height - 1)
+        {
+            if com.domain_height - 1 < resolution.conflicting_height
+                && com.parent_domain_block_hash != parent_com.domain_block_hash
+            {
+                return Err(SettlementTxError::Refused(
+                    "winning commitment parent hash does not link to pre-fork ancestor".into(),
+                ));
+            }
+        }
+    }
+
+    refuse_classical_only_quorum_on_mainnet(ctx.chain_id, &resolution.winning.proof)?;
+    let expected_proof_hash = crate::domain::hash_finality_proof(&resolution.winning.proof)
+        .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+    if com.finality_proof_hash != expected_proof_hash || expected_proof_hash == [0u8; 32] {
+        return Err(SettlementTxError::Refused(
+            "winning commitment finality_proof_hash mismatch".into(),
+        ));
+    }
+
+    let mut observed = crate::crypto::facts::CryptoFacts::new();
+    verify_commitment_finality_observed_mode(
+        state,
+        com,
+        &resolution.winning.proof,
+        ctx.bls,
+        &mut observed,
+        true,
+    )
+    .map_err(SettlementTxError::Refused)?;
+    validate_commitment_state_updates(state, com).map_err(SettlementTxError::Refused)?;
+
+    let winning_candidate = fork_candidate_for_verified(&domain, &resolution.winning)
+        .map_err(SettlementTxError::Refused)?;
+    let mut cand_a = winning_candidate.clone();
+    cand_a.height = resolution.conflicting_height;
+    cand_a.head_hash = resolution.head_a;
+    cand_a.finalized_checkpoint = Some(resolution.head_a);
+    let mut cand_b = cand_a.clone();
+    cand_b.head_hash = resolution.head_b;
+    cand_b.finalized_checkpoint = Some(resolution.head_b);
+
+    let chooser = crate::domain::DomainForkChoice {
+        domain_id: domain.id,
+        kind: domain.kind.clone(),
+    };
+    let freeze_state = match chooser.evaluate_with_freeze(&[cand_a, cand_b]) {
+        Err((crate::domain::ForkChoiceError::ConflictingFinality, frozen)) => frozen,
+        other => {
+            return Err(SettlementTxError::Refused(format!(
+                "supplied conflict pair did not trigger fork freeze: {other:?}"
+            )));
+        }
+    };
+    let in_block_proof = crate::domain::InBlockForkResolutionProof {
+        block_height: state.current_block_height.max(1),
+        winning_head_hash: com.domain_block_hash,
+        quorum_proof_digest: expected_proof_hash,
+        verified_in_block: true,
+    };
+    let (next_status, resolved) = chooser
+        .unfreeze_with_in_block_proof(&freeze_state, &winning_candidate, &in_block_proof)
+        .map_err(|e| SettlementTxError::Refused(format!("fork resolution rejected: {e:?}")))?;
+    if next_status != crate::domain::DomainForkFreezeStatus::Active
+        || resolved.head_hash != com.domain_block_hash
+    {
+        return Err(SettlementTxError::Refused(
+            "fork resolution did not produce an active resolved head".into(),
+        ));
+    }
+
+    // All checks succeeded; prune the equivocated branch and apply the winning head.
+    state
+        .settlement
+        .commitments
+        .prune_from_height(domain.id, resolution.conflicting_height);
+    state
+        .settlement
+        .proof_claims
+        .rollback_domain_above(domain.id, com.domain_height);
+    if !com.state_updates.is_empty() {
+        return Err(SettlementTxError::Refused(
+            "canonical account nonce writes require account-owner authorization".to_string(),
+        ));
+    }
+    let budlum_height = state.current_block_height;
+    state
+        .settlement
+        .commitments
+        .insert_at_height(com.clone(), budlum_height)
+        .map_err(SettlementTxError::Refused)?;
+    if let Some(dom) = state.settlement.domains.get_mut(domain.id) {
+        dom.last_committed_height = com.domain_height;
+        dom.last_committed_hash = com.domain_block_hash;
+    }
+    state
+        .settlement
+        .domains
+        .transition_status_checked(domain.id, DomainStatus::Active)
+        .map_err(SettlementTxError::Refused)?;
+    state
+        .settlement
+        .domains
+        .record_observed(domain.id, &observed);
+    Ok(())
 }
 
 fn domain_has_bound_authority(domain: &ConsensusDomain) -> bool {
     match domain.kind {
         ConsensusKind::PoW => domain.pow_parameters.is_some(),
         ConsensusKind::Zk => !domain.zk_program_allowlist.is_empty(),
+        ConsensusKind::Custom(_) if domain.finality_adapter == "zk-proof-verification" => domain
+            .plugin_code_hash
+            .is_some_and(|h| h != [0u8; 32] && domain.zk_program_allowlist.as_slice() == [h]),
         ConsensusKind::PoA
         | ConsensusKind::PoS
         | ConsensusKind::Bft

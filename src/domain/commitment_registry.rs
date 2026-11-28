@@ -155,6 +155,23 @@ impl DomainCommitmentRegistry {
         Some(commitment)
     }
 
+    /// Prune every stored commitment of `domain_id` at or above `from_height`
+    /// when an in-block fork resolution replaces an equivocated tip.
+    pub(crate) fn prune_from_height(&mut self, domain_id: DomainId, from_height: u64) -> usize {
+        let keys: Vec<(DomainId, u64, u64)> = self
+            .commitments
+            .range((domain_id, from_height, 0)..=(domain_id, u64::MAX, u64::MAX))
+            .map(|(k, _)| *k)
+            .collect();
+        let mut removed = 0usize;
+        for (d, h, seq) in keys {
+            if self.remove(d, h, seq).is_some() {
+                removed = removed.saturating_add(1);
+            }
+        }
+        removed
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.commitments.len()

@@ -457,6 +457,7 @@ impl SovereignDomainRegistry {
             hasher.update(domain_id.to_le_bytes());
             hasher.update(template.template_id);
             hasher.update(template.compliance.root());
+            hasher.update([template.lifecycle.tag()]);
         }
         hasher.finalize().into()
     }

@@ -2786,7 +2786,9 @@ impl Transaction {
             // check. The template and allowlist doors are registry writes.
             TransactionType::Settlement(
                 crate::settlement::domains::SettlementTx::RegisterDomain(_)
-                | crate::settlement::domains::SettlementTx::SubmitZkProof(_),
+                | crate::settlement::domains::SettlementTx::SubmitZkProof(_)
+                | crate::settlement::domains::SettlementTx::AnchorClosedGarden(_)
+                | crate::settlement::domains::SettlementTx::ResolveDomainFork(_),
             ) => schedule.contract_call_gas * 4 + schedule.gas_per_signature * 8,
             TransactionType::Settlement(
                 crate::settlement::domains::SettlementTx::SubmitCommitment(_),
@@ -4569,6 +4571,40 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
             let bytes = postcard::to_allocvec(uol_tx.as_ref())
                 .unwrap_or_else(|_| b"budlum/object-layer/serialize-failed".to_vec());
             put_bytes(out, &bytes);
+        }
+        SettlementTx::TransitionSovereignLifecycle { domain_id, next } => {
+            put_u8(out, 11);
+            put_u32(out, *domain_id);
+            put_u8(out, next.tag());
+        }
+        SettlementTx::AnchorClosedGarden(closed) => {
+            put_u8(out, 12);
+            put_u64(out, closed.domain_chain_id);
+            put_fixed(out, &closed.genesis_hash);
+            put_fixed(out, closed.operator.as_bytes());
+            put_fixed(out, &closed.final_commitment.commitment.leaf_hash());
+            match crate::domain::hash_finality_proof(&closed.final_commitment.proof) {
+                Ok(hash) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &hash);
+                }
+                Err(_) => put_u8(out, 0),
+            }
+        }
+        SettlementTx::ResolveDomainFork(resolution) => {
+            put_u8(out, 13);
+            put_u32(out, resolution.domain_id);
+            put_u64(out, resolution.conflicting_height);
+            put_fixed(out, &resolution.head_a);
+            put_fixed(out, &resolution.head_b);
+            put_fixed(out, &resolution.winning.commitment.leaf_hash());
+            match crate::domain::hash_finality_proof(&resolution.winning.proof) {
+                Ok(hash) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &hash);
+                }
+                Err(_) => put_u8(out, 0),
+            }
         }
     }
 }

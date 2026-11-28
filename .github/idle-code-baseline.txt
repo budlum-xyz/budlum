@@ -605,11 +605,8 @@ src/domain/commitment_registry.rs	fn	get_by_block_hash
 src/domain/finality_adapter.rs	fn	required_signatures
 src/domain/fork_choice.rs	enum	DomainFinalityStatus
 src/domain/fork_choice.rs	enum	DomainLifecycleStatus
-src/domain/fork_choice.rs	enum	ForkChoiceError
 src/domain/fork_choice.rs	enum	ForkChoiceReason
 src/domain/fork_choice.rs	fn	can_transition_to
-src/domain/fork_choice.rs	struct	DomainForkChoice
-src/domain/fork_choice.rs	struct	ForkCandidate
 src/domain/fork_choice.rs	struct	ResolvedHead
 src/domain/fork_choice.rs	trait	ConsensusDomainForkChoice
 src/domain/plugin.rs	struct	ZkDomainPlugin
@@ -617,13 +614,10 @@ src/domain/plugin_registry.rs	struct	PluginReplacement
 src/domain/registry.rs	fn	domain_leaf_hash
 src/domain/sovereign.rs	const	MAX_AUDIT_EXPORT_SPAN_BLOCKS
 src/domain/sovereign.rs	const	MAX_SOVEREIGN_DOMAIN_TEMPLATES
-src/domain/sovereign.rs	enum	DomainLifecycleState
 src/domain/sovereign.rs	fn	can_transition_to
 src/domain/sovereign.rs	fn	register_template
-src/domain/sovereign.rs	fn	transition_lifecycle
 src/domain/sovereign.rs	fn	transition_to
 src/domain/sovereign.rs	fn	validate_against_template
-src/domain/sovereign.rs	struct	ComplianceEvidence
 src/domain/storage_deal.rs	const	DEMAND_REPLICA_STEP_SCALED
 src/domain/storage_deal.rs	const	FEE_RATE_SCALE
 src/domain/storage_deal.rs	const	MAINNET_MIN_OPENER_BOND

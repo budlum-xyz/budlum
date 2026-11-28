@@ -85,6 +85,66 @@ pub fn authority_set_hash(chain_id: u64, authorities: &[GardenKey]) -> Result<Ha
     poa_authority_set_hash(&probe, &addresses).map_err(|e| e.to_string())
 }
 
+/// Build a [`crate::settlement::domains::ClosedGardenSettlement`] envelope from
+/// a closed Garden's genesis parameters, final authority electorate, and final
+/// quorum-signed commitment so Budlum can anchor and retire the Garden's final
+/// state root in block.
+pub fn closing_settlement_from_parts(
+    domain_chain_id: u64,
+    genesis_hash: Hash32,
+    operator: Address,
+    final_commitment: VerifiedDomainCommitment,
+) -> Result<crate::settlement::domains::ClosedGardenSettlement, String> {
+    super::types::verify_garden_execution_chain(domain_chain_id)?;
+    if genesis_hash == [0u8; 32] {
+        return Err("Garden genesis_hash cannot be zero".into());
+    }
+    if operator == Address::zero() {
+        return Err("Garden operator cannot be the zero address".into());
+    }
+    let expected_domain_id = garden_domain_id(domain_chain_id);
+    if final_commitment.commitment.domain_id != expected_domain_id {
+        return Err(format!(
+            "Garden commitment domain_id {} does not match derived id {expected_domain_id}",
+            final_commitment.commitment.domain_id
+        ));
+    }
+    if final_commitment.commitment.domain_height == 0 {
+        return Err("Closed Garden final commitment height must be >= 1".into());
+    }
+    if final_commitment.commitment.consensus_kind != ConsensusKind::PoA {
+        return Err("Garden closing commitment must use ConsensusKind::PoA".into());
+    }
+    if final_commitment.commitment.validator_set_hash == [0u8; 32] {
+        return Err("Garden closing commitment validator_set_hash cannot be zero".into());
+    }
+    Ok(crate::settlement::domains::ClosedGardenSettlement {
+        domain_chain_id,
+        genesis_hash,
+        operator,
+        final_commitment,
+    })
+}
+
+#[cfg(test)]
+fn closing_settlement(
+    genesis: &GardenGenesis,
+    operator: GardenKey,
+    electorate: &[GardenKey],
+    final_commit: &GardenCommit,
+) -> Result<crate::settlement::domains::ClosedGardenSettlement, String> {
+    if final_commit.block.header.chain_id != genesis.chain_id {
+        return Err("Garden final commit chain_id does not match genesis".into());
+    }
+    let verified = verified_commitment(electorate, final_commit)?;
+    closing_settlement_from_parts(
+        genesis.chain_id,
+        genesis.hash(),
+        Address(operator),
+        verified,
+    )
+}
+
 /// Turn a finalized Garden block into the payload Budlum verifies.
 ///
 /// The proof carries the electorate of the block and the votes as they were
@@ -595,5 +655,51 @@ mod tests {
                 .is_none(),
             "view_for_genesis() must refuse a record with another genesis hash"
         );
+    }
+
+    #[test]
+    fn closed_garden_final_commit_anchors_and_retires_in_budlum_settlement() {
+        let mut net = Net::new();
+        let a = net.join("a");
+        let _b = net.join("b");
+        net.commit(vec![net.publish(&a, 1)]).unwrap();
+        net.commit(vec![net.publish(&a, 2)]).unwrap();
+
+        let (final_commit, electorate) = net.ledger.commit_at(net.ledger.state.height).unwrap();
+        let closed = closing_settlement(
+            &net.ledger.state.genesis,
+            net.host,
+            electorate,
+            final_commit,
+        )
+        .unwrap();
+
+        let mut chain = budlum();
+        let host_addr = Address(net.host);
+        chain.state.get_or_create(&host_addr).balance = MIN_DOMAIN_OPERATOR_BOND * 4;
+        let ctx = crate::settlement::domains::SettlementTxContext {
+            sender: host_addr,
+            chain_id: Network::Devnet.chain_id().value(),
+            fee: 0,
+            bls: crate::cross_domain::external::IntakeState::production_bls,
+        };
+        crate::settlement::domains::execute_settlement_tx(
+            &mut chain.state,
+            &ctx,
+            &crate::settlement::domains::SettlementTx::AnchorClosedGarden(Box::new(closed)),
+        )
+        .unwrap();
+
+        let dom_id = garden_domain_id(net.ledger.state.genesis.chain_id);
+        let dom = chain.state.settlement.domains.get(dom_id).unwrap();
+        assert_eq!(dom.status, DomainStatus::Retired);
+        assert_eq!(dom.last_committed_height, final_commit.block.header.height);
+        let stored = chain
+            .state
+            .settlement
+            .commitments
+            .find_by_height(dom_id, final_commit.block.header.height)
+            .unwrap();
+        assert_eq!(stored.state_root, final_commit.block.header.state_root);
     }
 }

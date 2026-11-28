@@ -110,9 +110,8 @@ impl ConsensusDomainForkChoice for DomainForkChoice {
 
 /// Freeze state produced when conflicting finalized commitments are observed
 /// for the same domain.
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-enum DomainForkFreezeStatus {
+pub enum DomainForkFreezeStatus {
     Active,
     Frozen {
         conflicting_height: u64,
@@ -124,16 +123,14 @@ enum DomainForkFreezeStatus {
 /// In-block evidence required to unfreeze a domain frozen by conflicting
 /// finalized commitments. Out-of-block claims (`verified_in_block == false`)
 /// or zero digests are unconditionally refused.
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct InBlockForkResolutionProof {
-    block_height: u64,
-    winning_head_hash: Hash32,
-    quorum_proof_digest: Hash32,
-    verified_in_block: bool,
+pub struct InBlockForkResolutionProof {
+    pub block_height: u64,
+    pub winning_head_hash: Hash32,
+    pub quorum_proof_digest: Hash32,
+    pub verified_in_block: bool,
 }
 
-#[cfg(test)]
 impl DomainForkChoice {
     fn first_conflict_pair(candidates: &[ForkCandidate]) -> Option<(u64, Hash32, Hash32)> {
         let mut seen = std::collections::BTreeMap::<u64, Hash32>::new();
@@ -159,7 +156,7 @@ impl DomainForkChoice {
         None
     }
 
-    fn evaluate_with_freeze(
+    pub fn evaluate_with_freeze(
         &self,
         candidates: &[ForkCandidate],
     ) -> Result<(DomainForkFreezeStatus, ResolvedHead), (ForkChoiceError, DomainForkFreezeStatus)>
@@ -182,7 +179,7 @@ impl DomainForkChoice {
         }
     }
 
-    fn unfreeze_with_in_block_proof(
+    pub fn unfreeze_with_in_block_proof(
         &self,
         current: &DomainForkFreezeStatus,
         winning_candidate: &ForkCandidate,
@@ -248,6 +245,9 @@ fn ensure_single_domain(
 }
 
 fn resolve_pow(candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceError> {
+    if has_conflicting_finalized_checkpoints(candidates) {
+        return Err(ForkChoiceError::ConflictingFinality);
+    }
     let best = candidates
         .iter()
         .map(|c| c.cumulative_work.filter(|w| *w > 0).map(|work| (c, work)))
@@ -265,7 +265,11 @@ fn resolve_pow(candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceE
         domain_id: best.domain_id,
         head_hash: best.head_hash,
         height: best.height,
-        finality: DomainFinalityStatus::Probabilistic,
+        finality: if best.finalized_checkpoint.is_some() {
+            DomainFinalityStatus::Finalized
+        } else {
+            DomainFinalityStatus::Probabilistic
+        },
         reason: ForkChoiceReason::PowMostWork,
     })
 }

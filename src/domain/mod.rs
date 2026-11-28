@@ -23,8 +23,9 @@ pub use finality_adapter::{
     PospaceFinalityAdapter, StorageAttestationFinalityAdapter, ZkFinalityAdapter,
 };
 pub use fork_choice::{
-    ConsensusDomainForkChoice, DomainFinalityStatus, DomainForkChoice, DomainLifecycleStatus,
-    ForkCandidate, ForkChoiceError, ForkChoiceReason, ResolvedHead,
+    ConsensusDomainForkChoice, DomainFinalityStatus, DomainForkChoice, DomainForkFreezeStatus,
+    DomainLifecycleStatus, ForkCandidate, ForkChoiceError, ForkChoiceReason,
+    InBlockForkResolutionProof, ResolvedHead,
 };
 pub use plugin::{
     default_domain, BftDomainPlugin, ConsensusDomainPlugin, DagDomainPlugin, DomainContext,

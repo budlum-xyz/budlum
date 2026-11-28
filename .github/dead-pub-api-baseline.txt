@@ -102,7 +102,6 @@ src/crypto/pkcs11.rs:store_pq_key
 src/crypto/primitives.rs:devnet_default
 src/crypto/signer.rs:with_pq
 src/domain/commitment_registry.rs:get_by_block_hash
-src/domain/sovereign.rs:transition_lifecycle
 src/network/gossip_dedup.rs:get_peer_score
 src/network/gossip_dedup.rs:peer_score
 src/network/gossip_dedup.rs:peers_below_threshold
