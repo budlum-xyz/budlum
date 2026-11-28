@@ -250,8 +250,6 @@ crates/wallet-core/src/lib.rs	struct	ViewKeyDisclosure
 crates/wallet-core/src/lib.rs	struct	WalletBindingCapabilities
 crates/wallet-core/src/lib.rs	struct	WalletBindingExport
 crates/wallet-core/src/lib.rs	struct	WalletPrivacyConfig
-crates/wallet-core/src/lib.rs	type	PublicKeyBytes
-crates/wallet-core/src/lib.rs	type	SignatureBytes
 crates/wallet-core/src/privacy_crypto.rs	fn	poseidon4_hash3
 crates/wallet-core/src/privacy_crypto.rs	fn	poseidon4_hash_state
 crates/wallet-core/src/privacy_transfer.rs	struct	PrivateNoteOutput

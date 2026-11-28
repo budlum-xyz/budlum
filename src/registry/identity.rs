@@ -243,6 +243,11 @@ impl IdentityRecord {
     ///
     /// First structural violation found.
     pub fn validate(&self) -> Result<(), IdentityError> {
+        if self.subject == Address::zero() {
+            return Err(IdentityError::BadApproval(
+                "identity subject address cannot be zero".into(),
+            ));
+        }
         if self.methods.is_empty() {
             return Err(IdentityError::NoMethods {
                 did: did_of(&self.subject),
@@ -263,6 +268,11 @@ impl IdentityRecord {
             });
         }
         for (i, method) in self.methods.iter().enumerate() {
+            if method.key_id == [0u8; 32] {
+                return Err(IdentityError::BadApproval(
+                    "verification method key_id cannot be all-zero".into(),
+                ));
+            }
             if self
                 .methods
                 .iter()
@@ -275,6 +285,11 @@ impl IdentityRecord {
             }
         }
         for (i, guardian) in self.guardians.iter().enumerate() {
+            if *guardian == Address::zero() {
+                return Err(IdentityError::BadApproval(
+                    "guardian address cannot be zero".into(),
+                ));
+            }
             if guardian == &self.subject {
                 return Err(IdentityError::SubjectIsOwnGuardian {
                     did: did_of(&self.subject),
@@ -379,6 +394,11 @@ impl CredentialCommitment {
     /// committing to nothing (a root over an empty list is a constant, and a
     /// constant root means every such credential "matches" every other).
     pub fn validate(&self) -> Result<(), IdentityError> {
+        if self.issuer == Address::zero() || self.subject == Address::zero() {
+            return Err(IdentityError::BadApproval(
+                "credential issuer and subject addresses cannot be zero".into(),
+            ));
+        }
         if self.fields.len() > MAX_CREDENTIAL_FIELDS {
             return Err(IdentityError::TooMany {
                 did: did_of(&self.subject),
@@ -840,11 +860,19 @@ impl IdentityRegistry {
                 got: counted.len(),
             });
         }
-        if record
-            .methods
-            .iter()
-            .any(|m| m.key_id == new_key && m.is_live_at(now))
-        {
+        if new_key == [0u8; 32] {
+            return Err(IdentityError::BadApproval(
+                "recovery new_key cannot be all-zero".into(),
+            ));
+        }
+        if record.methods.len() >= MAX_IDENTITY_METHODS {
+            return Err(IdentityError::TooMany {
+                did,
+                what: "verification methods",
+                max: MAX_IDENTITY_METHODS,
+            });
+        }
+        if record.methods.iter().any(|m| m.key_id == new_key) {
             return Err(IdentityError::DuplicateKeyId { did });
         }
         for method in &mut record.methods {
@@ -875,7 +903,10 @@ impl IdentityRegistry {
     /// must not become the same anchor the day a real registry appears.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.records.is_empty() && self.credentials.is_empty() && self.revoked.is_empty()
+        self.records.is_empty()
+            && self.credentials.is_empty()
+            && self.revoked.is_empty()
+            && self.retired.is_empty()
     }
 
     /// The deterministic root of the whole registry: every record (subject,
