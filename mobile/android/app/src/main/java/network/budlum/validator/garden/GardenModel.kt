@@ -414,6 +414,30 @@ class GardenModel(
 
     fun wordCount(): Int = runCatching { phone.walletWordCount().toInt() }.getOrDefault(24)
 
+    /** What the next code is for: a Garden to join, or one person to talk to. */
+    var invitePurpose by mutableStateOf(GardenLogic.InvitePurpose.Garden)
+        private set
+
+    fun selectInvitePurpose(next: GardenLogic.InvitePurpose) {
+        invitePurpose = next
+    }
+
+    /**
+     * Ask for a new code, burning the one that was live.
+     *
+     * The screen calls this when a person presses "new code": the old digits
+     * stop being answered before the new ones exist, so nothing is ever live
+     * twice.
+     */
+    fun newCode() = background {
+        val opened = phone.newCode()
+        state = state.copy(
+            code = opened.code,
+            codeSecondsLeft = opened.secondsLeft.toLong(),
+            record = opened.record.ifBlank { state.record },
+        )
+    }
+
     fun openCode() = background {
         val opened = phone.openCode()
         state = state.copy(

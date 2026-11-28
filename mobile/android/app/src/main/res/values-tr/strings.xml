@@ -81,8 +81,10 @@
     <string name="g_code_label">kod</string>
     <string name="g_code_enter">altı hane</string>
     <string name="g_code_new">yeni kod</string>
+    <string name="g_code_reach">bağlantı her yerde; altı rakam aynı ağda</string>
+    <string name="g_purpose_garden">garden</string>
+    <string name="g_purpose_person">tek kişi</string>
     <string name="g_code_minutes">%1$d dk kaldı</string>
-    <string name="g_code_same_wifi">yalnız aynı Wi-Fi</string>
     <string name="g_waiting">bekliyor</string>
     <string name="g_waiting_for_you">seni bekliyor</string>
     <string name="g_waiting_for_host">alınmayı bekliyorsun</string>

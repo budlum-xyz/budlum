@@ -81,8 +81,10 @@
     <string name="g_code_label">code</string>
     <string name="g_code_enter">six digits</string>
     <string name="g_code_new">new code</string>
+    <string name="g_code_reach">link works anywhere; six digits on the same network</string>
+    <string name="g_purpose_garden">garden</string>
+    <string name="g_purpose_person">one person</string>
     <string name="g_code_minutes">%1$d min left</string>
-    <string name="g_code_same_wifi">same Wi-Fi only</string>
     <string name="g_waiting">waiting</string>
     <string name="g_waiting_for_you">waiting for you</string>
     <string name="g_waiting_for_host">waiting to be let in</string>

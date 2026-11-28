@@ -168,9 +168,9 @@ private fun CodeRow(model: GardenModel) {
                     Label(
                         text = when {
                             copied -> stringResource(R.string.g_code_copied)
-                            state.code.isBlank() -> stringResource(R.string.g_code_same_wifi)
+                            state.code.isBlank() -> stringResource(R.string.g_code_reach)
                             else -> GardenLogic.formatCountdown(state.codeSecondsLeft) +
-                                " · " + stringResource(R.string.g_code_same_wifi)
+                                " · " + stringResource(R.string.g_code_reach)
                         },
                         skin = skin,
                         color = if (copied) skin.accentOnSurface else skin.surfaceMuted,
@@ -179,10 +179,32 @@ private fun CodeRow(model: GardenModel) {
 
                 RuleButton(
                     text = stringResource(R.string.g_code_new),
-                    onTap = { model.openCode() },
+                    onTap = { model.newCode() },
                     enabled = !state.busy,
                     skin = skin,
                     filled = state.code.isBlank(),
+                )
+            }
+
+            // A code opens one of two doors; the switch says which before the
+            // code is asked for, and the link it is shared as carries it.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                RuleButton(
+                    text = stringResource(R.string.g_purpose_garden),
+                    onTap = { model.selectInvitePurpose(GardenLogic.InvitePurpose.Garden) },
+                    skin = skin,
+                    filled = model.invitePurpose == GardenLogic.InvitePurpose.Garden,
+                    modifier = Modifier.weight(1f),
+                )
+                RuleButton(
+                    text = stringResource(R.string.g_purpose_person),
+                    onTap = { model.selectInvitePurpose(GardenLogic.InvitePurpose.Person) },
+                    skin = skin,
+                    filled = model.invitePurpose == GardenLogic.InvitePurpose.Person,
+                    modifier = Modifier.weight(1f),
                 )
             }
 
@@ -204,7 +226,12 @@ private fun CodeRow(model: GardenModel) {
                     )
                     RuleButton(
                         text = stringResource(R.string.g_long_invite),
-                        onTap = { shareInvite(context, state.record) },
+                        onTap = {
+                            shareInvite(
+                                context,
+                                GardenLogic.inviteLink(state.record, model.invitePurpose),
+                            )
+                        },
                         skin = skin,
                         modifier = Modifier.weight(1f),
                     )
