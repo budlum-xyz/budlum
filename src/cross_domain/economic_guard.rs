@@ -4183,6 +4183,113 @@ mod tests {
             .expect("100-atom flow fits the honest ceiling");
     }
 
+    // Valid certificate for a different domain: exercises policy fallback without
+    // conflating these refusal branches with certificate integrity validation.
+    fn refusal_test_certificate(
+        height: u64,
+    ) -> crate::settlement::universal_finality::GlobalFinalityCertificate {
+        use crate::crypto::facts::QuantumClass;
+        use crate::settlement::universal_finality::{
+            compose, DomainFinalityEntry, FinalityGuarantee, FinalityReversibility,
+            FinalityVerdict, FINALITY_BINDS_ALL,
+        };
+        compose(&[DomainFinalityEntry {
+            domain_id: 999,
+            height,
+            checkpoint_height: height,
+            state_root: [1; 32],
+            adapter_id: "cometbft-v1".to_owned(),
+            adapter_version: 1,
+            finality_proof_hash: [2; 32],
+            guarantee_backing_hash: [3; 32],
+            bond_atoms: 100,
+            guarantee: FinalityGuarantee {
+                reversibility: FinalityReversibility::DeterministicQuorum,
+                quantum_posture: QuantumClass::Hash,
+                attestation: FINALITY_BINDS_ALL,
+                slashable_backing: true,
+                fault_tolerance_bps: 10_000,
+            },
+            verdict: FinalityVerdict::Established,
+        }])
+        .expect("valid certificate")
+    }
+
+    #[test]
+    fn certificate_flow_unknown_domain_is_fail_closed_without_state_change() {
+        let mut guard = BridgeEconomicGuard::production();
+        let before = guard.root();
+        let cert = refusal_test_certificate(10);
+        assert_eq!(
+            guard.check_and_record_flow_with_certificate(405, 1, 10, &cert),
+            Err(EconomicGuardError::UnknownDomain(405))
+        );
+        assert!(guard.record(405).is_none());
+        assert_eq!(guard.root(), before);
+    }
+
+    #[test]
+    fn certificate_flow_frozen_domain_does_not_consume_budget() {
+        let mut guard = BridgeEconomicGuard::production();
+        guard
+            .configure_domain(405, DomainCeilingPolicy::default(), None)
+            .unwrap();
+        // Inject a frozen record to isolate this gate; contradiction verification
+        // itself is exercised by the signed-double-root test above.
+        let rec = guard.domains.get_mut(&405).unwrap();
+        rec.active_window = 4;
+        rec.window_used_atoms = 37;
+        rec.status = DomainGuardStatus::FrozenByContradiction {
+            frozen_at_height: 4,
+            evidence_digest: [42; 32],
+        };
+        let before = guard.root();
+        let cert = refusal_test_certificate(10);
+        assert_eq!(
+            guard.check_and_record_flow_with_certificate(405, 1, 10, &cert),
+            Err(EconomicGuardError::DomainFrozen {
+                domain_id: 405,
+                evidence_digest: [42; 32]
+            })
+        );
+        assert_eq!(guard.root(), before);
+        let rec = guard.record(405).unwrap();
+        assert_eq!((rec.active_window, rec.window_used_atoms), (4, 37));
+    }
+
+    #[test]
+    fn certificate_flow_addition_overflow_is_refused_without_state_change() {
+        let mut guard = BridgeEconomicGuard::production();
+        guard
+            .configure_domain(
+                405,
+                DomainCeilingPolicy {
+                    window_blocks: 100,
+                    ..DomainCeilingPolicy::default()
+                },
+                None,
+            )
+            .unwrap();
+        let rec = guard.domains.get_mut(&405).unwrap();
+        rec.active_window = 0;
+        rec.window_used_atoms = u128::MAX;
+        let before = guard.root();
+        let cert = refusal_test_certificate(10);
+        let result = guard.check_and_record_flow_with_certificate(405, 1, 10, &cert);
+        assert!(matches!(
+            result,
+            Err(EconomicGuardError::CeilingExceeded {
+                domain_id: 405,
+                requested_atoms: 1,
+                window_used_atoms: u128::MAX,
+                ..
+            })
+        ));
+        assert_eq!(guard.root(), before);
+        let rec = guard.record(405).unwrap();
+        assert_eq!((rec.active_window, rec.window_used_atoms), (0, u128::MAX));
+    }
+
     #[test]
     fn epoch_boundary_pruning_prevents_replay_table_exhaustion_attack() {
         let ed_kp = KeyPair::generate().expect("ed25519 key");
