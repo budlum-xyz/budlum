@@ -5567,6 +5567,23 @@ fn encode_adapter_spec(spec: &crate::cross_domain::external::AdapterSpec, out: &
                 None => put_u8(out, 0),
             }
         }
+        // Tag 10: succinct NIPoPoW proof-of-proof-of-work adapter, appended last.
+        AdapterSpec::Nipopow { network, anchor } => {
+            put_u8(out, 10);
+            put_string(out, network);
+            match anchor {
+                Some(pin) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &pin.genesis_id);
+                    put_u64(out, pin.genesis_height);
+                    put_fixed(out, &pin.pow_target);
+                    put_u32(out, pin.min_superblocks_m);
+                    put_u8(out, pin.min_superblock_level);
+                    put_u32(out, pin.min_suffix_k);
+                }
+                None => put_u8(out, 0),
+            }
+        }
     }
 }
 
@@ -5765,6 +5782,79 @@ mod v29_signing_tests {
 
         assert_bft_fault_proof_preimages();
         assert_dag_and_bitvm_fault_proof_preimages();
+    }
+
+    /// A NIPoPoW registration's genesis anchor is part of the signed bytes.
+    /// The anchor is the trust root the adapter checks every proof against;
+    /// if it were not signed, a relay could swap the chain the registration
+    /// names without invalidating the registrant's signature.
+    #[test]
+    fn nipopow_anchor_reaches_the_registration_signing_preimage() {
+        use crate::cross_domain::external::nipopow::PinnedNipopowGenesis;
+        use crate::cross_domain::external::{
+            AdapterId, AdapterSpec, ExternalDomainTx, IntakeState, RawConsensusEvidence,
+            RegistrationRequest, VerificationPolicy, VersionPolicy,
+        };
+
+        let evidence = RawConsensusEvidence {
+            adapter: AdapterId::from_name("nipopow-superblock-v1"),
+            evidence_version: 1,
+            network: "ergo".to_string(),
+            payload: vec![1, 2, 3],
+            declared_height: 0,
+            declared_root: [9u8; 32],
+            submitter: test_addr_from_byte(1u8),
+        };
+        let pin = PinnedNipopowGenesis {
+            genesis_id: [0xAA; 32],
+            genesis_height: 0,
+            pow_target: {
+                let mut t = [0xFFu8; 32];
+                t[0] = 0x7F;
+                t
+            },
+            min_superblocks_m: 3,
+            min_superblock_level: 3,
+            min_suffix_k: 4,
+        };
+        let request = |anchor: Option<PinnedNipopowGenesis>| RegistrationRequest {
+            spec: AdapterSpec::Nipopow {
+                network: "ergo".to_string(),
+                anchor,
+            },
+            policy: VerificationPolicy::strict(1_000),
+            economics: IntakeState::conservative_economics(1_000_000),
+            versions: VersionPolicy::single(AdapterId::from_name("nipopow-superblock-v1"), 1, 0),
+            bond_atoms: 5_000,
+            poster: test_addr_from_byte(1u8),
+            golden: evidence.clone(),
+        };
+        let register = |r: RegistrationRequest| {
+            TransactionType::ExternalDomain(ExternalDomainTx::Register(Box::new(r)))
+        };
+
+        let base = signed_variant(register(request(Some(pin.clone())))).signing_hash();
+        let closed = signed_variant(register(request(None))).signing_hash();
+        assert_ne!(
+            base, closed,
+            "an unpinned spec must not sign like a pinned one"
+        );
+
+        let mut other_genesis = pin.clone();
+        other_genesis.genesis_id[0] ^= 0xFF;
+        assert_ne!(
+            base,
+            signed_variant(register(request(Some(other_genesis)))).signing_hash(),
+            "the genesis id is not signed"
+        );
+
+        let mut other_k = pin;
+        other_k.min_suffix_k += 1;
+        assert_ne!(
+            base,
+            signed_variant(register(request(Some(other_k)))).signing_hash(),
+            "the KMZ suffix parameter is not signed"
+        );
     }
 
     fn assert_bft_fault_proof_preimages() {

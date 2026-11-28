@@ -238,6 +238,17 @@ pub enum AdapterSpec {
         #[serde(default)]
         anchor: Option<crate::cross_domain::external::bitvm_covenant::PinnedBitVmAnchor>,
     },
+    /// Succinct `NIPoPoW` proof-of-proof-of-work finality for one `PoW`
+    /// network, pinned to a governance-pinned genesis and KMZ `(m, k)`
+    /// parameters. APPENDED LAST (tag `10`), so every registration already
+    /// signed under tags `0..=9` keeps its bytes. A spec without a pin is the
+    /// closed admission state: `register_domain` refuses it, because an
+    /// unpinned superblock verifier would answer for a chain nobody anchored.
+    Nipopow {
+        network: String,
+        #[serde(default)]
+        anchor: Option<crate::cross_domain::external::nipopow::PinnedNipopowGenesis>,
+    },
 }
 
 impl AdapterSpec {
@@ -255,7 +266,8 @@ impl AdapterSpec {
             | Self::DagCertificate { network, .. }
             | Self::CasperFfg { network, .. }
             | Self::MysticetiDag { network, .. }
-            | Self::BitVmCovenant { network, .. } => network,
+            | Self::BitVmCovenant { network, .. }
+            | Self::Nipopow { network, .. } => network,
         }
     }
 
@@ -334,6 +346,16 @@ impl AdapterSpec {
                 || BitVmCovenantAdapter::new(network, anchor.clone()),
                 golden,
                 BitVmCovenantAdapter::with_golden,
+            ),
+            Self::Nipopow { network, anchor } => box_with_golden(
+                || {
+                    crate::cross_domain::external::nipopow::NipopowAdapter::new(
+                        network,
+                        anchor.clone(),
+                    )
+                },
+                golden,
+                crate::cross_domain::external::nipopow::NipopowAdapter::with_golden,
             ),
         }
     }
@@ -521,6 +543,18 @@ pub struct IntakeState {
     /// tombstone ledger, folded into [`Self::state_digest`].
     #[serde(default)]
     pub guard: IntakeGuard,
+    /// Governance-pinned `NIPoPoW` genesis anchors keyed by external network.
+    ///
+    /// APPENDED LAST. `bincode` is not self-describing: a state written
+    /// before this field existed ends before it, and the loader treats the
+    /// decode failure as CRITICAL rather than silently defaulting it. That is
+    /// the honest contract for a consensus-state shape change; see the note on
+    /// [`Self::quorum`].
+    #[serde(default)]
+    pub pinned_nipopow_anchors: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::nipopow::PinnedNipopowGenesis,
+    >,
 }
 
 /// Which anchor map an external-domain adapter family reads.
@@ -541,6 +575,7 @@ pub enum AnchorFamily {
     Bitcoin,
     Tendermint,
     Da,
+    Nipopow,
 }
 
 impl AnchorFamily {
@@ -552,6 +587,7 @@ impl AnchorFamily {
             Self::Bitcoin => "bitcoin",
             Self::Tendermint => "tendermint",
             Self::Da => "da",
+            Self::Nipopow => "nipopow",
         }
     }
 }
@@ -573,6 +609,7 @@ pub enum PinnedExternalAnchor {
     Bitcoin(PinnedBitcoinAnchor),
     Tendermint(crate::cross_domain::external::tendermint::PinnedTendermintAnchor),
     Da(crate::cross_domain::external::da_sampling::PinnedDaCommittee),
+    Nipopow(crate::cross_domain::external::nipopow::PinnedNipopowGenesis),
 }
 
 impl PinnedExternalAnchor {
@@ -584,6 +621,7 @@ impl PinnedExternalAnchor {
             Self::Bitcoin(_) => AnchorFamily::Bitcoin,
             Self::Tendermint(_) => AnchorFamily::Tendermint,
             Self::Da(_) => AnchorFamily::Da,
+            Self::Nipopow(_) => AnchorFamily::Nipopow,
         }
     }
 
@@ -631,6 +669,7 @@ impl PinnedExternalAnchor {
                     return Err("the pinned DA committee has no members".into());
                 }
             }
+            Self::Nipopow(anchor) => anchor.validate()?,
         }
         Ok(())
     }
@@ -1320,6 +1359,16 @@ impl IntakeState {
         self.pinned_bitvm_anchors.insert(network.into(), anchor);
     }
 
+    /// Installs or updates the consensus-pinned `NIPoPoW` genesis anchor for `network`.
+    /// WIRING: governance/genesis `NIPoPoW` checkpoint surface paired with `register_domain`.
+    pub fn pin_nipopow_anchor(
+        &mut self,
+        network: impl Into<String>,
+        anchor: crate::cross_domain::external::nipopow::PinnedNipopowGenesis,
+    ) {
+        self.pinned_nipopow_anchors.insert(network.into(), anchor);
+    }
+
     /// Installs or replaces a family's trust anchor for `network`.
     ///
     /// The consensus door: `GovernanceAction::PinExternalAnchor` in block
@@ -1346,6 +1395,10 @@ impl IntakeState {
             PinnedExternalAnchor::Da(committee) => {
                 self.pinned_da_committees
                     .insert(network.to_string(), committee);
+            }
+            PinnedExternalAnchor::Nipopow(anchor) => {
+                self.pinned_nipopow_anchors
+                    .insert(network.to_string(), anchor);
             }
         }
     }
@@ -1383,6 +1436,11 @@ impl IntakeState {
                 .get(network)
                 .cloned()
                 .map(PinnedExternalAnchor::Da),
+            AnchorFamily::Nipopow => self
+                .pinned_nipopow_anchors
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Nipopow),
         }
     }
 
@@ -1555,6 +1613,18 @@ impl IntakeState {
         // BitVmCovenant admission requires a governance-pinned PoW + program anchor.
         if let AdapterSpec::BitVmCovenant { network, anchor } = &spec {
             let Some(pinned) = self.pinned_bitvm_anchors.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if anchor.as_ref() != Some(pinned) {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // NIPoPoW admission requires a governance-pinned genesis + KMZ anchor.
+        // A registrant that chose its own genesis could answer for a chain
+        // nobody anchored, which is the same trust break the Bitcoin door
+        // closes by comparing the spec against the pinned checkpoint.
+        if let AdapterSpec::Nipopow { network, anchor } = &spec {
+            let Some(pinned) = self.pinned_nipopow_anchors.get(network) else {
                 return Err(IntakeError::CommitteeNotPinned);
             };
             if anchor.as_ref() != Some(pinned) {

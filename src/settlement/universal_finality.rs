@@ -561,6 +561,30 @@ impl FinalityGuarantee {
                     fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
                 }
             }
+            AdapterSpec::Nipopow { anchor, .. } => {
+                // NIPoPoW is pure proof-of-work: the superblock prefix is
+                // SHA-256d work, and the suffix is the same chain's contiguous
+                // PoW tail. It attests a state root and a tx root (the suffix
+                // carries both) and a parent (prefix -> suffix), but it has no
+                // slashable backing: a PoW chain's security is energy spent,
+                // not stake that can be burned.
+                let (valid, confirmations) = anchor.as_ref().map_or((false, 0), |a| {
+                    let ok = a.validate().is_ok();
+                    (ok, if ok { u64::from(a.min_suffix_k) } else { 0 })
+                });
+                Self {
+                    reversibility: FinalityReversibility::ProbabilisticWork { confirmations },
+                    quantum_posture: QuantumClass::Hash,
+                    attestation: CommitmentAttestation {
+                        state_root: valid,
+                        tx_root: valid,
+                        event_root: false,
+                        parent: valid,
+                    },
+                    slashable_backing: false,
+                    fault_tolerance_bps: if valid { POW_FAULT_TOLERANCE_BPS } else { 0 },
+                }
+            }
         }
     }
 
@@ -2017,6 +2041,46 @@ mod tests {
         });
         assert!(g_bv.admits_cross_domain_value());
         assert_eq!(g_bv.fault_tolerance_bps, POW_FAULT_TOLERANCE_BPS);
+
+        let g_np = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::Nipopow {
+            network: "ergo-nipopow".into(),
+            anchor: Some(
+                crate::cross_domain::external::nipopow::PinnedNipopowGenesis {
+                    genesis_id: [0x66; 32],
+                    genesis_height: 0,
+                    pow_target: {
+                        let mut t = [0xFFu8; 32];
+                        t[0] = 0x7F;
+                        t
+                    },
+                    min_superblocks_m: 3,
+                    min_superblock_level: 3,
+                    min_suffix_k: 4,
+                },
+            ),
+        });
+        assert_eq!(
+            g_np.reversibility,
+            FinalityReversibility::ProbabilisticWork { confirmations: 4 }
+        );
+        assert_eq!(g_np.quantum_posture, QuantumClass::Hash);
+        assert!(g_np.attestation.state_root);
+        assert!(g_np.attestation.tx_root);
+        assert!(g_np.attestation.parent);
+        assert!(!g_np.attestation.event_root);
+        assert!(!g_np.slashable_backing, "PoW has no stake to slash");
+        assert_eq!(g_np.fault_tolerance_bps, POW_FAULT_TOLERANCE_BPS);
+
+        let g_np_closed = FinalityGuarantee::for_external_spec_declared(&AdapterSpec::Nipopow {
+            network: "ergo-nipopow".into(),
+            anchor: None,
+        });
+        assert_eq!(
+            g_np_closed.reversibility,
+            FinalityReversibility::ProbabilisticWork { confirmations: 0 }
+        );
+        assert!(!g_np_closed.attestation.state_root);
+        assert_eq!(g_np_closed.fault_tolerance_bps, 0);
 
         let hub = FinalityGuarantee::settlement_hub();
         assert_eq!(g_bv.meet(&hub), hub.meet(&g_bv));
