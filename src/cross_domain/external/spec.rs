@@ -82,6 +82,28 @@ impl DomainKey {
         ]))
     }
 
+    /// Derives the distinct domain identity of a registrant-bonded external
+    /// anchor (`K-B.4`).
+    ///
+    /// Unlike [`Self::from_parts`], which addresses the single governance-voted
+    /// slot for `(adapter, network)`, a bonded registration folds
+    /// `anchor_digest` directly into the key so two different bonded anchors on
+    /// the same external network produce two distinct `DomainKey`s without
+    /// colliding with each other or with a governance-voted registration.
+    #[must_use]
+    pub fn from_bonded_anchor(
+        adapter: &AdapterId,
+        network: &str,
+        anchor_digest: &[u8; 32],
+    ) -> Self {
+        Self(crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_BONDED_DOMAIN_KEY_V1",
+            adapter.as_bytes(),
+            network.as_bytes(),
+            anchor_digest,
+        ]))
+    }
+
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0

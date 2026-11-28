@@ -45,6 +45,11 @@ pub enum DomainState {
     /// its signatures no longer bind anything on a chain whose curves fell.
     /// Appended last so the serialized codes of the older states stay put.
     QuantumIsolated,
+    /// Registrant-bonded anchor awaiting completion of its optimistic challenge
+    /// window (`K-B.5`). While in this state, `serves()` is `false`: no
+    /// attestations are accepted and zero cross-domain value may be routed.
+    /// Appended last so existing bincode discriminants stay put.
+    PendingAnchorChallenge,
 }
 
 impl DomainState {
@@ -57,6 +62,7 @@ impl DomainState {
             Self::Retired => "retired",
             Self::Faulted => "faulted",
             Self::QuantumIsolated => "quantum-isolated",
+            Self::PendingAnchorChallenge => "pending-anchor-challenge",
         }
     }
 
@@ -64,6 +70,49 @@ impl DomainState {
     #[must_use]
     pub const fn serves(&self) -> bool {
         matches!(self, Self::Admitted | Self::Active)
+    }
+}
+
+/// How an external domain's trust anchor entered Budlum consensus (`K-B.4`).
+///
+/// First class (`GovernanceVoted`) is installed by a governance vote
+/// (`ProposalType::PinExternalAnchor`). Second class (`Bonded`) is posted in a
+/// single signed transaction (`ExternalDomainTx::RegisterBonded`) with
+/// escrowed collateral: its `anchor_digest` is bound into [`DomainKey`], it
+/// waits through `challenge_until_height` before serving (`K-B.5`), and its
+/// value ceiling is bounded by live escrowed collateral.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+pub enum AnchorClass {
+    /// Governance-voted or genesis-installed trust anchor.
+    #[default]
+    GovernanceVoted,
+    /// Registrant-posted collateralized anchor subject to an optimistic
+    /// challenge window and live-bond value ceiling.
+    Bonded {
+        /// Domain-separated digest of the spec's self-contained anchor.
+        anchor_digest: [u8; 32],
+        /// Budlum block height at which an unrefuted registration promotes
+        /// from [`DomainState::PendingAnchorChallenge`] to [`DomainState::Admitted`].
+        challenge_until_height: u64,
+    },
+}
+
+impl AnchorClass {
+    /// Stable display label published in [`DomainProfile`] and certificates.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::GovernanceVoted => "governance-voted",
+            Self::Bonded { .. } => "bonded",
+        }
+    }
+
+    /// Whether this registration uses a collateral-bonded anchor (`K-B.4`).
+    #[must_use]
+    pub const fn is_bonded(&self) -> bool {
+        matches!(self, Self::Bonded { .. })
     }
 }
 
@@ -152,6 +201,10 @@ pub struct DomainProfile {
     /// nothing has been observed. Not a score: classical means a quantum
     /// attacker could forge what rests on it, and that is all it means.
     pub quantum_class: Option<QuantumClass>,
+    /// How this domain's trust anchor entered Budlum (`governance-voted` vs
+    /// `bonded`, `K-B.4`). Appended last so existing bincode fields stay put.
+    #[serde(default)]
+    pub anchor_class: AnchorClass,
 }
 
 impl DomainProfile {
@@ -186,8 +239,9 @@ impl DomainProfile {
     pub fn summary_line(&self) -> String {
         let (refused, attempts) = self.refusal_ratio();
         format!(
-            "{} | consensus={} | finality={:?} | depth>={} | bond={} {} from {} poster(s) | accepted={} refused={}/{} | forks={} | crypto={} | quantum_class={}",
+            "{} | anchor_class={} | consensus={} | finality={:?} | depth>={} | bond={} {} from {} poster(s) | accepted={} refused={}/{} | forks={} | crypto={} | quantum_class={}",
             self.state.as_str(),
+            self.anchor_class.as_str(),
             self.consensus_kind,
             self.finality_kind,
             self.required_depth,
@@ -228,6 +282,9 @@ pub struct DomainRecord {
     /// What the adapter observed across every accepted attestation.
     #[serde(default)]
     pub crypto_facts: CryptoFacts,
+    /// Anchor class (`GovernanceVoted` vs `Bonded`, `K-B.4`). Appended last.
+    #[serde(default)]
+    pub anchor_class: AnchorClass,
 }
 
 /// Builds the profile. Reads the record and nothing else - the signature is
@@ -255,6 +312,7 @@ pub fn profile_of(record: &DomainRecord) -> DomainProfile {
         history: record.history.clone(),
         crypto_facts: record.crypto_facts.clone(),
         quantum_class: record.crypto_facts.quantum_class(),
+        anchor_class: record.anchor_class,
     }
 }
 
@@ -289,6 +347,7 @@ mod tests {
             history: Vec::new(),
             crypto_facts: CryptoFacts::new(),
             quantum_class: None,
+            anchor_class: AnchorClass::GovernanceVoted,
         };
         let owned_json: &'static str =
             Box::leak(serde_json::to_string(&profile).unwrap().into_boxed_str());

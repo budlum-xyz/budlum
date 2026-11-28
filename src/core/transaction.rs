@@ -2768,6 +2768,7 @@ impl Transaction {
             // registry write. The policy and bond doors are registry writes.
             TransactionType::ExternalDomain(
                 crate::cross_domain::external::ExternalDomainTx::Register(_)
+                | crate::cross_domain::external::ExternalDomainTx::RegisterBonded(_)
                 | crate::cross_domain::external::ExternalDomainTx::Readmit { .. },
             ) => schedule.contract_call_gas * 4 + schedule.gas_per_signature * 8,
             TransactionType::ExternalDomain(
@@ -2777,7 +2778,8 @@ impl Transaction {
             ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature,
             TransactionType::ExternalDomain(
                 crate::cross_domain::external::ExternalDomainTx::SubmitFaultProof { .. }
-                | crate::cross_domain::external::ExternalDomainTx::RotateCommittee { .. },
+                | crate::cross_domain::external::ExternalDomainTx::RotateCommittee { .. }
+                | crate::cross_domain::external::ExternalDomainTx::ChallengeBondedAnchor { .. },
             ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature * 2,
             TransactionType::ExternalDomain(_) => schedule.contract_call_gas * 2,
             // Registration validates the domain record and escrows a bond; a
@@ -5092,6 +5094,41 @@ fn encode_external_domain_tx(
             put_fixed(out, &domain.0);
             encode_committee_rotation_proof(proof, out);
         }
+        // Tag 10: governance-free collateral-bonded anchor registration (K-B.4, K-B.5).
+        ExternalDomainTx::RegisterBonded(bonded) => {
+            put_u8(out, 10);
+            encode_adapter_spec(&bonded.request.spec, out);
+            encode_verification_policy(&bonded.request.policy, out);
+            encode_domain_economics(&bonded.request.economics, out);
+            encode_version_policy(&bonded.request.versions, out);
+            put_u128(out, bonded.request.bond_atoms);
+            put_fixed(out, bonded.request.poster.as_bytes());
+            encode_raw_evidence(&bonded.request.golden, out);
+            put_u64(out, bonded.challenge_window_heights);
+        }
+        // Tag 11: optimistic bonded-anchor challenge proof (K-B.5).
+        ExternalDomainTx::ChallengeBondedAnchor { domain, proof } => {
+            put_u8(out, 11);
+            put_fixed(out, &domain.0);
+            encode_bonded_anchor_challenge_proof(proof, out);
+        }
+    }
+}
+
+fn encode_bonded_anchor_challenge_proof(
+    proof: &crate::cross_domain::external::BondedAnchorChallengeProof,
+    out: &mut Vec<u8>,
+) {
+    use crate::cross_domain::external::BondedAnchorChallengeProof;
+    match proof {
+        BondedAnchorChallengeProof::ConflictingFinality(evidence) => {
+            put_u8(out, 0);
+            encode_raw_evidence(evidence, out);
+        }
+        BondedAnchorChallengeProof::ObjectiveFault(fault) => {
+            put_u8(out, 1);
+            encode_objective_fault_proof(fault, out);
+        }
     }
 }
 
@@ -5765,6 +5802,126 @@ mod v29_signing_tests {
 
         assert_bft_fault_proof_preimages();
         assert_dag_and_bitvm_fault_proof_preimages();
+    }
+
+    #[test]
+    fn bonded_registration_and_challenge_fields_are_signed() {
+        use crate::cross_domain::external::hotstuff::{HotStuffEquivocationProof, HotStuffVoteSig};
+        use crate::cross_domain::external::{
+            AdapterId, AdapterSpec, BondedAnchorChallengeProof, BondedRegistrationRequest,
+            DomainEconomics, DomainKey, ExternalDomainTx, ObjectiveFaultProof,
+            RawConsensusEvidence, RegistrationRequest, VerificationPolicy, VersionPolicy,
+        };
+
+        let poster = Address::from([7u8; 32]);
+        let adapter = AdapterId([1u8; 32]);
+        let golden = RawConsensusEvidence {
+            adapter,
+            evidence_version: 2,
+            network: "sepolia".to_string(),
+            payload: vec![1, 2, 3],
+            declared_height: 64,
+            declared_root: [2u8; 32],
+            submitter: poster,
+        };
+        let base_bonded = BondedRegistrationRequest {
+            request: RegistrationRequest {
+                spec: AdapterSpec::ZkVm {
+                    network: "sepolia".to_string(),
+                    program_hash: Some([4u8; 32]),
+                    chain_id: Some(11_155_111),
+                },
+                policy: VerificationPolicy::strict(1_000),
+                economics: DomainEconomics::default(),
+                versions: VersionPolicy::single(adapter, 2, 0),
+                bond_atoms: 100_000,
+                poster,
+                golden: golden.clone(),
+            },
+            challenge_window_heights: 25,
+        };
+        let mk_reg = |b: BondedRegistrationRequest| {
+            signed_variant(TransactionType::ExternalDomain(
+                ExternalDomainTx::RegisterBonded(Box::new(b)),
+            ))
+        };
+        let base_hash = mk_reg(base_bonded.clone()).signing_hash();
+
+        let mut changed_window = base_bonded.clone();
+        changed_window.challenge_window_heights = 26;
+        assert_ne!(mk_reg(changed_window).signing_hash(), base_hash);
+
+        let mut changed_bond = base_bonded.clone();
+        changed_bond.request.bond_atoms += 1;
+        assert_ne!(mk_reg(changed_bond).signing_hash(), base_hash);
+
+        let mut changed_prog = base_bonded;
+        changed_prog.request.spec = AdapterSpec::ZkVm {
+            network: "sepolia".to_string(),
+            program_hash: Some([5u8; 32]),
+            chain_id: Some(11_155_111),
+        };
+        assert_ne!(mk_reg(changed_prog).signing_hash(), base_hash);
+
+        let mk_chal = |domain: DomainKey, proof: BondedAnchorChallengeProof| {
+            signed_variant(TransactionType::ExternalDomain(
+                ExternalDomainTx::ChallengeBondedAnchor {
+                    domain,
+                    proof: Box::new(proof),
+                },
+            ))
+        };
+        let base_chal = mk_chal(
+            DomainKey([9u8; 32]),
+            BondedAnchorChallengeProof::ConflictingFinality(Box::new(golden.clone())),
+        )
+        .signing_hash();
+
+        assert_ne!(
+            mk_chal(
+                DomainKey([10u8; 32]),
+                BondedAnchorChallengeProof::ConflictingFinality(Box::new(golden.clone())),
+            )
+            .signing_hash(),
+            base_chal
+        );
+
+        let mut diff_ev = golden;
+        diff_ev.declared_root = [99u8; 32];
+        assert_ne!(
+            mk_chal(
+                DomainKey([9u8; 32]),
+                BondedAnchorChallengeProof::ConflictingFinality(Box::new(diff_ev)),
+            )
+            .signing_hash(),
+            base_chal
+        );
+
+        let fault =
+            ObjectiveFaultProof::HotStuffEquivocation(Box::new(HotStuffEquivocationProof {
+                epoch: 1,
+                view: 2,
+                block_hash_a: [1u8; 32],
+                vote_a: HotStuffVoteSig {
+                    signer_pubkey: [2u8; 32],
+                    ed25519_sig: vec![3u8; 64],
+                    pq_sig: Vec::new(),
+                },
+                block_hash_b: [4u8; 32],
+                vote_b: HotStuffVoteSig {
+                    signer_pubkey: [2u8; 32],
+                    ed25519_sig: vec![5u8; 64],
+                    pq_sig: Vec::new(),
+                },
+            }));
+        assert_ne!(
+            mk_chal(
+                DomainKey([9u8; 32]),
+                BondedAnchorChallengeProof::ObjectiveFault(Box::new(fault)),
+            )
+            .signing_hash(),
+            base_chal
+        );
     }
 
     fn assert_bft_fault_proof_preimages() {

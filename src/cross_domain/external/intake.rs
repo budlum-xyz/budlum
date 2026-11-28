@@ -259,6 +259,182 @@ impl AdapterSpec {
         }
     }
 
+    /// Validates the self-contained trust anchor inside this spec and returns
+    /// its canonical domain-separated digest for [`AnchorClass::Bonded`]
+    /// registrations (`K-B.4`, `K-B.5`).
+    ///
+    /// Covers all ten live external adapter families without requiring a
+    /// governance vote, while rejecting missing or placeholder anchors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeError::CommitteeNotPinned`] when the spec omits its
+    /// anchor, or [`IntakeError::InvalidBondedAnchor`] when the anchor fails
+    /// structural validation.
+    pub fn bonded_anchor_digest(&self) -> Result<[u8; 32], IntakeError> {
+        let (family_tag, payload) = match self {
+            Self::EthereumSync { committee, .. } => {
+                let Some(committee) = committee.as_ref() else {
+                    return Err(IntakeError::CommitteeNotPinned);
+                };
+                PinnedExternalAnchor::Ethereum(committee.clone())
+                    .validate()
+                    .map_err(|reason| IntakeError::InvalidBondedAnchor { reason })?;
+                let bytes = bincode::serialize(committee).map_err(|e| {
+                    IntakeError::InvalidBondedAnchor {
+                        reason: e.to_string(),
+                    }
+                })?;
+                ("ethereum", bytes)
+            }
+            Self::ZkVm {
+                program_hash,
+                chain_id,
+                ..
+            } => {
+                let (Some(program_hash), Some(chain_id)) = (program_hash, chain_id) else {
+                    return Err(IntakeError::CommitteeNotPinned);
+                };
+                if *program_hash == [0u8; 32] || *chain_id == 0 {
+                    return Err(IntakeError::InvalidBondedAnchor {
+                        reason: "ZkVm bonded anchor requires non-zero program_hash and chain_id"
+                            .to_string(),
+                    });
+                }
+                let mut bytes = Vec::with_capacity(40);
+                bytes.extend_from_slice(program_hash);
+                bytes.extend_from_slice(&chain_id.to_le_bytes());
+                ("zkvm", bytes)
+            }
+            Self::BitcoinSpv { anchor, .. } => {
+                let Some(anchor) = anchor.as_ref() else {
+                    return Err(IntakeError::CommitteeNotPinned);
+                };
+                PinnedExternalAnchor::Bitcoin(anchor.clone())
+                    .validate()
+                    .map_err(|reason| IntakeError::InvalidBondedAnchor { reason })?;
+                let bytes =
+                    bincode::serialize(anchor).map_err(|e| IntakeError::InvalidBondedAnchor {
+                        reason: e.to_string(),
+                    })?;
+                ("bitcoin", bytes)
+            }
+            Self::TendermintCommit {
+                chain_id,
+                validator_set_hash,
+                ..
+            } => {
+                if chain_id.trim().is_empty() {
+                    return Err(IntakeError::CommitteeNotPinned);
+                }
+                let Some(validator_set_hash) = validator_set_hash else {
+                    return Err(IntakeError::CommitteeNotPinned);
+                };
+                let anchor = crate::cross_domain::external::tendermint::PinnedTendermintAnchor {
+                    chain_id: chain_id.clone(),
+                    validator_set_hash: *validator_set_hash,
+                };
+                PinnedExternalAnchor::Tendermint(anchor.clone())
+                    .validate()
+                    .map_err(|reason| IntakeError::InvalidBondedAnchor { reason })?;
+                let bytes =
+                    bincode::serialize(&anchor).map_err(|e| IntakeError::InvalidBondedAnchor {
+                        reason: e.to_string(),
+                    })?;
+                ("tendermint", bytes)
+            }
+            Self::DataAvailability { committee, .. } => {
+                let Some(committee) = committee.as_ref() else {
+                    return Err(IntakeError::CommitteeNotPinned);
+                };
+                PinnedExternalAnchor::Da(committee.clone())
+                    .validate()
+                    .map_err(|reason| IntakeError::InvalidBondedAnchor { reason })?;
+                let bytes = bincode::serialize(committee).map_err(|e| {
+                    IntakeError::InvalidBondedAnchor {
+                        reason: e.to_string(),
+                    }
+                })?;
+                ("da", bytes)
+            }
+            Self::HotStuffQc { committee, .. } => {
+                let Some(committee) = committee.as_ref() else {
+                    return Err(IntakeError::CommitteeNotPinned);
+                };
+                PinnedExternalAnchor::HotStuff(committee.clone())
+                    .validate()
+                    .map_err(|reason| IntakeError::InvalidBondedAnchor { reason })?;
+                let bytes = bincode::serialize(committee).map_err(|e| {
+                    IntakeError::InvalidBondedAnchor {
+                        reason: e.to_string(),
+                    }
+                })?;
+                ("hotstuff", bytes)
+            }
+            Self::DagCertificate { committee, .. } => {
+                let Some(committee) = committee.as_ref() else {
+                    return Err(IntakeError::CommitteeNotPinned);
+                };
+                PinnedExternalAnchor::Dag(committee.clone())
+                    .validate()
+                    .map_err(|reason| IntakeError::InvalidBondedAnchor { reason })?;
+                let bytes = bincode::serialize(committee).map_err(|e| {
+                    IntakeError::InvalidBondedAnchor {
+                        reason: e.to_string(),
+                    }
+                })?;
+                ("dag", bytes)
+            }
+            Self::CasperFfg { committee, .. } => {
+                let Some(committee) = committee.as_ref() else {
+                    return Err(IntakeError::CommitteeNotPinned);
+                };
+                PinnedExternalAnchor::CasperFfg(committee.clone())
+                    .validate()
+                    .map_err(|reason| IntakeError::InvalidBondedAnchor { reason })?;
+                let bytes = bincode::serialize(committee).map_err(|e| {
+                    IntakeError::InvalidBondedAnchor {
+                        reason: e.to_string(),
+                    }
+                })?;
+                ("casper-ffg", bytes)
+            }
+            Self::MysticetiDag { committee, .. } => {
+                let Some(committee) = committee.as_ref() else {
+                    return Err(IntakeError::CommitteeNotPinned);
+                };
+                PinnedExternalAnchor::Mysticeti(committee.clone())
+                    .validate()
+                    .map_err(|reason| IntakeError::InvalidBondedAnchor { reason })?;
+                let bytes = bincode::serialize(committee).map_err(|e| {
+                    IntakeError::InvalidBondedAnchor {
+                        reason: e.to_string(),
+                    }
+                })?;
+                ("mysticeti", bytes)
+            }
+            Self::BitVmCovenant { anchor, .. } => {
+                let Some(anchor) = anchor.as_ref() else {
+                    return Err(IntakeError::CommitteeNotPinned);
+                };
+                PinnedExternalAnchor::BitVm(anchor.clone())
+                    .validate()
+                    .map_err(|reason| IntakeError::InvalidBondedAnchor { reason })?;
+                let bytes =
+                    bincode::serialize(anchor).map_err(|e| IntakeError::InvalidBondedAnchor {
+                        reason: e.to_string(),
+                    })?;
+                ("bitvm", bytes)
+            }
+        };
+        Ok(crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_BONDED_ANCHOR_V1",
+            family_tag.as_bytes(),
+            self.network().as_bytes(),
+            &payload,
+        ]))
+    }
+
     /// Builds the live adapter. `bls` is the node's pairing implementation,
     /// injected so this module can be tested without curve arithmetic and so
     /// the spec stays serializable. `golden` is attached when the caller is
@@ -497,6 +673,16 @@ pub enum AnchorFamily {
     Bitcoin,
     Tendermint,
     Da,
+    /// Chained 3-phase `HotStuff` BFT epoch committee. Appended last (tag `4`).
+    HotStuff,
+    /// Stake-weighted Bullshark round-`DAG` BFT committee. Appended last (tag `5`).
+    Dag,
+    /// Two-epoch `Casper-FFG` checkpoint validator set. Appended last (tag `6`).
+    CasperFfg,
+    /// Three-round uncertified `Mysticeti` `DAG-BFT` committee. Appended last (tag `7`).
+    Mysticeti,
+    /// `BitVM2` `PoW` checkpoint, guest program, and operator anchor. Appended last (tag `8`).
+    BitVm,
 }
 
 impl AnchorFamily {
@@ -508,27 +694,41 @@ impl AnchorFamily {
             Self::Bitcoin => "bitcoin",
             Self::Tendermint => "tendermint",
             Self::Da => "da",
+            Self::HotStuff => "hotstuff",
+            Self::Dag => "dag",
+            Self::CasperFfg => "casper-ffg",
+            Self::Mysticeti => "mysticeti",
+            Self::BitVm => "bitvm",
         }
     }
 }
 
 /// A trust anchor as consensus installs it.
 ///
-/// Until this existed, the four anchor maps in [`IntakeState`] had no writer
-/// outside this crate's tests: every anchored adapter was closed on every
-/// chain, because "governance pins a committee" named a vote that could not
-/// happen. The anchors are inside `external_intake_root`
-/// ([`IntakeState::state_digest`] hashes the whole state), so an operator-side
-/// RPC or a node-local flag could not have written one without forking the
-/// chain: the value is consensus state, and only a block may move it.
-///
-/// This is the value a `ProposalType::PinExternalAnchor` vote carries.
+/// Covers all nine committee/checkpoint-anchored external adapter families in
+/// [`IntakeState`] (the tenth live family, `AdapterSpec::ZkVm`, is verified by
+/// canonical STARK cryptographic validity over `(program_hash, chain_id)`).
+/// Every anchor map lives inside `external_intake_root`
+/// ([`IntakeState::state_digest`] hashes the whole state), so only an in-block
+/// `ProposalType::PinExternalAnchor` governance vote or genesis bootstrap may
+/// install into these maps; governance-free collateralized anchors instead use
+/// [`IntakeState::register_bonded_domain`] (`K-B.4`, `K-B.5`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PinnedExternalAnchor {
     Ethereum(crate::cross_domain::external::ethereum::PinnedCommittee),
     Bitcoin(PinnedBitcoinAnchor),
     Tendermint(crate::cross_domain::external::tendermint::PinnedTendermintAnchor),
     Da(crate::cross_domain::external::da_sampling::PinnedDaCommittee),
+    /// Appended last (tag `4`) to preserve existing bincode discriminants.
+    HotStuff(crate::cross_domain::external::hotstuff::PinnedHotStuffCommittee),
+    /// Appended last (tag `5`) to preserve existing bincode discriminants.
+    Dag(crate::cross_domain::external::dag_bft::PinnedDagCommittee),
+    /// Appended last (tag `6`) to preserve existing bincode discriminants.
+    CasperFfg(crate::cross_domain::external::casper_ffg::PinnedFfgCommittee),
+    /// Appended last (tag `7`) to preserve existing bincode discriminants.
+    Mysticeti(crate::cross_domain::external::mysticeti_dag::PinnedMysticetiCommittee),
+    /// Appended last (tag `8`) to preserve existing bincode discriminants.
+    BitVm(crate::cross_domain::external::bitvm_covenant::PinnedBitVmAnchor),
 }
 
 impl PinnedExternalAnchor {
@@ -540,6 +740,11 @@ impl PinnedExternalAnchor {
             Self::Bitcoin(_) => AnchorFamily::Bitcoin,
             Self::Tendermint(_) => AnchorFamily::Tendermint,
             Self::Da(_) => AnchorFamily::Da,
+            Self::HotStuff(_) => AnchorFamily::HotStuff,
+            Self::Dag(_) => AnchorFamily::Dag,
+            Self::CasperFfg(_) => AnchorFamily::CasperFfg,
+            Self::Mysticeti(_) => AnchorFamily::Mysticeti,
+            Self::BitVm(_) => AnchorFamily::BitVm,
         }
     }
 
@@ -586,6 +791,64 @@ impl PinnedExternalAnchor {
                 if committee.members.is_empty() {
                     return Err("the pinned DA committee has no members".into());
                 }
+            }
+            Self::HotStuff(committee) => {
+                if committee.members.is_empty() {
+                    return Err("the pinned HotStuff committee has no members".into());
+                }
+                if committee
+                    .members
+                    .iter()
+                    .any(|m| m.ed25519_pubkey == [0u8; 32] || m.voting_weight == 0)
+                {
+                    return Err(
+                        "the pinned HotStuff committee contains a zero pubkey or zero weight"
+                            .into(),
+                    );
+                }
+            }
+            Self::Dag(committee) => {
+                if committee.members.is_empty() {
+                    return Err("the pinned Bullshark DAG committee has no members".into());
+                }
+                if committee
+                    .members
+                    .iter()
+                    .any(|m| m.ed25519_pubkey == [0u8; 32] || m.voting_weight == 0)
+                {
+                    return Err(
+                        "the pinned Bullshark DAG committee contains a zero pubkey or zero weight"
+                            .into(),
+                    );
+                }
+            }
+            Self::CasperFfg(committee) => {
+                crate::cross_domain::external::casper_ffg::PinnedFfgCommittee::new(
+                    committee.epoch,
+                    committee.validators.clone(),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            Self::Mysticeti(committee) => {
+                if committee.epoch == 0 || committee.members.is_empty() {
+                    return Err(
+                        "the pinned Mysticeti committee must have epoch > 0 and non-empty members"
+                            .into(),
+                    );
+                }
+                if committee
+                    .members
+                    .iter()
+                    .any(|m| m.ed25519_pubkey == [0u8; 32] || m.voting_weight == 0)
+                {
+                    return Err(
+                        "the pinned Mysticeti committee contains a zero pubkey or zero weight"
+                            .into(),
+                    );
+                }
+            }
+            Self::BitVm(anchor) => {
+                anchor.validate().map_err(|e| e.to_string())?;
             }
         }
         Ok(())
@@ -688,8 +951,69 @@ pub enum IntakeError {
     SelfChallengeForbidden,
     #[error("contradiction proof refused: {reason}")]
     InvalidContradiction { reason: String },
+    #[error("bonded anchor refused: {reason}")]
+    InvalidBondedAnchor { reason: String },
+    #[error("bonded anchor challenge window is not open: {reason}")]
+    ChallengeWindowClosed { reason: String },
+    #[error("multiple bonded anchors serve ({adapter}, {network}); pass an explicit DomainKey")]
+    AmbiguousBondedDomain { adapter: String, network: String },
     #[error(transparent)]
     Guard(#[from] IntakeGuardError),
+}
+
+/// Minimum optimistic challenge window (in Budlum blocks) required for a
+/// governance-free bonded anchor registration (`K-B.5`).
+pub const MIN_BONDED_ANCHOR_CHALLENGE_HEIGHTS: u64 = 10;
+
+/// Maximum optimistic challenge window (in Budlum blocks) accepted for a
+/// governance-free bonded anchor registration (`K-B.5`).
+pub const MAX_BONDED_ANCHOR_CHALLENGE_HEIGHTS: u64 = 403_200;
+
+/// Governance-free, collateral-backed external domain registration request
+/// (`K-B.4`, `K-B.5`).
+///
+/// Carried on-chain by `ExternalDomainTx::RegisterBonded`. Unlike
+/// [`RegistrationRequest`], which requires a governance-voted anchor in
+/// `IntakeState::pinned_*`, a bonded registration supplies a self-contained
+/// anchor inside `request.spec`, binds that anchor's digest into [`DomainKey`],
+/// waits `challenge_window_heights` blocks in
+/// [`crate::cross_domain::external::profile::DomainState::PendingAnchorChallenge`]
+/// with zero value routing, and bounds its serving value ceiling by live
+/// escrowed collateral.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BondedRegistrationRequest {
+    pub request: RegistrationRequest,
+    pub challenge_window_heights: u64,
+}
+
+/// Cryptographic fraud or contradiction proof refuting a bonded external anchor
+/// while its optimistic challenge window is open (`K-B.5`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BondedAnchorChallengeProof {
+    /// Adapter-verified finality evidence (under the bonded spec or under a
+    /// canonical governance-pinned anchor for the same family + network)
+    /// certifying a conflicting `state_root` against the registrant's golden
+    /// claim.
+    ConflictingFinality(Box<RawConsensusEvidence>),
+    /// Objective protocol equivocation or single-step execution fraud proof
+    /// verified directly against the bonded spec's committee or anchor.
+    ObjectiveFault(Box<crate::cross_domain::external::ObjectiveFaultProof>),
+}
+
+/// Certified external-domain guarantee and economic conservation envelope
+/// published to cross-domain consumers (`K-B.4`, `K-B.5`).
+///
+/// Exposes `anchor_class` alongside the observed [`crate::settlement::universal_finality::FinalityGuarantee`]
+/// and [`crate::settlement::universal_finality::EconomicSecurityBound`], zeroing
+/// `safe_value_outflow_ceiling_atoms` throughout `PendingAnchorChallenge` and
+/// capping a serving `Bonded` domain's ceiling by its live escrowed collateral.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertifiedExternalDomainEnvelope {
+    pub domain: DomainKey,
+    pub anchor_class: crate::cross_domain::external::profile::AnchorClass,
+    pub state: crate::cross_domain::external::profile::DomainState,
+    pub guarantee: crate::settlement::universal_finality::FinalityGuarantee,
+    pub economic_bound: crate::settlement::universal_finality::EconomicSecurityBound,
 }
 
 /// Verified receipt emitted by [`IntakeState::slash_on_contradiction`].
@@ -748,16 +1072,12 @@ impl IntakeState {
     }
 
     /// Pins a consensus/governance-authorized Ethereum sync committee for
-    /// `network`. Only consensus bootstrap or governance may call this;
-    /// permissionless domain registration must match the pinned committee.
+    /// `network`. Governance-voted registrations must match the pinned
+    /// committee (`AnchorClass::GovernanceVoted`), whereas governance-free
+    /// collateralized anchors use [`Self::register_bonded_domain`] (`K-B.4`).
     ///
-    /// WIRING: unwired - the production door is a governance action that
-    /// installs the ceremony's committee (the `BnsSetPrimarySellers` shape:
-    /// an in-block `GovernanceAction` arm in `execution::executor`), and until
-    /// it lands the only callers are the test fixtures of this module,
-    /// `external_tx` and `settlement::domains`. Until then an `EthereumSync`
-    /// registration is refused with `CommitteeNotPinned`, which is the
-    /// fail-closed state and not a silent trust of the registrant's key.
+    /// WIRING: genesis/test helper paired with [`Self::install_pinned_anchor`]
+    /// (`GovernanceAction::PinExternalAnchor` in `execution::executor`).
     pub fn pin_ethereum_committee(
         &mut self,
         network: impl Into<String>,
@@ -1279,12 +1599,8 @@ impl IntakeState {
     /// Installs or replaces a family's trust anchor for `network`.
     ///
     /// The consensus door: `GovernanceAction::PinExternalAnchor` in block
-    /// execution is the only production caller. The four `pin_*` helpers above
-    /// remain the genesis/test initializers; anything that can be reached from
-    /// an operator RPC or a node-local flag would fork the chain, because these
-    /// maps are inside `state_digest`. (`HotStuff` and DAG-BFT committees are not
-    /// yet part of `PinnedExternalAnchor`/`AnchorFamily`; they stay genesis/test
-    /// -only until their own governance door is added.)
+    /// execution is the only production caller across all nine committee/checkpoint
+    /// families. The `pin_*` helpers above remain the genesis/test initializers.
     pub fn install_pinned_anchor(&mut self, network: &str, anchor: PinnedExternalAnchor) {
         match anchor {
             PinnedExternalAnchor::Ethereum(committee) => {
@@ -1302,6 +1618,26 @@ impl IntakeState {
             PinnedExternalAnchor::Da(committee) => {
                 self.pinned_da_committees
                     .insert(network.to_string(), committee);
+            }
+            PinnedExternalAnchor::HotStuff(committee) => {
+                self.pinned_hotstuff_committees
+                    .insert(network.to_string(), committee);
+            }
+            PinnedExternalAnchor::Dag(committee) => {
+                self.pinned_dag_committees
+                    .insert(network.to_string(), committee);
+            }
+            PinnedExternalAnchor::CasperFfg(committee) => {
+                self.pinned_casper_ffg_committees
+                    .insert(network.to_string(), committee);
+            }
+            PinnedExternalAnchor::Mysticeti(committee) => {
+                self.pinned_mysticeti_committees
+                    .insert(network.to_string(), committee);
+            }
+            PinnedExternalAnchor::BitVm(anchor) => {
+                self.pinned_bitvm_anchors
+                    .insert(network.to_string(), anchor);
             }
         }
     }
@@ -1339,6 +1675,31 @@ impl IntakeState {
                 .get(network)
                 .cloned()
                 .map(PinnedExternalAnchor::Da),
+            AnchorFamily::HotStuff => self
+                .pinned_hotstuff_committees
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::HotStuff),
+            AnchorFamily::Dag => self
+                .pinned_dag_committees
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Dag),
+            AnchorFamily::CasperFfg => self
+                .pinned_casper_ffg_committees
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::CasperFfg),
+            AnchorFamily::Mysticeti => self
+                .pinned_mysticeti_committees
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::Mysticeti),
+            AnchorFamily::BitVm => self
+                .pinned_bitvm_anchors
+                .get(network)
+                .cloned()
+                .map(PinnedExternalAnchor::BitVm),
         }
     }
 
@@ -1361,11 +1722,13 @@ impl IntakeState {
     }
 
     /// Drives the registry clock from the block-import path. Called on every
-    /// committed block; monotonicity is the registry's own rule. The quorum
-    /// round sweep rides the same clock: rounds nobody finished are swept on
-    /// the same schedule everywhere, or the digests diverge.
+    /// committed block; monotonicity is the registry's own rule. Also promotes
+    /// any unrefuted [`crate::cross_domain::external::profile::AnchorClass::Bonded`]
+    /// registration whose optimistic challenge window has reached `height`
+    /// (`K-B.5`), and sweeps expired quorum rounds and guard windows.
     pub fn on_block_committed(&mut self, height: u64) {
         self.registry.set_height(height);
+        self.registry.activate_matured_bonded_domains();
         self.quorum.sweep(height);
         self.guard.sweep(height);
     }
@@ -1557,6 +1920,584 @@ impl IntakeState {
         Ok(key)
     }
 
+    /// Governance-free registration of a collateral-bonded external domain
+    /// (`K-B.4`, `K-B.5`).
+    ///
+    /// - Validates `challenge_window_heights` against
+    ///   `MIN_BONDED_ANCHOR_CHALLENGE_HEIGHTS..=MAX_BONDED_ANCHOR_CHALLENGE_HEIGHTS`.
+    /// - Extracts and validates the self-contained anchor inside `spec` via
+    ///   [`AdapterSpec::bonded_anchor_digest`] without requiring any governance
+    ///   vote in `pinned_*`.
+    /// - Folds `anchor_digest` into [`DomainKey::from_bonded_anchor`] so two
+    ///   distinct anchors on `"sepolia"` produce two distinct `DomainKey`s.
+    /// - Enters [`crate::cross_domain::external::profile::DomainState::PendingAnchorChallenge`]
+    ///   (`serves() == false`, zero value routing) until
+    ///   `self.registry.height() + challenge_window_heights`, after which
+    ///   [`Self::on_block_committed`] promotes unrefuted domains to `Admitted`
+    ///   with value ceiling bounded by live escrowed collateral.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing BLS verifiers, missing/invalid anchors, out-of-range
+    /// challenge windows, dishonest economics, failed self-tests, or registry
+    /// bond/version refusals.
+    pub fn register_bonded_domain(
+        &mut self,
+        bonded: BondedRegistrationRequest,
+        bls: Option<Box<dyn BlsVerifier>>,
+    ) -> Result<DomainKey, IntakeError> {
+        let BondedRegistrationRequest {
+            request:
+                RegistrationRequest {
+                    spec,
+                    policy,
+                    economics,
+                    versions,
+                    bond_atoms,
+                    poster,
+                    golden,
+                },
+            challenge_window_heights,
+        } = bonded;
+
+        if !(MIN_BONDED_ANCHOR_CHALLENGE_HEIGHTS..=MAX_BONDED_ANCHOR_CHALLENGE_HEIGHTS)
+            .contains(&challenge_window_heights)
+        {
+            return Err(IntakeError::InvalidBondedAnchor {
+                reason: format!(
+                    "challenge_window_heights {challenge_window_heights} outside [{MIN_BONDED_ANCHOR_CHALLENGE_HEIGHTS}, {MAX_BONDED_ANCHOR_CHALLENGE_HEIGHTS}]"
+                ),
+            });
+        }
+        if matches!(spec, AdapterSpec::EthereumSync { .. }) && bls.is_none() {
+            return Err(IntakeError::MissingBlsVerifier);
+        }
+        if matches!(spec, AdapterSpec::EthereumSync { .. })
+            && bls.as_ref().is_some_and(|v| v.sync_committee_closed())
+        {
+            return Err(IntakeError::CommitteeNotPinned);
+        }
+        let anchor_digest = spec.bonded_anchor_digest()?;
+        let capped_ceiling = economics.routing_ceiling_atoms.min(bond_atoms);
+        if !honesty_is_cheaper(&economics, economics.routing_ceiling_atoms)
+            || !honesty_is_cheaper(&economics, capped_ceiling)
+        {
+            return Err(IntakeError::DishonestEconomics);
+        }
+        let challenge_until_height = self
+            .registry
+            .height()
+            .checked_add(challenge_window_heights)
+            .ok_or_else(|| IntakeError::InvalidBondedAnchor {
+                reason: "challenge_until_height overflows u64".to_string(),
+            })?;
+
+        let adapter = spec.build(bls, Some(golden.clone()));
+        let admission = admit(adapter.as_ref(), &policy);
+        if !admission.admitted {
+            return Err(IntakeError::AdmissionRefused {
+                golden_verified: admission.golden_verified,
+                passed: admission.passed(),
+                total: admission.total(),
+                failing: admission.failing_probe_names(),
+            });
+        }
+        let descriptor = adapter.descriptor();
+        let key = self.registry.register_bonded(
+            spec.network(),
+            descriptor,
+            (economics, versions, &admission),
+            (bond_atoms, poster),
+            (anchor_digest, challenge_until_height),
+        )?;
+        self.entries.insert(
+            key,
+            IntakeEntry {
+                spec,
+                policy,
+                admission,
+                golden,
+                registrant: poster,
+            },
+        );
+        Ok(key)
+    }
+
+    /// Canonical governance-voted `AdapterSpec` for the same `(family, network)`
+    /// as `candidate`, when a governance anchor is installed.
+    fn canonical_spec_for(&self, candidate: &AdapterSpec) -> Option<AdapterSpec> {
+        let net = candidate.network().to_string();
+        match candidate {
+            AdapterSpec::EthereumSync { .. } => {
+                self.pinned_ethereum_committees.get(&net).cloned().map(|c| {
+                    AdapterSpec::EthereumSync {
+                        network: net,
+                        committee: Some(c),
+                    }
+                })
+            }
+            AdapterSpec::ZkVm { .. } => None,
+            AdapterSpec::BitcoinSpv { .. } => {
+                self.pinned_bitcoin_anchors
+                    .get(&net)
+                    .cloned()
+                    .map(|a| AdapterSpec::BitcoinSpv {
+                        network: net,
+                        anchor: Some(a),
+                    })
+            }
+            AdapterSpec::TendermintCommit { .. } => {
+                self.pinned_tendermint_anchors.get(&net).cloned().map(|a| {
+                    AdapterSpec::TendermintCommit {
+                        network: net,
+                        chain_id: a.chain_id,
+                        validator_set_hash: Some(a.validator_set_hash),
+                    }
+                })
+            }
+            AdapterSpec::DataAvailability { .. } => {
+                self.pinned_da_committees.get(&net).cloned().map(|c| {
+                    AdapterSpec::DataAvailability {
+                        network: net,
+                        committee: Some(c),
+                    }
+                })
+            }
+            AdapterSpec::HotStuffQc { .. } => {
+                self.pinned_hotstuff_committees.get(&net).cloned().map(|c| {
+                    AdapterSpec::HotStuffQc {
+                        network: net,
+                        committee: Some(c),
+                    }
+                })
+            }
+            AdapterSpec::DagCertificate { .. } => self
+                .pinned_dag_committees
+                .get(&net)
+                .cloned()
+                .map(|c| AdapterSpec::DagCertificate {
+                    network: net,
+                    committee: Some(c),
+                }),
+            AdapterSpec::CasperFfg { .. } => self
+                .pinned_casper_ffg_committees
+                .get(&net)
+                .cloned()
+                .map(|c| AdapterSpec::CasperFfg {
+                    network: net,
+                    committee: Some(c),
+                }),
+            AdapterSpec::MysticetiDag { .. } => self
+                .pinned_mysticeti_committees
+                .get(&net)
+                .cloned()
+                .map(|c| AdapterSpec::MysticetiDag {
+                    network: net,
+                    committee: Some(c),
+                }),
+            AdapterSpec::BitVmCovenant { .. } => {
+                self.pinned_bitvm_anchors
+                    .get(&net)
+                    .cloned()
+                    .map(|a| AdapterSpec::BitVmCovenant {
+                        network: net,
+                        anchor: Some(a),
+                    })
+            }
+        }
+    }
+
+    /// Cryptographically adjudicate a challenge against a bonded anchor inside
+    /// its optimistic challenge window (`K-B.5`).
+    ///
+    /// When `proof` verifies a conflicting finality root or objective protocol
+    /// fault against the bonded registration, the domain immediately drops from
+    /// `PendingAnchorChallenge` to `Faulted`, the registrant's escrowed bond is
+    /// slashed, and the challenger reward is returned for distribution.
+    ///
+    /// # Errors
+    ///
+    /// Leaves `self` unchanged if `domain` is unknown, not in an open bonded
+    /// challenge window, self-challenged, or `proof` fails verification.
+    pub fn challenge_bonded_anchor(
+        &mut self,
+        domain: &DomainKey,
+        proof: &BondedAnchorChallengeProof,
+        challenger: Address,
+        now_unix_secs: u64,
+        bls: Option<Box<dyn BlsVerifier>>,
+    ) -> Result<ContradictionSlashOutcome, IntakeError> {
+        use crate::cross_domain::external::profile::{AnchorClass, DomainState};
+        use crate::cross_domain::external::ObjectiveFaultProof;
+        use subtle::ConstantTimeEq;
+
+        if challenger == Address::zero() {
+            return Err(IntakeError::SelfChallengeForbidden);
+        }
+        let Some(entry) = self.entries.get(domain).cloned() else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        if challenger == entry.registrant {
+            return Err(IntakeError::SelfChallengeForbidden);
+        }
+        let Some(reg) = self.registry.domain(domain) else {
+            return Err(IntakeError::UnknownDomain);
+        };
+        if reg.record.state != DomainState::PendingAnchorChallenge {
+            return Err(IntakeError::ChallengeWindowClosed {
+                reason: format!("domain state is {}", reg.record.state.as_str()),
+            });
+        }
+        let AnchorClass::Bonded {
+            challenge_until_height,
+            ..
+        } = reg.record.anchor_class
+        else {
+            return Err(IntakeError::ChallengeWindowClosed {
+                reason: "domain is not a bonded-anchor registration".to_string(),
+            });
+        };
+        let local_height = self.registry.height();
+        if local_height >= challenge_until_height {
+            return Err(IntakeError::ChallengeWindowClosed {
+                reason: format!(
+                    "current height {local_height} has reached challenge_until_height {challenge_until_height}"
+                ),
+            });
+        }
+
+        let (disputed_height, disputed_version, proof_digest) = match proof {
+            BondedAnchorChallengeProof::ConflictingFinality(ev) => {
+                if ev.submitter != challenger {
+                    return Err(IntakeError::InvalidContradiction {
+                        reason: "challenge evidence submitter must match challenger".to_string(),
+                    });
+                }
+                if ev.adapter != entry.golden.adapter || ev.network != entry.spec.network() {
+                    return Err(IntakeError::InvalidContradiction {
+                        reason:
+                            "challenge evidence adapter or network does not match bonded domain"
+                                .to_string(),
+                    });
+                }
+                if matches!(entry.spec, AdapterSpec::EthereumSync { .. }) && bls.is_none() {
+                    return Err(IntakeError::MissingBlsVerifier);
+                }
+                if matches!(entry.spec, AdapterSpec::EthereumSync { .. })
+                    && bls.as_ref().is_some_and(|v| v.sync_committee_closed())
+                {
+                    return Err(IntakeError::CommitteeNotPinned);
+                }
+                let mut challenge_policy = entry.policy.clone();
+                challenge_policy.max_age = 0;
+                challenge_policy.require_declared_match = true;
+
+                // Path A: verify under a canonical governance-pinned anchor for
+                // the same `(family, network)` when one exists and differs from
+                // the registrant's spec.
+                let mut verified_conflict = false;
+                if let Some(canonical_spec) = self.canonical_spec_for(&entry.spec) {
+                    if canonical_spec != entry.spec {
+                        let canonical_bls = match (&canonical_spec, &bls) {
+                            (AdapterSpec::EthereumSync { .. }, _) => Some(Self::production_bls()),
+                            _ => None,
+                        };
+                        let canonical_adapter = canonical_spec.build(canonical_bls, None);
+                        if let Ok(canonical_att) = canonical_adapter.verify(ev, &challenge_policy) {
+                            if ev.declared_height != entry.golden.declared_height
+                                || !bool::from(
+                                    canonical_att.state_root.ct_eq(&entry.golden.declared_root),
+                                )
+                            {
+                                verified_conflict = true;
+                            }
+                        }
+                    }
+                }
+
+                // Path B (pure governance-free): verify under the registrant's
+                // own bonded spec that `ev` certifies a divergent `state_root`
+                // at `entry.golden.declared_height` (with strictly higher PoW
+                // work when work-backed).
+                if !verified_conflict {
+                    let golden_adapter = entry.spec.build(
+                        match &entry.spec {
+                            AdapterSpec::EthereumSync { .. } => None,
+                            _ => None,
+                        },
+                        None,
+                    );
+                    let bonded_adapter = entry.spec.build(bls, None);
+                    let verified = bonded_adapter
+                        .verify(ev, &challenge_policy)
+                        .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+                    if verified.height != entry.golden.declared_height {
+                        return Err(IntakeError::InvalidContradiction {
+                            reason: format!(
+                                "conflicting finality height {} must match bonded golden height {}",
+                                verified.height, entry.golden.declared_height
+                            ),
+                        });
+                    }
+                    if bool::from(verified.state_root.ct_eq(&entry.golden.declared_root)) {
+                        return Err(IntakeError::InvalidContradiction {
+                            reason: "challenge finality commits the same state_root as golden"
+                                .to_string(),
+                        });
+                    }
+                    if let SecurityBacking::Work { .. } = verified.security {
+                        if let Ok(golden_att) =
+                            golden_adapter.verify(&entry.golden, &challenge_policy)
+                        {
+                            if let SecurityBacking::Work {
+                                difficulty_bits: golden_bits,
+                            } = golden_att.security
+                            {
+                                if !out_works(golden_bits, &verified.security) {
+                                    return Err(IntakeError::InvalidContradiction {
+                                        reason: "PoW anchor challenge must carry strictly greater difficulty bits than golden".to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                let ev_bytes = bincode::serialize(ev.as_ref()).map_err(|e| {
+                    IntakeError::InvalidContradiction {
+                        reason: e.to_string(),
+                    }
+                })?;
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_BONDED_ANCHOR_CHALLENGE_V1",
+                    domain.as_bytes(),
+                    &[0u8],
+                    &ev_bytes,
+                ]);
+                (ev.declared_height, ev.evidence_version, digest)
+            }
+            BondedAnchorChallengeProof::ObjectiveFault(fault) => {
+                match (&entry.spec, fault.as_ref()) {
+                    (
+                        AdapterSpec::HotStuffQc { network, committee },
+                        ObjectiveFaultProof::HotStuffEquivocation(hs),
+                    ) => {
+                        let Some(pinned) = committee.as_ref() else {
+                            return Err(IntakeError::CommitteeNotPinned);
+                        };
+                        crate::cross_domain::external::hotstuff::verify_hotstuff_equivocation(
+                            network, pinned, hs,
+                        )
+                        .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+                    }
+                    (
+                        AdapterSpec::CasperFfg { network, committee },
+                        ObjectiveFaultProof::CasperFfgEquivocation(ffg),
+                    ) => {
+                        let Some(pinned) = committee.as_ref() else {
+                            return Err(IntakeError::CommitteeNotPinned);
+                        };
+                        crate::cross_domain::external::casper_ffg::verify_ffg_slashing_evidence(
+                            network, pinned, ffg,
+                        )
+                        .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+                    }
+                    (
+                        AdapterSpec::MysticetiDag { network, committee },
+                        ObjectiveFaultProof::MysticetiEquivocation(my),
+                    ) => {
+                        let Some(pinned) = committee.as_ref() else {
+                            return Err(IntakeError::CommitteeNotPinned);
+                        };
+                        crate::cross_domain::external::mysticeti_dag::verify_mysticeti_equivocation(
+                            network, pinned, my,
+                        )
+                        .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+                    }
+                    (
+                        AdapterSpec::BitVmCovenant { network, anchor },
+                        ObjectiveFaultProof::BitVmDisprove(bv),
+                    ) => {
+                        let Some(pinned) = anchor.as_ref() else {
+                            return Err(IntakeError::CommitteeNotPinned);
+                        };
+                        crate::cross_domain::external::bitvm_covenant::verify_disprove_script(
+                            network, pinned, bv,
+                        )
+                        .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+                    }
+                    (
+                        AdapterSpec::DagCertificate { network, committee },
+                        ObjectiveFaultProof::DagEquivocation(dag),
+                    ) => {
+                        let Some(pinned) = committee.as_ref() else {
+                            return Err(IntakeError::CommitteeNotPinned);
+                        };
+                        crate::cross_domain::external::dag_bft::verify_dag_equivocation_proof(
+                            network, pinned, dag,
+                        )
+                        .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+                    }
+                    (
+                        AdapterSpec::TendermintCommit {
+                            chain_id,
+                            validator_set_hash,
+                            ..
+                        },
+                        ObjectiveFaultProof::TendermintMisbehaviour {
+                            trusted,
+                            params,
+                            evidence,
+                        },
+                    ) => {
+                        let Some(pinned_hash) = validator_set_hash.as_ref() else {
+                            return Err(IntakeError::CommitteeNotPinned);
+                        };
+                        if trusted.chain_id != *chain_id {
+                            return Err(IntakeError::InvalidContradiction {
+                                reason: "Tendermint misbehaviour chain_id mismatch".to_string(),
+                            });
+                        }
+                        let supplied_hash =
+                            crate::cross_domain::external::tendermint::validator_set_commitment(
+                                &trusted.validators,
+                            );
+                        if !bool::from(supplied_hash.ct_eq(pinned_hash)) {
+                            return Err(IntakeError::InvalidContradiction {
+                                reason: "Tendermint misbehaviour validator_set_hash mismatch"
+                                    .to_string(),
+                            });
+                        }
+                        crate::cross_domain::external::tendermint::verify_tendermint_misbehaviour(
+                            trusted,
+                            params,
+                            evidence,
+                            now_unix_secs,
+                        )
+                        .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+                    }
+                    _ => {
+                        return Err(IntakeError::InvalidContradiction {
+                            reason:
+                                "objective fault proof family does not match bonded AdapterSpec"
+                                    .to_string(),
+                        });
+                    }
+                }
+                let fault_bytes = bincode::serialize(fault.as_ref()).map_err(|e| {
+                    IntakeError::InvalidContradiction {
+                        reason: e.to_string(),
+                    }
+                })?;
+                let digest = hash_fields_bytes(&[
+                    b"BDLM_BONDED_ANCHOR_CHALLENGE_V1",
+                    domain.as_bytes(),
+                    &[1u8],
+                    &fault_bytes,
+                ]);
+                (
+                    entry.golden.declared_height,
+                    entry.golden.evidence_version,
+                    digest,
+                )
+            }
+        };
+
+        let (slashed_atoms, challenger_reward_atoms) = self.registry.slash_bonded_anchor(
+            domain,
+            entry.registrant,
+            proof_digest,
+            challenger,
+        )?;
+        let _ = self.guard.record_adverse_round(*domain, local_height);
+        Ok(ContradictionSlashOutcome {
+            domain: *domain,
+            slashed_prover: entry.registrant,
+            contradicted_digest: proof_digest,
+            height: disputed_height,
+            evidence_version: disputed_version,
+            slashed_atoms,
+            challenger_reward_atoms,
+        })
+    }
+
+    /// Publishes the certified guarantee, anchor class, and live-bond-capped
+    /// economic conservation envelope for `domain` (`K-B.4`, `K-B.5`).
+    #[must_use]
+    pub fn certified_domain_envelope(
+        &self,
+        domain: &DomainKey,
+    ) -> Option<CertifiedExternalDomainEnvelope> {
+        use crate::settlement::universal_finality::{EconomicSecurityBound, FinalityGuarantee};
+
+        let entry = self.entries.get(domain)?;
+        let reg = self.registry.domain(domain)?;
+        let effective_ceiling = reg.effective_routing_ceiling_atoms();
+        let observed = if reg.record.state.serves() {
+            reg.record.last_backing.as_ref()
+        } else {
+            None
+        };
+        let guarantee = FinalityGuarantee::for_external_spec_with_backing(&entry.spec, observed);
+        let economic_bound =
+            EconomicSecurityBound::derive(&guarantee, reg.record.bond_atoms, effective_ceiling);
+        Some(CertifiedExternalDomainEnvelope {
+            domain: *domain,
+            anchor_class: reg.record.anchor_class,
+            state: reg.record.state,
+            guarantee,
+            economic_bound,
+        })
+    }
+
+    /// Resolves `(adapter, network)` to the governance-voted [`DomainKey`] when
+    /// registered, or to the unique bonded registration on `(adapter, network)`
+    /// when no governance-voted domain exists.
+    pub fn resolve_evidence_domain_key(
+        &self,
+        adapter: &crate::cross_domain::external::spec::AdapterId,
+        network: &str,
+    ) -> Result<DomainKey, IntakeError> {
+        let voted = DomainKey::from_parts(adapter, network);
+        if self.entries.contains_key(&voted) {
+            return Ok(voted);
+        }
+        let matching: Vec<DomainKey> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                entry.golden.adapter == *adapter && entry.spec.network() == network
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        match matching.as_slice() {
+            [] => Err(IntakeError::UnknownDomain),
+            [single] => Ok(*single),
+            _ => {
+                // Prefer the unique serving bonded domain when any others are
+                // Faulted/PendingAnchorChallenge; if multiple bonded domains
+                // serve simultaneously, require an explicit `DomainKey`.
+                let serving: Vec<DomainKey> = matching
+                    .into_iter()
+                    .filter(|k| {
+                        self.registry
+                            .domain(k)
+                            .is_some_and(|reg| reg.record.state.serves())
+                    })
+                    .collect();
+                match serving.as_slice() {
+                    [unique] => Ok(*unique),
+                    [] => Err(IntakeError::Registry(RegistryError::NotServing {
+                        state: "pending-anchor-challenge".to_string(),
+                    })),
+                    _ => Err(IntakeError::AmbiguousBondedDomain {
+                        adapter: hex::encode(adapter.as_bytes()),
+                        network: network.to_string(),
+                    }),
+                }
+            }
+        }
+    }
+
     /// Submits evidence for a registered domain. The adapter is rebuilt from
     /// the stored spec on every call: stateless by construction, so restart
     /// and replay cannot diverge from live operation.
@@ -1581,7 +2522,24 @@ impl IntakeState {
         evidence: &RawConsensusEvidence,
         bls: Option<Box<dyn BlsVerifier>>,
     ) -> Result<FinalityAttestation, IntakeError> {
-        let key = DomainKey::from_parts(&evidence.adapter, &evidence.network);
+        let key = self.resolve_evidence_domain_key(&evidence.adapter, &evidence.network)?;
+        self.submit_evidence_for_domain(&key, evidence, bls)
+    }
+
+    /// Submits finality evidence against an explicit [`DomainKey`], unambiguous
+    /// even when multiple bonded anchors serve the same `(adapter, network)`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unknown or non-serving domains (`PendingAnchorChallenge`,
+    /// `Faulted`), missing BLS verifiers, guard trips, or registry refusals.
+    pub fn submit_evidence_for_domain(
+        &mut self,
+        key: &DomainKey,
+        evidence: &RawConsensusEvidence,
+        bls: Option<Box<dyn BlsVerifier>>,
+    ) -> Result<FinalityAttestation, IntakeError> {
+        let key = *key;
         let Some(entry) = self.entries.get(&key) else {
             return Err(IntakeError::UnknownDomain);
         };
@@ -1596,15 +2554,6 @@ impl IntakeState {
             return Err(IntakeError::CommitteeNotPinned);
         }
         let adapter = entry.spec.build(bls, None);
-        // `now` is the live clock, not the
-        // registration timestamp. A policy stored `now` forever, so
-        // `max_age` was measured against a frozen instant and newer evidence
-        // saturated the age subtraction to 0 - freshness was dead in
-        // practice. The deterministic clock Budlum has is the domain's own
-        // accepted tip: every node replays the same acceptances, so every
-        // node measures age against the same height. Until the domain has an
-        // accepted attestation the stored value stays (registration-time
-        // admission used it deliberately).
         let mut policy = entry.policy.clone();
         let time_unit = adapter.descriptor().time_unit;
         policy.now = live_policy_clock(
@@ -1614,9 +2563,6 @@ impl IntakeState {
                 .and_then(|reg| accepted_policy_clock_tip(reg, time_unit)),
         );
         if self.quorum.policy_of(&key).is_some() {
-            // When the round takes the answer without deciding yet, refuse with a
-            // named state rather than inventing a partial attestation; RPC reports
-            // the round state through `bud_getExternalQuorumRound`.
             return self
                 .submit_to_round(key, evidence, adapter.as_ref(), &policy)?
                 .ok_or(IntakeError::RoundPending);
@@ -1635,7 +2581,9 @@ impl IntakeState {
                 )?;
             }
         }
-        Ok(self.registry.submit(adapter.as_ref(), evidence, &policy)?)
+        Ok(self
+            .registry
+            .submit_for_domain(&key, adapter.as_ref(), evidence, &policy)?)
     }
 
     /// Cryptographically verify a contradicting finality proof against the same
@@ -1674,7 +2622,8 @@ impl IntakeState {
                 reason: "contradiction evidence submitter must match challenger".to_string(),
             });
         }
-        let key = DomainKey::from_parts(&contradicting.adapter, &contradicting.network);
+        let key =
+            self.resolve_evidence_domain_key(&contradicting.adapter, &contradicting.network)?;
         let Some(entry) = self.entries.get(&key) else {
             return Err(IntakeError::UnknownDomain);
         };
@@ -1726,9 +2675,12 @@ impl IntakeState {
         let mut challenge_policy = entry.policy.clone();
         challenge_policy.max_age = 0;
         challenge_policy.require_declared_match = true;
-        let verified = adapter
+        let mut verified = adapter
             .verify(contradicting, &challenge_policy)
             .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        if verified.domain == DomainKey::from_parts(&verified.adapter, &contradicting.network) {
+            verified.domain = key;
+        }
 
         if verified.domain != existing.domain
             || verified.adapter != existing.adapter
@@ -1845,7 +2797,7 @@ impl IntakeState {
                 reason: "ancestry witness submitter must match challenger".to_string(),
             });
         }
-        let key = DomainKey::from_parts(&successor.adapter, &successor.network);
+        let key = self.resolve_evidence_domain_key(&successor.adapter, &successor.network)?;
         let Some((spec, policy)) = self
             .entries
             .get(&key)
@@ -1870,9 +2822,12 @@ impl IntakeState {
         let mut challenge_policy = policy;
         challenge_policy.max_age = 0;
         challenge_policy.require_declared_match = true;
-        let verified = adapter
+        let mut verified = adapter
             .verify(successor, &challenge_policy)
             .map_err(|e| IntakeError::Registry(RegistryError::Adapter(e)))?;
+        if verified.domain == DomainKey::from_parts(&verified.adapter, &successor.network) {
+            verified.domain = key;
+        }
         if verified.height == 0 {
             return Err(IntakeError::InvalidContradiction {
                 reason: "an ancestry witness needs a predecessor height".to_string(),
@@ -2004,7 +2959,9 @@ impl IntakeState {
         adapter: &dyn ExternalFinalityAdapter,
         policy: &VerificationPolicy,
     ) -> Result<Option<FinalityAttestation>, IntakeError> {
-        let verdict = self.registry.evaluate(adapter, evidence, policy);
+        let verdict = self
+            .registry
+            .evaluate_for_domain(&key, adapter, evidence, policy);
         // Boundary refusals that are not answers about the claim must not
         // enter the round at all: an unknown domain or an unbonded prover is
         // the caller's problem, not a vote. The quorum fold handles adapter
@@ -4917,6 +5874,220 @@ mod tests {
         assert!(
             !shown.contains("header-flip"),
             "a passing probe must not be blamed: {shown}"
+        );
+    }
+
+    #[test]
+    fn pinned_external_anchor_covers_all_nine_committee_families_and_ten_bonded_digests() {
+        use crate::cross_domain::external::bitcoin_spv::PinnedBitcoinAnchor;
+        use crate::cross_domain::external::bitvm_covenant::PinnedBitVmAnchor;
+        use crate::cross_domain::external::casper_ffg::{FfgValidator, PinnedFfgCommittee};
+        use crate::cross_domain::external::da_sampling::{DaCommitteeMember, PinnedDaCommittee};
+        use crate::cross_domain::external::dag_bft::{DagBftValidator, PinnedDagCommittee};
+        use crate::cross_domain::external::ethereum::PinnedCommittee;
+        use crate::cross_domain::external::hotstuff::{HotStuffValidator, PinnedHotStuffCommittee};
+        use crate::cross_domain::external::mysticeti_dag::{
+            MysticetiMember, PinnedMysticetiCommittee,
+        };
+        use crate::cross_domain::external::tendermint::PinnedTendermintAnchor;
+
+        let eth = PinnedCommittee {
+            period: 1,
+            aggregate_pubkey: vec![0x11; 96],
+            next_committee_root: [0x22; 32],
+        };
+        let btc = PinnedBitcoinAnchor {
+            height: 840_000,
+            block_hash: [0x33; 32],
+            bits: 0x1703_4219,
+        };
+        let tm = PinnedTendermintAnchor {
+            chain_id: "celestia-1".to_string(),
+            validator_set_hash: [0x44; 32],
+        };
+        let da = PinnedDaCommittee {
+            namespace_id: [0x01; 32],
+            min_samples: 4,
+            min_square_size: 4,
+            members: vec![DaCommitteeMember {
+                ed25519_pubkey: [0x55; 32],
+                voting_weight: 100,
+                pq_pubkey: Vec::new(),
+            }],
+        };
+        let hs = PinnedHotStuffCommittee {
+            epoch: 3,
+            members: vec![HotStuffValidator {
+                ed25519_pubkey: [0x66; 32],
+                voting_weight: 100,
+                pq_pubkey: Vec::new(),
+            }],
+        };
+        let dag = PinnedDagCommittee {
+            epoch: 4,
+            members: vec![DagBftValidator {
+                ed25519_pubkey: [0x77; 32],
+                voting_weight: 100,
+                pq_pubkey: Vec::new(),
+            }],
+        };
+        let ffg = PinnedFfgCommittee::new(
+            5,
+            vec![FfgValidator {
+                pubkey: [0x88; 32],
+                stake: 100,
+                pq_pubkey: Vec::new(),
+            }],
+        )
+        .expect("valid ffg committee");
+        let my = PinnedMysticetiCommittee {
+            epoch: 6,
+            members: vec![MysticetiMember {
+                ed25519_pubkey: [0x99; 32],
+                voting_weight: 100,
+                pq_pubkey: Vec::new(),
+            }],
+        };
+        let bitvm = PinnedBitVmAnchor {
+            height: 100,
+            block_hash: [0xaa; 32],
+            bits: 0x1d00_ffff,
+            program_hash: [0xbb; 32],
+            min_pow_confirmations: 6,
+            challenge_blocks: 2,
+            operator_ed25519_pubkey: [0xcc; 32],
+            operator_pq_pubkey: Vec::new(),
+        };
+
+        let all_nine = vec![
+            PinnedExternalAnchor::Ethereum(eth.clone()),
+            PinnedExternalAnchor::Bitcoin(btc.clone()),
+            PinnedExternalAnchor::Tendermint(tm.clone()),
+            PinnedExternalAnchor::Da(da.clone()),
+            PinnedExternalAnchor::HotStuff(hs.clone()),
+            PinnedExternalAnchor::Dag(dag.clone()),
+            PinnedExternalAnchor::CasperFfg(ffg.clone()),
+            PinnedExternalAnchor::Mysticeti(my.clone()),
+            PinnedExternalAnchor::BitVm(bitvm.clone()),
+        ];
+
+        let mut intake = IntakeState::new();
+        let mut seen_digests = std::collections::BTreeSet::new();
+        for anchor in all_nine {
+            anchor
+                .validate()
+                .expect("every valid anchor family must validate");
+            let family = anchor.family();
+            assert_eq!(intake.pinned_anchor(family, "sepolia-multi"), None);
+            let expected_digest = anchor.digest().expect("digest");
+            assert!(
+                seen_digests.insert(expected_digest),
+                "family digests must be domain-separated"
+            );
+            intake.install_pinned_anchor("sepolia-multi", anchor.clone());
+            assert_eq!(intake.pinned_anchor(family, "sepolia-multi"), Some(anchor));
+            assert_eq!(
+                intake
+                    .pinned_anchor_digest(family, "sepolia-multi")
+                    .expect("digest lookup"),
+                Some(expected_digest)
+            );
+        }
+
+        // Placeholder anchors for each newly added family must be rejected at proposal validation.
+        assert!(PinnedExternalAnchor::HotStuff(PinnedHotStuffCommittee {
+            epoch: 1,
+            members: Vec::new(),
+        })
+        .validate()
+        .is_err());
+        assert!(PinnedExternalAnchor::Dag(PinnedDagCommittee {
+            epoch: 1,
+            members: Vec::new(),
+        })
+        .validate()
+        .is_err());
+        assert!(PinnedExternalAnchor::CasperFfg(PinnedFfgCommittee {
+            epoch: 0,
+            validators: Vec::new(),
+        })
+        .validate()
+        .is_err());
+        assert!(PinnedExternalAnchor::Mysticeti(PinnedMysticetiCommittee {
+            epoch: 0,
+            members: Vec::new(),
+        })
+        .validate()
+        .is_err());
+        assert!(PinnedExternalAnchor::BitVm(PinnedBitVmAnchor {
+            block_hash: [0u8; 32],
+            ..bitvm.clone()
+        })
+        .validate()
+        .is_err());
+
+        // All 10/10 live `AdapterSpec` families derive distinct bonded anchor digests,
+        // and omit-anchor variants fail closed with `CommitteeNotPinned`.
+        let specs = vec![
+            AdapterSpec::EthereumSync {
+                network: "sepolia".to_string(),
+                committee: Some(eth),
+            },
+            AdapterSpec::ZkVm {
+                network: "sepolia".to_string(),
+                program_hash: Some([0xdd; 32]),
+                chain_id: Some(11_155_111),
+            },
+            AdapterSpec::BitcoinSpv {
+                network: "signet".to_string(),
+                anchor: Some(btc),
+            },
+            AdapterSpec::TendermintCommit {
+                network: "celestia".to_string(),
+                chain_id: tm.chain_id,
+                validator_set_hash: Some(tm.validator_set_hash),
+            },
+            AdapterSpec::DataAvailability {
+                network: "celestia".to_string(),
+                committee: Some(da),
+            },
+            AdapterSpec::HotStuffQc {
+                network: "aptos-testnet".to_string(),
+                committee: Some(hs),
+            },
+            AdapterSpec::DagCertificate {
+                network: "bullshark-testnet".to_string(),
+                committee: Some(dag),
+            },
+            AdapterSpec::CasperFfg {
+                network: "sepolia".to_string(),
+                committee: Some(ffg),
+            },
+            AdapterSpec::MysticetiDag {
+                network: "sui-testnet".to_string(),
+                committee: Some(my),
+            },
+            AdapterSpec::BitVmCovenant {
+                network: "signet".to_string(),
+                anchor: Some(bitvm),
+            },
+        ];
+        let mut bonded_digests = std::collections::BTreeSet::new();
+        for s in specs {
+            let d = s
+                .bonded_anchor_digest()
+                .expect("valid spec must yield bonded digest");
+            assert!(bonded_digests.insert(d));
+        }
+        assert_eq!(bonded_digests.len(), 10);
+        assert_eq!(
+            AdapterSpec::ZkVm {
+                network: "sepolia".to_string(),
+                program_hash: None,
+                chain_id: Some(11_155_111),
+            }
+            .bonded_anchor_digest(),
+            Err(IntakeError::CommitteeNotPinned)
         );
     }
 }

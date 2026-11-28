@@ -34,7 +34,11 @@
 use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::cross_domain::external::ethereum::BlsVerifier;
-use crate::cross_domain::external::intake::{AdapterSpec, IntakeError, RegistrationRequest};
+use crate::cross_domain::external::intake::{
+    AdapterSpec, BondedAnchorChallengeProof, BondedRegistrationRequest,
+    CertifiedExternalDomainEnvelope, IntakeError, RegistrationRequest,
+    MAX_BONDED_ANCHOR_CHALLENGE_HEIGHTS, MIN_BONDED_ANCHOR_CHALLENGE_HEIGHTS,
+};
 use crate::cross_domain::external::quorum::QuorumPolicy;
 use crate::cross_domain::external::spec::{DomainKey, RawConsensusEvidence};
 use crate::cross_domain::external::versioning::ForkError;
@@ -104,6 +108,20 @@ pub enum ExternalDomainTx {
     RotateCommittee {
         domain: DomainKey,
         proof: CommitteeRotationProof,
+    },
+    /// Governance-free registration of a collateral-bonded external anchor
+    /// (`K-B.4`, `K-B.5`). Folds `anchor_digest` into `DomainKey`, enters
+    /// `DomainState::PendingAnchorChallenge` with zero value routing until
+    /// `challenge_window_heights` blocks elapse cleanly, and bounds value
+    /// routing by live escrowed collateral. APPENDED LAST (tag `10`).
+    RegisterBonded(Box<BondedRegistrationRequest>),
+    /// Refute a pending bonded anchor inside its optimistic challenge window
+    /// (`K-B.5`), dropping the registration to `DomainState::Faulted` and
+    /// slashing the registrant's escrowed collateral to reward the challenger.
+    /// APPENDED LAST (tag `11`).
+    ChallengeBondedAnchor {
+        domain: DomainKey,
+        proof: Box<BondedAnchorChallengeProof>,
     },
 }
 
@@ -245,17 +263,24 @@ fn uses_ethereum_sync(state: &AccountState, tx: &ExternalDomainTx) -> bool {
         ExternalDomainTx::Register(request) => {
             matches!(&request.spec, AdapterSpec::EthereumSync { .. })
         }
+        ExternalDomainTx::RegisterBonded(bonded) => {
+            matches!(&bonded.request.spec, AdapterSpec::EthereumSync { .. })
+        }
         ExternalDomainTx::SubmitEvidence(evidence)
         | ExternalDomainTx::ChallengeContradiction(evidence)
-        | ExternalDomainTx::ChallengeAncestry(evidence) => {
-            entry_is_sync(&DomainKey::from_parts(&evidence.adapter, &evidence.network))
-        }
+        | ExternalDomainTx::ChallengeAncestry(evidence) => state
+            .settlement
+            .external_intake
+            .resolve_evidence_domain_key(&evidence.adapter, &evidence.network)
+            .ok()
+            .is_some_and(|k| entry_is_sync(&k)),
         ExternalDomainTx::BondProver { domain, .. }
         | ExternalDomainTx::Readmit { domain, .. }
         | ExternalDomainTx::ScheduleFork { domain, .. }
         | ExternalDomainTx::SetQuorumPolicy { domain, .. }
         | ExternalDomainTx::SubmitFaultProof { domain, .. }
-        | ExternalDomainTx::RotateCommittee { domain, .. } => entry_is_sync(domain),
+        | ExternalDomainTx::RotateCommittee { domain, .. }
+        | ExternalDomainTx::ChallengeBondedAnchor { domain, .. } => entry_is_sync(domain),
     }
 }
 
@@ -324,6 +349,10 @@ pub fn execute_external_domain_tx(
         }
         ExternalDomainTx::RotateCommittee { domain, proof } => {
             rotate_committee(state, domain, proof)
+        }
+        ExternalDomainTx::RegisterBonded(bonded) => register_bonded(state, ctx, bonded),
+        ExternalDomainTx::ChallengeBondedAnchor { domain, proof } => {
+            challenge_bonded_anchor(state, ctx, domain, proof)
         }
     }
 }
@@ -447,8 +476,12 @@ fn submit_evidence(
     if evidence.submitter != ctx.sender {
         return Err(ExternalDomainTxError::SubmitterIsNotSender);
     }
-    let key = DomainKey::from_parts(&evidence.adapter, &evidence.network);
     let intake = &mut state.settlement.external_intake;
+    let key = match intake.resolve_evidence_domain_key(&evidence.adapter, &evidence.network) {
+        Ok(k) => k,
+        Err(IntakeError::UnknownDomain) => return Err(ExternalDomainTxError::UnknownDomain),
+        Err(e) => return Err(e.into()),
+    };
     let Some(entry) = intake.entries.get(&key) else {
         return Err(ExternalDomainTxError::UnknownDomain);
     };
@@ -457,7 +490,7 @@ fn submit_evidence(
     }
     let bls = bls_for(&entry.spec, ctx);
     let before = intake.clone();
-    match intake.submit_evidence(evidence, bls) {
+    match intake.submit_evidence_for_domain(&key, evidence, bls) {
         // Accepted, or entered a quorum round that has not decided yet: both
         // are recorded states.
         Ok(_) | Err(IntakeError::RoundPending) => Ok(()),
@@ -465,6 +498,136 @@ fn submit_evidence(
         Err(_) if *intake != before => Ok(()),
         Err(e) => Err(e.into()),
     }
+}
+
+fn register_bonded(
+    state: &mut AccountState,
+    ctx: &ExternalDomainTxContext,
+    bonded: &BondedRegistrationRequest,
+) -> Result<(), ExternalDomainTxError> {
+    let request = &bonded.request;
+    if is_testnet(ctx.chain_id) && matches!(request.spec, AdapterSpec::EthereumSync { .. }) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    }
+    if request.poster != ctx.sender {
+        return Err(ExternalDomainTxError::PosterIsNotSender);
+    }
+    if !(MIN_BONDED_ANCHOR_CHALLENGE_HEIGHTS..=MAX_BONDED_ANCHOR_CHALLENGE_HEIGHTS)
+        .contains(&bonded.challenge_window_heights)
+    {
+        return Err(IntakeError::InvalidBondedAnchor {
+            reason: format!(
+                "challenge_window_heights {} outside [{MIN_BONDED_ANCHOR_CHALLENGE_HEIGHTS}, {MAX_BONDED_ANCHOR_CHALLENGE_HEIGHTS}]",
+                bonded.challenge_window_heights
+            ),
+        }
+        .into());
+    }
+    let _anchor_digest = request.spec.bonded_anchor_digest()?;
+    let bond = fundable_bond(state, ctx, request.bond_atoms)?;
+    let bls = bls_for(&request.spec, ctx);
+    let observer_adapter = request
+        .spec
+        .build(bls_for(&request.spec, ctx), Some(request.golden.clone()));
+    let (_, observed_crypto) =
+        crate::cross_domain::external::admit_observed(observer_adapter.as_ref(), &request.policy);
+    state
+        .lock_external_bond(&ctx.sender, bond)
+        .map_err(ExternalDomainTxError::Intake)?;
+    let key = match state
+        .settlement
+        .external_intake
+        .register_bonded_domain(bonded.clone(), bls)
+    {
+        Ok(k) => k,
+        Err(e) => {
+            state
+                .release_external_bond(&ctx.sender, bond)
+                .map_err(ExternalDomainTxError::Intake)?;
+            return Err(e.into());
+        }
+    };
+    if !observed_crypto.is_empty() {
+        if let Some(reg) = state.settlement.external_intake.registry.domain_mut(&key) {
+            reg.record.crypto_facts.merge(&observed_crypto);
+        }
+    }
+    let envelope: CertifiedExternalDomainEnvelope = state
+        .settlement
+        .external_intake
+        .certified_domain_envelope(&key)
+        .ok_or_else(|| {
+            ExternalDomainTxError::Intake(
+                "bonded registration missing certified domain envelope".to_string(),
+            )
+        })?;
+    if envelope.economic_bound.safe_value_outflow_ceiling_atoms != 0 {
+        return Err(ExternalDomainTxError::Intake(
+            "bonded registration must carry zero safe value outflow during PendingAnchorChallenge"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn challenge_bonded_anchor(
+    state: &mut AccountState,
+    ctx: &ExternalDomainTxContext,
+    domain: &DomainKey,
+    proof: &BondedAnchorChallengeProof,
+) -> Result<(), ExternalDomainTxError> {
+    if let BondedAnchorChallengeProof::ConflictingFinality(ev) = proof {
+        if ev.submitter != ctx.sender {
+            return Err(ExternalDomainTxError::SubmitterIsNotSender);
+        }
+    }
+    let Some(spec) = state
+        .settlement
+        .external_intake
+        .entries
+        .get(domain)
+        .map(|entry| entry.spec.clone())
+    else {
+        return Err(ExternalDomainTxError::UnknownDomain);
+    };
+    if is_testnet(ctx.chain_id) && matches!(spec, AdapterSpec::EthereumSync { .. }) {
+        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
+    }
+    let bls = bls_for(&spec, ctx);
+    let now_unix_secs = state.current_block_unix_secs;
+    let intake_before = state.settlement.external_intake.clone();
+    let outcome = state.settlement.external_intake.challenge_bonded_anchor(
+        domain,
+        proof,
+        ctx.sender,
+        now_unix_secs,
+        bls,
+    )?;
+    let slashed = match u64::try_from(outcome.slashed_atoms) {
+        Ok(v) => v,
+        Err(_) => {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::BondTooLarge(outcome.slashed_atoms));
+        }
+    };
+    let reward = match u64::try_from(outcome.challenger_reward_atoms) {
+        Ok(v) => v,
+        Err(_) => {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::BondTooLarge(
+                outcome.challenger_reward_atoms,
+            ));
+        }
+    };
+    if slashed > 0 {
+        if let Err(err) =
+            state.slash_external_bond(&outcome.slashed_prover, slashed, reward, &ctx.sender)
+        {
+            state.settlement.external_intake = intake_before;
+            return Err(ExternalDomainTxError::Intake(err));
+        }
+    }
+    Ok(())
 }
 
 fn challenge_contradiction(
@@ -475,7 +638,15 @@ fn challenge_contradiction(
     if evidence.submitter != ctx.sender {
         return Err(ExternalDomainTxError::SubmitterIsNotSender);
     }
-    let key = DomainKey::from_parts(&evidence.adapter, &evidence.network);
+    let key = match state
+        .settlement
+        .external_intake
+        .resolve_evidence_domain_key(&evidence.adapter, &evidence.network)
+    {
+        Ok(k) => k,
+        Err(IntakeError::UnknownDomain) => return Err(ExternalDomainTxError::UnknownDomain),
+        Err(e) => return Err(e.into()),
+    };
     let Some(spec) = state
         .settlement
         .external_intake
@@ -534,7 +705,15 @@ fn challenge_ancestry(
     if evidence.submitter != ctx.sender {
         return Err(ExternalDomainTxError::SubmitterIsNotSender);
     }
-    let key = DomainKey::from_parts(&evidence.adapter, &evidence.network);
+    let key = match state
+        .settlement
+        .external_intake
+        .resolve_evidence_domain_key(&evidence.adapter, &evidence.network)
+    {
+        Ok(k) => k,
+        Err(IntakeError::UnknownDomain) => return Err(ExternalDomainTxError::UnknownDomain),
+        Err(e) => return Err(e.into()),
+    };
     let Some(spec) = state
         .settlement
         .external_intake
@@ -2589,6 +2768,474 @@ mod tests {
                 .expect("pinned")
                 .period,
             100
+        );
+    }
+
+    fn sepolia_evidence(
+        submitter: Address,
+        committee: &PinnedCommittee,
+        height: u64,
+        root: [u8; 32],
+    ) -> RawConsensusEvidence {
+        let spec = AdapterSpec::EthereumSync {
+            network: "sepolia".to_string(),
+            committee: Some(committee.clone()),
+        };
+        let payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+            height,
+            height * 2,
+            committee.period,
+            committee,
+            &[0x22; 96],
+            &[0xff; 64],
+            root,
+        );
+        let adapter = spec.build(Some(test_bls()), None);
+        RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            evidence_version: 2,
+            network: "sepolia".to_string(),
+            payload,
+            declared_height: height,
+            declared_root: root,
+            submitter,
+        }
+    }
+
+    #[test]
+    fn sepolia_bonded_anchor_registers_without_governance_vote_and_caps_ceiling_by_bond() {
+        use crate::cross_domain::external::{profile_of, AnchorClass};
+        use crate::unification::UniversalDomainCatalog;
+
+        let poster_a = addr(0x51);
+        let poster_b = addr(0x52);
+        let mut state = AccountState::new();
+        state.add_balance(&poster_a, 500_000);
+        state.add_balance(&poster_b, 500_000);
+
+        let committee_a = PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x33; 96],
+            next_committee_root: [0xaa; 32],
+        };
+        let committee_b = PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x44; 96],
+            next_committee_root: [0xbb; 32],
+        };
+        let spec_a = AdapterSpec::EthereumSync {
+            network: "sepolia".to_string(),
+            committee: Some(committee_a.clone()),
+        };
+        let spec_b = AdapterSpec::EthereumSync {
+            network: "sepolia".to_string(),
+            committee: Some(committee_b.clone()),
+        };
+        let adapter_id = spec_a.build(Some(test_bls()), None).descriptor().id;
+        // Declared ceiling is 1_000_000 (required bond = 100_000); poster posts
+        // 150_000 atoms so live bond < declared ceiling, proving the certificate
+        // caps value outflow by the posted collateral (150_000) rather than 1_000_000.
+        let economics = IntakeState::conservative_economics(1_000_000);
+        let posted_bond = 150_000u128;
+
+        let req_a = RegistrationRequest {
+            spec: spec_a.clone(),
+            policy: VerificationPolicy::strict(1_000),
+            economics,
+            versions: VersionPolicy::single(adapter_id, 2, 0),
+            bond_atoms: posted_bond,
+            poster: poster_a,
+            golden: sepolia_evidence(poster_a, &committee_a, 64, [0xc1; 32]),
+        };
+
+        // 1. Governance-voted `Register` on Sepolia with no governance vote fails closed.
+        let unpinned_err = execute_external_domain_tx(
+            &mut state,
+            &ctx(poster_a),
+            &ExternalDomainTx::Register(Box::new(req_a.clone())),
+        )
+        .expect_err("governance-voted registration without a vote must fail closed");
+        assert!(
+            matches!(unpinned_err, ExternalDomainTxError::Intake(ref msg) if msg.contains("no sync committee is pinned")),
+            "unexpected error: {unpinned_err:?}"
+        );
+        assert!(state
+            .settlement
+            .external_intake
+            .pinned_ethereum_committees
+            .is_empty());
+
+        // 2. Signed `RegisterBonded` registers Sepolia with zero governance vote,
+        //    and a second distinct anchor on Sepolia yields a distinct `DomainKey`.
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster_a),
+            &ExternalDomainTx::RegisterBonded(Box::new(BondedRegistrationRequest {
+                request: req_a,
+                challenge_window_heights: 15,
+            })),
+        )
+        .expect("Sepolia bonded registration must succeed without governance vote");
+
+        let req_b = RegistrationRequest {
+            spec: spec_b.clone(),
+            policy: VerificationPolicy::strict(1_000),
+            economics,
+            versions: VersionPolicy::single(adapter_id, 2, 0),
+            bond_atoms: posted_bond,
+            poster: poster_b,
+            golden: sepolia_evidence(poster_b, &committee_b, 64, [0xc2; 32]),
+        };
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(poster_b),
+            &ExternalDomainTx::RegisterBonded(Box::new(BondedRegistrationRequest {
+                request: req_b,
+                challenge_window_heights: 15,
+            })),
+        )
+        .expect("second distinct Sepolia bonded anchor must coexist cleanly");
+
+        let digest_a = spec_a.bonded_anchor_digest().expect("digest a");
+        let digest_b = spec_b.bonded_anchor_digest().expect("digest b");
+        let key_a = DomainKey::from_bonded_anchor(&adapter_id, "sepolia", &digest_a);
+        let key_b = DomainKey::from_bonded_anchor(&adapter_id, "sepolia", &digest_b);
+        let voted_key = DomainKey::from_parts(&adapter_id, "sepolia");
+        assert_ne!(
+            key_a, key_b,
+            "distinct bonded anchors must produce distinct DomainKeys"
+        );
+        assert_ne!(
+            key_a, voted_key,
+            "bonded DomainKey must not collide with governance-voted key"
+        );
+        assert!(state
+            .settlement
+            .external_intake
+            .entries
+            .contains_key(&key_a));
+        assert!(state
+            .settlement
+            .external_intake
+            .entries
+            .contains_key(&key_b));
+
+        // Before the challenge window matures, neither pending bonded domain is
+        // exposed for live routing in `UniversalDomainCatalog`, and its routing
+        // ceiling is zero.
+        let catalog_pending = UniversalDomainCatalog::from_chain_state(&state);
+        assert!(
+            catalog_pending.list().is_empty(),
+            "PendingAnchorChallenge domains must not be exposed in UniversalDomainCatalog before maturity"
+        );
+        assert_eq!(
+            state
+                .settlement
+                .external_intake
+                .certified_domain_envelope(&key_a)
+                .expect("pending envelope")
+                .economic_bound
+                .routing_ceiling_atoms,
+            0
+        );
+
+        // 3. Mature challenge window -> submit attestation -> verify catalog,
+        //    profile, and envelope publish `AnchorClass::Bonded` and cap the
+        //    effective routing ceiling to `posted_bond` (150_000 < 1_000_000).
+        state.settlement.external_intake.on_block_committed(15);
+        let catalog_matured = UniversalDomainCatalog::from_chain_state(&state);
+        assert!(
+            catalog_matured.list().len() >= 2,
+            "matured bonded Sepolia domains must coexist in UniversalDomainCatalog without CAIP-2 collision"
+        );
+        let att_ev = sepolia_evidence(poster_a, &committee_a, 128, [0xd1; 32]);
+        let att = state
+            .settlement
+            .external_intake
+            .submit_evidence_for_domain(&key_a, &att_ev, Some(test_bls()))
+            .expect("matured Sepolia bonded domain must accept valid finality evidence");
+        assert_eq!(att.domain, key_a);
+
+        let reg_a = state
+            .settlement
+            .external_intake
+            .registry
+            .domain(&key_a)
+            .expect("registered");
+        let profile = profile_of(&reg_a.record);
+        assert_eq!(
+            profile.anchor_class,
+            AnchorClass::Bonded {
+                anchor_digest: digest_a,
+                challenge_until_height: 15,
+            }
+        );
+        assert!(profile.summary_line().contains("anchor_class=bonded"));
+
+        let envelope = state
+            .settlement
+            .external_intake
+            .certified_domain_envelope(&key_a)
+            .expect("certified envelope");
+        assert_eq!(envelope.anchor_class, profile.anchor_class);
+        assert_eq!(envelope.state, DomainState::Active);
+        assert_eq!(
+            envelope.economic_bound.routing_ceiling_atoms, posted_bond,
+            "bonded anchor effective routing ceiling must be capped by live collateral (150_000 < 1_000_000)"
+        );
+        assert_eq!(
+            envelope.economic_bound.safe_value_outflow_ceiling_atoms, 0,
+            "Altair sync-committee attestation carries no event_root or protocol slashing"
+        );
+    }
+
+    #[test]
+    fn bonded_anchor_challenge_window_blocks_routing_slashes_fraud_and_activates_honest_anchor() {
+        let dishonest = addr(0x61);
+        let honest = addr(0x62);
+        let challenger = addr(0x63);
+        let mut state = AccountState::new();
+        let initial_bond = bond();
+        state.add_balance(&dishonest, initial_bond + 1_000);
+        state.add_balance(&honest, initial_bond + 1_000);
+        state.add_balance(&challenger, 1_000);
+
+        let bad_committee = PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x71; 96],
+            next_committee_root: [0xe1; 32],
+        };
+        let good_committee = PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x72; 96],
+            next_committee_root: [0xe2; 32],
+        };
+        let bad_spec = AdapterSpec::EthereumSync {
+            network: "sepolia".to_string(),
+            committee: Some(bad_committee.clone()),
+        };
+        let good_spec = AdapterSpec::EthereumSync {
+            network: "sepolia".to_string(),
+            committee: Some(good_committee.clone()),
+        };
+        let adapter_id = bad_spec.build(Some(test_bls()), None).descriptor().id;
+        let economics = IntakeState::conservative_economics(1_000_000);
+
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(dishonest),
+            &ExternalDomainTx::RegisterBonded(Box::new(BondedRegistrationRequest {
+                request: RegistrationRequest {
+                    spec: bad_spec.clone(),
+                    policy: VerificationPolicy::strict(1_000),
+                    bond_atoms: economics.required_bond_atoms(),
+                    economics,
+                    versions: VersionPolicy::single(adapter_id, 2, 0),
+                    poster: dishonest,
+                    golden: sepolia_evidence(dishonest, &bad_committee, 64, [0xa1; 32]),
+                },
+                challenge_window_heights: 20,
+            })),
+        )
+        .expect("dishonest bonded registration enters challenge window");
+
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(honest),
+            &ExternalDomainTx::RegisterBonded(Box::new(BondedRegistrationRequest {
+                request: RegistrationRequest {
+                    spec: good_spec.clone(),
+                    policy: VerificationPolicy::strict(1_000),
+                    bond_atoms: economics.required_bond_atoms(),
+                    economics,
+                    versions: VersionPolicy::single(adapter_id, 2, 0),
+                    poster: honest,
+                    golden: sepolia_evidence(honest, &good_committee, 64, [0xb1; 32]),
+                },
+                challenge_window_heights: 20,
+            })),
+        )
+        .expect("honest bonded registration enters challenge window");
+
+        let bad_key = DomainKey::from_bonded_anchor(
+            &adapter_id,
+            "sepolia",
+            &bad_spec.bonded_anchor_digest().unwrap(),
+        );
+        let good_key = DomainKey::from_bonded_anchor(
+            &adapter_id,
+            "sepolia",
+            &good_spec.bonded_anchor_digest().unwrap(),
+        );
+
+        // 1. Inside the challenge window (`height = 10 < 20`), both sit in
+        //    `PendingAnchorChallenge`, carry zero value ceiling, refuse evidence,
+        //    and refuse `Readmit` window-skip attempts.
+        state.settlement.external_intake.on_block_committed(10);
+        for k in [bad_key, good_key] {
+            let env = state
+                .settlement
+                .external_intake
+                .certified_domain_envelope(&k)
+                .expect("envelope");
+            assert_eq!(env.state, DomainState::PendingAnchorChallenge);
+            assert!(!env.state.serves());
+            assert_eq!(env.economic_bound.safe_value_outflow_ceiling_atoms, 0);
+        }
+        let early_ev = sepolia_evidence(honest, &good_committee, 96, [0xb2; 32]);
+        let not_serving = state
+            .settlement
+            .external_intake
+            .submit_evidence_for_domain(&good_key, &early_ev, Some(test_bls()))
+            .expect_err("evidence during PendingAnchorChallenge must be refused");
+        assert!(not_serving.to_string().contains("pending-anchor-challenge"));
+
+        let skip_err = execute_external_domain_tx(
+            &mut state,
+            &ctx(dishonest),
+            &ExternalDomainTx::Readmit {
+                domain: bad_key,
+                reason: "try skipping challenge window".to_string(),
+            },
+        )
+        .expect_err("Readmit must not skip PendingAnchorChallenge");
+        assert!(skip_err.to_string().contains("pending-anchor-challenge"));
+
+        // 2. Self-challenge and identical-root challenge are refused without mutating state.
+        let self_proof = BondedAnchorChallengeProof::ConflictingFinality(Box::new(
+            sepolia_evidence(dishonest, &bad_committee, 64, [0xa9; 32]),
+        ));
+        let self_err = execute_external_domain_tx(
+            &mut state,
+            &ctx(dishonest),
+            &ExternalDomainTx::ChallengeBondedAnchor {
+                domain: bad_key,
+                proof: Box::new(self_proof),
+            },
+        )
+        .expect_err("self-challenge must be forbidden");
+        assert!(self_err.to_string().contains("cannot challenge its own"));
+
+        let same_root_proof = BondedAnchorChallengeProof::ConflictingFinality(Box::new(
+            sepolia_evidence(challenger, &bad_committee, 64, [0xa1; 32]),
+        ));
+        let same_err = execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::ChallengeBondedAnchor {
+                domain: bad_key,
+                proof: Box::new(same_root_proof),
+            },
+        )
+        .expect_err("non-conflicting root must be refused");
+        assert!(same_err.to_string().contains("same state_root"));
+
+        // 3. Valid conflicting finality proof drops `bad_key` to `Faulted`,
+        //    slashes 100% of `dishonest`'s escrowed bond, and rewards `challenger`.
+        let challenger_before = state.spendable_balance(&challenger);
+        let valid_fraud = BondedAnchorChallengeProof::ConflictingFinality(Box::new(
+            sepolia_evidence(challenger, &bad_committee, 64, [0xfe; 32]),
+        ));
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(challenger),
+            &ExternalDomainTx::ChallengeBondedAnchor {
+                domain: bad_key,
+                proof: Box::new(valid_fraud),
+            },
+        )
+        .expect("conflicting finality proof must take down dishonest bonded anchor");
+
+        let bad_reg = state
+            .settlement
+            .external_intake
+            .registry
+            .domain(&bad_key)
+            .expect("bad_reg");
+        assert_eq!(bad_reg.record.state, DomainState::Faulted);
+        assert_eq!(bad_reg.record.bond_atoms, 0);
+        assert_eq!(
+            state
+                .external_bond_escrow
+                .get(&dishonest)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "dishonest registrant's entire escrowed bond must be slashed"
+        );
+        assert!(
+            state.spendable_balance(&challenger) > challenger_before,
+            "challenger must receive the slash reward"
+        );
+
+        // 4. At height 19 `good_key` is still pending; at height 20 it promotes to
+        //    `Admitted` while `bad_key` stays `Faulted` and cannot be readmitted.
+        state.settlement.external_intake.on_block_committed(19);
+        assert_eq!(
+            state
+                .settlement
+                .external_intake
+                .registry
+                .domain(&good_key)
+                .unwrap()
+                .record
+                .state,
+            DomainState::PendingAnchorChallenge
+        );
+
+        state.settlement.external_intake.on_block_committed(20);
+        assert_eq!(
+            state
+                .settlement
+                .external_intake
+                .registry
+                .domain(&good_key)
+                .unwrap()
+                .record
+                .state,
+            DomainState::Admitted
+        );
+        assert_eq!(
+            state
+                .settlement
+                .external_intake
+                .registry
+                .domain(&bad_key)
+                .unwrap()
+                .record
+                .state,
+            DomainState::Faulted
+        );
+
+        // Refuted bonded anchor can never be readmitted even after top-up.
+        state.add_balance(&dishonest, initial_bond + 1_000);
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(dishonest),
+            &ExternalDomainTx::BondProver {
+                domain: bad_key,
+                bond_atoms: economics.required_bond_atoms(),
+            },
+        )
+        .expect_err("already-bonded registrant cannot reset bond");
+
+        // Honest matured domain now serves attestations and carries live value ceiling.
+        let post_window_ev = sepolia_evidence(honest, &good_committee, 128, [0xb3; 32]);
+        execute_external_domain_tx(
+            &mut state,
+            &ctx(honest),
+            &ExternalDomainTx::SubmitEvidence(Box::new(post_window_ev)),
+        )
+        .expect("matured honest bonded domain must accept SubmitEvidence");
+        let good_env = state
+            .settlement
+            .external_intake
+            .certified_domain_envelope(&good_key)
+            .expect("good envelope");
+        assert_eq!(good_env.state, DomainState::Active);
+        assert_eq!(
+            good_env.economic_bound.routing_ceiling_atoms,
+            economics.required_bond_atoms()
         );
     }
 }
