@@ -7946,15 +7946,20 @@ impl Blockchain {
     where
         F: FnMut(&Block, &AccountState) -> Result<(), String>,
     {
-        let mut current_state = if fork_point > 0 {
-            Self::rebuild_state(
-                &chain[..fork_point],
-                &self.genesis_config,
-                self.consensus.domain_kind(),
-            )?
-        } else {
-            AccountState::new()
-        };
+        // A replay never starts at the configured genesis: `try_reorg` refuses
+        // a candidate that would replace it before it gets here, and a fresh
+        // `AccountState::new()` is not the genesis state (`build_state` seeds
+        // the chain-keyed parameters, allocations and validators), so a
+        // replay from it could only disagree with every committed root.
+        // Refusing is the same answer stated once instead of by accident.
+        if fork_point == 0 {
+            return Err("Reorg replay cannot start at the configured genesis".into());
+        }
+        let mut current_state = Self::rebuild_state(
+            &chain[..fork_point],
+            &self.genesis_config,
+            self.consensus.domain_kind(),
+        )?;
         // The rebuild starts from a fresh state; carry the engine's
         // domain over before re-executing blocks, or a reorg after an
         // identity write would replay it as a refusal and fork the node
@@ -14099,6 +14104,25 @@ mod bond_and_reorg_tests {
             .unwrap_err();
         assert!(error.contains("state root mismatch"), "unexpected: {error}");
         assert_eq!(seen, last - fork_point);
+        assert_eq!(left.chain, chain_before);
+    }
+
+    /// A replay asked to start at the configured genesis is refused before it
+    /// touches a block: `try_reorg` never asks for it, and a fresh state is
+    /// not the genesis state, so the only honest answer is no.
+    #[test]
+    fn reorg_replay_refuses_to_start_at_the_configured_genesis() {
+        let (left, right) = build_divergent_pow_chains();
+        let chain_before = left.chain.clone();
+        let mut seen = 0usize;
+        let error = left
+            .replay_reorg_blocks(&right.chain, 0, |_, _| {
+                seen += 1;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error.contains("configured genesis"), "unexpected: {error}");
+        assert_eq!(seen, 0);
         assert_eq!(left.chain, chain_before);
     }
 
