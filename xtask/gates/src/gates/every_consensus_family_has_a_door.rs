@@ -63,8 +63,8 @@ const EXTERNAL_DIR: &str = "src/cross_domain/external";
 
 fn parse(root: &Path, rel: &str) -> Result<syn::File, String> {
     let path = root.join(rel);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("{rel} could not be read: {e}"))?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("{rel} could not be read: {e}"))?;
     syn::parse_file(&text).map_err(|e| format!("{rel} does not parse: {e}"))
 }
 
@@ -116,9 +116,8 @@ fn canonical_families(root: &Path) -> Result<BTreeMap<String, String>, String> {
                 continue;
             }
             for stmt in &f.block.stmts {
-                let expr = match stmt {
-                    syn::Stmt::Expr(e, _) => e,
-                    _ => continue,
+                let syn::Stmt::Expr(expr, _) = stmt else {
+                    continue;
                 };
                 let Expr::Match(m) = expr else { continue };
                 for arm in &m.arms {
@@ -182,9 +181,8 @@ fn spec_arms(root: &Path) -> Result<BTreeMap<String, Option<String>>, String> {
                 continue;
             }
             for stmt in &f.block.stmts {
-                let expr = match stmt {
-                    syn::Stmt::Expr(e, _) => e,
-                    _ => continue,
+                let syn::Stmt::Expr(expr, _) = stmt else {
+                    continue;
                 };
                 let Expr::Match(m) = expr else { continue };
                 for arm in &m.arms {
@@ -247,7 +245,10 @@ fn adapter_type_in(body: &Expr) -> Option<String> {
             continue;
         }
         // `Type::assoc` only: a trailing `::<` turbofish is not a call here.
-        if bytes.get(from).is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_') {
+        if bytes
+            .get(from)
+            .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+        {
             found.insert(ty.to_string());
         }
     }
@@ -460,7 +461,9 @@ fn check_event_root_authority(root: &Path) -> Result<usize, String> {
         })
         .collect();
     if marks.is_empty() {
-        return Err(format!("{REL}: for_external_spec_declared names no variants"));
+        return Err(format!(
+            "{REL}: for_external_spec_declared names no variants"
+        ));
     }
 
     let mut bearers: Vec<String> = Vec::new();
@@ -578,17 +581,15 @@ fn check_tag_order(root: &Path) -> Result<usize, String> {
             .map_or(body.len(), |(p, _)| *p);
         let seg = &body[*pos..end];
         let Some(at) = seg.find("put_u8(out, ") else {
-            return Err(format!(
-                "{REL}: AdapterSpec::{variant} writes no wire tag"
-            ));
+            return Err(format!("{REL}: AdapterSpec::{variant} writes no wire tag"));
         };
         let digits: String = seg[at + "put_u8(out, ".len()..]
             .chars()
             .take_while(char::is_ascii_digit)
             .collect();
-        let tag: usize = digits.parse().map_err(|_| {
-            format!("{REL}: AdapterSpec::{variant} writes a non-literal wire tag")
-        })?;
+        let tag: usize = digits
+            .parse()
+            .map_err(|_| format!("{REL}: AdapterSpec::{variant} writes a non-literal wire tag"))?;
         if tag != index {
             return Err(format!(
                 "{REL}: AdapterSpec::{variant} is bincode index {index} but signs wire tag                  {tag}. The persisted variant and the signed variant must be the same number:                  a spec read back from storage would otherwise verify as a different consensus                  family. Append new variants at the end and never renumber a tag."
@@ -679,103 +680,89 @@ pub fn run(root: &Path) -> Result<String, String> {
     ))
 }
 
-pub fn self_test() -> Result<String, String> {
-    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ecfhad")?;
+fn write_canary_tree(
+    dir: &Path,
+    families: &str,
+    kind_arms: &str,
+    variants: &str,
+    build_arms: &str,
+    adapters: &str,
+) -> Result<(), String> {
     let model_dir = dir.join("src/domain");
     let ext_dir = dir.join(EXTERNAL_DIR);
-    std::fs::create_dir_all(&model_dir).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&ext_dir).map_err(|e| e.to_string())?;
-
-    let model = |families: &str, arms: &str| {
-        format!(
-            "pub enum ExternalVerifierFamily {{\n{families}}}\n\
-             impl ExternalVerifierFamily {{\n    \
-             pub const fn consensus_kind(self) -> &'static str {{\n        \
-             match self {{\n{arms}        }}\n    }}\n}}\n"
-        )
-    };
-    let intake = |variants: &str, arms: &str| {
-        format!(
-            "pub enum AdapterSpec {{\n{variants}}}\n\
-             impl AdapterSpec {{\n    pub fn build(&self) -> u8 {{\n        \
-             match self {{\n{arms}        }}\n    }}\n}}\n"
-        )
-    };
-
-    // The canary tree carries the other two per-variant tables too, so the
-    // exhaustive-table check runs against real files in every canary rather
-    // than being skipped when a file is absent.
     let core_dir = dir.join("src/core");
     let settlement_dir = dir.join("src/settlement");
+    std::fs::create_dir_all(&model_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&ext_dir).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&core_dir).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&settlement_dir).map_err(|e| e.to_string())?;
 
-    let write = |families: &str, kind_arms: &str, variants: &str, build_arms: &str, adapters: &str| -> Result<(), String> {
-        std::fs::write(model_dir.join("finality_proof_model.rs"), model(families, kind_arms))
-            .map_err(|e| e.to_string())?;
-        std::fs::write(ext_dir.join("intake.rs"), intake(variants, build_arms))
-            .map_err(|e| e.to_string())?;
-        std::fs::write(ext_dir.join("adapters.rs"), adapters).map_err(|e| e.to_string())?;
-        // The canary tree's preimage table writes a real tag, so the
-        // index/tag agreement check has something to read in every canary.
-        std::fs::write(
-            core_dir.join("transaction.rs"),
-            "fn encode_adapter_spec(s: &AdapterSpec) {\n    match s {\n        AdapterSpec::AlphaSpec { .. } => { put_u8(out, 0); }\n    }\n}\n",
-        )
+    let model_src = format!(
+        "pub enum ExternalVerifierFamily {{\n{families}}}\n\
+         impl ExternalVerifierFamily {{\n    \
+         pub const fn consensus_kind(self) -> &'static str {{\n        \
+         match self {{\n{kind_arms}        }}\n    }}\n}}\n"
+    );
+    let intake_src = format!(
+        "pub enum AdapterSpec {{\n{variants}}}\n\
+         impl AdapterSpec {{\n    pub fn build(&self) -> u8 {{\n        \
+         match self {{\n{build_arms}        }}\n    }}\n}}\n"
+    );
+    std::fs::write(model_dir.join("finality_proof_model.rs"), model_src)
         .map_err(|e| e.to_string())?;
-        // The canary tree declares the same event-root bearers the real tree
-        // does, so the value-authority check runs against a realistic table
-        // in every canary instead of tripping over a stub that omits them.
-        let mut settlement_src = String::from(
-            "fn for_external_spec_declared(s: &AdapterSpec) {\n    match s {\n",
+    std::fs::write(ext_dir.join("intake.rs"), intake_src).map_err(|e| e.to_string())?;
+    std::fs::write(ext_dir.join("adapters.rs"), adapters).map_err(|e| e.to_string())?;
+    std::fs::write(
+        core_dir.join("transaction.rs"),
+        "fn encode_adapter_spec(s: &AdapterSpec) {\n    match s {\n        AdapterSpec::AlphaSpec { .. } => { put_u8(out, 0); }\n    }\n}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let mut settlement_src =
+        String::from("fn for_external_spec_declared(s: &AdapterSpec) {\n    match s {\n");
+    for bearer in EVENT_ROOT_BEARING_SPECS {
+        let _ = writeln!(
+            settlement_src,
+            "        AdapterSpec::{bearer} {{ .. }} => Self {{ event_root: valid, }},"
         );
-        for bearer in EVENT_ROOT_BEARING_SPECS {
-            settlement_src.push_str(&format!(
-                "        AdapterSpec::{bearer} {{ .. }} => Self {{ event_root: valid, }},\n"
-            ));
-        }
-        settlement_src.push_str(
-            "        AdapterSpec::AlphaSpec { .. } => Self { event_root: false, },\n    }\n}\n",
-        );
-        std::fs::write(settlement_dir.join("universal_finality.rs"), settlement_src)
-            .map_err(|e| e.to_string())
-    };
+    }
+    settlement_src.push_str(
+        "        AdapterSpec::AlphaSpec { .. } => Self { event_root: false, },\n    }\n}\n",
+    );
+    std::fs::write(settlement_dir.join("universal_finality.rs"), settlement_src)
+        .map_err(|e| e.to_string())
+}
 
-    let cleanup = |dir: &Path| {
-        let _ = std::fs::remove_dir_all(dir);
-    };
-
+fn self_test_door_canaries(dir: &Path) -> Result<(), String> {
     // Canary 1 - honest tree: one family, one spec, one adapter that declares
     // the family's kind. Must pass.
-    write(
+    write_canary_tree(
+        dir,
         "    Alpha,\n",
         "            Self::Alpha => \"alpha-bft\",\n",
         "    AlphaSpec { network: String },\n",
         "            Self::AlphaSpec { .. } => AlphaAdapter::new(1),\n",
         "impl AlphaAdapter {\n    fn d(&self) -> D {\n        D { consensus_kind: \"alpha-bft\".to_string() }\n    }\n}\n",
     )?;
-    if let Err(e) = run(&dir) {
-        cleanup(&dir);
+    if let Err(e) = run(dir) {
         return Err(format!("canary 1: an honest tree was rejected: {e}"));
     }
 
     // Canary 2 - a family with no door. Must fail and name the family.
-    write(
+    write_canary_tree(
+        dir,
         "    Alpha,\n    Beta,\n",
         "            Self::Alpha => \"alpha-bft\",\n            Self::Beta => \"beta-pow\",\n",
         "    AlphaSpec { network: String },\n",
         "            Self::AlphaSpec { .. } => AlphaAdapter::new(1),\n",
         "impl AlphaAdapter {\n    fn d(&self) -> D {\n        D { consensus_kind: \"alpha-bft\".to_string() }\n    }\n}\n",
     )?;
-    match run(&dir) {
+    match run(dir) {
         Ok(_) => {
-            cleanup(&dir);
             return Err(String::from(
                 "canary 2: a family with no AdapterSpec variant was accepted",
             ));
         }
         Err(e) if !e.contains("Beta") => {
-            cleanup(&dir);
             return Err(format!("canary 2: failed without naming the family: {e}"));
         }
         Err(_) => {}
@@ -783,67 +770,62 @@ pub fn self_test() -> Result<String, String> {
 
     // Canary 3 - the spec exists but builds an adapter that declares a
     // different kind. Coverage must not be inferred from the variant name.
-    write(
+    write_canary_tree(
+        dir,
         "    Beta,\n",
         "            Self::Beta => \"beta-pow\",\n",
         "    Beta { network: String },\n",
         "            Self::Beta { .. } => AlphaAdapter::new(1),\n",
         "impl AlphaAdapter {\n    fn d(&self) -> D {\n        D { consensus_kind: \"alpha-bft\".to_string() }\n    }\n}\n",
     )?;
-    match run(&dir) {
-        Ok(_) => {
-            cleanup(&dir);
-            return Err(String::from(
-                "canary 3: a same-named spec building a foreign adapter was accepted",
-            ));
-        }
-        Err(_) => {}
+    if run(dir).is_ok() {
+        return Err(String::from(
+            "canary 3: a same-named spec building a foreign adapter was accepted",
+        ));
     }
 
-    // Canary 4 - a build arm that constructs nothing must be unresolved, not
-    // silently treated as covering its family.
-    write(
+    // Canary 4 - a build arm that constructs nothing must be unresolved.
+    write_canary_tree(
+        dir,
         "    Alpha,\n",
         "            Self::Alpha => \"alpha-bft\",\n",
         "    Alpha { network: String },\n",
         "            Self::Alpha { .. } => 0u8,\n",
         "impl AlphaAdapter {\n    fn d(&self) -> D {\n        D { consensus_kind: \"alpha-bft\".to_string() }\n    }\n}\n",
     )?;
-    match run(&dir) {
+    match run(dir) {
         Ok(_) => {
-            cleanup(&dir);
             return Err(String::from(
                 "canary 4: a build arm constructing no adapter was accepted as a door",
             ));
         }
         Err(e) if !e.contains("unresolved") && !e.contains("no door") => {
-            cleanup(&dir);
             return Err(format!("canary 4: failed for the wrong reason: {e}"));
         }
         Err(_) => {}
     }
 
-    // Canary 5 - an adapter type with no declared consensus_kind is
-    // unresolved, so its family is still doorless.
-    write(
+    // Canary 5 - an adapter type with no declared consensus_kind is unresolved.
+    write_canary_tree(
+        dir,
         "    Alpha,\n",
         "            Self::Alpha => \"alpha-bft\",\n",
         "    Alpha { network: String },\n",
         "            Self::Alpha { .. } => GhostAdapter::new(1),\n",
         "impl AlphaAdapter {\n    fn d(&self) -> D {\n        D { consensus_kind: \"alpha-bft\".to_string() }\n    }\n}\n",
     )?;
-    match run(&dir) {
-        Ok(_) => {
-            cleanup(&dir);
-            return Err(String::from(
-                "canary 5: an adapter declaring no consensus_kind was accepted as a door",
-            ));
-        }
-        Err(_) => {}
+    if run(dir).is_ok() {
+        return Err(String::from(
+            "canary 5: an adapter declaring no consensus_kind was accepted as a door",
+        ));
     }
 
-    // Canary 6a - a wildcard arm in one of the real tables must fail the run.
-    write(
+    Ok(())
+}
+
+fn self_test_wildcard_canaries(dir: &Path) -> Result<(), String> {
+    write_canary_tree(
+        dir,
         "    Alpha,\n",
         "            Self::Alpha => \"alpha-bft\",\n",
         "    AlphaSpec { network: String },\n",
@@ -851,26 +833,22 @@ pub fn self_test() -> Result<String, String> {
         "impl AlphaAdapter {\n    fn d(&self) -> D {\n        D { consensus_kind: \"alpha-bft\".to_string() }\n    }\n}\n",
     )?;
     std::fs::write(
-        core_dir.join("transaction.rs"),
+        dir.join("src/core/transaction.rs"),
         "fn encode_adapter_spec(s: &AdapterSpec) {\n    match s {\n        AdapterSpec::AlphaSpec { .. } => 0,\n        _ => 1,\n    }\n}\n",
     )
     .map_err(|e| e.to_string())?;
-    match run(&dir) {
+    match run(dir) {
         Ok(_) => {
-            cleanup(&dir);
             return Err(String::from(
                 "canary 6a: a wildcard arm in the signature-preimage table was accepted",
             ));
         }
         Err(e) if !e.contains("wildcard") => {
-            cleanup(&dir);
             return Err(format!("canary 6a: failed for the wrong reason: {e}"));
         }
         Err(_) => {}
     }
 
-    // Canary 6 - the wildcard check itself. A table that grows `_ =>` must
-    // fail, and a line that merely starts with an underscore must not.
     let probe = dir.join("probe.rs");
     std::fs::write(
         &probe,
@@ -880,8 +858,7 @@ pub fn self_test() -> Result<String, String> {
     let text = std::fs::read_to_string(&probe).map_err(|e| e.to_string())?;
     let body = function_body(&text, "fn build(")
         .ok_or_else(|| String::from("canary 6: the probe body was not found"))?;
-    if !body.lines().any(|l| is_wildcard_arm(l)) {
-        cleanup(&dir);
+    if !body.lines().any(is_wildcard_arm) {
         return Err(String::from("canary 6: a real `_ =>` arm was not detected"));
     }
     for honest in [
@@ -891,93 +868,101 @@ pub fn self_test() -> Result<String, String> {
         "        _unused => 0,",
     ] {
         if is_wildcard_arm(honest) {
-            cleanup(&dir);
-            return Err(format!("canary 6: `{honest}` was misread as a wildcard arm"));
-        }
-    }
-
-    // Canaries 8 and 9 - the event-root value-authority boundary, both ways.
-    let settlement = settlement_dir.join("universal_finality.rs");
-    let table = |hotstuff: &str, alpha: &str| {
-        let mut out = String::from(
-            "fn for_external_spec_declared(s: &AdapterSpec) {\n    match s {\n",
-        );
-        for bearer in EVENT_ROOT_BEARING_SPECS {
-            let value = if *bearer == "HotStuffQc" { hotstuff } else { "valid" };
-            out.push_str(&format!(
-                "        AdapterSpec::{bearer} {{ .. }} => Self {{ event_root: {value}, }},\n"
+            return Err(format!(
+                "canary 6: `{honest}` was misread as a wildcard arm"
             ));
         }
-        out.push_str(&format!(
-            "        AdapterSpec::AlphaSpec {{ .. }} => Self {{ event_root: {alpha}, }},\n    }}\n}}\n"
-        ));
+    }
+    Ok(())
+}
+
+fn self_test_event_root_and_tag_canaries(dir: &Path) -> Result<(), String> {
+    let settlement = dir.join("src/settlement/universal_finality.rs");
+    let table = |hotstuff: &str, alpha: &str| {
+        let mut out =
+            String::from("fn for_external_spec_declared(s: &AdapterSpec) {\n    match s {\n");
+        for bearer in EVENT_ROOT_BEARING_SPECS {
+            let value = if *bearer == "HotStuffQc" {
+                hotstuff
+            } else {
+                "valid"
+            };
+            let _ = writeln!(
+                out,
+                "        AdapterSpec::{bearer} {{ .. }} => Self {{ event_root: {value}, }},"
+            );
+        }
+        let _ = writeln!(
+            out,
+            "        AdapterSpec::AlphaSpec {{ .. }} => Self {{ event_root: {alpha}, }},\n    }}\n}}"
+        );
         out
     };
     // 8: an undeclared arm starts binding an event root.
     std::fs::write(&settlement, table("valid", "valid")).map_err(|e| e.to_string())?;
-    match check_event_root_authority(&dir) {
+    match check_event_root_authority(dir) {
         Ok(_) => {
-            cleanup(&dir);
             return Err(String::from(
                 "canary 8: an undeclared arm binding an event root was accepted",
             ));
         }
         Err(e) if !e.contains("AlphaSpec") => {
-            cleanup(&dir);
             return Err(format!("canary 8: failed without naming the arm: {e}"));
         }
         Err(_) => {}
     }
     // 9: a declared bearer stops binding one, leaving a stale entry.
     std::fs::write(&settlement, table("false", "false")).map_err(|e| e.to_string())?;
-    match check_event_root_authority(&dir) {
+    match check_event_root_authority(dir) {
         Ok(_) => {
-            cleanup(&dir);
             return Err(String::from(
                 "canary 9: a stale event-root entry was accepted",
             ));
         }
         Err(e) if !e.contains("HotStuffQc") => {
-            cleanup(&dir);
-            return Err(format!("canary 9: failed without naming the stale entry: {e}"));
+            return Err(format!(
+                "canary 9: failed without naming the stale entry: {e}"
+            ));
         }
         Err(_) => {}
     }
 
-    // Canary 10 - the bincode index and the signed wire tag must be one
-    // number. A renumbered tag means a stored spec and a signed spec can be
-    // different variants with nobody reporting it.
-    let core_tx = core_dir.join("transaction.rs");
+    // Canary 10 - the bincode index and the signed wire tag must be one number.
+    let core_tx = dir.join("src/core/transaction.rs");
     std::fs::write(
         &core_tx,
         "fn encode_adapter_spec(s: &AdapterSpec) {\n    match s {\n                 AdapterSpec::AlphaSpec { .. } => { put_u8(out, 7); }\n    }\n}\n",
     )
     .map_err(|e| e.to_string())?;
-    match check_tag_order(&dir) {
+    match check_tag_order(dir) {
         Ok(_) => {
-            cleanup(&dir);
             return Err(String::from(
                 "canary 10: index 0 signing wire tag 7 was accepted",
             ));
         }
         Err(e) if !e.contains("wire tag") => {
-            cleanup(&dir);
             return Err(format!("canary 10: failed for the wrong reason: {e}"));
         }
         Err(_) => {}
     }
-    // The honest form of the same table must pass.
     std::fs::write(
         &core_tx,
         "fn encode_adapter_spec(s: &AdapterSpec) {\n    match s {\n                 AdapterSpec::AlphaSpec { .. } => { put_u8(out, 0); }\n    }\n}\n",
     )
     .map_err(|e| e.to_string())?;
-    if let Err(e) = check_tag_order(&dir) {
-        cleanup(&dir);
+    if let Err(e) = check_tag_order(dir) {
         return Err(format!("canary 10: an honest tag order was rejected: {e}"));
     }
+    Ok(())
+}
 
-    cleanup(&dir);
+pub fn self_test() -> Result<String, String> {
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ecfhad")?;
+    let outcome = self_test_door_canaries(&dir)
+        .and_then(|()| self_test_wildcard_canaries(&dir))
+        .and_then(|()| self_test_event_root_and_tag_canaries(&dir));
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome?;
     Ok(String::from(
         "every-consensus-family-has-a-door self-test OK: 10 canaries (honest tree, doorless \
          family, name-only match, empty build arm, undeclared adapter kind, wildcard arm in a \

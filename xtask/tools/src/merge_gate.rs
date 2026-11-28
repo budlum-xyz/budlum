@@ -160,13 +160,13 @@ pub fn read_payload(payload: &str) -> Result<MergeRequest, String> {
         .map(str::to_ascii_lowercase)
         .ok_or_else(|| format!("{CONTEXT}: `pull_request.head.sha` is missing"))?;
     if !is_sha(&base_sha) {
-        return Err(String::from(
-            "{CONTEXT}: `pull_request.base.sha` is not a forty-character commit id",
+        return Err(format!(
+            "{CONTEXT}: `pull_request.base.sha` is not a forty-character commit id"
         ));
     }
     if !is_sha(&head_sha) {
-        return Err(String::from(
-            "{CONTEXT}: `pull_request.head.sha` is not a forty-character commit id",
+        return Err(format!(
+            "{CONTEXT}: `pull_request.head.sha` is not a forty-character commit id"
         ));
     }
     let base_ref = text(base, "ref")
@@ -219,8 +219,8 @@ pub fn read_list(text: &str, path: &str) -> Result<Vec<String>, String> {
             continue;
         }
         if line.contains(char::is_whitespace) {
-            return Err(String::from(
-                "{CONTEXT}: {path} has an entry with whitespace ({line:?}); one name per line",
+            return Err(format!(
+                "{CONTEXT}: {path} has an entry with whitespace ({line:?}); one name per line"
             ));
         }
         out.push(line.to_owned());
@@ -543,8 +543,8 @@ pub fn self_test() -> Result<String, String> {
     let mut undeclared = base.clone();
     undeclared.head_ref = String::from("someone/scratch");
     if decide(&undeclared, &branches, &forbidden, &clean).allowed {
-        return Err(String::from(
-            "canary: an undeclared head branch must be denied by {CONTEXT}",
+        return Err(format!(
+            "canary: an undeclared head branch must be denied by {CONTEXT}"
         ));
     }
 
@@ -572,9 +572,7 @@ pub fn self_test() -> Result<String, String> {
     ] {
         let changed = vec![String::from(path)];
         if decide(&base, &branches, &forbidden, &changed).allowed {
-            return Err(String::from(
-                "canary: `{path}` must be denied as a product path",
-            ));
+            return Err(format!("canary: `{path}` must be denied as a product path"));
         }
     }
 
@@ -590,8 +588,8 @@ pub fn self_test() -> Result<String, String> {
         &[String::from("review-notes/x.md")],
     );
     if !ok.allowed || !ok.detail.contains("not the default branch") {
-        return Err(String::from(
-            "canary: a non-default base must be allowed with its reason stated, got {ok:?}",
+        return Err(format!(
+            "canary: a non-default base must be allowed with its reason stated, got {ok:?}"
         ));
     }
 
