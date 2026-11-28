@@ -209,6 +209,20 @@ fun GardenApp(
         when (current) {
             Step.Blocks -> BlockFieldScreen(
                 model = model,
+                onCube = {
+                    // A block is the wallet: touching one draws this phone's
+                    // own twenty-four words out of the core, or the wallet it
+                    // already holds. No menu, no second screen to find.
+                    if (model.state.walletExists) {
+                        wantedTestnet = false
+                        walletReturnStep = Step.Blocks
+                        step = Step.Wallet
+                    } else {
+                        model.createWallet()
+                        walletReturnStep = Step.Blocks
+                        step = Step.Seed
+                    }
+                },
                 onGo = { goes ->
                     when (goes) {
                         BlockGoes.Testnet -> {

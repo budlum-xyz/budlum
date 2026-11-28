@@ -112,7 +112,6 @@
     <string name="w_restore">Put my wallet back</string>
     <string name="w_make_instead">Make a new one instead</string>
     <string name="w_words_hint">the twenty-four words, in order, separated by spaces</string>
-    <string name="w_seed_warning">Write these down on paper and keep them away from this phone. Anyone holding them holds the wallet. They are shown once and cannot be shown again.</string>
     <string name="w_chain">chain</string>
     <string name="w_verify_why">Type three of them back. This is the only moment a mistake can still be caught: the words cannot be shown again.</string>
     <string name="w_word_number">word %1$d</string>
@@ -193,8 +192,6 @@
     <string name="g_skin_sage">Sage</string>
     <string name="g_skin_ground">Dark</string>
     <string name="w_word_count">%1$d / %2$d words</string>
-    <string name="w_tap_to_reveal">tap to reveal recovery words</string>
-    <string name="w_reveal_hint">Make sure nobody is looking at your screen. Screenshots are blocked here.</string>
     <string name="w_back_to_words">show words again</string>
     <string name="w_receive_qr">receive qr</string>
     <string name="w_open_testnet">testnet faucet &amp; balance</string>

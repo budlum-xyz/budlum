@@ -112,7 +112,6 @@
     <string name="w_restore">Cüzdanımı geri getir</string>
     <string name="w_make_instead">Bunun yerine yeni bir tane oluştur</string>
     <string name="w_words_hint">yirmi dört kelime, sırasıyla, aralarında boşluk</string>
-    <string name="w_seed_warning">Bunları kâğıda yazın ve bu telefondan uzakta saklayın. Kelimeleri elinde tutan cüzdanı elinde tutar. Bir kez gösterilir, bir daha gösterilemez.</string>
     <string name="w_chain">zincir</string>
     <string name="w_verify_why">Üçünü geri yazın. Bir hatanın hâlâ yakalanabileceği tek an budur: kelimeler bir daha gösterilemez.</string>
     <string name="w_word_number">%1$d. kelime</string>
@@ -193,8 +192,6 @@
     <string name="g_skin_sage">Adaçayı</string>
     <string name="g_skin_ground">Koyu</string>
     <string name="w_word_count">%1$d / %2$d kelime</string>
-    <string name="w_tap_to_reveal">kurtarma kelimelerini görmek için dokun</string>
-    <string name="w_reveal_hint">Ekranınıza kimsenin bakmadığından emin olun. Bu ekranda ekran görüntüsü engellenir.</string>
     <string name="w_back_to_words">kelimeleri yeniden göster</string>
     <string name="w_receive_qr">alım qr</string>
     <string name="w_open_testnet">testnet musluğu ve bakiye</string>

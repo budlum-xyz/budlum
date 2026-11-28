@@ -1,7 +1,43 @@
+                    .pointerInput(block.id) {
+                        detectTapGestures { onTap(block.id) }
+                    }
+                    .pointerInput(block.id, rowsDrawn, floorWidth, floorHeight) {
+                        detectDragGestures(
+                            onDragStart = {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                held = block.id
+                                carry = Offset.Zero
+                            },
+                            onDrag = { change, amount ->
+                                change.consume()
+                                carry += amount
+                            },
+                            onDragEnd = {
+                                val home = Offset(block.column * cellPx, clampedRow * cellPx)
+                                val want = (taken[block.id] ?: Offset.Zero) + carry
+                                val minX = -home.x
+                                val minY = -home.y
+                                val topX = floorWidth - cellPx - home.x
+                                val topY = floorHeight - cellPx - home.y
+                                taken[block.id] = Offset(
+                                    want.x.coerceIn(minX, maxOf(minX, topX)),
+                                    want.y.coerceIn(minY, maxOf(minY, topY)),
+                                )
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                held = null
+                                carry = Offset.Zero
+                            },
+                            onDragCancel = {
+                                held = null
+                                carry = Offset.Zero
+                            },
+                        )
+                    },
 package network.budlum.validator.garden
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -20,6 +56,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -113,6 +150,7 @@ private fun openingBlocks(): List<Block> = listOf(
 @Composable
 fun BlockFieldScreen(
     model: GardenModel,
+    onCube: () -> Unit,
     onGo: (BlockGoes) -> Unit,
     onJoin: () -> Unit,
     onChoose: () -> Unit,
@@ -194,6 +232,7 @@ fun BlockFieldScreen(
 
             BlockField(
                 skin = skin,
+                onTap = { onCube() },
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
@@ -220,11 +259,16 @@ fun BlockFieldScreen(
 @Composable
 fun BlockField(
     skin: Skin,
+    onTap: (Int) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val blocks = remember { mutableStateListOf<Block>().apply { addAll(openingBlocks()) } }
     var held by remember { mutableStateOf<Int?>(null) }
     var carry by remember { mutableStateOf(Offset.Zero) }
+    // Where a block has been taken to, in pixels, on top of the tile it was
+    // drawn on. Free: no grid, no neighbour to stay clear of, nothing that
+    // refuses a place because another block is near it.
+    val taken = remember { mutableStateMapOf<Int, Offset>() }
     val haptic = LocalHapticFeedback.current
     val mark = ImageBitmap.imageResource(
         when (skin) {
@@ -243,10 +287,14 @@ fun BlockField(
         val columns = (with(density) { maxWidth.toPx() } / cellPx).toInt().coerceAtLeast(1)
         val rowsDrawn = (with(density) { maxHeight.toPx() } / cellPx).toInt().coerceAtLeast(1)
 
-        blocks.forEachIndexed { index, block ->
+        val floorWidth = with(density) { maxWidth.toPx() }
+        val floorHeight = with(density) { maxHeight.toPx() }
+
+        blocks.forEach { block ->
             val lifted = held == block.id
-            val dx = if (lifted) carry.x else 0f
-            val dy = if (lifted) carry.y else 0f
+            val settled = taken[block.id] ?: Offset.Zero
+            val dx = settled.x + if (lifted) carry.x else 0f
+            val dy = settled.y + if (lifted) carry.y else 0f
             val clampedRow = block.row.coerceIn(0, (rowsDrawn - SPAN).coerceAtLeast(0))
 
             Box(

@@ -192,14 +192,14 @@ fun WalletStartScreen(
 /**
  * The 24 recovery words in Figma's two-column numbered grid.
  *
- * Masked behind a tap-to-reveal privacy shield until the owner confirms nobody
- * is looking over their shoulder; FLAG_SECURE blocks screenshots on this step.
+ * Shown on arrival, the way the frame draws them: numbered chips and one button.
+ * The step already runs under FLAG_SECURE, so a screenshot is blocked without a
+ * shield standing between a person and the words they have to write down.
  */
 @Composable
 fun SeedPhraseScreen(model: GardenModel, onWritten: () -> Unit) {
     val skin = model.skin
     val words = model.state.mnemonic
-    var revealed by remember { mutableStateOf(false) }
 
     BudlumPage(
         skin = skin,
@@ -207,39 +207,6 @@ fun SeedPhraseScreen(model: GardenModel, onWritten: () -> Unit) {
     ) {
         Sheet(skin) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    text = stringResource(R.string.w_seed_warning),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = skin.surfaceInk,
-                )
-
-                if (!revealed) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(1.dp, skin.accentOnSurface, RoundedCornerShape(CONTROL_RADIUS))
-                            .background(
-                                skin.accentOnSurface.copy(alpha = 0.08f),
-                                RoundedCornerShape(CONTROL_RADIUS),
-                            )
-                            .clickable { revealed = true }
-                            .padding(horizontal = 16.dp, vertical = 28.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        EyeIcon(visible = false, tint = skin.accentOnSurface, size = 24.dp)
-                        Text(
-                            text = stringResource(R.string.w_tap_to_reveal),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = skin.surfaceInk,
-                        )
-                        Label(
-                            text = stringResource(R.string.w_reveal_hint),
-                            skin = skin,
-                        )
-                    }
-                }
-
                 val lines = (words.size + 1) / 2
                 for (line in 0 until lines) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -248,7 +215,7 @@ fun SeedPhraseScreen(model: GardenModel, onWritten: () -> Unit) {
                             number = left + 1,
                             word = words.getOrNull(left) ?: "",
                             skin = skin,
-                            masked = !revealed,
+                            masked = false,
                             modifier = Modifier.weight(1f),
                         )
                         if (left + 1 < words.size) {
@@ -256,7 +223,7 @@ fun SeedPhraseScreen(model: GardenModel, onWritten: () -> Unit) {
                                 number = left + 2,
                                 word = words[left + 1],
                                 skin = skin,
-                                masked = !revealed,
+                                masked = false,
                                 modifier = Modifier.weight(1f),
                             )
                         } else {
@@ -268,7 +235,7 @@ fun SeedPhraseScreen(model: GardenModel, onWritten: () -> Unit) {
                 PillButton(
                     text = stringResource(R.string.w_noted_go_on),
                     onTap = onWritten,
-                    enabled = revealed && words.isNotEmpty(),
+                    enabled = words.isNotEmpty(),
                     skin = skin,
                     primary = true,
                     modifier = Modifier
