@@ -4072,6 +4072,152 @@ impl Executor {
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
+            TransactionType::QuantumAccountRegister(reg) => {
+                // One arm delegating to the registry's own replay-safe doors:
+                // address-key binding, duplicate refusal, capacity, pact-root
+                // equality and structural validation all live there. The door
+                // itself owes four things and nothing more.
+                // A registration commits state, it never carries an amount -
+                if tx.amount != 0 {
+                    return Err(BudlumError::validation(
+                        "quantum_account_amount_must_be_zero",
+                        "a quantum-account registration commits state; an unspent amount would be silently burned",
+                    ));
+                }
+                let account = &reg.account;
+                // - a fresh record cannot mint balance or pre-spend nonces -
+                if account.balance != 0 || account.nonce != 0 {
+                    return Err(BudlumError::validation(
+                        "quantum_account_fresh_record",
+                        "a registration enters with zero balance and zero nonce; anything else manufactures money or skips replay protection",
+                    ));
+                }
+                // - the registrant must hold the key the address derives
+                // from, or anyone could occupy a published key's address
+                // with a hostile guardian policy -
+                let possession_digest = crate::core::hash::hash_fields_bytes(&[
+                    b"BDLM_QACC_REG_V1",
+                    &tx.chain_id.to_le_bytes(),
+                    &account.address,
+                    &account.pq_public_key,
+                    &account.storage_root,
+                    &account.pact_root,
+                    &account.guardian_root,
+                    &reg.based_on_root,
+                ]);
+                crate::crypto::primitives::verify_ml_dsa_87_signature_in(
+                    &state.scheme_registry,
+                    crate::crypto::ctx::QACC_REG_V1,
+                    &possession_digest,
+                    &reg.possession_sig,
+                    &account.pq_public_key,
+                )
+                .map_err(|e| {
+                    BudlumError::validation(
+                        "quantum_account_possession",
+                        format!("the registration is not signed by the account's own key: {e}"),
+                    )
+                })?;
+                // - and occupying a registry row locks the single-table
+                // deposit behind that exact row, refunded if the registry
+                // refuses in the same breath.
+                let policy = crate::tokenomics::pool_deposit::policy_of(
+                    crate::tokenomics::pool_deposit::SharedPool::QuantumAccount,
+                );
+                let deposit = match policy.class {
+                    crate::tokenomics::pool_deposit::PoolDepositClass::OwnerRefundable {
+                        ..
+                    } => policy.deposit,
+                    crate::tokenomics::pool_deposit::PoolDepositClass::ShieldedBalance => {
+                        return Err(BudlumError::validation(
+                            "quantum_account_pool_deposit",
+                            "a quantum-account row is not shielded-class; refusing the wrong ledger",
+                        ));
+                    }
+                };
+                let row_key = format!("quantum-account:{}", hex::encode(account.address));
+                let full_cost = deposit.checked_add(tx.fee).ok_or_else(|| {
+                    BudlumError::validation(
+                        "quantum_account_pool_deposit",
+                        "deposit + fee arithmetic overflow",
+                    )
+                })?;
+                if state.spendable_balance(&tx.from) < full_cost {
+                    return Err(BudlumError::validation(
+                        "quantum_account_pool_deposit",
+                        "spendable balance cannot cover the row deposit and the fee",
+                    ));
+                }
+                state
+                    .lock_pool_deposit_row(&row_key, &tx.from, deposit)
+                    .map_err(|e| BudlumError::validation("quantum_account_pool_deposit", e))?;
+                let registered = if reg.pacts.is_empty() {
+                    if account.pact_root != [0u8; 32] {
+                        Err(crate::account_abstraction::QuantumAccountRegistryError::PactRootDoesNotMatchRegistry {
+                            declared: account.pact_root,
+                            computed: [0u8; 32],
+                        })
+                    } else {
+                        state.register_quantum_account_at_root(reg.based_on_root, account.clone())
+                    }
+                } else {
+                    // The pact set travels as transport rows and is rebuilt
+                    // through the pact module's own ordered, deduplicating
+                    // door, so its structural invariants are enforced where
+                    // they live, then verified again by the registry gate.
+                    let mut pact_registry = crate::storage::pact_binding::PactRegistry::new();
+                    let mut rebuild: Result<(), &'static str> = Ok(());
+                    for row in &reg.pacts {
+                        let row: &crate::core::transaction::QuantumAccountPactEntry = row;
+                        let pact = crate::storage::pact_binding::Pact {
+                            id: row.id,
+                            program_hash: row.program_hash,
+                            seed: row.seed,
+                            commitment: row.commitment,
+                            residual_commitment: row.residual_commitment,
+                            byte_budget: row.byte_budget,
+                            mode_flag: row.mode_flag,
+                        };
+                        if let Err(reason) = pact.validate().and_then(|()| pact_registry.add_pact(pact)) {
+                            rebuild = Err(reason);
+                            break;
+                        }
+                    }
+                    match rebuild {
+                        Err(reason) => {
+                            state.release_pool_deposit_row(&row_key).map_err(|r| {
+                                BudlumError::validation("quantum_account_pool_deposit_release", r)
+                            })?;
+                            return Err(BudlumError::validation(
+                                "quantum_account_pacts",
+                                reason,
+                            ));
+                        }
+                        Ok(()) => state.register_quantum_account_with_pacts_at_root(
+                            reg.based_on_root,
+                            account.clone(),
+                            &pact_registry,
+                        ),
+                    }
+                };
+                if let Err(e) = registered {
+                    // A registry refusal releases the freshly locked deposit
+                    // in the same breath: a refused row must not strand the
+                    // depositor's money.
+                    state.release_pool_deposit_row(&row_key).map_err(|r| {
+                        BudlumError::validation("quantum_account_pool_deposit_release", r)
+                    })?;
+                    return Err(BudlumError::validation(
+                        "quantum_account_register_failed",
+                        format!("{e:?}"),
+                    ));
+                }
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
+            }
             TransactionType::Vault(vault_tx) => {
                 // One arm delegating to the tested body
                 // (`socialfi::execute_vault_tx`): every ownership reading

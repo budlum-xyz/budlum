@@ -279,7 +279,6 @@ src/account_abstraction/quantum_account.rs	fn	verify_storage_bound
 src/account_abstraction/quantum_account.rs	struct	BftGuardianFinality
 src/account_abstraction/quantum_account.rs	struct	GuardianVote
 src/account_abstraction/quantum_account.rs	struct	RecoveryProposal
-src/account_abstraction/registry.rs	enum	QuantumAccountRegistryError
 src/account_abstraction/registry.rs	fn	register_with_pacts
 src/account_abstraction/tee_attestation.rs	const	MAX_QUOTE_LEN
 src/account_abstraction/tee_attestation.rs	const	TEE_ATTESTATION_DOMAIN

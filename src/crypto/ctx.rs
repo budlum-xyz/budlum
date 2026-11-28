@@ -26,6 +26,8 @@ pub const MAX_CONTEXT_LEN: usize = 255;
 pub const TX_V7: &[u8] = b"BDLM/TX/V7";
 /// Multisig transaction (`TxV8`).
 pub const TX_V8: &[u8] = b"BDLM/TX/V8";
+/// Possession proof inside a quantum-account registration transaction.
+pub const QACC_REG_V1: &[u8] = b"BDLM/QACC_REG/V1";
 /// Block.
 pub const BLOCK_V6: &[u8] = b"BDLM/BLOCK/V6";
 /// Quorum certificate blob.
@@ -155,6 +157,7 @@ pub const EXTRAS: &[&[u8]] = &[
     AGG_SEGMENT_V1,
     IDENTITY_ADDR_LINK_V1,
     OFFLINE_VOUCHER_V1,
+    QACC_REG_V1,
 ];
 
 /// Whether `ctx` is a registered context string.

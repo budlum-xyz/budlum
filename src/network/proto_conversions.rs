@@ -101,6 +101,18 @@ fn decode_verify_stark_tx(
         .map_err(|e| format!("Invalid VerifyStark payload: {e}"))
 }
 
+/// The largest `QuantumAccountRegisterTx` payload a peer may send: sixteen
+/// guardian keys, a full pact set and one ML-DSA-87 signature fit well under
+/// half the budget.
+const MAX_QUANTUM_ACCOUNT_REGISTER_TX_BYTES: usize = 1 << 19;
+
+fn decode_quantum_account_register_tx(
+    data: &[u8],
+) -> Result<crate::core::transaction::QuantumAccountRegisterTx, String> {
+    decode_bounded_bincode(data, MAX_QUANTUM_ACCOUNT_REGISTER_TX_BYTES)
+        .map_err(|e| format!("Invalid QuantumAccountRegister payload: {e}"))
+}
+
 /// Decode a peer-supplied transaction-type payload under both a byte ceiling
 /// and an aggregate collection-count budget. `what` names the wire union arm
 /// in the refusal; fixint encoding and legacy trailing bytes stay compatible.
@@ -393,6 +405,14 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 Some(pb::proto_transaction::TypePayload::VerifyStark(
                     pb::ProtoVerifyStarkTx {
                         data: bincode_payload_or_log("VerifyStarkTx", verify_tx.as_ref()),
+                    },
+                )),
+            ),
+            TransactionType::QuantumAccountRegister(reg) => (
+                pb::ProtoTransactionType::QuantumAccountRegister as i32,
+                Some(pb::proto_transaction::TypePayload::QuantumAccountRegister(
+                    pb::ProtoQuantumAccountRegisterTx {
+                        data: bincode_payload_or_log("QuantumAccountRegisterTx", reg.as_ref()),
                     },
                 )),
             ),
@@ -1481,6 +1501,15 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched VerifyStark payload".into()),
                 };
                 TransactionType::VerifyStark(Box::new(decode_verify_stark_tx(&payload.data)?))
+            }
+            pb::ProtoTransactionType::QuantumAccountRegister => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::QuantumAccountRegister(p)) => p,
+                    _ => return Err("Missing or mismatched QuantumAccountRegister payload".into()),
+                };
+                TransactionType::QuantumAccountRegister(Box::new(
+                    decode_quantum_account_register_tx(&payload.data)?,
+                ))
             }
             pb::ProtoTransactionType::CrossDomainMessage => {
                 let payload = match proto.type_payload {
