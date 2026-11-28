@@ -3837,7 +3837,7 @@ impl Node {
         }
         // A record may not admit more keys than the Garden has seats for.
         let uses = u16::try_from(state.genesis.limits.max_validators).unwrap_or(u16::MAX);
-        GardenRecord::issue(
+        let mut record = GardenRecord::issue(
             state.genesis.chain_id,
             state.genesis.hash(),
             self.token,
@@ -3847,7 +3847,12 @@ impl Node {
             DEFAULT_RECORD_TTL_MS,
             uses,
             &self.key,
-        )
+        )?;
+        // The peer list is bounded (a QR a person can carry), so the record
+        // also says how many validators the Garden has. Without this the
+        // card reads "3 in" for a Garden of thirty.
+        record.peers_total = u16::try_from(state.active().len()).unwrap_or(u16::MAX);
+        Ok(record)
     }
 
     async fn publish(

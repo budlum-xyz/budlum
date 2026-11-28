@@ -3979,6 +3979,14 @@ mod rpc_tests {
             answer.get("peers").and_then(|v| v.as_array()).map(Vec::len),
             Some(1)
         );
+        // A Garden of one validator says one. A phone that only counted the
+        // peer lines would print the same number here, so the count is read
+        // as a field of its own rather than inferred from the array.
+        assert_eq!(
+            answer.get("peers_total").and_then(|v| v.as_u64()),
+            Some(1),
+            "the record does not say how big the Garden is: {answer}"
+        );
     }
 
     #[tokio::test]

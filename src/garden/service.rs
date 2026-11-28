@@ -237,6 +237,18 @@ fn qr_local_authority(invite: &GardenInvite) -> Option<String> {
     Some(format!("{host_part}:{port}"))
 }
 
+/// The peers a record names, and how many validators the Garden has.
+///
+/// The record holds a bounded list, so a Garden that outgrew it would
+/// otherwise look smaller than it is. The list is passed through as it is;
+/// the count is the record's own count when it carries one, and never less
+/// than the addresses it names.
+fn peers_the_record_names(record: &GardenRecord) -> (Vec<String>, usize) {
+    let named = record.peers.len();
+    let total = usize::from(record.peers_total).max(named);
+    (record.peers.clone(), total)
+}
+
 impl GardenService {
     /// Build the service of a node.
     ///
@@ -678,6 +690,7 @@ impl GardenService {
     pub fn read_record(record: &str) -> Result<Value, String> {
         let parsed = GardenRecord::parse(record)?;
         parsed.check(now_ms())?;
+        let (peers, peers_total) = peers_the_record_names(&parsed);
         Ok(json!({
             "version": parsed.version,
             "chain_id": format!("{:016x}", parsed.chain_id),
@@ -686,7 +699,12 @@ impl GardenService {
             "host": hex::encode(parsed.host),
             "expires_at_ms": parsed.expires_at_ms,
             "uses": parsed.uses,
-            "peers": parsed.peers,
+            // A record carries a bounded number of peer lines, so a Garden
+            // larger than that says how many there are instead of implying
+            // the list is the whole Garden. `peers` is what the line holds,
+            // `peers_total` is what is in it.
+            "peers": peers,
+            "peers_total": peers_total,
         }))
     }
 
@@ -785,6 +803,42 @@ impl GardenService {
             .await
     }
 }
+
+
+    /// The record a joining phone reads says how big the Garden is, not only
+    /// how many peer lines fitted in the invite.
+    ///
+    /// The record holds a bounded peer list (a QR a person can carry), so a
+    /// Garden larger than the list would otherwise look smaller than it is,
+    /// and the Join screen would say "3 in" about a Garden of thirty.
+    #[test]
+    fn a_record_says_how_big_the_garden_is_not_only_how_many_peer_lines_fit() {
+        let key = KeyPair::generate().unwrap();
+        let peers: Vec<String> = (1..=3)
+            .map(|n| format!("/ip4/10.0.0.{n}/tcp/4001/p2p/peer{n}"))
+            .collect();
+        let mut record = GardenRecord::issue(
+            7,
+            [0x11; 32],
+            [0x22; 32],
+            key.public_key_bytes(),
+            peers.clone(),
+            now_ms(),
+            DEFAULT_RECORD_TTL_MS,
+            3,
+            &key,
+        )
+        .unwrap();
+        let (named, total) = peers_the_record_names(&record);
+        assert_eq!(named.len(), 3);
+        assert_eq!(total, 3, "a record that holds every peer still counts them");
+        // A Garden larger than the peer list says so, and still hands out the
+        // addresses it can.
+        record.peers_total = 30;
+        let (named, total) = peers_the_record_names(&record);
+        assert_eq!(named.len(), 3);
+        assert_eq!(total, 30, "the count is the record's, not a guess");
+    }
 
 #[cfg(test)]
 mod tests {

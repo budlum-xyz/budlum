@@ -53,19 +53,30 @@ private val budlumColors = lightColorScheme(
     onSurface = Ink,
     surfaceVariant = Faint,
     onSurfaceVariant = Ink,
-    outline = Mute,
+    // A boundary a person has to see is the ink token, not the passive grey:
+    // #BDBDBD on the page measures 1.83:1, under the 3.0 a control boundary
+    // needs, while #060705 on the same page measures 19.3:1. Both are measured
+    // tokens from the file; only one of them can carry a border.
+    outline = Ground,
     outlineVariant = Faint,
     error = Flow,
     onError = Chalk,
 )
 
-/** Panel 16, control and chip 8, and the shell that carries both. */
+/**
+ * Panel and control 16, the bare radius 0.
+ *
+ * The shapes were 0 / 8 / 8 / 16 / 16. The frames the Garden screens are
+ * measured from contain 16 and 32 and no 8, so a control corner at 8 was a
+ * value nobody measured: on a real screen Material's small component would
+ * have rounded where the design file is square-cornered at 16.
+ */
 private val budlumShapes = Shapes(
     extraSmall = RoundedCornerShape(0.dp),
-    small = RoundedCornerShape(8.dp),
-    medium = RoundedCornerShape(8.dp),
+    small = RoundedCornerShape(16.dp),
+    medium = RoundedCornerShape(16.dp),
     large = RoundedCornerShape(16.dp),
-    extraLarge = RoundedCornerShape(16.dp),
+    extraLarge = RoundedCornerShape(32.dp),
 )
 
 private val budlum = FontFamily(Font(R.font.budlum_regular))

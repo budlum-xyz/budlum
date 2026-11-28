@@ -72,6 +72,11 @@ const MAX_RECORD_QR_BYTES: usize = 640;
 /// Most peer addresses one record names.
 const MAX_RECORD_PEERS: usize = 8;
 
+/// Most validators a Garden can hold, and so the largest count a record can
+/// carry. This is the Garden's own limit, not a limit of the link: the count
+/// is outside the signed body and would otherwise be unbounded text.
+const MAX_RECORD_PEERS_TOTAL: u16 = 4096;
+
 /// Longest single peer address inside a record, in bytes.
 const MAX_RECORD_PEER_BYTES: usize = 255;
 
@@ -104,6 +109,16 @@ pub struct GardenRecord {
     pub uses: u16,
     /// Host address first, relay addresses after it.
     pub peers: Vec<String>,
+    /// How many validators the Garden has, when that is more than `peers`.
+    ///
+    /// A record carries at most `MAX_RECORD_PEERS` addresses so the link stays
+    /// something a person can hold in a QR, and a Garden of thirty would
+    /// otherwise hand out a record that reads like a Garden of three. Zero
+    /// means "`peers` is the whole Garden", which is what every record written
+    /// before this field says. It is not covered by the proof: it is a count
+    /// for the person reading the card, and the addresses it counts stay
+    /// signed, so a wrong count can mislead nobody about where to knock.
+    pub peers_total: u16,
     /// The owner's signature over every field above.
     pub proof: Vec<u8>,
 }
@@ -137,6 +152,7 @@ impl GardenRecord {
             expires_at_ms: now_ms.saturating_add(ttl_ms),
             uses,
             peers: fit_record_peers(peers),
+            peers_total: 0,
             proof: Vec::new(),
         };
         record.proof = key.sign(&record.preimage()).to_vec();
@@ -233,6 +249,7 @@ impl GardenRecord {
                 return Err("invite record carries a peer address of an impossible length".into());
             }
         }
+        self.check_peer_count()?;
         if self.uses == 0 {
             return Err("invite record has admitted everyone it was good for".into());
         }
@@ -244,7 +261,12 @@ impl GardenRecord {
         }
         verify_signature(&self.preimage(), &self.proof, &self.owner)
             .map_err(|_| "invite record is not signed by the validator it names".to_string())?;
-        let length = RECORD_LINK_PREFIX.len() + base64url_len(self.to_bytes().len());
+        let suffix = if self.peers_total > self.peers.len() as u16 {
+            "&peers_total=".len() + digits(self.peers_total)
+        } else {
+            0
+        };
+        let length = RECORD_LINK_PREFIX.len() + base64url_len(self.to_bytes().len()) + suffix;
         if length > MAX_RECORD_LINK_BYTES {
             return Err(format!(
                 "invite record is {length} bytes, over the {MAX_RECORD_LINK_BYTES} byte ceiling"
@@ -253,10 +275,33 @@ impl GardenRecord {
         Ok(())
     }
 
+    /// The count on the card may only be a number somebody could mean: at
+    /// least the addresses the record names, and no larger than a Garden.
+    fn check_peer_count(&self) -> Result<(), String> {
+        let named = u16::try_from(self.peers.len()).unwrap_or(u16::MAX);
+        if self.peers_total != 0 && self.peers_total < named {
+            return Err("invite record counts fewer validators than it names".into());
+        }
+        if self.peers_total > MAX_RECORD_PEERS_TOTAL {
+            return Err("invite record counts more validators than a Garden holds".into());
+        }
+        Ok(())
+    }
+
     /// The link. It is also the QR content.
+    ///
+    /// `&peers_total=` is appended after the record body when the Garden is
+    /// larger than the peer list, so the card a person reads can say "2 of
+    /// 30" instead of "2". A record that holds its whole Garden writes no
+    /// parameter, so its link is byte for byte what it was before.
     #[must_use]
     pub fn to_link(&self) -> String {
-        format!("{RECORD_LINK_PREFIX}{}", base64url_encode(&self.to_bytes()))
+        let body = base64url_encode(&self.to_bytes());
+        if self.peers_total > self.peers.len() as u16 {
+            format!("{RECORD_LINK_PREFIX}{body}&peers_total={}", self.peers_total)
+        } else {
+            format!("{RECORD_LINK_PREFIX}{body}")
+        }
     }
 
     /// What a QR code for this record holds.
@@ -318,8 +363,25 @@ impl GardenRecord {
                 "invite record must start with '{RECORD_LINK_PREFIX}'"
             ));
         };
+        // The count rides outside the signed body (see `to_link`), so it is
+        // read off the link and placed on the record after it is unpacked.
+        let (body, total) = match body.split_once("&peers_total=") {
+            Some((body, value)) => {
+                let total: u16 = value
+                    .parse()
+                    .map_err(|_| "invite record carries an unreadable peer count".to_string())?;
+                (body, total)
+            }
+            None => (body, 0u16),
+        };
+        if body.contains('#') {
+            return Err("invite record carries a second fragment".into());
+        }
         let bytes = base64url_decode(body)?;
-        Self::from_bytes(&bytes)
+        let mut record = Self::from_bytes(&bytes)?;
+        record.peers_total = total;
+        record.check_peer_count()?;
+        Ok(record)
     }
 
     /// Unpack a record. Every field is read at a fixed place, so a record
@@ -363,6 +425,7 @@ impl GardenRecord {
             expires_at_ms,
             uses,
             peers,
+            peers_total: 0,
             proof,
         })
     }
@@ -386,6 +449,17 @@ fn local_qr_body(text: &str) -> Option<&str> {
         return None;
     }
     Some(fragment)
+}
+
+/// How many decimal digits `value` needs, so a link's real length is counted.
+fn digits(value: u16) -> usize {
+    let mut left = value;
+    let mut count = 1;
+    while left >= 10 {
+        left /= 10;
+        count += 1;
+    }
+    count
 }
 
 fn short() -> String {
@@ -575,6 +649,44 @@ mod tests {
         assert!(
             length <= MAX_RECORD_LINK_BYTES,
             "a record link is {length} bytes, over the {MAX_RECORD_LINK_BYTES} byte ceiling"
+        );
+    }
+
+    /// The record a QR carries says how big the Garden is.
+    ///
+    /// `peers` is bounded so the link stays a thing a person can carry, so a
+    /// Garden of thirty would otherwise hand out a record that looks like a
+    /// Garden of three. `peers_total` is the count; it is not covered by the
+    /// proof for that reason, and the peer list itself still is.
+    #[test]
+    fn a_record_says_how_big_the_garden_is_not_only_how_many_peer_lines_fit() {
+        let mut peers: Vec<String> = (1..=3).map(short_peer).collect();
+        peers.truncate(1);
+        let mut record = issued(peers);
+        record.peers_total = 30;
+        let link = record.to_link();
+        let read = GardenRecord::parse(&link).unwrap();
+        assert_eq!(read.peers.len(), 1, "the line still carries the peers it can");
+        assert_eq!(read.peers_total, 30, "the count survives the trip");
+        let mut inflated = read.clone();
+        inflated.peers_total = 31;
+        assert!(
+            inflated.check(NOW).is_ok(),
+            "the count is not signed, so a record from a newer node still verifies"
+        );
+        // A count nobody could mean is refused: fewer than the addresses the
+        // record names, or more validators than a Garden can hold.
+        let mut too_few = read.clone();
+        too_few.peers_total = 0;
+        assert!(too_few.check(NOW).is_ok(), "no count is the old, honest shape");
+        let mut nonsense = read.clone();
+        nonsense.peers_total = MAX_RECORD_PEERS_TOTAL + 1;
+        assert!(nonsense.check(NOW).is_err(), "an impossible count was accepted");
+        // A record that carries no count writes the link it always wrote.
+        let plain = issued(vec![short_peer(1)]);
+        assert!(
+            !plain.to_link().contains("peers_total"),
+            "a record of a small Garden grew a parameter nobody needs"
         );
     }
 

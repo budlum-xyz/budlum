@@ -69,6 +69,15 @@ fun GardenApp(model: GardenModel, onTestnet: () -> Unit) {
     // after it, Back still walks to Choose and Setup, and staying
     // there is respected rather than snapped away from.
     var landed by remember { mutableStateOf(false) }
+
+    // A code read by the camera is answered on the Join screen, because that
+    // is the screen that says whose Garden it is and asks for the tap.
+    LaunchedEffect(model.state.scanTaken) {
+        if (model.state.scanTaken) {
+            step = Step.Garden
+            mark = GardenMark.Join
+        }
+    }
     LaunchedEffect(model.state.status) {
         if (!landed && GardenSeat.seated(model.state.status)) {
             landed = true

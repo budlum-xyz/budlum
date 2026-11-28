@@ -27,6 +27,9 @@ data class GardenState(
     /** The record the preview describes, so confirming joins that record. */
     val previewRecord: String = "",
     val message: String = "",
+
+    // True when a scanned code is waiting for a person to confirm it.
+    val scanTaken: Boolean = false,
     val busy: Boolean = false,
     val selfTest: List<SelfTestStep> = emptyList(),
     val selfTestMs: Long = 0,
@@ -107,9 +110,17 @@ class GardenModel(
             val shown = withContext(Dispatchers.IO) {
                 runCatching {
                     val json = JSONObject(phone.readRecord(record.trim()).json)
-                    val owner = json.optString("owner").take(16)
+                    // Who is asking, how many already said yes, and until
+                    // when: the three things a person needs before a tap.
+                    val host = json.optString("host").take(16)
                     val until = stamp(json.optLong("expires_at_ms"))
-                    "validator " + owner + ", good until " + until
+                    // `peers` is what the invite line holds; `peers_total` is
+                    // how big the Garden is. A reader that only counted the
+                    // line would say "3 in" about a Garden of thirty.
+                    val held = json.optInt("peers")
+                    val total = maxOf(json.optInt("peers_total", held), held)
+                    val count = if (total > held) held.toString() + " of " + total else total.toString()
+                    "host " + host + " - " + count + " in - good until " + until
                 }.getOrElse { "" }
             }
             state = state.copy(
@@ -122,7 +133,8 @@ class GardenModel(
     fun join(record: String) = background {
         if (!selfTestPassed()) return@background
         val answer = phone.join(record.trim(), name)
-        state = state.copy(status = answer.json, preview = "", previewRecord = "")
+        state = state.copy(status = answer.json, preview = "", previewRecord = "",
+                           scanTaken = false)
         readInvite(phone.invite())
         startValidating()
     }
@@ -140,7 +152,8 @@ class GardenModel(
      */
     fun returnToGarden() = background {
         val answer = phone.rejoin()
-        state = state.copy(status = answer.json, preview = "", previewRecord = "")
+        state = state.copy(status = answer.json, preview = "", previewRecord = "",
+                           scanTaken = false)
         readInvite(phone.invite())
         startValidating()
     }
@@ -227,10 +240,20 @@ class GardenModel(
         )
     }
 
-    /** Section 5.12: a scanned invite joins without a second detour. */
+    /**
+     * A code read by the camera.
+     *
+     * It used to call `join` on the spot, so a QR a stranger held up took a
+     * seat with nothing on screen saying whose Garden it was. The code is
+     * now read and the person confirms, which is the same rule a pasted
+     * invite already followed (section 5.12).
+     */
     fun scanned(record: String) {
+        // A code read by the camera is also an act, but it is not a read
+        // answer: the person never saw whose Garden it is. The invite is
+        // previewed and the Join screen asks, exactly as a pasted one does.
         preview(record)
-        join(record)
+        state = state.copy(scanTaken = true)
     }
 
     private fun selfTestPassed(): Boolean {

@@ -102,6 +102,24 @@ fn parse_hash(label: &str, value: &str) -> Result<Hash32, String> {
         .map_err(|_| format!("invite field '{label}' is not 32 bytes"))
 }
 
+/// True when the address says how to reach it: a transport and a port.
+///
+/// `peer_id` alone is a name with no road; `/ip4/.../tcp/` is a road with no
+/// number. Both look like a complete invite line and both fail after a person
+/// has already agreed to join, which is the worst place to find out.
+fn carries_a_door(address: &str) -> bool {
+    ["/tcp/", "/udp/"].iter().any(|transport| {
+        address
+            .split(transport)
+            .nth(1)
+            .map(|rest| {
+                let port = rest.split('/').next().unwrap_or_default();
+                !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())
+            })
+            .unwrap_or(false)
+    })
+}
+
 /// True when `address` can stand in an invite line without escaping.
 fn is_plain_peer(address: &str) -> bool {
     !address.is_empty()
@@ -140,6 +158,13 @@ impl GardenInvite {
             }
             if !is_plain_peer(peer) {
                 return Err("invite carries a peer address that is not a plain multiaddr".into());
+            }
+            // A peer line is where a node knocks. One that carries only a
+            // peer id, or no transport at all, is a door with no address: the
+            // record looks complete and the join fails afterwards, which is
+            // the worst place to find out.
+            if !carries_a_door(peer) {
+                return Err(format!("peer address {peer} carries no transport and port to knock on"));
             }
             // A node dials these before it knows anything else about the
             // Garden, so each one names the validator it leads to and uses a
@@ -473,6 +498,36 @@ mod tests {
             let refusal = GardenInvite::new(&g, token, vec![bare.into()]).unwrap_err();
             assert!(refusal.contains("peer id"), "{refusal}");
         }
+    }
+
+    /// A peer line with no transport, or with a transport and no port, is
+    /// refused when the invite is built rather than after a person agreed.
+    #[test]
+    fn garden_invite_refuses_a_peer_with_no_door_to_knock_on() {
+        let token = [4u8; 32];
+        let g = genesis(&token);
+        let key = KeyPair::generate().unwrap().public_key_bytes();
+        let id = super::super::net::peer_id_of(&key).unwrap();
+        for address in [
+            format!("/p2p/{id}"),
+            format!("/ip4/10.0.0.9/p2p/{id}"),
+        ] {
+            let refusal = GardenInvite::new(&g, token, vec![address.clone()]).unwrap_err();
+            assert!(
+                refusal.contains("transport"),
+                "{address} was accepted or refused for the wrong reason: {refusal}"
+            );
+        }
+        // The transport spelling the network actually announces still passes.
+        assert!(GardenInvite::new(&g, token, vec![peer("10.0.0.9", 4001)]).is_ok());
+        // A port is part of the address: `/tcp/` with nothing after it is not
+        // somewhere to knock either. QUIC is a real transport here and is
+        // not refused for this reason.
+        let portless = format!("/ip4/10.0.0.9/tcp/p2p/{id}");
+        let refusal = GardenInvite::new(&g, token, vec![portless]).unwrap_err();
+        assert!(refusal.contains("transport"), "{refusal}");
+        let quic = format!("/ip4/10.0.0.9/udp/4001/quic-v1/p2p/{id}");
+        assert!(carries_a_door(&quic), "quic carries a transport and a port");
     }
 
     #[test]

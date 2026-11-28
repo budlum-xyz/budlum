@@ -83,8 +83,15 @@ object GardenDesignTokens {
     /** Panels and rows: the measured radius of every card in the file. */
     val panelRadius = 16.dp
 
-    /** Controls and chips: the theme's control radius. */
-    val controlRadius = 8.dp
+    /**
+     * Controls and chips: the panel radius, because the file has one.
+     *
+     * An 8 dp control radius was carried here from the theme. The frames this
+     * file is measured from (`43:30102`, `43:30406`, `43:28885`) contain 16
+     * and 32 and no 8 at all, so a control had a corner nobody measured. One
+     * radius is measured, and it is the one used.
+     */
+    val controlRadius = panelRadius
 
     /** The side rail: one column of 28 dp marks, 56 dp wide. */
     val railWidth = 56.dp
@@ -422,13 +429,16 @@ fun GardenRail(
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
         marks.forEach { mark ->
+            val tile = if (mark == current) GardenDesignTokens.faint else Color.Transparent
+            val shape = RoundedCornerShape(GardenDesignTokens.controlRadius)
             Box(
+                // A mark is a tap, not a 40 dp picture: the target is the
+                // rail's full width and 48 dp tall, and the icon draws in
+                // the middle of it.
                 modifier = Modifier
-                    .size(40.dp)
-                    .background(
-                        if (mark == current) GardenDesignTokens.faint else Color.Transparent,
-                        RoundedCornerShape(GardenDesignTokens.controlRadius),
-                    )
+                    .width(GardenDesignTokens.railWidth)
+                    .height(48.dp)
+                    .background(tile, shape)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
