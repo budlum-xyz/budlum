@@ -1556,6 +1556,144 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_settlement_backed_by_a_forged_certificate_is_refused_before_any_debit() {
+        use crate::crypto::facts::QuantumClass;
+        use crate::settlement::universal_finality::{
+            compose, DomainFinalityEntry, FinalityGuarantee, FinalityReversibility,
+            FinalityVerdict, FINALITY_BINDS_ALL,
+        };
+        use crate::unification::payment_router::RATE_SCALE;
+
+        let hub_g = FinalityGuarantee::settlement_hub();
+        let mut ledger = UnificationLedger::new(hub_g);
+        ledger
+            .anchor_domain_finality(1, hub_g, 3_000, 10_000, 100, [0x11; 32])
+            .expect("anchor d1");
+        ledger
+            .anchor_domain_finality(3, hub_g, 50_000, 50_000, 200, [0x33; 32])
+            .expect("anchor d3");
+        let solver = [0x50; 32];
+        ledger.bond_solver(solver, 1_000).expect("bond solver");
+
+        let asset_d1 = [0x01; 32];
+        let usdc_d3 = [0x03; 32];
+        let mut bals = vec![DomainTokenBalance {
+            domain_id: 1,
+            asset_id: asset_d1,
+            symbol: "BUD".into(),
+            available_amount: 2_000,
+        }];
+        let quote = BondedLiquidityQuote {
+            solver_id: solver,
+            quote: LiquidityQuote {
+                quote_id: [0x82; 32],
+                source_domain: 1,
+                source_asset_id: asset_d1,
+                target_domain: 3,
+                target_asset_id: usdc_d3,
+                rate_scaled: RATE_SCALE,
+                fee_bps: 0,
+                max_target_liquidity: 500,
+                valid_until_unix_secs: 5_000,
+            },
+        };
+        let intent = UniversalPaymentIntent {
+            payer_id: [0xA1; 32],
+            merchant_id: [0xC3; 32],
+            nonce: 1,
+            target_domain: 3,
+            target_asset_id: usdc_d3,
+            target_amount: 100,
+            max_slippage_bps: 50,
+            deadline_unix_secs: 5_000,
+            invoice_hash: [0x91; 32],
+            rail: PaymentRail::OnChain,
+        };
+
+        let row = |domain_id: u32| DomainFinalityEntry {
+            domain_id,
+            height: 1,
+            checkpoint_height: 10,
+            state_root: [0x30; 32],
+            adapter_id: "test-adapter".into(),
+            adapter_version: 1,
+            finality_proof_hash: [0x33; 32],
+            guarantee_backing_hash: [0xBB; 32],
+            bond_atoms: 3_000,
+            guarantee: FinalityGuarantee {
+                reversibility: FinalityReversibility::CryptographicValidity,
+                quantum_posture: QuantumClass::Hash,
+                attestation: FINALITY_BINDS_ALL,
+                slashable_backing: false,
+                fault_tolerance_bps: 9_999,
+            },
+            verdict: FinalityVerdict::Established,
+        };
+        let good = compose(&[row(1), row(3)]).expect("compose certificate");
+        let mut forged = good.clone();
+        forged.established_count = forged.established_count.saturating_add(1);
+
+        // The forged certificate is refused before any staging, so neither the
+        // caller's balances nor the ledger move.
+        let root_before = ledger.state_root();
+        let refused = ledger.execute_finality_gated_payment_checked(
+            &intent,
+            &mut bals,
+            &[quote.clone()],
+            1_000,
+            Some(&forged),
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(UnificationExecutionError::PaymentFinalityRefused(_))
+            ),
+            "a forged certificate must refuse the settlement: {refused:?}"
+        );
+        assert_eq!(bals[0].available_amount, 2_000, "no debit on refusal");
+        assert_eq!(
+            ledger.state_root(),
+            root_before,
+            "no state change on refusal"
+        );
+
+        // The same settlement, backed by the intact certificate, is not refused
+        // for its seal: the refusal above was the seal, not a blanket "no".
+        let admitted = ledger.execute_finality_gated_payment_checked(
+            &intent,
+            &mut bals,
+            &[quote],
+            1_000,
+            Some(&good),
+        );
+        assert!(
+            !matches!(
+                admitted,
+                Err(UnificationExecutionError::PaymentFinalityRefused(_))
+            ),
+            "an intact certificate must not be refused for its seal: {admitted:?}"
+        );
+
+        // The unchecked door keeps its old contract: the ledger anchor alone
+        // decides, so the forged certificate cannot reach it at all.
+        let mut unchecked_bals = vec![DomainTokenBalance {
+            domain_id: 1,
+            asset_id: asset_d1,
+            symbol: "BUD".into(),
+            available_amount: 2_000,
+        }];
+        let unchecked =
+            ledger.execute_finality_gated_payment(&intent, &mut unchecked_bals, &[], 1_000);
+        assert!(
+            !matches!(
+                unchecked,
+                Err(UnificationExecutionError::PaymentFinalityRefused(_))
+            ),
+            "the unchecked entry point never raises a certificate refusal: {unchecked:?}"
+        );
+    }
+
+    #[test]
     fn wide_mul_div_avoids_u128_intermediate_overflow_and_rounds_safely() {
         let big = u128::MAX / 2;
         assert_eq!(mul_div_floor(big, 4, 4), Some(big));
