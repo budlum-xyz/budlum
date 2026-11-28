@@ -45,6 +45,106 @@ const MINT_FN: &str = "try_mint_balance";
 /// The function that adds balance without a ceiling check.
 const MOVE_FN: &str = "try_add_balance";
 
+/// Saturating balance helper that bypasses `try_add_balance` / `try_mint_balance`.
+const RAW_ADD_FN: &str = "add_balance";
+
+/// Fractional attoBUD normalizer that writes `self.balance` directly.
+const ATTOS_SET_FN: &str = "set_from_total_attos";
+
+/// Direct `.balance` writes (`+=`, non-debit `=`, `&mut ...balance`),
+/// saturating `.add_balance(` calls, and `.set_from_total_attos(` calls across
+/// all production files under `src/`.
+///
+/// Without counting these sites alongside `try_add_balance`, a supply-creating
+/// change could write `account.balance += minted`, `account.balance =
+/// account.balance.saturating_add(minted)` or `state.add_balance(&who, minted)`
+/// and leave `minting-paths-are-counted` completely silent.
+const DIRECT_BALANCE_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
+    (
+        "src/aggregation/fraud.rs",
+        1,
+        "one in `try_credit_escrow_redistribution`: credits an already-debited \
+         challenger bond or confiscated aggregator stake redistribution after \
+         rejecting zero, burn-reserve and `checked_add` overflow - escrow \
+         moving back, never new supply.",
+    ),
+    (
+        "src/chain/blockchain.rs",
+        4,
+        "one slashing-report fee refund (`saturating_add(fee)` returning the \
+         exact `fee` debited at the top of the same block), one expired AI \
+         request `max_fee` refund returning the requester's escrowed fee, and \
+         two devnet-only consensus-refused test faucet helpers (`fund_devnet` \
+         and `credit_devnet`, both hard-gated on `devnet_chain_id()` and \
+         unreachable on mainnet or testnet).",
+    ),
+    (
+        "src/chain/genesis.rs",
+        3,
+        "three initial genesis allocation credits inside genesis construction, \
+         bounded by the genesis supply invariant before any block executes.",
+    ),
+    (
+        "src/core/account.rs",
+        11,
+        "one inside `Account::set_from_total_attos`, two snapshot restores \
+         (`from_snapshot` and `from_snapshot_v2`), three unbonding/withdrawal \
+         settlements returning staked principal (`withdraw_delegation`, \
+         `withdraw_role`, `withdraw_ai_operator`), one expired proof-market \
+         escrow refund in epoch close, the single body line of `add_balance` \
+         and the single body line of `try_add_balance`, plus the two sender/ \
+         recipient `set_from_total_attos` calls in `transfer_attos_in_unit` \
+         where `new_sender_total` and `new_recipient_total` conserve total \
+         attoBUD.",
+    ),
+    (
+        "src/execution/coordinator/conformance.rs",
+        2,
+        "two isolated `AccountState::new()` funding lines in `funded_pair` for \
+         the self-contained Prague EVM conformance vector runner.",
+    ),
+    (
+        "src/execution/coordinator/gas.rs",
+        1,
+        "one `acct.set_from_total_attos(after)` burn debit in gas settlement \
+         where `after = current.checked_sub(exact_burn_attos)` strictly \
+         decreases balance and increments `burned_total`.",
+    ),
+    (
+        "src/execution/coordinator/overlay.rs",
+        1,
+        "one `acct.balance = *bal` rollback restore in `restore_accounts`, \
+         putting back the pre-execution snapshot on revert.",
+    ),
+    (
+        "src/execution/executor.rs",
+        12,
+        "twelve `checked_add` transfer/escrow settlements inside transaction \
+         execution: P2P transfer receiver credit (debited from sender), BNS \
+         resale seller credit (debited from buyer), NFT boost creator and \
+         burn-reserve shares (carved out of booster debit), Pollen marketplace \
+         seller credit (debited from buyer), two AI request `max_fee` escrow \
+         refunds on timeout/cancel, immediate AI agent payment recipient \
+         credit, escrowed AI agent payment release and expiry reclaim, and \
+         storage custody endowment/gateway split credits (carved out of \
+         `charged_storage_fee`). None creates new supply.",
+    ),
+    (
+        "src/settlement/domains.rs",
+        3,
+        "three `ProofMarketTx` escrow payouts (`PayReceipt` prover reward, \
+         `RefundExpired` creator refund, and `WithdrawEscrow` withdrawal), \
+         each paid strictly out of funds previously escrowed into \
+         `state.proof_market`.",
+    ),
+    (
+        "src/sharding/mod.rs",
+        1,
+        "one shard transfer `receiver.balance = receiver.balance.checked_add(tx.amount)` \
+         immediately following `sender.balance.checked_sub(total_cost)`.",
+    ),
+];
+
 /// The expected `try_add_balance` call count and why each of them is a
 /// **transfer**.
 ///
@@ -191,9 +291,123 @@ fn brace_delta(line: &str) -> i64 {
     d
 }
 
-/// Does this line define (not call) one of the two balance functions?
+/// Does this line define (not call) one of the balance functions?
 fn is_definition(line: &str) -> bool {
-    line.contains(&format!("fn {MOVE_FN}")) || line.contains(&format!("fn {MINT_FN}"))
+    line.contains(&format!("fn {MOVE_FN}"))
+        || line.contains(&format!("fn {MINT_FN}"))
+        || line.contains(&format!("fn {RAW_ADD_FN}"))
+        || line.contains(&format!("fn {ATTOS_SET_FN}"))
+}
+
+/// True when `code` calls `.method(` as a receiver method call.
+fn has_dot_call(code: &str, method: &str) -> bool {
+    let needle = format!(".{method}");
+    let mut from = 0usize;
+    while let Some(pos) = code[from..].find(&needle) {
+        let after = &code[from + pos + needle.len()..];
+        if after.trim_start().starts_with('(') {
+            return true;
+        }
+        from += pos + needle.len();
+    }
+    false
+}
+
+/// True when `code` borrows `&mut <expr>.balance` so a helper could credit it
+/// through a mutable reference without naming `try_mint_balance`.
+fn has_mut_ref_balance(code: &str) -> bool {
+    let mut from = 0usize;
+    while let Some(pos) = code[from..].find("&mut") {
+        let after = &code[from + pos + 4..];
+        if after
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_whitespace())
+        {
+            let expr = after.trim_start();
+            let end = expr
+                .find(|c: char| {
+                    !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '(' | ')' | '[' | ']'))
+                })
+                .unwrap_or(expr.len());
+            if expr[..end].ends_with(".balance") {
+                return true;
+            }
+        }
+        from += pos + 4;
+    }
+    false
+}
+
+/// True when `rhs` is strictly a pure debit (`checked_sub`, `saturating_sub`
+/// or `balance - <ident>;` with no `add` anywhere in the statement).
+fn is_pure_debit_rhs(rhs: &str) -> bool {
+    let trimmed = rhs.trim_start();
+    if trimmed.contains("add") {
+        return false;
+    }
+    if trimmed.contains("checked_sub(") || trimmed.contains("saturating_sub(") {
+        return true;
+    }
+    if let Some(after_bal) = trimmed.strip_prefix("balance") {
+        let after_bal = after_bal.trim_start();
+        if let Some(after_minus) = after_bal.strip_prefix('-') {
+            let operand = after_minus.trim_start();
+            let id_len = operand
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(operand.len());
+            if id_len > 0 && operand[id_len..].trim_start().starts_with(';') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// True when `lines[idx]` mutates an account balance outside `try_add_balance`
+/// / `try_mint_balance` via `.add_balance(`, `.set_from_total_attos(`,
+/// `&mut ...balance`, `.balance +=`, or a non-debit `.balance =` write.
+fn is_direct_balance_credit(lines: &[(usize, &str)], idx: usize) -> bool {
+    let line = lines[idx].1;
+    let code = line.split("//").next().unwrap_or(line);
+    if has_dot_call(code, RAW_ADD_FN) || has_dot_call(code, ATTOS_SET_FN) {
+        return true;
+    }
+    if has_mut_ref_balance(code) {
+        return true;
+    }
+    let needle = ".balance";
+    let mut from = 0usize;
+    while let Some(pos) = code[from..].find(needle) {
+        let abs = from + pos;
+        let after_idx = abs + needle.len();
+        let next_byte = code.as_bytes().get(after_idx).copied();
+        if next_byte.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            from = after_idx;
+            continue;
+        }
+        let rest = code[after_idx..].trim_start();
+        if rest.starts_with("+=") {
+            return true;
+        }
+        if rest.starts_with('=') && !rest.starts_with("==") {
+            let mut window = code[abs..].to_string();
+            for (_, next_line) in lines.iter().skip(idx + 1).take(4) {
+                if window.contains(';') {
+                    break;
+                }
+                window.push(' ');
+                window.push_str(next_line.split("//").next().unwrap_or(next_line).trim());
+            }
+            if let Some((_, rhs)) = window.split_once('=') {
+                if !is_pure_debit_rhs(rhs) {
+                    return true;
+                }
+            }
+        }
+        from = after_idx;
+    }
+    false
 }
 
 /// Does a line open a test item at column zero?
@@ -312,6 +526,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mut problems = String::new();
     let mut minting = 0usize;
     let mut moving = 0usize;
+    let mut direct_sites = 0usize;
 
     let mut sources: Vec<(String, String)> = Vec::new();
     collect_sources(root, &root.join(SCAN_ROOT), &mut sources)?;
@@ -331,6 +546,14 @@ pub fn run(root: &Path) -> Result<String, String> {
             );
         }
     }
+    for (name, _, _) in DIRECT_BALANCE_JUSTIFICATIONS {
+        if !sources.iter().any(|(rel, _)| rel == name) {
+            let _ = write!(
+                problems,
+                "\n  {name}: listed in the direct-balance justifications but not found."
+            );
+        }
+    }
 
     for (source, text) in &sources {
         let lines = production_lines(text);
@@ -340,8 +563,12 @@ pub fn run(root: &Path) -> Result<String, String> {
             .filter(|(_, l)| l.contains(MOVE_FN) && !l.contains(MINT_FN))
             .count();
         let found_mint = lines.iter().filter(|(_, l)| l.contains(MINT_FN)).count();
+        let found_direct = (0..lines.len())
+            .filter(|&i| is_direct_balance_credit(&lines, i))
+            .count();
         moving += found_move;
         minting += found_mint;
+        direct_sites += found_direct;
 
         let (expected, why) = TRANSFER_JUSTIFICATIONS
             .iter()
@@ -361,6 +588,25 @@ pub fn run(root: &Path) -> Result<String, String> {
                  (then `{MINT_FN}` must be used, it checks the ceiling) or money that \
                  merely changes place (then the rationale must be written into this gate)? \
                  If a call was deleted the count must be updated."
+            );
+        }
+
+        let (expected_direct, why_direct) = DIRECT_BALANCE_JUSTIFICATIONS
+            .iter()
+            .find(|(name, _, _)| name == source)
+            .map_or(
+                (0, "this file has no recorded direct balance write"),
+                |(_, n, w)| (*n, *w),
+            );
+
+        if found_direct != expected_direct {
+            let _ = write!(
+                problems,
+                "\n  {source}: there are {found_direct} direct `.balance` / `{RAW_ADD_FN}` / \
+                 `{ATTOS_SET_FN}` write sites, the justified count is {expected_direct}.\n    \
+                 Recorded rationale: {why_direct}\n    \
+                 Direct field writes bypass `{MINT_FN}` and `{HEADROOM_FN}`: new supply must \
+                 go through `{MINT_FN}`, and any transfer/escrow write must be justified."
             );
         }
     }
@@ -389,7 +635,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     Ok(format!(
         "minting-paths-are-counted OK: {minting} mint calls are bound to the ceiling, \
-         {moving} transfer calls are justified"
+         {moving} transfer calls and {direct_sites} direct balance writes are justified"
     ))
 }
 
@@ -466,7 +712,44 @@ mod tests {
     if !mint_fn_checks_headroom(good) || mint_fn_checks_headroom(bad) {
         return Err("self_test: the headroom-call check misjudged a fixture".into());
     }
-    Ok("minting-paths-are-counted self-test OK: test modules, comments, definitions, one-line fns and code after test modules are classified correctly".into())
+    // Direct field writes, saturating `.add_balance`, and `&mut ...balance`
+    // bypass `try_mint_balance` and must be counted, while pure debits and
+    // equality comparisons must not.
+    let count_direct = |text: &str| {
+        let pl = production_lines(text);
+        (0..pl.len())
+            .filter(|&i| is_direct_balance_credit(&pl, i))
+            .count()
+    };
+    let bypass_plus_eq = "fn mint(a: &mut Account, v: u64) {\n    a.balance += v;\n}\n";
+    if count_direct(bypass_plus_eq) != 1 {
+        return Err("self_test: direct `.balance +=` bypass was not counted".into());
+    }
+    let bypass_sat =
+        "fn mint(a: &mut Account, v: u64) {\n    a.balance = a.balance.saturating_add(v);\n}\n";
+    if count_direct(bypass_sat) != 1 {
+        return Err(
+            "self_test: direct `.balance = ...saturating_add` bypass was not counted".into(),
+        );
+    }
+    let bypass_raw_add =
+        "fn mint(s: &mut AccountState, k: &Address, v: u64) {\n    s.add_balance(k, v);\n}\n";
+    if count_direct(bypass_raw_add) != 1 {
+        return Err("self_test: saturating `.add_balance(` call was not counted".into());
+    }
+    let bypass_mut_ref =
+        "fn mint(a: &mut Account) {\n    let b = &mut a.balance;\n    *b += 1;\n}\n";
+    if count_direct(bypass_mut_ref) != 1 {
+        return Err("self_test: `&mut account.balance` borrow was not counted".into());
+    }
+    let pure_debit_and_cmp = "fn debit(a: &mut Account, fee: u64) -> Result<bool, &'static str> {\n    a.balance = a\n        .balance\n        .checked_sub(fee)\n        .ok_or(\"underflow\")?;\n    Ok(a.balance == 0)\n}\n";
+    if count_direct(pure_debit_and_cmp) != 0 {
+        return Err(
+            "self_test: pure `checked_sub` debit or `==` comparison was miscounted as a credit"
+                .into(),
+        );
+    }
+    Ok("minting-paths-are-counted self-test OK: test modules, comments, definitions, one-line fns, code after test modules and direct `.balance` / `add_balance` bypasses are classified correctly".into())
 }
 
 #[cfg(test)]
