@@ -211,3 +211,70 @@ jobs:
             echo "::error::the SVM settlement endpoint declares no program entry point"
             exit 1
           fi
+
+  bud3-fountain-acceptance:
+    # The B.U.D. 3.0 fountain directive names 10 000 trials over k in
+    # {100, 1000, 4096} at 99.99 % recovery. `bud3_fountain_acceptance` reads
+    # `BUDLUM_BUD3_ACCEPTANCE_TRIALS` and defaults to 8 (48 decoded trials),
+    # and nothing in `.github/` set that variable, so the directive's figure
+    # had never run: at 48 trials the `failures * 10_000 <= decoded` bar admits
+    # no drop at all, which is stricter than the claim and weaker as evidence.
+    # Heavy battery, so it lives here rather than on the pull-request path
+    # (same reason the note at the top of this file gives). The in-tree test
+    # `sweep_claims_its_directive` fails when the variable is unset, so this
+    # job cannot silently fall back to the default.
+    name: B.U.D. 3.0 fountain sweep at the directive's 10 000 trials
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - id: protoc
+        name: Install protoc
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -euo pipefail
+          if ! command -v protoc >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              aarch64|arm64)
+                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
+                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
+                ;;
+              *)
+                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
+                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
+                ;;
+            esac
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
+            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+            rm -f /tmp/protoc.zip
+          fi
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: bud3-fountain-acceptance
+      - name: Fountain sweep, 10 000 trials per loss case
+        if: always() && steps.rust.outcome == 'success' && steps.protoc.outcome == 'success'
+        env:
+          BUDLUM_BUD3_ACCEPTANCE_TRIALS: "10000"
+        run: |
+          set -euo pipefail
+          # Release, not the test profile: `profile.test` inherits
+          # `debug-assertions = true` and raptorq's GF(256) setup spends 179 s
+          # on a single k=4096 encoder under it. The sweep runs 3 k values x
+          # 2 loss models x 10 000 trials.
+          cargo test --release --lib storage::bud3::fountain::tests::sweep_claims_its_directive -- --ignored --nocapture 2>&1 | tee /tmp/bud3-acceptance.log
+          # A filter that matches nothing exits 0 and looks like a pass.
+          if ! grep -qE 'sweep_claims_its_directive \.\.\. ok' /tmp/bud3-acceptance.log; then
+            echo "::error::the sweep did not report the test it was asked to run"
+            exit 1
+          fi
