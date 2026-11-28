@@ -259,7 +259,7 @@ private fun MessageProofDialog(
     val haptic = LocalHapticFeedback.current
     var copiedLabel by remember { mutableStateOf(false) }
     // The other half of B.U.D. 3: what crossed as text comes back as a QR code.
-    val asQr = remember(line.text) { rememberQrBitmap(line.text.orEmpty()) }
+    val asQr = rememberQrBitmap(line.text.orEmpty())
 
     Dialog(onDismissRequest = onDismiss) {
         Sheet(skin = skin) {
