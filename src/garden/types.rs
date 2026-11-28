@@ -231,7 +231,12 @@ impl GardenLimits {
     pub const fn testnet_default() -> Self {
         Self {
             max_validators: 32,
-            max_object_bytes: 4 * 1024 * 1024,
+            // One object may be a quarter of what one validator is allowed
+            // to publish in total. The old 4 MiB was a quarter of the
+            // network frame, because an object used to have to cross in
+            // one: symbols travel in batches now, so the frame has no say
+            // in how large a thing a Garden carries.
+            max_object_bytes: 64 * 1024 * 1024,
             max_block_txs: 64,
             max_sender_txs_per_block: 8,
             round_ms: 3_000,
@@ -247,8 +252,8 @@ impl GardenLimits {
         if !(1..=256).contains(&self.max_validators) {
             return Err("max_validators must be in 1..=256".into());
         }
-        if !(1..=16 * 1024 * 1024).contains(&self.max_object_bytes) {
-            return Err("max_object_bytes must be in 1..=16 MiB".into());
+        if self.max_object_bytes == 0 {
+            return Err("max_object_bytes must be at least 1".into());
         }
         if !(1..=1024).contains(&self.max_block_txs) {
             return Err("max_block_txs must be in 1..=1024".into());

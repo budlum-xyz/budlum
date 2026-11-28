@@ -101,7 +101,7 @@
     <string name="g_kept_here">kept here</string>
     <string name="g_checked">checked</string>
     <string name="g_sending">going</string>
-    <string name="g_file_too_big">a file holds up to %1$d MB</string>
+    <string name="g_file_too_big">that file is %1$s and this Garden was founded to take %2$s</string>
     <string name="g_parts_held">parts held</string>
     <string name="g_stored">stored</string>
     <string name="g_coded">objects coded</string>

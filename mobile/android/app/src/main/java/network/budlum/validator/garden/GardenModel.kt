@@ -210,15 +210,31 @@ class GardenModel(
         }
         // The object size ceiling is a chain parameter published in status;
         // read it dynamically and let the core enforce when no status is present.
+        //
+        // It is the ceiling this Garden was founded with, and a genesis
+        // cannot be amended, so a Garden started before the ceiling rose
+        // keeps the one it has. Saying whose rule it is spares someone
+        // looking for the setting that would change it.
         val ceiling = objectCeiling()
         if (ceiling != null && bytes.size > ceiling) {
             state = state.copy(
-                message = app.getString(R.string.g_file_too_big, ceiling / (1024 * 1024)),
+                message = app.getString(
+                    R.string.g_file_too_big,
+                    readableSize(bytes.size.toLong()),
+                    readableSize(ceiling.toLong()),
+                ),
             )
             return@background
         }
         phone.sendFile(bytes.toHex(), mime, caption)
         refreshChatLocked()
+    }
+
+    /** Bytes as a person reads them. */
+    private fun readableSize(bytes: Long): String = when {
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+        else -> "${bytes / 1024 / 1024} MB"
     }
 
     private fun objectCeiling(): Int? = runCatching {

@@ -59,6 +59,20 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Largest response frame. A response carries at most one object or a batch
 /// of commits.
 pub const MAX_RESPONSE_BYTES: usize = 18 * 1024 * 1024;
+
+/// How many B.U.D. 3.0 symbols travel in one frame.
+///
+/// An object does not have to fit a frame. Symbols are independent of one
+/// another, which is the whole reason the object layer cuts content into
+/// them, so a large object crosses the network as however many batches it
+/// takes and the holder rebuilds from the set.
+///
+/// Half the frame is left over. A batch also carries the object's record,
+/// which grows with the number of segments, and bincode's own framing; a
+/// batch that overran the frame would be dropped by the reader rather than
+/// refused, which is the one failure that would be hard to see.
+pub const SYMBOLS_PER_FRAME: usize = (MAX_RESPONSE_BYTES / 2)
+    / (crate::storage::bud3::limits::Profile::P0.symbol_size as usize);
 /// Largest number of response bytes buffered concurrently across all streams
 /// of one Garden swarm, charged at `LARGE_FRAME_UNIT_BYTES` granularity for
 /// bytes actually received.
@@ -129,6 +143,26 @@ pub enum GardenRequest {
         record: Box<crate::storage::bud3::pipeline::ObjectRecord>,
         symbols: Vec<crate::storage::bud3::fountain::Symbol>,
     },
+    /// One batch of an object's symbols.
+    ///
+    /// `PutCodedObject` puts every symbol in a single frame, so the largest
+    /// object a Garden could carry was whatever the frame held once repair
+    /// symbols were added to it. That is a property of the transport, not
+    /// of the object layer: the holder rebuilds from a set of symbols and
+    /// does not care how many frames brought them.
+    PutCodedBatch {
+        content_id: Hash32,
+        record: Box<crate::storage::bud3::pipeline::ObjectRecord>,
+        symbols: Vec<crate::storage::bud3::fountain::Symbol>,
+        /// Batches still to come after this one.
+        remaining: u32,
+    },
+    /// Ask a holder for an object as symbols, from `from` on.
+    ///
+    /// The holder answers with as many as a frame carries, so the reader
+    /// asks again until it has the set. A holder that has the bytes but no
+    /// coding for them answers `Object` instead.
+    GetCoded { content_id: Hash32, from: u32 },
 }
 
 /// A response on the Garden protocol.
@@ -145,6 +179,19 @@ pub enum GardenResponse {
     Object(Option<Vec<u8>>),
     Refused(String),
     AdmissionStatus(GardenAdmissionState),
+    /// Symbols of an object, from the index that was asked for.
+    ///
+    /// Last in the enum on purpose: bincode numbers variants by position,
+    /// so appending leaves every existing response where a running node
+    /// already expects it.
+    Coded {
+        record: Box<crate::storage::bud3::pipeline::ObjectRecord>,
+        /// Index of the first symbol carried here.
+        from: u32,
+        symbols: Vec<crate::storage::bud3::fountain::Symbol>,
+        /// How many symbols the holder has for this object in all.
+        total: u32,
+    },
 }
 
 /// The libp2p peer id of a Garden key.
@@ -492,9 +539,11 @@ impl request_response::Codec for GardenCodec {
             0 => MAX_UNADMITTED_REQUEST_BYTES, // Hello
             2 | 5 => 64,                       // GetCommits | AdmissionStatus
             3 => 128,                          // GetObject
-            // Gossip | PutObject | PutCodedObject. Coded parts carry repair
-            // symbols, so the frame is larger than the object it rebuilds.
-            1 | 4 | 6 => MAX_REQUEST_BYTES,
+            8 => 128,                          // GetCoded
+            // Gossip | PutObject | PutCodedObject | PutCodedBatch. Coded
+            // parts carry repair symbols, so the frame is larger than the
+            // piece of the object it rebuilds.
+            1 | 4 | 6 | 7 => MAX_REQUEST_BYTES,
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
