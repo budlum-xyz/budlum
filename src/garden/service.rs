@@ -804,7 +804,10 @@ impl GardenService {
     }
 }
 
-
+#[cfg(test)]
+mod tests {
+    use super::super::record::DEFAULT_RECORD_TTL_MS;
+    use super::*;
     /// The record a joining phone reads says how big the Garden is, not only
     /// how many peer lines fitted in the invite.
     ///
@@ -840,9 +843,6 @@ impl GardenService {
         assert_eq!(total, 30, "the count is the record's, not a guess");
     }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
     use crate::chain::blockchain::Blockchain;
     use crate::chain::chain_actor::ChainActor;
     use crate::consensus::pow::PoWEngine;
