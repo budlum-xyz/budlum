@@ -94,17 +94,26 @@ fn parse_call_payload(mut cur: &[u8]) -> Result<ParsedCallPayload, String> {
         return Err("declared slot limit exceeded".into());
     }
     let mut declared = Vec::with_capacity(decl_count);
+    let mut seen_decl = std::collections::BTreeSet::new();
     for _ in 0..decl_count {
-        declared.push(take_u64(&mut cur)?);
+        let s = take_u64(&mut cur)?;
+        if !seen_decl.insert(s) {
+            return Err("duplicate declared slot in call payload".into());
+        }
+        declared.push(s);
     }
     let input_count = take_u32(&mut cur)? as usize;
     if input_count > MAX_SLOTS_PER_CALL {
         return Err("input slot limit exceeded".into());
     }
     let mut pairs = Vec::with_capacity(input_count);
+    let mut seen_input = std::collections::BTreeSet::new();
     for _ in 0..input_count {
         let s = take_u64(&mut cur)?;
         let v = take_u64(&mut cur)?;
+        if !seen_input.insert(s) {
+            return Err("duplicate input slot in call payload".into());
+        }
         pairs.push((s, v));
     }
     if !cur.is_empty() {
@@ -221,12 +230,29 @@ impl ExecutionEnvironment for BudZeroWorker {
                         gas_used: call.gas_limit,
                     });
                 }
-                if matches!(host.read(&prog_ns, &call.target.id), Ok(Some(_))) {
-                    return Ok(EeOutcome {
-                        status: OutcomeStatus::Revert,
-                        output: b"program already deployed".to_vec(),
-                        gas_used: 0,
-                    });
+                match host.read(&prog_ns, &call.target.id) {
+                    Ok(Some(_)) => {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"program already deployed".to_vec(),
+                            gas_used: deploy_gas,
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(HostError::OutOfGas) => {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::OutOfGas,
+                            output: Vec::new(),
+                            gas_used: call.gas_limit,
+                        });
+                    }
+                    Err(_) => {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"program existence check failed".to_vec(),
+                            gas_used: deploy_gas,
+                        });
+                    }
                 }
                 let Ok(cp) = host.checkpoint_begin() else {
                     return Ok(EeOutcome {
@@ -261,12 +287,29 @@ impl ExecutionEnvironment for BudZeroWorker {
                 })
             }
             EeCallKind::Call => {
-                let Some(code_bytes) = host.read(&prog_ns, &call.target.id).ok().flatten() else {
-                    return Ok(EeOutcome {
-                        status: OutcomeStatus::Revert,
-                        output: b"program not found".to_vec(),
-                        gas_used: 0,
-                    });
+                let code_bytes = match host.read(&prog_ns, &call.target.id) {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) => {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"program not found".to_vec(),
+                            gas_used: 0,
+                        });
+                    }
+                    Err(HostError::OutOfGas) => {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::OutOfGas,
+                            output: Vec::new(),
+                            gas_used: call.gas_limit,
+                        });
+                    }
+                    Err(_) => {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"program read failed".to_vec(),
+                            gas_used: 0,
+                        });
+                    }
                 };
                 let Ok(program) = decode_gated(&code_bytes) else {
                     return Ok(EeOutcome {
@@ -420,11 +463,31 @@ impl ExecutionEnvironment for BudZeroWorker {
 
                 let mut ucall_gas = 0u64;
                 if program_has_universal_syscall(&program) {
-                    let is_owner_or_self = call.caller.id == call.target.id
-                        || matches!(
-                            host.read(&prog_ns, &[b"owner:", call.target.id.as_slice()].concat()),
-                            Ok(Some(ref owner)) if owner.as_slice() == call.caller.id.as_slice()
-                        );
+                    let is_owner_or_self = if call.caller.id == call.target.id {
+                        true
+                    } else {
+                        match host.read(&prog_ns, &[b"owner:", call.target.id.as_slice()].concat())
+                        {
+                            Ok(Some(owner)) => owner.as_slice() == call.caller.id.as_slice(),
+                            Ok(None) => false,
+                            Err(HostError::OutOfGas) => {
+                                let _ = host.checkpoint_rollback(call_cp);
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::OutOfGas,
+                                    output: Vec::new(),
+                                    gas_used: call.gas_limit,
+                                });
+                            }
+                            Err(_) => {
+                                let _ = host.checkpoint_rollback(call_cp);
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: b"owner read failed".to_vec(),
+                                    gas_used: 0,
+                                });
+                            }
+                        }
+                    };
                     if !is_owner_or_self {
                         let _ = host.checkpoint_rollback(call_cp);
                         return Ok(EeOutcome {
@@ -439,6 +502,15 @@ impl ExecutionEnvironment for BudZeroWorker {
                     let req_gas = vm.storage.get(&0x4001).copied().unwrap_or(call.gas_limit);
                     let val_lo = u128::from(vm.storage.get(&0x4002).copied().unwrap_or(0));
                     let val_hi = u128::from(vm.storage.get(&0x4003).copied().unwrap_or(0));
+                    let value_attos = (val_hi << 64) | val_lo;
+                    if is_static && value_attos != 0 {
+                        let _ = host.checkpoint_rollback(call_cp);
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"static budzero universal call cannot carry value".to_vec(),
+                            gas_used: 0,
+                        });
+                    }
                     let t_len = (vm.storage.get(&0x4004).copied().unwrap_or(0) as usize).min(64);
                     let i_len =
                         (vm.storage.get(&0x4005).copied().unwrap_or(0) as usize).min(16_384);
@@ -451,7 +523,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                             ee: to_ee,
                             id: target_bytes,
                         },
-                        value: BudAmount((val_hi << 64) | val_lo),
+                        value: BudAmount(value_attos),
                         input: input_bytes,
                         gas_limit: req_gas.min(call.gas_limit),
                         is_static,
@@ -482,7 +554,7 @@ impl ExecutionEnvironment for BudZeroWorker {
 
                 let receipt = vm.run_receipt(&program);
                 let total_gas = receipt.gas_used.saturating_add(ucall_gas);
-                if host.charge(total_gas).is_err() {
+                if total_gas > call.gas_limit || host.charge(total_gas).is_err() {
                     let _ = host.checkpoint_rollback(call_cp);
                     return Ok(EeOutcome {
                         status: OutcomeStatus::OutOfGas,
