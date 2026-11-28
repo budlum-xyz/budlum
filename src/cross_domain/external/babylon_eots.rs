@@ -980,6 +980,17 @@ impl BabylonEotsAdapter {
             self.anchor
                 .map_or(0, |anchor| anchor.required_confirmations),
         );
+        // SLASHABLE-DEPENDS-ON-SCHEME: this domain's slashing guarantee is key
+        // extraction - an equivocating finality provider reveals its EOTS secret
+        // and the Bitcoin stake is taken. The guarantee is therefore only as
+        // strong as the signature that would have to be forged to fake the
+        // equivocation, so a classical-only vote is reported as not slashable
+        // even though the remote protocol calls the stake slashable. Every
+        // other adapter in this tree decides the field from the remote
+        // protocol's economics alone; the gate
+        // `slashable-is-not-quietly-a-scheme-claim` keeps the list of
+        // exceptions to one line per site so a consumer comparing domains can
+        // find them.
         let security = if pq_pinned_and_verified {
             SecurityBacking::SignatureSet {
                 scheme: ObservedScheme::Secp256k1,

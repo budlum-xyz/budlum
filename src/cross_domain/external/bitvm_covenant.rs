@@ -958,10 +958,10 @@ impl BitVmCovenantAdapter {
                 ),
             });
         }
+        // External proof of work has nobody to slash; a caller that wants
+        // slashable backing pairs this with a bonded prover instead.
         if policy.require_slashable {
-            return Err(AdapterError::ConsensusRule {
-                rule: "BitVM2 external PoW headers are not slashable; pair with bonded IntakeState prover".to_string(),
-            });
+            return Err(AdapterError::UnslashableBacking);
         }
 
         let (anchor, parsed, parent_of_claim, tip_time, used_pq) =
@@ -1293,7 +1293,14 @@ mod tests {
 
         let mut slash_policy = VerificationPolicy::strict(0);
         slash_policy.require_slashable = true;
-        assert!(adapter.verify(&raw, &slash_policy).is_err());
+        assert!(
+            matches!(
+                adapter.verify(&raw, &slash_policy),
+                Err(AdapterError::UnslashableBacking)
+            ),
+            "external proof of work has nobody to slash; the refusal must name that class and \
+             not merely be an error"
+        );
 
         let mut shallow = bundle.clone();
         shallow.headers.truncate(5);

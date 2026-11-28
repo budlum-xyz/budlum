@@ -9,18 +9,63 @@
 //! Usage:
 //!   garden-phone self-test <dir>
 //!   garden-phone read <dir> <record>
+//!   garden-phone create <dir> <title> [name] [listen multiaddr]
 //!   garden-phone join <dir> <record> <name>
 //!   garden-phone serve <dir> <port> [record] [name]
 //!   garden-phone return-check <dir> <record> [name]
+//!   garden-phone cleanup-check <dir> <record> [name]
 //!   garden-phone status <dir>
+//!   garden-phone send <dir> <text> [caption]
+//!   garden-phone feed <dir> [limit]
+//!   garden-phone fetch <dir> <content id>
+//!   garden-phone trace <dir> <id>
 //!   garden-phone leave <dir>
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Read;
+use std::io::Write;
+use std::net::TcpListener;
+use std::net::TcpStream;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use budlum_garden_ffi::GardenPhone;
+
+/// The address the status door opens on.
+///
+/// Loopback, and not a configurable value: this door answers with the phone's
+/// own Garden view and it has no caller authentication, so the only thing that
+/// keeps it closed is the address it is bound to. A flag that widened it would
+/// be an admin key by another name, and a host that could reach the port could
+/// read the Garden without ever holding an invite.
+const STATUS_DOOR_ADDRESS: &str = "127.0.0.1";
+
+/// Bytes read from one caller before the door gives up on the request line.
+///
+/// The listener answers one caller at a time, so a caller that never sends a
+/// newline would otherwise hold the door forever.
+const STATUS_REQUEST_LINE_LIMIT: u64 = 1024;
+
+/// Socket read and write timeout, for the same reason: a stalled reader must
+/// not become the next caller's outage.
+const STATUS_IO_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How many records `/feed` answers with when the caller names no limit, and
+/// the ceiling a caller cannot raise.
+const FEED_LIMIT_DEFAULT: u32 = 50;
+const FEED_LIMIT_MAX: u32 = 500;
+
+/// How many times `send` asks the Garden for the verdict before it gives up,
+/// and how long it waits between two asks.
+///
+/// The budget is a count and not a deadline: a deadline makes the refusal
+/// depend on how loaded the machine is, so the same transaction would be
+/// reported committed on an idle host and refused on a busy one. Six hundred
+/// asks a hundred milliseconds apart is a minute of consensus rounds.
+const FINALITY_ASKS: u32 = 600;
+const FINALITY_ASK_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -28,12 +73,12 @@ fn main() -> ExitCode {
     let dir = args.get(2).cloned().unwrap_or_default();
     if command.is_empty() || dir.is_empty() {
         eprintln!(
-            "usage: garden-phone <self-test|read|join|serve|return-check|status|leave> <dir> [...]"
+            "usage: garden-phone <self-test|read|create|join|serve|return-check|cleanup-check|status|send|feed|fetch|trace|leave> <dir> [...]"
         );
         return ExitCode::from(2);
     }
 
-    let phone = match GardenPhone::new(dir) {
+    let phone = match GardenPhone::new(dir.clone()) {
         Ok(phone) => phone,
         Err(e) => {
             eprintln!("the phone did not start: {e}");
@@ -75,6 +120,21 @@ fn main() -> ExitCode {
             || Err("a record is needed".to_string()),
             |record| phone.read_record(record.clone()).map_err(|e| e.to_string()),
         )),
+        "create" => {
+            let title = args.get(3).cloned().unwrap_or_default();
+            let name = args.get(4).cloned().unwrap_or_else(|| "Phone".to_string());
+            if title.is_empty() {
+                eprintln!("usage: garden-phone create <dir> <title> [name] [listen multiaddr]");
+                return ExitCode::from(2);
+            }
+            if !gate(&phone) {
+                return ExitCode::FAILURE;
+            }
+            let address = args.get(5).cloned();
+            say(phone
+                .create_with_address(title, name, address)
+                .map_err(|e| e.to_string()))
+        }
         "join" => {
             let record = args.get(3).cloned().unwrap_or_default();
             let name = args.get(4).cloned().unwrap_or_else(|| "Phone".to_string());
@@ -146,7 +206,117 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "cleanup-check" => {
+            let record = args.get(3).cloned().unwrap_or_default();
+            let name = args.get(4).cloned().unwrap_or_else(|| "Phone".to_string());
+            if record.is_empty() {
+                eprintln!("a record is needed");
+                return ExitCode::from(2);
+            }
+            if !gate(&phone) {
+                return ExitCode::FAILURE;
+            }
+            match cleanup_round_trip(&phone, std::path::Path::new(&dir), record, name) {
+                Ok(()) => {
+                    println!("the phone wiped its Garden content on leave");
+                    ExitCode::SUCCESS
+                }
+                Err(reason) => {
+                    eprintln!("the cleanup check failed: {reason}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         "status" => say(phone.status().map_err(|e| e.to_string())),
+        // The Data screen's three taps. A Garden is a group that sends
+        // data over its own chain and reads it back verified, so the phone
+        // has to be able to do all three from the command line the app's
+        // own library answers.
+        // Each of these is one command in one process, and a phone that
+        // closed its process has stepped out of its Garden with its seat
+        // kept. So the door does what the Status screen does on the way up:
+        // it returns first, then acts. A phone with no seat is told so.
+        "send" => {
+            let text = match args.get(3) {
+                Some(text) => text.clone(),
+                None => {
+                    eprintln!("usage: garden-phone send <dir> <text> [caption]");
+                    return ExitCode::from(2);
+                }
+            };
+            let caption = args.get(4).cloned().unwrap_or_default();
+            if !gate(&phone) || !return_first(&phone) {
+                return ExitCode::FAILURE;
+            }
+            match phone.send(text, caption) {
+                Ok(answer) => {
+                    // What the core answers is a mempool acceptance, not a
+                    // block. Because a CLI command is one process whose
+                    // mempool and validator swarm stop when main returns,
+                    // exiting before a block is agreed on would drop the
+                    // transaction before the Garden ever committed it. So the
+                    // mempool receipt is printed first, and this process stays
+                    // on the network until trace settles stage final.
+                    println!("accepted into the mempool, not yet in a block");
+                    println!("{}", answer.json);
+                    let Some(tx_id) = json_field_str(&answer.json, "tx_id") else {
+                        eprintln!("refused: the publish answer carried no tx_id");
+                        return ExitCode::FAILURE;
+                    };
+                    match wait_until_final(&phone, &tx_id) {
+                        Ok(final_json) => {
+                            println!("committed in a final block");
+                            println!("{final_json}");
+                            ExitCode::SUCCESS
+                        }
+                        Err(reason) => {
+                            eprintln!("refused: {reason}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                Err(reason) => {
+                    eprintln!("refused: {reason}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "feed" => {
+            let limit = args
+                .get(3)
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or(20);
+            if !return_first(&phone) {
+                return ExitCode::FAILURE;
+            }
+            say(phone.feed(limit).map_err(|e| e.to_string()))
+        }
+        "fetch" => {
+            let content_id = match args.get(3) {
+                Some(id) => id.clone(),
+                None => {
+                    eprintln!("usage: garden-phone fetch <dir> <content id>");
+                    return ExitCode::from(2);
+                }
+            };
+            if !return_first(&phone) {
+                return ExitCode::FAILURE;
+            }
+            say(phone.fetch(content_id).map_err(|e| e.to_string()))
+        }
+        "trace" => {
+            let id = match args.get(3) {
+                Some(id) => id.clone(),
+                None => {
+                    eprintln!("usage: garden-phone trace <dir> <tx id or content id>");
+                    return ExitCode::from(2);
+                }
+            };
+            if !return_first(&phone) {
+                return ExitCode::FAILURE;
+            }
+            say(phone.trace(id).map_err(|e| e.to_string()))
+        }
         "leave" => say(phone.leave().map_err(|e| e.to_string())),
         other => {
             eprintln!("no such command: {other}");
@@ -167,6 +337,30 @@ fn gate(phone: &Arc<GardenPhone>) -> bool {
     report.passed
 }
 
+/// Put a phone that stepped out back into its Garden, and say plainly when
+/// there is no Garden to return to.
+///
+/// A phone command is one process. The process that joined kept a seat and
+/// ended, so the seat is "away" until something returns it; the app does this
+/// on the way up, and a data command has to do the same. A phone that never
+/// joined is refused rather than left to fail deeper in with a less useful
+/// message.
+fn return_first(phone: &Arc<GardenPhone>) -> bool {
+    match phone.rejoin() {
+        Ok(answer) => {
+            println!(
+                "returned to the Garden: {}",
+                one_line(&answer.json, "status")
+            );
+            true
+        }
+        Err(back) => {
+            eprintln!("no Garden to return to: {back}");
+            false
+        }
+    }
+}
+
 /// Join, leave, and return - the three taps the Status screen allows.
 fn round_trip(phone: &Arc<GardenPhone>, record: String, name: String) -> Result<(), String> {
     let joined = phone.join(record, name).map_err(|e| e.to_string())?;
@@ -185,6 +379,129 @@ fn round_trip(phone: &Arc<GardenPhone>, record: String, name: String) -> Result<
     Ok(())
 }
 
+fn json_field_str(json: &str, key: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()?
+        .get(key)?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Ask for a verdict until the Garden says the transaction is final.
+///
+/// `trace` is a parameter, not the phone, so both halves of the contract can
+/// be run without a chain: a transaction that reaches a block answers with the
+/// final verdict, and one that never does is refused by name after the budget
+/// runs out. The refusal is the half that matters here. `send` reports success
+/// only because this function returned `Ok`, so a transaction that is still
+/// in the mempool has to end in an error that says so, never in a `sent`.
+fn final_within<F>(tx_id: &str, asks: u32, mut trace: F) -> Result<String, String>
+where
+    F: FnMut() -> Result<String, String>,
+{
+    let mut last_reason = String::from("the transaction has not been traced yet");
+    for asked in 1..=asks {
+        match trace() {
+            Ok(answer) => {
+                if json_field_str(&answer, "stage").as_deref() == Some("final") {
+                    return Ok(answer);
+                }
+                last_reason = answer;
+            }
+            Err(reason) => {
+                last_reason = reason;
+            }
+        }
+        if asked < asks {
+            std::thread::sleep(FINALITY_ASK_INTERVAL);
+        }
+    }
+    Err(format!(
+        "transaction {tx_id} did not reach a final block in {asks} asks \
+         ({last_reason}); it is not published"
+    ))
+}
+
+/// Hold the validator online until `tx_id` reaches a finalized Garden block.
+///
+/// A CLI command is one process, and the mempool and the validator swarm stop
+/// with it, so returning while the transaction is still in the mempool drops
+/// it before any block carries it. Nothing is persisted to resume a pending
+/// publication: a later run starts a fresh mempool and a fresh service, which
+/// deletes the content tree it did not write. Waiting here is the whole
+/// durability contract, and the refusal above is the failure the caller sees
+/// instead of a success it cannot keep.
+fn wait_until_final(phone: &Arc<GardenPhone>, tx_id: &str) -> Result<String, String> {
+    final_within(tx_id, FINALITY_ASKS, || {
+        let answer = phone.trace(tx_id.to_owned()).map_err(|e| e.to_string())?;
+        Ok(answer.json)
+    })
+}
+
+/// Join, publish to finality, verify non-empty `garden/` on disk, and verify
+/// that `leave` wipes `garden/` inside a single live process without relying
+/// on `GardenService::new`'s startup cleanup.
+fn cleanup_round_trip(
+    phone: &Arc<GardenPhone>,
+    dir: &std::path::Path,
+    record: String,
+    name: String,
+) -> Result<(), String> {
+    phone.join(record, name).map_err(|e| e.to_string())?;
+    let sent = phone
+        .send("live cleanup content".into(), "live cleanup".into())
+        .map_err(|e| e.to_string())?;
+    let parsed: serde_json::Value = serde_json::from_str(&sent.json).map_err(|e| e.to_string())?;
+    if parsed.get("published") != Some(&serde_json::Value::Bool(false)) {
+        return Err(format!(
+            "send claimed publication before block: {}",
+            sent.json
+        ));
+    }
+    let tx_id = json_field_str(&sent.json, "tx_id")
+        .ok_or_else(|| String::from("send returned no tx_id"))?;
+    wait_until_final(phone, &tx_id)?;
+
+    let garden_dir = dir.join("garden");
+    if !has_any_file(&garden_dir) {
+        return Err(String::from(
+            "garden/ held no stored content before leave, so leave would prove nothing",
+        ));
+    }
+    let left = phone.leave().map_err(|e| e.to_string())?;
+    if has_any_file(&garden_dir) {
+        return Err(String::from("Garden content under garden/ survived leave"));
+    }
+    let left_val: serde_json::Value =
+        serde_json::from_str(&left.json).map_err(|e| e.to_string())?;
+    let keeps_seat = left_val.get("can_return") == Some(&serde_json::Value::Bool(true));
+    let seat_exists = dir.join("seat.json").is_file();
+    if seat_exists != keeps_seat {
+        return Err(format!(
+            "seat.json ({seat_exists}) disagrees with can_return ({keeps_seat})"
+        ));
+    }
+    Ok(())
+}
+
+fn has_any_file(root: &std::path::Path) -> bool {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// The one field worth printing out of a long status answer.
 fn one_line(json: &str, field: &str) -> String {
     let needle = format!("\"{field}\":");
@@ -201,16 +518,18 @@ fn one_line(json: &str, field: &str) -> String {
 /// Hold the Garden open and answer the phone's own status on `port`.
 ///
 /// Only the phone's view is served, exactly as `status` prints it. Nothing
-/// can be changed through this door: it reads, and that is all.
+/// can be changed through this door: it reads, and that is all. It is bound to
+/// [`STATUS_DOOR_ADDRESS`], not to every interface, because it asks the caller
+/// for nothing.
 fn serve(phone: &Arc<GardenPhone>, port: u16) -> ExitCode {
-    let listener = match TcpListener::bind(("0.0.0.0", port)) {
+    let listener = match open_status_door(port) {
         Ok(listener) => listener,
         Err(e) => {
-            eprintln!("the status door would not open on {port}: {e}");
+            eprintln!("the status door would not open on {STATUS_DOOR_ADDRESS}:{port}: {e}");
             return ExitCode::FAILURE;
         }
     };
-    println!("the phone is in the Garden; its status is on port {port}");
+    println!("the phone is in the Garden; its status is on {STATUS_DOOR_ADDRESS}:{port}");
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => answer_one(phone, stream),
@@ -220,21 +539,130 @@ fn serve(phone: &Arc<GardenPhone>, port: u16) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn answer_one(phone: &Arc<GardenPhone>, mut stream: TcpStream) {
-    // The request line is read and discarded past its first word: every
-    // path answers the same thing, and the body is never written to.
-    let mut first = String::new();
-    if BufReader::new(&stream).read_line(&mut first).is_err() {
-        return;
+/// Open the status door on loopback only.
+///
+/// A separate function so the address policy is one thing to read and one
+/// thing to test, rather than a literal buried in `serve`.
+fn open_status_door(port: u16) -> std::io::Result<TcpListener> {
+    TcpListener::bind((STATUS_DOOR_ADDRESS, port))
+}
+
+/// What one request line asks the door for.
+#[derive(Debug, PartialEq, Eq)]
+enum DoorRoute {
+    Status,
+    Feed(u32),
+    Fetch(String),
+}
+
+/// The method and target of a request line, or why the door refuses it.
+///
+/// Only `GET` is answered. The door reads, so a write method is refused with a
+/// status of its own instead of being served the status answer, which is what
+/// an unrecognised path does.
+fn parse_request_line(line: &str) -> Result<(&str, &str), &'static str> {
+    let mut parts = line.split_whitespace();
+    let method = parts.next().ok_or("the request line is empty")?;
+    let target = parts.next().ok_or("the request line names no path")?;
+    if method != "GET" {
+        return Err("only GET is answered");
     }
-    let body = match phone.status() {
-        Ok(answer) => answer.json,
-        Err(e) => format!("{{\"error\":{}}}", json_string(&e.to_string())),
+    Ok((method, target))
+}
+
+/// Which answer a path asks for.
+///
+/// `/feed` and `/fetch/<id>` are the two the Data screen reads; anything else
+/// is the status, which is what this door always answered. A `/fetch/` with an
+/// empty id is not a read of content id `""`, so it falls back to status the
+/// same way an unknown path does.
+fn route_for_path(path: &str) -> DoorRoute {
+    match path {
+        "/feed" => DoorRoute::Feed(FEED_LIMIT_DEFAULT),
+        _ => {
+            if let Some(rest) = path.strip_prefix("/feed/") {
+                return rest
+                    .parse::<u32>()
+                    .map_or(DoorRoute::Feed(FEED_LIMIT_DEFAULT), |limit| {
+                        DoorRoute::Feed(limit.min(FEED_LIMIT_MAX))
+                    });
+            }
+            if let Some(content_id) = path.strip_prefix("/fetch/") {
+                if !content_id.is_empty() {
+                    return DoorRoute::Fetch(content_id.to_string());
+                }
+            }
+            DoorRoute::Status
+        }
+    }
+}
+
+/// The response head, with no wildcard origin grant.
+///
+/// `Access-Control-Allow-Origin: *` let any page a person had open read the
+/// Garden through their own browser. The door has no cross-origin caller that
+/// needs it, so the grant is gone; `nosniff` and `no-store` are here because
+/// the body is a live view of a private group and must not be cached or
+/// reinterpreted as another content type.
+fn response_head(status: &str, body_len: usize) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+    )
+}
+
+/// Read the first request line, bounded in size and in time.
+///
+/// A stream that ends, errors, or sends [`STATUS_REQUEST_LINE_LIMIT`] bytes
+/// without a newline is not a request and gets no answer.
+fn read_request_line<R: Read>(input: R) -> Option<String> {
+    let mut first = String::new();
+    let mut reader = BufReader::new(input.take(STATUS_REQUEST_LINE_LIMIT));
+    match reader.read_line(&mut first) {
+        Ok(0) | Err(_) => None,
+        Ok(_) if !first.ends_with('\n') => None,
+        Ok(_) => Some(first),
+    }
+}
+
+fn answer_one(phone: &Arc<GardenPhone>, mut stream: TcpStream) {
+    // Both timeouts are set before a byte is read, so a caller cannot hold the
+    // single-threaded accept loop by opening a connection and saying nothing.
+    let _ = stream.set_read_timeout(Some(STATUS_IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(STATUS_IO_TIMEOUT));
+    // The first line names what is being asked for. Nothing here writes to
+    // the Garden: `status` is the phone's view, `feed` is what the Garden
+    // holds and `fetch` reads one object back out by content id. A path this
+    // door does not know answers the status, which is what it always did.
+    let first = match read_request_line(&stream) {
+        Some(first) => first,
+        None => return,
     };
-    let head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
+    let (status, body) = match parse_request_line(&first) {
+        Err(reason) => (
+            "405 METHOD NOT ALLOWED",
+            format!("{{\"error\":{}}}", json_string(reason)),
+        ),
+        Ok((_method, path)) => {
+            let answer = match route_for_path(path) {
+                DoorRoute::Feed(limit) => phone.feed(limit),
+                DoorRoute::Fetch(content_id) => phone.fetch(content_id),
+                DoorRoute::Status => phone.status(),
+            };
+            // A refusal is not a success with a sad body. A caller that only
+            // reads the status line - which is most of them - would take
+            // `{"error":...}` for an answer and go on to parse a Garden that
+            // was never read. The status says which it was, and the body says
+            // why.
+            match answer {
+                Ok(answer) => ("200 OK", answer.json),
+                Err(e) => (
+                    "409 CONFLICT",
+                    format!("{{\"error\":{}}}", json_string(&e.to_string())),
+                ),
+            }
+        }
+    };
+    let head = response_head(status, body.len());
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(body.as_bytes());
     let _ = stream.flush();
@@ -266,5 +694,165 @@ fn say(result: Result<budlum_garden_ffi::GardenAnswer, String>) -> ExitCode {
             eprintln!("refused: {reason}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod status_door_tests {
+    use super::*;
+
+    /// The door must not be reachable from another host: the address it binds
+    /// is the whole of its access control.
+    #[test]
+    fn the_status_door_opens_on_loopback_and_nothing_else() {
+        assert_eq!(STATUS_DOOR_ADDRESS, "127.0.0.1");
+        let bound = open_status_door(0).map(|listener| listener.local_addr().map(|a| a.ip()));
+        assert!(
+            matches!(bound, Ok(Ok(ip)) if ip.is_loopback()),
+            "the status door bound to {bound:?}, not to loopback"
+        );
+    }
+
+    /// The wildcard grant is what let a page read the Garden; it must not come
+    /// back through another spelling of the same header.
+    #[test]
+    fn the_response_head_grants_no_cross_origin_reader() {
+        let head = response_head("200 OK", 7);
+        assert!(
+            !head.to_ascii_lowercase().contains("access-control"),
+            "the head still carries a CORS grant: {head:?}"
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("x-content-type-options: nosniff"),
+            "the head does not refuse a sniffed content type: {head:?}"
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("cache-control: no-store"),
+            "the head does not refuse a cached Garden view: {head:?}"
+        );
+    }
+
+    /// The declared length is the body a caller reads; an off-by-one here is a
+    /// truncated or hung reader.
+    #[test]
+    fn the_response_head_declares_the_exact_body_length() {
+        let head = response_head("200 OK", 11);
+        assert!(
+            head.contains("Content-Length: 11\r\n"),
+            "the head declares another length: {head:?}"
+        );
+    }
+
+    /// A caller that writes a write method is refused, and the door says so
+    /// with a status: serving it the status answer would report success for a
+    /// request that was never allowed.
+    #[test]
+    fn a_write_method_is_refused_with_its_own_status() {
+        assert!(parse_request_line("POST /feed HTTP/1.1\r\n").is_err());
+        assert!(parse_request_line("DELETE / HTTP/1.1\r\n").is_err());
+        assert!(parse_request_line("GET /feed/3 HTTP/1.1\r\n").is_ok());
+        assert!(parse_request_line("\r\n").is_err());
+    }
+
+    /// The three reads the Data screen makes, and the fallback for everything
+    /// else that has always answered the status.
+    #[test]
+    fn the_route_splits_the_three_reads_from_everything_else() {
+        assert_eq!(route_for_path("/"), DoorRoute::Status);
+        assert_eq!(route_for_path("/status"), DoorRoute::Status);
+        assert_eq!(route_for_path("/feed"), DoorRoute::Feed(FEED_LIMIT_DEFAULT));
+        assert_eq!(route_for_path("/feed/3"), DoorRoute::Feed(3));
+        assert_eq!(
+            route_for_path("/feed/999999"),
+            DoorRoute::Feed(FEED_LIMIT_MAX)
+        );
+        assert_eq!(
+            route_for_path("/feed/two"),
+            DoorRoute::Feed(FEED_LIMIT_DEFAULT)
+        );
+        assert_eq!(route_for_path("/fetch/abc"), DoorRoute::Fetch("abc".into()));
+        assert_eq!(route_for_path("/fetch/"), DoorRoute::Status);
+        assert_eq!(route_for_path("/../etc/passwd"), DoorRoute::Status);
+    }
+
+    /// A request line that never ends must not hold the door: the limit is the
+    /// reason the accept loop cannot be stalled by one silent caller.
+    #[test]
+    fn an_unterminated_request_line_is_refused() {
+        assert!(read_request_line(&b"GET / HTTP/1.1\r\n"[..]).is_some());
+        assert!(read_request_line(&[b'A'; 4096][..]).is_none());
+        assert!(read_request_line(&b""[..]).is_none());
+    }
+    /// The half that lets `send` say "committed": the verdict arrives on the
+    /// ask that carries it, and no earlier answer is treated as one.
+    #[test]
+    fn a_final_verdict_is_the_only_answer_that_ends_the_wait() {
+        let mut answers = [
+            r#"{"stage":"mempool","tx_id":"ab"}"#.to_string(),
+            r#"{"stage":"voted","tx_id":"ab"}"#.to_string(),
+            r#"{"stage":"final","tx_id":"ab","height":7}"#.to_string(),
+        ]
+        .into_iter();
+        let mut asks = 0;
+        let answer = final_within("ab", 10, || {
+            asks += 1;
+            Ok(answers.next().unwrap_or_default())
+        })
+        .unwrap();
+        assert_eq!(asks, 3, "the wait stopped before the final answer");
+        assert!(
+            answer.contains(r#""stage":"final""#),
+            "the wait returned a non-final answer: {answer}"
+        );
+    }
+
+    /// The case the review asked for: a transaction that stays in the mempool.
+    /// The command has to fail, name the handle it could not settle, and say
+    /// the bytes are not published, because the process is about to end and
+    /// nothing will carry the transaction into a block afterwards.
+    #[test]
+    fn a_transaction_that_never_reaches_a_block_is_refused_and_not_called_published() {
+        let reason = final_within("cd", 4, || {
+            Ok(r#"{"stage":"mempool","tx_id":"cd"}"#.to_string())
+        })
+        .unwrap_err();
+        assert!(
+            reason.contains("cd") && reason.contains("did not reach a final block"),
+            "the refusal does not name what it could not settle: {reason}"
+        );
+        assert!(
+            reason.contains("in 4 asks"),
+            "the refusal does not say how long it waited: {reason}"
+        );
+        assert!(
+            reason.contains("not published"),
+            "the refusal does not say the bytes are not published: {reason}"
+        );
+    }
+
+    /// A trace that itself refuses is not a finality, and a node that answers
+    /// errors for the whole budget must not be able to talk the wait into
+    /// returning a string that looks like a verdict.
+    #[test]
+    fn a_refusing_trace_is_carried_into_the_refusal() {
+        let reason =
+            final_within("ef", 2, || Err(String::from("the Garden is not running"))).unwrap_err();
+        assert!(
+            reason.contains("the Garden is not running"),
+            "the refusal lost the reason the trace gave: {reason}"
+        );
+        assert!(
+            !reason.contains(r#""stage""#),
+            "a refusal was dressed as a verdict: {reason}"
+        );
+    }
+
+    /// Zero asks is not a quiet success: a budget of nothing can settle
+    /// nothing, so the caller is told rather than handed an empty answer.
+    #[test]
+    fn an_empty_budget_settles_nothing() {
+        assert!(final_within("gh", 0, || Ok(String::from(r#"{"stage":"final"}"#))).is_err());
     }
 }

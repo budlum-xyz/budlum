@@ -77,6 +77,7 @@ mod gates {
     pub mod cargo_vet;
     pub mod chain_id_is_not_hardcoded;
     pub mod ci_fanout_budget;
+    pub mod ci_full_battery_parity;
     pub mod ci_jobs_end_on_cancel;
     pub mod ci_trigger_coverage;
     pub mod ci_workflow_guards;
@@ -97,6 +98,7 @@ mod gates {
     pub mod domain_tags;
     pub mod economy_invariants;
     pub mod ee_workers_build_with_unwind;
+    pub mod every_adapter_has_an_intake_class;
     pub mod every_fuzz_target_is_run;
     pub mod every_opcode_forgery;
     pub mod evidence_provenance;
@@ -199,6 +201,7 @@ mod gates {
     pub mod serialize_map_keys_are_strings;
     pub mod shard_placement;
     pub mod slash_expression;
+    pub mod slashable_is_not_quietly_a_scheme_claim;
     pub mod source_reading;
     pub mod sources_are_whole;
     pub mod state_recovery_door;
@@ -220,6 +223,7 @@ mod gates {
     pub mod typos;
     pub mod udeps;
     pub mod uncheckable_proof;
+    pub mod unslashable_refusal_is_typed;
     pub mod untrusted_manifests;
     pub mod unwired_code_is_ratcheted;
     pub mod value_transfers;
@@ -630,6 +634,38 @@ const GATES: &[Gate] = &[
         run: gates::ci_trigger_coverage::run,
         run_args: None,
         self_test: gates::ci_trigger_coverage::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "ci-full-battery-parity",
+        replaces: None,
+        run: gates::ci_full_battery_parity::run,
+        run_args: None,
+        self_test: gates::ci_full_battery_parity::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "every-adapter-has-an-intake-class",
+        replaces: None,
+        run: gates::every_adapter_has_an_intake_class::run,
+        run_args: None,
+        self_test: gates::every_adapter_has_an_intake_class::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "slashable-is-not-quietly-a-scheme-claim",
+        replaces: None,
+        run: gates::slashable_is_not_quietly_a_scheme_claim::run,
+        run_args: None,
+        self_test: gates::slashable_is_not_quietly_a_scheme_claim::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "unslashable-refusal-is-typed",
+        replaces: None,
+        run: gates::unslashable_refusal_is_typed::run,
+        run_args: None,
+        self_test: gates::unslashable_refusal_is_typed::self_test,
         run_log: None,
     },
     Gate {

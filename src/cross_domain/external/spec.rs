@@ -182,7 +182,18 @@ pub enum SecurityBacking {
     /// `slashable` is carried because it is the difference between "the
     /// signers lose money if they lie" and "the signers lose nothing": an
     /// Ethereum sync committee is the second, and a reader is entitled to know
-    /// that without having to read the Altair spec. `scheme` names what the
+    /// that without having to read the Altair spec.
+    ///
+    /// It answers an economic question, and it has to answer the same question
+    /// in every domain or a consumer comparing two routes is comparing two
+    /// different things. One domain legitimately needs more: where the slashing
+    /// evidence works by extracting the signing key, the guarantee is only as
+    /// strong as that signature, so a breakable scheme makes the stake
+    /// unreachable in practice. An adapter that reads the field off the
+    /// observed scheme for that reason says so at the site with a
+    /// `SLASHABLE-DEPENDS-ON-SCHEME:` note, and the gate
+    /// `slashable-is-not-quietly-a-scheme-claim` fails when one does it
+    /// silently. `grep SLASHABLE-DEPENDS-ON-SCHEME` is the list. `scheme` names what the
     /// signers signed with: BLS12-381 for a sync committee, secp256k1
     /// for an EVM validator set, an ML-DSA scheme for a post-quantum one.
     SignatureSet {
@@ -498,6 +509,39 @@ impl VerificationPolicy {
             require_slashable: false,
         }
     }
+
+    /// Whether this policy admits a backing an adapter attested.
+    ///
+    /// The rule every adapter in this tree applies, stated once: when the
+    /// caller requires slashable backing, only a signature set whose signers
+    /// hold a bond the chain can take satisfies it. Accumulated work costs
+    /// energy but no miner has a bond Budlum can confiscate; a validity proof
+    /// is valid or it is not, nobody is slashed for it; an authority set and
+    /// an empty backing name nobody at all. Each adapter refuses these itself
+    /// when asked for a bond, and the registry re-applies the same rule after
+    /// the adapter returns, so an adapter that forgets does not open the door.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::UnslashableBacking`] when `require_slashable` is set
+    /// and `security` is anything but a slashable signature set.
+    pub const fn admits_backing(&self, security: &SecurityBacking) -> Result<(), AdapterError> {
+        if !self.require_slashable {
+            return Ok(());
+        }
+        match security {
+            SecurityBacking::SignatureSet {
+                slashable: true, ..
+            } => Ok(()),
+            SecurityBacking::SignatureSet {
+                slashable: false, ..
+            }
+            | SecurityBacking::Work { .. }
+            | SecurityBacking::Zk { .. }
+            | SecurityBacking::Authority { .. }
+            | SecurityBacking::None => Err(AdapterError::UnslashableBacking),
+        }
+    }
 }
 
 /// Why a verification was refused. Every variant names the rule, so a refusal
@@ -628,5 +672,81 @@ pub trait ExternalFinalityAdapter: Send + Sync {
     /// unanchored evidence before evaluating untrusted bytes.
     fn has_pinned_trust_anchor(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod policy_backing_tests {
+    use super::{AdapterError, ProofSystem, SecurityBacking, VerificationPolicy};
+    use crate::crypto::facts::ObservedScheme;
+    use crate::crypto::scheme::SchemeId;
+
+    fn bonded() -> SecurityBacking {
+        SecurityBacking::SignatureSet {
+            scheme: ObservedScheme::Scheme(SchemeId::ED25519),
+            signers: 67,
+            required: 67,
+            total_weight: 100,
+            slashable: true,
+        }
+    }
+
+    fn unslashable() -> [SecurityBacking; 5] {
+        [
+            SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG),
+                signers: 512,
+                required: 342,
+                total_weight: 512,
+                slashable: false,
+            },
+            SecurityBacking::Work {
+                difficulty_bits: 80,
+            },
+            SecurityBacking::Zk {
+                system: ProofSystem::Stark,
+                public_inputs_digest: [3; 32],
+            },
+            SecurityBacking::Authority { count: 4 },
+            SecurityBacking::None,
+        ]
+    }
+
+    /// Under the demand, exactly one shape passes: a slashable signature set.
+    /// Work, a proof, an authority set, an empty backing and an unslashable
+    /// set are refused with the one error every adapter uses for it.
+    #[test]
+    fn a_slashability_demand_admits_only_a_bonded_signature_set() {
+        let demanding = VerificationPolicy {
+            require_slashable: true,
+            ..VerificationPolicy::strict(10)
+        };
+        assert_eq!(demanding.admits_backing(&bonded()), Ok(()));
+        for security in unslashable() {
+            assert_eq!(
+                demanding.admits_backing(&security),
+                Err(AdapterError::UnslashableBacking),
+                "{security:?} must not satisfy require_slashable"
+            );
+        }
+    }
+
+    /// Without the demand the policy says nothing about the backing: every
+    /// shape passes, so the rule refuses exactly what the caller asked for.
+    #[test]
+    fn without_the_demand_every_backing_is_admitted() {
+        for policy in [
+            VerificationPolicy::strict(10),
+            VerificationPolicy::proven(10),
+        ] {
+            assert!(
+                !policy.require_slashable,
+                "the default policies make no demand"
+            );
+            assert_eq!(policy.admits_backing(&bonded()), Ok(()));
+            for security in unslashable() {
+                assert_eq!(policy.admits_backing(&security), Ok(()), "{security:?}");
+            }
+        }
     }
 }

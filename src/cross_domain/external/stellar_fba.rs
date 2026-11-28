@@ -42,6 +42,11 @@
 //! WIRING: implements `ExternalFinalityAdapter` for `ExternalDomainRegistry`
 //! admission/submission/slashing; `AdapterSpec` tag append joins `intake.rs`
 //! after concurrent intake hardening merges.
+//!
+//! INTAKE: economic-guard-only - Stellar SCP quorum-slice intersection is verified here and priced by
+//! `cross_domain/economic_guard.rs`; `intake.rs` does not name this adapter, so SCP
+//! finality cannot yet be folded into a global header. The missing piece is one
+//! `AdapterSpec` registration.
 
 use crate::crypto::facts::{CryptoObserver, ObservedScheme};
 use crate::crypto::scheme::SchemeId;

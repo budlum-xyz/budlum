@@ -2762,10 +2762,13 @@ impl Node {
                 if !self.first_sight(Seen::Presence(signal.validator, signal.window)) {
                     return;
                 }
-                self.presence_windows
-                    .insert(signal.validator, signal.window);
-                self.last_seen.insert(signal.validator, Instant::now());
+                let validator = signal.validator;
+                self.presence_windows.insert(validator, signal.window);
+                self.last_seen.insert(validator, Instant::now());
                 self.gossip(&GardenGossip::Presence(signal), from).await;
+                if validator == self.ledger.state.host() {
+                    self.report_to_budlum().await;
+                }
             }
         }
     }
@@ -2932,11 +2935,16 @@ impl Node {
             return;
         }
         let hash = vote.block_hash;
+        let voter = vote.voter;
+        self.last_seen.insert(voter, Instant::now());
         self.votes
             .entry(hash)
             .or_default()
-            .insert(vote.voter, vote.clone());
+            .insert(voter, vote.clone());
         self.gossip(&GardenGossip::Vote(vote), from).await;
+        if voter == self.ledger.state.host() {
+            self.report_to_budlum().await;
+        }
         self.consider(hash).await;
     }
 
@@ -3923,12 +3931,36 @@ impl Node {
             .await;
         }
         let tx_id = self.submit(tx_kind).await?;
-        Ok(json!({
+        Ok(Self::publish_answer(tx_id, content_id, kind, size))
+    }
+
+    /// The answer a publish hands back, as a pure function of what is known
+    /// when the transaction has entered the mempool.
+    ///
+    /// It says `accepted`, and it says `published: false`, because nothing at
+    /// this point has reached a block: `submit` signs the transaction, puts it
+    /// in this node's mempool and gossips it, and finality is a later event.
+    /// A caller that wants to know the object is final asks `trace` with the
+    /// `tx_id` this answer carries and waits for `"stage": "final"`.
+    ///
+    /// The words are part of the contract, not a log line: the phone prints
+    /// this JSON as its answer and the app renders it, so a caller must not be
+    /// able to read "accepted into the mempool" as "published".
+    fn publish_answer(
+        tx_id: Hash32,
+        content_id: Hash32,
+        kind: GardenContentKind,
+        size: u32,
+    ) -> Value {
+        json!({
             "tx_id": hex::encode(tx_id),
             "content_id": hex::encode(content_id),
             "kind": kind.label(),
             "size": size,
-        }))
+            "accepted": true,
+            "published": false,
+            "stage": "mempool",
+        })
     }
 
     fn trace(&self, tx_id: &Hash32) -> Result<Value, String> {
@@ -4259,6 +4291,40 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A publish answer may not be readable as "it is on the chain".
+    ///
+    /// `submit` returns when the signed transaction is in this node's mempool
+    /// and has been gossiped; nothing in that call waits for a block. The
+    /// answer carries the transaction id so `trace` can follow it to
+    /// `"stage": "final"`, and until that happens it must not claim the object
+    /// is published - a caller (the phone, the app, a script) prints this JSON
+    /// as the result of the command.
+    #[test]
+    fn a_publish_answer_names_the_mempool_and_not_publication() {
+        let answer = Node::publish_answer(
+            [7u8; 32],
+            [9u8; 32],
+            GardenContentKind::parse("message").expect("a known kind"),
+            5,
+        );
+        assert_eq!(answer.get("stage").and_then(Value::as_str), Some("mempool"));
+        assert_eq!(
+            answer.get("published").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(answer.get("accepted").and_then(Value::as_bool), Some(true));
+        // The handle a caller follows to finality is present and is the id of
+        // the transaction, not of the content.
+        assert_eq!(
+            answer.get("tx_id").and_then(Value::as_str),
+            Some(hex::encode([7u8; 32]).as_str())
+        );
+        assert_eq!(
+            answer.get("content_id").and_then(Value::as_str),
+            Some(hex::encode([9u8; 32]).as_str())
+        );
+    }
 
     fn config(name: &str, listen: &str) -> GardenNodeConfig {
         GardenNodeConfig {

@@ -9,7 +9,7 @@ on:
     branches: [main]
   pull_request:
     # Run on the normal protected bases and on stacked continuation bases.
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, agg/phase-5-pcs-claims, agg-phase-2, agg/phase-2-sig-claims, agg/phase-3-recursion-stark, agg/phase-4-program-claims, audit-2026-11-16, audit-testnet-2026-11, budlum, budlum-4-you, budlum-osv-coverage-agent, budlum-unification, budlum-universal, diag-rehearsal-a, diag-rehearsal-b, ortak-teslim]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, testnet-50, garden, budlum-stack, agg/phase-5-pcs-claims, agg-phase-2, agg/phase-2-sig-claims, agg/phase-3-recursion-stark, agg/phase-4-program-claims, audit-2026-11-16, audit-testnet-2026-11, budlum, budlum-4-you, budlum-osv-coverage-agent, budlum-unification, budlum-universal, diag-rehearsal-a, diag-rehearsal-b, ortak-teslim]
   # A manual run on a snapshot ref (a branch or a tag that names one commit).
   # Its concurrency group is the snapshot ref, so a push to a stacked branch
   # cannot cancel it, and a head gets one complete result.
@@ -35,10 +35,10 @@ concurrency:
   # `testnet-50` and `consensus-of-consensuses` are exempt for the same reason,
   # measured on the Garden branch on 2026-11-27: of the last 100 runs on it, 59
   # ended `cancelled`, and the last 40 CI runs carried only 4 distinct heads in
-  # 51 minutes (one every 13 minutes). This branch carries a pull request into
-  # `consensus-of-consensuses`, so the same rule applies here: a new head used
-  # to cancel the suite that was measuring the previous one, and the determinism
-  # jobs died that way twice in a row.
+  # 51 minutes (one every 13 minutes). On the head sampled at 22:50 the counters
+  # read 86 queued, 6 in progress, 2 skipped and 1 success, so the suite never
+  # produced a table to read. A queued run costs wall clock; a cancelled one
+  # costs the measurement, and these two branches exist to produce one.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.run_attempt == '1' &&
     github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' &&
     github.base_ref != 'testnet-50' &&
@@ -1544,7 +1544,9 @@ jobs:
     # NDK and Xcode, which belong to the mobile app build jobs.
     name: Mobile FFI bindings
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # Raised from 40: the Garden crate's first cold build of the core now
+    # shares this job. Later runs hit the cache above.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1559,7 +1561,20 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: mobile-ffi
-          workspaces: mobile/ffi
+          # The Garden surface keeps its own target directory and its own
+          # dependency graph (its `ml-dsa` pin cannot share one with
+          # mobile/ffi), so its build is cached beside the mobile one rather
+          # than rebuilt cold on every run of this job.
+          workspaces: |
+            mobile/ffi
+            mobile/garden-ffi
+      # `budlum-core` is a path dependency of the Garden crate, so its build
+      # script runs here and needs protoc. `mobile/ffi` does not depend on the
+      # core and never needed it, which is why this job had no installer; the
+      # pinned one is shared with every other job.
+      - name: Install protoc
+        if: always() && steps.rust.outcome == 'success'
+        run: python3 .github/scripts/install_protoc.py
       - name: Format
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path mobile/ffi/Cargo.toml --all -- --check
@@ -1569,6 +1584,15 @@ jobs:
       - name: Tests
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path mobile/ffi/Cargo.toml --locked
+      # The Garden surface is a crate of its own, so no step above touches it.
+      # Its unit tests are the only place the phone's status door is pinned:
+      # the loopback bind it opens on, the response head it refuses to send a
+      # cross-origin grant in, the 1024-byte request line it will not overrun
+      # and the socket timeout it sets. A test no workflow runs protects
+      # nothing, so they run here, on every pull request.
+      - name: Garden FFI tests (the phone's status door)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path mobile/garden-ffi/Cargo.toml --locked --bin garden-phone
       - name: Generate the Kotlin and Swift bindings
         if: always() && steps.rust.outcome == 'success'
         working-directory: mobile/ffi

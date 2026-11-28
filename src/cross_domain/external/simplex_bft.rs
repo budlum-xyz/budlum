@@ -42,6 +42,11 @@
 //! WIRING: implements [`ExternalFinalityAdapter`] and is invoked in production
 //! by [`crate::cross_domain::economic_guard`] for Simplex/`MonadBFT` ceiling
 //! checks and safety-violation slashing.
+//!
+//! INTAKE: economic-guard-only - Simplex BFT notarisation and finalisation are verified here and priced by
+//! `cross_domain/economic_guard.rs`; `intake.rs` does not name this adapter, so Simplex
+//! finality cannot yet be folded into a global header. The missing piece is one
+//! `AdapterSpec` registration.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::crypto::facts::{CryptoObserver, ObservedScheme};
@@ -1112,10 +1117,10 @@ impl SimplexBftAdapter {
         };
         let attested_event_root =
             (!bool::from(block.event_root.ct_eq(&[0u8; 32]))).then_some(block.event_root);
+        // Foreign Simplex committee stake has no local confiscation escrow,
+        // so the backing is not slashable from Budlum.
         if policy.require_slashable {
-            return Err(AdapterError::ConsensusRule {
-                rule: "caller policy requires slashable backing; foreign Simplex committee stake has no local confiscation escrow".into(),
-            });
+            return Err(AdapterError::UnslashableBacking);
         }
         let min_signed = notarize_signers.min(finalize_signers);
         let required_weight = min_simplex_supermajority(active_total);
@@ -1422,9 +1427,9 @@ mod tests {
         assert!(
             matches!(
                 adapter.verify(&raw, &slash_policy),
-                Err(AdapterError::ConsensusRule { .. })
+                Err(AdapterError::UnslashableBacking)
             ),
-            "foreign Simplex stake without local confiscation escrow must refuse require_slashable"
+            "foreign Simplex stake without local confiscation escrow must refuse require_slashable with the class that names the rule"
         );
         let mut facts = CryptoFacts::new();
         let att = adapter

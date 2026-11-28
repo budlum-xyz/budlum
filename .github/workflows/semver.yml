@@ -12,8 +12,16 @@ on:
   # `branches` filter of a stacked pull request against the root of the stack,
   # so the filter alone does not keep it out. This keeps one push from queueing
   # more work than the shared runner pool can finish before the next push cancels it.
+  #
+  # 2026-11-27: `testnet-50` was added to this trigger and to the job
+  # condition(s) below. It was a delivery base with an open pull request into
+  # it, and the condition named only `main` and `consensus-of-consensuses`, so
+  # the job(s) of this file reported `skipped` there. GitHub counts a skipped
+  # job as a passing check, so the branch looked gated and was not. The gate
+  # `ci-full-battery-parity` now fails when a branch listed in
+  # `.github/workflows/ci-full-battery-branches.txt` is left out of either place.
   pull_request:
-    branches: [main, consensus-of-consensuses, agg-phase-2, agg/phase-2-sig-claims, agg/phase-3-recursion-stark, agg/phase-4-program-claims, audit-2026-11-16, audit-testnet-2026-11, budlum, budlum-4-you, budlum-osv-coverage-agent, budlum-unification, budlum-universal, diag-rehearsal-a, diag-rehearsal-b, ortak-teslim]
+    branches: [main, consensus-of-consensuses, testnet-50, agg-phase-2, agg/phase-2-sig-claims, agg/phase-3-recursion-stark, agg/phase-4-program-claims, audit-2026-11-16, audit-testnet-2026-11, budlum, budlum-4-you, budlum-osv-coverage-agent, budlum-unification, budlum-universal, diag-rehearsal-a, diag-rehearsal-b, ortak-teslim]
 
 concurrency:
   group: semver-${{ github.ref }}
@@ -24,9 +32,11 @@ permissions:
 
 jobs:
   semver-check:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet`
+    # does not start this job; a pull request into a delivery base listed in
+    # `.github/workflows/ci-full-battery-branches.txt` always does. See the note
+    # at the top of the file; the gate is `ci-full-battery-parity`.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses","testnet-50"]'), github.event.pull_request.base.ref) }}
     # CI Expansion item 5: cargo-semver-checks, public API breakage detection.
     #
     # Hardening (2026-07-21): the old version carried `continue-on-error: true` on

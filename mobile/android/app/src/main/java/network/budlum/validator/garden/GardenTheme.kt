@@ -23,8 +23,11 @@ import network.budlum.validator.R
  * invented: a colour that is not in the tokens is not in this file.
  *
  * The radii come from the same place, and they matter more than they
- * look: panels and rows are square because the grid is the interface,
- * not decoration, and only controls and chips are allowed to soften.
+ * look: a panel is 16, measured on the chat shell in the file (`43:30406`,
+ * `43:28885`, both 1080 wide with `r=16`), and a control or a chip is 8.
+ * The role-named copy the Garden screens read lives in
+ * [GardenDesignTokens]; this file keeps the Material scheme built from the
+ * same values so a stock component cannot arrive in another palette.
  */
 private val Page = Color(0xFFFBFCFA)
 private val Ground = Color(0xFF060705)
@@ -56,13 +59,13 @@ private val budlumColors = lightColorScheme(
     onError = Chalk,
 )
 
-/** Panel and row square, control and chip 8, shell 12 - the token radii. */
+/** Panel 16, control and chip 8, and the shell that carries both. */
 private val budlumShapes = Shapes(
     extraSmall = RoundedCornerShape(0.dp),
     small = RoundedCornerShape(8.dp),
     medium = RoundedCornerShape(8.dp),
-    large = RoundedCornerShape(12.dp),
-    extraLarge = RoundedCornerShape(12.dp),
+    large = RoundedCornerShape(16.dp),
+    extraLarge = RoundedCornerShape(16.dp),
 )
 
 private val budlum = FontFamily(Font(R.font.budlum_regular))

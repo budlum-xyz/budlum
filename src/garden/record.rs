@@ -43,7 +43,7 @@ use crate::domain::types::Hash32;
 const RECORD_VERSION: u8 = 1;
 
 /// The scheme and path an invite record is written under.
-pub(crate) const RECORD_LINK_PREFIX: &str = "budlum://garden/join#";
+const RECORD_LINK_PREFIX: &str = "budlum://garden/join#";
 
 /// How long a record is good for when the caller does not say.
 ///
@@ -269,6 +269,9 @@ impl GardenRecord {
     pub fn to_qr(&self, local_address: Option<&str>) -> Result<String, String> {
         let content = match local_address {
             Some(address) if !address.is_empty() => {
+                if !is_safe_qr_authority(address) {
+                    return Err("local qr address contains disallowed URL characters".into());
+                }
                 let body = self.to_link();
                 let fragment = body
                     .strip_prefix(RECORD_LINK_PREFIX)
@@ -284,6 +287,14 @@ impl GardenRecord {
             ));
         }
         Ok(content)
+    }
+
+    /// True when `link` is shaped as either a direct `budlum://garden/join#...`
+    /// record link or a local `http://<address>/g#<record>` QR payload.
+    #[must_use]
+    pub(super) fn looks_like_record(link: &str) -> bool {
+        let trimmed = link.trim();
+        trimmed.starts_with(RECORD_LINK_PREFIX) || local_qr_body(trimmed).is_some()
     }
 
     /// Read a link back. This does not judge the record: it only turns the
@@ -361,10 +372,17 @@ impl GardenRecord {
 ///
 /// Only the path this code writes is accepted. A stray `http` link that
 /// happens to carry a `#` is not an invite and is not read as one.
+fn is_safe_qr_authority(address: &str) -> bool {
+    !address.is_empty()
+        && address
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !matches!(b, b'/' | b'\\' | b'@' | b'?' | b'#'))
+}
+
 fn local_qr_body(text: &str) -> Option<&str> {
     let rest = text.strip_prefix("http://")?;
     let (address, fragment) = rest.split_once("/g#")?;
-    if address.is_empty() || address.contains('/') {
+    if !is_safe_qr_authority(address) || fragment.is_empty() || fragment.contains('#') {
         return None;
     }
     Some(fragment)
@@ -763,5 +781,13 @@ mod tests {
             links.push(record.to_link());
         }
         assert_ne!(links[0], links[1], "two owners produced one record");
+        let sample = GardenRecord::parse(&links[0]).unwrap();
+        let qr = sample.to_qr(Some("192.168.1.5:4800")).unwrap();
+        assert!(GardenRecord::looks_like_record(&qr));
+        assert_eq!(GardenRecord::parse(&qr).unwrap(), sample);
+        assert!(sample.to_qr(Some("evil.example@192.168.1.5:4800")).is_err());
+        assert!(!GardenRecord::looks_like_record(
+            "http://evil.example@192.168.1.5:4800/g#abc"
+        ));
     }
 }

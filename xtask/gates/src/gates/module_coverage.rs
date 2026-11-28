@@ -32,7 +32,6 @@ const MODULE_PREFIXES: &[(&str, &str)] = &[
     ("budlum:aggregation", "src/aggregation/"),
     ("budlum:ai", "src/ai/"),
     ("budlum:ai_inference", "src/ai_inference/"),
-    ("budlum:app_registry", "src/app_registry/"),
     ("budlum:bat3", "src/bat3/"),
     ("budlum:bns", "src/bns/"),
     ("budlum:budlumxyz", "src/budlumxyz/"),

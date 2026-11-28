@@ -722,10 +722,10 @@ impl CasperFfgAdapter {
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
     ) -> Result<(FinalityAttestation, bool), AdapterError> {
+        // External Casper FFG committee stake is not escrowed locally, so it
+        // is not slashable from Budlum.
         if policy.require_slashable {
-            return Err(AdapterError::ConsensusRule {
-                rule: "the policy requires slashable backing; external Casper FFG committee stake is not escrowed locally".to_string(),
-            });
+            return Err(AdapterError::UnslashableBacking);
         }
         let (committee, parsed) = self.validate_envelope_and_epochs(evidence, policy)?;
         let (source_signers, source_all_pq) = self.check_vote_set(
@@ -1439,7 +1439,11 @@ mod tests {
         let err = adapter
             .verify(&evidence_with(&signers, 3, 3), &strict)
             .unwrap_err();
-        assert!(matches!(err, AdapterError::ConsensusRule { .. }));
+        assert!(
+            matches!(err, AdapterError::UnslashableBacking),
+            "unbonded external committee stake must refuse with the class that names the rule, \
+             got {err:?}"
+        );
     }
 
     #[test]
