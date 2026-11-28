@@ -128,10 +128,25 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("net.java.dev.jna:jna:5.15.0@aar")
+    // Section 2.5 draws a QR and section 2.6 reads one. zxing core is the
+    // encoder and decoder only: no activity, no camera code of its own.
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("androidx.camera:camera-camera2:1.4.0")
+    implementation("androidx.camera:camera-lifecycle:1.4.0")
+    implementation("androidx.camera:camera-view:1.4.0")
 
     testImplementation("junit:junit:4.13.2")
     // Android's org.json API is stubbed in local JVM unit tests.
     testImplementation("org.json:json:20240303")
+    // Measured on run 44982930517: the emulator booted, then
+    // connectedDebugAndroidTest reported "Starting 0 tests" and crashed with
+    // "ClassNotFoundException: Didn't find class
+    // androidx.test.runner.AndroidJUnitRunner". The instrumentation runner
+    // named in defaultConfig lives in androidx.test:runner, and the POM of
+    // androidx.test.ext:junit:1.2.1 lists annotation, storage, core, monitor,
+    // junit and kotlin-stdlib but not runner, so the test APK shipped without
+    // the class the manifest asked it to load.
+    androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.work:work-testing:2.10.0")
 }

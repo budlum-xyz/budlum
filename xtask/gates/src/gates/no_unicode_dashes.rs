@@ -224,8 +224,7 @@ pub fn self_test() -> Result<String, String> {
     copy_tree(&clean, &wf).map_err(|e| format!("cannot stage workflow tree: {e}"))?;
     let wf_dir = wf.join(".github/workflows");
     fs::create_dir_all(&wf_dir).map_err(|e| format!("cannot create workflow dir: {e}"))?;
-    let semver =
-        "jobs:\n  x:\n    name: Semver Check (Madde 5 \u{2014} public API breakage gate)\n";
+    let semver = "jobs:\n  x:\n    name: Semver Check \u{2014} public API breakage gate\n";
     fs::write(wf_dir.join("semver.yml"), semver)
         .map_err(|e| format!("cannot write semver.yml: {e}"))?;
     if run(&wf).is_ok() {

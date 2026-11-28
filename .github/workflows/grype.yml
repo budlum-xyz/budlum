@@ -2,7 +2,7 @@
 #
 # WHY ON TOP OF THE EXISTING SCANNERS: the repo already has cargo-audit (RustSec),
 # cargo-deny (RustSec) and OSV-Scanner (the OSV.dev aggregator). Grype adds two
-# Ekliyor:
+# distinct signals:
 #
 #   1) The EPSS score. A measurable answer to "is this vulnerability exploited in
 #      the wild"; present neither in RustSec nor OSV.dev. It changes priority:
@@ -25,7 +25,7 @@ name: Grype
 
 on:
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses, agg/phase-5-pcs-claims]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, agg/phase-5-pcs-claims]
   push:
     branches: [main]
   schedule:
@@ -38,7 +38,7 @@ permissions:
 
 concurrency:
   group: grype-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 jobs:
   grype:

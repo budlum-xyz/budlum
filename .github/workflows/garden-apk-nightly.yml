@@ -1,0 +1,66 @@
+name: Garden APK acceptance
+
+# The ten APK checks of section 9.1, run late so a change to Garden can show
+# its result without every pull-request push paying for two binaries and a
+# node farm. The APK build itself is `garden-apk.yml`; this one does not build
+# an Android artifact, it builds the same phone library for the host and runs
+# the checks against a real node, which is what the checks assert.
+#
+# The gate at the end is the point of the job: a suite that quietly lost a
+# test would still print "9 passed", so the log is held to the ten names by
+# `budlum-gates garden-apk` rather than by the pass count.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 3 * * *'
+
+concurrency:
+  group: garden-apk-acceptance-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  garden-apk:
+    name: Garden APK acceptance (ten checks, gate held)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'refs/heads/testnet' || github.ref }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: python3 .github/scripts/install_protoc.py
+      - name: Gate canary (proof it is not vacuous)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- garden-apk --self-test
+      - name: Build the two binaries the checks drive
+        run: |
+          set -euo pipefail
+          cargo build --bin budlum-core
+          cargo build -p budlum-garden-ffi --bin garden-phone
+      - name: The ten checks, one thread at a time
+        run: |
+          set -euo pipefail
+          cargo test --test garden_apk -- --test-threads=1 2>&1 | tee /tmp/garden-apk.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- garden-apk /tmp/garden-apk.txt
+      - name: Keep the log when a check fails
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: garden-apk-log
+          path: |
+            /tmp/garden-apk.txt
+            /tmp/garden-node.log
+          if-no-files-found: warn
+          retention-days: 14

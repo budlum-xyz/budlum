@@ -5,7 +5,10 @@ pub mod cold_quorum;
 pub mod cold_wallet;
 pub mod commitment_tree;
 pub mod domains;
+pub mod finality_gate;
 pub mod global_block;
+pub mod liquidation_proof;
+pub mod notary;
 pub mod pq_anchor;
 pub mod pq_anchor_verify;
 pub mod proof_market;
@@ -45,12 +48,28 @@ pub use anchor_production::{
 };
 #[cfg(feature = "bpqs-research")]
 pub use budlum_bpqs as bpqs_research;
+pub use liquidation_proof::{
+    build_reserve_inclusion_proof, build_reserve_state_root, execute_liquidation,
+    execute_proven_cross_domain_liquidation, prove_position_health, reserve_observation_leaf,
+    AmmReserveSnapshot, CollateralLegSpec, CrossDomainLiquidationParams, CrossDomainSeizureLeg,
+    LiquidationError, LiquidationOutcome, LiquidationPosition, ProofCarryingHealth,
+    ProvenLiquidationResult, ProvenReserveObservation, LIQUIDATION_PENALTY_BPS, LIQ_BONUS_MAX_BPS,
+    LIQ_CLOSE_FACTOR_MAX_BPS, LIQ_RESERVE_LEAF_TAG, MAX_BATCH_SIZE, MAX_OBSERVATIONS,
+    MAX_TWAP_EPOCHS, MIN_TWAP_EPOCHS,
+};
+pub use notary::{
+    anchor_notary_entries, verify_notary_proof_offline, NotaryAnchorRequest, NotaryEntry,
+    NotaryError, NotaryInclusionProof, NotaryTimestampProof, SealAnchorInclusionProof,
+    StaticSealKeySet, VerifiedNotaryTimestamp,
+};
 pub use pq_anchor::{
     aggregate_finality_roots, anchor_due, anchor_leaf_digest, anchor_payload_for, assemble_anchor,
-    build_anchor_for_height, emit_anchor_node_local, enforce_anchor_mode,
-    rotate_anchor_key_with_committee, verify_anchor_full, verify_anchor_light, AnchorError,
-    AnchorLeaf, AnchorMode, AnchorSignature, AnchorSignatureAlgorithm, AnchorSigner,
-    EmissionOutcome, EmissionRequest, HsmSignerStub, PqAnchor, SignerBackend, ANCHOR_INTERVAL,
+    build_anchor_for_height, build_anchor_inclusion_proof, emit_anchor_node_local,
+    enforce_anchor_mode, rotate_anchor_key_with_committee, verify_anchor_full,
+    verify_anchor_leaf_light, verify_anchor_light, AnchorError, AnchorInclusionProof, AnchorLeaf,
+    AnchorMode, AnchorSignature, AnchorSignatureAlgorithm, AnchorSigner, EmissionOutcome,
+    EmissionRequest, HsmSignerStub, PqAnchor, SignerBackend, ANCHOR_INTERVAL,
+    MAX_ANCHOR_MERKLE_DEPTH, MAX_ANCHOR_SIGNATURES,
 };
 pub use proof_market::{
     ProofMarketState, ProofMarketTx, ProofReceipt, ProofTask, ProofTaskKind, ProofTaskStatus,
@@ -62,5 +81,8 @@ pub use root_seal::{
     seal_due, RootSeal, RootSealLog, SealError, SealKeys, SoftwareSealSigner, ROOT_SEAL_INTERVAL,
 };
 pub use universal_finality::{
-    compose_cross_domain_route, FinalityGuarantee, FinalityReversibility, RouteFinalityBound,
+    compose as compose_global_finality_certificate, compose_cross_domain_route,
+    DomainFinalityEntry, DomainFinalityInclusionProof, EconomicSecurityBound, FinalityBucket,
+    FinalityComposeError, FinalityGuarantee, FinalityPendingReason, FinalityReversibility,
+    FinalityVerdict, GlobalFinalityCertificate, RouteFinalityBound, FINALITY_BINDS_ALL,
 };

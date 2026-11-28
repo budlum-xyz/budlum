@@ -15,7 +15,7 @@ mod tests {
         Address::from([b; 32])
     }
 
-    /// REGRESSION: finalize before end_epoch is a no-op.
+    /// REGRESSION: finalize before `end_epoch` is a no-op.
     #[test]
     fn finalize_before_end_epoch_noop() {
         let proposer = addr(1);
@@ -119,7 +119,7 @@ mod tests {
         assert_ne!(trie.root(), single_root);
     }
 
-    /// REGRESSION: burn_from clips and returns burned amount (no panic).
+    /// REGRESSION: `burn_from` clips and returns burned amount (no panic).
     #[test]
     fn burn_from_clips_to_balance() {
         let mut state = crate::core::account::AccountState::new();

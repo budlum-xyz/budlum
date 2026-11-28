@@ -16,11 +16,9 @@
 //! `len(..)` fields are kept anyway so the preimage is the formula above,
 //! field for field, and a second implementation can follow the text.
 //!
-//! WIRING: the block executor reaches this module through the
-//! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
-//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
-//! other object-layer read methods. Both land in a later step; until then
-//! the state is held by `SettlementRegistries::object_layer` and closed on
+//! WIRING: unwired - SettlementTx::ObjectLayer and bud_getCharter /
+//! bud_getAssetClass / bud_getAsset RPC doors land in a subsequent step; until
+//! then the state is held by `SettlementRegistries::object_layer` and closed on
 //! the testnet by `ACTIVATION`.
 
 use crate::core::hash::hash_fields_bytes;
@@ -111,6 +109,85 @@ impl AssetId {
             &len_field(native_id),
             native_id,
         ]))
+    }
+
+    /// Derive the unified 32-byte cross-domain bridge asset identifier for
+    /// `(home_domain, local_asset)` using the canonical domain-namespaced rule.
+    ///
+    /// Convenience: bridges the object layer to the unified 32-byte
+    /// cross-domain asset namespace shared by the bridge, UEL, and payment router.
+    #[must_use]
+    pub fn universal_bridge_id(
+        home_domain: DomainId,
+        local_asset: &[u8],
+    ) -> crate::cross_domain::bridge::AssetId {
+        crate::cross_domain::bridge::AssetId::for_domain(home_domain, local_asset)
+    }
+
+    /// Validate a CAIP-19 asset identifier string
+    /// (`<chain_namespace>:<chain_reference>/<asset_namespace>:<asset_reference>[/<token_id>]`).
+    ///
+    /// Convenience: validates external CAIP-19 asset references before binding
+    /// them to canonical 32-byte domain asset identifiers.
+    #[must_use]
+    pub fn is_valid_caip19(caip19: &str) -> bool {
+        if caip19.is_empty() || caip19.len() > 256 || !caip19.is_ascii() {
+            return false;
+        }
+        let mut segments = caip19.split('/');
+        let Some(chain_id) = segments.next() else {
+            return false;
+        };
+        let Some(asset_type) = segments.next() else {
+            return false;
+        };
+        let token_id = segments.next();
+        if segments.next().is_some() {
+            return false;
+        }
+
+        let Some((chain_ns, chain_ref)) = chain_id.split_once(':') else {
+            return false;
+        };
+        let Some((asset_ns, asset_ref)) = asset_type.split_once(':') else {
+            return false;
+        };
+
+        let valid_ns = |s: &str| {
+            (3..=8).contains(&s.len())
+                && s.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        };
+        let valid_chain_ref = |s: &str| {
+            (1..=32).contains(&s.len())
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        };
+        let valid_asset_ref = |s: &str| {
+            (1..=128).contains(&s.len())
+                && s.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_' || b == b'%'
+                })
+        };
+        let valid_token_id = |s: &str| {
+            (1..=78).contains(&s.len())
+                && s.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_' || b == b'%'
+                })
+        };
+
+        if !valid_ns(chain_ns) || !valid_chain_ref(chain_ref) {
+            return false;
+        }
+        if !valid_ns(asset_ns) || !valid_asset_ref(asset_ref) {
+            return false;
+        }
+        if let Some(tid) = token_id {
+            if !valid_token_id(tid) {
+                return false;
+            }
+        }
+        true
     }
 }
 

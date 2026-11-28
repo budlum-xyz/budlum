@@ -90,11 +90,11 @@ pub enum SlashingCondition {
 const REGISTRY_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/permissionless-registry";
 
 impl SlashingCondition {
-    pub fn as_bytes(&self) -> &'static [u8] {
+    pub const fn as_bytes(&self) -> &'static [u8] {
         match self {
-            SlashingCondition::DoubleSign => b"double_sign",
-            SlashingCondition::LivenessFault => b"liveness_fault",
-            SlashingCondition::MaliciousBehaviour => b"malicious_behaviour",
+            Self::DoubleSign => b"double_sign",
+            Self::LivenessFault => b"liveness_fault",
+            Self::MaliciousBehaviour => b"malicious_behaviour",
         }
     }
 }
@@ -129,7 +129,7 @@ impl Registration {
     /// Eligible to actively perform the role right now. This is purely a
     /// Function of bonded stake + status (never any allow-list): the member
     /// Must be `Active` and still hold a positive bond.
-    pub fn is_active(&self) -> bool {
+    pub const fn is_active(&self) -> bool {
         matches!(self.status, MemberStatus::Active) && self.stake > 0
     }
 
@@ -150,7 +150,7 @@ impl Registration {
     /// bond is still locked and still slashable. Otherwise a relayer would
     /// submit its transaction and then immediately call `begin_unbonding` to
     /// step out of responsibility.
-    pub fn is_slashable(&self) -> bool {
+    pub const fn is_slashable(&self) -> bool {
         matches!(
             self.status,
             MemberStatus::Active
@@ -162,7 +162,7 @@ impl Registration {
     /// Whether this registration currently holds operational authority to
     /// act in its role (`Active`, or clean `Unbonding` whose bond is still
     /// locked; never `Slashed` or `SlashedUnbonding`).
-    fn has_role_authority(&self) -> bool {
+    const fn has_role_authority(&self) -> bool {
         matches!(
             self.status,
             MemberStatus::Active | MemberStatus::Unbonding { .. }
@@ -222,43 +222,48 @@ pub enum RegistryError {
         account: Address,
         role: RoleId,
     },
+    /// The zero address cannot register a role bond.
+    ZeroAddress,
 }
 
 impl std::fmt::Display for RegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RegistryError::InsufficientStake { required, provided } => write!(
+            Self::InsufficientStake { required, provided } => write!(
                 f,
                 "insufficient stake: required {required}, provided {provided}"
             ),
-            RegistryError::AlreadyRegistered { account, role } => {
+            Self::AlreadyRegistered { account, role } => {
                 write!(f, "{account} already registered as {role}")
             }
-            RegistryError::NotRegistered { account, role } => {
+            Self::NotRegistered { account, role } => {
                 write!(f, "{account} is not registered as {role}")
             }
-            RegistryError::NotActive { account, role } => {
+            Self::NotActive { account, role } => {
                 write!(f, "{account} is not active as {role}")
             }
-            RegistryError::StillUnbonding {
+            Self::StillUnbonding {
                 release_epoch,
                 current_epoch,
             } => write!(
                 f,
                 "stake still unbonding until epoch {release_epoch} (now {current_epoch})"
             ),
-            RegistryError::UnsupportedRole { role } => {
+            Self::UnsupportedRole { role } => {
                 write!(f, "role {role} has no bond registration path")
             }
-            RegistryError::RelayerNotActive { account } => write!(
+            Self::RelayerNotActive { account } => write!(
                 f,
                 "{account} is not an active relayer (register with stake first)"
             ),
-            RegistryError::AlreadySlashed { account, role } => {
+            Self::AlreadySlashed { account, role } => {
                 write!(f, "{account} is already slashed as {role}")
             }
-            RegistryError::StakeOverflow { account, role } => {
+            Self::StakeOverflow { account, role } => {
                 write!(f, "stake of {account} as {role} would overflow")
+            }
+            Self::ZeroAddress => {
+                write!(f, "zero address cannot register a role bond")
             }
         }
     }
@@ -391,6 +396,7 @@ fn permissionless_offence_window(
     proof: &crate::registry::evidence::SlashingProof,
 ) -> Option<(u8, u64, u64)> {
     use crate::registry::evidence::SlashingProof;
+    use sha2::{Digest, Sha256};
     match proof {
         SlashingProof::Liveness {
             window_start_epoch,
@@ -399,7 +405,20 @@ fn permissionless_offence_window(
         } => Some((1, *window_start_epoch, *window_end_epoch)),
         SlashingProof::DoubleSign { height, .. } => Some((2, *height, *height)),
         SlashingProof::InvalidSignatureSpam { epoch, .. } => Some((3, *epoch, *epoch)),
-        SlashingProof::Other { .. } => None,
+        SlashingProof::Other { tag, data } => {
+            let mut hasher = Sha256::new();
+            hasher.update(b"BDLM_SLASH_OTHER_V1");
+            hasher.update((tag.len() as u64).to_le_bytes());
+            hasher.update(tag.as_bytes());
+            hasher.update((data.len() as u64).to_le_bytes());
+            hasher.update(data);
+            let digest = hasher.finalize();
+            let mut hi = [0u8; 8];
+            let mut lo = [0u8; 8];
+            hi.copy_from_slice(&digest[0..8]);
+            lo.copy_from_slice(&digest[8..16]);
+            Some((4, u64::from_le_bytes(hi), u64::from_le_bytes(lo)))
+        }
     }
 }
 
@@ -415,8 +434,10 @@ pub struct SlashingRecord {
 
 mod registrations_as_seq {
     use super::{Address, Registration, RoleId};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;
+
+    const MAX_DESER_REGISTRATIONS: usize = 1_000_000;
 
     pub fn serialize<S>(
         map: &BTreeMap<(RoleId, Address), Registration>,
@@ -436,10 +457,21 @@ mod registrations_as_seq {
         D: Deserializer<'de>,
     {
         let entries = Vec::<Registration>::deserialize(deserializer)?;
-        Ok(entries
-            .into_iter()
-            .map(|r| ((r.role, r.account), r))
-            .collect())
+        if entries.len() > MAX_DESER_REGISTRATIONS {
+            return Err(de::Error::custom(
+                "registration table exceeds deserialization safety cap",
+            ));
+        }
+        let mut map = BTreeMap::new();
+        for r in entries {
+            let key = (r.role, r.account);
+            if map.insert(key, r).is_some() {
+                return Err(de::Error::custom(
+                    "duplicate registration entry for (role, account)",
+                ));
+            }
+        }
+        Ok(map)
     }
 }
 
@@ -457,7 +489,8 @@ impl PermissionlessRegistry {
         }
     }
 
-    pub fn with_params(params: RegistryParams) -> Self {
+    #[cfg(test)]
+    pub(crate) const fn with_params(params: RegistryParams) -> Self {
         Self {
             registrations: BTreeMap::new(),
             params,
@@ -470,11 +503,11 @@ impl PermissionlessRegistry {
         }
     }
 
-    pub fn params(&self) -> &RegistryParams {
+    pub const fn params(&self) -> &RegistryParams {
         &self.params
     }
 
-    pub fn set_params(&mut self, params: RegistryParams) {
+    pub const fn set_params(&mut self, params: RegistryParams) {
         self.params = params;
     }
 
@@ -490,6 +523,9 @@ impl PermissionlessRegistry {
         stake: u64,
         current_epoch: u64,
     ) -> Result<(), RegistryError> {
+        if account == Address::zero() {
+            return Err(RegistryError::ZeroAddress);
+        }
         if stake < self.params.min_stake {
             return Err(RegistryError::InsufficientStake {
                 required: self.params.min_stake,
@@ -693,6 +729,9 @@ impl PermissionlessRegistry {
         total_stake: u64,
         current_epoch: u64,
     ) {
+        if account == Address::zero() {
+            return;
+        }
         let key = (role, account);
         let unbonding_epochs = self.params.unbonding_epochs;
         match self.registrations.get_mut(&key) {
@@ -1723,11 +1762,11 @@ impl PermissionlessRegistry {
             })
     }
 
-    pub fn delegation_count(&self) -> usize {
+    pub const fn delegation_count(&self) -> usize {
         self.delegations.len()
     }
 
-    pub fn delegation_unbonding_count(&self) -> usize {
+    pub const fn delegation_unbonding_count(&self) -> usize {
         self.delegation_unbonding.len()
     }
 
@@ -1739,12 +1778,12 @@ impl PermissionlessRegistry {
             .collect()
     }
 
-    pub fn validator_commission_count(&self) -> usize {
+    pub const fn validator_commission_count(&self) -> usize {
         self.validator_commissions.len()
     }
 
     #[must_use]
-    pub fn slashing_history_count(&self) -> usize {
+    pub const fn slashing_history_count(&self) -> usize {
         self.slashing_history.len()
     }
 
@@ -2650,7 +2689,7 @@ mod tests {
         reg.register_attester(addr(30), 5_000, 0).unwrap();
         // Bond on bond is refused - a second
         // registration of the same role must not stack stake or reset
-        // cooldowns (F04's seam).
+        // cooldowns (bypassing cooldown accounting).
         assert!(
             reg.register_attester(addr(30), 6_000, 0).is_err(),
             "bonding an attester role twice must refuse"

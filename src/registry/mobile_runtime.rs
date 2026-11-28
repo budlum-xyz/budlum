@@ -548,7 +548,7 @@ impl MobileValidatorController {
 
     /// Run iOS `BGProcessingTaskRequest` background job (Section 7.10 item 4).
     /// Requires `requires_external_power == true` and `requires_network_connectivity == true`.
-    /// exposed for iOS `BGTaskScheduler` UniFFI bridge.
+    /// exposed for iOS `BGTaskScheduler` `UniFFI` bridge.
     ///
     /// # Errors
     ///

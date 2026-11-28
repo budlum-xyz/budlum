@@ -434,14 +434,61 @@ mod tests {
     /// How many times the acceptance sweep repeats each loss case. The
     /// directive asks for 10 000 independent trials over `k` in `{100, 1000,
     /// 4096}`; that is the nightly figure and it is reached by setting
-    /// `BUDLUM_BUD3_ACCEPTANCE_TRIALS`. The default keeps an ordinary debug
-    /// `cargo test --lib` in the same shape at a fraction of the cost, which is
-    /// the split `pq_vectors_differential_random_inputs` already uses.
+    /// `BUDLUM_BUD3_ACCEPTANCE_TRIALS`. The everyday `cargo test --lib` keeps
+    /// the sweep's shape (both loss models, every `k`) at one trial per case:
+    /// measured at eight trials a single acceptance test ran 73 of the suite's
+    /// 84 minutes on a two-core host, so the default is a smoke cost, not a
+    /// statistical bar. The nightly `bud3_fountain_acceptance_suite` and an
+    /// explicit `BUDLUM_BUD3_ACCEPTANCE_TRIALS=10000` keep the directive's
+    /// 99.99 % figure.
+    const DEFAULT_ACCEPTANCE_TRIALS: usize = 1;
+
+    /// Pure so the default and the fail-closed parse are testable without
+    /// touching the process environment (env edits race the parallel suite).
+    fn trials_from(raw: Option<&str>) -> usize {
+        raw.and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_ACCEPTANCE_TRIALS)
+    }
+
     fn acceptance_trials() -> usize {
-        std::env::var("BUDLUM_BUD3_ACCEPTANCE_TRIALS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8)
+        trials_from(
+            std::env::var("BUDLUM_BUD3_ACCEPTANCE_TRIALS")
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    /// The everyday suite must not inherit a multi-hour sweep: the default
+    /// stays a smoke cost (one trial per loss case) or the suite's wall clock
+    /// belongs to this single test.
+    #[test]
+    fn acceptance_default_trials_stay_cheap() {
+        assert_eq!(
+            trials_from(None),
+            DEFAULT_ACCEPTANCE_TRIALS,
+            "the lib-suite default is the cost ceiling for this sweep"
+        );
+        assert!(
+            trials_from(None) <= 2,
+            "default trials rose to {}: the everyday suite pays for it on every run",
+            trials_from(None)
+        );
+    }
+
+    /// The directive's stronger figures stay reachable through the env, and a
+    /// malformed value falls closed to the cheap default instead of a panic
+    /// or an accidental mega-sweep.
+    #[test]
+    fn acceptance_trials_env_overrides_and_fails_closed() {
+        assert_eq!(trials_from(Some("1")), 1);
+        assert_eq!(trials_from(Some("8")), 8);
+        assert_eq!(trials_from(Some("10000")), 10_000);
+        assert_eq!(
+            trials_from(Some("not-a-number")),
+            DEFAULT_ACCEPTANCE_TRIALS,
+            "a malformed override must fall closed to the default"
+        );
+        assert_eq!(trials_from(Some("-3")), DEFAULT_ACCEPTANCE_TRIALS);
     }
 
     /// A deterministic index generator: the same trial always drops the same
@@ -600,7 +647,11 @@ mod tests {
             "both loss models ran every k in the sweep"
         );
         // The directive's bar: at least 99.99 % recovery. Stated as a ratio so
-        // the nightly figure and the default both read the same rule.
+        // the nightly figure and the default both read the same rule. At the
+        // debug default the denominator is `trials * 6`, far below 10 000, so
+        // here the rule degenerates into "no failure at all"; the sweep that
+        // actually resolves 99.99 % is `bud3_fountain_acceptance_suite`, which
+        // carries the same inequality at 10 000+ trials per k.
         assert!(
             failures * 10_000 <= decoded,
             "T6 wants at least 99.99 % recovery; {failures} of {decoded} trials failed"
@@ -905,7 +956,18 @@ mod tests {
             let mut pool = enc.source_symbols();
             pool.extend(enc.repair_symbols(0, repair_budget).unwrap());
 
-            let trials = 3_400u32;
+            let trials = 10_200u32;
+            // A 99.99 % bar is only a *measurement* when the denominator can
+            // absorb one failure. Below 10 000 trials the inequality below is
+            // a strict zero-failure rule wearing a ratio's clothes, so the run
+            // would print a figure it never resolved. At 10 200 trials one
+            // failure still clears the bar and two do not, which is what makes
+            // the ratio a measurement rather than a restatement of "no
+            // failure".
+            assert!(
+                trials >= 10_000,
+                "the 99.99 % bar needs at least 10 000 trials per k; this sweep runs {trials}"
+            );
             let mut successes = 0u32;
             for trial in 0..trials {
                 let mut dec = SegmentDecoder::new(0, data.len() as u64, &prof).unwrap();

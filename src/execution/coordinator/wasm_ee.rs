@@ -1,10 +1,10 @@
-//! WASM (CosmWasm ABI) execution environment (`EeId::WASM` = `0x02`) over `HostApi`.
+//! WASM (`CosmWasm` ABI) execution environment (`EeId::WASM` = `0x02`) over `HostApi`.
 //!
 //! Implements  items 1-3 and the WASM leg of :
 //! - Deterministic WebAssembly module validation: refuses IEEE-754 floating-point
 //!   types (`f32`/`f64`) and opcodes, enforces the 64 MiB (1024-page) memory ceiling,
 //!   and refuses IBC entry-point exports (`ibc_channel_*`, `ibc_packet_*`).
-//! - CosmWasm storage/contract namespaces (`ee/wasm/code`, `ee/wasm/contract`,
+//! - `CosmWasm` storage/contract namespaces (`ee/wasm/code`, `ee/wasm/contract`,
 //!   `ee/wasm/store`) backed strictly by `HostApi`.
 //! - Refuses `StakingMsg`, `DistributionMsg`, `GovMsg`, and `IbcMsg` messages.
 //! - Supports `BudlumMsg::UniversalCall` (`SubMsg` reply model), `BudlumQuery::UniversalView`,
@@ -13,8 +13,9 @@
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::execution::coordinator::assets::{
-    decode_pointer_bytecode, resolve_pointer_party_for_home, AssetStandard, MovePointerFlavor,
-    MovePointerOp, PointerDescriptor, SplPointerOp,
+    is_pointer_bytecode_prefixed, resolve_pointer_party_for_home,
+    verify_canonical_pointer_bytecode, AssetStandard, MovePointerFlavor, MovePointerOp,
+    PointerDescriptor, SplPointerOp,
 };
 use crate::execution::coordinator::evm_ee::solidity_selector;
 use crate::execution::coordinator::state::{NS_WASM_CODE, NS_WASM_CONTRACT, NS_WASM_STORE};
@@ -34,10 +35,10 @@ use sha3::Keccak256;
 
 /// Maximum WASM linear memory in 64 KiB pages (`1024 * 64 KiB = 64 MiB`, 8.3.5 item 1).
 pub const MAX_WASM_MEMORY_PAGES: u32 = 1_024;
-/// Maximum CosmWasm module bytecode size (2 MiB).
+/// Maximum `CosmWasm` module bytecode size (2 MiB).
 pub const MAX_WASM_CODE_BYTES: usize = 2 * 1024 * 1024;
 
-/// Forbidden CosmWasm IBC export symbols (section 8.15 WASM row).
+/// Forbidden `CosmWasm` IBC export symbols (section 8.15 WASM row).
 pub const FORBIDDEN_IBC_EXPORTS: &[&str] = &[
     "ibc_channel_open",
     "ibc_channel_connect",
@@ -47,7 +48,7 @@ pub const FORBIDDEN_IBC_EXPORTS: &[&str] = &[
     "ibc_packet_timeout",
 ];
 
-/// Forbidden Cosmos / CosmWasm message families refused at runtime (section 8.15).
+/// Forbidden Cosmos / `CosmWasm` message families refused at runtime (section 8.15).
 pub const FORBIDDEN_COSMOS_SUBMSG_KEYS: &[&str] = &["staking", "distribution", "gov", "ibc"];
 
 fn read_leb_u32(buf: &[u8], cur: &mut usize) -> Result<u32, String> {
@@ -168,10 +169,17 @@ fn scan_code_body_no_floats(body: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Validates a WebAssembly binary for UEL determinism, page limits, and CosmWasm rules.
+/// Validates a WebAssembly binary for UEL determinism, page limits, and `CosmWasm` rules.
+///
+/// # Errors
+///
+/// Returns an error if the bytecode uses a reserved pointer prefix, exceeds size or memory
+/// bounds, lacks valid WASM headers, uses floating-point instructions, or exports IBC symbols.
 pub fn validate_cosmwasm_bytecode(code: &[u8]) -> Result<(), String> {
-    if decode_pointer_bytecode(code).is_some() {
-        return Ok(());
+    if is_pointer_bytecode_prefixed(code) {
+        return Err(String::from(
+            "system pointer bytecode prefix is reserved for uel/assets",
+        ));
     }
     if code.len() > MAX_WASM_CODE_BYTES {
         return Err(String::from("WASM module exceeds 2 MiB size ceiling"));
@@ -281,7 +289,7 @@ pub fn validate_cosmwasm_bytecode(code: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Builds a minimal valid WebAssembly binary carrying CosmWasm exports
+/// Builds a minimal valid WebAssembly binary carrying `CosmWasm` exports
 /// (`instantiate`, `execute`, `query`) so tests and CW20/CW721 templates pass
 /// real binary validation.
 #[must_use]
@@ -323,7 +331,7 @@ pub(crate) struct WasmContractMeta {
     pub(crate) label: String,
 }
 
-/// Stateless WASM (CosmWasm ABI) execution environment worker (`budlum-ee-wasm`).
+/// Stateless WASM (`CosmWasm` ABI) execution environment worker (`budlum-ee-wasm`).
 #[derive(Debug, Default, Clone)]
 pub struct WasmEe;
 
@@ -348,9 +356,9 @@ fn read_store(host: &dyn HostRead, contract: &[u8], key: &[u8]) -> Result<Option
         .map_err(|e| e.to_string())
 }
 
-/// BGU charged per byte of key plus value a CosmWasm store write stages.
+/// BGU charged per byte of key plus value a `CosmWasm` store write stages.
 const WASM_STORE_BYTE_BGU: u64 = 200;
-/// BGU charged per byte of module code a CosmWasm deploy stores.
+/// BGU charged per byte of module code a `CosmWasm` deploy stores.
 const WASM_DEPLOY_BYTE_BGU: u64 = 200;
 /// Longest store key a message may produce. Every key is a short fixed prefix
 /// followed by names the caller chooses.
@@ -370,7 +378,7 @@ fn store_write_cost(contract: &[u8], key: &[u8], val: Option<&[u8]>) -> u64 {
         .saturating_mul(WASM_STORE_BYTE_BGU)
 }
 
-/// Stage one CosmWasm store write.
+/// Stage one `CosmWasm` store write.
 ///
 /// This is the only door a message has to `ee/wasm/store`, so the bound on an
 /// entry and the price of its bytes live here and not in the message that
@@ -1569,6 +1577,23 @@ impl ExecutionEnvironment for WasmEe {
                         gas_used: 15_000,
                     });
                 };
+                match host.read(&contract_ns, &call.target.id) {
+                    Ok(Some(_)) => {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"target CosmWasm contract already exists".to_vec(),
+                            gas_used: 15_000,
+                        });
+                    }
+                    Err(_) => {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"failed reading wasm contract meta".to_vec(),
+                            gas_used: 15_000,
+                        });
+                    }
+                    Ok(None) => {}
+                }
                 if host.write(&code_ns, &code_hash, Some(raw_in)).is_err() {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
@@ -1616,6 +1641,17 @@ impl ExecutionEnvironment for WasmEe {
                         gas_used: 15_000,
                     });
                 }
+                let verified_ptr =
+                    match verify_canonical_pointer_bytecode(&code, EeId::WASM, &call.target.id) {
+                        Ok(ptr) => ptr,
+                        Err(reason) => {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: reason.into_bytes(),
+                                gas_used: 15_000,
+                            });
+                        }
+                    };
                 let Ok(msg_json) = serde_json::from_slice::<serde_json::Value>(raw_in) else {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
@@ -1623,7 +1659,7 @@ impl ExecutionEnvironment for WasmEe {
                         gas_used: 15_000,
                     });
                 };
-                let res = if let Some(ptr) = decode_pointer_bytecode(&code) {
+                let res = if let Some(ptr) = verified_ptr {
                     if EeId(ptr.home_ee) == EeId::EVM {
                         execute_wasm_pointer_to_evm(
                             &ptr,

@@ -322,6 +322,7 @@ fn warning_hash(warning: &Option<String>) -> Option<[u8; 32]> {
     })
 }
 
+#[must_use]
 pub fn build_passport_proof_bundle(
     profile: &DwebPassportProfile,
     generated_at_block: u64,
@@ -466,6 +467,7 @@ fn owned_by(address: &Address, asset: &DataAsset) -> bool {
     &asset.owner == address
 }
 
+#[must_use]
 pub fn build_passport_profile(
     name: String,
     resolved: Option<BnsResolved>,
@@ -831,6 +833,264 @@ fn evaluate_bns_evidence(
                     .into(),
             ),
         )
+    }
+}
+
+/// Registered PQ-hybrid signing context for identity-to-address ownership
+/// binding. The signing facade refuses any context outside the registry, so
+/// the binding digest keeps its own domain tag below.
+pub const IDENTITY_ADDR_LINK_CTX: &[u8] = crate::crypto::ctx::IDENTITY_ADDR_LINK_V1;
+
+/// Domain separation tag of the ownership binding digest.
+const IDENTITY_ADDR_LINK_TAG: &[u8] = b"BDLM_IDENTITY_ADDR_LINK_V1";
+
+/// Domain separation tag for external-domain identity / attestation Merkle proofs.
+pub const IDENTITY_EXT_ATTEST_TAG: &[u8] = b"BDLM_IDENTITY_EXT_ATTEST_V1";
+
+/// Claim that a Budlum identity (`subject_name`, e.g. `alice.bud`) controls an
+/// address or holds an attestation on `target_domain`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedAccountClaim {
+    pub subject_name: String,
+    pub target_domain: u32,
+    pub account_label: String,
+    pub linked_address_bytes: Vec<u8>,
+}
+
+impl LinkedAccountClaim {
+    /// Deterministic domain-separated digest signed by the address owner when
+    /// binding `linked_address_bytes` to `subject_name`.
+    ///
+    /// Convenience: shared by wallets signing ownership bindings and verifiers
+    /// evaluating identity profile evidence cards.
+    #[must_use]
+    pub fn binding_digest(&self) -> [u8; 32] {
+        crate::core::hash::hash_fields_bytes(&[
+            IDENTITY_ADDR_LINK_TAG,
+            self.subject_name.as_bytes(),
+            &self.target_domain.to_le_bytes(),
+            self.account_label.as_bytes(),
+            &self.linked_address_bytes,
+        ])
+    }
+}
+
+/// Cryptographic proof backing a [`LinkedAccountClaim`].
+///
+/// Unproven text records are represented explicitly so an unbound address can
+/// never be labelled [`EvidenceStatus::Verified`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccountOwnershipProof {
+    /// Unproven text record (e.g., raw `addr.eth` / `addr.sol` record without
+    /// cryptographic ownership proof). Always evaluates to `Unverified`.
+    UnprovenTextRecord,
+    /// Post-quantum hybrid composite signature from the keypair that owns the
+    /// Budlum address (`Address::from(pk.ed) == linked_address_bytes`).
+    BudlumCompositeSignature {
+        composite_pubkey: Vec<u8>,
+        signature: Vec<u8>,
+    },
+    /// External-domain finalized state Merkle inclusion proof anchoring an
+    /// external account link, name record, or attestation contract slot.
+    ExternalDomainAttestation {
+        domain_id: u32,
+        finalized_state_root: [u8; 32],
+        attestation_digest: [u8; 32],
+        leaf_index: usize,
+        leaf_count: usize,
+        proof: Vec<[u8; 32]>,
+    },
+}
+
+/// Compute the deterministic Merkle leaf anchoring an external-domain identity
+/// or attestation claim inside `domain_id`'s finalized state root.
+///
+/// Convenience: shared by external-domain attestation provers and profile verifiers.
+#[must_use]
+pub fn external_attestation_leaf(
+    claim: &LinkedAccountClaim,
+    attestation_digest: &[u8; 32],
+) -> [u8; 32] {
+    crate::core::hash::hash_fields_bytes(&[
+        IDENTITY_EXT_ATTEST_TAG,
+        claim.subject_name.as_bytes(),
+        &claim.target_domain.to_le_bytes(),
+        claim.account_label.as_bytes(),
+        &claim.linked_address_bytes,
+        attestation_digest,
+    ])
+}
+
+/// Compute the Merkle root over external-domain identity attestation leaves.
+///
+/// Convenience: builds finalized external attestation roots for verification and tests.
+#[must_use]
+pub fn build_external_attestation_root(leaves: &[[u8; 32]]) -> [u8; 32] {
+    crate::unification::unification_merkle_root(IDENTITY_EXT_ATTEST_TAG, leaves)
+}
+
+/// Build a Merkle inclusion proof for `leaf_index` in an external-domain
+/// identity attestation tree.
+///
+/// Convenience: generates inclusion proofs consumed by [`evaluate_linked_account_evidence`].
+#[must_use]
+pub fn build_external_attestation_proof(
+    leaves: &[[u8; 32]],
+    leaf_index: usize,
+) -> Option<Vec<[u8; 32]>> {
+    crate::unification::build_merkle_proof(IDENTITY_EXT_ATTEST_TAG, leaves, leaf_index)
+}
+
+/// Evaluate a [`LinkedAccountClaim`] against `proof` and return a validated
+/// [`EvidenceCard`].
+///
+/// Enforces fail-closed honesty:
+/// - Invalid `subject_name`, `account_label`, or empty `linked_address_bytes` -> `Unverified`.
+/// - [`AccountOwnershipProof::UnprovenTextRecord`] -> ALWAYS `Unverified`.
+/// - [`AccountOwnershipProof::BudlumCompositeSignature`] -> `Verified` only when
+///   `linked_address_bytes` equals the 32-byte `Address::from(pk.ed)` derived
+///   from `composite_pubkey` AND `composite::verify` succeeds over `claim.binding_digest()`.
+/// - [`AccountOwnershipProof::ExternalDomainAttestation`] -> `Verified` only when
+///   `domain_id == claim.target_domain`, `finalized_state_root` and
+///   `attestation_digest` are non-zero, and the Merkle inclusion proof verifies.
+///
+/// Convenience: ensures identity profiles only mark linked accounts and
+/// cross-chain attestations as `Verified` when backed by cryptographic proof.
+#[must_use]
+pub fn evaluate_linked_account_evidence(
+    claim: &LinkedAccountClaim,
+    proof: &AccountOwnershipProof,
+) -> EvidenceCard {
+    let subject = format!("linked:{}", claim.account_label);
+    if validate_passport_name(&claim.subject_name).is_err()
+        || validate_label("account_label", &claim.account_label).is_err()
+        || claim.linked_address_bytes.is_empty()
+        || claim.linked_address_bytes.len() > 128
+    {
+        return EvidenceCard {
+            subject: "linked:invalid".into(),
+            status: EvidenceStatus::Unverified,
+            source: "Identity account link".into(),
+            root: None,
+            warning: Some("Invalid linked account claim fields".into()),
+        };
+    }
+
+    match proof {
+        AccountOwnershipProof::UnprovenTextRecord => EvidenceCard {
+            subject,
+            status: EvidenceStatus::Unverified,
+            source: "BNS text record".into(),
+            root: None,
+            warning: Some(
+                "Unproven address claim: requires cryptographic ownership signature or finalized domain proof"
+                    .into(),
+            ),
+        },
+        AccountOwnershipProof::BudlumCompositeSignature {
+            composite_pubkey,
+            signature,
+        } => {
+            let Ok(pk) = crate::crypto::composite::CompositePublicKey::decode(composite_pubkey)
+            else {
+                return EvidenceCard {
+                    subject,
+                    status: EvidenceStatus::Unverified,
+                    source: "PQ-hybrid ownership signature".into(),
+                    root: None,
+                    warning: Some("Malformed composite public key".into()),
+                };
+            };
+            let derived_addr = Address::from(pk.ed);
+            if claim.linked_address_bytes.as_slice() != derived_addr.as_bytes() {
+                return EvidenceCard {
+                    subject,
+                    status: EvidenceStatus::Unverified,
+                    source: "PQ-hybrid ownership signature".into(),
+                    root: None,
+                    warning: Some(
+                        "Composite public key does not derive the claimed linked address".into(),
+                    ),
+                };
+            }
+            let Ok(sig) = crate::crypto::composite::CompositeSignature::decode(signature) else {
+                return EvidenceCard {
+                    subject,
+                    status: EvidenceStatus::Unverified,
+                    source: "PQ-hybrid ownership signature".into(),
+                    root: None,
+                    warning: Some("Malformed composite signature".into()),
+                };
+            };
+            let digest = claim.binding_digest();
+            if crate::crypto::composite::verify(&pk, IDENTITY_ADDR_LINK_CTX, &digest, &sig).is_err()
+            {
+                return EvidenceCard {
+                    subject,
+                    status: EvidenceStatus::Unverified,
+                    source: "PQ-hybrid ownership signature".into(),
+                    root: None,
+                    warning: Some("Ownership binding signature verification failed".into()),
+                };
+            }
+            EvidenceCard {
+                subject,
+                status: EvidenceStatus::Verified,
+                source: "PQ-hybrid ownership signature".into(),
+                root: Some(hex32(&digest)),
+                warning: None,
+            }
+        }
+        AccountOwnershipProof::ExternalDomainAttestation {
+            domain_id,
+            finalized_state_root,
+            attestation_digest,
+            leaf_index,
+            leaf_count,
+            proof: merkle_proof,
+        } => {
+            if *domain_id != claim.target_domain
+                || *finalized_state_root == [0u8; 32]
+                || *attestation_digest == [0u8; 32]
+            {
+                return EvidenceCard {
+                    subject,
+                    status: EvidenceStatus::Unverified,
+                    source: "External domain attestation".into(),
+                    root: None,
+                    warning: Some(
+                        "External domain attestation domain mismatch or zero commitment root"
+                            .into(),
+                    ),
+                };
+            }
+            let leaf = external_attestation_leaf(claim, attestation_digest);
+            if !crate::unification::verify_merkle_proof(
+                IDENTITY_EXT_ATTEST_TAG,
+                finalized_state_root,
+                *leaf_index,
+                *leaf_count,
+                &leaf,
+                merkle_proof,
+            ) {
+                return EvidenceCard {
+                    subject,
+                    status: EvidenceStatus::Unverified,
+                    source: "External domain attestation".into(),
+                    root: Some(hex32(finalized_state_root)),
+                    warning: Some(
+                        "External domain Merkle inclusion proof failed verification".into(),
+                    ),
+                };
+            }
+            EvidenceCard {
+                subject,
+                status: EvidenceStatus::Verified,
+                source: "External domain attestation".into(),
+                root: Some(hex32(finalized_state_root)),
+                warning: None,
+            }
+        }
     }
 }
 

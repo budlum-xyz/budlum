@@ -711,7 +711,13 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
     }
 
     fn preprocessed_trace(&self) -> Option<p3_matrix::dense::RowMajorMatrix<F>> {
-        let degree = (3 * self.num_steps + 1).next_power_of_two().max(16);
+        let degree = self
+            .num_steps
+            .checked_mul(3)
+            .and_then(|rows| rows.checked_add(1))
+            .and_then(usize::checked_next_power_of_two)
+            .map(|rows| rows.max(16))?;
+        let total_cells = degree.checked_mul(PREPROCESSED_WIDTH)?;
         // PC, RAW_INST, IS_ACTIVE, then the decoded fields OPCODE, RD, RS1,
         // RS2, IMM.
         //
@@ -728,7 +734,7 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
         // reinterpretation the decoder already performs. Two copies of that
         // rule is one copy too many: if they ever disagree the honest prover
         // is the one that fails.
-        let mut values = vec![F::ZERO; degree * PREPROCESSED_WIDTH];
+        let mut values = vec![F::ZERO; total_cells];
         for i in 0..degree {
             let pc = i as u64;
             let inst = self.program.get(i).copied().unwrap_or(0);
@@ -740,13 +746,24 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
             // A word that does not decode contributes zero for the immediate.
             // Such a row can never be matched by a CPU row anyway: the VM
             // refuses to step on it, so no trace row carries that pc.
-            let imm = bud_isa::Instruction::decode_any(inst)
-                .map(|d| d.imm)
-                .unwrap_or(0);
-            let imm_field = if imm < 0 {
-                F::ZERO - F::from_u64((-(imm as i64)) as u64)
-            } else {
-                F::from_u64(imm as u64)
+            let decoded = bud_isa::Instruction::decode_any(inst).ok();
+            // Extended 256-bit caller-word syscalls (10..=13) are only valid in
+            // native UEL execution; ExecutionPublicInputs commits only the 64-bit
+            // `sender`, so BudAir must reject any program containing Syscall
+            // 10..=13 fail-closed rather than folding them into `unknown_syscall`.
+            if i < self.program.len()
+                && matches!(
+                    decoded,
+                    Some(d)
+                        if d.opcode == bud_isa::Opcode::Syscall && (10..=13).contains(&d.imm)
+                )
+            {
+                return None;
+            }
+            let imm = decoded.map(|d| d.imm).unwrap_or(0);
+            let imm_field = match u64::try_from(imm) {
+                Ok(non_neg) => F::from_u64(non_neg),
+                Err(_) => F::ZERO - F::from_u64(u64::from(imm.unsigned_abs())),
             };
             values[i * PREPROCESSED_WIDTH] = F::from_u64(pc);
             values[i * PREPROCESSED_WIDTH + 1] = F::from_u64(inst);
@@ -1948,7 +1965,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // (6b) Bind exit_code to boolean {0, 1} on the active Halt row and force
         // zero on every non-Halt row. A clean Halt (exit_code == 0) remains active
         // in the Program CTL so the ROM proves `program[pc]` is a real Halt, whereas
-        // a synthetic fault Halt (exit_code == 1) skips the ROM fetch (`BLG-191`).
+        // a synthetic fault Halt (exit_code == 1) skips the ROM fetch.
         builder
             .when(one.clone() - is_halt.clone())
             .assert_zero(cur[COL_EXIT_CODE]);
@@ -3372,5 +3389,177 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .assert_eq(rd_val_new.clone(), one.clone() - is_nonzero);
             builder.when(sc).assert_bool(rd_val_new.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod base_air_boundary_tests {
+    use super::*;
+    use bud_isa::{Instruction, Opcode};
+    use p3_field::PrimeCharacteristicRing;
+    use p3_goldilocks::Goldilocks;
+    use p3_matrix::Matrix;
+
+    #[test]
+    fn base_air_metadata_and_degree_boundaries_are_exact_and_overflow_safe() {
+        let air = BudAir {
+            num_steps: 2,
+            program: vec![Opcode::Halt as u64],
+        };
+        assert_eq!(BaseAir::<Goldilocks>::width(&air), TRACE_WIDTH);
+        assert_eq!(BaseAir::<Goldilocks>::num_public_values(&air), 56);
+        assert!(
+            BaseAir::<Goldilocks>::preprocessed_next_row_columns(&air).is_empty(),
+            "preprocessed trace looks up current-row tuples only; next-row columns must stay empty"
+        );
+
+        // Degree law: `(3 * num_steps + 1).next_power_of_two().max(16)`.
+        // `num_steps = 11` exercises the `3 * 11 = 33` straddle: `33 + 1 = 34 -> 64`
+        // whereas `33 - 1 = 32 -> 32`.
+        for (num_steps, expected_height) in [
+            (0usize, 16usize),
+            (1, 16),
+            (5, 16),
+            (6, 32),
+            (10, 32),
+            (11, 64),
+            (21, 64),
+            (22, 128),
+        ] {
+            let trace = BaseAir::<Goldilocks>::preprocessed_trace(&BudAir {
+                num_steps,
+                program: vec![Opcode::Halt as u64],
+            })
+            .expect("bounded step count must produce a preprocessed matrix");
+            assert_eq!(trace.width(), PREPROCESSED_WIDTH);
+            assert_eq!(trace.height(), expected_height, "num_steps={num_steps}");
+        }
+
+        // Arithmetic overflow on extreme `num_steps` returns `None` instead of panicking.
+        assert!(BaseAir::<Goldilocks>::preprocessed_trace(&BudAir {
+            num_steps: usize::MAX,
+            program: Vec::new(),
+        })
+        .is_none());
+        assert!(BaseAir::<Goldilocks>::preprocessed_trace(&BudAir {
+            num_steps: (usize::MAX / 3) + 1,
+            program: Vec::new(),
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn base_air_preprocessed_trace_enforces_exact_program_end_and_signed_immediates() {
+        let i_zero = Instruction {
+            opcode: Opcode::Add,
+            rd: 3,
+            rs1: 11,
+            rs2: 29,
+            imm: 0,
+        }
+        .try_encode()
+        .expect("valid instruction");
+        let i_pos = Instruction {
+            opcode: Opcode::Sub,
+            rd: 7,
+            rs1: 14,
+            rs2: 2,
+            imm: 37,
+        }
+        .try_encode()
+        .expect("valid instruction");
+        let i_neg_one = Instruction {
+            opcode: Opcode::Jmp,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: -1,
+        }
+        .try_encode()
+        .expect("valid instruction");
+        let i_min = Instruction {
+            opcode: Opcode::Load,
+            rd: 31,
+            rs1: 17,
+            rs2: 5,
+            imm: i32::MIN,
+        }
+        .try_encode()
+        .expect("valid instruction");
+        let i_halt = Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .try_encode()
+        .expect("valid instruction");
+
+        let program = vec![i_zero, i_pos, i_neg_one, i_min, i_halt];
+        let air = BudAir {
+            num_steps: 2,
+            program: program.clone(),
+        };
+        let trace = BaseAir::<Goldilocks>::preprocessed_trace(&air).expect("preprocessed trace");
+        assert_eq!(trace.height(), 16);
+
+        let cell = |row: usize, col: usize| trace.values[row * PREPROCESSED_WIDTH + col];
+
+        // Every in-bounds row [0, program.len()) has IS_ACTIVE == 1; every
+        // out-of-bounds row [program.len(), degree) - specifically `pc == program.len()` -
+        // MUST have IS_ACTIVE == 0 so a prover cannot execute a phantom Halt past end.
+        for (row, word) in program.iter().enumerate() {
+            assert_eq!(cell(row, 0), Goldilocks::from_u64(row as u64));
+            assert_eq!(cell(row, 1), Goldilocks::from_u64(*word));
+            assert_eq!(
+                cell(row, 2),
+                Goldilocks::ONE,
+                "in-bounds row {row} must be active"
+            );
+        }
+        for row in program.len()..trace.height() {
+            assert_eq!(cell(row, 0), Goldilocks::from_u64(row as u64));
+            assert_eq!(cell(row, 1), Goldilocks::ZERO);
+            assert_eq!(
+                cell(row, 2),
+                Goldilocks::ZERO,
+                "out-of-bounds row {row} (including pc == program.len()) must be inactive"
+            );
+            assert_eq!(cell(row, 7), Goldilocks::ZERO);
+        }
+
+        // Row 0: imm == 0, decoded opcode/rd/rs1/rs2 exact.
+        assert_eq!(cell(0, 3), Goldilocks::from_u64(Opcode::Add as u64));
+        assert_eq!(cell(0, 4), Goldilocks::from_u64(3));
+        assert_eq!(cell(0, 5), Goldilocks::from_u64(11));
+        assert_eq!(cell(0, 6), Goldilocks::from_u64(29));
+        assert_eq!(cell(0, 7), Goldilocks::ZERO);
+
+        // Row 1: imm == +37.
+        assert_eq!(cell(1, 3), Goldilocks::from_u64(Opcode::Sub as u64));
+        assert_eq!(cell(1, 4), Goldilocks::from_u64(7));
+        assert_eq!(cell(1, 5), Goldilocks::from_u64(14));
+        assert_eq!(cell(1, 6), Goldilocks::from_u64(2));
+        assert_eq!(cell(1, 7), Goldilocks::from_u64(37));
+
+        // Row 2: imm == -1 -> P - 1 (additive inverse of 1 in Goldilocks).
+        assert_eq!(cell(2, 7), Goldilocks::ZERO - Goldilocks::ONE);
+        assert_eq!(cell(2, 7) + Goldilocks::ONE, Goldilocks::ZERO);
+
+        // Row 3: imm == i32::MIN (-2^31) -> P - (2^31 mod P), without signed overflow.
+        let expected_min = Goldilocks::ZERO - Goldilocks::from_u64(1u64 << 31);
+        assert_eq!(cell(3, 4), Goldilocks::from_u64(31));
+        assert_eq!(cell(3, 5), Goldilocks::from_u64(17));
+        assert_eq!(cell(3, 6), Goldilocks::from_u64(5));
+        assert_eq!(cell(3, 7), expected_min);
+
+        // An empty program has zero active rows, including row 0.
+        let empty_trace = BaseAir::<Goldilocks>::preprocessed_trace(&BudAir {
+            num_steps: 1,
+            program: Vec::new(),
+        })
+        .expect("empty program trace");
+        assert_eq!(empty_trace.values[2], Goldilocks::ZERO);
     }
 }

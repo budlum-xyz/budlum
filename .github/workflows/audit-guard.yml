@@ -7,7 +7,7 @@ name: Audit Guard
 
 on:
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses, agg/phase-5-pcs-claims]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, agg/phase-5-pcs-claims]
   push:
     branches: [main]
   schedule:
@@ -19,7 +19,7 @@ permissions:
 
 concurrency:
   group: audit-guard-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 jobs:
   audit-guard:
@@ -45,3 +45,55 @@ jobs:
         run: |
           set -euo pipefail
           cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- audit-guard
+
+  # The check the protected branch requires.
+  #
+  # Branch protection on `consensus-of-consensuses` required the status context
+  # `merge-block-default-branch`. Until this job existed nothing in the
+  # repository produced a check with that name - measured 2026-11-27 across
+  # every branch: 39 workflow files, 0 jobs named `merge-block-default-branch`.
+  # A required context nothing reports does not block a bad merge; it blocks
+  # every merge. Pull request #215 sat at `mergeable_state: blocked` with 79
+  # successful checks and one context GitHub was still waiting for.
+  #
+  # It lives in this workflow rather than in a file of its own because the
+  # pull-request fan-out is a budget (`.github/ci-fanout-baseline.txt`), and the
+  # review boundary is the same concern: the gate that decides whether a merge
+  # may happen belongs with the gate that decides what the merge may carry.
+  #
+  # The rules live in `xtask/tools/src/merge_gate.rs` (its rustdoc states each
+  # one), and the two lists they read are reviewable diffs:
+  #
+  #   .github/merge-gate-branches.txt          head branches allowed to close
+  #   .github/merge-gate-forbidden-paths.txt   paths the product tree refuses
+  #
+  # `budlum-gates required-contexts-are-produced` closes the class rather than
+  # this instance: it fails when branch protection requires a context that no
+  # workflow declares, so the next renamed job cannot recreate the dead end.
+  #
+  # The event payload is read by the tool, never interpolated into a `run:`
+  # block: `${{ github.event.* }}` inside shell is the injection surface
+  # `zizmor` and `actionlint` exist to reject.
+  merge-block-default-branch:
+    name: merge-block-default-branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - name: Gate self-test (a gate must prove it can fail)
+        run: |
+          set -euo pipefail
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- merge-gate --self-test
+      - name: Decide the merge
+        run: |
+          set -euo pipefail
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- merge-gate

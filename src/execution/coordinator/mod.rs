@@ -1,6 +1,6 @@
 //! The Universal Execution Layer coordinator: account aliases, sparse Merkle
 //! namespaces, BGU gas and EIP-1559 fee accounting, nested call-frame overlays,
-//! stateful BudZero contract execution, and worker supervision.
+//! stateful `BudZero` contract execution, and worker supervision.
 //!
 //! The scheduler executes independent waves in parallel with deterministic
 //! sequential fallback and byte-identical checked state transitions.
@@ -51,7 +51,7 @@ use crate::execution::coordinator::universal_call::{
 };
 use crate::execution::coordinator::wasm_ee::WasmEe;
 use crate::execution::coordinator::worker::{
-    WorkerEndpoint, WorkerError, WorkerSupervisor, MAX_BLOCK_WORKER_RETRIES,
+    EngineClass, WorkerEndpoint, WorkerError, WorkerSupervisor, MAX_BLOCK_WORKER_RETRIES,
 };
 use crate::execution::zkvm::{TxContext, ZkVmExecutor, DEFAULT_CONTRACT_GAS_LIMIT};
 use budlum_uel_abi::{
@@ -61,7 +61,7 @@ use budlum_uel_abi::{
 };
 use sha2::{Digest, Sha256};
 
-/// Maximum BudZero contract bytecode size accepted at deployment (256 KiB).
+/// Maximum `BudZero` contract bytecode size accepted at deployment (256 KiB).
 pub const MAX_BUDZERO_CODE_BYTES: usize = 256 * 1024;
 
 /// Typed UEL call payload submitted to the coordinator.
@@ -277,6 +277,13 @@ pub enum CoordinatorError {
     InvalidBlock(String),
     /// Worker failed non-deterministically across all 3 block retries; node halts.
     WorkerHalt { attempts: usize, cause: String },
+    /// A chain configured to run only real engines met a block that needs an
+    /// environment currently served by the in-tree interpreter.
+    ///
+    /// The block is refused before the first write, so the sender, the aliases
+    /// and the state root are untouched: refusing an engine the chain did not
+    /// agree to is not the same as failing to execute it halfway.
+    ModelEngineRefused { ee: EeId },
 }
 
 impl std::fmt::Display for CoordinatorError {
@@ -286,6 +293,12 @@ impl std::fmt::Display for CoordinatorError {
             Self::WorkerHalt { attempts, cause } => {
                 write!(f, "UEL halted after {attempts} worker retries: {cause}")
             }
+            Self::ModelEngineRefused { ee } => write!(
+                f,
+                "EE 0x{:02x} is served by this tree's interpreter, not by the engine; \
+                 the chain requires real engines",
+                ee.0
+            ),
         }
     }
 }
@@ -349,15 +362,15 @@ impl CallerRegistration {
     }
 }
 
-/// Stateful BudZero execution adapter closing  (deploy, contract address,
+/// Stateful `BudZero` execution adapter closing  (deploy, contract address,
 /// and persistent key-value storage in `ee/budzero/{program,storage}`).
 #[derive(Debug, Default, Clone)]
 pub struct StatefulBudZeroEe;
 
 impl StatefulBudZeroEe {
-    /// Creates the stateful BudZero execution environment adapter.
+    /// Creates the stateful `BudZero` execution environment adapter.
     ///
-    /// exposed for: `ExecutionCoordinator` default BudZero registration.
+    /// exposed for: `ExecutionCoordinator` default `BudZero` registration.
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -641,6 +654,9 @@ impl ExecutionEnvironment for StatefulBudZeroEe {
 /// Coordinator executing UEL transactions across isolated EE workers.
 pub struct ExecutionCoordinator {
     supervisor: WorkerSupervisor,
+    /// When set, a block that routes work to an environment served by this
+    /// tree's interpreter is refused instead of executed.
+    require_real_engines: bool,
 }
 
 impl Default for ExecutionCoordinator {
@@ -650,7 +666,7 @@ impl Default for ExecutionCoordinator {
 }
 
 impl ExecutionCoordinator {
-    /// Creates a coordinator with the built-in stateful BudZero adapter registered.
+    /// Creates a coordinator with the built-in stateful `BudZero` adapter registered.
     ///
     /// exposed for: block execution ( slice 2/2) and EE worker setup.
     #[must_use]
@@ -671,7 +687,10 @@ impl ExecutionCoordinator {
         supervisor.register(WorkerEndpoint::in_process(|| Box::new(UtxoEe::new())));
         supervisor.register(WorkerEndpoint::in_process(|| Box::new(PlutusEe::new())));
         supervisor.register(WorkerEndpoint::in_process(|| Box::new(Rv32Ee::new())));
-        Self { supervisor }
+        Self {
+            supervisor,
+            require_real_engines: false,
+        }
     }
 
     /// Registers or overrides a worker endpoint (e.g. `budlum-ee-evm` Unix socket).
@@ -687,6 +706,40 @@ impl ExecutionCoordinator {
     #[must_use]
     pub const fn supervisor(&self) -> &WorkerSupervisor {
         &self.supervisor
+    }
+
+    /// Engine class answering `ee`, or `None` when no endpoint is registered.
+    ///
+    /// exposed for: node readiness reads and the opening ladder, which must
+    /// publish which environments run on the engine and which on the stand-in.
+    #[must_use]
+    pub fn engine_class(&self, ee: EeId) -> Option<EngineClass> {
+        self.supervisor.engine_class(ee)
+    }
+
+    /// Requires every environment a block touches to be served by its engine.
+    ///
+    /// Off by default so a devnet keeps the interpreters it was built with; a
+    /// chain that publishes "real engine" in the feature matrix turns it on.
+    ///
+    /// exposed for: node configuration and the opening ladder, which set it from
+    /// the profile the node runs rather than from a per-block request.
+    pub const fn set_require_real_engines(&mut self, required: bool) {
+        self.require_real_engines = required;
+    }
+
+    /// The first environment in `txs` that `require_real_engines` refuses.
+    ///
+    /// Exposed so the opening ladder and the rehearsal can ask the same question
+    /// of a block before submitting it, instead of discovering it mid-block.
+    #[must_use]
+    pub fn first_refused_environment(&self, txs: &[UelTx]) -> Option<EeId> {
+        if !self.require_real_engines {
+            return None;
+        }
+        txs.iter()
+            .map(|tx| tx.ee)
+            .find(|ee| self.engine_class(*ee) != Some(EngineClass::Real))
     }
 
     /// Applies a verified contract or account migration transaction (`8.12.2` EVM & `8.12.3` WASM/SVM/Move).
@@ -803,6 +856,9 @@ impl ExecutionCoordinator {
         proposer: Address,
         txs: &[UelTx],
     ) -> Result<Vec<UelReceipt>, CoordinatorError> {
+        if let Some(ee) = self.first_refused_environment(txs) {
+            return Err(CoordinatorError::ModelEngineRefused { ee });
+        }
         let mut last_transport_err = String::new();
         for attempt in 1..=MAX_BLOCK_WORKER_RETRIES {
             let mut candidate = state.clone();
@@ -1372,18 +1428,42 @@ impl HostApi for HostBridge<'_> {
                 return Err(e);
             }
         }
+        // Record a newly derived target-EE alias only when the frame is
+        // non-static AND the child frame ultimately commits; a static call or a
+        // reverted/faulted child call must never leak new alias rows into the
+        // consensus state root.
+        let mut newly_registered_alias_key: Option<[u8; 33]> = None;
         let child_caller = if call.from.ee != call.to_ee {
             if let Some(owner) = self
                 .state
                 .execution_state
                 .resolve_alias_owner(call.from.ee, &call.from.id)
             {
-                match self
+                let alias_key = alias::alias_storage_key(&owner, call.to_ee);
+                let already_present = self
                     .state
                     .execution_state
-                    .ensure_alias_registered(&owner, call.to_ee)
-                {
-                    Ok(alias) => match EeIdentity::new(call.to_ee, alias) {
+                    .read(alias::ALIAS_NAMESPACE, &alias_key)
+                    .ok()
+                    .flatten()
+                    .is_some();
+                let derived = if is_static || already_present {
+                    alias::derive_alias_bytes(&owner, call.to_ee)
+                } else {
+                    match self
+                        .state
+                        .execution_state
+                        .ensure_alias_registered(&owner, call.to_ee)
+                    {
+                        Ok(bytes) => {
+                            newly_registered_alias_key = Some(alias_key);
+                            Ok(bytes)
+                        }
+                        Err(err) => Err(err),
+                    }
+                };
+                match derived {
+                    Ok(alias_bytes) => match EeIdentity::new(call.to_ee, alias_bytes) {
                         Ok(mapped) => mapped,
                         Err(_) => call.from,
                     },
@@ -1394,6 +1474,11 @@ impl HostApi for HostBridge<'_> {
             }
         } else {
             call.from
+        };
+        let rollback_alias = |st: &mut AccountState, key: Option<[u8; 33]>| {
+            if let Some(k) = key {
+                let _ = st.execution_state.write(alias::ALIAS_NAMESPACE, &k, None);
+            }
         };
         let child_depth = u32::try_from(self.overlay.universal_depth()).unwrap_or(u32::MAX);
         let child_call = EeCall {
@@ -1416,12 +1501,16 @@ impl HostApi for HostBridge<'_> {
             (call.to_ee, &child_call, self.root_actor),
         ) {
             Ok(Ok(outcome)) => {
-                let extra = outcome
-                    .gas_used
-                    .saturating_sub(self.overlay.gas_used_bgu().saturating_sub(gas_before));
-                let _ = self.overlay.charge_bgu(extra);
+                let already_charged = self.overlay.gas_used_bgu().saturating_sub(gas_before);
+                let extra = outcome.gas_used.saturating_sub(already_charged);
+                let charge_ok = self.overlay.charge_bgu(extra).is_ok();
+                if !charge_ok {
+                    let rem = budget.saturating_sub(already_charged);
+                    let _ = self.overlay.charge_bgu(rem);
+                }
                 let total_child = self.overlay.gas_used_bgu().saturating_sub(gas_before);
-                if outcome.status == OutcomeStatus::Success {
+                let within_budget = outcome.gas_used <= budget && charge_ok;
+                if outcome.status == OutcomeStatus::Success && within_budget {
                     self.overlay.commit_universal_frame(self.cache);
                     Ok(UniversalResult {
                         success: true,
@@ -1430,15 +1519,22 @@ impl HostApi for HostBridge<'_> {
                     })
                 } else {
                     self.overlay.rollback_universal_frame(self.state);
+                    rollback_alias(self.state, newly_registered_alias_key);
+                    let out = if within_budget {
+                        outcome.output
+                    } else {
+                        Vec::new()
+                    };
                     Ok(UniversalResult {
                         success: false,
-                        output: outcome.output,
+                        output: out,
                         gas_used: total_child,
                     })
                 }
             }
             Ok(Err(fault)) => {
                 self.overlay.rollback_universal_frame(self.state);
+                rollback_alias(self.state, newly_registered_alias_key);
                 let _ = self.overlay.charge_bgu(budget);
                 if let Err(w_err) = self.supervisor.note_fault_and_restart(fault.ee) {
                     self.transport_failure = Some(w_err);
@@ -1452,11 +1548,13 @@ impl HostApi for HostBridge<'_> {
             }
             Err(AttemptError::Transport(w_err)) => {
                 self.overlay.rollback_universal_frame(self.state);
+                rollback_alias(self.state, newly_registered_alias_key);
                 self.transport_failure = Some(w_err);
                 Err(HostError::Denied(String::from("worker transport lost")))
             }
             Err(AttemptError::Deterministic(reason)) => {
                 self.overlay.rollback_universal_frame(self.state);
+                rollback_alias(self.state, newly_registered_alias_key);
                 Err(HostError::Denied(reason))
             }
         }
@@ -1539,3 +1637,6 @@ mod review_2_attack_tests;
 mod svm_move_tests;
 #[cfg(test)]
 mod worker_identity_tests;
+
+#[cfg(test)]
+mod engine_class_tests;

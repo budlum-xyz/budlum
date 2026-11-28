@@ -3,7 +3,7 @@
 // aderyn-fp-next-line(push-zero-opcode)
 pragma solidity 0.8.26;
 
-import {IBudlumFinality} from "../external-domain/BudlumFinalityVerifier.sol";
+import {FinalityMode, IBudlumFinality} from "../external-domain/BudlumFinalityVerifier.sol";
 import {BudlumHash} from "../lib/BudlumHash.sol";
 
 /// @notice A Budlum AppBinding payment as `AppBindingPayment` (src/settlement/app_binding.rs).
@@ -89,10 +89,20 @@ abstract contract BudlumPaymentReceiver {
     error WrongAppBinding(bytes32 expected, bytes32 got);
     error AlreadyConsumed(bytes32 paymentId);
     error ProofInvalid(string link);
+    error InvalidReceiverConfig();
 
     constructor(IBudlumFinality finality_, bytes32 appBindingId_) {
+        if (address(finality_) == address(0) || address(finality_).code.length == 0 || appBindingId_ == bytes32(0)) {
+            revert InvalidReceiverConfig();
+        }
         finality = finality_;
         appBindingId = appBindingId_;
+    }
+
+    /// @notice Whether this consumer requires both classical and post-quantum
+    ///         finality halves. Defaults to fail-closed hybrid finality.
+    function _requiresHybridFinality() internal pure virtual returns (bool) {
+        return true;
     }
 
     function _consumePayment(PaymentProof calldata proof) internal returns (AppBindingPayment calldata) {
@@ -107,9 +117,7 @@ abstract contract BudlumPaymentReceiver {
             revert ProofInvalid(failed);
         }
         consumed[proof.payment.paymentId] = true;
-        emit PaymentConsumed(
-            proof.payment.paymentId, proof.payment.payer, proof.payment.amount, proof.payment.memoHash
-        );
+        emit PaymentConsumed(proof.payment.paymentId, proof.payment.payer, proof.payment.amount, proof.payment.memoHash);
         return proof.payment;
     }
 
@@ -117,26 +125,35 @@ abstract contract BudlumPaymentReceiver {
         if (proof.payment.appBindingId != appBindingId) {
             return "wrong app_binding";
         }
-        (bool fits, bytes32 window) =
-            BudlumHash.rootFromProof(paymentLeaf(proof.payment), proof.index, proof.path);
+        if (proof.payment.paymentId == bytes32(0)) {
+            return "payment id";
+        }
+        if (proof.header.version == 0) {
+            return "header version";
+        }
+        (bool fits, bytes32 window) = BudlumHash.rootFromProof(paymentLeaf(proof.payment), proof.index, proof.path);
         if (!fits || window != proof.paymentsRoot) {
             return "payment path";
         }
-        if (!proof.header.hasAppBindingRoot
-            || proof.header.appBindingRoot != appBindingRegistryRoot(proof.paymentsRoot, proof.restHash)) {
+        if (
+            !proof.header.hasAppBindingRoot
+                || proof.header.appBindingRoot != appBindingRegistryRoot(proof.paymentsRoot, proof.restHash)
+        ) {
             return "app_binding root opening";
         }
         // Consensus-committed deployment binding: targetChainId and
         // targetReceiver live in AppBindingTx::Pay and BDLM_APP_BINDING_PAYMENT_LEAF_V1.
-        if (uint256(proof.payment.targetChainId) != block.chainid
-            || proof.payment.targetReceiver.length != EVM_ADDRESS_BYTE_LEN
-            || address(bytes20(proof.payment.targetReceiver)) != address(this))
-        {
+        if (
+            uint256(proof.payment.targetChainId) != block.chainid
+                || proof.payment.targetReceiver.length != EVM_ADDRESS_BYTE_LEN
+                || address(bytes20(proof.payment.targetReceiver)) != address(this)
+        ) {
             return "receiver binding";
         }
-        if (proof.header.checkpointHeight < proof.payment.paidAtBlock
-            || proof.header.checkpointHeight - proof.payment.paidAtBlock > MAX_PAYMENT_WINDOW_BLOCKS)
-        {
+        if (
+            proof.header.checkpointHeight < proof.payment.paidAtBlock
+                || proof.header.checkpointHeight - proof.payment.paidAtBlock > MAX_PAYMENT_WINDOW_BLOCKS
+        ) {
             return "payment window";
         }
         // The finality mappings are append-only, so without an age bound a
@@ -149,8 +166,18 @@ abstract contract BudlumPaymentReceiver {
         if (!finality.heightFinal(height)) {
             return "checkpoint not final";
         }
+        FinalityMode mode = finality.finalityModeAtHeight(height);
+        if (mode == FinalityMode.None) {
+            return "checkpoint not final";
+        }
+        if (_requiresHybridFinality() && mode != FinalityMode.Hybrid) {
+            return "hybrid finality required";
+        }
         uint64 latest = finality.latestFinalHeight();
-        if (latest < height || (latest > proof.payment.paidAtBlock && latest - proof.payment.paidAtBlock > MAX_PAYMENT_WINDOW_BLOCKS)) {
+        if (
+            latest < height
+                || (latest > proof.payment.paidAtBlock && latest - proof.payment.paidAtBlock > MAX_PAYMENT_WINDOW_BLOCKS)
+        ) {
             return "proof too old";
         }
         bytes32 stateRoot = stateRootFromOpening(proof.stateRootBody, headerHash(proof.header));

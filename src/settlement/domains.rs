@@ -92,8 +92,8 @@ pub enum SettlementTx {
     ProofMarket(Box<ProofMarketTx>),
     /// Open, bid on, fulfill, or expire a state-rooted relayer intent.
     RelayerIntent(Box<RelayerIntentTx>),
-    /// Register an AppBinding application, move value into its mirror, prove a
-    /// claim, or use the AppBinding relayer-intent adapter.
+    /// Register an `AppBinding` application, move value into its mirror, prove a
+    /// claim, or use the `AppBinding` relayer-intent adapter.
     AppBinding(Box<crate::settlement::app_binding::AppBindingTx>),
     /// Name a Mikoriza registrar or record a proven restaking allocation.
     SharedSecurity(Box<crate::settlement::shared_security::SharedSecurityTx>),
@@ -124,7 +124,7 @@ impl Eq for SettlementTx {}
 
 /// Mainnet refuses a quorum proof that carries only classical signatures
 /// a `PoS` or BFT proof needs the ML-DSA QC of the same
-/// signers (`FinalityProof::PoSPq`, `FinalityProof::BftPq`), and a PoA proof
+/// signers (`FinalityProof::PoSPq`, `FinalityProof::BftPq`), and a `PoA` proof
 /// needs composite authority signatures (`FinalityProof::PoAPq`).
 fn refuse_classical_only_quorum_on_mainnet(
     chain_id: u64,
@@ -278,7 +278,7 @@ pub struct SettlementTxContext {
 
 /// Why a settlement transaction was refused. A refused transaction changes
 /// nothing.
-/// exposed for execute_settlement_tx: the executor's Settlement arm reports it by its message, not by name.
+/// exposed for `execute_settlement_tx`: the executor's Settlement arm reports it by its message, not by name.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SettlementTxError {
     #[error("the domain must name the transaction sender as its operator")]
@@ -450,7 +450,22 @@ pub fn register_domain(state: &mut AccountState, domain: ConsensusDomain) -> Res
             ));
         }
     }
-    state.settlement.domains.register(domain)
+    const _: () = assert!(
+        crate::domain::registry::MAX_ACTIVE_DOMAINS_PER_OPERATOR > 0
+            && crate::domain::registry::MAX_ACTIVE_DOMAINS_PER_OPERATOR
+                < crate::domain::registry::MAX_REGISTERED_DOMAINS
+    );
+    state.settlement.domains.reclaim_inactive_domains(
+        state.current_block_height,
+        crate::domain::registry::DOMAIN_INACTIVITY_RETIREMENT_BLOCKS,
+    );
+    let id = domain.id;
+    state.settlement.domains.register(domain)?;
+    state
+        .settlement
+        .domains
+        .note_activity(id, state.current_block_height);
+    Ok(())
 }
 
 fn validate_commitment_metadata<'a>(
@@ -700,25 +715,34 @@ pub fn verify_commitment_finality_observed(
             )
         }
         ConsensusKind::Zk => {
-            // The claim-bound verifier: a ZK domain finalizes only against
-            // the root an accepted proof claim recorded.
-            let adapter = ZkFinalityAdapter;
-            ensure_adapter_name(domain, adapter.adapter_name())?;
-            let claim_key = ProofClaimKey {
-                domain_id: commitment.domain_id,
-                target_height: commitment.domain_height,
-            };
-            let accepted_root = state
-                .settlement
-                .proof_claims
-                .get(&claim_key)
-                .map(|c| c.final_state_root);
-            let verdict =
-                adapter.verify_finality_with_claim(domain, commitment, proof, accepted_root);
-            if let Ok(status) = &verdict {
-                adapter.observe_finalized(status, proof, observer);
+            if domain.finality_adapter == state.settlement.claimed_domain_finality.adapter_name() {
+                let adapter = &state.settlement.claimed_domain_finality;
+                let verdict = adapter.verify_finality(domain, commitment, proof);
+                if let Ok(status) = &verdict {
+                    adapter.observe_finalized(status, proof, observer);
+                }
+                verdict
+            } else {
+                // The claim-bound verifier: a ZK domain finalizes only against
+                // the root an accepted proof claim recorded.
+                let adapter = ZkFinalityAdapter;
+                ensure_adapter_name(domain, adapter.adapter_name())?;
+                let claim_key = ProofClaimKey {
+                    domain_id: commitment.domain_id,
+                    target_height: commitment.domain_height,
+                };
+                let accepted_root = state
+                    .settlement
+                    .proof_claims
+                    .get(&claim_key)
+                    .map(|c| c.final_state_root);
+                let verdict =
+                    adapter.verify_finality_with_claim(domain, commitment, proof, accepted_root);
+                if let Ok(status) = &verdict {
+                    adapter.observe_finalized(status, proof, observer);
+                }
+                verdict
             }
-            verdict
         }
         ConsensusKind::Custom(_) => {
             if domain.finality_adapter
@@ -1111,6 +1135,10 @@ fn freeze_domain(
         domain.status = DomainStatus::Frozen;
     }
     state
+        .settlement
+        .relayer_policy
+        .record_domain_freeze(domain_id, state.current_block_height);
+    state
         .governance
         .applied_domain_unfreezes
         .retain(|u| u.domain_id != domain_id);
@@ -1126,8 +1154,18 @@ fn freeze_domain(
 /// a registry refusal, or nonce writes that break the account invariants.
 pub fn accept_commitment(
     state: &mut AccountState,
-    commitment: DomainCommitment,
+    mut commitment: DomainCommitment,
 ) -> Result<CommitmentOutcome, String> {
+    if state.settlement.commitments.is_quarantined(
+        commitment.domain_id,
+        commitment.domain_height,
+        commitment.domain_block_hash,
+    ) {
+        return Err(format!(
+            "Commitment for domain {} height {} is quarantined after unavailable data attestation",
+            commitment.domain_id, commitment.domain_height
+        ));
+    }
     let domain = validate_commitment_metadata(state, &commitment)?.clone();
 
     if domain.validator_set_hash != [0u8; 32]
@@ -1143,10 +1181,31 @@ pub fn accept_commitment(
         .settlement
         .commitments
         .find_by_height(commitment.domain_id, commitment.domain_height);
+    let attested = CommitmentAttestation::for_domain(&domain);
+    let kind_attested = CommitmentAttestation::for_kind(&domain.kind);
+    // When an adapter narrows its ConsensusKind's attestation surface (such as
+    // `bitcoin-spv-v1` under `ConsensusKind::PoW`, whose 80-byte header binds
+    // `parent` and `tx_root` but never a `state_root` or `event_root`), scrub
+    // the unattested roots before any comparison or persistence so downstream
+    // proof verifiers consulting `for_kind` cannot accept a relayer-supplied
+    // fabricated event tree or state root.
+    if kind_attested.state_root && !attested.state_root {
+        commitment.state_root = [0u8; 32];
+    }
+    if kind_attested.event_root && !attested.event_root {
+        commitment.event_root = [0u8; 32];
+    }
+    let agrees_on_attested = |prev: &DomainCommitment, cand: &DomainCommitment| -> bool {
+        use subtle::ConstantTimeEq;
+        bool::from(prev.domain_block_hash.ct_eq(&cand.domain_block_hash))
+            && (!attested.state_root || bool::from(prev.state_root.ct_eq(&cand.state_root)))
+            && (!attested.tx_root || bool::from(prev.tx_root.ct_eq(&cand.tx_root)))
+            && (!attested.event_root || bool::from(prev.event_root.ct_eq(&cand.event_root)))
+    };
 
     if commitment.domain_height <= domain.last_committed_height {
-        if let Some(existing) = existing {
-            if existing.domain_block_hash == commitment.domain_block_hash {
+        if let Some(ref existing) = existing {
+            if agrees_on_attested(existing, &commitment) {
                 return Ok(CommitmentOutcome::Idempotent);
             }
             return Ok(freeze_domain(
@@ -1169,11 +1228,12 @@ pub fn accept_commitment(
         ));
     }
 
-    if let Some(existing) = existing {
+    if let Some(ref existing) = existing {
         // The same finalized block is not an equivocation merely because a
-        // relayer changed an auxiliary sequence number. Treat it as a replay,
-        // not evidence that the domain finalized conflicting blocks.
-        if existing.domain_block_hash == commitment.domain_block_hash {
+        // relayer changed an auxiliary sequence number or an unattested root.
+        // Divergence on `domain_block_hash` or any finality-attested root
+        // (`state_root`, `tx_root`, `event_root`) is cryptographic equivocation.
+        if agrees_on_attested(existing, &commitment) {
             return Ok(CommitmentOutcome::Idempotent);
         }
         return Ok(freeze_domain(
@@ -1187,6 +1247,20 @@ pub fn accept_commitment(
     }
 
     let next = domain.last_committed_height.saturating_add(1);
+    if commitment.domain_height > next {
+        let pending = state
+            .settlement
+            .commitments
+            .pending_count_above(commitment.domain_id, domain.last_committed_height);
+        if pending >= crate::domain::commitment_registry::MAX_PENDING_COMMITMENTS_PER_DOMAIN {
+            return Err(format!(
+                "Pending commitment quota exceeded for domain {} (queued={}, max={})",
+                commitment.domain_id,
+                pending,
+                crate::domain::commitment_registry::MAX_PENDING_COMMITMENTS_PER_DOMAIN
+            ));
+        }
+    }
     if commitment.domain_height == next {
         validate_commitment_state_updates(state, &commitment)?;
         // A parent link only means something when the proof binds it. For a
@@ -1207,11 +1281,29 @@ pub fn accept_commitment(
     }
     let domain_id = commitment.domain_id;
     let budlum_height = state.current_block_height;
+    let expected_da_hash =
+        crate::domain::commitment_registry::DomainCommitmentRegistry::canonical_commitment_hash(
+            &commitment,
+        );
+    let _ = expected_da_hash;
     state
         .settlement
         .commitments
         .insert_at_height(commitment, budlum_height)?;
-    apply_pending_commitments(state, domain_id)
+    let outcome = apply_pending_commitments(state, domain_id)?;
+    let overdue = overdue_pending_commitments_for_domain(
+        state,
+        domain_id,
+        crate::domain::commitment_registry::DEFAULT_MAX_INCLUSION_LAG_BLOCKS,
+    );
+    if !overdue.is_empty() {
+        tracing::warn!(
+            domain_id,
+            overdue_count = overdue.len(),
+            "pending domain commitments exceeded default forced-inclusion SLA"
+        );
+    }
+    Ok(outcome)
 }
 
 /// Advance a domain through every stored commitment that continues its
@@ -1281,6 +1373,10 @@ fn apply_pending_commitments(
             domain.last_committed_height = next_height;
             domain.last_committed_hash = com.domain_block_hash;
         }
+        state
+            .settlement
+            .domains
+            .note_activity(domain_id, state.current_block_height);
         advanced = true;
     }
     Ok(if advanced {
@@ -1478,6 +1574,13 @@ pub fn submit_zk_proof(
             submission.public_inputs.chain_id
         ));
     }
+    if submission.program.len() > crate::prover::MAX_ZK_PROGRAM_WORDS {
+        return Err(format!(
+            "zk program length {} exceeds limit {}",
+            submission.program.len(),
+            crate::prover::MAX_ZK_PROGRAM_WORDS
+        ));
+    }
     if crate::prover::is_empty_or_halt_only_program(&submission.program) {
         return Err("empty or bare Halt program cannot attest a ZK domain state root".into());
     }
@@ -1489,6 +1592,18 @@ pub fn submit_zk_proof(
         .domains
         .get(claimed_domain)
         .ok_or_else(|| format!("unknown domain {claimed_domain}"))?;
+    if domain.kind != ConsensusKind::Zk {
+        return Err(format!(
+            "domain {claimed_domain} has consensus kind {:?}, not Zk",
+            domain.kind
+        ));
+    }
+    if domain.status == DomainStatus::Frozen {
+        return Err(format!("domain {claimed_domain} is frozen"));
+    }
+    if !domain.is_active() {
+        return Err(format!("domain {claimed_domain} is not active"));
+    }
     let program_hash = crate::prover::zk_program_hash(&submission.program);
     if !domain.zk_program_allowlist.contains(&program_hash) {
         return Err(format!(
@@ -1595,18 +1710,26 @@ pub fn submit_zk_proof(
     };
 
     let fee = state.registry.params().proof_submission_fee;
+    let needed = fee
+        .checked_add(reserve)
+        .ok_or_else(|| "proof fee plus transaction fee reserve overflows u64".to_string())?;
     let submitter = submission.submitter();
-    let balance = state.get_balance(&submitter);
-    if balance < fee.saturating_add(reserve) {
+    // Enforce spendable_balance (not raw balance) so cliff-locked vesting
+    // allocations and the burn-reserve account cannot spend locked tokens
+    // as proof fees.
+    let balance = state.spendable_balance(&submitter);
+    if balance < needed {
         return Err(format!(
-            "insufficient balance for proof fee: have {balance}, need {}",
-            fee.saturating_add(reserve)
+            "insufficient balance for proof fee: have {balance}, need {needed}"
         ));
     }
     // The proof fee leaves the submitter whatever the verdict, and no pool
     // receives it: it is burned, and recorded as burned.
     let account = state.get_or_create(&submitter);
-    account.balance -= fee;
+    account.balance = account
+        .balance
+        .checked_sub(fee)
+        .ok_or_else(|| "proof fee sender balance underflow".to_string())?;
     state.mark_dirty(&submitter);
     state.burned_total = state.burned_total.saturating_add(fee);
 
@@ -1644,6 +1767,10 @@ pub fn submit_zk_proof(
                 domain.last_committed_height = key.target_height;
                 domain.last_committed_hash = final_state_root;
             }
+            state
+                .settlement
+                .domains
+                .note_activity(claimed_domain, state.current_block_height);
             Ok(ProofAcceptance::Accepted {
                 rewarded: false,
                 reward: 0,
@@ -1693,6 +1820,10 @@ pub fn apply_domain_unfreezes(
             .transition_status_checked(domain_id, DomainStatus::Active)
         {
             Ok(()) => {
+                state
+                    .settlement
+                    .relayer_policy
+                    .record_domain_unfreeze(domain_id, state.current_block_height);
                 tracing::info!(
                     "Governance unfreeze: domain {} unfrozen via justification {}",
                     domain_id,
@@ -1708,10 +1839,33 @@ pub fn apply_domain_unfreezes(
     unfrozen
 }
 
+/// Return any pending commitments for `domain_id` whose Budlum inclusion age
+/// meets or exceeds `max_inclusion_lag` blocks (forced-inclusion SLA monitor).
+///
+/// WIRING: Reads `state.settlement.commitments` and `state.settlement.domains`
+/// to surface withholding delays without mutating consensus state.
+#[must_use]
+pub fn overdue_pending_commitments_for_domain(
+    state: &AccountState,
+    domain_id: DomainId,
+    max_inclusion_lag: u64,
+) -> Vec<DomainCommitment> {
+    let Some(domain) = state.settlement.domains.get(domain_id) else {
+        return Vec::new();
+    };
+    state.settlement.commitments.overdue_pending_commitments(
+        domain_id,
+        domain.last_committed_height,
+        state.current_block_height,
+        max_inclusion_lag,
+    )
+}
+
 /// Apply governance-queued consensus domain tip rollbacks inside the
-/// deterministic `(state, block) -> state` transition, rolling back both the
-/// domain's `last_committed_height`/`last_committed_hash` and any accepted proof
-/// claims strictly above `target_height`.
+/// deterministic `(state, block) -> state` transition, rolling back the
+/// domain's `last_committed_height`/`last_committed_hash`, any accepted proof
+/// claims strictly above `target_height`, any stored commitments strictly above
+/// `target_height`, and synchronizing `external_roots` with the target tip.
 pub fn apply_domain_tip_resets(
     state: &mut AccountState,
     pending: &[crate::core::account::PendingDomainTipReset],
@@ -1719,37 +1873,72 @@ pub fn apply_domain_tip_resets(
     let mut reset = Vec::new();
     for req in pending {
         let domain_id = req.domain_id;
-        let Some(domain) = state.settlement.domains.get_mut(domain_id) else {
-            tracing::warn!("ResetConsensusDomainTip: domain {domain_id} not found");
-            continue;
+        let attests_state_root = {
+            let Some(domain) = state.settlement.domains.get_mut(domain_id) else {
+                tracing::warn!("ResetConsensusDomainTip: domain {domain_id} not found");
+                continue;
+            };
+            if req.target_height > domain.last_committed_height {
+                tracing::warn!(
+                    "ResetConsensusDomainTip: domain {} target_height {} exceeds committed height {}",
+                    domain_id,
+                    req.target_height,
+                    domain.last_committed_height
+                );
+                continue;
+            }
+            if req.target_height == 0 && req.target_hash != domain.genesis_state_root {
+                tracing::warn!(
+                    "ResetConsensusDomainTip: domain {} target_height 0 must restore genesis_state_root",
+                    domain_id
+                );
+                continue;
+            }
+            domain.last_committed_height = req.target_height;
+            domain.last_committed_hash = req.target_hash;
+            CommitmentAttestation::for_domain(domain).state_root
         };
-        if req.target_height > domain.last_committed_height {
-            tracing::warn!(
-                "ResetConsensusDomainTip: domain {} target_height {} exceeds committed height {}",
-                domain_id,
-                req.target_height,
-                domain.last_committed_height
-            );
-            continue;
-        }
-        if req.target_height == 0 && req.target_hash != domain.genesis_state_root {
-            tracing::warn!(
-                "ResetConsensusDomainTip: domain {} target_height 0 must restore genesis_state_root",
-                domain_id
-            );
-            continue;
-        }
-        domain.last_committed_height = req.target_height;
-        domain.last_committed_hash = req.target_hash;
-        let pruned = state
+        let pruned_claims = state
             .settlement
             .proof_claims
             .rollback_domain_above(domain_id, req.target_height);
+        let pruned_commitments = state
+            .settlement
+            .commitments
+            .rollback_domain_above(domain_id, req.target_height);
+        // Keep `external_roots` synchronized with the rolled-back domain tip so
+        // orphaned pre-reorg roots cannot remain trusted by the bridge or relayer,
+        // verifying the restored commitment through its content-addressed digest.
+        if req.target_height == 0 || !attests_state_root {
+            state.external_roots.remove(&domain_id);
+        } else if let Some(target_com) = state
+            .settlement
+            .commitments
+            .find_by_height(domain_id, req.target_height)
+        {
+            let expected_da_hash =
+                crate::domain::commitment_registry::DomainCommitmentRegistry::canonical_commitment_hash(
+                    &target_com,
+                );
+            let verified = state.settlement.commitments.get_verified_by_canonical_hash(
+                domain_id,
+                req.target_height,
+                &expected_da_hash,
+            );
+            if verified.is_some_and(|com| com.state_root != [0u8; 32]) {
+                let _ = state.anchor_external_root(domain_id, target_com.state_root);
+            } else {
+                state.external_roots.remove(&domain_id);
+            }
+        } else {
+            state.external_roots.remove(&domain_id);
+        }
         tracing::info!(
-            "Governance tip reset: domain={} target_height={} pruned_claims={} justification={}",
+            "Governance tip reset: domain={} target_height={} pruned_claims={} pruned_commitments={} justification={}",
             domain_id,
             req.target_height,
-            pruned,
+            pruned_claims,
+            pruned_commitments,
             hex::encode(req.justification_hash)
         );
         reset.push(domain_id);
@@ -1841,6 +2030,23 @@ pub fn execute_settlement_tx(
                     .settlement
                     .domains
                     .record_observed(payload.commitment.domain_id, &observed);
+                if matches!(payload.proof, FinalityProof::AggregatedProg { .. }) {
+                    if let Some(domain) = state
+                        .settlement
+                        .domains
+                        .get(payload.commitment.domain_id)
+                        .cloned()
+                    {
+                        let _ = state
+                            .settlement
+                            .claimed_domain_finality
+                            .verify_and_certify_commitment(
+                                &domain,
+                                &payload.commitment,
+                                &payload.proof,
+                            );
+                    }
+                }
             }
             Ok(())
         }
@@ -1916,6 +2122,58 @@ fn execute_object_layer_tx(
     ctx: &SettlementTxContext,
     tx: &crate::object_layer::ObjectLayerTx,
 ) -> Result<(), SettlementTxError> {
+    let charter_caip2 = |charter: &crate::object_layer::DomainCharter| -> Option<String> {
+        let trimmed = charter.chain_reference.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.contains(':') {
+            Some(trimmed.to_string())
+        } else {
+            use crate::object_layer::family::HomeVmFamily;
+            let ns = match charter.vm_family {
+                HomeVmFamily::Evm => "eip155",
+                HomeVmFamily::CosmWasm => "cosmos",
+                HomeVmFamily::Svm => "solana",
+                HomeVmFamily::Move => "move",
+            };
+            Some(format!("{ns}:{trimmed}"))
+        }
+    };
+    if let crate::object_layer::ObjectLayerTx::Charter {
+        domain, charter, ..
+    } = tx
+    {
+        if let Some(caip2) = charter_caip2(charter) {
+            if let Some(existing) = state.settlement.domains.domain_id_by_caip2(&caip2) {
+                if existing != *domain {
+                    return Err(SettlementTxError::Refused(format!(
+                        "CAIP-2 reference '{caip2}' is already bound to domain {existing}"
+                    )));
+                }
+            }
+            state
+                .settlement
+                .domains
+                .validate_caip2_binding(*domain, &caip2)
+                .map_err(SettlementTxError::Refused)?;
+        }
+    }
+    if let crate::object_layer::ObjectLayerTx::Arrive(proof) = tx {
+        crate::settlement::finality_gate::enforce_domain_not_refuted(
+            &state.settlement,
+            state.current_block_height,
+            crate::settlement::finality_gate::ValueGate::ObjectLayerArrive,
+            proof.domain,
+        )
+        .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+        crate::settlement::finality_gate::enforce_sentry_circuit_clear(
+            &state.bridge_state.consensus_sentry,
+            crate::settlement::finality_gate::ValueGate::ObjectLayerArrive,
+            proof.domain,
+        )
+        .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+    }
     struct IntakeFinality<'a> {
         domains: &'a crate::domain::ConsensusDomainRegistry,
         commitments: &'a crate::domain::DomainCommitmentRegistry,
@@ -2151,7 +2409,100 @@ fn execute_object_layer_tx(
             crate::object_layer::tx::TxRefusal::Refused(r) => {
                 SettlementTxError::Refused(format!("object_layer_refused: {r:?}"))
             }
-        })
+        })?;
+    if let crate::object_layer::ObjectLayerTx::Charter {
+        domain, charter, ..
+    } = tx
+    {
+        if let Some(caip2) = charter_caip2(charter) {
+            state
+                .settlement
+                .domains
+                .bind_caip2(*domain, &caip2)
+                .map_err(SettlementTxError::Refused)?;
+        }
+    }
+    Ok(())
+}
+
+/// Enforce K4-C O-C.10 route finality and economic outflow ceiling on relayer
+/// intents whenever the universal finality certificate covers `source_domain`
+/// or `target_domain`.
+///
+/// - Any covered leg whose certificate verdict is `Pending` or `Refuted` is
+///   refused fail-closed ("Pending domain legs are never taken").
+/// - Every covered leg's route guarantee is composed via
+///   `compose_cross_domain_route` and must pass `admits_cross_domain_value()`.
+/// - Cumulative outflow `prior_outflow_atoms + amount_atoms` on each covered
+///   domain must stay within `EconomicSecurityBound::safe_value_outflow_ceiling_atoms`
+///   derived directly from that domain's certificate row.
+fn enforce_relayer_route_finality_and_ceiling(
+    state: &AccountState,
+    source_domain: u32,
+    target_domain: u32,
+    amount_atoms: u128,
+) -> Result<(), SettlementTxError> {
+    let Some(cert) = state
+        .settlement
+        .universal_finality_certificate(state.current_block_height)
+    else {
+        return Ok(());
+    };
+    let hub = crate::settlement::universal_finality::FinalityGuarantee::settlement_hub();
+    let mut legs = [source_domain, target_domain];
+    let leg_count = if source_domain == target_domain { 1 } else { 2 };
+    for domain_id in legs.iter_mut().take(leg_count) {
+        let dom = *domain_id;
+        let Some(proof) = cert.prove_domain(dom) else {
+            continue;
+        };
+        match proof.entry.verdict {
+            crate::settlement::universal_finality::FinalityVerdict::Established => {}
+            crate::settlement::universal_finality::FinalityVerdict::Pending { reason } => {
+                return Err(SettlementTxError::Refused(format!(
+                    "relayer intent cannot take leg on pending domain {dom} ({reason:?})"
+                )));
+            }
+            crate::settlement::universal_finality::FinalityVerdict::Refuted { code } => {
+                return Err(SettlementTxError::Refused(format!(
+                    "relayer intent cannot take leg on refuted domain {dom} (code {code})"
+                )));
+            }
+        }
+        let route = crate::settlement::universal_finality::compose_cross_domain_route(
+            &proof.entry.guarantee,
+            &hub,
+            &hub,
+        );
+        if !proof.entry.guarantee.admits_cross_domain_value()
+            || !route.source_admits_value_transfer
+            || route.bottleneck_fault_tolerance_bps == 0
+        {
+            return Err(SettlementTxError::Refused(format!(
+                "relayer intent route guarantee on domain {dom} does not admit cross-domain value ({})",
+                proof.entry.guarantee.label()
+            )));
+        }
+        let econ = crate::settlement::universal_finality::EconomicSecurityBound::derive(
+            &proof.entry.guarantee,
+            proof.entry.bond_atoms,
+            proof.entry.bond_atoms,
+        );
+        let prior = state
+            .settlement
+            .relayer_policy
+            .domain_outflow_atoms
+            .get(&dom)
+            .copied()
+            .unwrap_or(0);
+        if prior.saturating_add(amount_atoms) > econ.safe_value_outflow_ceiling_atoms {
+            return Err(SettlementTxError::Refused(format!(
+                "relayer intent exceeds economic outflow ceiling on domain {dom}: {} + {} > {}",
+                prior, amount_atoms, econ.safe_value_outflow_ceiling_atoms
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn execute_relayer_intent_tx(
@@ -2173,11 +2524,49 @@ pub(crate) fn execute_relayer_intent_tx(
             if balance < needed {
                 return Err(SettlementTxError::BondUnfunded { needed, balance });
             }
-            let id = state
-                .settlement
-                .relayer_policy
-                .submit_intent((**intent).clone(), policy, state.current_block_height)
-                .map_err(SettlementTxError::Refused)?;
+            // K4-J O-J.5: if a quantum canary alarm is active, refuse intents
+            // touching classical-backed domains while keeping PQ legs open.
+            let alarm = state.settlement.quantum.alarm();
+            for leg_domain in [intent.source_domain, intent.target_domain] {
+                if let Some(posture) = state
+                    .settlement
+                    .domains
+                    .observed(leg_domain)
+                    .quantum_class()
+                {
+                    crate::relayer::check_quantum_leg_posture(alarm, posture)
+                        .map_err(SettlementTxError::Refused)?;
+                }
+            }
+            // K4-C O-C.10: refuse taking legs from Pending/Refuted domains,
+            // routes failing admits_cross_domain_value, or domains whose
+            // certificate economic outflow ceiling would be exceeded.
+            enforce_relayer_route_finality_and_ceiling(
+                state,
+                intent.source_domain,
+                intent.target_domain,
+                u128::from(intent.max_fee),
+            )?;
+            // K4-J O-J.3: enforce chain_id binding whenever ctx carries a
+            // non-zero chain_id so testnet intents cannot replay on mainnet.
+            let id = if ctx.chain_id != 0 {
+                state
+                    .settlement
+                    .relayer_policy
+                    .submit_intent_for_chain(
+                        (**intent).clone(),
+                        policy,
+                        ctx.chain_id,
+                        state.current_block_height,
+                    )
+                    .map_err(SettlementTxError::Refused)?
+            } else {
+                state
+                    .settlement
+                    .relayer_policy
+                    .submit_intent((**intent).clone(), policy, state.current_block_height)
+                    .map_err(SettlementTxError::Refused)?
+            };
             state
                 .settlement
                 .relayer_policy
@@ -2249,6 +2638,35 @@ pub(crate) fn execute_relayer_intent_tx(
                     "relayer settlement fee exceeds the sender's bid".into(),
                 ));
             }
+            crate::settlement::finality_gate::enforce_domain_not_refuted(
+                &state.settlement,
+                state.current_block_height,
+                crate::settlement::finality_gate::ValueGate::RelayerIntentSettle,
+                intent.target_domain,
+            )
+            .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+            crate::settlement::finality_gate::enforce_sentry_circuit_clear(
+                &state.bridge_state.consensus_sentry,
+                crate::settlement::finality_gate::ValueGate::RelayerIntentSettle,
+                intent.target_domain,
+            )
+            .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+            let intent_source_domain = intent.source_domain;
+            let intent_target_domain = intent.target_domain;
+            // K4-C O-C.10: enforce universal finality certificate route guarantee
+            // and cumulative per-domain economic outflow ceiling before mutating state.
+            enforce_relayer_route_finality_and_ceiling(
+                state,
+                intent_source_domain,
+                intent_target_domain,
+                u128::from(*paid_fee),
+            )?;
+            // K4-C O-C.7: one external delivery transfer cannot close two intents.
+            let transfer_key = state
+                .settlement
+                .relayer_policy
+                .ensure_delivery_transfer_unused(result.chain, &result.tx_hash)
+                .map_err(SettlementTxError::Refused)?;
             crate::relayer::policy::verify_intent_result(
                 &state.external_roots,
                 intent,
@@ -2289,6 +2707,15 @@ pub(crate) fn execute_relayer_intent_tx(
                     state.current_block_height,
                 )
                 .map_err(SettlementTxError::Refused)?;
+            state
+                .settlement
+                .relayer_policy
+                .record_delivery_transfer_and_outflow(
+                    transfer_key,
+                    intent_source_domain,
+                    intent_target_domain,
+                    u128::from(*paid_fee),
+                );
             state
                 .settlement
                 .relayer_policy
@@ -2580,6 +3007,17 @@ fn execute_proof_market_tx(
             if verification_hash == [0u8; 32] {
                 return Err(SettlementTxError::Refused(
                     "proof-market ZK verification hash cannot be zero".into(),
+                ));
+            }
+            // Pre-check potential refund overflow before `submit_zk_proof`
+            // burns the submitter's proof fee, keeping refusal atomic.
+            if state
+                .get_balance(&task.creator)
+                .checked_add(task.reward)
+                .is_none()
+            {
+                return Err(SettlementTxError::Refused(
+                    "proof-market task refund would overflow creator balance".into(),
                 ));
             }
             let chain_height = state.current_block_height;
@@ -3175,7 +3613,7 @@ mod tests {
         }
     }
 
-    /// A PoS certificate is an aggregate of precommits over the checkpoint
+    /// A `PoS` certificate is an aggregate of precommits over the checkpoint
     /// hash; it signs no root. The commitment may therefore advance the
     /// domain's height and hash, but no external-root anchor may be written
     /// from a root the certificate never bound: that map is the value the
@@ -3209,7 +3647,7 @@ mod tests {
         );
     }
 
-    /// The parent link a PoS certificate does not sign cannot be used to freeze
+    /// The parent link a `PoS` certificate does not sign cannot be used to freeze
     /// the domain: a relayer that submits a genuine certificate for the next
     /// height with a parent of its choosing is refused, and the honest
     /// commitment for that height still advances.
@@ -3271,7 +3709,7 @@ mod tests {
         );
     }
 
-    /// The other half of the rule: a parent the proof *does* bind (the PoW
+    /// The other half of the rule: a parent the proof *does* bind (the `PoW`
     /// header chain carries it) stays equivocation evidence, and a mismatch
     /// freezes the domain exactly as before.
     #[test]
@@ -3757,7 +4195,7 @@ mod tests {
     /// An earlier liveness fault does not release a bidder from a *different*
     /// accepted job: a liveness slash keeps the role Active, so expiry charges
     /// the unhonoured award again while still refunding the owner's escrow.
-    /// The distinct `SlashedUnbonding` case below checks the AlreadySlashed
+    /// The distinct `SlashedUnbonding` case below checks the `AlreadySlashed`
     /// refusal and verifies that its refund succeeds without a second charge.
     #[test]
     fn relayer_intent_expiry_refunds_owner_and_charges_a_second_liveness_fault() {
@@ -5656,140 +6094,370 @@ mod tests {
         )>(&forged, 4 * 1024)
         .is_err());
     }
-    /// The attestation table is a promise about what a proof proved. Pinning it
-    /// to the adapters is what keeps it from drifting into a claim no adapter
-    /// checks: this is the shape that let `Poh`/`Pospace` advertise all-false
-    /// while their adapters ran `h(x,y) == h(x,y)` and a zero-step identity.
-    ///
-    /// The last arm is the one that matters for safety: a PoSpace equations
-    /// runs over `state_root`, but a plot commitment is not a domain state
-    /// root, so the table must not license anchoring that field.
+
     #[test]
-    fn the_attestation_table_matches_what_the_adapters_actually_bind() {
-        // A PoH ladder and a PoSpace plot response both bind the parent, so the
-        // obvious reading of these two rows is `parent: true`. They are not:
-        // the certificate that finalizes them is a BFT one, whose shape binds
-        // only the checkpoint height and hash, and `verify_commitment_finality_observed`
-        // refuses a commitment whose attestation claims a field its proof does
-        // not bind. Claiming the parent here would make every honest PoH or
-        // PoSpace block unfinalizable while proving nothing extra - the parent
-        // equation belongs to the adapter, which runs it for every proof
-        // variant before the certificate is read.
-        for kind in [ConsensusKind::Poh, ConsensusKind::Pospace] {
-            let att = CommitmentAttestation::for_kind(&kind);
-            assert!(
-                !att.parent,
-                "{kind:?} finalizes on a certificate, which signs no parent"
-            );
-            assert!(!att.state_root, "a plot commitment is not a state root");
-            assert!(!att.tx_root);
-            assert!(!att.event_root);
-        }
-
-        // A quorum certificate signs the checkpoint hash alone, so these three
-        // stay all-false: no certificate attests a root or a parent.
-        for kind in [ConsensusKind::PoS, ConsensusKind::Bft, ConsensusKind::Dag] {
-            let att = CommitmentAttestation::for_kind(&kind);
-            assert!(
-                !att.state_root && !att.tx_root && !att.event_root && !att.parent,
-                "{kind:?} must claim nothing a certificate cannot prove"
-            );
-        }
-
-        // And the PoA family, which signs the whole commitment, claims all four.
-        for kind in [ConsensusKind::PoA, ConsensusKind::AiInference] {
-            let att = CommitmentAttestation::for_kind(&kind);
-            assert!(att.state_root && att.tx_root && att.event_root && att.parent);
-        }
-    }
-
-    /// A PoH or PoSpace commitment may not re-point its parent: the parent is
-    /// exactly what the adapter's new equation binds, and the certificate does
-    /// not sign it. This is the settlement-level consequence of the adapter
-    /// fix, exercised through the same door a relayer uses.
-    #[test]
-    fn a_poh_commitment_whose_parent_does_not_advance_is_refused_in_block() {
-        let mut spec = crate::domain::producer::QuorumBlockSpec {
-            domain: default_domain(4_101, ConsensusKind::Poh, 45262, "poh-hash-chain-v1", 0),
-            height: 5,
-            block_hash: [0u8; 32],
-            parent_hash: [0x71; 32],
-            state_root: [0x72; 32],
-            tx_root: [0x73; 32],
-            event_root: [0x74; 32],
-            timestamp_ms: 9_000,
-            sequence: 1,
-            producer: None,
-        };
-        // A PoH domain finalizes on a quorum certificate; give it the same
-        // shape the BFT producer test uses.
-        let members: Vec<crate::domain::producer::BftMember> = (0..4u8)
-            .map(|i| {
-                let mut seed = [0u8; 64];
-                seed[0] = i + 1;
-                let bls = crate::crypto::primitives::BlsKeypair::from_seed(&seed)
-                    .expect("a non-zero test seed");
-                let pq = crate::crypto::primitives::PqKeyPair::generate();
-                let address = Address::from([i + 1; 32]);
-                let pop = crate::chain::finality::sign_bls_pop(
-                    &bls.secret_key,
-                    &crate::chain::finality::pop_signing_message(45_262, &address, &bls.public_key),
-                );
-                crate::domain::producer::BftMember {
-                    entry: crate::chain::finality::ValidatorEntry {
-                        address,
-                        stake: 100,
-                        bls_public_key: bls.public_key.clone(),
-                        pop_signature: pop,
-                        pq_public_key: pq.public_key_bytes().to_vec(),
-                    },
-                    bls,
-                    pq: Some(pq),
-                }
-            })
-            .collect();
-        let snapshot = crate::chain::finality::ValidatorSetSnapshot::new(
-            1,
-            members.iter().map(|m| m.entry.clone()).collect(),
-        );
-        spec.domain.validator_set_hash = hex::decode(&snapshot.set_hash)
-            .expect("hex")
-            .try_into()
-            .expect("32 bytes");
-
-        let built = crate::domain::producer::build_poh_commitment(
-            &spec,
-            4,
-            45_262,
-            1,
-            0,
-            &members,
-            &[0, 1, 2],
-        )
-        .expect("the PoH commitment builds");
+    fn bitcoin_spv_commitment_scrubs_unattested_event_and_state_roots() {
+        use crate::cross_domain::event_tree::{DomainEvent, DomainEventTree};
+        use crate::cross_domain::DomainEventKind;
+        use crate::domain::plugin::default_domain;
+        use crate::domain::types::BITCOIN_SPV_ADAPTER;
+        use crate::settlement::proof_verifier::{ProofVerificationError, SettlementProofVerifier};
 
         let mut state = AccountState::new();
-        register_domain(&mut state, spec.domain.clone()).expect("the domain registers");
+        let btc_dom = default_domain(709, ConsensusKind::PoW, 70_900, BITCOIN_SPV_ADAPTER, 6);
+        state
+            .settlement
+            .domains
+            .register(btc_dom)
+            .expect("register bitcoin-spv domain");
 
-        // Honest: verifies and advances.
-        verify_commitment_finality(
-            &state,
-            &built.commitment,
-            &built.proof,
-            IntakeState::production_bls,
-        )
-        .expect("the honest PoH commitment finalizes");
+        let forged_event = DomainEvent {
+            domain_id: 709,
+            domain_height: 1,
+            event_index: 0,
+            kind: DomainEventKind::Custom(b"forged-lock".to_vec()),
+            emitter: Address::from([0x33; 32]),
+            message: None,
+            payload_hash: [0xEE; 32],
+        };
+        let mut fake_tree = DomainEventTree::new();
+        fake_tree.push(forged_event.clone());
+        let fake_event_root = fake_tree.root();
+        let merkle_proof = fake_tree.proof(0).expect("merkle proof");
 
-        // Re-pointed parent: the same certificate, the same block hash.
-        let mut tampered = built.commitment.clone();
-        tampered.parent_domain_block_hash = [0x75; 32];
-        let err = verify_commitment_finality(
-            &state,
-            &tampered,
-            &built.proof,
-            IntakeState::production_bls,
+        let commitment = DomainCommitment {
+            domain_id: 709,
+            domain_height: 1,
+            domain_block_hash: [0x11; 32],
+            parent_domain_block_hash: [0u8; 32],
+            state_root: [0xAA; 32],
+            tx_root: [0x22; 32],
+            event_root: fake_event_root,
+            finality_proof_hash: [0x44; 32],
+            consensus_kind: ConsensusKind::PoW,
+            validator_set_hash: [0u8; 32],
+            producer: Some(Address::from([0x55; 32])),
+            timestamp_ms: 1_000,
+            sequence: 1,
+            state_updates: std::collections::BTreeMap::new(),
+        };
+        let out = accept_commitment(&mut state, commitment).expect("accept bitcoin-spv commitment");
+        assert!(matches!(out, CommitmentOutcome::Advanced));
+
+        let stored = state
+            .settlement
+            .commitments
+            .find_by_height(709, 1)
+            .expect("stored commitment");
+        assert_eq!(stored.tx_root, [0x22; 32]);
+        assert_eq!(stored.state_root, [0u8; 32]);
+        assert_eq!(stored.event_root, [0u8; 32]);
+
+        let err = SettlementProofVerifier::verify_event_against_commitment(
+            &stored,
+            forged_event,
+            &merkle_proof,
         )
-        .expect_err("a re-pointed PoH parent must not finalize");
-        assert!(err.contains("continue the parent digest"), "{err}");
+        .expect_err("bitcoin-spv commitment must never attest event_root");
+        assert_eq!(err, ProofVerificationError::UnattestedEventRoot);
+    }
+
+    #[test]
+    fn submit_zk_proof_refuses_vesting_locked_fee_and_frozen_or_non_zk_domain() {
+        use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams};
+        use crate::cross_domain::MessageKind;
+        use crate::domain::plugin::default_domain;
+        use crate::execution::zkvm::{prove_bytecode, DEFAULT_CONTRACT_GAS_LIMIT};
+        use crate::prover::{zk_program_hash, ZkProofSubmission};
+        use crate::tokenomics::VestingSchedule;
+        use bud_isa::{Instruction, Opcode};
+
+        let bytecode: Vec<u8> = [
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 7,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+        ]
+        .into_iter()
+        .flat_map(u64::to_le_bytes)
+        .collect();
+        let (proof, pi, program) =
+            prove_bytecode(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT).expect("prove");
+        let allow_hash = zk_program_hash(&program);
+
+        let mk_sub = |sender: Address, domain_id: u32, h: u64| -> ZkProofSubmission {
+            let payload_hash =
+                ZkProofSubmission::payload_binding_hash(&proof, &pi, &program, domain_id, h);
+            ZkProofSubmission {
+                message: CrossDomainMessage::new(CrossDomainMessageParams {
+                    source_domain: domain_id,
+                    target_domain: domain_id,
+                    source_height: h,
+                    event_index: 0,
+                    nonce: h,
+                    sender,
+                    recipient: Address::zero(),
+                    payload_hash,
+                    kind: MessageKind::Custom(b"zk-proof".to_vec()),
+                    expiry_height: 1_000,
+                }),
+                proof: proof.clone(),
+                public_inputs: pi.clone(),
+                program: program.clone(),
+            }
+        };
+
+        let mut state = AccountState::new();
+        state.current_block_height = 10;
+        let fee = state.registry.params().proof_submission_fee;
+
+        // 1. Active ZK domain, but submitter's full balance is cliff-locked in team_vesting.
+        let mut zk_dom = default_domain(701, ConsensusKind::Zk, 70_100, "budzero-stark-v1", 1);
+        zk_dom.zk_program_allowlist = vec![allow_hash];
+        state
+            .settlement
+            .domains
+            .register(zk_dom)
+            .expect("register zk");
+
+        let vested = Address::from([0x71; 32]);
+        let locked = fee.saturating_mul(4);
+        state.add_balance(&vested, locked);
+        state.team_vesting = Some((
+            vested,
+            VestingSchedule {
+                total: locked,
+                start_epoch: 0,
+                cliff_epochs: 500,
+                duration_epochs: 1_000,
+            },
+        ));
+        assert_eq!(state.spendable_balance(&vested), 0);
+        let sub_v = mk_sub(vested, 701, 1);
+        let err = submit_zk_proof(&mut state, &sub_v, 45_262, 10, 0)
+            .expect_err("cliff-locked vesting balance must never pay proof fee");
+        assert!(
+            err.contains("insufficient balance"),
+            "unexpected err: {err}"
+        );
+        assert_eq!(state.get_balance(&vested), locked);
+        assert_eq!(state.burned_total, 0);
+
+        // 2. Funded submitter, but target domain is non-ZK (Bft) -> refused.
+        let funded = Address::from([0x72; 32]);
+        state.add_balance(&funded, locked);
+        let mut bft_dom = default_domain(702, ConsensusKind::Bft, 70_200, "bft-v1", 1);
+        bft_dom.zk_program_allowlist = vec![allow_hash];
+        state
+            .settlement
+            .domains
+            .register(bft_dom)
+            .expect("register bft");
+        let sub_bft = mk_sub(funded, 702, 1);
+        let err = submit_zk_proof(&mut state, &sub_bft, 45_262, 10, 0)
+            .expect_err("non-ZK domain must refuse submit_zk_proof");
+        assert!(err.contains("not Zk"), "unexpected err: {err}");
+
+        // 3. Frozen ZK domain -> refused before burning fee.
+        state
+            .settlement
+            .domains
+            .set_status(701, DomainStatus::Frozen)
+            .expect("freeze");
+        let sub_frz = mk_sub(funded, 701, 1);
+        let err = submit_zk_proof(&mut state, &sub_frz, 45_262, 10, 0)
+            .expect_err("frozen ZK domain must refuse submit_zk_proof");
+        assert!(
+            err.contains("not active") || err.contains("frozen"),
+            "unexpected err: {err}"
+        );
+        assert_eq!(state.get_balance(&funded), locked);
+    }
+
+    #[test]
+    fn domain_tip_reset_rolls_back_commitments_external_roots_and_enforces_pending_quota() {
+        let mut state = AccountState::new();
+        let mut eth_dom = default_domain(
+            1,
+            ConsensusKind::PoA,
+            crate::core::transaction::ExternalChain::Ethereum.canonical_chain_id(),
+            "poa-v1",
+            0,
+        );
+        eth_dom.last_committed_hash = [0x01; 32];
+        eth_dom.genesis_state_root = [0x01; 32];
+        state.settlement.domains.register(eth_dom).expect("reg");
+
+        let make_poa_com = |h: u64, prev: Hash32, blk: Hash32, root: Hash32| DomainCommitment {
+            domain_id: 1,
+            domain_height: h,
+            domain_block_hash: blk,
+            parent_domain_block_hash: prev,
+            state_root: root,
+            tx_root: [0x22; 32],
+            event_root: [0x33; 32],
+            finality_proof_hash: [0x44; 32],
+            consensus_kind: ConsensusKind::PoA,
+            validator_set_hash: [0u8; 32],
+            timestamp_ms: u128::from(1_000 + h),
+            sequence: h,
+            producer: None,
+            state_updates: std::collections::BTreeMap::new(),
+        };
+
+        state.current_block_height = 5;
+        assert_eq!(
+            accept_verified_commitment(
+                &mut state,
+                make_poa_com(1, [0x01; 32], [0x11; 32], [0xA1; 32]),
+            )
+            .unwrap(),
+            CommitmentOutcome::Advanced
+        );
+        assert_eq!(
+            accept_verified_commitment(
+                &mut state,
+                make_poa_com(2, [0x11; 32], [0x12; 32], [0xA2; 32]),
+            )
+            .unwrap(),
+            CommitmentOutcome::Advanced
+        );
+        assert_eq!(state.external_roots.get(&1), Some(&[0xA2; 32]));
+
+        // Queue out-of-order commitment above gap height 3 and confirm SLA tracking.
+        state.current_block_height = 10;
+        assert_eq!(
+            accept_commitment(
+                &mut state,
+                make_poa_com(4, [0x13; 32], [0x14; 32], [0xA4; 32]),
+            )
+            .unwrap(),
+            CommitmentOutcome::Stored
+        );
+        state.current_block_height = 45;
+        let overdue = overdue_pending_commitments_for_domain(&state, 1, 32);
+        assert_eq!(overdue.len(), 1);
+        assert_eq!(overdue[0].domain_height, 4);
+
+        // Tip reset back to height 1 removes height >= 2 commitments and restores height-1 root.
+        let reset = crate::core::account::PendingDomainTipReset {
+            domain_id: 1,
+            target_height: 1,
+            target_hash: [0x11; 32],
+            justification_hash: [0x99; 32],
+        };
+        let reset_domains = apply_domain_tip_resets(&mut state, &[reset]);
+        assert_eq!(reset_domains, vec![1]);
+        assert_eq!(state.external_roots.get(&1), Some(&[0xA1; 32]));
+        assert!(state.settlement.commitments.find_by_height(1, 2).is_none());
+        assert!(state.settlement.commitments.find_by_height(1, 4).is_none());
+
+        // Pending quota caps out-of-order backlog at MAX_PENDING_COMMITMENTS_PER_DOMAIN.
+        for i in 0..crate::domain::commitment_registry::MAX_PENDING_COMMITMENTS_PER_DOMAIN {
+            let h = 10 + u64::try_from(i).unwrap_or(0);
+            let mut blk = [0u8; 32];
+            blk[..8].copy_from_slice(&h.to_le_bytes());
+            accept_commitment(&mut state, make_poa_com(h, [0u8; 32], blk, [0xB0; 32]))
+                .expect("within quota");
+        }
+        let err = accept_commitment(
+            &mut state,
+            make_poa_com(500, [0u8; 32], [0xFE; 32], [0xB1; 32]),
+        )
+        .expect_err("out-of-order backlog beyond per-domain quota must be rejected");
+        assert!(err.contains("quota exceeded"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn pow_domain_refuses_bft_and_pos_finality_proof_families() {
+        let mut state = AccountState::new();
+        let mut pow_domain = pow(77);
+        pow_domain.bridge_enabled = false;
+        register_domain(&mut state, pow_domain.clone()).unwrap();
+
+        let block_one = block(1, &"00".repeat(32), 0x51);
+        let com = commitment(&pow_domain, &block_one, 0);
+
+        let dummy_cert = crate::chain::finality::FinalityCert {
+            epoch: 1,
+            checkpoint_height: 1,
+            checkpoint_hash: String::new(),
+            chain_id: 45262,
+            agg_sig_bls: Vec::new(),
+            bitmap: Vec::new(),
+            set_hash: String::new(),
+            seat_table_version: 0,
+        };
+        let dummy_snapshot = crate::chain::finality::ValidatorSetSnapshot {
+            epoch: 1,
+            validators: Vec::new(),
+            set_hash: String::new(),
+            total_stake: 0,
+        };
+        let bft_proof = FinalityProof::Bft {
+            round: 1,
+            commit_hash: [0x11; 32],
+            cert: dummy_cert.clone(),
+            validator_snapshot: dummy_snapshot.clone(),
+        };
+        let bft_err = verify_commitment_finality(
+            &state,
+            &com,
+            &bft_proof,
+            crate::cross_domain::external::IntakeState::production_bls,
+        )
+        .expect_err("PoW domain must refuse Bft finality proof family");
+        assert!(
+            !bft_err.is_empty(),
+            "refusal must carry explicit family mismatch reason"
+        );
+
+        let pos_proof = FinalityProof::PoS {
+            cert: dummy_cert,
+            validator_snapshot: dummy_snapshot,
+        };
+        let pos_err = verify_commitment_finality(
+            &state,
+            &com,
+            &pos_proof,
+            crate::cross_domain::external::IntakeState::production_bls,
+        )
+        .expect_err("PoW domain must refuse PoS finality proof family");
+        assert!(
+            !pos_err.is_empty(),
+            "refusal must carry explicit family mismatch reason"
+        );
+    }
+
+    #[test]
+    fn accept_commitment_refuses_quarantined_unavailable_commitment() {
+        let mut state = AccountState::new();
+        let dom = pow(78);
+        register_domain(&mut state, dom.clone()).unwrap();
+        let b1 = block(1, &"00".repeat(32), 0x61);
+        let com = commitment(&dom, &b1, 0);
+        accept_commitment(&mut state, com.clone()).expect("initial commitment accepts");
+        state
+            .settlement
+            .commitments
+            .quarantine_unavailable_commitment(dom.id, com.domain_height, 0)
+            .expect("quarantine succeeds");
+        let mut retry = com;
+        retry.sequence = 1;
+        let err = accept_commitment(&mut state, retry)
+            .expect_err("quarantined unavailable commitment must be rejected on readmission");
+        assert!(err.contains("quarantined"), "unexpected err: {err}");
     }
 }

@@ -70,7 +70,7 @@ mod tests {
         );
     }
 
-    /// Canary: calculate_seed deterministic + non-zero verir.
+    /// Canary: `calculate_seed` deterministic + non-zero verir.
     /// Poison path (Err→fallback hash) kodda mevcut; bu test temel
     /// It verifies determinism. The poison itself is a separate integration
     /// test.

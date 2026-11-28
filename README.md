@@ -13,7 +13,7 @@ the layer asks which finality proof holds for a fact, never which consensus prod
 value moves between domains without trusting an intermediary.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=consensus-of-consensuses&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Aconsensus-of-consensuses+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-6043%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Aconsensus-of-consensuses+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-6948%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Aconsensus-of-consensuses+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
@@ -25,7 +25,7 @@ value moves between domains without trusting an intermediary.
 > **Budlum has not launched a mainnet and has not been audited.** No public testnet
 > launch or mainnet launch is evidenced here. No external audit has been performed.
 > This is development software. Do not use it for real-value traffic. The
-> [testnet launch-gate ledger](docs/audit/TLG_REPORT.md) distinguishes in-tree code
+> The testnet launch-gate ledger (kept in the operator workspace repository, outside this tree) distinguishes in-tree code
 > and synthetic fixtures from verified deployments.
 
 ---
@@ -187,7 +187,7 @@ dependencies, so the entire system builds, tests and ships as one tree.
 | Layer | In this repo | What it is |
 | --- | --- | --- |
 | **BudZero** | [`budzero/`](budzero), [README](budzero/README.md) | ZK-native VM: deterministic ISA, gas-metered VM, compiler, and a Plonky3 STARK prover/verifier |
-| **B.U.D.** | [`bud/`](bud) · [`src/storage/`](src/storage) | Broad Universal Database: `bud/` is the 1.0/2.0/3.0 implementation (tarif / QR / receipt / settlement modules, [bud README](bud/README.md)); `src/storage/` is the settlement layer's storage engine (content addressing, deals, challenge/response proofs) |
+| **B.U.D. 3.0** | [`src/storage/bud3/`](src/storage/bud3) · [`src/storage/`](src/storage) | Broad Universal Database 3.0: self-verifying BOF-1 object store, RaptorQ fountain shards, deterministic compression, Merkle custody proofs, and access-tiered encryption |
 | **AI inference layer** | [`src/ai_inference/`](src/ai_inference) | Closed-circuit AI layer: model registry, operator compute-bond, effort tiers, Pollen-gated data access, perception declarations (V3), SocialFi output bridge. Off-chain workspace: [`crates/ai-inference/`](crates/ai-inference) |
 | **Pollen** | [`src/pollen/`](src/pollen) | Consent-gated data marketplace, grants, encryption, and the gate the AI layer must pass |
 | **BNS** | [`src/bns/`](src/bns) | `.bud` naming: registration, renewal, transfer, subdomains, content and storage records |
@@ -198,7 +198,6 @@ dependencies, so the entire system builds, tests and ships as one tree.
 | Path | Contents |
 | --- | --- |
 | [`crates/`](crates) | Standalone workspaces: wallet-core, budlum-explorer, ai_inference, note-packing |
-| [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 implementation (its own workspace) |
 | [`docs/`](docs) | Reference docs: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, NOTICE |
 | [`config/`](config) | Devnet / testnet / mainnet profiles and genesis templates |
 | [`xtask/gates/`](xtask/gates) | CI gates, every one is self-testing (see [Engineering standards](#engineering-standards)) |
@@ -265,8 +264,10 @@ cargo run --manifest-path xtask/tools/Cargo.toml -- pre-push   # fmt + clippy, p
 | `pq-ml-dsa` | OK | FIPS 204 ML-DSA (NIST final) - ML-DSA-65 validator signatures (`ml-dsa`). Scheme is written into genesis; a node whose build disagrees with the chain refuses to start |
 | `p2p-mdns` | - | Devnet-only local peer discovery. Deliberately excluded from release builds so mDNS advisories stay unreachable |
 
-`cargo build --all-features` is **expected to fail**: the PQ backends are mutually exclusive
-and a `compile_error!` enforces it. CI asserts that failure, so the guard cannot silently rot.
+`cargo build --all-features` is **expected to build**: pq-dilithium took the mutually
+exclusive pair with it (304cfe8), so the remaining backends coexist. CI's feature canary
+(`cargo check --all-features`) fails the build when a feature combination breaks, so the
+guard cannot silently rot.
 
 ---
 
@@ -282,7 +283,7 @@ cargo run --release -- --network devnet
 
 ```bash
 docker compose -f ops/docker-compose.yml up   # see ops/docker-compose.yml
-bash ops/scripts/devnet-multinode-smoke.sh
+cargo run --manifest-path xtask/tools/Cargo.toml -- devnet-multinode-smoke
 ```
 
 ### From a profile
@@ -302,7 +303,7 @@ ceremony file.
 
 The testnet profile uses chain id `45261` and network magic `BDLT`; this is
 configuration, **not** proof that a public network has launched. The operator
-must first complete the [launch gate](docs/audit/TLG_REPORT.md), a genesis
+must first complete the launch gate (its evidence ledger is kept in the operator workspace repository, outside this tree): a genesis
 ceremony and public endpoint deployment. For a local rehearsal:
 
 - **Create a wallet:** `bud wallet create --key-file ./secrets/wallet.json`
@@ -408,7 +409,7 @@ BudZero, determinism, security audit, supply chain, fuzzing, Miri, semver and mo
 - **Definition and placeholders.** Gates in `xtask/gates/` check the definition
   block's pinned digest and reject new unrecorded placeholder slots and to-do
   markers. These syntax checks do not establish that a testnet claim is wired
-  into production; [the launch ledger](docs/audit/TLG_REPORT.md) records that
+  into production; the launch ledger (kept in the operator workspace repository, outside this tree) records that
   missing evidence separately.
 - **Badge checking.** In CI, the badge gate compares the test count to that
   run's measured count, the Rust version to `rust-toolchain.toml`, the license
@@ -487,7 +488,7 @@ marketplace and SocialFi modules, EVM chain adapter, tokenomics, snapshots and
 relayer intents exist in the repository. Their presence is **not** proof that
 the bridge, a unified B.U.D. 3.0 production path, cross-environment execution
 or a physical-device testnet rehearsal has passed. See the
-[launch-gate evidence ledger](docs/audit/TLG_REPORT.md) for required evidence.
+launch-gate evidence ledger (kept in the operator workspace repository, outside this tree) for required evidence.
 
 **Deliberately not enabled, and pinned by tests that break if that changes:** on-chain AI
 inference proof *verification* ([status](docs/AI_VERIFICATION_STATUS.md)) · BudZKVM

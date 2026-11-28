@@ -155,6 +155,12 @@ pub fn check_charter_at_state_root(
     if !domain_active {
         return Err(CharterRefusal::DomainNotActive);
     }
+    if charter.chain_reference.trim().is_empty()
+        || charter.chain_reference.len() > 128
+        || charter.endpoint == charter.verifier
+    {
+        return Err(CharterRefusal::BadAddress);
+    }
     let family = profile_for(charter.vm_family);
     family
         .validate_address(&charter.endpoint)

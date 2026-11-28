@@ -31,11 +31,14 @@ module budlum::settlement_endpoint {
 
     /// Seconds without a newly accepted checkpoint before the exit opens.
     const SILENCE_WINDOW_SECS: u64 = 1209600;
+    /// Canonical header hash length in bytes.
+    const HEADER_HASH_LEN: u64 = 32;
 
     struct Endpoint has key {
         /// The custody object; assets are held at its address.
         vault: ExtendRef,
         last_accepted_height: u64,
+        last_accepted_header_hash: vector<u8>,
         last_accepted_at: u64,
         home_nonce: Table<address, u64>,
     }
@@ -82,6 +85,7 @@ module budlum::settlement_endpoint {
         move_to(publisher, Endpoint {
             vault,
             last_accepted_height: 0,
+            last_accepted_header_hash: vector::empty(),
             last_accepted_at: timestamp::now_seconds(),
             home_nonce: table::new(),
         });
@@ -121,19 +125,38 @@ module budlum::settlement_endpoint {
         abort E_NOT_OPEN
     }
 
-    /// Accept a newer final Budlum checkpoint; restarts the silence clock.
+    fun is_nonzero_header_hash(header_hash: &vector<u8>): bool {
+        if (vector::length(header_hash) != HEADER_HASH_LEN) {
+            return false
+        };
+        let i = 0;
+        while (i < HEADER_HASH_LEN) {
+            if (*vector::borrow(header_hash, i) != 0) {
+                return true
+            };
+            i = i + 1;
+        };
+        false
+    }
+
+    /// Accept a newer final Budlum checkpoint; restarts the silence clock only
+    /// after pinning its exact authenticated 32-byte header hash.
     public entry fun accept_header(height: u64) acquires Endpoint {
         let e = borrow_global_mut<Endpoint>(@budlum);
         assert!(height > e.last_accepted_height, E_NOT_NEWER);
         assert!(budlum_verifier::height_final(height), E_NOT_FINAL);
+        let header_hash = budlum_verifier::header_at(height);
+        assert!(is_nonzero_header_hash(&header_hash), E_NOT_FINAL);
         e.last_accepted_height = height;
+        e.last_accepted_header_hash = header_hash;
         e.last_accepted_at = timestamp::now_seconds();
     }
 
     #[view]
     public fun silent(): bool acquires Endpoint {
         let e = borrow_global<Endpoint>(@budlum);
-        timestamp::now_seconds() > e.last_accepted_at + SILENCE_WINDOW_SECS
+        let now = timestamp::now_seconds();
+        now > e.last_accepted_at && now - e.last_accepted_at > SILENCE_WINDOW_SECS
     }
 
     /// Opens with the object-layer root opening.

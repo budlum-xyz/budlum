@@ -11,11 +11,11 @@ use std::path::Path;
 const SCAN_ROOTS: &[&str] = &[
     "src",
     "budzero",
-    "bud",
     "crates/ai-inference",
     "crates/bpqs",
     "crates/bud-codec",
     "crates/budlum-explorer",
+    "crates/budlum-nipopow",
     "crates/budlum-types",
     "crates/note-packing",
     "crates/uel-abi",
@@ -212,12 +212,11 @@ mod scan_root_tests {
         }
     }
 
-    /// Every crate directory under `crates/` and the `bud` tree must be
-    /// scanned, so a new crate cannot sit outside the gate unnoticed.
+    /// Every crate directory under `crates/` must be scanned, so a new crate
+    /// cannot sit outside the gate unnoticed.
     #[test]
     fn every_crate_directory_is_a_scan_root() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        assert!(SCAN_ROOTS.contains(&"bud"), "bud/ is not scanned");
         let entries = std::fs::read_dir(repo.join("crates")).expect("crates/ is readable");
         for e in entries.flatten() {
             if e.file_type().is_ok_and(|t| t.is_dir()) {

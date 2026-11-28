@@ -157,15 +157,37 @@ pub struct TeeAttestation {
     pub backend: TeeBackendKind,
 }
 
+fn ct_eq_32(lhs: &[u8; 32], rhs: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for (&a, &b) in lhs.iter().zip(rhs.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+fn is_all_zero_32(bytes: &[u8; 32]) -> bool {
+    bytes.iter().fold(0u8, |acc, &b| acc | b) == 0
+}
+
 impl TeeAttestation {
-    /// Validate that the attestation binds to the expected measurement.
+    /// Validate that the attestation binds to a non-zero expected measurement
+    /// on an active hardware backend using constant-time comparison.
+    #[must_use]
     pub fn verify_measurement(&self, expected: &[u8; 32]) -> bool {
-        self.measurement == *expected
+        self.backend != TeeBackendKind::None
+            && !is_all_zero_32(&self.measurement)
+            && !is_all_zero_32(expected)
+            && ct_eq_32(&self.measurement, expected)
     }
 
-    /// Validate that the report data matches expected commitment.
+    /// Validate that the report data matches a non-zero expected commitment
+    /// on an active hardware backend using constant-time comparison.
+    #[must_use]
     pub fn verify_report_data(&self, expected: &[u8; 32]) -> bool {
-        self.report_data == *expected
+        self.backend != TeeBackendKind::None
+            && !is_all_zero_32(&self.report_data)
+            && !is_all_zero_32(expected)
+            && ct_eq_32(&self.report_data, expected)
     }
 }
 
@@ -249,28 +271,53 @@ pub mod mock {
 
     impl TeeQuoteVerifier for MockQuoteVerifier {
         fn verify_quote(&self, quote: &[u8]) -> Result<TeeAttestation, WalletError> {
-            if quote.len() != 4 + 32 + 32 + 1 + 8 || quote[0..4] != MOCK_QUOTE_MAGIC {
+            let (
+                Some(magic),
+                Some(meas_slice),
+                Some(rd_slice),
+                Some(&backend_byte),
+                Some(ts_slice),
+            ) = (
+                quote.get(0..4),
+                quote.get(4..36),
+                quote.get(36..68),
+                quote.get(68),
+                quote.get(69..77),
+            )
+            else {
+                return Err(WalletError::TeeUnavailable(
+                    "quote does not verify against the hardware root of trust".into(),
+                ));
+            };
+            if quote.len() != 4 + 32 + 32 + 1 + 8 || magic != MOCK_QUOTE_MAGIC {
                 return Err(WalletError::TeeUnavailable(
                     "quote does not verify against the hardware root of trust".into(),
                 ));
             }
             let mut measurement = [0u8; 32];
-            measurement.copy_from_slice(&quote[4..36]);
-            if !self.recognized_measurements.contains(&measurement) {
+            measurement.copy_from_slice(meas_slice);
+            if !self
+                .recognized_measurements
+                .iter()
+                .any(|known| ct_eq_32(known, &measurement))
+            {
                 return Err(WalletError::TeeUnavailable(
                     "quote names an unrecognized enclave measurement".into(),
                 ));
             }
             let mut report_data = [0u8; 32];
-            report_data.copy_from_slice(&quote[36..68]);
-            let backend_byte = quote[68];
+            report_data.copy_from_slice(rd_slice);
             let backend = match backend_byte {
                 b'c' => TeeBackendKind::ClientSgx,
                 b's' => TeeBackendKind::ServerNitro,
-                _ => TeeBackendKind::None,
+                _ => {
+                    return Err(WalletError::TeeUnavailable(
+                        "quote names an unrecognized TEE backend".into(),
+                    ));
+                }
             };
             let mut timestamp_bytes = [0u8; 8];
-            timestamp_bytes.copy_from_slice(&quote[69..77]);
+            timestamp_bytes.copy_from_slice(ts_slice);
             Ok(TeeAttestation {
                 measurement,
                 report_data,
@@ -337,6 +384,62 @@ pub mod mock {
             let v = UnavailableTeeQuoteVerifier;
             let err = v.verify_quote(b"anything").unwrap_err();
             assert!(matches!(err, WalletError::TeeUnavailable(_)));
+        }
+
+        #[test]
+        fn walcore04_tee_attestation_rejects_zero_fields_none_backend_and_unknown_mock_backend() {
+            // 1. All-zero measurement must never verify even if expected is also zero.
+            let zero_meas = TeeAttestation {
+                measurement: [0u8; 32],
+                report_data: [0x11; 32],
+                timestamp: 1,
+                backend: TeeBackendKind::ClientSgx,
+            };
+            assert!(
+                !zero_meas.verify_measurement(&[0u8; 32]),
+                "all-zero enclave measurement must be refused"
+            );
+
+            // 2. All-zero report_data must never verify even if expected is also zero.
+            let zero_rd = TeeAttestation {
+                measurement: MOCK_MEASUREMENT,
+                report_data: [0u8; 32],
+                timestamp: 1,
+                backend: TeeBackendKind::ServerNitro,
+            };
+            assert!(
+                !zero_rd.verify_report_data(&[0u8; 32]),
+                "all-zero report_data must be refused"
+            );
+
+            // 3. TeeBackendKind::None must fail BOTH verify_measurement and verify_report_data.
+            let none_att = TeeAttestation {
+                measurement: MOCK_MEASUREMENT,
+                report_data: [0x42; 32],
+                timestamp: 1,
+                backend: TeeBackendKind::None,
+            };
+            assert!(
+                !none_att.verify_measurement(&MOCK_MEASUREMENT),
+                "TeeBackendKind::None must fail verify_measurement"
+            );
+            assert!(
+                !none_att.verify_report_data(&[0x42; 32]),
+                "TeeBackendKind::None must fail verify_report_data"
+            );
+
+            // 4. MockQuoteVerifier must reject unknown/corrupted backend byte instead of None.
+            let rt = MockTeeRuntime::new(TeeBackendKind::ClientSgx);
+            let mut quote = rt.quote([0x42; 32]).unwrap();
+            quote[68] = b'z';
+            let verifier = MockQuoteVerifier::default();
+            assert!(
+                matches!(
+                    verifier.verify_quote(&quote),
+                    Err(WalletError::TeeUnavailable(_))
+                ),
+                "unknown backend byte in quote must fail closed"
+            );
         }
     }
 }

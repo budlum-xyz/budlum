@@ -401,7 +401,7 @@ pub enum MigrationTx {
     ImportEvmStorageChunk(ImportEvmStorageChunk),
     /// Verifies complete `storage_root`, charges migration fee, and installs EVM state.
     FinalizeEvmImport { contract: [u8; 20] },
-    /// Verifies CosmWasm bytecode, Cosmos creator signature, and ICS-23 proofs, and installs WASM state (`8.12.3`).
+    /// Verifies `CosmWasm` bytecode, Cosmos creator signature, and ICS-23 proofs, and installs WASM state (`8.12.3`).
     ImportWasmContract(Box<WasmMigrationRequest>),
     /// Verifies Solana account Merkle proof and Ed25519 authority signature, and installs SVM state (`8.12.3`).
     ImportSvmAccount(Box<SvmMigrationRequest>),
@@ -741,10 +741,10 @@ pub fn is_evm_address_occupied(
         return Ok(true);
     }
     let bud_addr = derive_contract_account(EeId::EVM, addr20);
-    if is_native_contract_account_occupied(account_state, &bud_addr) {
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(is_native_contract_account_occupied(
+        account_state,
+        &bud_addr,
+    ))
 }
 
 fn evm_storage_key(addr: &[u8; 20], slot: &[u8; 32]) -> [u8; 52] {

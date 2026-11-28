@@ -30,11 +30,11 @@ pub trait HsmPqKey: Send + Sync {
 }
 
 pub struct Pkcs11Signer {
-    /// Read by [`Self::connection_info`] (F12): no dead-code allow here.
+    /// Read by [`Self::connection_info`]: no dead-code allow here.
     module_path: String,
-    /// Read by [`Self::connection_info`] (F12).
+    /// Read by [`Self::connection_info`].
     slot_id: u64,
-    /// Read by [`Self::connection_info`] (F12).
+    /// Read by [`Self::connection_info`].
     token_pin_env: String,
     /// Label that picks the consensus key when the slot holds more than one Ed25519 pair.
     key_label: Option<String>,
@@ -96,7 +96,7 @@ impl Pkcs11Signer {
     /// mechanisms and any vendor failure is fail-closed by
     /// [`Self::require_vendor_native_signing`].
     ///
-    /// F12: there is no software fallback left to load, so this is the same
+    /// There is no software fallback left to load, so this is the same
     /// extractable-free session as [`Self::new`]; the two names are kept
     /// because callers use both and the semantics each name promises.
     ///
@@ -112,7 +112,7 @@ impl Pkcs11Signer {
         Self::connect(module_path, slot_id, token_pin_env, key_label)
     }
 
-    /// The HSM connection identity this signer is bound to (F12). Logged at
+    /// The HSM connection identity this signer is bound to. Logged at
     /// startup so an operator can confirm which module and slot answered.
     pub fn connection_info(&self) -> String {
         format!(
@@ -212,7 +212,7 @@ impl Pkcs11Signer {
         })
     }
 
-    /// Read the PUBLIC_KEY object carrying `label`, exactly one.
+    /// Read the `PUBLIC_KEY` object carrying `label`, exactly one.
     ///
     /// Zero objects is `None` - the slot may legitimately hold only the Ed25519
     /// identity. More than one is refused: announcing one consensus key while
@@ -362,7 +362,7 @@ impl Pkcs11Signer {
     }
 
     /// Set vendor-native BLS/PQ mechanism IDs.
-    /// Cryptoki 0.12 uses Mechanism::VendorDefined for hardware-native signing.
+    /// Cryptoki 0.12 uses `Mechanism::VendorDefined` for hardware-native signing.
     pub fn with_vendor_mechanisms(
         mut self,
         bls_mech: Option<String>,
@@ -489,7 +489,7 @@ impl Pkcs11Signer {
 
     /// Require vendor-native BLS/PQ signing and fail closed on any fallback.
     #[must_use]
-    pub fn require_vendor_native_signing(mut self) -> Self {
+    pub const fn require_vendor_native_signing(mut self) -> Self {
         self.strict_vendor_native = true;
         self
     }
@@ -819,20 +819,20 @@ impl Pkcs11VendorCapabilities {
     /// vendor mechanism. Still requires external audit before mainnet
     /// "non-extractable" claims.
     #[must_use]
-    pub fn vendor_native_signing_configured(&self) -> bool {
+    pub const fn vendor_native_signing_configured(&self) -> bool {
         self.bls_vendor_mechanism.is_some()
             && (self.pq_vendor_mechanism.is_some() || self.pq_standard_mechanism)
     }
 
     /// True when BLS can be signed (vendor path OR software fallback material).
     #[must_use]
-    pub fn bls_signing_available(&self) -> bool {
+    pub const fn bls_signing_available(&self) -> bool {
         self.bls_vendor_mechanism.is_some() || self.bls_software_fallback_present
     }
 
     /// True when PQ can be signed (vendor path OR software fallback material).
     #[must_use]
-    pub fn pq_signing_available(&self) -> bool {
+    pub const fn pq_signing_available(&self) -> bool {
         self.pq_vendor_mechanism.is_some()
             || self.pq_standard_mechanism
             || self.pq_software_fallback_present
@@ -855,7 +855,7 @@ impl Pkcs11Signer {
     }
 
     /// Parse + validate a vendor mechanism id string (hex `0x…` or decimal).
-    /// Rejects zero and values below the conventional CKM_VENDOR_DEFINED base
+    /// Rejects zero and values below the conventional `CKM_VENDOR_DEFINED` base
     /// (`0x80000000`) so misconfigured low IDs fail closed before session use.
     pub fn validate_vendor_mechanism_id(raw: &str) -> Result<u64, CryptoError> {
         let id = Self::parse_mechanism(raw).ok_or_else(|| {
@@ -933,7 +933,7 @@ impl ConsensusSigner for Pkcs11Signer {
                                 "vendor-native BLS signing required, fallback forbidden: {e}"
                             )));
                         }
-                        tracing::warn!("Vendor BLS sign failed ({e}), sw fallback")
+                        tracing::warn!("Vendor BLS sign failed ({e}), sw fallback");
                     }
                 }
             } else if self.strict_vendor_native {
@@ -1131,9 +1131,9 @@ mod tests {
 /// Known vendor-defined mechanism ID ranges for supported HSMs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pkcs11Vendor {
-    /// YubiHSM 2: vendor mechanisms in 0x8000_0000..0x8000_FFFF range.
+    /// `YubiHSM` 2: vendor mechanisms in `0x8000_0000..0x8000_FFFF` range.
     YubiHsm2,
-    /// Generic PKCS#11 vendor-defined range (CKM_VENDOR_DEFINED = 0x8000_0000).
+    /// Generic PKCS#11 vendor-defined range (`CKM_VENDOR_DEFINED` = `0x8000_0000`).
     Generic,
 }
 
@@ -1142,7 +1142,7 @@ pub enum Pkcs11Vendor {
 pub struct Pkcs11VendorCapability {
     /// Vendor identifier.
     pub vendor: Pkcs11Vendor,
-    /// Mechanism ID (must be >= CKM_VENDOR_DEFINED = 0x8000_0000).
+    /// Mechanism ID (must be >= `CKM_VENDOR_DEFINED` = `0x8000_0000`).
     pub mechanism_id: u64,
     /// Human-readable name.
     pub name: String,
@@ -1150,12 +1150,12 @@ pub struct Pkcs11VendorCapability {
     pub mainnet_allowed: bool,
 }
 
-/// CKM_VENDOR_DEFINED constant from PKCS#11 spec.
+/// `CKM_VENDOR_DEFINED` constant from PKCS#11 spec.
 pub const CKM_VENDOR_DEFINED: u64 = 0x8000_0000;
 
-/// Known YubiHSM 2 vendor mechanism IDs for BLS signing.
+/// Known `YubiHSM` 2 vendor mechanism IDs for BLS signing.
 pub const YUBIHSM2_CKM_BLS_SIGN: u64 = 0x8000_0001;
-/// Known YubiHSM 2 vendor mechanism IDs for PQ (Dilithium) signing.
+/// Known `YubiHSM` 2 vendor mechanism IDs for PQ (Dilithium) signing.
 pub const YUBIHSM2_CKM_PQ_SIGN: u64 = 0x8000_0002;
 
 impl Pkcs11VendorCapability {
@@ -1194,7 +1194,7 @@ impl Pkcs11VendorCapability {
     }
 }
 
-/// Build the default set of known vendor capabilities for YubiHSM 2.
+/// Build the default set of known vendor capabilities for `YubiHSM` 2.
 pub fn yubihsm2_default_capabilities() -> Vec<Pkcs11VendorCapability> {
     vec![
         Pkcs11VendorCapability {
@@ -1220,7 +1220,7 @@ pub fn yubihsm2_default_capabilities() -> Vec<Pkcs11VendorCapability> {
 /// `mainnet_allowed` was false. `main.rs` checked only that the id parsed and
 /// sat at or above `CKM_VENDOR_DEFINED`, so a mechanism the table explicitly
 /// marks as not-for-mainnet was accepted, and so was one outside the vendor's
-/// own documented range: `validate_mechanism_id` refuses a YubiHSM2 id above
+/// own documented range: `validate_mechanism_id` refuses a `YubiHSM2` id above
 /// `0x8000_FFFF` and nothing asked it.
 ///
 /// The rule, as decided: an id the table knows is governed by the table's
@@ -1368,8 +1368,8 @@ mod vendor_tests {
 
     /// A mechanism outside the vendor's documented range is refused.
     ///
-    /// `validate_mechanism_id` refuses a YubiHSM2 id above `0x8000_FFFF` and
-    /// nothing asked it. Above that range the id is not a YubiHSM2 mechanism
+    /// `validate_mechanism_id` refuses a `YubiHSM2` id above `0x8000_FFFF` and
+    /// nothing asked it. Above that range the id is not a `YubiHSM2` mechanism
     /// at all, so what the token does with it is undefined.
     #[test]
     fn a_mechanism_outside_the_vendor_range_is_refused() {
@@ -1591,16 +1591,16 @@ use crate::crypto::scheme::SchemeId;
 /// SLH-DSA-SHAKE-256s (Root Seal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HsmPqAlgorithm {
-    /// CKK_ML_DSA with CKP_ML_DSA_65: the validator key.
+    /// `CKK_ML_DSA` with `CKP_ML_DSA_65`: the validator key.
     MlDsa65,
-    /// CKK_ML_DSA with CKP_ML_DSA_87.
+    /// `CKK_ML_DSA` with `CKP_ML_DSA_87`.
     MlDsa87,
-    /// CKK_SLH_DSA with CKP_SLH_DSA_SHAKE_256S.
+    /// `CKK_SLH_DSA` with `CKP_SLH_DSA_SHAKE_256S`.
     SlhDsaShake256s,
 }
 
 impl HsmPqAlgorithm {
-    fn scheme(self) -> SchemeId {
+    const fn scheme(self) -> SchemeId {
         match self {
             Self::MlDsa65 => SchemeId::ML_DSA_65,
             Self::MlDsa87 => SchemeId::ML_DSA_87,
@@ -1608,7 +1608,7 @@ impl HsmPqAlgorithm {
         }
     }
 
-    fn key_type(self) -> KeyType {
+    const fn key_type(self) -> KeyType {
         match self {
             Self::MlDsa65 | Self::MlDsa87 => KeyType::ML_DSA,
             Self::SlhDsaShake256s => KeyType::SLH_DSA,
@@ -1623,7 +1623,7 @@ impl HsmPqAlgorithm {
         }
     }
 
-    fn keygen_mechanism(self) -> Mechanism<'static> {
+    const fn keygen_mechanism(self) -> Mechanism<'static> {
         match self {
             Self::MlDsa65 | Self::MlDsa87 => Mechanism::MlDsaKeyPairGen,
             Self::SlhDsaShake256s => Mechanism::SlhDsaKeyPairGen,

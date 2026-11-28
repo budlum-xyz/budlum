@@ -18,6 +18,8 @@
 
 use crate::core::address::Address;
 use crate::core::transaction::{ExternalChain, RelayerExternalResult};
+use crate::crypto::facts::QuantumClass;
+use crate::security::quantum_canary::{AlarmKind, AlarmLevel, QuantumAlarmState};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -98,6 +100,17 @@ pub enum RelayerActionKind {
     },
 }
 
+const fn is_bidi_or_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
 impl RelayerActionKind {
     /// Performs the requested operation.
     ///
@@ -106,7 +119,7 @@ impl RelayerActionKind {
     /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         match self {
-            RelayerActionKind::ExternalTransaction {
+            Self::ExternalTransaction {
                 target_address,
                 payload_hash,
                 ..
@@ -114,24 +127,33 @@ impl RelayerActionKind {
                 if target_address.is_empty() || target_address.len() > 256 {
                     return Err("RelayerAction external target_address length invalid".into());
                 }
-                if target_address.bytes().any(|b| b.is_ascii_whitespace()) {
+                if target_address
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control() || is_bidi_or_invisible_format(c))
+                {
                     return Err(
-                        "RelayerAction external target_address cannot contain whitespace".into(),
+                        "RelayerAction external target_address contains disallowed characters"
+                            .into(),
                     );
                 }
                 if *payload_hash == [0u8; 32] {
                     return Err("RelayerAction external payload_hash cannot be zero".into());
                 }
             }
-            RelayerActionKind::DwebResolve { name } => {
+            Self::DwebResolve { name } => {
                 if name.is_empty() || name.len() > 253 {
                     return Err("RelayerAction dweb name length invalid".into());
                 }
-                if name.contains("..") || name.contains('/') || name.bytes().any(|b| b == 0) {
+                if name.contains("..")
+                    || name.contains('/')
+                    || name.chars().any(|c| {
+                        c.is_control() || c.is_whitespace() || is_bidi_or_invisible_format(c)
+                    })
+                {
                     return Err("RelayerAction dweb name contains an invalid label".into());
                 }
             }
-            RelayerActionKind::PollenRead { asset_id, grant_id } => {
+            Self::PollenRead { asset_id, grant_id } => {
                 if *asset_id == crate::pollen::AssetId::zero()
                     || *grant_id == crate::pollen::GrantId::zero()
                 {
@@ -187,6 +209,7 @@ impl PolicyEnvelope {
         Ok(())
     }
 
+    #[must_use]
     pub fn policy_hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_RELAYER_POLICY_ENVELOPE_V1");
@@ -232,10 +255,19 @@ pub struct UserIntent {
     /// when it locks the fee, and the id commits to it.
     #[serde(default)]
     pub expected_emitter: Address,
+    /// Settlement chain identifier binding this intent to one network (K4-J O-J.3).
+    /// Zero preserves V2 compatibility for legacy callers; non-zero binds `chain_id`
+    /// under `BDLM_RELAYER_USER_INTENT_V3` so cross-chain / testnet->mainnet replay
+    /// changes `intent_id` and fails closed.
+    #[serde(default)]
+    pub chain_id: u64,
 }
+
+const UNBOUND_INTENT_CHAIN_ID: u64 = 0;
 
 impl UserIntent {
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new(
         owner: Address,
         source_domain: u32,
@@ -258,16 +290,32 @@ impl UserIntent {
             replay_nonce,
             policy_hash,
             expected_emitter,
+            chain_id: UNBOUND_INTENT_CHAIN_ID,
         };
         intent.intent_id = intent.calculate_id();
         intent
     }
 
+    /// Bind this intent to a specific settlement `chain_id` and recompute its
+    /// canonical `intent_id` under `BDLM_RELAYER_USER_INTENT_V3` (K4-J O-J.3).
+    #[must_use]
+    pub fn with_chain_id(mut self, chain_id: u64) -> Self {
+        self.chain_id = chain_id;
+        self.intent_id = self.calculate_id();
+        self
+    }
+
+    #[must_use]
     pub fn calculate_id(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        // V2: the emitter is part of the id. A `V1` id did not commit to one,
-        // so it could name a different emitter than the owner chose.
-        hasher.update(b"BDLM_RELAYER_USER_INTENT_V2");
+        if self.chain_id != 0 {
+            hasher.update(b"BDLM_RELAYER_USER_INTENT_V3");
+            hasher.update(self.chain_id.to_le_bytes());
+        } else {
+            // V2: the emitter is part of the id. A `V1` id did not commit to one,
+            // so it could name a different emitter than the owner chose.
+            hasher.update(b"BDLM_RELAYER_USER_INTENT_V2");
+        }
         hasher.update(self.owner.as_bytes());
         hasher.update(self.source_domain.to_le_bytes());
         hasher.update(self.target_domain.to_le_bytes());
@@ -280,6 +328,7 @@ impl UserIntent {
         hasher.finalize().into()
     }
 
+    #[must_use]
     pub fn verify_id(&self) -> bool {
         self.intent_id == self.calculate_id()
     }
@@ -542,9 +591,126 @@ pub struct RelayerPolicyRegistry {
     /// The locked winner of each currently awarded intent.
     #[serde(default, with = "crate::core::map_keys")]
     pub awards: BTreeMap<[u8; 32], RelayerAward>,
+    /// Currently frozen domains mapped to the settlement block height at which
+    /// each freeze began (K4-J O-J.4). Empty on normal chains so pinned roots
+    /// remain unchanged.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub frozen_domains: BTreeMap<u32, u64>,
+    /// Accumulated freeze grace blocks per open intent id (K4-J O-J.4).
+    /// Extended when a frozen source or target domain unfreezes so honest
+    /// solvers are never slashed for domain freezes.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "crate::core::map_keys"
+    )]
+    pub freeze_grace_blocks: BTreeMap<[u8; 32], u64>,
+    /// External delivery transfers (`delivery_transfer_key(chain, tx_hash)`)
+    /// already consumed to close an intent (K4-C O-C.7). Prevents one external
+    /// transfer from closing two separate intents.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub consumed_delivery_transfers: BTreeSet<[u8; 32]>,
+    /// Cumulative settled value outflow in atoms per domain (K4-C O-C.10).
+    /// Checked against the universal finality certificate's
+    /// `safe_value_outflow_ceiling_atoms`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub domain_outflow_atoms: BTreeMap<u32, u128>,
+}
+
+/// Maximum number of consumed external delivery transfer keys retained in
+/// consensus state to bound memory growth (A-F.1 / K4-C O-C.7).
+pub const MAX_CONSUMED_DELIVERY_TRANSFERS: usize = 65_536;
+
+/// Domain-separated canonical key for an external delivery transfer `(chain, tx_hash)`
+/// used to enforce K4-C O-C.7 (one external transfer cannot close two intents).
+///
+/// Canonicalizes `tx_hash` by trimming ASCII whitespace, stripping any `0x`/`0X`
+/// hex prefix, and lowercasing ASCII hex digits so `"0xAABB"`, `"0xaabb"`, and
+/// `"aabb"` all collide onto the same single-use key.
+#[must_use]
+pub fn delivery_transfer_key(chain: ExternalChain, tx_hash: &str) -> [u8; 32] {
+    let trimmed = tx_hash.trim();
+    let stripped = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    let canonical = stripped.to_ascii_lowercase();
+    let mut hasher = Sha256::new();
+    hasher.update(b"BDLM_RELAYER_DELIVERY_TX_V1");
+    hasher.update(chain.domain_id().to_be_bytes());
+    hasher.update((canonical.len() as u64).to_be_bytes());
+    hasher.update(canonical.as_bytes());
+    hasher.finalize().into()
+}
+
+/// Default single-solver concentration warning threshold (`5_000` bps = `50%`,
+/// K4-G O-G.6).
+pub const DEFAULT_SOLVER_CONCENTRATION_WARN_BPS: u64 = 5_000;
+
+/// Single-solver market concentration telemetry derived from executed intent
+/// settlements (K4-G O-G.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolverConcentrationReport {
+    /// Total number of `Executed` intent settlements measured.
+    pub total_executed_settlements: u64,
+    /// Number of distinct solvers that executed at least one settlement.
+    pub distinct_solvers: usize,
+    /// Solver with the highest executed settlement count (`None` when empty).
+    pub top_solver: Option<Address>,
+    /// Number of executed settlements completed by `top_solver`.
+    pub top_solver_settlements: u64,
+    /// Top solver's share of executed settlements in basis points (`0..=10_000`).
+    pub top_solver_share_bps: u64,
+    /// Configured concentration warning threshold in basis points.
+    pub warn_threshold_bps: u64,
+    /// `true` when `total_executed_settlements > 0` and
+    /// `top_solver_share_bps > warn_threshold_bps`.
+    pub concentration_alert: bool,
+}
+
+/// Enforce K4-J O-J.5 quantum canary posture on a payment/intent leg.
+///
+/// Classical-signature legs close fail-closed at `AlarmLevel::Restrict`
+/// and `AlarmLevel::Isolate`, while post-quantum legs (`Lattice`,
+/// `Hash`) remain open unless their own cryptographic family breaks.
+///
+/// # Errors
+///
+/// Returns an error string naming the active quantum canary refusal.
+pub fn check_quantum_leg_posture(
+    alarm: &QuantumAlarmState,
+    leg_posture: QuantumClass,
+) -> Result<(), String> {
+    match leg_posture {
+        QuantumClass::Classical => {
+            if alarm.level() >= AlarmLevel::Restrict {
+                return Err(format!(
+                    "RelayerPolicyRegistry classical payment leg closed by quantum canary alarm ({:?})",
+                    alarm.level()
+                ));
+            }
+        }
+        QuantumClass::Lattice => {
+            if alarm.has(AlarmKind::LatticeBreak) {
+                return Err(
+                    "RelayerPolicyRegistry lattice payment leg closed by quantum canary alarm"
+                        .into(),
+                );
+            }
+        }
+        QuantumClass::Hash => {
+            if alarm.has(AlarmKind::HashBreak) {
+                return Err(
+                    "RelayerPolicyRegistry hash payment leg closed by quantum canary alarm".into(),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 impl RelayerPolicyRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -557,6 +723,183 @@ impl RelayerPolicyRegistry {
             && self.settlements.is_empty()
             && self.settled_intents.is_empty()
             && self.awards.is_empty()
+            && self.frozen_domains.is_empty()
+            && self.freeze_grace_blocks.is_empty()
+            && self.consumed_delivery_transfers.is_empty()
+            && self.domain_outflow_atoms.is_empty()
+    }
+
+    /// Ensure `(chain, tx_hash)` has not already been consumed to settle another
+    /// intent (K4-C O-C.7), returning its canonical key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the external delivery transfer was already used.
+    pub fn ensure_delivery_transfer_unused(
+        &self,
+        chain: ExternalChain,
+        tx_hash: &str,
+    ) -> Result<[u8; 32], String> {
+        let key = delivery_transfer_key(chain, tx_hash);
+        if self.consumed_delivery_transfers.contains(&key) {
+            return Err(format!(
+                "relayer delivery transfer `{tx_hash}` on domain {} was already consumed by another intent",
+                chain.domain_id()
+            ));
+        }
+        if self.consumed_delivery_transfers.len() >= MAX_CONSUMED_DELIVERY_TRANSFERS {
+            return Err(format!(
+                "relayer consumed delivery transfer capacity exceeded (max={MAX_CONSUMED_DELIVERY_TRANSFERS})"
+            ));
+        }
+        Ok(key)
+    }
+
+    /// Record a consumed external delivery transfer key and accumulate
+    /// settled outflow atoms across each distinct touched domain (K4-C O-C.7 / O-C.10).
+    pub fn record_delivery_transfer_and_outflow(
+        &mut self,
+        transfer_key: [u8; 32],
+        source_domain: u32,
+        target_domain: u32,
+        amount_atoms: u128,
+    ) {
+        self.consumed_delivery_transfers.insert(transfer_key);
+        let entry = self.domain_outflow_atoms.entry(source_domain).or_insert(0);
+        *entry = entry.saturating_add(amount_atoms);
+        if target_domain != source_domain {
+            let dst = self.domain_outflow_atoms.entry(target_domain).or_insert(0);
+            *dst = dst.saturating_add(amount_atoms);
+        }
+    }
+
+    /// Measure single-solver concentration across `Executed` settlements and
+    /// raise `concentration_alert` whenever the leading solver's basis-point
+    /// share exceeds `warn_threshold_bps` (K4-G O-G.6).
+    #[must_use]
+    pub fn get_solver_concentration_report(
+        &self,
+        warn_threshold_bps: u64,
+    ) -> SolverConcentrationReport {
+        let mut counts: BTreeMap<Address, u64> = BTreeMap::new();
+        let mut total: u64 = 0;
+        for settlement in self.settlements.values() {
+            if settlement.status == IntentSettlementStatus::Executed {
+                let entry = counts.entry(settlement.relayer).or_insert(0);
+                *entry = entry.saturating_add(1);
+                total = total.saturating_add(1);
+            }
+        }
+        let mut top_solver: Option<Address> = None;
+        let mut top_count: u64 = 0;
+        for (solver, count) in &counts {
+            if *count > top_count {
+                top_count = *count;
+                top_solver = Some(*solver);
+            }
+        }
+        let share_bps = if total == 0 {
+            0
+        } else {
+            let wide = u128::from(top_count).saturating_mul(10_000) / u128::from(total);
+            u64::try_from(wide).unwrap_or(10_000)
+        };
+        SolverConcentrationReport {
+            total_executed_settlements: total,
+            distinct_solvers: counts.len(),
+            top_solver,
+            top_solver_settlements: top_count,
+            top_solver_share_bps: share_bps,
+            warn_threshold_bps,
+            concentration_alert: total > 0 && share_bps > warn_threshold_bps,
+        }
+    }
+
+    /// Record that `domain_id` entered `DomainStatus::Frozen` at `block_height`
+    /// (idempotent if already frozen), suspending open intents on that domain
+    /// so solvers are not penalized during the freeze (K4-J O-J.4).
+    pub fn record_domain_freeze(&mut self, domain_id: u32, block_height: u64) {
+        self.frozen_domains.entry(domain_id).or_insert(block_height);
+    }
+
+    /// Record that `domain_id` returned to `DomainStatus::Active` at
+    /// `block_height`, extending `freeze_grace_blocks` for every open intent
+    /// touching `domain_id` by the exact freeze duration (K4-J O-J.4).
+    pub fn record_domain_unfreeze(&mut self, domain_id: u32, block_height: u64) {
+        let Some(started) = self.frozen_domains.remove(&domain_id) else {
+            return;
+        };
+        let duration = block_height.saturating_sub(started);
+        if duration == 0 {
+            return;
+        }
+        for (id, intent) in &self.intents {
+            if intent.source_domain == domain_id || intent.target_domain == domain_id {
+                let entry = self.freeze_grace_blocks.entry(*id).or_insert(0);
+                *entry = entry.saturating_add(duration);
+            }
+        }
+    }
+
+    fn intent_has_frozen_domain(&self, intent: &UserIntent) -> bool {
+        self.frozen_domains.contains_key(&intent.source_domain)
+            || self.frozen_domains.contains_key(&intent.target_domain)
+    }
+
+    fn intent_grace_at(
+        &self,
+        intent_id: &[u8; 32],
+        intent: &UserIntent,
+        current_block: u64,
+    ) -> u64 {
+        let stored = self
+            .freeze_grace_blocks
+            .get(intent_id)
+            .copied()
+            .unwrap_or(0);
+        let active_src = self
+            .frozen_domains
+            .get(&intent.source_domain)
+            .map_or(0, |&s| current_block.saturating_sub(s));
+        let active_dst = self
+            .frozen_domains
+            .get(&intent.target_domain)
+            .map_or(0, |&s| current_block.saturating_sub(s));
+        stored.saturating_add(active_src.max(active_dst))
+    }
+
+    /// Submit a chain-bound intent, refusing cross-chain or testnet-to-mainnet
+    /// replay when `intent.chain_id != expected_chain_id` (K4-J O-J.3).
+    ///
+    /// # Errors
+    ///
+    /// Refuses zero `expected_chain_id`, mismatched `intent.chain_id`, or any
+    /// standard [`Self::submit_intent`] validation failure.
+    pub fn submit_intent_for_chain(
+        &mut self,
+        intent: UserIntent,
+        policy: &PolicyEnvelope,
+        expected_chain_id: u64,
+        current_block: u64,
+    ) -> Result<[u8; 32], String> {
+        if expected_chain_id == 0 {
+            return Err("RelayerPolicyRegistry expected_chain_id must be non-zero".into());
+        }
+        if intent.chain_id != 0 {
+            if intent.chain_id != expected_chain_id {
+                return Err(format!(
+                    "RelayerPolicyRegistry intent chain_id {} does not match settlement chain_id {} (cross-chain replay refused)",
+                    intent.chain_id, expected_chain_id
+                ));
+            }
+            let rebound = intent.clone().with_chain_id(expected_chain_id);
+            if rebound.intent_id != intent.intent_id {
+                return Err(
+                    "RelayerPolicyRegistry intent_id does not match chain_id V3 digest".into(),
+                );
+            }
+        }
+        self.submit_intent(intent, policy, current_block)
     }
 
     /// Performs the requested operation.
@@ -572,7 +915,7 @@ impl RelayerPolicyRegistry {
     ) -> Result<[u8; 32], String> {
         intent.validate(policy, current_block)?;
         self.prune_expired(current_block);
-        if self.intents.contains_key(&intent.intent_id) {
+        if self.intents.contains_key(&intent.intent_id) || self.is_settled(&intent.intent_id) {
             return Err("RelayerPolicyRegistry intent already exists".into());
         }
         if self.intents.len() >= MAX_RELAYER_INTENTS {
@@ -610,6 +953,7 @@ impl RelayerPolicyRegistry {
         })
     }
 
+    #[must_use]
     pub fn escrowed_amount(&self, intent_id: &[u8; 32]) -> u64 {
         self.escrowed.get(intent_id).copied().unwrap_or(0)
     }
@@ -637,7 +981,18 @@ impl RelayerPolicyRegistry {
         if self.is_settled(&intent_id) {
             return Err("RelayerPolicyRegistry intent already settled".into());
         }
-        if intent.deadline_block > current_block {
+        if self.intent_has_frozen_domain(intent) {
+            return Err(
+                "RelayerPolicyRegistry intent suspended while source or target domain is frozen"
+                    .into(),
+            );
+        }
+        let effective_deadline = intent.deadline_block.saturating_add(self.intent_grace_at(
+            &intent_id,
+            intent,
+            current_block,
+        ));
+        if effective_deadline > current_block {
             return Err("RelayerPolicyRegistry intent is not expired".into());
         }
         let owner = intent.owner;
@@ -658,7 +1013,8 @@ impl RelayerPolicyRegistry {
             })
             .collect();
         self.intents.remove(&intent_id);
-        self.settled_intents.insert(intent_id);
+        self.freeze_grace_blocks.remove(&intent_id);
+        self.settled_intents.remove(&intent_id);
         let settlement = IntentSettlement {
             intent_id,
             relayer: Address::zero(),
@@ -802,7 +1158,9 @@ impl RelayerPolicyRegistry {
         if self.is_settled(&intent_id) {
             return Err("RelayerPolicyRegistry intent already settled".into());
         }
-        if intent.deadline_block <= current_block {
+        let grace = self.intent_grace_at(&intent_id, intent, current_block);
+        let effective_deadline = intent.deadline_block.saturating_add(grace);
+        if effective_deadline <= current_block {
             return Err("RelayerPolicyRegistry intent expired".into());
         }
         // The owner fixed the winner before execution. Looking up the cheapest
@@ -822,7 +1180,7 @@ impl RelayerPolicyRegistry {
             .flatten()
             .find(|bid| bid.relayer == award.relayer)
             .ok_or_else(|| "RelayerPolicyRegistry awarded bid not found".to_string())?;
-        if bid.expires_at_block <= current_block {
+        if bid.expires_at_block.saturating_add(grace) <= current_block {
             return Err("RelayerPolicyRegistry selected bid expired".into());
         }
         if paid_fee == 0 || paid_fee > bid.quoted_fee {
@@ -841,6 +1199,7 @@ impl RelayerPolicyRegistry {
         self.settlements.insert(intent_id, settlement.clone());
         self.settled_intents.insert(intent_id);
         self.awards.remove(&intent_id);
+        self.freeze_grace_blocks.remove(&intent_id);
         Ok(settlement)
     }
 
@@ -858,14 +1217,22 @@ impl RelayerPolicyRegistry {
             .intents
             .iter()
             .filter_map(|(id, intent)| {
-                (intent.deadline_block <= current_block && !self.escrowed.contains_key(id))
-                    .then_some(*id)
+                let effective = intent.deadline_block.saturating_add(self.intent_grace_at(
+                    id,
+                    intent,
+                    current_block,
+                ));
+                (!self.intent_has_frozen_domain(intent)
+                    && effective <= current_block
+                    && !self.escrowed.contains_key(id))
+                .then_some(*id)
             })
             .collect();
         for id in &expired {
             self.intents.remove(id);
             self.bids.remove(id);
             self.awards.remove(id);
+            self.freeze_grace_blocks.remove(id);
             self.settled_intents.remove(id);
         }
         expired.len()
@@ -892,22 +1259,27 @@ impl RelayerPolicyRegistry {
         to_remove
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_RELAYER_POLICY_REGISTRY_V1");
+        hasher.update((self.intents.len() as u64).to_le_bytes());
         for (id, intent) in &self.intents {
             hasher.update(b"intent");
             hasher.update(id);
             hasher.update(intent.calculate_id());
         }
+        hasher.update((self.escrowed.len() as u64).to_le_bytes());
         for (intent_id, amount) in &self.escrowed {
             hasher.update(b"escrow");
             hasher.update(intent_id);
             hasher.update(amount.to_le_bytes());
         }
+        hasher.update((self.bids.len() as u64).to_le_bytes());
         for (intent_id, bids) in &self.bids {
             hasher.update(b"bids");
             hasher.update(intent_id);
+            hasher.update((bids.len() as u64).to_le_bytes());
             for bid in bids {
                 hasher.update(bid.intent_id);
                 hasher.update(bid.relayer.as_bytes());
@@ -917,12 +1289,14 @@ impl RelayerPolicyRegistry {
                 hasher.update(bid.expires_at_block.to_le_bytes());
             }
         }
+        hasher.update((self.awards.len() as u64).to_le_bytes());
         for (id, award) in &self.awards {
             hasher.update(b"award");
             hasher.update(id);
             hasher.update(award.relayer.as_bytes());
             hasher.update(award.awarded_at_block.to_le_bytes());
         }
+        hasher.update((self.settlements.len() as u64).to_le_bytes());
         for (id, settlement) in &self.settlements {
             hasher.update(b"settlement");
             hasher.update(id);
@@ -936,9 +1310,35 @@ impl RelayerPolicyRegistry {
                 IntentSettlementStatus::Slashed => 4,
             }]);
         }
+        hasher.update((self.settled_intents.len() as u64).to_le_bytes());
         for id in &self.settled_intents {
             hasher.update(b"settled");
             hasher.update(id);
+        }
+        if !self.frozen_domains.is_empty() || !self.freeze_grace_blocks.is_empty() {
+            hasher.update(b"freeze_grace_v1");
+            hasher.update((self.frozen_domains.len() as u64).to_le_bytes());
+            for (dom, started) in &self.frozen_domains {
+                hasher.update(dom.to_le_bytes());
+                hasher.update(started.to_le_bytes());
+            }
+            hasher.update((self.freeze_grace_blocks.len() as u64).to_le_bytes());
+            for (id, grace) in &self.freeze_grace_blocks {
+                hasher.update(id);
+                hasher.update(grace.to_le_bytes());
+            }
+        }
+        if !self.consumed_delivery_transfers.is_empty() || !self.domain_outflow_atoms.is_empty() {
+            hasher.update(b"BDLM_RELAYER_POLICY_DELIVERY_V1");
+            hasher.update((self.consumed_delivery_transfers.len() as u64).to_le_bytes());
+            for key in &self.consumed_delivery_transfers {
+                hasher.update(key);
+            }
+            hasher.update((self.domain_outflow_atoms.len() as u64).to_le_bytes());
+            for (dom, atoms) in &self.domain_outflow_atoms {
+                hasher.update(dom.to_le_bytes());
+                hasher.update(atoms.to_le_bytes());
+            }
         }
         hasher.finalize().into()
     }
@@ -1672,5 +2072,26 @@ mod tests {
         assert_eq!(bids.len(), 1);
         assert!(registry.is_settled(&intent_id));
         assert!(registry.escrowed.is_empty());
+        // Expired intents must not leak permanent unprunable entries into
+        // `settled_intents` after their settlement history row rotates out.
+        assert!(registry.settled_intents.is_empty());
+        assert_eq!(registry.prune_settlements(0), 1);
+        assert!(registry.is_empty());
+
+        // Control and bidi-override characters in action targets are refused.
+        assert!(RelayerActionKind::ExternalTransaction {
+            chain: ExternalChain::Ethereum,
+            target_address: "0x1234\u{202E}abcd".into(),
+            payload_hash: [0x11; 32],
+        }
+        .validate()
+        .is_err());
+        assert!(RelayerActionKind::ExternalTransaction {
+            chain: ExternalChain::Ethereum,
+            target_address: "0x1234\x07abcd".into(),
+            payload_hash: [0x11; 32],
+        }
+        .validate()
+        .is_err());
     }
 }

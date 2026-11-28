@@ -3,7 +3,6 @@
 use crate::chain::blockchain::Blockchain;
 use crate::chain::finality::{FinalityCert, Precommit, Prevote};
 use crate::consensus::qc::{QcBlob, QcFaultProof};
-use crate::core::account::ConsensusAccountProof;
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
@@ -59,6 +58,13 @@ pub struct BnsAnchoredProof {
     pub state_root: String,
 }
 
+/// Committed account Merkle proof, state-root opening, and block height.
+pub type AccountProofReply = (
+    crate::core::account::ConsensusAccountProof,
+    crate::core::account::StateRootAccountsOpening,
+    u64,
+);
+
 #[derive(Debug)]
 pub enum ChainCommand {
     GetHeight(oneshot::Sender<u64>),
@@ -80,10 +86,7 @@ pub enum ChainCommand {
     ///
     /// Distinct from [`Self::GetBalance`]: that answers what the node says a
     /// balance is, this answers what the node can *prove* about it.
-    GetAccountProof(
-        Address,
-        oneshot::Sender<Option<(crate::core::account::ConsensusAccountProof, u64)>>,
-    ),
+    GetAccountProof(Address, oneshot::Sender<Option<AccountProofReply>>),
     AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
     /// Run the aggregation side of the node with this ML-DSA-87 seed; the
     /// answer is the tick interval in milliseconds when the chain has the
@@ -228,7 +231,7 @@ pub enum ChainCommand {
     FundDevelopmentAccount(Address, oneshot::Sender<Result<(), String>>),
     GetStateSnapshotData(
         u64,
-        oneshot::Sender<Option<crate::chain::snapshot::StateSnapshot>>,
+        oneshot::Sender<Result<Option<crate::chain::snapshot::StateSnapshot>, String>>,
     ),
     ApplySnapshot(
         crate::chain::snapshot::StateSnapshot,
@@ -239,6 +242,15 @@ pub enum ChainCommand {
         u64,
         oneshot::Sender<Option<crate::settlement::GlobalBlockHeader>>,
     ),
+    /// Derive the three-bucket Universal Finality Certificate at `checkpoint_height`
+    /// (`None` selects the current chain tip; future heights return `None`).
+    GetFinalityCertificate(
+        Option<u64>,
+        oneshot::Sender<Option<crate::settlement::GlobalFinalityCertificate>>,
+    ),
+    /// Snapshot the state-rooted `ConsensusSentry` health and circuit breaker state.
+    GetConsensusSentry(oneshot::Sender<crate::cross_domain::external::sentry::ConsensusSentry>),
+    GetUniversalDomains(oneshot::Sender<crate::unification::UniversalDomainCatalog>),
     GetDomainCommitments(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetDomainCommitmentsWithGarden(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetConsensusDomains(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
@@ -336,6 +348,12 @@ pub enum ChainCommand {
         crate::cross_domain::external::DomainKey,
         oneshot::Sender<Option<(crate::cross_domain::external::DomainRegistration, u64)>>,
     ),
+    ValidateDomainBlock(
+        crate::domain::DomainId,
+        Box<Block>,
+        u64,
+        oneshot::Sender<Result<crate::domain::DomainCommitment, String>>,
+    ),
     GetAiModel(
         crate::ai::types::AiModelId,
         oneshot::Sender<Option<crate::ai::types::AiModelSpec>>,
@@ -383,7 +401,7 @@ pub enum ChainCommand {
         verifier: crate::core::address::Address,
         response: oneshot::Sender<Option<crate::ai::types::AiExecutionProof>>,
     },
-    /// Get QoS metrics for a verifier.
+    /// Get `QoS` metrics for a verifier.
     GetAiVerifierQos {
         verifier: crate::core::address::Address,
         response: oneshot::Sender<Option<crate::ai::types::AiVerifierQos>>,
@@ -691,7 +709,7 @@ pub enum ChainCommand {
     HubGetApps {
         response: oneshot::Sender<Vec<crate::budlumxyz::types::AppRecord>>,
     },
-    /// The AppBinding applications, listed beside the native apps.
+    /// The `AppBinding` applications, listed beside the native apps.
     HubGetAppBindingApps {
         response: oneshot::Sender<Vec<crate::settlement::app_binding::AppBindingApp>>,
     },
@@ -703,6 +721,7 @@ pub struct ChainHandle {
 }
 
 impl ChainHandle {
+    #[must_use]
     pub fn new(tx: mpsc::Sender<ChainCommand>) -> Self {
         Self { tx }
     }
@@ -764,7 +783,7 @@ impl ChainHandle {
     /// `None` means the node could not answer, which is not the same as the
     /// account being absent: absence is itself a proof and comes back as
     /// `Some` with `present: false`.
-    pub async fn get_account_proof(&self, addr: &Address) -> Option<(ConsensusAccountProof, u64)> {
+    pub async fn get_account_proof(&self, addr: &Address) -> Option<AccountProofReply> {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetAccountProof(*addr, tx)).await;
         rx.await.unwrap_or(None)
@@ -1779,16 +1798,23 @@ impl ChainHandle {
             .map_err(|e| format!("faucet response channel closed: {e}"))?
     }
 
+    /// The snapshot at `height`, or the reason this node cannot rebuild it.
+    ///
+    /// `Ok(None)` means there is no such height here; an `Err` means the height
+    /// exists and the state behind it did not rebuild. Collapsing the two into
+    /// one `None` made an unrebuildable state answer exactly like a missing
+    /// block.
     pub async fn get_state_snapshot_data(
         &self,
         height: u64,
-    ) -> Option<crate::chain::snapshot::StateSnapshot> {
+    ) -> Result<Option<crate::chain::snapshot::StateSnapshot>, String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
             .send(ChainCommand::GetStateSnapshotData(height, tx))
             .await;
-        rx.await.unwrap_or(None)
+        rx.await
+            .map_err(|e| format!("chain actor dropped the snapshot request: {e}"))?
     }
 
     pub async fn apply_snapshot(
@@ -1838,6 +1864,37 @@ impl ChainHandle {
             .send(ChainCommand::GetGlobalHeaderProof(global_height, tx))
             .await;
         rx.await.unwrap_or(None)
+    }
+
+    /// Derive the canonical three-bucket [`crate::settlement::GlobalFinalityCertificate`]
+    /// for `checkpoint_height` (`None` uses the current chain tip height).
+    /// Returns `None` when no consensus domain is registered or when `checkpoint_height`
+    /// exceeds the node's current tip.
+    pub async fn get_finality_certificate(
+        &self,
+        checkpoint_height: Option<u64>,
+    ) -> Option<crate::settlement::GlobalFinalityCertificate> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetFinalityCertificate(checkpoint_height, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    /// Read a snapshot of the embedded deterministic [`crate::cross_domain::external::sentry::ConsensusSentry`].
+    pub async fn get_consensus_sentry(
+        &self,
+    ) -> crate::cross_domain::external::sentry::ConsensusSentry {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetConsensusSentry(tx)).await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_universal_domains(&self) -> crate::unification::UniversalDomainCatalog {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetUniversalDomains(tx)).await;
+        rx.await.unwrap_or_default()
     }
 
     pub async fn get_domain_commitments(&self) -> Vec<crate::domain::DomainCommitment> {
@@ -2214,6 +2271,34 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// Fail-closed consensus-plugin block validation and commitment extraction
+    /// through `Blockchain::validate_and_extract_domain_block`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unknown/inactive domains, unregistered plugins, and invalid blocks.
+    ///
+    /// WIRING: Actor handle for domain-local block intake (`plugin_registry`).
+    pub async fn import_domain_block(
+        &self,
+        domain_id: crate::domain::DomainId,
+        block: Block,
+        sequence: u64,
+    ) -> Result<crate::domain::DomainCommitment, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::ValidateDomainBlock(
+                domain_id,
+                Box::new(block),
+                sequence,
+                tx,
+            ))
+            .await
+            .map_err(|_| "Chain actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Chain actor dropped response".to_string())?
+    }
+
     pub async fn get_ai_model(
         &self,
         id: crate::ai::types::AiModelId,
@@ -2424,7 +2509,7 @@ impl ChainHandle {
         rx.await.ok().flatten()
     }
 
-    /// Get QoS metrics for a verifier.
+    /// Get `QoS` metrics for a verifier.
     pub async fn get_ai_verifier_qos(
         &self,
         verifier: crate::core::address::Address,
@@ -3063,9 +3148,9 @@ impl ChainActor {
     /// After a successful reorg the old tip's finality
     /// round is dead (0186 invalidated it), but nobody restarted voting - the
     /// node just sat there and the post-fork chain finalized nothing until the
-    /// NEXT checkpoint block happened to arrive through AddBlock. Resume the
+    /// NEXT checkpoint block happened to arrive through `AddBlock`. Resume the
     /// prevote task on the new tip when it is itself a checkpoint height,
-    /// mirroring ValidateAndAddBlock. Shared by both reorg entry points.
+    /// mirroring `ValidateAndAddBlock`. Shared by both reorg entry points.
     fn resume_finality_after_reorg(&mut self, outcome: &Result<bool, String>) {
         if !matches!(outcome, Ok(true)) {
             return;
@@ -3088,10 +3173,11 @@ impl ChainActor {
     /// to, so a light client can anchor the claim to a finalized block. There
     /// is no separate proof cache: the tree is maintained incrementally by
     /// the state itself, so a stale proof cannot be served.
-    fn account_proof(&mut self, addr: &Address) -> (ConsensusAccountProof, u64) {
+    fn account_proof(&mut self, addr: &Address) -> AccountProofReply {
         let proof = self.blockchain.state.get_account_proof(addr);
+        let opening = self.blockchain.state.get_state_root_accounts_opening();
         let height = self.blockchain.state.current_block_height;
-        (proof, height)
+        (proof, opening, height)
     }
 
     /// Height the AI read queries judge deadlines at. It is the height the
@@ -3175,7 +3261,7 @@ impl ChainActor {
                     let _ = res_tx.send(
                         self.blockchain
                             .add_transaction(tx_obj)
-                            .map_err(|e| e.to_string()),
+                            .map_err(|e| e.clone()),
                     );
                 }
                 ChainCommand::EnableAggregator(signer_seed, res_tx) => {
@@ -3280,7 +3366,7 @@ impl ChainActor {
                     let res = self
                         .blockchain
                         .handle_finality_cert(cert)
-                        .map_err(|e| e.to_string());
+                        .map_err(|e| e.clone());
                     if res.is_ok() {
                         self.blockchain.start_pending_finality_round();
                     }
@@ -3342,10 +3428,7 @@ impl ChainActor {
                     let _ = response.send(result);
                 }
                 ChainCommand::ImportQcBlob(blob, res_tx) => {
-                    let res = self
-                        .blockchain
-                        .import_qc_blob(blob)
-                        .map_err(|e| e.to_string());
+                    let res = self.blockchain.import_qc_blob(blob).map_err(|e| e.clone());
                     if res.is_ok() {
                         self.blockchain.start_pending_finality_round();
                     }
@@ -3355,7 +3438,7 @@ impl ChainActor {
                     let _ = res_tx.send(
                         self.blockchain
                             .handle_qc_fault_proof(proof)
-                            .map_err(|e| e.to_string()),
+                            .map_err(|e| e.clone()),
                     );
                 }
                 ChainCommand::SubmitSlashingEvidence(evidence, res_tx) => {
@@ -3410,7 +3493,7 @@ impl ChainActor {
                     let _ = tx.send(removed);
                 }
                 ChainCommand::TryReorg(fork, res_tx) => {
-                    let outcome = self.blockchain.try_reorg(fork).map_err(|e| e.to_string());
+                    let outcome = self.blockchain.try_reorg(fork).map_err(|e| e.clone());
                     // After a successful reorg the old tip's
                     // finality round is dead (0186 invalidated it), but nobody
                     // restarted voting - the node just sat there and the post-
@@ -3427,7 +3510,7 @@ impl ChainActor {
                     let outcome = self
                         .blockchain
                         .try_reorg_suffix(suffix)
-                        .map_err(|e| e.to_string());
+                        .map_err(|e| e.clone());
                     self.resume_finality_after_reorg(&outcome);
                     let _ = res_tx.send(outcome);
                 }
@@ -3571,7 +3654,7 @@ impl ChainActor {
                 }
                 ChainCommand::ApplySnapshot(snapshot, res_tx) => {
                     let res = self.blockchain.apply_state_snapshot(snapshot);
-                    let _ = res_tx.send(res.map_err(|e: String| e.to_string()));
+                    let _ = res_tx.send(res.map_err(|e: String| e.clone()));
                 }
                 ChainCommand::GetSettlementInfo(tx) => {
                     let header = self.blockchain.build_global_header(None);
@@ -3619,6 +3702,33 @@ impl ChainActor {
                 ChainCommand::GetGlobalHeader(height, tx) => {
                     let header = self.blockchain.global_header(height);
                     let _ = tx.send(header);
+                }
+                ChainCommand::GetConsensusSentry(tx) => {
+                    let sentry = self.blockchain.state.bridge_state.consensus_sentry.clone();
+                    let _ = tx.send(sentry);
+                }
+                ChainCommand::GetUniversalDomains(tx) => {
+                    let catalog = crate::unification::UniversalDomainCatalog::from_chain_state(
+                        &self.blockchain.state,
+                    );
+                    let _ = tx.send(catalog);
+                }
+                ChainCommand::GetFinalityCertificate(checkpoint_height, tx) => {
+                    let tip = self.blockchain.chain.last().map_or(0, |b| b.index);
+                    let cert = match checkpoint_height {
+                        Some(h) if h > tip => None,
+                        Some(h) => self
+                            .blockchain
+                            .state
+                            .settlement
+                            .universal_finality_certificate(h),
+                        None => self
+                            .blockchain
+                            .state
+                            .settlement
+                            .universal_finality_certificate(tip),
+                    };
+                    let _ = tx.send(cert);
                 }
                 ChainCommand::GetDomainCommitments(tx) => {
                     // Public RPC (`bud_getDomainCommitments`) reads canonical
@@ -3726,6 +3836,14 @@ impl ChainActor {
                 }
                 ChainCommand::GetRelayerStatus(message_id, tx) => {
                     let relayer = &self.blockchain.state.settlement.relayer;
+                    let concentration = self
+                        .blockchain
+                        .state
+                        .settlement
+                        .relayer_policy
+                        .get_solver_concentration_report(
+                            crate::relayer::policy::DEFAULT_SOLVER_CONCENTRATION_WARN_BPS,
+                        );
                     let pending = message_id.and_then(|id| relayer.pending_relay(&id));
                     let record = message_id.and_then(|id| relayer.ledger.get_record(&id));
                     let _ = tx.send(serde_json::json!({
@@ -3735,6 +3853,7 @@ impl ChainActor {
                         "ledgerRoot": format!("0x{}", hex::encode(relayer.ledger_root())),
                         "pending": pending,
                         "record": record,
+                        "solverConcentration": concentration,
                     }));
                 }
                 ChainCommand::GetRelayerIntent(intent_id, tx) => {
@@ -3792,6 +3911,14 @@ impl ChainActor {
                 }
                 ChainCommand::GetExternalDomainRegistration(key, res_tx) => {
                     let _ = res_tx.send(self.blockchain.external_domain_registration(&key));
+                }
+                ChainCommand::ValidateDomainBlock(domain_id, block, seq, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.validate_and_extract_domain_block(
+                        domain_id,
+                        &block,
+                        &[],
+                        seq,
+                    ));
                 }
                 ChainCommand::GetAiModel(id, res_tx) => {
                     let res = self.blockchain.state.ai_registry.models.get(&id).cloned();
@@ -4796,13 +4923,16 @@ mod proof_cache_tests {
         let (mut actor, _handle) = ChainActor::new(bc);
         let who = Address([7u8; 32]);
         actor.blockchain.state.add_balance(&who, 100);
-        let (before, _) = actor.account_proof(&who);
+        let (before, before_opening, _) = actor.account_proof(&who);
         assert_eq!(before.balance, 100);
+        assert!(before.verify_against_state_root(&before_opening, &before_opening.state_root));
         // No block is added: the chain length stays the same.
         actor.blockchain.state.add_balance(&who, 50);
-        let (after, _) = actor.account_proof(&who);
+        let (after, after_opening, _) = actor.account_proof(&who);
         assert_eq!(after.balance, 150);
+        assert!(after.verify_against_state_root(&after_opening, &after_opening.state_root));
         assert_ne!(before.root, after.root);
+        assert_ne!(before_opening.state_root, after_opening.state_root);
     }
 
     #[test]

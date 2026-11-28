@@ -1,0 +1,12 @@
+# Frozen commit subjects that already carried the review identity.
+#
+# Each line is one full commit id whose subject carries the identity and cannot
+# be rewritten, because rewriting pushed history is forbidden outright. The
+# list is a ratchet: it only ever shrinks, and every entry must be a commit
+# that exists on this line of history, is an ancestor of HEAD, and whose
+# subject still carries the identity.
+#
+# This lineage forked before the two commits the main line quarantines, so it
+# carries no subjects to freeze: any entry copied across lines would fail the
+# guard as "not an ancestor of HEAD". If a subject ever needs freezing here,
+# the entry is added with the commit that introduced it.

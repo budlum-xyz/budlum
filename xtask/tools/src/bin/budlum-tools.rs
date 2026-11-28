@@ -39,7 +39,8 @@ use budlum_tools::{
     smoke_rpc, testnet_genesis, testnet_rehearsal,
 };
 use budlum_tools::{
-    audit_guard, clippy_extra_report, fsf_fit, pq_measure, stark_soundness, step_reachability,
+    audit_guard, clippy_extra_report, fsf_fit, merge_gate, pq_measure, stark_soundness,
+    step_reachability,
 };
 
 fn usage() -> String {
@@ -57,6 +58,7 @@ fn usage() -> String {
      \x20 docker-smoke-mainnet  image smoke: mainnet refuses, devnet boots\n\
      \x20 devnet-multinode-smoke  4-node compose smoke (needs docker)\n\
      \x20 audit-guard           review boundary audit of workflows and history\n\
+     \x20 merge-gate            the merge gate the protected branch requires\n\
      \x20 step-reachability     which workflow steps can run (guards that point nowhere)\n\
      \x20 clippy-extra-report   per-lint tally and addresses from clippy JSON\n\
      \x20 fsf-project-fit       generate or check docs/FSF_PROJECT_FIT.md\n\
@@ -93,6 +95,7 @@ fn run_self_tests() {
         ("ai-test-verifier", ai_test_verifier::self_test()),
         ("sarif", sarif::self_test()),
         ("dependency-snapshot", dep_snapshot::self_test()),
+        ("merge-gate", merge_gate::self_test()),
     ] {
         match result {
             Ok(msg) => println!("{msg}"),
@@ -161,6 +164,7 @@ fn main() {
                 "docker-smoke-mainnet",
                 "devnet-multinode-smoke",
                 "audit-guard",
+                "merge-gate",
                 "step-reachability",
                 "clippy-extra-report",
                 "fsf-project-fit",
@@ -186,6 +190,7 @@ fn main() {
             run_self_tests();
             return;
         }
+        Some(&"merge-gate") => merge_gate::cli(refs.get(1..).unwrap_or_default(), &root),
         Some(&"pre-push") => prepush::ensure_components(&root).and_then(|()| prepush::run(&root)),
         Some(&"install-hook") => prepush::install_hook(&root),
         Some(&"devnet") => devnet::prepare(&root),

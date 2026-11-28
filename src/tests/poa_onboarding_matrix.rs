@@ -1,4 +1,4 @@
-//! The PoA participant onboarding test matrix.
+//! The `PoA` participant onboarding test matrix.
 //!
 //! It covers the full lifecycle of the
 //! [`crate::registry::poa_onboarding::PoAOnboarding`] module, the whitelist
@@ -109,7 +109,7 @@ mod tests {
     }
 
     /// 3. KYC expiry: once the horizon passes, the member drops off the
-    ///    whitelist and a KycExpired event is added to the audit trail once.
+    ///    whitelist and a `KycExpired` event is added to the audit trail once.
     #[test]
     fn kyc_expiry_drops_member_from_whitelist() {
         let admin = addr(0xAD);

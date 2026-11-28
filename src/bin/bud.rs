@@ -5,7 +5,7 @@
 //! (`query balance`/`query block`/`query status`), and guidance for running
 //! a validator (`validator run`).
 //!
-//! The BudZKVM toolchain (`budzero/bud-cli`) is a separate workspace; this binary
+//! The `BudZKVM` toolchain (`budzero/bud-cli`) is a separate workspace; this binary
 //! is for chain interaction and uses the core types directly.
 //!
 //! # Design
@@ -68,6 +68,23 @@ struct Cli {
     /// Trusted epoch corresponding to `--trusted-bns-root`.
     #[arg(long, global = true)]
     trusted_bns_epoch: Option<u64>,
+
+    /// Trusted Universal Finality Certificate digest (32-byte hex) from an
+    /// out-of-band source. Required, together with
+    /// `--trusted-finality-checkpoint`, by `bud finality show` and
+    /// `bud finality route`: the certificate fetched via RPC must match it
+    /// exactly. A certificate checked only against itself proves nothing - a
+    /// hostile node can compose a self-consistent forgery from rows of its
+    /// choosing.
+    #[arg(long, global = true)]
+    trusted_finality_digest: Option<String>,
+
+    /// Trusted finality checkpoint height paired with
+    /// `--trusted-finality-digest`. The certificate is requested at this
+    /// height and its `checkpoint_height` must match it exactly, refusing
+    /// stale or forked certificates the RPC node might serve.
+    #[arg(long, global = true)]
+    trusted_finality_checkpoint: Option<u64>,
     /// Maximum fee in atoms that auto-fee resolution (`bud_estimateGas` /
     /// `bud_gasPrice`) is allowed to adopt when `--fee` is omitted.
     #[arg(long, global = true)]
@@ -204,6 +221,11 @@ enum Command {
         #[command(subcommand)]
         action: DomainAction,
     },
+    /// Universal finality certificates and cross-domain route guarantees.
+    Finality {
+        #[command(subcommand)]
+        action: FinalityAction,
+    },
     /// Show deterministic cross-VM aliases (EVM / Solana / Aptos) for a Budlum address.
     Alias {
         /// Budlum 32-byte hex address (`0x` optional).
@@ -222,7 +244,7 @@ enum Command {
         #[command(subcommand)]
         action: DevAction,
     },
-    /// AppBinding: use an application of another network from Budlum, in BUD.
+    /// `AppBinding`: use an application of another network from Budlum, in BUD.
     AppBinding {
         #[command(subcommand)]
         action: AppBindingAction,
@@ -274,6 +296,109 @@ enum Command {
         /// Epoch whose calendar budget is split.
         #[arg(long)]
         epoch: u64,
+    },
+    /// Quantum-safe hash-only notary timestamps chained to SLH-DSA Root Seals.
+    Notary {
+        #[command(subcommand)]
+        action: NotaryAction,
+    },
+    /// Universal cross-domain event bus helper commands.
+    EventBus {
+        #[command(subcommand)]
+        action: EventBusAction,
+    },
+    /// Compare a solver quote against proven AMM reserve TWAP (non-binding advisory).
+    QuoteCheck {
+        /// Path to JSON file containing an array of `AmmReserveSnapshot` records.
+        #[arg(long, required = true)]
+        observations: String,
+        /// Solver-quoted price scaled by 1e18.
+        #[arg(long, required = true)]
+        quoted_price_scaled: u128,
+        /// Advisory warning threshold in basis points (default 500 = 5%).
+        #[arg(long, default_value_t = budlum_core::settlement::liquidation_proof::DEFAULT_QUOTE_DEVIATION_WARN_BPS)]
+        warn_bps: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum EventBusAction {
+    /// Validate and print the deterministic subscription id and EVM topic0 for
+    /// a cross-domain event subscription.
+    SubscriptionId {
+        /// Source domain emitting the watched event.
+        #[arg(long, required = true)]
+        source_domain: u32,
+        /// Target domain hosting the callback contract.
+        #[arg(long, required = true)]
+        target_domain: u32,
+        /// Subscriber address (hex, optional `0x`).
+        #[arg(long, required = true)]
+        subscriber: String,
+        /// Callback contract address (hex, optional `0x`).
+        #[arg(long, required = true)]
+        callback: String,
+        /// Source contract emitter address (hex, optional `0x`).
+        #[arg(long, required = true)]
+        emitter: String,
+        /// Canonical EVM event signature (for example `Transfer(address,address,uint256)`).
+        #[arg(long, required = true)]
+        signature: String,
+        /// Maximum allowed deliveries (`0` = unlimited).
+        #[arg(long, default_value_t = 0)]
+        max_deliveries: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum NotaryAction {
+    /// Anchor a 32-byte digest into an offline-verifiable SLH-DSA-SHAKE-256s Root Seal proof
+    /// (devnet/testnet software seal key mode).
+    Anchor {
+        /// 32-byte digest to notarize (hex, optional `0x` prefix).
+        digest: String,
+        /// Optional human-readable label (<= 256 bytes, no control bytes).
+        #[arg(long, default_value = "")]
+        label: String,
+        /// Chain identifier committed into the anchor and Root Seal.
+        #[arg(long, default_value_t = 45261)]
+        chain_id: u64,
+        /// Block height of the notarized entry (must be positive).
+        #[arg(long, default_value_t = 360)]
+        height: u64,
+        /// Key epoch stamped on the Root Seal.
+        #[arg(long, default_value_t = 1)]
+        key_epoch: u32,
+        /// Key slot index stamped on the Root Seal.
+        #[arg(long, default_value_t = 0)]
+        key_index: u8,
+        /// Optional 96-byte SLH-DSA-SHAKE-256s seed hex for deterministic devnet/test sealing;
+        /// omits to generate a fresh OS-RNG key.
+        #[arg(long)]
+        seed_hex: Option<String>,
+        /// Output JSON file path for the self-contained proof bundle (prints to stdout if omitted).
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+    /// Verify a notary timestamp proof completely offline using only SHA3-256 and SLH-DSA-SHAKE-256s.
+    Verify {
+        /// Path to the JSON `NotaryTimestampProof` bundle.
+        proof: std::path::PathBuf,
+        /// Pinned 64-byte SLH-DSA-SHAKE-256s public key hex (optional `0x` prefix).
+        #[arg(long, required = true)]
+        seal_pubkey: String,
+        /// Optional expected 32-byte document digest hex (optional `0x` prefix).
+        #[arg(long)]
+        digest: Option<String>,
+        /// Expected chain identifier.
+        #[arg(long, default_value_t = 45261)]
+        chain_id: u64,
+        /// Expected seal key epoch.
+        #[arg(long, default_value_t = 1)]
+        key_epoch: u32,
+        /// Expected seal key slot index.
+        #[arg(long, default_value_t = 0)]
+        key_index: u8,
     },
 }
 
@@ -456,7 +581,7 @@ enum DomainAction {
     /// verify and every fault probe must be refused. Exits non-zero when
     /// the adapter would not be admitted.
     Selftest {
-        /// Adapter family. `zkvm` is the BudZKVM proof adapter.
+        /// Adapter family. `zkvm` is the `BudZKVM` proof adapter.
         #[arg(long, default_value = "zkvm")]
         adapter: String,
         /// The external network label the adapter serves.
@@ -505,7 +630,7 @@ enum FaucetAction {
 
 #[derive(Subcommand)]
 enum AppBindingAction {
-    /// Print the AppBinding id and the mirror account of an application.
+    /// Print the `AppBinding` id and the mirror account of an application.
     Id {
         #[arg(long, required = true)]
         domain: u32,
@@ -617,7 +742,7 @@ enum AppBindingAction {
         evidence: std::path::PathBuf,
     },
     /// Claim an externally owned application with its EIP-191 signature
-    /// over `eoa_claim_hash` (docs/APP_BINDING.md, section 4).
+    /// over `eoa_claim_hash` (`docs/APP_BINDING.md`, section 4).
     ClaimSigned {
         #[command(flatten)]
         signer: V5Signer,
@@ -710,6 +835,31 @@ impl ContentArgs {
         .map(Some)
         .map_err(|e| format!("invalid content reference: {e:?}"))
     }
+}
+
+#[derive(Subcommand)]
+enum FinalityAction {
+    /// Inspect and locally verify the Universal Finality Certificate or one
+    /// domain's `O(log N)` Merkle inclusion proof.
+    Show {
+        /// Optional settlement checkpoint height (defaults to the node tip).
+        #[arg(long)]
+        checkpoint: Option<u64>,
+        /// Optional consensus domain id; when set, fetches and verifies its
+        /// Merkle inclusion proof (`bud_getDomainFinality`).
+        #[arg(long)]
+        domain: Option<u32>,
+    },
+    /// Inspect and locally verify the composed cross-domain finality guarantee
+    /// and safe value outflow ceiling for `source -> hub -> target`.
+    Route {
+        /// Source consensus domain id.
+        #[arg(long, required = true)]
+        source: u32,
+        /// Target consensus domain id.
+        #[arg(long, required = true)]
+        target: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -926,9 +1076,14 @@ enum BnsAction {
         /// Paid B.U.D. 3.0 object lifetime in epochs.
         #[arg(long, default_value_t = 100_000)]
         lifetime_epochs: u64,
-        /// Optional 32-byte custody validator hex (defaults to wallet address).
+        /// 32-byte custody validator hex, repeatable.
+        ///
+        /// A B.U.D. 3.0 object refuses a single custodian, so pass at least
+        /// two: `--validator 0x.. --validator 0x..`. Defaults to the signing
+        /// wallet, which alone is never enough, so the CLI refuses to publish
+        /// until a second one is named.
         #[arg(long)]
-        validator: Option<String>,
+        validator: Vec<String>,
     },
 }
 
@@ -959,7 +1114,7 @@ enum ProjectAction {
         /// Project name.
         #[arg(long, required = true)]
         name: String,
-        /// The 32-byte hash of the BudL source tree (hex, `0x` prefix optional).
+        /// The 32-byte hash of the `BudL` source tree (hex, `0x` prefix optional).
         #[arg(long, required = true)]
         source_hash: String,
     },
@@ -2082,7 +2237,7 @@ fn evidence_file(
         .map_err(|e| format!("{} is not an external result: {e}", path.display()))
 }
 
-/// `bud domain register-pow`: a PoW domain with the header-chain adapter,
+/// `bud domain register-pow`: a `PoW` domain with the header-chain adapter,
 /// the wallet as operator.
 fn run_domain_register_pow(
     rpc_url: &str,
@@ -2106,7 +2261,7 @@ fn run_domain_register_pow(
     send_v5(rpc_url, &key, v5_template(tx_type, 0, signer.fee), None)
 }
 
-/// Build the exact PoA domain row committed by `bud domain register-poa`.
+/// Build the exact `PoA` domain row committed by `bud domain register-poa`.
 ///
 /// The authority list is part of consensus security, not display metadata: a
 /// future finality proof is accepted only when its authority set reproduces
@@ -2144,7 +2299,7 @@ fn poa_domain(
     Ok(domain)
 }
 
-/// `bud domain register-poa`: a PoA domain with a committed authority set and
+/// `bud domain register-poa`: a `PoA` domain with a committed authority set and
 /// the wallet as operator.
 fn run_domain_register_poa(
     rpc_url: &str,
@@ -2164,16 +2319,30 @@ fn run_domain_register_poa(
 /// `bud domain selftest`: the admission harness
 /// (`cross_domain::external::admit`) run locally, so an adapter author sees
 /// the report before bonding anything.
-fn run_domain_selftest(
-    adapter: &str,
-    network: &str,
-    golden: &std::path::Path,
-    program_hash: Option<&str>,
+///
+/// Options forwarded from `bud domain selftest` into [`run_domain_selftest`].
+struct DomainSelftestArgs<'a> {
+    adapter: &'a str,
+    network: &'a str,
+    golden: &'a std::path::Path,
+    program_hash: Option<&'a str>,
     chain_id: Option<u64>,
-    tm_chain_id: Option<&str>,
-    tm_pin_set_hash: Option<&str>,
+    tm_chain_id: Option<&'a str>,
+    tm_pin_set_hash: Option<&'a str>,
     now: u64,
-) -> Result<(), String> {
+}
+
+fn run_domain_selftest(args: DomainSelftestArgs<'_>) -> Result<(), String> {
+    let DomainSelftestArgs {
+        adapter,
+        network,
+        golden,
+        program_hash,
+        chain_id,
+        tm_chain_id,
+        tm_pin_set_hash,
+        now,
+    } = args;
     use budlum_core::cross_domain::external::{
         admit, RawConsensusEvidence, TendermintFinalityAdapter, VerificationPolicy,
         ZkVmFinalityAdapter,
@@ -2259,7 +2428,7 @@ fn run_faucet(action: &FaucetAction) -> Result<(), String> {
     }
 }
 
-/// `bud app-binding ...`: build the AppBinding settlement transaction here and sign it
+/// `bud app-binding ...`: build the `AppBinding` settlement transaction here and sign it
 /// with the V5 wallet.
 fn run_app_binding(rpc_url: &str, action: &AppBindingAction) -> Result<(), String> {
     use budlum_core::settlement::app_binding::AppBindingTx;
@@ -3567,6 +3736,321 @@ fn run_bns_resolve(rpc_url: &str, name: &str, verify_proof: bool) -> Result<(), 
     Ok(())
 }
 
+fn parse_hex_bytes32(value: &str, field: &str) -> Result<[u8; 32], String> {
+    let trimmed = value.strip_prefix("0x").unwrap_or(value);
+    let raw = hex::decode(trimmed).map_err(|e| format!("invalid hex in {field}: {e}"))?;
+    let arr: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| format!("{field} must be 32 bytes (64 hex chars)"))?;
+    Ok(arr)
+}
+
+fn verify_certificate_rpc_response(
+    resp: &serde_json::Value,
+) -> Result<budlum_core::settlement::GlobalFinalityCertificate, String> {
+    let cert: budlum_core::settlement::GlobalFinalityCertificate = serde_json::from_value(
+        resp.get("certificate")
+            .cloned()
+            .ok_or_else(|| "RPC response missing `certificate`".to_string())?,
+    )
+    .map_err(|e| format!("failed to decode GlobalFinalityCertificate: {e}"))?;
+    cert.verify_integrity()
+        .map_err(|e| format!("certificate integrity verification failed: {e:?}"))?;
+    if let Some(hex_digest) = resp.get("certificateDigest").and_then(|v| v.as_str()) {
+        let claimed = parse_hex_bytes32(hex_digest, "certificateDigest")?;
+        if claimed != cert.certificate_digest {
+            return Err(
+                "RPC `certificateDigest` conflicts with recomputed certificate digest".to_string(),
+            );
+        }
+    }
+    Ok(cert)
+}
+
+/// Read the node's CRQC alarm state before the route gate runs.
+///
+/// The quantum posture of a route is a fact about the chain the certificate
+/// came from, and the CLI has no sentry of its own. The one thing it can do
+/// honestly is ask the node whether its alarm is active, and refuse unless
+/// the answer is an explicit `false`: a node that does not answer the
+/// question has not said "no".
+fn read_crqc_alarm_active(rpc_url: &str) -> Result<bool, String> {
+    let health = rpc_call(rpc_url, "bud_getDomainHealth", serde_json::json!([null]))?;
+    health
+        .get("crqcAlarmActive")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| {
+            "the node's `bud_getDomainHealth` response has no boolean `crqcAlarmActive`; \
+             the route's quantum posture cannot be read, refusing"
+                .to_string()
+        })
+}
+
+/// Operator-supplied finality anchor (`--trusted-finality-digest` +
+/// `--trusted-finality-checkpoint`), obtained out-of-band from a source the
+/// operator already trusts: an own node, a light client, a pinned header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FinalityAnchor {
+    digest: [u8; 32],
+    checkpoint: u64,
+}
+
+/// Resolve the finality anchor before any RPC traffic. Both values are
+/// required: `GlobalFinalityCertificate::verify_integrity` only recomposes the
+/// certificate from its own rows, so without an independent anchor every
+/// "verified" field would be a statement the RPC node makes about itself.
+fn require_finality_anchor(
+    digest_hex: Option<&str>,
+    checkpoint: Option<u64>,
+) -> Result<FinalityAnchor, String> {
+    match (digest_hex, checkpoint) {
+        (Some(raw), Some(checkpoint)) => Ok(FinalityAnchor {
+            digest: parse_hex32_str(raw, "--trusted-finality-digest")?,
+            checkpoint,
+        }),
+        (Some(_), None) | (None, Some(_)) => Err(
+            "--trusted-finality-digest and --trusted-finality-checkpoint must be provided together"
+                .to_string(),
+        ),
+        (None, None) => Err(
+            "--trusted-finality-digest <hex32> and --trusted-finality-checkpoint <height> are \
+             required to verify finality: a certificate checked only against itself lets a \
+             hostile RPC node compose a self-consistent forgery and report any route as \
+             admitting cross-domain value"
+                .to_string(),
+        ),
+    }
+}
+
+/// Bind a fetched certificate to the operator's anchor: the checkpoint first
+/// (a stale or forked height gets the more specific error), then the digest.
+fn check_certificate_against_anchor(
+    cert: &budlum_core::settlement::GlobalFinalityCertificate,
+    anchor: &FinalityAnchor,
+) -> Result<(), String> {
+    if cert.checkpoint_height != anchor.checkpoint {
+        return Err(format!(
+            "--trusted-finality-checkpoint {} conflicts with certificate checkpoint_height {}",
+            anchor.checkpoint, cert.checkpoint_height
+        ));
+    }
+    if cert.certificate_digest != anchor.digest {
+        return Err("--trusted-finality-digest does not match certificate digest".to_string());
+    }
+    Ok(())
+}
+
+fn run_finality_show(
+    rpc_url: &str,
+    checkpoint: Option<u64>,
+    domain: Option<u32>,
+    trusted_digest: Option<&str>,
+    trusted_checkpoint: Option<u64>,
+) -> Result<(), String> {
+    // Anchor first: refuse before any RPC traffic when the operator has not
+    // supplied an independent commitment to compare the certificate with.
+    let anchor = require_finality_anchor(trusted_digest, trusted_checkpoint)?;
+    // hxIP: the certificate is the single local source of truth; every field
+    // below is derived from it, never copied from the RPC reply.
+    let resp = rpc_call(
+        rpc_url,
+        "bud_getFinalityCertificate",
+        serde_json::json!([checkpoint.unwrap_or(anchor.checkpoint)]),
+    )?;
+    let cert = verify_certificate_rpc_response(&resp)?;
+
+    if let Some(cp) = checkpoint {
+        if cp != cert.checkpoint_height {
+            return Err(format!(
+                "--checkpoint {} conflicts with certificate checkpoint_height {}",
+                cp, cert.checkpoint_height
+            ));
+        }
+    }
+    check_certificate_against_anchor(&cert, &anchor)?;
+
+    let summary = if let Some(domain_id) = domain {
+        // hxIP: inclusion proof verified against cert.bucket_root(proof.bucket),
+        // not against an RPC-supplied bucket root.
+        let proof = cert.prove_domain(domain_id).ok_or_else(|| {
+            format!("domain {domain_id} is not present in the finality certificate")
+        })?;
+        if !proof.verify(&cert.bucket_root(proof.bucket)) {
+            return Err(
+                "domain finality Merkle inclusion proof failed local verification against certificate bucket root"
+                    .to_string(),
+            );
+        }
+
+        // hxIS: derive admitsCrossDomainValue and safeValueOutflowCeilingAtoms locally.
+        let established = matches!(
+            proof.entry.verdict,
+            budlum_core::settlement::FinalityVerdict::Established
+        );
+        let econ = budlum_core::settlement::EconomicSecurityBound::derive(
+            &proof.entry.guarantee,
+            proof.entry.bond_atoms,
+            proof.entry.bond_atoms,
+        );
+        let admits_value = established && proof.entry.guarantee.admits_cross_domain_value();
+        let safe_ceiling = if admits_value {
+            econ.safe_value_outflow_ceiling_atoms
+        } else {
+            0
+        };
+
+        serde_json::json!({
+            "domainId": domain_id,
+            "checkpointHeight": cert.checkpoint_height,
+            "certificateDigest": format!("0x{}", hex::encode(cert.certificate_digest)),
+            "bucket": proof.bucket,
+            "bucketRoot": format!("0x{}", hex::encode(cert.bucket_root(proof.bucket))),
+            "rowDigest": format!("0x{}", hex::encode(proof.entry.row_digest())),
+            "height": proof.entry.height,
+            "verdict": proof.entry.verdict,
+            "guaranteeLabel": proof.entry.guarantee.label(),
+            "admitsCrossDomainValue": admits_value,
+            "safeValueOutflowCeilingAtoms": safe_ceiling.to_string(),
+            "proofVerified": true,
+        })
+    } else {
+        // hxIU: derive domainLabels from cert.{established,pending,refuted}, not RPC.
+        let domain_labels: Vec<serde_json::Value> = cert
+            .established
+            .iter()
+            .map(|row| ("established", row))
+            .chain(cert.pending.iter().map(|row| ("pending", row)))
+            .chain(cert.refuted.iter().map(|row| ("refuted", row)))
+            .map(|(bucket, row)| {
+                serde_json::json!({
+                    "domainId": row.domain_id,
+                    "bucket": bucket,
+                    "height": row.height,
+                    "guaranteeLabel": row.guarantee.label(),
+                    "rowDigest": format!("0x{}", hex::encode(row.row_digest())),
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "checkpointHeight": cert.checkpoint_height,
+            "certificateDigest": format!("0x{}", hex::encode(cert.certificate_digest)),
+            "establishedCount": cert.established_count,
+            "pendingCount": cert.pending_count,
+            "refutedCount": cert.refuted_count,
+            "establishedRoot": format!("0x{}", hex::encode(cert.established_root)),
+            "pendingRoot": format!("0x{}", hex::encode(cert.pending_root)),
+            "refutedRoot": format!("0x{}", hex::encode(cert.refuted_root)),
+            "guaranteeLabel": cert.guarantee.map(|g| g.label()),
+            "domainLabels": domain_labels,
+            "integrityVerified": true,
+        })
+    };
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+fn run_finality_route(
+    rpc_url: &str,
+    source: u32,
+    target: u32,
+    trusted_digest: Option<&str>,
+    trusted_checkpoint: Option<u64>,
+) -> Result<(), String> {
+    // Anchor first: refuse before any RPC traffic (see `require_finality_anchor`).
+    let anchor = require_finality_anchor(trusted_digest, trusted_checkpoint)?;
+    // hxIW / hxIP: the certificate is the single local source of truth.
+    let resp = rpc_call(
+        rpc_url,
+        "bud_getFinalityCertificate",
+        serde_json::json!([anchor.checkpoint]),
+    )?;
+    let cert = verify_certificate_rpc_response(&resp)?;
+    check_certificate_against_anchor(&cert, &anchor)?;
+
+    // The gate's quantum posture check reads a sentry, and the CLI has none.
+    // Ask the node for the one fact that decides whether that check can say
+    // anything: an active alarm means the posture question is live, and only
+    // the node's sentry can answer it for a route. Refuse there; never
+    // invent an answer.
+    if read_crqc_alarm_active(rpc_url)? {
+        return Err(
+            "the node reports an active CRQC alarm: the route's quantum posture is decided \
+             by the node (bud_getRouteFinality), not by this client"
+                .to_string(),
+        );
+    }
+
+    let src = cert.prove_domain(source).ok_or_else(|| {
+        format!("source domain {source} is not present in the finality certificate")
+    })?;
+    let dst = cert.prove_domain(target).ok_or_else(|| {
+        format!("target domain {target} is not present in the finality certificate")
+    })?;
+
+    // hxIP: same-cert inclusion proof via cert.bucket_root(proof.bucket).
+    if !src.verify(&cert.bucket_root(src.bucket)) {
+        return Err("source domain finality Merkle proof failed local verification".to_string());
+    }
+    if !dst.verify(&cert.bucket_root(dst.bucket)) {
+        return Err("target domain finality Merkle proof failed local verification".to_string());
+    }
+
+    // hxIW: compute all route values locally from the certificate.
+    let hub = budlum_core::settlement::FinalityGuarantee::settlement_hub();
+    let composed_guarantee = src.entry.guarantee.meet(&hub).meet(&dst.entry.guarantee);
+
+    let gate_result: Result<
+        budlum_core::settlement::finality_gate::ValueGateVerdict,
+        budlum_core::settlement::finality_gate::ValueGateRefusal,
+    > = budlum_core::settlement::finality_gate::check_certificate_value_gate(
+        &cert,
+        // The CLI has no sentry of its own. A fresh sentry is the no-alarm
+        // state, which is exactly what the node just reported: without an
+        // alarm the posture check inside the gate asks nothing, so this
+        // answer equals the node's for every route the node admits, and the
+        // alarm case was refused above instead of being guessed.
+        &budlum_core::cross_domain::external::sentry::ConsensusSentry::new(),
+        budlum_core::settlement::finality_gate::ValueGate::UniversalPayment,
+        source,
+        Some(target),
+        budlum_core::settlement::universal_finality::FinalityBinds::EVENT_ROOT,
+    );
+
+    let (admits_value, refusal_reason, safe_ceiling) = match gate_result {
+        Ok(verdict) => (true, None, verdict.safe_value_outflow_ceiling_atoms),
+        Err(refusal) => (false, Some(refusal.to_string()), 0),
+    };
+
+    let summary = serde_json::json!({
+        "checkpointHeight": cert.checkpoint_height,
+        "certificateDigest": format!("0x{}", hex::encode(cert.certificate_digest)),
+        "sourceDomain": source,
+        "targetDomain": target,
+        "sourceBucket": src.bucket,
+        "targetBucket": dst.bucket,
+        "sourceBucketRoot": format!("0x{}", hex::encode(cert.bucket_root(src.bucket))),
+        "targetBucketRoot": format!("0x{}", hex::encode(cert.bucket_root(dst.bucket))),
+        "admitsCrossDomainValue": admits_value,
+        "refusalReason": refusal_reason,
+        "routeGuaranteeLabel": composed_guarantee.label(),
+        "sourceGuaranteeLabel": src.entry.guarantee.label(),
+        "targetGuaranteeLabel": dst.entry.guarantee.label(),
+        "safeValueOutflowCeilingAtoms": safe_ceiling.to_string(),
+        "proofsVerified": true,
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
 fn run_bns_info(rpc_url: &str, name: &str) -> Result<(), String> {
     if !budlum_core::bns::BnsRegistry::is_valid_name(name) {
         return Err(format!(
@@ -3729,7 +4213,7 @@ fn prepare_publish_site_payloads(
     payload: &[u8],
     mime: &str,
     lifetime_epochs: u64,
-    custody_validator: [u8; 32],
+    custody_validators: &[[u8; 32]],
 ) -> Result<
     (
         budlum_core::storage::bud3::tx::StorageTxV3,
@@ -3753,6 +4237,15 @@ fn prepare_publish_site_payloads(
     if lifetime_epochs == 0 {
         return Err("--lifetime-epochs must be greater than zero".into());
     }
+    // Placement refuses a segment that one custodian holds end to end, and it
+    // is right to: a lone holder is a lone point of loss. Refusing here, before
+    // the payload is built, names the fix the user can act on.
+    if custody_validators.len() < 2 {
+        return Err(format!(
+            "a B.U.D. 3.0 object needs at least two custody validators (got {}); pass --validator twice",
+            custody_validators.len()
+        ));
+    }
     const SITE_PROFILE: Profile = Profile {
         id: 0,
         qr_version: 40,
@@ -3762,17 +4255,52 @@ fn prepare_publish_site_payloads(
     };
     let prepared = prepare_public_upload(payload, &SITE_PROFILE, &Bud3Limits::default(), 8)
         .map_err(|e| format!("B.U.D. 3.0 site encoding failed: {e:?}"))?;
-    let mut shares = Vec::with_capacity(prepared.segments.len());
+    // Symbol ranges are split across the custody set in ESI order, so every
+    // segment names each custodian exactly once and together they cover the
+    // coded symbols. Duplicates are refused rather than deduplicated: a user who
+    // passed the same key twice believes two holders exist.
+    let mut seen = std::collections::BTreeSet::new();
+    for v in custody_validators {
+        if !seen.insert(v) {
+            return Err(format!(
+                "custody validator {} appears twice",
+                hex::encode(v)
+            ));
+        }
+    }
+    let n = u32::try_from(custody_validators.len())
+        .map_err(|_| "too many custody validators for one object".to_string())?;
+    let mut shares = Vec::with_capacity(prepared.segments.len() * custody_validators.len());
     for (seg_idx, syms) in prepared.segments.iter().enumerate() {
-        shares.push((
-            seg_idx as u64,
-            Share {
-                validator: custody_validator,
-                class: Class::Full,
-                first_esi: 0,
-                symbols: syms.len() as u32,
-            },
-        ));
+        // A segment that cannot give each custodian a symbol would put an empty
+        // share in the placement, which the registry refuses with a message
+        // about ESIs rather than about the object being too small.
+        let total = u32::try_from(syms.len()).map_err(|_| {
+            format!("segment {seg_idx} carries more coded symbols than one share can name")
+        })?;
+        if n > total {
+            return Err(format!(
+                "segment {seg_idx} has {total} coded symbols, fewer than the {} custody validators; \
+                 use a larger object or fewer `--validator` flags",
+                n
+            ));
+        }
+        let base = total / n;
+        let extra = total % n;
+        let mut first = 0u32;
+        for (i, validator) in custody_validators.iter().enumerate() {
+            let take = base + u32::from(u32::try_from(i).unwrap_or(u32::MAX) < extra);
+            shares.push((
+                seg_idx as u64,
+                Share {
+                    validator: *validator,
+                    class: Class::Full,
+                    first_esi: first,
+                    symbols: take,
+                },
+            ));
+            first += take;
+        }
     }
     let cref = ContentRef::new(prepared.record.content_id, prepared.record.commitment, None)
         .map_err(|e| format!("invalid ContentRef: {e:?}"))?;
@@ -3797,16 +4325,23 @@ fn run_bns_publish_site(
     name: &str,
     path: &std::path::Path,
     lifetime_epochs: u64,
-    validator: Option<&str>,
+    validators: &[String],
 ) -> Result<(), String> {
     let key = open_wallet(signer)?;
     let (payload, mime) = bundle_site_payload(path)?;
-    let custody_validator = match validator {
-        Some(raw) => parse_address(raw.strip_prefix("0x").unwrap_or(raw))?.0,
-        None => key.address().0,
-    };
+    let mut custody_validators: Vec<[u8; 32]> = Vec::with_capacity(validators.len() + 1);
+    for raw in validators {
+        custody_validators.push(parse_address(raw.strip_prefix("0x").unwrap_or(raw))?.0);
+    }
+    // The signing wallet holds a share by default: it is the account paying for
+    // the object, and leaving it out of the placement would mean paying for
+    // custody it never holds.
+    let signer_address = key.address().0;
+    if !custody_validators.contains(&signer_address) {
+        custody_validators.push(signer_address);
+    }
     let (storage_tx, cref, set_content_data, set_records_data) =
-        prepare_publish_site_payloads(name, &payload, &mime, lifetime_epochs, custody_validator)?;
+        prepare_publish_site_payloads(name, &payload, &mime, lifetime_epochs, &custody_validators)?;
     let nonce_val = rpc_call(
         rpc_url,
         "bud_getNonce",
@@ -4124,19 +4659,35 @@ fn main() {
                 tm_chain_id,
                 tm_pin_set_hash,
                 now,
-            } => run_domain_selftest(
+            } => run_domain_selftest(DomainSelftestArgs {
                 adapter,
                 network,
                 golden,
-                program_hash.as_deref(),
-                *chain_id,
-                tm_chain_id.as_deref(),
-                tm_pin_set_hash.as_deref(),
-                *now,
-            ),
+                program_hash: program_hash.as_deref(),
+                chain_id: *chain_id,
+                tm_chain_id: tm_chain_id.as_deref(),
+                tm_pin_set_hash: tm_pin_set_hash.as_deref(),
+                now: *now,
+            }),
         },
         Command::Dev { action } => run_dev(&cli.rpc_url, action),
         Command::AppBinding { action } => run_app_binding(&cli.rpc_url, action),
+        Command::Finality { action } => match action {
+            FinalityAction::Show { checkpoint, domain } => run_finality_show(
+                &cli.rpc_url,
+                *checkpoint,
+                *domain,
+                cli.trusted_finality_digest.as_deref(),
+                cli.trusted_finality_checkpoint,
+            ),
+            FinalityAction::Route { source, target } => run_finality_route(
+                &cli.rpc_url,
+                *source,
+                *target,
+                cli.trusted_finality_digest.as_deref(),
+                cli.trusted_finality_checkpoint,
+            ),
+        },
         Command::Bns { action } => match action {
             BnsAction::Sell {
                 signer,
@@ -4246,7 +4797,7 @@ fn main() {
                 name,
                 path,
                 *lifetime_epochs,
-                validator.as_deref(),
+                validator,
             ),
         },
         Command::Node { action } => match action {
@@ -4302,10 +4853,217 @@ fn main() {
             shard,
         } => run_deal_consent_digest(*chain_id, payer, *nonce, deal, manifest, shard),
         Command::RewardPool { epoch } => run_reward_pool(*epoch),
+        Command::Notary { action } => run_notary(action),
+        Command::EventBus { action } => run_event_bus(action),
+        Command::QuoteCheck {
+            observations,
+            quoted_price_scaled,
+            warn_bps,
+        } => run_quote_check(observations, *quoted_price_scaled, *warn_bps),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
+    }
+}
+
+fn run_quote_check(
+    observations_path: &str,
+    quoted_price_scaled: u128,
+    warn_bps: u64,
+) -> Result<(), String> {
+    use budlum_core::settlement::liquidation_proof::{
+        evaluate_quote_against_proven_twap, AmmReserveSnapshot,
+    };
+    let raw = std::fs::read(observations_path)
+        .map_err(|e| format!("failed to read observations `{observations_path}`: {e}"))?;
+    let snapshots: Vec<AmmReserveSnapshot> = serde_json::from_slice(&raw)
+        .map_err(|e| format!("invalid AmmReserveSnapshot JSON: {e}"))?;
+    let advisory = evaluate_quote_against_proven_twap(&snapshots, quoted_price_scaled, warn_bps)
+        .map_err(|e| format!("TWAP reference evaluation failed: {e}"))?;
+    let out = serde_json::to_string_pretty(&advisory)
+        .map_err(|e| format!("failed to serialize advisory: {e}"))?;
+    println!("{out}");
+    Ok(())
+}
+
+fn run_event_bus(action: &EventBusAction) -> Result<(), String> {
+    use budlum_core::cross_domain::event_bus::{
+        evm_event_topic0, EventSubscriptionRequest, EventTopicFilter, UniversalEventBus,
+    };
+
+    match action {
+        EventBusAction::SubscriptionId {
+            source_domain,
+            target_domain,
+            subscriber,
+            callback,
+            emitter,
+            signature,
+            max_deliveries,
+        } => {
+            let sub_addr = Address(parse_hex32_str(subscriber, "subscriber")?);
+            let cb_addr = Address(parse_hex32_str(callback, "callback")?);
+            let emit_addr = Address(parse_hex32_str(emitter, "emitter")?);
+            let topic0 = evm_event_topic0(signature);
+            let filter = EventTopicFilter::evm_event(emit_addr, signature);
+            let req = EventSubscriptionRequest {
+                source_domain: *source_domain,
+                target_domain: *target_domain,
+                subscriber: sub_addr,
+                callback_contract: cb_addr,
+                filter,
+                max_deliveries: *max_deliveries,
+            };
+            let mut bus = UniversalEventBus::new();
+            let sub_id = bus
+                .subscribe(req)
+                .map_err(|e| format!("invalid event-bus subscription: {e}"))?;
+            let active = bus.get_subscription(sub_id).is_some_and(|s| s.active);
+            let delivered = bus.is_delivered(sub_id);
+            bus.cancel_subscription(sub_id, sub_addr)
+                .map_err(|e| format!("subscription lifecycle check failed: {e}"))?;
+            println!(
+                "{{\"subscription_id\":\"0x{}\",\"topic0\":\"0x{}\",\"source_domain\":{},\"target_domain\":{},\"active_on_open\":{},\"delivered\":{}}}",
+                hex::encode(sub_id),
+                hex::encode(topic0),
+                source_domain,
+                target_domain,
+                active,
+                delivered
+            );
+            Ok(())
+        }
+    }
+}
+
+fn run_notary(action: &NotaryAction) -> Result<(), String> {
+    use budlum_core::settlement::notary::{
+        anchor_notary_entries, verify_notary_proof_offline, NotaryAnchorRequest, NotaryEntry,
+        NotaryError, NotaryInclusionProof, NotaryTimestampProof, SealAnchorInclusionProof,
+        StaticSealKeySet, VerifiedNotaryTimestamp,
+    };
+    use budlum_core::settlement::pq_anchor::AnchorMode;
+    use budlum_core::settlement::root_seal::{SealSigner, SoftwareSealSigner, ROOT_SEAL_INTERVAL};
+
+    let format_notary_err = |err: NotaryError| format!("notary error: {err}");
+
+    match action {
+        NotaryAction::Anchor {
+            digest,
+            label,
+            chain_id,
+            height,
+            key_epoch,
+            key_index,
+            seed_hex,
+            out,
+        } => {
+            let document_digest = parse_hex32_str(digest, "digest")?;
+            if *height == 0 {
+                return Err("height must be positive".to_string());
+            }
+            let seal_height = height
+                .div_ceil(ROOT_SEAL_INTERVAL)
+                .saturating_mul(ROOT_SEAL_INTERVAL);
+            let signer = match seed_hex {
+                Some(raw) => {
+                    let trimmed = raw.trim().strip_prefix("0x").unwrap_or(raw.trim());
+                    let seed =
+                        hex::decode(trimmed).map_err(|e| format!("invalid --seed-hex: {e}"))?;
+                    SoftwareSealSigner::from_seed(&seed)
+                        .map_err(|e| format!("invalid SLH-DSA seed: {e}"))?
+                }
+                None => SoftwareSealSigner::generate()
+                    .map_err(|e| format!("failed to generate SLH-DSA key: {e}"))?,
+            };
+            let entry = NotaryEntry {
+                document_digest,
+                height: *height,
+                label: label.clone(),
+            };
+            let req = NotaryAnchorRequest {
+                mode: AnchorMode::Devnet,
+                chain_id: *chain_id,
+                anchor_height: *height,
+                seal_height,
+                key_epoch: *key_epoch,
+                key_index: *key_index,
+                previous_seal: None,
+                extra_anchor_leaves: &[],
+                extra_period_anchors: &[],
+            };
+            let proof =
+                anchor_notary_entries(&req, &[entry], 0, &signer).map_err(format_notary_err)?;
+            let notary_part: &NotaryInclusionProof = &proof.notary_proof;
+            let seal_part: &SealAnchorInclusionProof = &proof.seal_proof;
+            let _ = (notary_part.leaf_count, seal_part.anchor_count);
+            let json = serde_json::to_string_pretty(&proof)
+                .map_err(|e| format!("serialize notary proof: {e}"))?;
+            let pubkey_hex = hex::encode(signer.public_key());
+            let seal_digest_hex = hex::encode(proof.seal.digest());
+            if let Some(path) = out {
+                std::fs::write(path, &json)
+                    .map_err(|e| format!("write {}: {e}", path.display()))?;
+                println!(
+                    "{{\"status\":\"anchored\",\"mode\":\"devnet\",\"digest\":\"0x{}\",\"height\":{},\"seal_height\":{},\"seal_digest\":\"0x{}\",\"seal_pubkey\":\"0x{}\",\"proof_path\":\"{}\"}}",
+                    hex::encode(document_digest),
+                    height,
+                    seal_height,
+                    seal_digest_hex,
+                    pubkey_hex,
+                    path.display()
+                );
+            } else {
+                eprintln!(
+                    "anchored digest=0x{} seal_height={} seal_digest=0x{} seal_pubkey=0x{}",
+                    hex::encode(document_digest),
+                    seal_height,
+                    seal_digest_hex,
+                    pubkey_hex
+                );
+                println!("{json}");
+            }
+            Ok(())
+        }
+        NotaryAction::Verify {
+            proof: proof_path,
+            seal_pubkey,
+            digest,
+            chain_id,
+            key_epoch,
+            key_index,
+        } => {
+            let raw = std::fs::read_to_string(proof_path)
+                .map_err(|e| format!("read {}: {e}", proof_path.display()))?;
+            let proof: NotaryTimestampProof =
+                serde_json::from_str(&raw).map_err(|e| format!("parse notary proof: {e}"))?;
+            let pk_trimmed = seal_pubkey
+                .trim()
+                .strip_prefix("0x")
+                .unwrap_or(seal_pubkey.trim());
+            let pk_bytes =
+                hex::decode(pk_trimmed).map_err(|e| format!("invalid --seal-pubkey hex: {e}"))?;
+            let keys = StaticSealKeySet::new(*key_index, pk_bytes).map_err(format_notary_err)?;
+            let expected_digest = match digest {
+                Some(raw_digest) => Some(parse_hex32_str(raw_digest, "digest")?),
+                None => None,
+            };
+            let verified: VerifiedNotaryTimestamp =
+                verify_notary_proof_offline(&proof, expected_digest, *chain_id, &keys, *key_epoch)
+                    .map_err(format_notary_err)?;
+            println!(
+                "{{\"status\":\"valid\",\"assumption\":\"hash-only-slh-dsa-shake256s\",\"digest\":\"0x{}\",\"entry_height\":{},\"anchor_height\":{},\"seal_height\":{},\"latest_seal_height\":{},\"latest_seal_digest\":\"0x{}\",\"label\":{}}}",
+                hex::encode(verified.document_digest),
+                verified.entry_height,
+                verified.anchor_height,
+                verified.seal_height,
+                verified.latest_seal_height,
+                hex::encode(verified.latest_seal_digest),
+                serde_json::to_string(&verified.label).unwrap_or_else(|_| "\"\"".to_string())
+            );
+            Ok(())
+        }
     }
 }
 
@@ -5175,6 +5933,15 @@ mod rpc_auth_tests {
         state.epoch_index = 5;
         state.add_balance(&seller, 50_000_000_000);
         state.add_balance(&alice, 50_000_000_000);
+        // A `RegisterObject` share holder must be an active consensus
+        // validator: the executor refuses a share held by anyone else, because
+        // the shares are the consensus set's custody obligations. Placement
+        // additionally refuses a segment held by one custodian, so the payload
+        // is built for two.
+        let custodian_kp = KeyPair::generate().unwrap();
+        let custodian = Address::from(custodian_kp.public_key_bytes());
+        state.add_validator(alice, 1_000);
+        state.add_validator(custodian, 1_000);
         state.bns_registry.set_primary_sellers([seller]).unwrap();
 
         let offer_req = budlum_core::bns::CreateNameOffer {
@@ -5212,9 +5979,14 @@ mod rpc_auth_tests {
         buy_tx.sign(&kp);
         Executor::apply_transaction_checked(&mut state, &buy_tx).unwrap();
 
-        let (storage_tx, cref, set_content_data, set_records_data) =
-            prepare_publish_site_payloads("ayaz.bud", &file_bytes, &file_mime, 100, alice.0)
-                .unwrap();
+        let (storage_tx, cref, set_content_data, set_records_data) = prepare_publish_site_payloads(
+            "ayaz.bud",
+            &file_bytes,
+            &file_mime,
+            100,
+            &[alice.0, custodian.0],
+        )
+        .unwrap();
 
         let mut tx1 = Transaction::new_with_chain_id(
             alice,
@@ -5338,5 +6110,406 @@ mod rpc_auth_tests {
         let mut forged_json = proof_json;
         forged_json["bns_root"] = serde_json::json!(format!("0x{}", "ee".repeat(32)));
         assert!(parse_and_verify_bns_proof_json(&forged_json, "ayaz.bud", &trusted).is_err());
+    }
+
+    #[test]
+    fn publishing_a_site_with_one_custody_validator_is_refused_before_it_is_built() {
+        let err = prepare_publish_site_payloads(
+            "ayaz.bud",
+            b"<html>site</html>",
+            "text/html; charset=utf-8",
+            100,
+            &[[0x11u8; 32]],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("at least two custody validators"),
+            "the refusal must name the cause, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_repeated_custody_validator_is_refused_rather_than_deduplicated() {
+        let err = prepare_publish_site_payloads(
+            "ayaz.bud",
+            b"<html>site</html>",
+            "text/html; charset=utf-8",
+            100,
+            &[[0x11u8; 32], [0x11u8; 32]],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("appears twice"),
+            "the refusal must name the cause, got: {err}"
+        );
+    }
+
+    #[test]
+    fn finality_cli_verifiers_accept_valid_proofs_and_reject_forged_payloads() {
+        use budlum_core::crypto::facts::QuantumClass;
+        use budlum_core::settlement::{
+            compose_global_finality_certificate, DomainFinalityEntry, FinalityGuarantee,
+            FinalityReversibility, FinalityVerdict, FINALITY_BINDS_ALL,
+        };
+
+        let make_entry = |id: u32| DomainFinalityEntry {
+            domain_id: id,
+            height: 100 + u64::from(id),
+            checkpoint_height: 200,
+            state_root: [u8::try_from(id).unwrap_or(1); 32],
+            adapter_id: "pow-header-v1".to_owned(),
+            adapter_version: 1,
+            finality_proof_hash: [0x11; 32],
+            guarantee_backing_hash: [0x22; 32],
+            bond_atoms: 1_000_000,
+            binds: budlum_core::settlement::universal_finality::FinalityBinds::ALL,
+            guarantee: FinalityGuarantee {
+                reversibility: FinalityReversibility::ProbabilisticWork { confirmations: 6 },
+                quantum_posture: QuantumClass::Hash,
+                attestation: FINALITY_BINDS_ALL,
+                slashable_backing: false,
+                fault_tolerance_bps: 4_999,
+            },
+            verdict: FinalityVerdict::Established,
+        };
+
+        let cert = compose_global_finality_certificate(&[make_entry(1), make_entry(2)])
+            .expect("compose certificate");
+        let p1 = cert.prove_domain(1).expect("proof 1");
+        let p2 = cert.prove_domain(2).expect("proof 2");
+
+        let cert_resp = serde_json::json!({
+            "certificateDigest": format!("0x{}", hex::encode(cert.certificate_digest)),
+            "certificate": cert,
+        });
+        assert!(verify_certificate_rpc_response(&cert_resp).is_ok());
+
+        let mut forged_cert = cert_resp.clone();
+        forged_cert["certificateDigest"] = serde_json::json!(format!("0x{}", "ff".repeat(32)));
+        assert!(verify_certificate_rpc_response(&forged_cert).is_err());
+
+        // Inclusion proofs are judged against the locally verified
+        // certificate's own bucket roots - an RPC-chosen root is never an
+        // input, so a root the server forges can prove nothing.
+        assert!(p1.verify(&cert.bucket_root(p1.bucket)));
+        assert!(p2.verify(&cert.bucket_root(p2.bucket)));
+        assert!(!p1.verify(&[0u8; 32]));
+    }
+}
+
+/// The finality commands' trust input. `bud finality show|route` print
+/// `integrityVerified` / `proofsVerified`, the route's value admission and its
+/// safe outflow ceiling; these tests pin that none of that is reported unless
+/// the certificate matched an anchor the operator supplied, and that the
+/// refusal happens before the RPC node is contacted at all.
+#[cfg(test)]
+mod finality_anchor_tests {
+    use super::*;
+    use budlum_core::crypto::facts::QuantumClass;
+    use budlum_core::settlement::{
+        compose_global_finality_certificate, DomainFinalityEntry, FinalityGuarantee,
+        FinalityReversibility, FinalityVerdict, GlobalFinalityCertificate, FINALITY_BINDS_ALL,
+    };
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    const CHECKPOINT: u64 = 200;
+
+    /// A row an RPC node is free to invent: any domain, any state root, the
+    /// strongest-looking guarantee `compose` accepts.
+    fn row(domain_id: u32, state_byte: u8) -> DomainFinalityEntry {
+        DomainFinalityEntry {
+            domain_id,
+            height: 100 + u64::from(domain_id),
+            checkpoint_height: CHECKPOINT,
+            state_root: [state_byte; 32],
+            adapter_id: "pow-header-v1".to_owned(),
+            adapter_version: 1,
+            finality_proof_hash: [0x11; 32],
+            guarantee_backing_hash: [0x22; 32],
+            bond_atoms: 1_000_000,
+            binds: budlum_core::settlement::universal_finality::FinalityBinds::ALL,
+            guarantee: FinalityGuarantee {
+                reversibility: FinalityReversibility::ProbabilisticWork { confirmations: 6 },
+                quantum_posture: QuantumClass::Hash,
+                attestation: FINALITY_BINDS_ALL,
+                slashable_backing: false,
+                fault_tolerance_bps: 4_999,
+            },
+            verdict: FinalityVerdict::Established,
+        }
+    }
+
+    fn honest() -> GlobalFinalityCertificate {
+        compose_global_finality_certificate(&[row(1, 0x01), row(2, 0x02)])
+            .expect("compose the honest certificate")
+    }
+
+    /// Self-consistent forgery: recomposed from invented rows, so it passes
+    /// `verify_integrity` - exactly what a hostile node can serve.
+    fn forged() -> GlobalFinalityCertificate {
+        compose_global_finality_certificate(&[row(1, 0xEE), row(2, 0xEF)])
+            .expect("compose the forged certificate")
+    }
+
+    fn digest_hex(cert: &GlobalFinalityCertificate) -> String {
+        format!("0x{}", hex::encode(cert.certificate_digest))
+    }
+
+    /// Read one HTTP request: headers, then exactly `Content-Length` body bytes.
+    fn read_request(stream: &mut TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&raw).into_owned();
+            if let Some(split) = text.find("\r\n\r\n") {
+                let wanted = text[..split]
+                    .lines()
+                    .find_map(|line| {
+                        let lower = line.to_ascii_lowercase();
+                        lower
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if raw.len() >= split + 4 + wanted {
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&raw).into_owned()
+    }
+
+    /// Serve `cert` as the `bud_getFinalityCertificate` result to at most one
+    /// request. The receiver yields the request if one arrived; the listener
+    /// gives up after a bounded wait, so a refused call never hangs the test.
+    fn serve(cert: &GlobalFinalityCertificate) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock RPC");
+        listener
+            .set_nonblocking(true)
+            .expect("non-blocking mock RPC");
+        let addr = listener.local_addr().expect("mock RPC address");
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "certificateDigest": digest_hex(cert),
+                "certificate": cert,
+            },
+        })
+        .to_string();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).expect("blocking stream");
+                        let request = read_request(&mut stream);
+                        let reply = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            payload.len(),
+                            payload
+                        );
+                        let _ = stream.write_all(reply.as_bytes());
+                        let _ = tx.send(request);
+                        return;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    fn contacted(rx: &mpsc::Receiver<String>) -> bool {
+        rx.recv_timeout(Duration::from_millis(300)).is_ok()
+    }
+
+    #[test]
+    fn show_refuses_a_self_consistent_forgery_when_no_anchor_is_given() {
+        let (url, rx) = serve(&forged());
+        let err = run_finality_show(&url, None, None, None, None)
+            .expect_err("an unanchored certificate must not be reported as verified");
+        assert!(
+            err.contains("--trusted-finality-digest"),
+            "unexpected error: {err}"
+        );
+        assert!(!contacted(&rx), "the refusal must precede any RPC traffic");
+    }
+
+    #[test]
+    fn route_refuses_a_self_consistent_forgery_when_no_anchor_is_given() {
+        let (url, rx) = serve(&forged());
+        let err = run_finality_route(&url, 1, 2, None, None)
+            .expect_err("an unanchored route must not be reported as admitting value");
+        assert!(
+            err.contains("--trusted-finality-digest"),
+            "unexpected error: {err}"
+        );
+        assert!(!contacted(&rx), "the refusal must precede any RPC traffic");
+    }
+
+    #[test]
+    fn a_digest_without_its_checkpoint_is_not_an_anchor() {
+        let forged = forged();
+        let (url, rx) = serve(&forged);
+        let err = run_finality_show(&url, None, None, Some(&digest_hex(&forged)), None)
+            .expect_err("half an anchor must be refused");
+        assert!(
+            err.contains("must be provided together"),
+            "unexpected error: {err}"
+        );
+        assert!(!contacted(&rx), "the refusal must precede any RPC traffic");
+    }
+
+    #[test]
+    fn an_honest_anchor_rejects_the_forgery_on_both_commands() {
+        let anchor = digest_hex(&honest());
+        let (url, _rx) = serve(&forged());
+        let err = run_finality_show(&url, None, None, Some(&anchor), Some(CHECKPOINT))
+            .expect_err("forged certificate against an honest anchor");
+        assert!(
+            err.contains("does not match certificate digest"),
+            "unexpected error: {err}"
+        );
+        let (url, _rx) = serve(&forged());
+        let err = run_finality_route(&url, 1, 2, Some(&anchor), Some(CHECKPOINT))
+            .expect_err("forged route against an honest anchor");
+        assert!(
+            err.contains("does not match certificate digest"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn an_anchored_show_asks_the_node_for_the_anchored_checkpoint() {
+        let honest = honest();
+        let (url, rx) = serve(&honest);
+        run_finality_show(
+            &url,
+            None,
+            None,
+            Some(&digest_hex(&honest)),
+            Some(CHECKPOINT),
+        )
+        .expect("the honest certificate verifies against its own anchor");
+        let request = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("one RPC request");
+        assert!(
+            request.contains(&format!("\"params\":[{CHECKPOINT}]")),
+            "the certificate must be requested at the anchored height, got: {request}"
+        );
+    }
+
+    /// Serve `replies` in order, one per request: the certificate first, then
+    /// whatever the node answers next. Every request body is yielded in order.
+    fn serve_sequence(replies: &[serde_json::Value]) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock RPC");
+        listener
+            .set_nonblocking(true)
+            .expect("non-blocking mock RPC");
+        let addr = listener.local_addr().expect("mock RPC address");
+        let payloads: Vec<String> = replies
+            .iter()
+            .enumerate()
+            .map(|(i, result)| {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": i + 1,
+                    "result": result,
+                })
+                .to_string()
+            })
+            .collect();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            for payload in payloads {
+                let mut stream = loop {
+                    if Instant::now() >= deadline {
+                        return;
+                    }
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    }
+                };
+                stream.set_nonblocking(false).expect("blocking stream");
+                let request = read_request(&mut stream);
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = tx.send(request);
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    fn certificate_reply(cert: &GlobalFinalityCertificate) -> serde_json::Value {
+        serde_json::json!({
+            "certificateDigest": digest_hex(cert),
+            "certificate": cert,
+        })
+    }
+
+    #[test]
+    fn route_refuses_when_the_node_reports_an_active_crqc_alarm() {
+        let honest = honest();
+        let (url, rx) = serve_sequence(&[
+            certificate_reply(&honest),
+            serde_json::json!({ "crqcAlarmActive": true }),
+        ]);
+        let err = run_finality_route(&url, 1, 2, Some(&digest_hex(&honest)), Some(CHECKPOINT))
+            .expect_err("an active alarm must not be reported as an admitted route");
+        assert!(err.contains("CRQC alarm"), "unexpected error: {err}");
+        let first = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("certificate request");
+        assert!(first.contains("bud_getFinalityCertificate"));
+        let second = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("health request");
+        assert!(
+            second.contains("bud_getDomainHealth"),
+            "the alarm must be read from the node, got: {second}"
+        );
+    }
+
+    #[test]
+    fn route_refuses_when_the_node_does_not_report_its_alarm_state() {
+        let honest = honest();
+        let (url, _rx) = serve_sequence(&[
+            certificate_reply(&honest),
+            serde_json::json!({ "watchedDomainCount": 0 }),
+        ]);
+        let err = run_finality_route(&url, 1, 2, Some(&digest_hex(&honest)), Some(CHECKPOINT))
+            .expect_err("a node that does not answer the alarm question has not said no");
+        assert!(err.contains("crqcAlarmActive"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn route_admits_only_when_the_node_reports_no_alarm() {
+        let honest = honest();
+        let (url, _rx) = serve_sequence(&[
+            certificate_reply(&honest),
+            serde_json::json!({ "crqcAlarmActive": false }),
+        ]);
+        run_finality_route(&url, 1, 2, Some(&digest_hex(&honest)), Some(CHECKPOINT))
+            .expect("an anchored honest route with no alarm on the node is admitted");
     }
 }

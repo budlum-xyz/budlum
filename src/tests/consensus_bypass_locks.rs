@@ -10,7 +10,7 @@
 //! ```
 //!
 //! The second is the worse of the two, and its name is why it survived
-//! review. "init_genesis_account" describes a moment in the chain's life, and
+//! review. "`init_genesis_account`" describes a moment in the chain's life, and
 //! the body checked nothing about that moment: no height, no network, no
 //! genesis flag. Measured against the body as it stood:
 //!

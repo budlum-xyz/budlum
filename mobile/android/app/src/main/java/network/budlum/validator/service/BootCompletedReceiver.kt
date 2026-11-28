@@ -10,6 +10,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import network.budlum.validator.R
+import network.budlum.validator.garden.GardenActivity
+import network.budlum.validator.garden.GardenHolder
 import network.budlum.validator.ui.MainActivity
 import network.budlum.validator.worker.DutyPeriodicWorker
 
@@ -26,6 +28,15 @@ class BootCompletedReceiver : BroadcastReceiver() {
             return
         }
         DutyPeriodicWorker.enqueuePeriodic(context)
+        // A phone that was validating a Garden when it was switched off is
+        // still seated on the chain. Android 15 will not let a specialUse
+        // service start from this broadcast, so the validator is not
+        // started here; the person is told where it is waiting instead,
+        // and one tap puts it back.
+        if (GardenHolder.hasGarden(context)) {
+            gardenWaiting(context)
+            return
+        }
 
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = NotificationChannel(
@@ -62,7 +73,46 @@ class BootCompletedReceiver : BroadcastReceiver() {
         }
     }
 
+    /** Tell the person their Garden is waiting, and open it on a tap. */
+    private fun gardenWaiting(context: Context) {
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            ?: return
+        nm.createNotificationChannel(
+            NotificationChannel(
+                ValidatorService.CHANNEL_ID,
+                context.getString(R.string.notif_channel_name),
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ),
+        )
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        if (!nm.areNotificationsEnabled()) return
+        val open = PendingIntent.getActivity(
+            context,
+            2,
+            Intent(context, GardenActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val note = Notification.Builder(context, ValidatorService.CHANNEL_ID)
+            .setContentTitle("Your Garden is waiting")
+            .setContentText("Tap to put this phone back on the network.")
+            .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .build()
+        try {
+            nm.notify(GARDEN_RESUME_NOTIFICATION_ID, note)
+        } catch (_: SecurityException) {
+            // Notification permission may have been revoked after the check.
+        }
+    }
+
     companion object {
         const val BOOT_RESUME_NOTIFICATION_ID: Int = 45262
+        const val GARDEN_RESUME_NOTIFICATION_ID: Int = 45263
     }
 }

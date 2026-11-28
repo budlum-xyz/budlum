@@ -484,7 +484,7 @@ mod tests {
 
     /// `validate_provider_id` chains its conditions with `&&`. Mutation
     /// testing turned the third link into `||` (run 36119848850, shard 2/24:
-    /// "replace && with || in validate_provider_id") and no test failed,
+    /// "replace && with || in `validate_provider_id`") and no test failed,
     /// because every existing case exercised the path-like rejections and
     /// none of them exercised the two cheap ones: empty, and too long.
     ///

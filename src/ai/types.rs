@@ -71,7 +71,7 @@ pub struct AiModelId(pub [u8; 32]);
 
 impl AiModelId {
     #[must_use]
-    pub fn new(id: [u8; 32]) -> Self {
+    pub const fn new(id: [u8; 32]) -> Self {
         Self(id)
     }
 
@@ -109,7 +109,7 @@ pub struct AiRequestId(pub [u8; 32]);
 
 impl AiRequestId {
     #[must_use]
-    pub fn new(id: [u8; 32]) -> Self {
+    pub const fn new(id: [u8; 32]) -> Self {
         Self(id)
     }
 
@@ -162,17 +162,17 @@ impl BoundedBytes {
     }
 
     #[must_use]
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self(Vec::new())
     }
 
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.0.len()
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
@@ -551,6 +551,7 @@ impl AiInferenceResult {
     /// Anyone wiring this into verification must add `chain_id` to the
     /// Preimage first, or the inner signature will be replayable between
     /// Networks in a way the outer one is not.
+    /// Convenience: exposed for envelope-verified AI result digest inspection once `chain_id` is folded in.
     #[must_use]
     pub fn calculate_signing_hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
@@ -571,6 +572,7 @@ impl AiInferenceResult {
         hasher.update(self.request_id.0);
         hasher.update(self.verifier.as_bytes());
         hasher.update(self.output_commitment);
+        hasher.update((self.output_ref.len() as u64).to_le_bytes());
         hasher.update(self.output_ref.as_slice());
         hasher.update(self.result_nonce.to_le_bytes());
         hasher.update(self.submitted_at_block.to_le_bytes());
@@ -818,8 +820,11 @@ impl AiExecutionProof {
             }
             None => hasher.update([0u8]),
         }
-        // Note: proof_bytes is NOT hashed (too large, and the
-        // Program_hash + commitments already uniquely identify the proof).
+        // Bind the exact proof envelope digest and byte length so two nodes holding
+        // divergent proof_bytes for the same header never share a state root.
+        hasher.update((self.proof_bytes.len() as u64).to_le_bytes());
+        let proof_digest: [u8; 32] = Sha256::digest(&self.proof_bytes).into();
+        hasher.update(proof_digest);
         hasher.finalize().into()
     }
 }
@@ -853,7 +858,7 @@ pub struct AiVerifierQos {
 impl AiVerifierQos {
     /// Create a new `QoS` record with zero metrics.
     #[must_use]
-    pub fn new(verifier: Address) -> Self {
+    pub const fn new(verifier: Address) -> Self {
         Self {
             verifier,
             total_results_submitted: 0,
@@ -882,12 +887,12 @@ impl AiVerifierQos {
     }
 
     /// Record participation in a successful finalization.
-    pub fn record_finalization(&mut self) {
+    pub const fn record_finalization(&mut self) {
         self.successful_finalizations = self.successful_finalizations.saturating_add(1);
     }
 
     /// Record an equivocation event (slashing).
-    pub fn record_equivocation(&mut self) {
+    pub const fn record_equivocation(&mut self) {
         self.equivocation_count = self.equivocation_count.saturating_add(1);
     }
 
@@ -1054,13 +1059,13 @@ impl AiAgentPayment {
 
     /// Check if this payment is escrowed (linked to a request).
     #[must_use]
-    pub fn is_escrowed(&self) -> bool {
+    pub const fn is_escrowed(&self) -> bool {
         self.request_id.is_some()
     }
 
     /// Check if this payment has expired.
     #[must_use]
-    pub fn is_expired(&self, current_block: u64) -> bool {
+    pub const fn is_expired(&self, current_block: u64) -> bool {
         current_block > self.expiry_block
     }
 }
@@ -1100,7 +1105,7 @@ pub struct AiAgentReputation {
 impl AiAgentReputation {
     /// Create a new reputation record.
     #[must_use]
-    pub fn new(agent: Address) -> Self {
+    pub const fn new(agent: Address) -> Self {
         Self {
             agent,
             payments_completed: 0,
@@ -1134,7 +1139,7 @@ impl AiAgentReputation {
     }
 
     /// Update activity tracking.
-    pub(crate) fn update_activity(&mut self, current_block: u64) {
+    pub(crate) const fn update_activity(&mut self, current_block: u64) {
         if self.first_active_block == 0 {
             self.first_active_block = current_block;
         }
@@ -1283,7 +1288,7 @@ impl AiPaymentEscrowStatus {
 
 impl AiAgentPaymentSettlement {
     #[must_use]
-    pub fn from_payment(
+    pub const fn from_payment(
         payment: &AiAgentPayment,
         settled_at_block: u64,
         status: AiPaymentEscrowStatus,

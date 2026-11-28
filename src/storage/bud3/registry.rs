@@ -101,10 +101,6 @@ pub struct ShareState {
     /// unacknowledged assignment handover, Section 7.6).
     #[serde(default)]
     pub assigned_epoch: u64,
-    /// Index of the repair [`SymbolRoot`] generated to replace this lost share,
-    /// or `None` if this share has not yet been assigned a replacement repair root.
-    #[serde(default)]
-    pub replaced_by_root: Option<usize>,
 }
 
 /// A symbol root and the ESI range it covers. The upload root covers ESI
@@ -119,6 +115,9 @@ pub struct SymbolRoot {
     pub first_esi: u32,
     /// Symbols under it.
     pub count: u32,
+    /// Whether this repair root has already retired the lost shares it replaced.
+    #[serde(default)]
+    pub settled: bool,
 }
 
 /// One object.
@@ -147,6 +146,12 @@ pub struct ObjectEntry {
     /// unconfirmed squatter cannot permanently poison a commitment.
     #[serde(default)]
     pub custody_confirmed: bool,
+    /// Per repair-root index, the lost baseline shares `(validator,
+    /// first_esi)` the repair was recorded to replace. Snapshotted at record
+    /// time so a loss marked later can never consume that root's budget
+    /// before the loss it was actually recorded for.
+    #[serde(default)]
+    pub repair_covers: BTreeMap<usize, Vec<(Address, u32)>>,
 }
 
 /// On-chain record of a paid G8 fallback decode authorization.
@@ -161,6 +166,9 @@ pub struct PaidViewRecord {
     pub amount_atoms: u64,
     /// Epoch in which the payment was recorded.
     pub paid_at_epoch: u64,
+    /// Whether this fallback-view receipt has already been redeemed.
+    #[serde(default)]
+    pub consumed: bool,
 }
 
 /// One replacement of an object: a second, better representation of the same
@@ -439,7 +447,6 @@ fn initial_state(
             lost: false,
             root: usize::try_from(segment).unwrap_or(usize::MAX),
             assigned_epoch: epoch,
-            replaced_by_root: None,
         })
         .collect();
     let roots = record
@@ -451,6 +458,7 @@ fn initial_state(
             root: *r,
             first_esi: 0,
             count: record.symbols_per_segment,
+            settled: false,
         })
         .collect();
     let next_esi = vec![record.symbols_per_segment; record.symbol_roots.len()];
@@ -472,6 +480,11 @@ fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(),
             .ok_or(RegistryError::BadRecord("segment"))?;
         if u64::from(record.symbols_per_segment) < k + 2 {
             return Err(RegistryError::BadPlacement("fewer than k + 2 symbols"));
+        }
+        if record.symbols_per_segment > super::pipeline::MAX_SYMBOLS_PER_SEGMENT {
+            return Err(RegistryError::BadPlacement(
+                "symbols_per_segment above the protocol ceiling",
+            ));
         }
         let mut ranges: Vec<(u32, u32)> = Vec::new();
         let mut distinct_validators = BTreeSet::new();
@@ -621,10 +634,15 @@ impl Bud3Registry {
         }
         let public = record.content_id.kind == ContentIdKind::Public;
         if public {
-            if let Some(existing) = self.public_index.get(&record.content_id.digest) {
+            // Reader-verified selection over the candidate row: dedup binds
+            // to the exact commitment, not the declared digest alone, so a
+            // squatter who confirmed custody of DIFFERENT bytes under this
+            // digest can never absorb the true copy's registration.
+            for existing in self.public_index.candidates(&record.content_id.digest) {
                 if self.objects.get(existing).is_some_and(|entry| {
                     entry.custody_confirmed
                         && entry.record.content_id == record.content_id
+                        && entry.record.commitment == record.commitment
                         && !entry.shares.is_empty()
                         && entry
                             .shares
@@ -714,6 +732,7 @@ impl Bud3Registry {
                 next_esi,
                 endowment,
                 custody_confirmed: false,
+                repair_covers: BTreeMap::new(),
             },
         );
         Ok(Registered::New(key))
@@ -895,36 +914,67 @@ impl Bud3Registry {
                 object: target_object,
                 amount_atoms,
                 paid_at_epoch: epoch,
+                consumed: false,
             },
         );
         Ok(())
     }
 
-    /// Verify that `receipt` corresponds to a live on-chain [`PaidViewRecord`].
+    /// Verify that `receipt` corresponds to a live, unconsumed on-chain [`PaidViewRecord`].
     #[must_use]
     pub fn verify_paid_view(&self, receipt: &PaidViewReceipt) -> bool {
         receipt.fee_paid_atoms >= MIN_PAID_VIEW_FEE_ATOMS
             && self.paid_views.get(&receipt.receipt_id).is_some_and(|rec| {
-                self.resolve_live_object(&receipt.object)
-                    .is_some_and(|(resolved, _)| {
-                        resolved == rec.object
-                            && self.objects.contains_key(&rec.object)
-                            && !self.tombstones.contains_key(&rec.object)
-                            && rec.payer == receipt.payer
-                            && rec.amount_atoms >= receipt.fee_paid_atoms
-                            && rec.amount_atoms >= MIN_PAID_VIEW_FEE_ATOMS
-                    })
+                !rec.consumed
+                    && self
+                        .resolve_live_object(&receipt.object)
+                        .is_some_and(|(resolved, _)| {
+                            resolved == rec.object
+                                && self.objects.contains_key(&rec.object)
+                                && !self.tombstones.contains_key(&rec.object)
+                                && rec.payer == receipt.payer
+                                && rec.amount_atoms >= receipt.fee_paid_atoms
+                                && rec.amount_atoms >= MIN_PAID_VIEW_FEE_ATOMS
+                        })
             })
     }
 
-    /// Verify that `receipt` corresponds to an unexpired on-chain [`PaidViewRecord`]
-    /// at `current_epoch` (even before `expire` sweeps the epoch boundary).
+    /// Verify that `receipt` corresponds to an unexpired, unconsumed on-chain
+    /// [`PaidViewRecord`] at `current_epoch` (even before `expire` sweeps the
+    /// epoch boundary).
     #[must_use]
     pub fn verify_paid_view_at(&self, receipt: &PaidViewReceipt, current_epoch: u64) -> bool {
         self.verify_paid_view(receipt)
             && self.paid_views.get(&receipt.receipt_id).is_some_and(|rec| {
                 current_epoch <= rec.paid_at_epoch.saturating_add(PAID_VIEW_RETENTION_EPOCHS)
             })
+    }
+
+    /// Atomically verify and mark `receipt` consumed at `current_epoch`, retaining
+    /// the spent entry across snapshot round-trips until its retention window
+    /// expires so the same `receipt_id` can neither be redeemed twice nor
+    /// re-registered before expiry.
+    ///
+    /// exposed for stateful single-use paid fallback-view redemption.
+    pub fn consume_paid_view_at(&mut self, receipt: &PaidViewReceipt, current_epoch: u64) -> bool {
+        if !self.verify_paid_view_at(receipt, current_epoch) {
+            return false;
+        }
+        if let Some(rec) = self.paid_views.get_mut(&receipt.receipt_id) {
+            rec.consumed = true;
+            return true;
+        }
+        false
+    }
+
+    /// Return whether `receipt_id` has been redeemed while still retained.
+    ///
+    /// exposed for paid fallback-view ledger queries.
+    #[must_use]
+    pub fn is_paid_view_consumed(&self, receipt_id: &[u8; 32]) -> bool {
+        self.paid_views
+            .get(receipt_id)
+            .is_some_and(|rec| rec.consumed)
     }
 
     /// Return whether `receipt_id` is still retained in the on-chain paid-view table.
@@ -960,7 +1010,9 @@ impl Bud3Registry {
         for old in superseded {
             if let Some(obj) = self.objects.remove(&old) {
                 if obj.record.content_id.kind == ContentIdKind::Public {
-                    self.public_index.insert(obj.record.content_id.digest, *key);
+                    let digest = obj.record.content_id.digest;
+                    self.public_index.remove_candidate(&digest, &old);
+                    self.public_index.admit(digest, *key);
                 }
                 self.forfeited_pool_total = self
                     .forfeited_pool_total
@@ -1112,6 +1164,43 @@ impl Bud3Registry {
     }
 
     /// Forget one live object: its public-index row, its references and its
+    /// Stand a custody-complete object as a candidate for its public
+    /// digest. First-writer-wins is gone: a full row evicts its weakest
+    /// candidate by the deterministic quality order - an unconfirmed
+    /// custody first, then a row with lost or unconfirmed shares, both in
+    /// canonical order - and when all three fully stand, the newcomer
+    /// waits; resolution already succeeds through any standing candidate.
+    fn admit_public_candidate(&mut self, digest: [u8; 32], key: ObjectKey) {
+        if self.public_index.admit(digest, key) {
+            return;
+        }
+        let quality = |candidate: &ObjectKey| -> u8 {
+            self.objects.get(candidate).map_or(0, |e| {
+                if !e.custody_confirmed {
+                    0
+                } else if e.shares.is_empty()
+                    || e.shares
+                        .iter()
+                        .any(|s| s.status != ShareStatus::Confirmed || s.lost)
+                {
+                    1
+                } else {
+                    2
+                }
+            })
+        };
+        let evict = self
+            .public_index
+            .candidates(&digest)
+            .iter()
+            .copied()
+            .filter(|candidate| quality(candidate) < 2)
+            .min_by_key(|candidate| (quality(candidate), *candidate));
+        if let Some(evict) = evict {
+            self.public_index.replace_candidate(&digest, &evict, key);
+        }
+    }
+
     /// shares. The replacement record, if any, is the caller's business.
     fn drop_object(&mut self, key: &ObjectKey, epoch: u64) {
         if let Some(obj) = self.objects.remove(key) {
@@ -1122,10 +1211,9 @@ impl Bud3Registry {
                     .forfeited_pool_total
                     .saturating_add(obj.endowment.remaining_balance);
             }
-            if obj.record.content_id.kind == ContentIdKind::Public
-                && self.public_index.get(&obj.record.content_id.digest) == Some(key)
-            {
-                self.public_index.remove(&obj.record.content_id.digest);
+            if obj.record.content_id.kind == ContentIdKind::Public {
+                self.public_index
+                    .remove_candidate(&obj.record.content_id.digest, key);
             }
             for nft in obj.references {
                 self.nfts.remove(&nft);
@@ -1534,7 +1622,9 @@ impl Bud3Registry {
     ///
     /// # Errors
     ///
-    /// Returns [`RegistryError`] if [`Self::validate_view_grant`] fails.
+    /// Returns [`RegistryError`] from the shared validation in [`Self::validate_view_grant`]
+    /// when the NFT is unknown, the signer is not authorized, or the grant row fails its
+    /// shape and epoch checks.
     pub fn issue_grant(
         &mut self,
         nft: &NftId,
@@ -1649,9 +1739,12 @@ impl Bud3Registry {
         public_digest: &[u8; 32],
         epoch: u64,
     ) -> Option<ObjectKey> {
-        let key = *self.public_index.get(public_digest)?;
-        self.delete(&key, epoch);
-        Some(key)
+        let keys = self.public_index.candidates(public_digest).to_vec();
+        let first = *keys.first()?;
+        for key in &keys {
+            self.delete(key, epoch);
+        }
+        Some(first)
     }
 
     /// Resolve `key` to the live leaf [`ObjectKey`] and [`ObjectEntry`] that
@@ -1702,7 +1795,7 @@ impl Bud3Registry {
     ///
     /// # Errors
     ///
-    /// Returns [`RegistryError::BadQuota`] if `quota_bytes` violates `limits`.
+    /// Returns [`RegistryError::BadQuota`] when the declared custody quota violates `limits`.
     pub fn set_mobile_custody_quota(
         &mut self,
         validator: Address,
@@ -1834,6 +1927,7 @@ impl Bud3Registry {
                 next_esi,
                 endowment,
                 custody_confirmed: false,
+                repair_covers: BTreeMap::new(),
             },
         );
         if let Some(old) = self.objects.get_mut(old_key) {
@@ -1932,11 +2026,36 @@ impl Bud3Registry {
         self.validator_quotas.get(validator).copied().unwrap_or(0)
     }
 
-    /// Look up the live `ObjectKey` indexed under a public content digest.
+    /// Look up a live `ObjectKey` indexed under a public content digest:
+    /// the first candidate whose custody fully stands, else the first
+    /// candidate at all. A caller that must bind to exact bytes verifies
+    /// the commitment itself over [`Self::public_candidates`] - the index
+    /// never judges bytes it cannot see.
     /// Convenience: exposed for upload-session deduplication and RPC lookup.
     #[must_use]
     pub fn public_object(&self, public_digest: &[u8; 32]) -> Option<ObjectKey> {
-        self.public_index.get(public_digest).copied()
+        let row = self.public_index.candidates(public_digest);
+        row.iter()
+            .find(|key| {
+                self.objects.get(*key).is_some_and(|entry| {
+                    entry.custody_confirmed
+                        && !entry.shares.is_empty()
+                        && entry
+                            .shares
+                            .iter()
+                            .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
+                })
+            })
+            .or_else(|| row.first())
+            .copied()
+    }
+
+    /// Every candidate standing for a public content digest, in canonical
+    /// order. Readers verify in order and take the one whose commitment
+    /// opens; a squatting candidate costs a lookup, never the content.
+    #[must_use]
+    pub fn public_candidates(&self, public_digest: &[u8; 32]) -> &[ObjectKey] {
+        self.public_index.candidates(public_digest)
     }
 
     /// Whether `key` has been deleted and recorded in the tombstone map.
@@ -2022,19 +2141,7 @@ impl Bud3Registry {
         // (section 6.14, item 6).
         if n > 0 && complete {
             if let Some(digest) = public_digest {
-                let occupied_live = self.public_index.get(&digest).is_some_and(|existing| {
-                    existing != key
-                        && self.objects.get(existing).is_some_and(|e| {
-                            e.custody_confirmed
-                                && !e.shares.is_empty()
-                                && e.shares
-                                    .iter()
-                                    .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
-                        })
-                });
-                if !occupied_live {
-                    self.public_index.insert(digest, *key);
-                }
+                self.admit_public_candidate(digest, *key);
             }
             self.release_replaced(key);
         }
@@ -2235,8 +2342,7 @@ impl Bud3Registry {
     /// Security Pool without slashing stake. Returns the number of misses.
     pub fn close_windows(&mut self, epoch: u64) -> usize {
         // Retire unacknowledged repair shares once their 3-epoch acknowledgment
-        // window elapses (clearing `replaced_by_root` on covered lost shares)
-        // so a silent recipient cannot freeze future repairs.
+        // window elapses so a silent recipient cannot freeze future repairs.
         let _ = self.retire_unacknowledged_repairs(epoch);
         let mut missed = 0;
         for obj in self.objects.values_mut() {
@@ -2452,7 +2558,9 @@ impl Bud3Registry {
                     .iter()
                     .filter(|s| {
                         s.segment == index
-                            && (s.root < upload_roots || s.status == ShareStatus::Confirmed)
+                            && (s.root < upload_roots
+                                || (s.status == ShareStatus::Confirmed
+                                    && obj.roots.get(s.root).is_some_and(|r| r.settled)))
                     })
                     .map(|s| u64::from(s.share.symbols))
                     .collect();
@@ -2536,6 +2644,25 @@ impl Bud3Registry {
         if !self.repairs_due(key).contains(&segment) {
             return Err(RegistryError::BadRepair("segment needs no repair"));
         }
+        // Compute current held custody bytes per declared-quota validator once so
+        // repair placements cannot force unlimited bytes onto a validator that
+        // declared a smaller (or zero) custody quota.
+        let held_by_validator: BTreeMap<Address, u64> = if self.validator_quotas.is_empty() {
+            BTreeMap::new()
+        } else {
+            let mut held = BTreeMap::new();
+            for other in self.objects.values() {
+                let sym_b = u64::from(other.record.profile.symbol_size);
+                for st in &other.shares {
+                    if !st.lost && self.validator_quotas.contains_key(&st.share.validator) {
+                        let bytes = u64::from(st.share.symbols).saturating_mul(sym_b);
+                        let entry = held.entry(st.share.validator).or_insert(0u64);
+                        *entry = entry.saturating_add(bytes);
+                    }
+                }
+            }
+            held
+        };
         let obj = self
             .objects
             .get_mut(key)
@@ -2626,35 +2753,57 @@ impl Bud3Registry {
                     "repair recipient is not an active consensus Full validator",
                 ));
             }
-            next += u64::from(s.symbols);
+            if let Some(&quota) = self.validator_quotas.get(&s.validator) {
+                let add_bytes =
+                    u64::from(s.symbols).saturating_mul(u64::from(obj.record.profile.symbol_size));
+                let already = held_by_validator.get(&s.validator).copied().unwrap_or(0);
+                if already.saturating_add(add_bytes) > quota {
+                    return Err(RegistryError::BadRepair(
+                        "repair recipient custody quota exceeded",
+                    ));
+                }
+            }
+            next = next
+                .checked_add(u64::from(s.symbols))
+                .ok_or(RegistryError::BadRepair("ESI range"))?;
         }
         if next > u64::from(super::fountain::MAX_ESI) {
             return Err(RegistryError::BadRepair("ESI range"));
         }
         let added = next - u64::from(first);
-        let expired_repair_roots: BTreeSet<usize> = obj
-            .shares
-            .iter()
-            .filter(|s| is_expired_pending_repair(s))
-            .map(|s| s.root)
-            .collect();
-        let needs_repair_for_root = |s: &ShareState| {
-            s.segment == segment
-                && s.lost
-                && (s.replaced_by_root.is_none()
-                    || s.replaced_by_root
-                        .is_some_and(|r| expired_repair_roots.contains(&r)))
+        // Settled-or-upload roots only: a lost baseline share counts toward
+        // the deficit until its replacement repair root settles.
+        let is_settled_or_upload = |s: &ShareState, roots: &[SymbolRoot]| {
+            s.root < upload_roots || roots.get(s.root).is_some_and(|r| r.settled)
         };
         let lost: u64 = obj
             .shares
             .iter()
-            .filter(|s| needs_repair_for_root(s))
+            .filter(|s| s.segment == segment && s.lost && is_settled_or_upload(s, &obj.roots))
             .map(|s| u64::from(s.share.symbols))
             .sum();
-        if added < lost {
+        // Subtract any already-confirmed live symbols belonging to an earlier
+        // unsettled partial repair root (whose other pending share expired) so
+        // retrying the repair replaces only the still-uncovered deficit.
+        let unsettled_confirmed_repair: u64 = obj
+            .shares
+            .iter()
+            .filter(|s| {
+                s.segment == segment
+                    && !is_settled_or_upload(s, &obj.roots)
+                    && s.status == ShareStatus::Confirmed
+                    && !s.lost
+            })
+            .map(|s| u64::from(s.share.symbols))
+            .sum();
+        let deficit = lost.saturating_sub(unsettled_confirmed_repair);
+        if deficit == 0 {
+            return Err(RegistryError::BadRepair("segment needs no repair"));
+        }
+        if added < deficit {
             return Err(RegistryError::BadRepair("fewer new symbols than lost"));
         }
-        if added > lost {
+        if added > deficit {
             return Err(RegistryError::BadRepair("more new symbols than lost"));
         }
         let count = u32::try_from(added).map_err(|_| RegistryError::BadRepair("ESI range"))?;
@@ -2756,23 +2905,75 @@ impl Bud3Registry {
             }
         }
         // Drop any expired unacknowledged repair shares on this segment only
-        // after every validation check above has passed.
+        // after every validation check above has passed, and shrink any partial
+        // repair root's expected count to its already-confirmed live symbols so
+        // those confirmed symbols can retire their portion of the deficit once.
+        let mut expired_by_root: BTreeMap<usize, u32> = BTreeMap::new();
+        for s in &obj.shares {
+            if is_expired_pending_repair(s) {
+                let entry = expired_by_root.entry(s.root).or_insert(0);
+                *entry = entry.saturating_add(s.share.symbols);
+            }
+        }
         obj.shares.retain(|s| !is_expired_pending_repair(s));
+        for (root_idx, pruned_syms) in expired_by_root {
+            if let Some(r) = obj.roots.get_mut(root_idx) {
+                if !r.settled {
+                    let confirmed_live: u32 = obj
+                        .shares
+                        .iter()
+                        .filter(|s| {
+                            s.root == root_idx && s.status == ShareStatus::Confirmed && !s.lost
+                        })
+                        .fold(0u32, |acc, s| acc.saturating_add(s.share.symbols));
+                    let _ = pruned_syms;
+                    if confirmed_live == 0 {
+                        r.settled = true;
+                    }
+                }
+            }
+        }
+        // Snapshot the lost baseline shares this repair replaces, skipping
+        // shares an earlier unsettled repair root already covers, so a loss
+        // marked after this record can never consume this root's budget.
+        let already_covered: BTreeSet<(Address, u32)> = obj
+            .repair_covers
+            .iter()
+            .filter(|(idx, _)| obj.roots.get(**idx).is_some_and(|r| !r.settled))
+            .flat_map(|(_, pairs)| pairs.iter().copied())
+            .collect();
+        let upload_root_count = obj.record.symbol_roots.len();
+        let mut covers: Vec<(Address, u32)> = Vec::new();
+        let mut cover_budget = u64::from(count);
+        for s in &obj.shares {
+            if s.segment != segment || !s.lost {
+                continue;
+            }
+            let is_baseline =
+                s.root < upload_root_count || obj.roots.get(s.root).is_some_and(|r| r.settled);
+            if !is_baseline {
+                continue;
+            }
+            let id = (s.share.validator, s.share.first_esi);
+            if already_covered.contains(&id) {
+                continue;
+            }
+            let need = u64::from(s.share.symbols);
+            if need <= cover_budget {
+                cover_budget -= need;
+                covers.push(id);
+            }
+        }
         obj.roots.push(SymbolRoot {
             segment,
             root: new_root,
             first_esi: first,
             count,
+            settled: false,
         });
         let root = obj.roots.len() - 1;
-        for s in obj.shares.iter_mut().filter(|s| {
-            s.segment == segment
-                && s.lost
-                && (s.replaced_by_root.is_none()
-                    || s.replaced_by_root
-                        .is_some_and(|r| expired_repair_roots.contains(&r)))
-        }) {
-            s.replaced_by_root = Some(root);
+        if !covers.is_empty() {
+            obj.repair_covers.insert(root, covers);
         }
         for share in sorted {
             obj.shares.push(ShareState {
@@ -2786,7 +2987,6 @@ impl Bud3Registry {
                 lost: false,
                 root,
                 assigned_epoch: epoch,
-                replaced_by_root: None,
             });
         }
         if let Some(n) = obj.next_esi.get_mut(seg_idx) {
@@ -2795,10 +2995,21 @@ impl Bud3Registry {
         Ok(())
     }
 
+    /// Drop the lost shares covered by each newly confirmed repair root.
+    ///
+    /// Each repair root settles at most once and retires at most the number of
+    /// confirmed non-lost symbols it added, so a previously settled repair can
+    /// never silently erase subsequent share losses and a concurrent extra loss
+    /// stays marked `lost` until its own repair is confirmed.
     /// Retire pending repair shares that remained unacknowledged past
-    /// `SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS`. Combined with `settle_repairs`
-    /// requiring `confirmed_symbols == r.count`, a partially retired repair
-    /// never releases old lost shares while unblocking a fresh replacement repair.
+    /// `SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS`, across every segment of every
+    /// object (the proactive, all-segments counterpart of the lazy pruning
+    /// `record_repair` performs for the one segment it touches).
+    ///
+    /// A repair root whose pending shares are all pruned and that has no
+    /// confirmed live symbols left is marked `settled`; partially confirmed
+    /// roots stay unsettled so their confirmed symbols keep exact-budget
+    /// retirement. Returns how many shares were retired.
     pub(crate) fn retire_unacknowledged_repairs(&mut self, epoch: u64) -> usize {
         let mut retired = 0;
         for obj in self.objects.values_mut() {
@@ -2806,25 +3017,40 @@ impl Bud3Registry {
             let is_retired = |s: &ShareState| {
                 s.root >= upload_roots
                     && s.status == ShareStatus::Pending
-                    && !s.lost
                     && epoch.saturating_sub(s.assigned_epoch)
                         >= super::custody::SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS
             };
-            let retired_roots: BTreeSet<usize> = obj
-                .shares
-                .iter()
-                .filter(|s| is_retired(s))
-                .map(|s| s.root)
-                .collect();
+            let mut touched_roots: BTreeSet<usize> = BTreeSet::new();
+            for s in &obj.shares {
+                if is_retired(s) {
+                    touched_roots.insert(s.root);
+                }
+            }
+            if touched_roots.is_empty() {
+                continue;
+            }
             let before = obj.shares.len();
             obj.shares.retain(|s| !is_retired(s));
             retired += before - obj.shares.len();
-            if !retired_roots.is_empty() {
-                for s in &mut obj.shares {
-                    if s.replaced_by_root
-                        .is_some_and(|r| retired_roots.contains(&r))
-                    {
-                        s.replaced_by_root = None;
+            for root_idx in touched_roots {
+                if let Some(r) = obj.roots.get_mut(root_idx) {
+                    if r.settled {
+                        continue;
+                    }
+                    let confirmed_live: u64 = obj
+                        .shares
+                        .iter()
+                        .filter(|s| {
+                            s.root == root_idx && s.status == ShareStatus::Confirmed && !s.lost
+                        })
+                        .map(|s| u64::from(s.share.symbols))
+                        .sum();
+                    let has_open_pending = obj
+                        .shares
+                        .iter()
+                        .any(|s| s.root == root_idx && s.status != ShareStatus::Confirmed);
+                    if confirmed_live == 0 && !has_open_pending {
+                        r.settled = true;
                     }
                 }
             }
@@ -2832,40 +3058,144 @@ impl Bud3Registry {
         retired
     }
 
-    /// Drop the lost shares whose replacement repair shares are all confirmed.
-    /// Old shares never go before the new ones covering them hold, and later
-    /// losses on the same segment stay intact until their own repair settles.
-    /// Returns how many were dropped.
     pub fn settle_repairs(&mut self) -> usize {
         let mut dropped = 0;
         for obj in self.objects.values_mut() {
             let upload_roots = obj.record.symbol_roots.len();
-            let settled_roots: BTreeSet<usize> = obj
-                .roots
-                .iter()
-                .enumerate()
-                .skip(upload_roots)
-                .filter(|(i, r)| {
-                    r.count > 0 && {
-                        let confirmed_symbols: u64 = obj
-                            .shares
-                            .iter()
-                            .filter(|s| {
-                                s.root == *i && s.status == ShareStatus::Confirmed && !s.lost
-                            })
-                            .map(|s| u64::from(s.share.symbols))
-                            .sum();
-                        confirmed_symbols == u64::from(r.count)
-                    }
+            // Group ready (all-confirmed, unsettled) repair roots by segment.
+            let mut ready_by_seg: BTreeMap<u64, (Vec<usize>, u64)> = BTreeMap::new();
+            for (i, r) in obj.roots.iter().enumerate().skip(upload_roots) {
+                if r.settled || r.count == 0 {
+                    continue;
+                }
+                let has_pending = obj
+                    .shares
+                    .iter()
+                    .any(|s| s.root == i && s.status != ShareStatus::Confirmed && !s.lost);
+                if has_pending {
+                    continue;
+                }
+                let confirmed_symbols: u64 = obj
+                    .shares
+                    .iter()
+                    .filter(|s| s.root == i && s.status == ShareStatus::Confirmed && !s.lost)
+                    .map(|s| u64::from(s.share.symbols))
+                    .sum();
+                if confirmed_symbols > 0 && confirmed_symbols <= u64::from(r.count) {
+                    let entry = ready_by_seg.entry(r.segment).or_insert((Vec::new(), 0));
+                    entry.0.push(i);
+                    entry.1 = entry.1.saturating_add(confirmed_symbols);
+                }
+            }
+            if ready_by_seg.is_empty() {
+                continue;
+            }
+            // The lost shares the ready roots were recorded to replace: these
+            // are retired first, so a loss marked after a repair was recorded
+            // can never consume that repair's budget before the loss it was
+            // actually recorded for.
+            let covered_now: BTreeSet<(u64, Address, u32)> = ready_by_seg
+                .values()
+                .flat_map(|(indices, _)| indices.iter())
+                .filter_map(|&i| {
+                    let seg = obj.roots.get(i)?.segment;
+                    Some((seg, obj.repair_covers.get(&i)?))
                 })
-                .map(|(i, _)| i)
+                .flat_map(|(seg, pairs)| pairs.iter().map(move |&(v, e)| (seg, v, e)))
                 .collect();
+            // Snapshot currently-settled root flags so we distinguish lost
+            // baseline shares (which consume repair budget) from lost shares of
+            // one of the roots settling right now (which never backed baseline
+            // coverage and can be cleaned up once spent == budget).
+            let mut retire_rem: BTreeMap<u64, u64> = BTreeMap::new();
+            let mut ready_roots_set: BTreeSet<usize> = BTreeSet::new();
+            for (&seg, (indices, budget)) in &ready_by_seg {
+                // Only settle a segment's ready roots once their pooled
+                // confirmed symbols fully retire an exact subset of lost
+                // baseline shares (consuming the entire budget so no repair
+                // symbol is ever wasted or double-counted). Covered losses
+                // consume the budget before uncovered ones.
+                let mut rem = *budget;
+                for pass in 0..2u8 {
+                    for s in &obj.shares {
+                        if s.segment != seg || !s.lost {
+                            continue;
+                        }
+                        let is_baseline = s.root < upload_roots
+                            || obj.roots.get(s.root).is_some_and(|r| r.settled);
+                        if !is_baseline {
+                            continue;
+                        }
+                        let covered = covered_now.contains(&(
+                            s.segment,
+                            s.share.validator,
+                            s.share.first_esi,
+                        ));
+                        if (pass == 0) != covered {
+                            continue;
+                        }
+                        let need = u64::from(s.share.symbols);
+                        if need <= rem {
+                            rem -= need;
+                        }
+                    }
+                }
+                if rem == 0 {
+                    retire_rem.insert(seg, *budget);
+                    for &idx in indices {
+                        ready_roots_set.insert(idx);
+                    }
+                }
+            }
+            if retire_rem.is_empty() {
+                continue;
+            }
+            // Decide the exact drop set in the same covered-first order the
+            // budget was proven against, then retain by index.
+            let mut drop_idx: BTreeSet<usize> = BTreeSet::new();
+            for (i, s) in obj.shares.iter().enumerate() {
+                if s.lost && ready_roots_set.contains(&s.root) {
+                    drop_idx.insert(i);
+                }
+            }
+            for pass in 0..2u8 {
+                for (i, s) in obj.shares.iter().enumerate() {
+                    if !s.lost || drop_idx.contains(&i) {
+                        continue;
+                    }
+                    let is_baseline =
+                        s.root < upload_roots || obj.roots.get(s.root).is_some_and(|r| r.settled);
+                    if !is_baseline {
+                        continue;
+                    }
+                    let covered =
+                        covered_now.contains(&(s.segment, s.share.validator, s.share.first_esi));
+                    if (pass == 0) != covered {
+                        continue;
+                    }
+                    let Some(rem) = retire_rem.get_mut(&s.segment) else {
+                        continue;
+                    };
+                    let need = u64::from(s.share.symbols);
+                    if need <= *rem {
+                        *rem -= need;
+                        drop_idx.insert(i);
+                    }
+                }
+            }
             let before = obj.shares.len();
-            obj.shares.retain(|s| {
-                !(s.lost
-                    && s.replaced_by_root
-                        .is_some_and(|r| settled_roots.contains(&r)))
+            let mut walk = 0usize;
+            obj.shares.retain(|_| {
+                let keep = !drop_idx.contains(&walk);
+                walk += 1;
+                keep
             });
+            for idx in ready_roots_set {
+                if let Some(r) = obj.roots.get_mut(idx) {
+                    r.settled = true;
+                }
+                obj.repair_covers.remove(&idx);
+            }
             dropped += before - obj.shares.len();
         }
         dropped
@@ -3193,6 +3523,13 @@ impl Bud3Registry {
                     &r.first_esi.to_le_bytes(),
                     &r.count.to_le_bytes(),
                 ]);
+                if r.settled {
+                    fold(&[
+                        b"root_settled",
+                        &r.segment.to_le_bytes(),
+                        &r.first_esi.to_le_bytes(),
+                    ]);
+                }
             }
             for n in &o.next_esi {
                 fold(&[b"next", &n.to_le_bytes()]);
@@ -3211,10 +3548,6 @@ impl Bud3Registry {
                     .map_or((0u8, 0u64, 0u64, 0u64, 0u64), |(a, last)| {
                         (1, a.segment, a.position, a.sub_block, last)
                     });
-                let (has_repair_root, repair_root) = match s.replaced_by_root {
-                    None => (0u8, 0u64),
-                    Some(r) => (1u8, r as u64),
-                };
                 fold(&[
                     b"share",
                     &s.segment.to_le_bytes(),
@@ -3234,15 +3567,18 @@ impl Bud3Registry {
                     &[u8::from(s.lost)],
                     &(s.root as u64).to_le_bytes(),
                     &s.assigned_epoch.to_le_bytes(),
-                    &[has_repair_root],
-                    &repair_root.to_le_bytes(),
                 ]);
             }
         }
         // The exact index is consensus state after snapshot restoration. The
         // node-local Bloom filter that accelerates it is deliberately excluded.
-        for (digest, key) in self.public_index.iter() {
-            fold(&[b"public_index", digest, key]);
+        for (digest, keys) in self.public_index.iter() {
+            // One fold frame per candidate: a single-candidate row folds the
+            // exact bytes the single-value index folded, so every pre-change
+            // root is byte-identical.
+            for key in keys {
+                fold(&[b"public_index", digest, key]);
+            }
         }
         for (nft, (key, holder)) in &self.nfts {
             fold(&[b"nft", nft, key, holder]);
@@ -3306,6 +3642,7 @@ impl Bud3Registry {
                 &pv.object,
                 &pv.amount_atoms.to_le_bytes(),
                 &pv.paid_at_epoch.to_le_bytes(),
+                &[u8::from(pv.consumed)],
             ]);
         }
         acc
@@ -3333,6 +3670,18 @@ mod tests {
 
     /// Upload content and spread each segment's 20 symbols over four
     /// holders of five symbols.
+    #[test]
+    fn a_record_above_the_symbol_ceiling_is_refused_at_registration() {
+        let mut r = Bud3Registry::default();
+        let content: Vec<u8> = (0u16..1500).map(|i| (i.wrapping_mul(29)) as u8).collect();
+        let (mut up, shares) = upload(&content);
+        up.record.symbols_per_segment = super::super::pipeline::MAX_SYMBOLS_PER_SEGMENT + 1;
+        let err = r
+            .register_object(addr(1), up.record, shares, 0, 100)
+            .expect_err("a placement row above the ceiling must be refused");
+        assert!(matches!(err, RegistryError::BadPlacement(_)));
+    }
+
     fn upload(content: &[u8]) -> (PreparedUpload, Vec<(u64, Share)>) {
         let up = prepare_public_upload(content, &P, &Bud3Limits::default(), 20).unwrap();
         let mut shares = Vec::new();
@@ -3477,7 +3826,7 @@ mod tests {
         assert!(!orphan_nft.is_empty());
         assert_ne!(orphan_nft.state_root(), empty.state_root());
         let mut orphan_index = empty.clone();
-        orphan_index.public_index.insert(digest, key);
+        orphan_index.public_index.admit(digest, key);
         assert!(!orphan_index.is_empty());
         assert_ne!(orphan_index.state_root(), empty.state_root());
     }
@@ -3608,14 +3957,22 @@ mod tests {
         }
         assert_eq!(r.public_object(&up.record.content_id.digest), Some(key));
         let root = r.state_root();
-        // A second upload of the same confirmed public content stores nothing.
-        let mut again = up.record.clone();
-        again.commitment = [0xEE; 32];
+        // A second upload of the same confirmed public content stores
+        // nothing: same bytes carry the same commitment.
         assert_eq!(
-            r.register_object(addr(2), again, shares.clone(), 1, 10),
+            r.register_object(addr(2), up.record.clone(), shares.clone(), 1, 10),
             Ok(Registered::Deduplicated(key))
         );
         assert_eq!(r.state_root(), root, "a dedup writes nothing");
+        // A registrant claiming the same digest over DIFFERENT bytes is not
+        // absorbed into the standing copy: dedup binds to the commitment,
+        // not to the declared digest alone.
+        let mut imposter = up.record.clone();
+        imposter.commitment = [0xEE; 32];
+        assert_eq!(
+            r.register_object(addr(2), imposter, shares.clone(), 1, 10),
+            Ok(Registered::New([0xEE; 32]))
+        );
         // Sealed content with the same digest bypasses the public index.
         let mut sealed = up.record;
         sealed.content_id.kind = ContentIdKind::Sealed;
@@ -3623,6 +3980,101 @@ mod tests {
         assert_eq!(
             r.register_object(addr(3), sealed, shares, 1, 10),
             Ok(Registered::New([0xDD; 32]))
+        );
+    }
+
+    /// Design rule D-1: with a correct committed copy standing, resolution
+    /// of its digest is never permanently blocked - a squatter costs one
+    /// extra candidate, never the content.
+    #[test]
+    fn a_squatter_cannot_keep_the_true_copy_out_of_resolution() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"the real bytes");
+        let digest = up.record.content_id.digest;
+        let true_key = up.record.commitment;
+        // The squatter claims the digest first, over different bytes, and
+        // fully confirms custody of its own object.
+        let mut squat = up.record.clone();
+        squat.commitment = [0xAA; 32];
+        r.register_object(addr(9), squat, shares.clone(), 0, 10)
+            .unwrap();
+        for h in [10u8, 11, 12, 13] {
+            r.ack(&[0xAA; 32], &addr(h)).unwrap();
+        }
+        assert_eq!(r.public_candidates(&digest), &[[0xAA; 32]]);
+        // The true copy is NOT absorbed into the squatter's object...
+        assert_eq!(
+            r.register_object(addr(1), up.record.clone(), shares.clone(), 0, 10),
+            Ok(Registered::New(true_key))
+        );
+        for h in [10u8, 11, 12, 13] {
+            r.ack(&true_key, &addr(h)).unwrap();
+        }
+        // ...and it STANDS in the candidate row next to the squatter.
+        assert!(r.public_candidates(&digest).contains(&true_key));
+        // Reader-verified selection: a later copy of the same bytes binds to
+        // the true candidate by commitment, whatever the squatter holds.
+        assert_eq!(
+            r.register_object(addr(2), up.record.clone(), shares.clone(), 1, 10),
+            Ok(Registered::Deduplicated(true_key))
+        );
+        // The takedown of this digest clears every candidate.
+        r.dao_delete_public_content(&digest, 11);
+        assert!(r.public_candidates(&digest).is_empty());
+    }
+
+    /// Design rule: a full row evicts its weakest candidate for a
+    /// custody-complete newcomer, deterministically; when all three fully
+    /// stand, the newcomer waits and the row does not move.
+    #[test]
+    fn a_full_candidate_row_evicts_by_quality_and_never_by_arrival() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"contested digest");
+        let digest = up.record.content_id.digest;
+        for n in 1u8..=3 {
+            let mut rec = up.record.clone();
+            rec.commitment = [n; 32];
+            r.register_object(addr(n), rec, shares.clone(), 0, 10)
+                .unwrap();
+            for h in [10u8, 11, 12, 13] {
+                r.ack(&[n; 32], &addr(h)).unwrap();
+            }
+        }
+        assert_eq!(
+            r.public_candidates(&digest),
+            &[[1u8; 32], [2u8; 32], [3u8; 32]]
+        );
+        // One candidate degrades: a share is lost.
+        if let Some(entry) = r.objects.get_mut(&[2u8; 32]) {
+            if let Some(share) = entry.shares.first_mut() {
+                share.lost = true;
+            }
+        }
+        // A custody-complete newcomer takes the degraded slot...
+        let mut rec = up.record.clone();
+        rec.commitment = [4u8; 32];
+        r.register_object(addr(4), rec, shares.clone(), 0, 10)
+            .unwrap();
+        for h in [10u8, 11, 12, 13] {
+            r.ack(&[4u8; 32], &addr(h)).unwrap();
+        }
+        assert_eq!(
+            r.public_candidates(&digest),
+            &[[1u8; 32], [3u8; 32], [4u8; 32]],
+            "the lost-share candidate leaves; canonical order holds"
+        );
+        // ...and with all three fully standing, the next newcomer waits.
+        let mut rec = up.record.clone();
+        rec.commitment = [5u8; 32];
+        r.register_object(addr(5), rec, shares.clone(), 0, 10)
+            .unwrap();
+        for h in [10u8, 11, 12, 13] {
+            r.ack(&[5u8; 32], &addr(h)).unwrap();
+        }
+        assert_eq!(
+            r.public_candidates(&digest),
+            &[[1u8; 32], [3u8; 32], [4u8; 32]],
+            "a row of fully standing candidates does not move"
         );
     }
 
@@ -5896,5 +6348,185 @@ mod tests {
         );
         assert!(r.object(&new_key).is_some());
         assert_eq!(r.nft_binding(&nft), Some((new_key, buyer)));
+    }
+
+    #[test]
+    fn paid_view_consumption_is_single_use_digest_bound_and_survives_snapshot() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"single use paid view content");
+        let key = up.record.commitment;
+        let lifetime = PAID_VIEW_RETENTION_EPOCHS
+            .saturating_mul(2)
+            .saturating_add(20);
+        r.register_object(addr(1), up.record, shares, 1, lifetime)
+            .unwrap();
+
+        let receipt_id = [0xC7; 32];
+        let receipt = PaidViewReceipt {
+            payer: addr(2),
+            object: key,
+            receipt_id,
+            fee_paid_atoms: MIN_PAID_VIEW_FEE_ATOMS,
+        };
+        r.record_paid_view(addr(2), key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 5)
+            .unwrap();
+        assert!(r.verify_paid_view_at(&receipt, 5));
+        assert!(!r.is_paid_view_consumed(&receipt_id));
+        let root_unconsumed = r.state_root();
+
+        // First consumption succeeds, flips the consensus state root, and blocks
+        // both repeat redemption and duplicate receipt_id re-registration.
+        assert!(r.consume_paid_view_at(&receipt, 5));
+        assert!(r.is_paid_view_consumed(&receipt_id));
+        assert!(r.has_paid_view(&receipt_id));
+        let root_consumed = r.state_root();
+        assert_ne!(
+            root_unconsumed, root_consumed,
+            "paid view consumption state must commit into the consensus state root"
+        );
+        assert!(!r.verify_paid_view(&receipt));
+        assert!(!r.verify_paid_view_at(&receipt, 5));
+        assert!(!r.consume_paid_view_at(&receipt, 5));
+        assert!(matches!(
+            r.record_paid_view(addr(2), key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 6),
+            Err(RegistryError::InvalidPaidView(_))
+        ));
+
+        // Round-trip through serde snapshot (simulating node restart) must keep
+        // the receipt marked consumed and preserve the exact state root.
+        let encoded = bincode::serialize(&r).expect("serialize Bud3Registry");
+        let mut restored: Bud3Registry =
+            bincode::deserialize(&encoded).expect("deserialize Bud3Registry");
+        assert_eq!(restored.state_root(), root_consumed);
+        assert!(restored.is_paid_view_consumed(&receipt_id));
+        assert!(!restored.verify_paid_view(&receipt));
+        assert!(!restored.consume_paid_view_at(&receipt, 6));
+
+        // Retention sweep still prunes spent records past PAID_VIEW_RETENTION_EPOCHS.
+        restored.expire(6 + PAID_VIEW_RETENTION_EPOCHS);
+        assert!(!restored.has_paid_view(&receipt_id));
+        assert!(!restored.is_paid_view_consumed(&receipt_id));
+    }
+
+    #[test]
+    fn settle_repairs_never_erases_post_settlement_or_concurrent_losses_and_enforces_quota() {
+        let mut r = Bud3Registry::default();
+        let content: Vec<u8> = (0u16..1500).map(|i| (i.wrapping_mul(37)) as u8).collect();
+        let (up, shares) = upload(&content);
+        let key = up.record.commitment;
+        r.register_object(addr(1), up.record.clone(), shares, 0, 1000)
+            .unwrap();
+        for h in 0..4u8 {
+            r.ack(&key, &addr(10 + h)).unwrap();
+        }
+
+        // First custody loss on segment 0: addr(13) loses its 5 symbols.
+        assert_eq!(r.mark_unseen(&addr(13)), 1);
+        assert_eq!(r.repairs_due(&key), vec![0]);
+
+        let obj_bytes = super::super::bof1::Object::raw_public(&content).encode();
+        let enc = SegmentEncoder::new(0, &obj_bytes, &P).unwrap();
+        let k = enc.k();
+        let witness = super::super::repair::RepairWitness::ProvenSymbols(
+            super::super::repair::build_repair_proven_witness(0, &up.segments[0], &up.segments[0])
+                .unwrap(),
+        );
+        let batch1 = enc.repair_symbols(20 - k, 5).unwrap();
+        let root1 = symbol_root(
+            &batch1
+                .iter()
+                .map(|x| (x.esi, symbol_leaf(&x.data)))
+                .collect::<Vec<_>>(),
+        );
+
+        // Recipient quota must be honored on repair just like upload.
+        r.set_validator_quota(addr(30), 64);
+        assert_eq!(
+            r.record_repair(
+                &key,
+                SegmentRepair {
+                    segment: 0,
+                    new_shares: vec![Share {
+                        validator: addr(30),
+                        class: Class::Full,
+                        first_esi: 20,
+                        symbols: 5,
+                    }],
+                    new_symbols: batch1.clone(),
+                    new_root: root1,
+                    witness: &witness,
+                },
+                5,
+            ),
+            Err(RegistryError::BadRepair(
+                "repair recipient custody quota exceeded"
+            ))
+        );
+
+        // Place repair #1 on addr(20), then lose a second share addr(12) before settling:
+        // settle_repairs may retire only the single 5-symbol loss covered by repair #1,
+        // leaving addr(12)'s 5-symbol loss intact and still due for repair.
+        r.record_repair(
+            &key,
+            SegmentRepair {
+                segment: 0,
+                new_shares: vec![Share {
+                    validator: addr(20),
+                    class: Class::Full,
+                    first_esi: 20,
+                    symbols: 5,
+                }],
+                new_symbols: batch1,
+                new_root: root1,
+                witness: &witness,
+            },
+            5,
+        )
+        .unwrap();
+        assert_eq!(r.mark_unseen(&addr(12)), 1);
+        assert_eq!(r.ack(&key, &addr(20)).unwrap(), 1);
+        let root_before = r.state_root();
+        assert_eq!(r.settle_repairs(), 1);
+        assert_ne!(r.state_root(), root_before);
+        assert_eq!(r.repairs_due(&key), vec![0]);
+
+        // Re-running settle_repairs without a new confirmed repair must drop zero shares.
+        assert_eq!(r.settle_repairs(), 0);
+        assert_eq!(r.repairs_due(&key), vec![0]);
+
+        // Repair #2 covers addr(12)'s 5-symbol deficit and settles cleanly.
+        let batch2 = enc.repair_symbols(25 - k, 5).unwrap();
+        let root2 = symbol_root(
+            &batch2
+                .iter()
+                .map(|x| (x.esi, symbol_leaf(&x.data)))
+                .collect::<Vec<_>>(),
+        );
+        r.record_repair(
+            &key,
+            SegmentRepair {
+                segment: 0,
+                new_shares: vec![Share {
+                    validator: addr(21),
+                    class: Class::Full,
+                    first_esi: 25,
+                    symbols: 5,
+                }],
+                new_symbols: batch2,
+                new_root: root2,
+                witness: &witness,
+            },
+            6,
+        )
+        .unwrap();
+        assert_eq!(r.ack(&key, &addr(21)).unwrap(), 1);
+        assert_eq!(r.settle_repairs(), 1);
+        assert!(r.repairs_due(&key).is_empty());
+
+        // Subsequent custody loss after prior settled repairs MUST NOT be erased by
+        // settle_repairs; live + lost symbol accounting stays at the full segment size.
+        assert_eq!(r.mark_unseen(&addr(11)), 1);
+        assert_eq!(r.settle_repairs(), 0);
+        assert_eq!(r.repairs_due(&key), vec![0]);
     }
 }

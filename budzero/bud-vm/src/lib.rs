@@ -237,6 +237,14 @@ pub const MAX_CONTRACT_TRACE_STEPS: usize = 1 << 14;
 /// proved.
 pub const MAX_MEMORY_BYTES: u64 = 1 << 32;
 
+/// Base byte address reserved for private witness words loaded by the host
+/// before execution (`2048..4096`), keeping clear of compiler heap (`4096+`).
+pub const WITNESS_BASE: u64 = 2048;
+
+/// Maximum number of 64-bit private witness words that fit inside
+/// `[WITNESS_BASE, 4096)`.
+pub const MAX_WITNESS_WORDS: usize = 256;
+
 /// True if a memory of `memory_size` bytes can be proved.
 fn memory_size_is_provable(memory_size: usize) -> bool {
     memory_size as u64 <= MAX_MEMORY_BYTES
@@ -292,6 +300,54 @@ impl Vm {
         let mut vm = Self::with_gas_limit(memory_size, gas_limit);
         vm.mainnet_mode = mainnet;
         vm
+    }
+
+    /// Populate the dedicated private witness tape at [`WITNESS_BASE`] so
+    /// compiled `witness::*` reads load host-supplied private inputs cleanly
+    /// while remaining bound by `initial_memory_reads` in the Memory LogUp.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VmError::InvalidMemoryAccess`] if `words.len() > MAX_WITNESS_WORDS`,
+    /// any word is `>= GOLDILOCKS_P`, or the VM memory is smaller than the end
+    /// of the witness window.
+    pub fn set_witness_words(&mut self, words: &[u64]) -> Result<(), VmError> {
+        if words.len() > MAX_WITNESS_WORDS {
+            return Err(VmError::InvalidMemoryAccess);
+        }
+        let end = (WITNESS_BASE as usize)
+            .checked_add(words.len() * 8)
+            .ok_or(VmError::InvalidMemoryAccess)?;
+        if end > self.memory.len() {
+            return Err(VmError::InvalidMemoryAccess);
+        }
+        for (idx, &word) in words.iter().enumerate() {
+            if word >= GOLDILOCKS_P {
+                return Err(VmError::InvalidMemoryAccess);
+            }
+            let addr = WITNESS_BASE as usize + idx * 8;
+            self.memory[addr..addr + 8].copy_from_slice(&word.to_le_bytes());
+        }
+        Ok(())
+    }
+
+    /// Read back a 64-bit witness word from slot `slot` under [`WITNESS_BASE`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VmError::InvalidMemoryAccess`] if the slot exceeds bounds.
+    pub fn witness_word(&self, slot: usize) -> Result<u64, VmError> {
+        if slot >= MAX_WITNESS_WORDS {
+            return Err(VmError::InvalidMemoryAccess);
+        }
+        let addr = (WITNESS_BASE as usize)
+            .checked_add(slot * 8)
+            .ok_or(VmError::InvalidMemoryAccess)?;
+        let end = addr.checked_add(8).ok_or(VmError::InvalidMemoryAccess)?;
+        if end > self.memory.len() {
+            return Err(VmError::InvalidMemoryAccess);
+        }
+        Ok(self.memory_word(addr))
     }
 
     pub fn consume_gas(&mut self, amount: u64) -> Result<(), VmError> {
@@ -653,7 +709,13 @@ impl Vm {
                 } else {
                     constant_storage_slot(inst.imm)
                 };
+                if slot >= GOLDILOCKS_P {
+                    return Err(VmError::InvalidMemoryAccess);
+                }
                 let val = *self.storage.get(&slot).unwrap_or(&0);
+                if val >= GOLDILOCKS_P {
+                    return Err(VmError::InvalidMemoryAccess);
+                }
                 self.registers[dst_idx as usize] = val;
                 self.pc += 1;
                 (val, cur_pc + 1)
@@ -664,6 +726,9 @@ impl Vm {
                 } else {
                     constant_storage_slot(inst.imm)
                 };
+                if slot >= GOLDILOCKS_P || src1_val >= GOLDILOCKS_P {
+                    return Err(VmError::InvalidMemoryAccess);
+                }
                 self.storage.insert(slot, src1_val);
                 self.state_writes.push((slot, src1_val));
                 self.pc += 1;
@@ -689,7 +754,9 @@ impl Vm {
                     6 => {
                         self.events.push(0x00A1_00A1);
                         self.events.push(src1_val);
-                        self.context.block_height.saturating_add(src1_val)
+                        let p = u128::from(GOLDILOCKS_P);
+                        ((u128::from(self.context.block_height) % p + u128::from(src1_val) % p) % p)
+                            as u64
                     }
                     10..=13 if self.mainnet_mode || self.context.sender_words != [0u64; 4] => {
                         let words = self.context.effective_sender_words();
@@ -2236,5 +2303,100 @@ mod poseidon_parameter_tests {
         assert!(!receipt.success);
         assert_eq!(receipt.error, Some(VmError::OutOfGas));
         assert!(vm.trace.len() <= MAX_CONTRACT_TRACE_STEPS + 1);
+    }
+
+    #[test]
+    fn sread_swrite_canonicality_and_syscall6_goldilocks_wrap() {
+        // 1. SWrite with non-canonical slot >= GOLDILOCKS_P must fail InvalidMemoryAccess.
+        let swrite_reg = Instruction {
+            opcode: Opcode::SWrite,
+            rd: 0,
+            rs1: 1,
+            rs2: 2,
+            imm: -1,
+        }
+        .encode();
+        let halt = Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode();
+        let mut vm = Vm::new(256);
+        vm.registers[1] = 42;
+        vm.registers[2] = GOLDILOCKS_P;
+        assert_eq!(
+            vm.run(&[swrite_reg, halt]).err(),
+            Some(VmError::InvalidMemoryAccess),
+            "SWrite with slot >= GOLDILOCKS_P must fail InvalidMemoryAccess"
+        );
+        assert!(vm.state_writes.is_empty());
+
+        // 2. SWrite with non-canonical value >= GOLDILOCKS_P must fail InvalidMemoryAccess.
+        let mut vm2 = Vm::new(256);
+        vm2.registers[1] = GOLDILOCKS_P;
+        vm2.registers[2] = 7;
+        assert_eq!(
+            vm2.run(&[swrite_reg, halt]).err(),
+            Some(VmError::InvalidMemoryAccess),
+            "SWrite with value >= GOLDILOCKS_P must fail InvalidMemoryAccess"
+        );
+        assert!(vm2.state_writes.is_empty());
+
+        // 3. SRead with non-canonical slot >= GOLDILOCKS_P must fail InvalidMemoryAccess.
+        let sread_reg = Instruction {
+            opcode: Opcode::SRead,
+            rd: 3,
+            rs1: 0,
+            rs2: 2,
+            imm: -1,
+        }
+        .encode();
+        let mut vm3 = Vm::new(256);
+        vm3.registers[2] = GOLDILOCKS_P;
+        assert_eq!(
+            vm3.run(&[sread_reg, halt]).err(),
+            Some(VmError::InvalidMemoryAccess),
+            "SRead with slot >= GOLDILOCKS_P must fail InvalidMemoryAccess"
+        );
+
+        // 4. Syscall 6 must use Goldilocks field addition matching BudAir, not saturating_add.
+        let sys6 = Instruction {
+            opcode: Opcode::Syscall,
+            rd: 4,
+            rs1: 1,
+            rs2: 0,
+            imm: 6,
+        }
+        .encode();
+        let mut vm4 = Vm::new(256);
+        vm4.context.block_height = GOLDILOCKS_P - 5;
+        vm4.registers[1] = 10;
+        vm4.run(&[sys6, halt]).expect("syscall 6 must succeed");
+        assert_eq!(
+            vm4.registers[4], 5,
+            "Syscall 6 must compute (block_height + rs1) mod GOLDILOCKS_P == 5"
+        );
+    }
+
+    #[test]
+    fn witness_tape_stages_and_validates_goldilocks_bounds() {
+        let mut vm = Vm::new(8192);
+        vm.set_witness_words(&[11, 29, 99]).expect("stage witness");
+        assert_eq!(vm.witness_word(0).unwrap(), 11);
+        assert_eq!(vm.witness_word(1).unwrap(), 29);
+        assert_eq!(vm.witness_word(2).unwrap(), 99);
+
+        assert_eq!(
+            vm.set_witness_words(&[GOLDILOCKS_P]).unwrap_err(),
+            VmError::InvalidMemoryAccess
+        );
+        let mut tiny = Vm::new(2048);
+        assert_eq!(
+            tiny.set_witness_words(&[1]).unwrap_err(),
+            VmError::InvalidMemoryAccess
+        );
     }
 }

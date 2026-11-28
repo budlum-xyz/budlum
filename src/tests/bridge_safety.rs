@@ -8,7 +8,7 @@ fn sender(byte: u8) -> Address {
     Address::from([byte; 32])
 }
 
-/// ReplayNonceStore rejects duplicate nonces.
+/// `ReplayNonceStore` rejects duplicate nonces.
 #[test]
 fn replay_nonce_store_rejects_duplicate() {
     let mut store = ReplayNonceStore::new();
@@ -20,7 +20,7 @@ fn replay_nonce_store_rejects_duplicate() {
     );
 }
 
-/// ReplayNonceStore accepts sequential nonces.
+/// `ReplayNonceStore` accepts sequential nonces.
 #[test]
 fn replay_nonce_store_accepts_sequential() {
     let mut store = ReplayNonceStore::new();
@@ -39,7 +39,7 @@ fn zero_nonce_is_valid() {
     assert!(store.mark_processed_at(1, 2, &s, 0, 2).is_err());
 }
 
-/// ReplayNonceStore handles many sequential nonces.
+/// `ReplayNonceStore` handles many sequential nonces.
 #[test]
 fn replay_nonce_store_handles_many() {
     let mut store = ReplayNonceStore::new();
@@ -52,7 +52,7 @@ fn replay_nonce_store_handles_many() {
     assert!(!store.is_processed(1, 2, &s, 1000));
 }
 
-/// A gap beyond MAX_NONCE_GAP is refused.
+/// A gap beyond `MAX_NONCE_GAP` is refused.
 #[test]
 fn nonce_gap_ceiling_enforced() {
     let mut store = ReplayNonceStore::new();

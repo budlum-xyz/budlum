@@ -22,7 +22,7 @@ name: OSV Scanner
 
 on:
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses, agg/phase-5-pcs-claims]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, agg/phase-5-pcs-claims]
   push:
     branches: [main]
   schedule:
@@ -35,7 +35,7 @@ permissions:
 
 concurrency:
   group: osv-scanner-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 jobs:
   osv-scan:
@@ -93,7 +93,7 @@ jobs:
           fi
           echo "Canary caught -> the OSV alarm works."
 
-      # fuzz/Cargo.lock ve crates/wallet-core/Cargo.lock buraya sonradan eklendi.
+      # fuzz/Cargo.lock and crates/wallet-core/Cargo.lock were added here later.
       # The repository has four lockfiles and the scan read two of them. The fuzz
       # lock carries the same 23 git packages as the root lock plus its own
       # carries; wallet-core carries BIP39 and SLIP-0010 key derivation,
@@ -115,12 +115,12 @@ jobs:
             --output=osv-scanner.sarif \
             --config=osv-scanner.toml \
             --lockfile=Cargo.lock \
-            --lockfile=bud/Cargo.lock \
             --lockfile=budzero/Cargo.lock \
             --lockfile=crates/ai-inference/Cargo.lock \
             --lockfile=crates/bpqs/Cargo.lock \
             --lockfile=crates/bud-codec/Cargo.lock \
             --lockfile=crates/budlum-explorer/Cargo.lock \
+            --lockfile=crates/budlum-nipopow/Cargo.lock \
             --lockfile=crates/budlum-types/Cargo.lock \
             --lockfile=crates/note-packing/Cargo.lock \
             --lockfile=crates/uel-abi/Cargo.lock \
@@ -129,6 +129,7 @@ jobs:
             --lockfile=kani/Cargo.lock \
             --lockfile=mobile/core/Cargo.lock \
             --lockfile=mobile/ffi/Cargo.lock \
+            --lockfile=mobile/garden-ffi/Cargo.lock \
             --lockfile=mobile/tools/log-analyzer/Cargo.lock \
             --lockfile=xtask/gates/Cargo.lock \
             --lockfile=xtask/release/Cargo.lock \
@@ -151,12 +152,12 @@ jobs:
           osv-scanner scan source \
             --config=osv-scanner.toml \
             --lockfile=Cargo.lock \
-            --lockfile=bud/Cargo.lock \
             --lockfile=budzero/Cargo.lock \
             --lockfile=crates/ai-inference/Cargo.lock \
             --lockfile=crates/bpqs/Cargo.lock \
             --lockfile=crates/bud-codec/Cargo.lock \
             --lockfile=crates/budlum-explorer/Cargo.lock \
+            --lockfile=crates/budlum-nipopow/Cargo.lock \
             --lockfile=crates/budlum-types/Cargo.lock \
             --lockfile=crates/note-packing/Cargo.lock \
             --lockfile=crates/uel-abi/Cargo.lock \
@@ -165,6 +166,7 @@ jobs:
             --lockfile=kani/Cargo.lock \
             --lockfile=mobile/core/Cargo.lock \
             --lockfile=mobile/ffi/Cargo.lock \
+            --lockfile=mobile/garden-ffi/Cargo.lock \
             --lockfile=mobile/tools/log-analyzer/Cargo.lock \
             --lockfile=xtask/gates/Cargo.lock \
             --lockfile=xtask/release/Cargo.lock \

@@ -48,6 +48,17 @@ impl std::fmt::Debug for IdNonce {
 /// than growing the table without bound.
 pub const MAX_REVEAL_SESSIONS: usize = 1024;
 
+/// Hard cap on the packed bytes one session may pin in node memory. The
+/// session keeps a padded copy of `packed` for its whole TTL, so without a
+/// per-session byte bound the session cap and the transport body cap
+/// multiply into gigabytes of resident memory.
+pub const MAX_REVEAL_PACKED_BYTES: usize = 1_048_576;
+
+/// Hard cap on the packed bytes ALL open sessions may pin together. The
+/// per-session bound times the session cap is still 1 GiB; this is the
+/// node-wide memory budget the table may never exceed.
+const MAX_REVEAL_TOTAL_PINNED_BYTES: usize = 64 * 1_048_576;
+
 /// Wall-clock lifetime of an open reveal session, in seconds. The product
 /// read path is a short burst; five minutes is far longer than a burst and
 /// far shorter than "forever".
@@ -91,6 +102,20 @@ pub enum RevealGatewayError {
         /// The id whose grant was revoked.
         id: u64,
     },
+    /// The packed payload one session would pin exceeds its byte cap.
+    PackedTooLarge {
+        /// The bytes the caller sent.
+        len: usize,
+        /// The per-session ceiling.
+        max: usize,
+    },
+    /// Admitting this session would exceed the node-wide pinned-byte budget.
+    PinnedBudget {
+        /// The bytes this session would pin.
+        needed: usize,
+        /// The node-wide ceiling.
+        max: usize,
+    },
     /// The underlying reveal/open failure.
     Reveal(RevealRpcError),
 }
@@ -98,6 +123,18 @@ pub enum RevealGatewayError {
 impl std::fmt::Display for RevealGatewayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::PackedTooLarge { len, max } => {
+                write!(
+                    f,
+                    "packed payload {len} bytes exceeds the per-session cap {max}"
+                )
+            }
+            Self::PinnedBudget { needed, max } => {
+                write!(
+                    f,
+                    "open sessions already pin the node budget; {needed} more bytes exceed {max}"
+                )
+            }
             Self::SessionLimit { max } => {
                 write!(f, "reveal gateway: session table full ({max})")
             }
@@ -161,6 +198,9 @@ struct GatewaySession {
     expires_at: u64,
     /// `Some` while the session rests on a grant that can be revoked.
     grant: Option<GrantScope>,
+    /// Packed bytes this session pins for its lifetime, counted against
+    /// [`MAX_REVEAL_TOTAL_PINNED_BYTES`] on admission.
+    pinned_bytes: usize,
 }
 
 /// A session whose emitter is built but not yet in the table.
@@ -172,6 +212,7 @@ struct GatewaySession {
 pub struct PreparedReveal {
     handle: RevealHandle,
     grant: Option<GrantScope>,
+    pinned_bytes: usize,
 }
 
 /// The session table a gateway/RPC handler owns.
@@ -255,8 +296,34 @@ impl RevealGateway {
         now: u64,
     ) -> Result<u64, RevealGatewayError> {
         let req = Self::with_default_budget(req);
+        let pinned_bytes = Self::effective_packed_bytes(&req.packed);
+        Self::check_packed_len(pinned_bytes)?;
         let handle = open_reveal_session(registry, recorded_owner, &req)?;
-        self.admit(handle, GrantScope::of(&req), now)
+        self.admit(handle, GrantScope::of(&req), now, pinned_bytes)
+    }
+
+    /// Effective resident footprint of `packed`: the larger of its wire byte
+    /// length and its `BDL3` uncompressed `orig_len` header (`[7..15]` LE),
+    /// closing zlib compression bombs alongside raw oversized bodies.
+    fn effective_packed_bytes(packed: &[u8]) -> usize {
+        let declared_orig = packed
+            .get(7..15)
+            .and_then(|slice| <[u8; 8]>::try_from(slice).ok())
+            .map_or(0usize, |le| {
+                usize::try_from(u64::from_le_bytes(le)).unwrap_or(usize::MAX)
+            });
+        packed.len().max(declared_orig)
+    }
+
+    /// The per-session byte cap, applied before any expensive open work.
+    fn check_packed_len(len: usize) -> Result<(), RevealGatewayError> {
+        if len > MAX_REVEAL_PACKED_BYTES {
+            return Err(RevealGatewayError::PackedTooLarge {
+                len,
+                max: MAX_REVEAL_PACKED_BYTES,
+            });
+        }
+        Ok(())
     }
 
     /// A request that names no budget gets the default cap, and a request
@@ -290,10 +357,13 @@ impl RevealGateway {
         grant_allows: bool,
     ) -> Result<PreparedReveal, RevealGatewayError> {
         let req = Self::with_default_budget(req);
+        let pinned_bytes = Self::effective_packed_bytes(&req.packed);
+        Self::check_packed_len(pinned_bytes)?;
         let handle = open_reveal_session_prechecked(&req, grant_allows)?;
         Ok(PreparedReveal {
             grant: GrantScope::of(&req),
             handle,
+            pinned_bytes,
         })
     }
 
@@ -307,7 +377,7 @@ impl RevealGateway {
         prepared: PreparedReveal,
         now: u64,
     ) -> Result<u64, RevealGatewayError> {
-        self.admit(prepared.handle, prepared.grant, now)
+        self.admit(prepared.handle, prepared.grant, now, prepared.pinned_bytes)
     }
 
     /// Open a session with a grant decision the chain actor already made.
@@ -334,11 +404,22 @@ impl RevealGateway {
         handle: RevealHandle,
         grant: Option<GrantScope>,
         now: u64,
+        pinned_bytes: usize,
     ) -> Result<u64, RevealGatewayError> {
         self.sweep(now);
         if self.sessions.len() >= MAX_REVEAL_SESSIONS {
             return Err(RevealGatewayError::SessionLimit {
                 max: MAX_REVEAL_SESSIONS,
+            });
+        }
+        // The node-wide memory budget: summed live rather than tracked,
+        // so every removal path (close, sweep, revoke, expiry) stays free
+        // of counter bookkeeping it could get wrong.
+        let pinned_total: usize = self.sessions.values().map(|s| s.pinned_bytes).sum();
+        if pinned_total.saturating_add(pinned_bytes) > MAX_REVEAL_TOTAL_PINNED_BYTES {
+            return Err(RevealGatewayError::PinnedBudget {
+                needed: pinned_bytes,
+                max: MAX_REVEAL_TOTAL_PINNED_BYTES,
             });
         }
         // Bounded collision retry: two derived ids colliding is a ~2^-64
@@ -363,6 +444,7 @@ impl RevealGateway {
                 handle,
                 expires_at: now.saturating_add(REVEAL_SESSION_TTL_SECS),
                 grant,
+                pinned_bytes,
             },
         );
         Ok(id)
@@ -470,7 +552,9 @@ impl RevealGateway {
             let _ = self.sessions.remove(&id);
             return Err(RevealGatewayError::Revoked { id });
         }
-        Ok(session.handle.emit_frames(seq_start, count)?)
+        let emitted = session.handle.emit_frames(seq_start, count)?;
+        self.sweep(now);
+        Ok(emitted)
     }
 
     /// Close a session early. Returns whether it existed.
@@ -548,6 +632,88 @@ mod gateway_tests {
             key_id,
             meter_budget: budget,
         }
+    }
+
+    /// A session pins its packed bytes for its whole TTL, so both the
+    /// per-session cap and the node-wide pinned budget must hold.
+    #[test]
+    fn pinned_bytes_are_capped_per_session_and_across_the_table() {
+        let (full, packed) = sample();
+        let make = || {
+            req(
+                ThreeRecipe::Public(full.clone()),
+                None,
+                packed.clone(),
+                addr(1),
+                addr(2),
+                [3u8; 32],
+                None,
+            )
+        };
+        // Per-session cap: an oversized packed body is refused before any
+        // open work, whatever its content would have been.
+        let mut oversized = make();
+        oversized.packed = vec![0u8; MAX_REVEAL_PACKED_BYTES + 1];
+        assert!(matches!(
+            RevealGateway::prepare_prechecked(oversized, false),
+            Err(RevealGatewayError::PackedTooLarge { .. })
+        ));
+
+        // Node-wide budget: admissions whose honest sizes sum past the
+        // budget are refused even while the session-count cap is far away,
+        // and closing a session frees its share again.
+        let mut gw = RevealGateway::new();
+        let first = RevealGateway::prepare_prechecked(make(), false).unwrap();
+        let hog = GatewaySession {
+            handle: RevealGateway::prepare_prechecked(make(), false)
+                .unwrap()
+                .handle,
+            expires_at: u64::MAX,
+            grant: None,
+            pinned_bytes: MAX_REVEAL_TOTAL_PINNED_BYTES,
+        };
+        gw.sessions.insert(7, hog);
+        let refused = gw.open_prepared(first, 100);
+        assert!(matches!(
+            refused,
+            Err(RevealGatewayError::PinnedBudget { .. })
+        ));
+        assert!(gw.close(7), "the hog existed");
+        let stale_id = gw
+            .open_prepared(
+                RevealGateway::prepare_prechecked(make(), false).unwrap(),
+                100,
+            )
+            .expect("freed budget admits the honest session");
+        let _ = stale_id;
+        let fresh_id = gw
+            .open_prepared(
+                RevealGateway::prepare_prechecked(make(), false).unwrap(),
+                350,
+            )
+            .expect("second session opens");
+        assert_eq!(gw.session_count(), 2);
+        gw.emit_frames(fresh_id, 0, 1, 450, true).unwrap();
+        assert_eq!(
+            gw.session_count(),
+            1,
+            "serving frames on a live session sweeps expired peer sessions"
+        );
+
+        // Zlib-compressed BDL3 bomb whose wire length is tiny (< 4 KiB) but
+        // whose declared uncompressed `orig_len` exceeds MAX_REVEAL_PACKED_BYTES.
+        let bomb_packed = pack_payload(
+            PayloadKind::ContentBytes,
+            &vec![0xAAu8; MAX_REVEAL_PACKED_BYTES + 1],
+        )
+        .unwrap();
+        assert!(bomb_packed.len() < 4096);
+        let mut bomb_req = make();
+        bomb_req.packed = bomb_packed;
+        assert!(matches!(
+            RevealGateway::prepare_prechecked(bomb_req, false),
+            Err(RevealGatewayError::PackedTooLarge { .. })
+        ));
     }
 
     /// The expensive half of an open needs no table, so a handler

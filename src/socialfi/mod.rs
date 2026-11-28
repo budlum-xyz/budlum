@@ -1,5 +1,5 @@
-//! The SocialFi module - the categorisation rename from `src/nft` to
-//! `src/socialfi` (scope_v1). Only the module path changed; the RPC method
+//! The `SocialFi` module - the categorisation rename from `src/nft` to
+//! `src/socialfi` (`scope_v1`). Only the module path changed; the RPC method
 //! strings and the types are the same, so nothing public broke.
 pub mod types;
 
@@ -31,6 +31,22 @@ pub const MAX_TAGS_PER_NFT: usize = 16;
 /// bound the NFT registry validates in this module.
 pub const MAX_AUTHOR_NAME_BYTES: usize = 64;
 
+/// Global ceiling on total live NFTs in [`NftRegistry`] so Sybil wallets cannot
+/// grow consensus snapshot state without limit.
+const MAX_TOTAL_NFTS: usize = 10_000_000;
+
+const fn is_disallowed_metadata_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NftRegistry {
     /// Id -> nft
@@ -41,6 +57,7 @@ pub struct NftRegistry {
 }
 
 impl NftRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -71,16 +88,18 @@ impl NftRegistry {
         epoch: u64,
         name: Option<String>,
     ) -> Result<u64, NftError> {
-        if name
-            .as_ref()
-            .is_some_and(|n| n.is_empty() || n.len() > MAX_AUTHOR_NAME_BYTES)
-        {
+        if name.as_ref().is_some_and(|n| {
+            n.trim().is_empty()
+                || n.len() > MAX_AUTHOR_NAME_BYTES
+                || n.chars().any(is_disallowed_metadata_char)
+        }) {
             return Err(NftError::InvalidName);
         }
-        if self
-            .ownership
-            .get(&owner)
-            .is_some_and(|ids| ids.len() >= MAX_NFTS_PER_OWNER)
+        if self.nfts.len() >= MAX_TOTAL_NFTS
+            || self
+                .ownership
+                .get(&owner)
+                .is_some_and(|ids| ids.len() >= MAX_NFTS_PER_OWNER)
         {
             return Err(NftError::TooManyNfts);
         }
@@ -115,7 +134,10 @@ impl NftRegistry {
     ///
     /// Returns an error if the operation fails.
     pub fn add_tag(&mut self, id: u64, tag: String) -> Result<(), NftError> {
-        if tag.is_empty() || tag.len() > MAX_TAG_BYTES {
+        if tag.trim().is_empty()
+            || tag.len() > MAX_TAG_BYTES
+            || tag.chars().any(is_disallowed_metadata_char)
+        {
             return Err(NftError::InvalidTag);
         }
         let nft = self.nfts.get_mut(&id).ok_or(NftError::NotFound)?;
@@ -210,11 +232,12 @@ impl NftRegistry {
         Ok(cid)
     }
 
+    #[must_use]
     pub fn get_nft(&self, id: u64) -> Option<&Nft> {
         self.nfts.get(&id)
     }
 
-    /// Return whether `signer` currently owns a live SocialFi NFT whose
+    /// Return whether `signer` currently owns a live `SocialFi` NFT whose
     /// derived 32-byte B.U.D. 3.0 id matches `bud3_nft_id`.
     ///
     /// Bounded by `MAX_NFTS_PER_OWNER` because lookup scans only `signer`'s
@@ -237,10 +260,12 @@ impl NftRegistry {
 }
 
 impl NftRegistry {
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.nfts.is_empty() && self.ownership.is_empty() && self.next_id == 0
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -376,7 +401,7 @@ mod tests {
         assert!(matches!(err, NftError::DuplicateId));
     }
 
-    /// Regression: luminance overflow to u64::MAX must be clamped.
+    /// Regression: luminance overflow to `u64::MAX` must be clamped.
     #[test]
     fn luminance_overflow_clamped() {
         let mut reg = NftRegistry::new();
@@ -554,5 +579,36 @@ mod tests {
             reg.ownership.get(&sender).map(Vec::len),
             Some(MAX_NFTS_PER_OWNER)
         );
+    }
+
+    #[test]
+    fn mint_and_add_tag_refuse_control_and_bidi_format_characters() {
+        let mut reg = NftRegistry::new();
+        let owner = Address::from([0x61; 32]);
+        let cid = crate::storage::content_id::ContentId([0x62; 32]);
+        assert!(matches!(
+            reg.mint(owner, cid, 1, Some("alice\u{202E}bob".into())),
+            Err(NftError::InvalidName)
+        ));
+        assert!(matches!(
+            reg.mint(owner, cid, 1, Some("null\0name".into())),
+            Err(NftError::InvalidName)
+        ));
+        assert!(matches!(
+            reg.mint(owner, cid, 1, Some("   ".into())),
+            Err(NftError::InvalidName)
+        ));
+        let id = reg
+            .mint(owner, cid, 1, Some("alice".into()))
+            .expect("clean author name mints");
+        assert!(matches!(
+            reg.add_tag(id, "art\u{2066}spoof".into()),
+            Err(NftError::InvalidTag)
+        ));
+        assert!(matches!(
+            reg.add_tag(id, "bad\ntag".into()),
+            Err(NftError::InvalidTag)
+        ));
+        reg.add_tag(id, "generative".into()).expect("valid tag");
     }
 }

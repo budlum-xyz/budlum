@@ -37,8 +37,8 @@ fn private_transfer_with_composite_authorization_executes() {
     let from = Address::from(account.address);
     let mut state = funded_state(from, 1_000_000);
     let chain_id = crate::core::transaction::DEFAULT_CHAIN_ID;
-    let commitment = hash_from_field(101);
     let proof = hash_from_field(0xA11CE);
+    let commitment = L1NoteRegistry::derive_commitment(&from, &proof);
     let nullifier = L1NoteRegistry::derive_nullifier(&commitment, &proof);
     let output = hash_from_field(103);
     state
@@ -99,8 +99,8 @@ fn private_transfer_submit_spend_and_create() {
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
 
-    let c_in = hash_from_field(1);
     let proof = budlum_note_packing::hash_from_field(0xA11CE);
+    let c_in = L1NoteRegistry::derive_commitment(&from, &proof);
     let n1 = crate::privacy::L1NoteRegistry::derive_nullifier(&c_in, &proof);
     let c_out = hash_from_field(3);
     state
@@ -148,8 +148,8 @@ fn private_transfer_double_spend_fails() {
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
-    let c_in = hash_from_field(9);
     let proof = budlum_note_packing::hash_from_field(0xA11CE);
+    let c_in = L1NoteRegistry::derive_commitment(&from, &proof);
     let n1 = crate::privacy::L1NoteRegistry::derive_nullifier(&c_in, &proof);
     let c_out = hash_from_field(7);
     state
@@ -296,8 +296,17 @@ fn ai_mlp_guest_program_hash_stable() {
 fn l1_note_registry_root_changes() {
     let mut r = L1NoteRegistry::new();
     let a = r.state_root();
-    r.insert_note_for_owner([1u8; 32], crate::core::address::Address::zero())
-        .unwrap();
+    assert!(
+        r.insert_note_for_owner([1u8; 32], crate::core::address::Address::zero())
+            .is_err(),
+        "unpacked non-canonical bytes must be refused"
+    );
+    assert_eq!(a, r.state_root());
+    r.insert_note_for_owner(
+        budlum_note_packing::hash_from_field(1),
+        crate::core::address::Address::zero(),
+    )
+    .unwrap();
     assert_ne!(a, r.state_root());
 }
 
@@ -359,11 +368,11 @@ fn transfer_fixture(
     kp: &KeyPair,
     state: &mut AccountState,
 ) -> (PrivateTransferSubmit, [u8; 32], [u8; 32]) {
-    let c_in = hash_from_field(21);
+    let from = Address::from(kp.public_key_bytes());
     let proof = hash_from_field(0xA11CE);
+    let c_in = L1NoteRegistry::derive_commitment(&from, &proof);
     let n1 = L1NoteRegistry::derive_nullifier(&c_in, &proof);
     let c_out = hash_from_field(23);
-    let from = Address::from(kp.public_key_bytes());
     state
         .note_registry
         .insert_note_for_owner(c_in, from)
@@ -406,8 +415,8 @@ fn private_transfer_admission_and_execution_are_closed_on_public_chains() {
     let from = Address::from(account.address);
     for chain_id in [Network::Mainnet.chain_id().value(), 999_999] {
         let mut state = funded_state(from, 1_000_000);
-        let c_in = hash_from_field(21);
         let proof = hash_from_field(0xA11CE);
+        let c_in = L1NoteRegistry::derive_commitment(&from, &proof);
         let n1 = L1NoteRegistry::derive_nullifier(&c_in, &proof);
         let c_out = hash_from_field(23);
         state
@@ -617,8 +626,8 @@ fn private_transfer_is_open_on_devnet() {
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
-    let c_in = hash_from_field(11);
     let proof = hash_from_field(0xA11CE);
+    let c_in = L1NoteRegistry::derive_commitment(&from, &proof);
     let n1 = L1NoteRegistry::derive_nullifier(&c_in, &proof);
     let c_out = hash_from_field(12);
     state
@@ -1142,4 +1151,165 @@ fn ai_verification_layer_apb_tile64_and_bound_small_model_on_testnet() {
     assert!(audited.is_authentic());
     let tampered_md = md.replace("equals 42.", "equals 43.");
     assert!(audit_answer_proof_markdown(&tampered_md).is_err());
+}
+
+/// At `abb9af0` a 1,000-atom balance bought a permanent slot in the shared
+/// note pool for a 100-atom fee - occupancy cost nothing. The deposit
+/// economy ends that: a depositor who cannot lock the table's deposit
+/// cannot occupy the pool, and the refusal mutates nothing.
+#[test]
+fn a_note_insert_that_cannot_cover_the_pool_deposit_is_refused() {
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let deposit = crate::tokenomics::pool_deposit::policy_of(
+        crate::tokenomics::pool_deposit::SharedPool::PrivacyNote,
+    )
+    .deposit;
+    // One atom short of deposit + fee.
+    let mut state = funded_state(from, deposit + 100 - 1);
+    let c = hash_from_field(91);
+    let devnet = crate::core::chain_config::Network::Devnet
+        .chain_id()
+        .value();
+    let tx = signed_tx(&kp, devnet, TransactionType::PrivacyNoteInsert(c));
+    let err = Executor::apply_transaction_checked(&mut state, &tx)
+        .expect_err("an uncovered deposit must refuse the row");
+    match err {
+        crate::error::BudlumError::Validation { code, .. } => {
+            assert_eq!(code, "privacy_note_deposit");
+        }
+        other => panic!("expected a validation refusal, got {other:?}"),
+    }
+    assert!(!state.note_registry.contains_commitment(&c));
+    assert_eq!(state.get_balance(&from), deposit + 100 - 1, "nothing taken");
+    assert!(state.pool_deposit_escrow.is_empty(), "nothing locked");
+}
+
+/// A registry refusal releases the freshly locked deposit in the same
+/// breath: a refused duplicate row cannot strand the depositor's money.
+#[test]
+fn a_refused_note_row_releases_its_deposit_in_the_same_breath() {
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let deposit = crate::tokenomics::pool_deposit::policy_of(
+        crate::tokenomics::pool_deposit::SharedPool::PrivacyNote,
+    )
+    .deposit;
+    let mut state = funded_state(from, 2 * (deposit + 100));
+    let devnet = crate::core::chain_config::Network::Devnet
+        .chain_id()
+        .value();
+    let c = hash_from_field(92);
+    let tx1 = signed_tx(&kp, devnet, TransactionType::PrivacyNoteInsert(c));
+    Executor::apply_transaction_checked(&mut state, &tx1).expect("the first row lands");
+    assert_eq!(state.pool_deposit_escrow.get(&from).copied(), Some(deposit));
+
+    let mut tx2 = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        0,
+        100,
+        1,
+        vec![],
+        devnet,
+        TransactionType::PrivacyNoteInsert(c),
+    );
+    tx2.sign(&kp);
+    let err = Executor::apply_transaction_checked(&mut state, &tx2)
+        .expect_err("a duplicate commitment is refused");
+    match err {
+        crate::error::BudlumError::Validation { code, .. } => {
+            assert_eq!(code, "privacy_note_insert");
+        }
+        other => panic!("expected a validation refusal, got {other:?}"),
+    }
+    assert_eq!(
+        state.pool_deposit_escrow.get(&from).copied(),
+        Some(deposit),
+        "the refused row's deposit came back; only the live row stays locked"
+    );
+    assert_eq!(
+        state.get_balance(&from),
+        2 * (deposit + 100) - deposit - 100,
+        "the refused transaction took nothing"
+    );
+}
+
+/// The 1-for-1 rollover conserves the row count, so the deposit claim
+/// RIDES to the spender instead of being refunded: a depositor's claim on
+/// a row someone else was bound to moves to that spender at spend time,
+/// with zero balance movement.
+#[test]
+fn a_transfer_rides_the_displaced_deposit_claim_to_the_spender() {
+    let depositor_kp = KeyPair::generate().unwrap();
+    let depositor = Address::from(depositor_kp.public_key_bytes());
+    let spender_kp = KeyPair::generate().unwrap();
+    let spender = Address::from(spender_kp.public_key_bytes());
+    let deposit = crate::tokenomics::pool_deposit::policy_of(
+        crate::tokenomics::pool_deposit::SharedPool::PrivacyNote,
+    )
+    .deposit;
+    let chain_id = crate::core::transaction::DEFAULT_CHAIN_ID;
+    let mut state = funded_state(depositor, deposit + 100);
+    state.get_or_create(&spender).balance = 100;
+
+    // The depositor inserts a commitment BOUND to the spender (the
+    // squatter shape): its deposit backs the row it recorded.
+    let secret = hash_from_field(0xB1);
+    let c_in = L1NoteRegistry::derive_commitment(&spender, &secret);
+    let tx_insert = signed_tx(
+        &depositor_kp,
+        chain_id,
+        TransactionType::PrivacyNoteInsert(c_in),
+    );
+    Executor::apply_transaction_checked(&mut state, &tx_insert).expect("the row lands");
+    assert_eq!(
+        state.pool_deposit_escrow.get(&depositor).copied(),
+        Some(deposit)
+    );
+
+    // The bound spender spends it; the claim rides, balances do not move.
+    let n1 = L1NoteRegistry::derive_nullifier(&c_in, &secret);
+    let c_out = hash_from_field(93);
+    let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
+    let auth_msg =
+        PrivateTransferSubmit::authorization_message(chain_id, spender.as_bytes(), 0, &digest);
+    let sig = spender_kp.sign(&auth_msg).to_vec();
+    let sub = PrivateTransferSubmit {
+        spent_commitments: vec![c_in],
+        nullifiers: vec![n1],
+        output_commitments: vec![c_out],
+        nullifier_proofs: vec![secret],
+        authorization_sig: sig,
+        public_digest: digest,
+    };
+    let mut tx_spend = Transaction::new_with_chain_id(
+        spender,
+        Address::zero(),
+        0,
+        100,
+        0,
+        vec![],
+        chain_id,
+        TransactionType::PrivateTransferSubmit(sub),
+    );
+    tx_spend.sign(&spender_kp);
+    Executor::apply_transaction_checked(&mut state, &tx_spend).expect("the bound spender spends");
+
+    assert_eq!(
+        state.pool_deposit_escrow.get(&depositor),
+        None,
+        "the displaced depositor's claim rode away with the row"
+    );
+    assert_eq!(
+        state.pool_deposit_escrow.get(&spender).copied(),
+        Some(deposit),
+        "the spender now backs the output row"
+    );
+    assert_eq!(state.get_balance(&depositor), 0, "no refund at spend");
+    assert_eq!(
+        state.get_balance(&spender),
+        0,
+        "only the fee left the spender"
+    );
 }

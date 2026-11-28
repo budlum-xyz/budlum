@@ -92,8 +92,19 @@ impl ViewGrant {
             ViewPolicy::NamedGrantee => 2u8,
             ViewPolicy::PublicKeyId => 3u8,
         }];
-        let grantee = self.grantee.map_or([0u8; 32], |a| *a.as_bytes());
-        let revoked = self.revoked_epoch.map_or([0u8; 8], u64::to_le_bytes);
+        // An absent option must not hash as its zero value: `None` here means
+        // "no grantee" and "still live", while `Some([0u8; 32])` and `Some(0)`
+        // are named values a caller can hold. One presence byte in front keeps
+        // the two apart, so a live grant can never share a commitment with a
+        // grant revoked at epoch 0, nor a public-key grant with a grant issued
+        // to the all-zero address.
+        let grantee = crate::core::hash::presence_tagged(self.grantee.map(|a| *a.as_bytes()));
+        let revoked: Vec<u8> = match self.revoked_epoch {
+            // One presence byte, then the epoch. Built by iteration so this
+            // file carries no new runtime index into a slice.
+            Some(epoch) => std::iter::once(1u8).chain(epoch.to_le_bytes()).collect(),
+            None => vec![0u8],
+        };
         hash_fields_bytes(&[
             b"BDLM_VIEW_GRANT_V1",
             &grant_id,
@@ -280,17 +291,17 @@ pub fn grant_issue_digest(
         ViewPolicy::NamedGrantee => 2u8,
         ViewPolicy::PublicKeyId => 3u8,
     }];
-    let absent_grantee = [0u8; 32];
+    // The grantee enters behind a presence byte: an absent grantee used to be
+    // folded into 32 zero bytes, so an issuance naming the all-zero address
+    // signed over the same digest as a public-key grant that names nobody.
+    let grantee = crate::core::hash::presence_tagged(terms.grantee.as_ref().map(|g| *g.as_bytes()));
     hash_fields_bytes(&[
         b"BDLM_GRANT_ISSUE_V2",
         &chain_id.to_le_bytes(),
         &nonce.to_le_bytes(),
         content_id.as_bytes(),
         issuer.as_bytes(),
-        terms
-            .grantee
-            .as_ref()
-            .map_or(absent_grantee.as_slice(), |g| g.as_bytes()),
+        &grantee,
         &terms.key_id,
         &policy_byte,
         &terms.opened_epoch.to_le_bytes(),
@@ -701,7 +712,7 @@ impl ViewGrantRegistry {
     /// the key handle. `NamedGrantee` requires address match. A row counts only
     /// when its issuer is that owner: a grant is the owner's word, so a row
     /// minted by anybody else is inert here even if it reached the book, and the
-    /// `StorageRegistry` decides who the owner is from the manifest.
+    /// on-chain storage registry decides who the owner is from the object record.
     #[must_use]
     pub fn may_view(
         &self,
@@ -740,7 +751,7 @@ impl ViewGrantRegistry {
     }
 
     /// Domain-tagged digest of the whole book: the next id and every row's
-    /// commitment. The storage registry folds this into `StorageRegistry::root`
+    /// commitment. The storage registry folds this into its state root
     /// once an id has been issued, so the grant set is state-root committed.
     #[must_use]
     pub fn root(&self) -> [u8; 32] {
@@ -1066,7 +1077,7 @@ mod tests {
             "a row issued by a stranger must not open the owner's content"
         );
         // The same row does open when the query names the stranger as owner: the
-        // rule binds a grant to an owner, it is `StorageRegistry` that decides
+        // rule binds a grant to an owner, and the storage registry decides
         // which owner is real.
         assert!(reg.may_view(&content, &bob, &key, &stranger));
     }
@@ -1218,5 +1229,63 @@ mod tests {
         let second = "If it has a body".to_string() + ", it is 2.0 (Classic)";
         assert!(doc_block.contains(&needle));
         assert!(doc_block.contains(second.as_str()));
+    }
+
+    #[test]
+    fn commitment_and_issue_digest_distinguish_absent_options_from_zero_values() {
+        let live = ViewGrant {
+            grant_id: 1,
+            content_id: cid(7),
+            issuer: addr(1),
+            grantee: None,
+            key_id: [0x55; 32],
+            policy: ViewPolicy::PublicKeyId,
+            opened_epoch: 0,
+            revoked_epoch: None,
+        };
+        let mut revoked_at_zero = live.clone();
+        revoked_at_zero.revoked_epoch = Some(0);
+        assert_ne!(
+            live.commitment(),
+            revoked_at_zero.commitment(),
+            "a live grant (None) must never collide with a grant revoked at epoch 0 (Some(0))"
+        );
+
+        let mut named_zero_grantee = live.clone();
+        named_zero_grantee.grantee = Some(Address::from([0u8; 32]));
+        assert_ne!(
+            live.commitment(),
+            named_zero_grantee.commitment(),
+            "grantee=None must never collide with grantee=Some(0x00..00)"
+        );
+
+        let d_none = grant_issue_digest(
+            45_261,
+            0,
+            &cid(7),
+            &addr(1),
+            &GrantIssueTerms {
+                grantee: None,
+                key_id: [0x55; 32],
+                policy: ViewPolicy::NamedGrantee,
+                opened_epoch: 1,
+            },
+        );
+        let d_zero = grant_issue_digest(
+            45_261,
+            0,
+            &cid(7),
+            &addr(1),
+            &GrantIssueTerms {
+                grantee: Some(Address::from([0u8; 32])),
+                key_id: [0x55; 32],
+                policy: ViewPolicy::NamedGrantee,
+                opened_epoch: 1,
+            },
+        );
+        assert_ne!(
+            d_none, d_zero,
+            "grant_issue_digest must distinguish absent grantee from zero address"
+        );
     }
 }

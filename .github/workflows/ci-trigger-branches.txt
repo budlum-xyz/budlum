@@ -1,0 +1,41 @@
+# Branches a pull request can target that must be covered by a full-gate
+# `pull_request:` trigger. One name per line; `#` starts a comment.
+#
+# This list is the repository's claim about itself. The `ci-trigger-coverage`
+# gate reads it together with `.github/workflows` and fails when a branch here
+# is not named by a workflow that runs `budlum-gates --all`. A new integration
+# branch that is not added here is not silently uplifted - it is simply not
+# claimed, and the claim that matters is the one in this file.
+#
+# Added 2026-11-23: fourteen long-lived integration branches existed while the
+# full-gate triggers named eight, none of them these. A PR into any of them ran
+# no workflow at all.
+main
+consensus-of-consensuses
+testnet-quantum
+testnet
+garden
+budlum-stack
+agg/phase-5-pcs-claims
+agg/phase-2-sig-claims
+agg/phase-3-recursion-stark
+agg/phase-4-program-claims
+agg-phase-2
+audit-2026-11-16
+audit-testnet-2026-11
+budlum
+budlum-4-you
+budlum-osv-coverage-agent
+budlum-unification
+budlum-universal
+diag-rehearsal-a
+diag-rehearsal-b
+ortak-teslim
+
+# Added 2026-11-27: `testnet-50` has been the base of an open pull request
+# (#221, the Garden slice) since 2026-11-25, and the delivery pull request
+# #215's head is the same branch. It was not claimed here, so a pull request
+# into it was covered by contract by nothing - the trigger list and the tree
+# disagreed and only the tree was measured. The stacked-continuation bases above
+# are the same shape; this line makes the claim match.
+testnet-50

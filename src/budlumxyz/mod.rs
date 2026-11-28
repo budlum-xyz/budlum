@@ -45,6 +45,17 @@ const MAX_HUB_APPS: usize = 65_536;
 /// directory or bury unrelated developers behind list-response truncation.
 const MAX_HUB_APPS_PER_DEVELOPER: usize = 64;
 
+const fn is_bidi_or_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
 fn is_valid_app_url(url: &str) -> bool {
     // The whole string is judged, never a prefix, and the default is refusal. Looking for a
     // scheme only before the first `/` and accepting everything else made acceptance the
@@ -54,25 +65,71 @@ fn is_valid_app_url(url: &str) -> bool {
     if url.is_empty() || url.len() > MAX_APP_URL_BYTES || url != url.trim() {
         return false;
     }
-    // Characters that never belong in a stored URL: control and whitespace characters, and the
-    // ones that open or close markup and attribute values where a client prints the URL.
+    // Characters that never belong in a stored URL: control, bidi-override/invisible format,
+    // and whitespace characters, and the ones that open or close markup and attribute values
+    // where a client prints the URL.
     if url.chars().any(|c| {
-        c.is_control() || c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`' | '\\')
+        c.is_control()
+            || c.is_whitespace()
+            || is_bidi_or_invisible_format(c)
+            || matches!(c, '<' | '>' | '"' | '\'' | '`' | '\\')
     }) {
         return false;
     }
     // Only an absolute URL on one of the three content and transport schemes (`https://`,
-    // `bud://`, `ipfs://`) with a target is accepted. `javascript:`, `data:`, `vbscript:`,
-    // `file:`, `blob:`, `http:`, a bare label and a relative path all fail here.
+    // `bud://`, `ipfs://`) with a well-formed, userinfo-free authority is accepted.
+    // `javascript:`, `data:`, `vbscript:`, `file:`, `blob:`, `http:`, `https://good@evil`,
+    // `https://?q`, `https://:443`, `https://..`, a bare label and a relative path all fail.
     let Some((scheme, target)) = url.split_once("://") else {
         return false;
     };
-    if target.is_empty() || target.starts_with('/') {
+    if !(scheme.eq_ignore_ascii_case("https")
+        || scheme.eq_ignore_ascii_case("bud")
+        || scheme.eq_ignore_ascii_case("ipfs"))
+    {
         return false;
     }
-    scheme.eq_ignore_ascii_case("https")
-        || scheme.eq_ignore_ascii_case("bud")
-        || scheme.eq_ignore_ascii_case("ipfs")
+    let authority_end = target.find(['/', '?', '#']).unwrap_or(target.len());
+    let Some(authority) = target.get(..authority_end) else {
+        return false;
+    };
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.starts_with(':')
+        || authority.starts_with('.')
+        || authority.ends_with('.')
+        || authority.contains("..")
+    {
+        return false;
+    }
+    let host = if authority.starts_with('[') {
+        let Some(close) = authority.find(']') else {
+            return false;
+        };
+        let Some(after) = authority.get(close.saturating_add(1)..) else {
+            return false;
+        };
+        if !after.is_empty() {
+            let Some(port) = after.strip_prefix(':') else {
+                return false;
+            };
+            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                return false;
+            }
+        }
+        let Some(ipv6) = authority.get(1..close) else {
+            return false;
+        };
+        ipv6
+    } else if let Some((h, port)) = authority.split_once(':') {
+        if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        h
+    } else {
+        authority
+    };
+    !host.is_empty()
 }
 
 #[cfg(test)]
@@ -102,7 +159,9 @@ impl BudlumxyzRegistry {
     ) -> Result<u64, BudlumxyzError> {
         if name.trim().is_empty()
             || name.len() > MAX_APP_NAME_BYTES
-            || name.chars().any(char::is_control)
+            || name
+                .chars()
+                .any(|c| c.is_control() || is_bidi_or_invisible_format(c))
             || !is_valid_app_url(&website_url)
         {
             return Err(BudlumxyzError::InvalidData);
@@ -888,5 +947,56 @@ mod tests {
             )
             .expect("independent developer still admitted");
         assert_eq!(reg.apps[&ok_id].developer, honest);
+    }
+
+    #[test]
+    fn register_app_refuses_userinfo_empty_host_and_bidi_spoofing() {
+        let mut reg = new_test_hub();
+        let dev = Address::from([0x44; 32]);
+        for bad_url in [
+            "https://budlum.xyz@evil.example/wallet",
+            "https://?redirect=evil.example",
+            "https://#fragment",
+            "https://:443/path",
+            "https://../etc",
+            "https://.evil.example",
+            "https://budlum\u{202E}zyx.example",
+            "https://[::1]:notaport/app",
+        ] {
+            assert!(
+                reg.register_app(
+                    "Wallet".into(),
+                    dev,
+                    AppCategory::DeFi,
+                    bad_url.into(),
+                    None,
+                    1,
+                )
+                .is_err(),
+                "must reject spoofed URL: {bad_url:?}"
+            );
+        }
+        assert!(
+            reg.register_app(
+                "Bud\u{202E}mul".into(),
+                dev,
+                AppCategory::DeFi,
+                "https://wallet.budlum.xyz".into(),
+                None,
+                1,
+            )
+            .is_err(),
+            "must reject bidi override in app name"
+        );
+        assert!(reg
+            .register_app(
+                "Budlum Wallet".into(),
+                dev,
+                AppCategory::DeFi,
+                "https://wallet.budlum.xyz:8443/app".into(),
+                None,
+                1,
+            )
+            .is_ok());
     }
 }

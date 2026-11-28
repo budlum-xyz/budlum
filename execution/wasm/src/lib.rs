@@ -1,6 +1,6 @@
 //! Out-of-process CosmWasm Execution Environment (`EeId::WASM = 0x02`,  &).
 //!
-//! Runs `wasmi = "=2.0.1"` in pure-interpreter mode with:
+//! Runs `wasmi = "=2.0.2"` in pure-interpreter mode with:
 //! - floating-point instructions forbidden (`Config::floats(false)`);
 //! - 64 MiB linear-memory ceiling (`1024` Wasm 64-KiB pages);
 //! - `1 wasmi fuel = 1 BGU` (`Section 8.9`);
@@ -30,8 +30,8 @@ use budlum_uel_abi::{
 use sha2::{Digest as _, Sha256};
 use wasmi::errors::HostError as WasmiHostError;
 use wasmi::{
-    Caller, Config, Engine, Error as WasmiError, Extern, ExternType, Instance, Linker, Memory,
-    Module, Store, StoreLimits, StoreLimitsBuilder, TypedResumableCall, Val,
+    Caller, CompilationMode, Config, Engine, Error as WasmiError, Extern, ExternType, Instance,
+    Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedResumableCall, Val,
 };
 
 use crate::abi::{StoredCodeMeta, StoredContractInfo, WasmTxAction, WasmViewAction};
@@ -143,13 +143,25 @@ impl GuestStoreState {
     }
 }
 
-/// Construct a deterministic `wasmi::Engine` with `floats(false)` and fuel metering.
+/// Construct a deterministic `wasmi::Engine` with `CompilationMode::Eager`,
+/// `floats(false)`, deterministic proposal pins, and fuel metering.
 #[must_use]
 pub fn build_wasm_engine() -> Engine {
     let mut cfg = Config::default();
+    cfg.compilation_mode(CompilationMode::Eager);
     cfg.floats(false);
     cfg.consume_fuel(true);
+    cfg.wasm_saturating_float_to_int(false);
     cfg.wasm_multi_memory(false);
+    cfg.wasm_custom_page_sizes(false);
+    cfg.wasm_wide_arithmetic(false);
+    cfg.wasm_tail_call(true);
+    cfg.wasm_extended_const(true);
+    cfg.wasm_multi_value(true);
+    cfg.wasm_mutable_global(true);
+    cfg.wasm_sign_extension(true);
+    cfg.wasm_bulk_memory(true);
+    cfg.wasm_reference_types(true);
     Engine::new(&cfg)
 }
 
@@ -1397,15 +1409,23 @@ fn invoke_contract_entry(
     Ok((final_data, total_fuel))
 }
 
-fn parse_ubud_coins(coins: &[CwCoin]) -> Result<u64, String> {
-    let mut total: u64 = 0;
+fn parse_ubud_coins(coins: &[CwCoin]) -> Result<u128, String> {
+    let mut total: u128 = 0;
+    let mut seen_ubud = false;
     for c in coins {
         if c.denom != "ubud" {
             return Err(format!("unsupported WASM coin denom '{}'", c.denom));
         }
+        if seen_ubud {
+            return Err(String::from("duplicate ubud coin entry"));
+        }
+        seen_ubud = true;
+        if c.amount.is_empty() || !c.amount.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("invalid ubud amount '{}'", c.amount));
+        }
         let amt = c
             .amount
-            .parse::<u64>()
+            .parse::<u128>()
             .map_err(|_| format!("invalid ubud amount '{}'", c.amount))?;
         total = total
             .checked_add(amt)
@@ -1429,7 +1449,9 @@ fn dispatch_submsg(
     match msg {
         CwCosmosMsg::Bank(CwBankMsg::Send { to_address, amount }) => {
             let ubud = parse_ubud_coins(amount).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
-            let attos = u128::from(ubud).saturating_mul(ATTOS_PER_UBUD);
+            let attos = ubud
+                .checked_mul(ATTOS_PER_UBUD)
+                .ok_or_else(|| (OutcomeStatus::Revert, String::from("attoBUD overflow"), 0))?;
             let to_id = EeIdentity {
                 ee: EeId::WASM,
                 id: to_address.as_bytes().to_vec(),
@@ -1492,16 +1514,15 @@ fn dispatch_submsg(
         }) => {
             let ubud = parse_ubud_coins(funds).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
             if ubud > 0 {
+                let attos = ubud
+                    .checked_mul(ATTOS_PER_UBUD)
+                    .ok_or_else(|| (OutcomeStatus::Revert, String::from("attoBUD overflow"), 0))?;
                 let to_id = EeIdentity {
                     ee: EeId::WASM,
                     id: contract_addr.as_bytes().to_vec(),
                 };
-                host.bud_transfer(
-                    &from_id,
-                    &to_id,
-                    u128::from(ubud).saturating_mul(ATTOS_PER_UBUD),
-                )
-                .map_err(|e| (OutcomeStatus::Revert, e.to_string(), 0))?;
+                host.bud_transfer(&from_id, &to_id, attos)
+                    .map_err(|e| (OutcomeStatus::Revert, e.to_string(), 0))?;
             }
             let decoded_msg = b64_decode(msg).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
             let info = CwMessageInfo {
@@ -1527,6 +1548,13 @@ fn dispatch_submsg(
             label,
         }) => {
             let ubud = parse_ubud_coins(funds).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
+            let ubud_u64 = u64::try_from(ubud).map_err(|_| {
+                (
+                    OutcomeStatus::Revert,
+                    String::from("ubud amount overflow"),
+                    0,
+                )
+            })?;
             let decoded_msg = b64_decode(msg).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
             execute_instantiate(
                 ctx,
@@ -1536,7 +1564,7 @@ fn dispatch_submsg(
                 admin.clone(),
                 label.clone(),
                 &decoded_msg,
-                ubud,
+                ubud_u64,
                 None,
                 fuel_budget,
                 depth,
@@ -1551,6 +1579,13 @@ fn dispatch_submsg(
             salt,
         }) => {
             let ubud = parse_ubud_coins(funds).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
+            let ubud_u64 = u64::try_from(ubud).map_err(|_| {
+                (
+                    OutcomeStatus::Revert,
+                    String::from("ubud amount overflow"),
+                    0,
+                )
+            })?;
             let decoded_msg = b64_decode(msg).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
             let salt_bytes = b64_decode(salt).map_err(|m| (OutcomeStatus::Revert, m, 0))?;
             execute_instantiate(
@@ -1561,7 +1596,7 @@ fn dispatch_submsg(
                 admin.clone(),
                 label.clone(),
                 &decoded_msg,
-                ubud,
+                ubud_u64,
                 Some(&salt_bytes),
                 fuel_budget,
                 depth,
@@ -2003,7 +2038,7 @@ impl WasmWorker {
                     gas_used: 0,
                 };
             };
-            let ubud_val = (call.value.0 / ATTOS_PER_UBUD) as u64;
+            let ubud_val = call.value.0 / ATTOS_PER_UBUD;
             let mut funds = Vec::new();
             if ubud_val > 0 {
                 funds.push(CwCoin {
@@ -2183,7 +2218,7 @@ mod tests {
 
     use crate::abi::WasmTxAction;
     use crate::budlum_msg::{b64_encode, bud_addr_canonicalize, bud_addr_humanize};
-    use crate::WasmWorker;
+    use crate::{build_wasm_engine, compile_and_validate_module, WasmWorker};
 
     fn sample_ctx() -> BlockContext {
         BlockContext {
@@ -2580,5 +2615,128 @@ mod tests {
         drop(client);
         let _ = handle.join();
         let _ = std::fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn eager_compilation_charges_identical_bgu_on_cold_and_warm_calls_and_refuses_memory64() {
+        let Ok(code_bytes) = counter_cw_wasm() else {
+            panic!("counter_cw_wasm failed");
+        };
+        let mut worker = WasmWorker;
+        let mut host = MemoryHost::new(50_000_000);
+        let ctx = sample_ctx();
+        let Ok(sender_bech32) = bud_addr_humanize(&[0x99u8; 32]) else {
+            panic!("sender humanize failed");
+        };
+        let caller = EeIdentity {
+            ee: EeId::WASM,
+            id: sender_bech32.into_bytes(),
+        };
+
+        let Ok(deploy_out) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: EeIdentity {
+                    ee: EeId::WASM,
+                    id: Vec::new(),
+                },
+                value: BudAmount(0),
+                input: code_bytes,
+                gas_limit: 5_000_000,
+                depth: 0,
+                tx_hash: [0x91; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("deploy faulted");
+        };
+        assert_eq!(deploy_out.status, OutcomeStatus::Success);
+
+        let Ok(inst_bytes) = serde_json::to_vec(&WasmTxAction::Instantiate {
+            code_id: 1,
+            admin: None,
+            label: String::from("eager-parity"),
+            msg_b64: b64_encode(b"{}"),
+            funds_ubud: 0,
+        }) else {
+            panic!("inst serialize");
+        };
+        let Ok(inst_out) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: EeIdentity {
+                    ee: EeId::WASM,
+                    id: Vec::new(),
+                },
+                value: BudAmount(0),
+                input: inst_bytes,
+                gas_limit: 5_000_000,
+                depth: 0,
+                tx_hash: [0x92; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("inst failed");
+        };
+        assert_eq!(inst_out.status, OutcomeStatus::Success);
+        let contract = EeIdentity {
+            ee: EeId::WASM,
+            id: inst_out.output,
+        };
+
+        // First call to `execute` ("cold" function never called during instantiate) vs second call ("warm").
+        let Ok(cold_exec) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: contract.clone(),
+                value: BudAmount(0),
+                input: b"{\"step\":1}".to_vec(),
+                gas_limit: 5_000_000,
+                depth: 0,
+                tx_hash: [0x93; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("cold execute failed");
+        };
+        let Ok(warm_exec) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller,
+                target: contract,
+                value: BudAmount(0),
+                input: b"{\"step\":1}".to_vec(),
+                gas_limit: 5_000_000,
+                depth: 0,
+                tx_hash: [0x94; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("warm execute failed");
+        };
+        assert_eq!(cold_exec.status, OutcomeStatus::Success);
+        assert_eq!(warm_exec.status, OutcomeStatus::Success);
+        assert_eq!(
+            cold_exec.gas_used, warm_exec.gas_used,
+            "cold and warm Wasm calls must charge identical BGU under CompilationMode::Eager"
+        );
+
+        // Hand-encoded minimal Wasm module requesting 64-bit linear memory (`flags = 0x04`).
+        let memory64_wasm: &[u8] = &[
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x04, 0x01,
+        ];
+        let engine = build_wasm_engine();
+        let res = compile_and_validate_module(&engine, memory64_wasm);
+        assert!(
+            res.is_err(),
+            "memory64 modules must be refused deterministically"
+        );
     }
 }

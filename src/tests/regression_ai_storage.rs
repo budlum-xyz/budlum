@@ -90,7 +90,7 @@ fn oversize_execution_dims_refused_without_allocating() {
 }
 
 /// Registry leaves commit to behaviour-controlling spec fields and
-/// the QoS running average cannot overflow.
+/// the `QoS` running average cannot overflow.
 #[test]
 fn registry_leaves_commit_spec_fields_and_qos_is_overflow_safe() {
     let owner = Address::from([0x62; 32]);

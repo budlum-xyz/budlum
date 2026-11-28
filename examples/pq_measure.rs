@@ -50,7 +50,7 @@ fn sizes_table(out: &mut String) {
         let sig = CompositeSignature::encoded_len(suite.id).ok();
         let recovery = suite
             .recovery
-            .and_then(|r| r.info())
+            .and_then(budlum_core::crypto::scheme::SchemeId::info)
             .and_then(|i| i.public_key_len);
         let pq_name = suite.pq.info().map_or("unlisted", |i| i.short);
         let _ = writeln!(

@@ -91,7 +91,8 @@ impl PlacementRow {
     /// Total symbols of a segment.
     #[must_use]
     pub const fn total_symbols(&self) -> u64 {
-        self.n_full as u64 * self.s_full as u64 + self.n_mobile as u64 * self.s_mobile as u64
+        (self.n_full as u64 * self.s_full as u64)
+            .saturating_add(self.n_mobile as u64 * self.s_mobile as u64)
     }
 
     /// Redundancy in thousandths: `total / k`.
@@ -100,7 +101,14 @@ impl PlacementRow {
         if k == 0 {
             return 0;
         }
-        self.total_symbols() * 1000 / k as u64
+        let total = self.n_full as u128 * self.s_full as u128
+            + self.n_mobile as u128 * self.s_mobile as u128;
+        let scaled = total * 1000 / (k as u128);
+        if scaled > u64::MAX as u128 {
+            u64::MAX
+        } else {
+            scaled as u64
+        }
     }
 
     /// Symbols the Full shares hold on their own.
@@ -119,11 +127,12 @@ impl PlacementRow {
     /// The Mobile share of the symbols, in thousandths.
     #[must_use]
     pub const fn mobile_share_milli(&self) -> u64 {
-        let total = self.total_symbols();
+        let mobile = self.n_mobile as u128 * self.s_mobile as u128;
+        let total = self.n_full as u128 * self.s_full as u128 + mobile;
         if total == 0 {
             return 0;
         }
-        self.n_mobile as u64 * self.s_mobile as u64 * 1000 / total
+        (mobile * 1000 / total) as u64
     }
 }
 
@@ -176,15 +185,29 @@ impl PlacementTable {
         }
     }
 
-    /// Check every row rebuilds a segment.
+    /// Check every row rebuilds a segment with valid non-empty shares and bounded ESIs.
     ///
     /// # Errors
     ///
-    /// [`PlacementError::RowTooSmall`].
+    /// [`PlacementError::RowTooSmall`] or [`PlacementError::EsiOverflow`].
     pub fn validate(&self) -> Result<(), PlacementError> {
-        let need = u64::from(self.k) + 2;
-        if self.rows.iter().any(|r| r.total_symbols() < need) {
+        if self.k == 0 || self.rows.is_empty() {
             return Err(PlacementError::RowTooSmall);
+        }
+        let need = u64::from(self.k) + 2;
+        if need > u64::from(super::fountain::MAX_ESI) {
+            return Err(PlacementError::EsiOverflow);
+        }
+        for r in &self.rows {
+            if (r.n_full > 0 && r.s_full == 0)
+                || (r.n_mobile > 0 && r.s_mobile == 0)
+                || r.total_symbols() < need
+            {
+                return Err(PlacementError::RowTooSmall);
+            }
+            if r.total_symbols() > u64::from(super::fountain::MAX_ESI) {
+                return Err(PlacementError::EsiOverflow);
+            }
         }
         Ok(())
     }
@@ -206,21 +229,37 @@ impl PlacementTable {
     /// single surviving Full validator still holds at least `k + 2` symbols.
     #[must_use]
     pub fn lookup_with_shrink(&self, full: u32, mobile: u32) -> Option<PlacementRow> {
+        if self.k == 0 {
+            return None;
+        }
+        let need = u64::from(self.k).saturating_add(2);
+        if need > u64::from(super::fountain::MAX_ESI) {
+            return None;
+        }
         if let Some(row) = self.lookup(full, mobile) {
-            return Some(row);
+            if row.total_symbols() >= need
+                && row.total_symbols() <= u64::from(super::fountain::MAX_ESI)
+                && (row.n_full == 0 || row.s_full > 0)
+                && (row.n_mobile == 0 || row.s_mobile > 0)
+            {
+                return Some(row);
+            }
         }
         if full == 0 {
             return None;
         }
-        let need = u64::from(self.k).saturating_add(2);
         let per_full_u64 = need.div_ceil(u64::from(full));
         let s_full = u32::try_from(per_full_u64).ok()?;
-        Some(PlacementRow {
+        let row = PlacementRow {
             n_full: full,
             s_full,
             n_mobile: 0,
             s_mobile: 0,
-        })
+        };
+        if row.total_symbols() > u64::from(super::fountain::MAX_ESI) {
+            return None;
+        }
+        Some(row)
     }
 
     /// Split physical bytes per segment into `(user_physical_bytes, decentralization_physical_bytes)`
@@ -247,12 +286,11 @@ impl PlacementTable {
         }
         let baseline_bytes = self
             .lookup(chosen.n_full, 0)
-            .map(|full_only| {
+            .map_or(total_bytes, |full_only| {
                 full_only
                     .total_symbols()
                     .saturating_mul(u64::from(symbol_size))
-            })
-            .unwrap_or(total_bytes);
+            });
         if total_bytes > baseline_bytes {
             Some((baseline_bytes, total_bytes - baseline_bytes))
         } else {
@@ -315,7 +353,8 @@ impl Ranked {
 }
 
 /// The rendezvous order of `candidates` for `segment_key`, best first.
-/// Zero-stake candidates are dropped.
+/// Zero-stake candidates are dropped and duplicate validator entries are
+/// deduplicated so each validator appears at most once.
 #[must_use]
 pub fn rank(segment_key: &[u8; 32], candidates: &[Candidate]) -> Vec<Candidate> {
     let mut ranked: Vec<Ranked> = candidates
@@ -327,7 +366,12 @@ pub fn rank(segment_key: &[u8; 32], candidates: &[Candidate]) -> Vec<Candidate> 
         })
         .collect();
     ranked.sort_by(Ranked::before);
-    ranked.into_iter().map(|r| r.c).collect()
+    let mut seen_validators: std::collections::BTreeSet<[u8; 32]> = Default::default();
+    ranked
+        .into_iter()
+        .filter(|r| seen_validators.insert(r.c.validator))
+        .map(|r| r.c)
+        .collect()
 }
 
 /// The segment key: the object commitment and the segment index.
@@ -352,7 +396,12 @@ pub fn place(
     k: u32,
     symbol_size: u32,
 ) -> Result<Vec<Share>, PlacementError> {
-    if row.total_symbols() < u64::from(k) + 2 {
+    if k == 0
+        || symbol_size == 0
+        || (row.n_full > 0 && row.s_full == 0)
+        || (row.n_mobile > 0 && row.s_mobile == 0)
+        || row.total_symbols() < u64::from(k) + 2
+    {
         return Err(PlacementError::RowTooSmall);
     }
     if row.total_symbols() > u64::from(super::fountain::MAX_ESI) {
@@ -362,6 +411,7 @@ pub fn place(
     let account_cap = (n / 64).max(1);
     let network_cap = (n / 32).max(2);
     let ordered = rank(segment_key, candidates);
+    let mut seen_validators: std::collections::BTreeSet<[u8; 32]> = Default::default();
     let mut per_account: std::collections::BTreeMap<[u8; 32], u32> = Default::default();
     let mut per_network: std::collections::BTreeMap<[u8; 8], u32> = Default::default();
     let mut shares = Vec::new();
@@ -376,7 +426,7 @@ pub fn place(
             if got == want {
                 break;
             }
-            if c.free_quota_bytes < share_bytes {
+            if seen_validators.contains(&c.validator) || c.free_quota_bytes < share_bytes {
                 continue;
             }
             let acc = per_account.entry(c.account).or_insert(0);
@@ -389,6 +439,7 @@ pub fn place(
                 }
                 *per_network.entry(net).or_insert(0) += 1;
             }
+            seen_validators.insert(c.validator);
             *acc += 1;
             shares.push(Share {
                 validator: c.validator,
@@ -672,5 +723,179 @@ mod tests {
         }
         let single = table.lookup_with_shrink(1, 0).unwrap();
         assert_eq!(single.s_full, table.k + 2);
+
+        // Extreme PlacementRow ratios never overflow u64 in milli calculations.
+        let extreme = PlacementRow {
+            n_full: u32::MAX,
+            s_full: u32::MAX,
+            n_mobile: u32::MAX,
+            s_mobile: u32::MAX,
+        };
+        assert_eq!(extreme.total_symbols(), u64::MAX);
+        assert_eq!(extreme.mobile_share_milli(), 500);
+        assert!(extreme.redundancy_milli(u32::MAX) > 0);
+    }
+
+    #[test]
+    fn rank_and_place_deduplicate_duplicate_validator_candidates() {
+        let mut cands = pool(3, 0);
+        // Duplicate validator 0 under a second owning account and network prefix:
+        // neither `rank` nor `place` may hand two shares of one segment to the same validator.
+        let mut dup = cands[0];
+        dup.account = [0xEE; 32];
+        dup.network = Some([0x77; 8]);
+        cands.push(dup);
+
+        let ranked = rank(&[0x42; 32], &cands);
+        assert_eq!(
+            ranked.len(),
+            3,
+            "rank must emit each unique validator at most once"
+        );
+
+        let row = PlacementRow {
+            n_full: 4,
+            s_full: 4,
+            n_mobile: 0,
+            s_mobile: 0,
+        };
+        assert_eq!(
+            place(&[0x42; 32], &cands, &row, 8, 256),
+            Err(PlacementError::NotEnough {
+                class: Class::Full,
+                want: 4,
+                got: 3,
+            }),
+            "duplicate candidate entries must not satisfy missing Full slots"
+        );
+
+        // Cross-class duplicate: one validator listed as both Full and Mobile
+        // must never hold both a Full and a Mobile share of the same segment.
+        let mut mixed = pool(4, 1);
+        let mut cross = mixed[0];
+        cross.class = Class::Mobile;
+        cross.account = [0xDD; 32];
+        mixed.push(cross);
+        let mixed_row = PlacementRow {
+            n_full: 4,
+            s_full: 4,
+            n_mobile: 2,
+            s_mobile: 2,
+        };
+        assert_eq!(
+            place(&[0x43; 32], &mixed, &mixed_row, 8, 256),
+            Err(PlacementError::NotEnough {
+                class: Class::Mobile,
+                want: 2,
+                got: 1,
+            }),
+            "a validator already placed in Full must not also take a Mobile share"
+        );
+    }
+
+    #[test]
+    fn place_rejects_zero_symbol_ghost_shares_and_zero_symbol_size_quota_bypass() {
+        let cands = pool(6, 4);
+        // Ghost Mobile shares (`n_mobile = 2`, `s_mobile = 0`) would emit 0-symbol shares.
+        let ghost_mobile = PlacementRow {
+            n_full: 4,
+            s_full: 4,
+            n_mobile: 2,
+            s_mobile: 0,
+        };
+        assert_eq!(
+            place(&[0x11; 32], &cands, &ghost_mobile, 4, 256),
+            Err(PlacementError::RowTooSmall)
+        );
+
+        let ghost_full = PlacementRow {
+            n_full: 2,
+            s_full: 0,
+            n_mobile: 4,
+            s_mobile: 4,
+        };
+        assert_eq!(
+            place(&[0x11; 32], &cands, &ghost_full, 4, 256),
+            Err(PlacementError::RowTooSmall)
+        );
+
+        // `symbol_size == 0` collapses `share_bytes` to 0 and would bypass free-quota checks.
+        let mut zero_quota = pool(4, 0);
+        for c in &mut zero_quota {
+            c.free_quota_bytes = 0;
+        }
+        let valid_row = PlacementRow {
+            n_full: 4,
+            s_full: 4,
+            n_mobile: 0,
+            s_mobile: 0,
+        };
+        assert_eq!(
+            place(&[0x12; 32], &zero_quota, &valid_row, 4, 0),
+            Err(PlacementError::RowTooSmall)
+        );
+
+        // `k == 0` is invalid for RFC 6330 segment coding.
+        assert_eq!(
+            place(&[0x13; 32], &cands, &valid_row, 0, 256),
+            Err(PlacementError::RowTooSmall)
+        );
+    }
+
+    #[test]
+    fn placement_table_validate_rejects_zero_k_empty_rows_ghost_shares_and_esi_overflow() {
+        let zero_k = PlacementTable {
+            k: 0,
+            rows: vec![PlacementRow {
+                n_full: 2,
+                s_full: 2,
+                n_mobile: 0,
+                s_mobile: 0,
+            }],
+        };
+        assert_eq!(zero_k.validate(), Err(PlacementError::RowTooSmall));
+
+        let empty_rows = PlacementTable {
+            k: 4,
+            rows: Vec::new(),
+        };
+        assert_eq!(empty_rows.validate(), Err(PlacementError::RowTooSmall));
+
+        let ghost_row = PlacementTable {
+            k: 4,
+            rows: vec![PlacementRow {
+                n_full: 4,
+                s_full: 4,
+                n_mobile: 2,
+                s_mobile: 0,
+            }],
+        };
+        assert_eq!(ghost_row.validate(), Err(PlacementError::RowTooSmall));
+
+        let overflow_row = PlacementTable {
+            k: 4,
+            rows: vec![PlacementRow {
+                n_full: 65_536,
+                s_full: 1_000,
+                n_mobile: 0,
+                s_mobile: 0,
+            }],
+        };
+        assert_eq!(overflow_row.validate(), Err(PlacementError::EsiOverflow));
+    }
+
+    #[test]
+    fn lookup_with_shrink_rejects_zero_k_and_esi_overflow() {
+        let zero_k = PlacementTable {
+            k: 0,
+            rows: Vec::new(),
+        };
+        assert_eq!(zero_k.lookup_with_shrink(1, 0), None);
+
+        let too_large_k = PlacementTable {
+            k: super::super::fountain::MAX_ESI,
+            rows: Vec::new(),
+        };
+        assert_eq!(too_large_k.lookup_with_shrink(1, 0), None);
     }
 }

@@ -572,11 +572,18 @@ fn run_load_test(chain_id: u64, air_registry: &AirRegistry) -> Result<(usize, f6
     let prove_ms = t_prove.elapsed().as_secs_f64() * 1000.0;
     let proof_bytes = master.proof.len();
 
+    let mut accounts = AccountState::new();
+    let agg_floor = Network::Devnet
+        .min_stake()
+        .max(accounts.registry.params().min_stake)
+        .max(1);
+    for seg in &master.segments {
+        accounts.add_validator_with_floor(seg.aggregator, agg_floor, agg_floor);
+    }
     let mut block = Block::new_with_chain_id(1, "0".repeat(64), all_txs, chain_id);
     block.frame_hash = Some(master.hash(domain).map_err(|e| e.to_string())?);
     block.claim_frame = Some(master);
 
-    let accounts = AccountState::new();
     let t_ver = Instant::now();
     check_block_with_backend_and_airs(
         &params,
@@ -591,7 +598,7 @@ fn run_load_test(chain_id: u64, air_registry: &AirRegistry) -> Result<(usize, f6
 }
 
 fn main() -> Result<(), String> {
-    let chain_id = Network::Testnet.chain_id().value();
+    let chain_id = Network::Devnet.chain_id().value();
     let domain = u32::try_from(chain_id).map_err(|_| "domain overflow".to_string())?;
     let mut air_registry = AirRegistry::with_builtins();
     air_registry

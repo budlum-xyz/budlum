@@ -1,6 +1,6 @@
 //! Domain edge-case test suite'leri.
 //!
-//! BFT view-change/leader election, PoS slashing triggers, PoW difficulty
+//! BFT view-change/leader election, `PoS` slashing triggers, `PoW` difficulty
 //! Separate edge-case tests for adjustment.
 
 #[cfg(test)]
@@ -65,7 +65,7 @@ mod tests {
     /// rejection this test never asserted and the engine never performs:
     /// `PoWEngine::validate_block` checks the previous hash, the block hash and
     /// the difficulty target, and says nothing about the transaction list. An
-    /// empty block is valid under PoW - that is what keeps a chain live when
+    /// empty block is valid under `PoW` - that is what keeps a chain live when
     /// the mempool is empty. The old name asserted the opposite of the design
     /// while the body asserted success, so nothing was ever going to catch the
     /// contradiction.
@@ -264,7 +264,7 @@ mod tests {
     ///
     /// `Blockchain::register_sovereign_template` binds the two records
     /// together. Without that binding a template would be valid on its own, and
-    /// a domain actually running PoS could be presented to an audit as
+    /// a domain actually running `PoS` could be presented to an audit as
     /// "permissioned and KYC'd".
     #[test]
     fn a_sovereign_template_must_match_the_registered_domain() {

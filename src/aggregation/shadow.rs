@@ -8,12 +8,13 @@
 //! when `AggParams::mode == AggMode::Shadow` to verify zero divergence across
 //! live blocks before flipping a network to `AggMode::On`.
 
-use super::chain::{claim_domain, claim_signature};
+use super::chain::{account_claim, claim_domain, claim_signature};
 use super::object::derive_claim;
 use super::params::{AggMode, AggParams};
 use crate::core::block::Block;
 use crate::core::transaction::{Transaction, SIGNATURE_VERSION_V5};
 use crate::crypto::scheme::SchemeStatusRegistry;
+use crate::domain::types::DomainId;
 
 /// Cumulative telemetry collected across audited blocks in `AggMode::Shadow`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -61,7 +62,9 @@ impl ShadowAuditor {
     /// Audits one block without affecting consensus.
     ///
     /// Returns `Ok(true)` if every transaction in `block` matched between
-    /// native signature verification and aggregation claim derivation, or
+    /// native signature verification (including `tx.chain_id == block.chain_id`)
+    /// and full aggregation claim admission (envelope domain match, `derive_claim`,
+    /// and Rule-6 account-claim digest binding against `tx.from`), or
     /// `Ok(false)` if any mismatch was recorded.
     ///
     /// # Errors
@@ -71,7 +74,7 @@ impl ShadowAuditor {
         if self.params.mode != AggMode::Shadow {
             return Ok(true);
         }
-        let _domain = claim_domain(block.chain_id)
+        let domain = claim_domain(block.chain_id)
             .ok_or_else(|| format!("shadow: chain_id {} does not fit DomainId", block.chain_id))?;
 
         let mut all_matched = true;
@@ -84,7 +87,7 @@ impl ShadowAuditor {
                 continue;
             }
             self.report.txs_checked = self.report.txs_checked.saturating_add(1);
-            let matched = self.audit_tx(tx);
+            let matched = self.audit_tx(tx, block.chain_id, domain);
             if matched {
                 self.report.matches = self.report.matches.saturating_add(1);
             } else {
@@ -96,10 +99,23 @@ impl ShadowAuditor {
         Ok(all_matched)
     }
 
-    fn audit_tx(&self, tx: &Transaction) -> bool {
-        let native_ok = tx.verify_in(&self.registry);
-        let agg_ok =
-            claim_signature(tx).is_some_and(|(_, env)| derive_claim(&self.registry, &env).is_ok());
+    fn audit_tx(&self, tx: &Transaction, block_chain_id: u64, domain: DomainId) -> bool {
+        let native_ok = tx.chain_id == block_chain_id && tx.verify_in(&self.registry);
+        let agg_ok = claim_signature(tx).is_some_and(|(claimed, env)| {
+            if env.domain != domain || !claimed.claimed_shape_is_canonical() {
+                return false;
+            }
+            let Some(expected) = account_claim(&claimed) else {
+                return false;
+            };
+            let expected_digest = expected.digest(domain);
+            if claimed.auth_claim != Some(expected_digest) {
+                return false;
+            }
+            derive_claim(&self.registry, &env).is_ok_and(|derived| {
+                derived == expected && derived.digest(domain) == expected_digest
+            })
+        });
         native_ok == agg_ok
     }
 }

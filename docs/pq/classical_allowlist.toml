@@ -24,7 +24,7 @@
 # signatures, the sr25519 VRF, the cold committee, the libp2p identity); the
 # baseline is locked at zero when Phase 3 ends.
 
-unregistered_baseline = 10
+unregistered_baseline = 8
 
 [[entry]]
 path = "src/crypto/composite.rs"

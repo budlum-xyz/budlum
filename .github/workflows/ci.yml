@@ -9,7 +9,7 @@ on:
     branches: [main]
   pull_request:
     # Run on the normal protected bases and on stacked continuation bases.
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, budlum-consensus-of-consensuses, agg/phase-5-pcs-claims]
+    branches: [main, consensus-of-consensuses, testnet-50, testnet-quantum, testnet, garden, budlum-stack, agg/phase-5-pcs-claims, agg-phase-2, agg/phase-2-sig-claims, agg/phase-3-recursion-stark, agg/phase-4-program-claims, audit-2026-11-16, audit-testnet-2026-11, budlum, budlum-4-you, budlum-osv-coverage-agent, budlum-unification, budlum-universal, diag-rehearsal-a, diag-rehearsal-b, ortak-teslim]
   # A manual run on a snapshot ref (a branch or a tag that names one commit).
   # Its concurrency group is the snapshot ref, so a push to a stacked branch
   # cannot cancel it, and a head gets one complete result.
@@ -17,7 +17,32 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # A new run of the group supersedes the one in progress; a re-run does not.
+  # Re-running an older head's run used to land in the same group and cancel
+  # the current head's run before its library test finished (measured
+  # 2026-11-23: a re-run queued at 08:20 cancelled nine jobs of the head's run,
+  # then the run). A re-run (attempt 2 and later) now waits for the group.
+  #
+  # The integration line is exempt. A pull request into `testnet` or
+  # `ortak-teslim` is the one place a complete verdict is required, and a push
+  # to its head arrives faster than the suite runs: measured on
+  # `arena/ajan-teslim` on 2026-11-24, six pushes landed between 08:22 and
+  # 08:38 (one every 2.7 minutes) and 72 of the 74 check runs on the head ended
+  # `cancelled`. Cancelling a working branch's run costs nothing that is not
+  # re-measured by the next push; cancelling the integration head's run costs
+  # the verdict the branch exists to produce.
+  #
+  # `testnet-50` and `consensus-of-consensuses` are exempt for the same reason,
+  # measured on the Garden branch on 2026-11-27: of the last 100 runs on it, 59
+  # ended `cancelled`, and the last 40 CI runs carried only 4 distinct heads in
+  # 51 minutes (one every 13 minutes). This branch carries a pull request into
+  # `consensus-of-consensuses`, so the same rule applies here: a new head used
+  # to cancel the suite that was measuring the previous one, and the determinism
+  # jobs died that way twice in a row.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.run_attempt == '1' &&
+    github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' &&
+    github.base_ref != 'testnet-50' &&
+    github.base_ref != 'consensus-of-consensuses' }}
 
 permissions:
   contents: read
@@ -47,25 +72,7 @@ jobs:
       - id: protoc
         name: Install protoc
         if: always() && steps.rust.outcome == 'success'
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-core-pq-build
@@ -94,25 +101,7 @@ jobs:
       - id: protoc
         name: Install protoc
         if: always() && steps.rust.outcome == 'success'
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-core-pq-crypto
@@ -161,25 +150,7 @@ jobs:
       - id: protoc
         name: Install protoc
         if: always() && steps.rust.outcome == 'success'
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-core-pq-aa
@@ -214,7 +185,9 @@ jobs:
   budlum-lib-test:
     name: Budlum Core library test
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # Warm-cache runs take ~69m across 6,739 library tests; cold-cache runs hit
+    # the old 90m ceiling and reported a green suite as cancelled.
+    timeout-minutes: 120
     permissions:
       contents: read
     steps:
@@ -230,25 +203,7 @@ jobs:
       - id: protoc
         name: Install protoc
         if: always() && steps.rust.outcome == 'success'
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-core-lib-test
@@ -268,6 +223,39 @@ jobs:
           for name in zero_retention_refuses_backup_without_deleting_existing_files retention_uses_numeric_timestamps_and_preserves_current_and_unknown_files backup_refuses_concurrent_writer_without_pruning backup_returns_a_verified_existing_snapshot; do
             grep -Eq "${name} \.\.\. ok" /tmp/node-tests.log || {
               echo "::error::backup regression $name did not pass"
+              exit 1
+            }
+          done
+      - name: CLI (bud) tests
+        if: always() && steps.rust.outcome == 'success'
+        # The CLI carries the publish path's own end-to-end tests - the site
+        # bundle, the B.U.D. 3.0 registration and the proof JSON a user is shown.
+        # Nothing tested them: `bud` was built in the rehearsal workflow and
+        # never run, so a payload fixture that the executor had started refusing
+        # stayed red without a single job saying so.
+        run: |
+          set -euo pipefail
+          cargo test --bin bud 2>&1 | tee /tmp/bud-tests.log
+          for name in site_bundle_and_publish_site_payloads_execute_cleanly_in_consensus_and_verify_proof_json; do
+            grep -Eq "${name} \.\.\. ok" /tmp/bud-tests.log || {
+              echo "::error::CLI regression $name did not pass"
+              exit 1
+            }
+          done
+      - name: Service binary tests
+        if: always() && steps.rust.outcome == 'success'
+        # `budlum-gateway`, `budlum-indexer`, `budlum-light` and
+        # `budlum-relayer` each carry their own tests and none of them ran in
+        # any workflow. The relayer's client construction panicked with "No
+        # provider set" the moment its tests were actually executed: it is built
+        # with the provider-less rustls feature and only `main` installed the
+        # process-wide provider, so every unit test that built a client hit it.
+        run: |
+          set -euo pipefail
+          cargo test --bin budlum-gateway --bin budlum-indexer --bin budlum-light --bin budlum-relayer 2>&1 | tee /tmp/service-bin-tests.log
+          for name in deposit_proof_builder_is_fail_closed_until_real_impl_exists; do
+            grep -Eq "${name} \.\.\. ok" /tmp/service-bin-tests.log || {
+              echo "::error::service binary regression $name did not pass"
               exit 1
             }
           done
@@ -349,25 +337,7 @@ jobs:
       - id: protoc
         name: Install protoc
         if: always() && steps.rust.outcome == 'success'
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-core-quality
@@ -411,6 +381,21 @@ jobs:
       - name: Clippy
         if: always() && steps.rust.outcome == 'success'
         run: cargo clippy --all-targets -- -D warnings
+      # `--all-targets` compiles the test target too, so a function that only
+      # a `#[cfg(test)]` caller reaches counts as used and the step above stays
+      # green. That is the exact shape of production code that ships to nobody:
+      # it reads like a live helper in review, it has a passing test, and no
+      # build that leaves the repository contains a single call to it. The vote
+      # history writer had one - a four-argument wrapper that filled
+      # `prevote_hash` and `precommit_hash` with `None`. Had any production
+      # path ever picked it over the real writer it would have erased the two
+      # marks that stop a restarted validator from signing a second hash at a
+      # height it already voted on, and the test next to it would still have
+      # passed. Dropping `--all-targets` asks rustc the one question the line
+      # above cannot: is this item reachable in the library we actually ship.
+      - name: Clippy (lib only - no test target to prop dead code up)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --lib -- -D warnings
       - name: Clippy pedantic/nursery ratchet (izleme modu)
         if: always() && steps.rust.outcome == 'success'
         # Warning visibility + ratchet against count growth (baseline 191,
@@ -454,13 +439,14 @@ jobs:
           cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- clippy-extra-report /tmp/clippy-extra.json
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- clippy-extra /tmp/clippy-extra.json
       - name: Format
+        id: format
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --all -- --check
       # Same reason as the build surface in rust.yml: `cargo fmt --check` prints a
       # diff to stdout, and stdout is on the log host. Here it is an annotation,
       # so the fix is mechanical even from a sandbox that cannot read logs.
       - name: Format diff surface (annotations)
-        if: failure()
+        if: failure() && steps.format.outcome == 'failure'
         run: |
           set +o pipefail
           # A check run keeps ten annotations and drops the earlier ones, so the
@@ -533,7 +519,8 @@ jobs:
   gates:
     name: Gates (a suite that cannot run is not a protection)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # Full gate suite measured ~80m on b441ed62; give headroom without changing any gate.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -545,25 +532,7 @@ jobs:
           toolchain: "1.97.1"
           components: clippy, rustfmt
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Audit Guard aggregation (the gate itself must be alive)
         run: |
           set -euo pipefail
@@ -945,34 +914,6 @@ jobs:
         run: |
           cargo clippy --manifest-path crates/ai-inference/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path crates/ai-inference/Cargo.toml
-      # The B.U.D. core (bud/) was in the same silent hole: bud-core with 103 modules
-      # -- ALL of B.U.D. 1.0/2.0/3.0 -- was built by no CI job,
-      # because it is not a member of the root workspace and no step pointed
-      # was not looked at. Measured: `clippy --features bud3 --all-targets -D warnings`
-      # -> 91 violations, among them real nested bugs (an if with identical branches,
-      # a lost Vec capacity, a misplaced cfg gate).
-      #
-      # All three configurations run because the versions are split by feature:
-      # default (bud2) and bud3 compile different module sets, while no-default
-      # what falls outside both. Skipping a configuration is exactly the
-      # would hide the "a 3.0 module leaked into the 2.0 build" bug found this
-      # would leave behind.
-      # `cargo fmt --all` scans the root workspace; because `bud/` is not a member of it
-      # there was no formatting check in this tree. Measured: 119
-      # 103 of the files had drifted from rustfmt output. Formatting does not change
-      # behaviour, but an unchecked tree becomes unreadable over time and
-      # telling a real change from noise gets harder. The tree was fixed once
-      # (`2c95cfe2`); this step prevents it drifting back.
-      - name: B.U.D. core is formatted
-        if: always() && steps.build.outcome == 'success'
-        run: cargo fmt --manifest-path bud/Cargo.toml --all -- --check
-      - name: B.U.D. core builds and its tests pass
-        if: always() && steps.build.outcome == 'success'
-        run: |
-          cargo clippy --manifest-path bud/Cargo.toml --all-targets -- -D warnings
-          cargo clippy --manifest-path bud/Cargo.toml --features bud3 --all-targets -- -D warnings
-          cargo clippy --manifest-path bud/Cargo.toml --no-default-features --all-targets -- -D warnings
-          cargo test --manifest-path bud/Cargo.toml --features bud3
       # `slice[i]` stops the process under the release profile (panic = abort); that is
       # the same liveness class as `unwrap`. 66 files in the tree carry this debt and
       # most of them in index-heavy parsers (RLP/MPT/erasure), and converting those to iterators
@@ -1114,7 +1055,13 @@ jobs:
           exit 1
 
       - name: Canary surface (annotations)
-        if: failure()
+        # A tally can only surface a verdict that was already cast: the
+        # self-test below runs the whole suite a second time, and on a machine
+        # without actionlint or typos it fails on the tools and reports that as
+        # a gate defect. Measured 2026-11-25: a green suite went red only
+        # because this step ran its self-test on a runner where those two
+        # binaries are absent. So it runs when a gate step actually failed.
+        if: failure() && steps.build.outcome == 'success'
         run: |
           set +o pipefail
           tmp=$(mktemp)
@@ -1191,25 +1138,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Gate canary (proof it is not vacuous)
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud-e2e --self-test
       - name: bud_e2e - 9 invariants + 3 e2e (name canary)
@@ -1236,25 +1165,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Economy invariant gate canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- economy-invariants --self-test
       - name:  named invariant tests
@@ -1282,25 +1193,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Fork-choice gate canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- fork-choice --self-test
       - name:  fork-choice tests
@@ -1327,25 +1220,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: StorageProvider gate canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-provider --self-test
       # The proof-boundary script existed in ops/scripts/ but no job ran it, so it
@@ -1380,25 +1255,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Node classification gate canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- node-classification --self-test
       - name:  node classification tests
@@ -1425,25 +1282,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Testnet runtime hardening gate
         run: |
           set -euo pipefail
@@ -1512,25 +1351,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: PoA compliance gate self-test
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- poa-compliance --self-test
       - name:  PoA compliance tests
@@ -1556,25 +1377,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Governance invariant gate self-test
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- governance-invariants --self-test
       - name:  governance invariant tests
@@ -1604,25 +1407,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: PQ core gate self-test
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-core-gate --self-test
       - name: PQ core tests
@@ -1677,12 +1462,12 @@ jobs:
           cargo build --manifest-path crates/wallet-core/Cargo.toml --lib --release \
             --target wasm32-unknown-unknown --features wasm
 
-  # ============================ Mobile core (WP-11) ============================
+  # ============================ Mobile core ============================
   mobile-core:
     # The mobile validator core is its own crate so a phone does not link
     # budlum-core. Root `cargo test --lib` never runs it. Without this job a
     # break in custody proofs, presence, quota or relay switch stays green.
-    name: Mobile core (WP-11)
+    name: Mobile core
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -1710,7 +1495,7 @@ jobs:
         run: cargo test --manifest-path mobile/core/Cargo.toml --locked
 
   mobile-core-targets:
-    # WP-11 job 2 names five phone targets and the card's test
+    # Cross-check five mobile targets and run the host test suite
     # `mobile_core_builds_for_all_targets` is this job. A host-only build hides
     # a target break (a pointer-width assumption on armv7, a dependency with no
     # Android or iOS support) until somebody tries a phone build. The library
@@ -1751,13 +1536,13 @@ jobs:
         run: cargo build --manifest-path mobile/core/Cargo.toml --locked --lib --target "$TARGET"
 
   mobile-ffi:
-    # WP-11 job 2: the Kotlin and Swift bindings of the mobile core come from
+    # The Kotlin and Swift bindings of the mobile core come from
     # mobile/ffi. Besides format, clippy and tests, the job builds the shared
     # library and generates both bindings from it with the pinned generator,
     # so a type UniFFI cannot express fails here and not in the app builds.
     # The phone targets are type-checked only: linking the cdylib needs the
-    # NDK and Xcode, which belong to the app jobs (WP-36, WP-38).
-    name: Mobile FFI bindings (WP-11)
+    # NDK and Xcode, which belong to the mobile app build jobs.
+    name: Mobile FFI bindings
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -1882,6 +1667,7 @@ jobs:
           workspaces: |
             crates/bpqs
             crates/bud-codec
+            crates/budlum-nipopow
             crates/note-packing
             crates/uel-abi
             execution/budzero
@@ -1900,25 +1686,7 @@ jobs:
       - id: protoc
         name: Install protoc
         if: always() && steps.rust.outcome == 'success'
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Format (bpqs)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path crates/bpqs/Cargo.toml --all -- --check
@@ -2033,6 +1801,13 @@ jobs:
       - name: Tests (uel-abi)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo test --manifest-path crates/uel-abi/Cargo.toml
+      - name: Tests (budlum-nipopow)
+        # The crate is not a dependency of the root package, so `cargo test
+        # --lib` at the root never compiles it and its proof verification
+        # tests would never run. Named here for the same reason the other
+        # standalone crates are: an unbuilt test is not evidence.
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path crates/budlum-nipopow/Cargo.toml
       - name: Tests (ee-mock)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo test --manifest-path execution/mock/Cargo.toml
@@ -2095,25 +1870,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Gate canary (proof it is not vacuous)
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- bns-gate --self-test
       - name: bns - 8 tests (name canary)
@@ -2153,25 +1910,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: PoA isolation tests (7 tests, 5 leak scenarios)
         run: |
           # pipefail: `tee` alone returns 0, and seven passing tests next to
@@ -2253,12 +1992,11 @@ jobs:
             cargo install --locked --version 0.20.2 cargo-deny
           fi
           cargo deny --version
-      - name: cargo deny check remaining 13 manifests
+      - name: cargo deny check remaining 12 manifests
         run: |
           set -euo pipefail
           entries=(
             "budzero|budzero/Cargo.toml|"
-            "bud|bud/Cargo.toml|--config .quality/deny.toml"
             "fuzz|fuzz/Cargo.toml|--config .quality/deny-fuzz.toml"
             "ai-inference|crates/ai-inference/Cargo.toml|--config .quality/deny.toml"
             "bpqs|crates/bpqs/Cargo.toml|--config .quality/deny.toml"
@@ -2337,13 +2075,12 @@ jobs:
           fi
           echo "Canary rejected as expected; the gate evaluates licences."
 
-      - name: Check licences across all 14 manifests
+      - name: Check licences across all 13 manifests
         run: |
           set -euo pipefail
           entries=(
             "root|./Cargo.toml|--config .quality/deny.toml"
             "budzero|budzero/Cargo.toml|"
-            "bud|bud/Cargo.toml|--config .quality/deny.toml"
             "fuzz|fuzz/Cargo.toml|--config .quality/deny-fuzz.toml"
             "ai-inference|crates/ai-inference/Cargo.toml|--config .quality/deny.toml"
             "bpqs|crates/bpqs/Cargo.toml|--config .quality/deny.toml"
@@ -2381,7 +2118,6 @@ jobs:
           entries=(
             "root|./Cargo.toml|--config .quality/deny.toml"
             "budzero|budzero/Cargo.toml|"
-            "bud|bud/Cargo.toml|--config .quality/deny.toml"
             "fuzz|fuzz/Cargo.toml|--config .quality/deny-fuzz.toml"
             "ai-inference|crates/ai-inference/Cargo.toml|--config .quality/deny.toml"
             "bpqs|crates/bpqs/Cargo.toml|--config .quality/deny.toml"
@@ -2416,7 +2152,7 @@ jobs:
           done
 
   fuzz-quick:
-    #  + : mevcut target'lar + 3 yeni (consensus/relayer/zk).
+    # Covers all active fuzz targets including consensus, relayer, and zk.
     # Long runs are handled by fuzz-nightly.yml (schedule, 4h/target, corpus cache).
     # Quick: 60s/target (10 targets x 60s ~ 10min + build; timeout-minutes 60).
     name: Fuzz Quick (60s x 12 targets)
@@ -2432,25 +2168,7 @@ jobs:
           # Pin this nightly to avoid the later compiler ICE in p3-goldilocks.
           toolchain: nightly-2026-10-09
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: fuzz
@@ -2498,6 +2216,11 @@ jobs:
             # Light-client header segment linking: one hash per header and at
             # most 32 headers per input.
             light_client_header_chain
+            # The Garden invite decoder reads phone-facing text: a version,
+            # fixed-width fields, then lengths the body itself declares. One
+            # decode is cheap, so the sixty-second budget fits it beside the
+            # other fast parsers.
+            garden_invite_record_decode
           )
           # evm_rlp_decode and evm_mpt_verify run in fuzz-nightly.yml. This
           # comment used to say "nightly/manual" while the nightly matrix did
@@ -2520,28 +2243,6 @@ jobs:
             cargo +nightly-2026-10-09 fuzz run "$t" -- -max_total_time=60 -timeout=25 -print_final_stats=1
           done
           echo "All fuzz targets clean."
-      - name: B.U.D. format fuzz (60s)
-        # bud/ is its own crate with its own fuzz/ directory, so cargo-fuzz
-        # has to run from bud/.
-        working-directory: bud
-        # The use-after-scope opt-out is scoped to this step only: ASan
-        # aborts inside vendored zstd 1.5.7 C code (zstd_opt.c reading its
-        # own getAllMatchesFns dispatch table, a global whose shadow is
-        # nevertheless f8 stack-use-after-scope poisoned - an
-        # instrumentation artifact in third-party C, no bud frame involved;
-        # bud itself is forbid(unsafe_code) and zstd is ASan-fuzzed
-        # upstream). The runtime option covers the Rust/LLVM objects, but
-        # a 2026-10-20 quick-fuzz run still aborted in the GCC-instrumented
-        # C objects: GCC emits that lifetime poisoning at compile time and
-        # does not honour detect_stack_use_after_scope=0 for it. The
-        # matching -fno-sanitize-address-use-after-scope CFLAGS entry is
-        # therefore also required; cc appends it after its default
-        # -fsanitize=address, so every other ASan check (heap/stack/global
-        # overflow, use-after-free) stays enabled for this target.
-        env:
-          ASAN_OPTIONS: detect_stack_use_after_scope=0
-          CFLAGS_x86_64_unknown_linux_gnu: -fno-sanitize-address-use-after-scope
-        run: cargo +nightly-2026-10-09 fuzz run fuzz_bud_format -- -max_total_time=60 -timeout=25 -print_final_stats=1
       - name: Crash artifact (varsa)
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -2619,8 +2320,8 @@ jobs:
         run: gitleaks detect --source . --config .gitleaks.toml --redact --verbose
 
   timing-safe:
-    # static scan for raw equality in RPC/crypto + dudect-style
-    # Istatistiksel zamanlama regresyon testi (cargo bench).
+    # Static scan for raw equality in RPC/crypto + dudect-style
+    # statistical timing regression benchmark (cargo bench).
     name: Timing-Safe Regression
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -2633,25 +2334,7 @@ jobs:
         with:
           toolchain: "1.97.1"
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-core
@@ -2762,14 +2445,16 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      code-quality: write
     # 45 minutes used to be enough and stopped being enough without the suite
     # getting slower: it got longer. The run on `7535554` was still walking the
     # suite at 44 minutes (2383 of 4355 tests at 17 minutes, plus the instrumented
     # build, plus a single cold-quorum test that took over a minute), and the
-    # runner cancelled it at 45:00 - a green suite reported as a red gate. The
-    # budget is raised, the ratchet is untouched.
-    timeout-minutes: 90
+    # runner cancelled it at 45:00 - a green suite reported as a red gate. At
+    # `b441ed62` the suite reached 6739 budlum library tests (passing the
+    # coverage ratchet in 81m 39s) plus 661 budzero workspace tests, so 90:00
+    # cancelled the job inside the budzero pass. The budget is raised, the
+    # ratchet is untouched.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2780,25 +2465,7 @@ jobs:
           toolchain: "1.97.1"
           components: llvm-tools-preview
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-core
@@ -2941,6 +2608,20 @@ jobs:
             n=$((n + 1))
           done < <(find . -name Cargo.lock -not -path '*/target/*' | sort)
           echo "lock freshness: $n workspace lockfile(s) verified."
+      - name: Gate source provenance canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --self-test
+      - name: Gate source provenance
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance
+      # One push to a branch that heads an open pull request queues every
+      # workflow that triggers on that event, and the pool those jobs share is
+      # finite. The budget this gate pins is what keeps the queue shorter than
+      # the interval between pushes, so a run can reach a conclusion instead of
+      # being cancelled by the commit behind it. The canary runs first: a gate
+      # that cannot fail proves nothing.
+      - name: Pull-request fan-out budget canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-pull-request-fanout-is-budgeted --self-test
+      - name: Pull-request fan-out is budgeted
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-pull-request-fanout-is-budgeted
       - name: Rust gates canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all --self-test
       - name: Rust gates
@@ -3033,6 +2714,10 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes
+      - name: internal identifier and commit identity gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-internal-ids --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-internal-ids
       # BudZero proofs are STARKs and rest on a hash only. A Groth16, KZG or
       # BN254 crate in any manifest, or a verifier arm for the external labels,
       # would put a pairing assumption on a verification path.
@@ -3132,25 +2817,7 @@ jobs:
       # did not, because until the steps above stopped failing no run had ever
       # reached this step. It failed with `Could not find protoc` from build.rs.
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       # the size, QC blob and daily traffic tables of docs/pq/MEASUREMENTS.md come
       # from the node library (examples/pq_measure.rs) and must be current. The timings
       # depend on the machine: they are produced here and uploaded, never compared.
@@ -3609,7 +3276,7 @@ jobs:
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --manifest-path crates/budlum-types/Cargo.toml --locked
 
-# WP-04 / WP-42 continuation: the integrated tree is checked without a Rust
+# The integrated tree is checked without a Rust
   # toolchain. Several open pull requests are merged into one branch here, and
   # a merge can break a cross-file table without breaking any single file.
   # The self-test injects a real violation for every check, then the plain run
@@ -3682,3 +3349,11 @@ jobs:
           set -euo pipefail
           cargo test --test garden_scenario -- --test-threads=1 2>&1 | tee /tmp/garden-scenario.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- garden-scenario /tmp/garden-scenario.txt
+      # Directive section 11 names six more acceptance steps than the eleven of
+      # section 9. They live in their own file because they start their own
+      # Gardens; running them here is what makes the directive's list a
+      # measurement rather than a description.
+      - name: Garden acceptance (directive section 11 names, real nodes)
+        run: |
+          set -euo pipefail
+          cargo test --test garden_acceptance -- --test-threads=1 2>&1 | tee /tmp/garden-acceptance.txt

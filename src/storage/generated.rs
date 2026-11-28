@@ -188,7 +188,7 @@ pub enum ContentSource {
     /// (`ViewGrantRegistry`). Putting the seed on a public chain under Three
     /// would make the "private" label a lie (threat T1).
     ///
-    /// Registration does **not** run the recipe (no seed). Reveal-time
+    /// Registration does **not** run the generator (no seed). Reveal-time
     /// `generate_and_verify` with the granted seed is the check that the
     /// commitment was honest.
     SealedGenerated(SealedGeneratedSpec),
@@ -220,7 +220,7 @@ pub enum ContentSource {
     /// The bytes are a region of another object this chain holds.
     ///
     /// The case `Generated` cannot honestly express. A generated object's
-    /// recipe is self-sufficient: the seed is on chain and the bytes follow
+    /// The generator is self-sufficient: the seed is on chain and the bytes follow
     /// from it. A derived object's recipe is not - it names a master, and if
     /// that master goes away the derivation cannot be produced at all.
     ///
@@ -327,7 +327,11 @@ pub const fn required_replica_count(source: &ContentSource, full_target: u8) -> 
 pub fn held_bytes(source: &ContentSource, object_bytes: u64) -> Option<u64> {
     match source {
         ContentSource::Stored => Some(object_bytes),
-        ContentSource::Generated(_) | ContentSource::SealedGenerated(_) => Some(0),
+        // Nothing is held for generated/sealed objects or derivations; a derivation's
+        // master bytes are held under the master's own manifest and paid for there.
+        ContentSource::Generated(_)
+        | ContentSource::SealedGenerated(_)
+        | ContentSource::Derived(_) => Some(0),
         ContentSource::Hybrid { prefix_bytes, .. } => {
             let prefix = u64::from(*prefix_bytes);
             if prefix > object_bytes {
@@ -336,9 +340,6 @@ pub fn held_bytes(source: &ContentSource, object_bytes: u64) -> Option<u64> {
                 Some(prefix)
             }
         }
-        // Nothing is held for the derivation itself; the bytes it is a region
-        // of are held under the master's own manifest and paid for there.
-        ContentSource::Derived(_) => Some(0),
     }
 }
 
@@ -405,6 +406,16 @@ impl SealedGeneratedSpec {
             return Err(format!(
                 "sealed recipe output_len {} is over the {MAX_GENERATED_BYTES} byte ceiling",
                 self.output_len
+            ));
+        }
+        if self.recipe_commitment == [0u8; 32] {
+            return Err("sealed spec commitment must be non-zero".into());
+        }
+        let floor = self.output_len.saturating_mul(STEPS_PER_OUTPUT_BYTE);
+        if self.step_budget < floor {
+            return Err(format!(
+                "sealed spec step_budget {} is below the per-byte floor {floor}",
+                self.step_budget
             ));
         }
         let ceiling = STEP_BUDGET_BASE
@@ -707,14 +718,8 @@ fn clamp_u8(v: i32) -> u8 {
 /// It is written as a conversion rather than a cast for the same reason as
 /// [`clamp_i32`]: a silent wrap here would produce a wrong colour that still
 /// hashed consistently, which is the failure this module exists to avoid.
-const fn clamp_i32_from_i64(v: i64) -> i32 {
-    if v > i32::MAX as i64 {
-        i32::MAX
-    } else if v < i32::MIN as i64 {
-        i32::MIN
-    } else {
-        v as i32
-    }
+fn clamp_i32_from_i64(v: i64) -> i32 {
+    i32::try_from(v).unwrap_or_else(|_| if v.is_negative() { i32::MIN } else { i32::MAX })
 }
 
 /// Draw the bytes a spec describes.
@@ -1649,5 +1654,30 @@ mod tests {
         assert!(!recipe_seed_is_public(&ContentSource::SealedGenerated(
             SealedGeneratedSpec::seal(&full)
         )));
+    }
+
+    #[test]
+    fn sealed_generated_public_bounds_refuse_zero_commitment_and_unopenable_step_budget() {
+        let valid = SealedGeneratedSpec::seal(&GeneratedSpec {
+            generator: GeneratorId::Gradient,
+            seed: [0x42; 32],
+            output_len: 64,
+            step_budget: 256,
+        });
+        assert!(valid.check_public_bounds().is_ok());
+
+        let mut zero_commit = valid.clone();
+        zero_commit.recipe_commitment = [0u8; 32];
+        assert!(
+            zero_commit.check_public_bounds().is_err(),
+            "all-zero sealed spec commitment must be refused"
+        );
+
+        let mut under_budget = valid;
+        under_budget.step_budget = 63; // strictly less than output_len (64)
+        assert!(
+            under_budget.check_public_bounds().is_err(),
+            "sealed step_budget below output_len cannot ever open and must be refused"
+        );
     }
 }

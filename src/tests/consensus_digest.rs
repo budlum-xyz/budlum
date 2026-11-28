@@ -5,7 +5,7 @@
 //! byte for byte identical across Linux, macOS and Windows".
 //!
 //! The method: a four-block scenario is run with fixed-seed keys, a fixed
-//! genesis_time and a fixed transaction plan. After each block
+//! `genesis_time` and a fixed transaction plan. After each block
 //! `calculate_state_root` and the transaction order of the block are recorded,
 //! and the final account state (balance and nonce) is dumped over a fixed address
 //! list. Every observation is reduced with SHA-256 to a single
@@ -85,8 +85,8 @@ fn run_scenario() -> Vec<String> {
     let addrs = [alice, bob, carol];
     let mut nonces = [0u64; 3];
 
-    for plan in rounds.iter() {
-        for &(from_i, to_i, amount, fee) in plan.iter() {
+    for plan in &rounds {
+        for &(from_i, to_i, amount, fee) in *plan {
             let mut tx = Transaction::new_with_fee(
                 addrs[from_i],
                 addrs[to_i],
@@ -146,8 +146,8 @@ mod tests {
 
     /// The cross-platform digest production for CI. It runs under `--nocapture`
     /// and the workflow collects the `CONSENSUS_DIGEST=` line. The two-round
-    /// equality assert inside the test catches in-process nondeterminism (HashMap
-    /// or HashSet iteration, for instance) on the spot; equality across platforms
+    /// equality assert inside the test catches in-process nondeterminism (`HashMap`
+    /// or `HashSet` iteration, for instance) on the spot; equality across platforms
     /// is the business of the compare job in determinism.yml.
     #[test]
     fn consensus_scenario_digest_cross_platform() {

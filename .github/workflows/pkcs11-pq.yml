@@ -7,26 +7,24 @@ name: PKCS#11 3.2 post-quantum token
 # software token (src/crypto/mainnet_policy.rs).
 
 on:
+  pull_request:
+    # Pull requests into the product branch still pay the full battery; the
+    # daily integration pull request into `main` does not - that path is
+    # budgeted by `ci-pull-request-fanout-is-budgeted` and the evidence-window
+    # owner dispatches this workflow on the wave head instead.
+    branches: [consensus-of-consensuses]
+  workflow_dispatch:
   push:
     branches: [main]
-  # Heavy battery. It runs on pull requests to `main` (the PR that merges the
-  # stack), on the schedule and on demand. A stacked pull request (base
-  # `testnet-quantum` or `testnet`) runs the PR gates in ci.yml,
-  # security-audit.yml, semgrep.yml and the other light workflows, and skips the
-  # jobs of this file through the job-level condition: GitHub evaluates the
-  # `branches` filter of a stacked pull request against the root of the stack,
-  # so the filter alone does not keep it out. This keeps one push from queueing
-  # more work than the shared runner pool can finish before the next push cancels it.
-  pull_request:
-    branches: [main, consensus-of-consensuses]
-  # On demand: an operator can start this battery on a branch without
-  # pushing to it, which is how a blocked stack gets its heavy evidence
-  # when the queue is empty enough to take one more run.
-  workflow_dispatch:
+  # Heavy battery. It runs on demand (the evidence-window
+  # owner dispatches it on the wave head) and on pushes to `main`. It is out
+  # of the pull-request path on purpose: one push was queueing more work than
+  # the shared runner pool could finish, and the budget gate
+  # `ci-pull-request-fanout-is-budgeted` pins that path's size.
 
 concurrency:
   group: pkcs11-pq-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 permissions:
   contents: read
@@ -37,9 +35,8 @@ env:
 
 jobs:
   kryoptic-pq-token:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
+    # Heavy battery: out of the pull-request path on purpose. See the note at
+    # the top of the file.
     name: Software token with PKCS#11 3.2 (kryoptic)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -55,25 +52,10 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install build dependencies
+        run: python3 .github/scripts/install_protoc.py
+      - name: Install build deps (clang, sqlite, perl)
         run: |
           set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
           if [ -f /etc/apt/apt-mirrors.txt ]; then
             printf 'http://azure.archive.ubuntu.com/ubuntu/\n' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           fi

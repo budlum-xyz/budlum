@@ -1,7 +1,7 @@
 //! Storage deal lifecycle state machine.
 //!
-//! This pure module models the spec-frozen lifecycle before it is wired into the
-//! Existing `StorageRegistry`: Open → Proving → Challenged → terminal outcomes.
+//! This pure module models the spec-frozen lifecycle wired into the
+//! storage deal table: Open -> Proving -> Challenged -> terminal outcomes.
 
 use serde::{Deserialize, Serialize};
 

@@ -148,6 +148,14 @@ pub struct ZkVmFinalityAdapter {
     /// The pinned chain id: a proof under
     /// another chain's id attests another chain's state.
     chain_id: Option<u64>,
+    /// Optional state-continuity pin: when configured, `inputs.initial_state_root`
+    /// must match this non-zero parent root in constant time before any STARK
+    /// verification work executes.
+    pinned_initial_state_root: Option<[u8; 32]>,
+    /// Optional data-availability commitment pin: when configured,
+    /// `inputs.state_writes_digest` must match this non-zero commitment in
+    /// constant time before any STARK verification work executes.
+    pinned_da_commitment: Option<[u8; 32]>,
     /// Whether the AIR binds `chain_id` to execution rather than only to a
     /// prover-chosen witness column on the first row. Production constructors
     /// keep this `false` until the VM and AIR expose and constrain a chain-id
@@ -165,6 +173,8 @@ impl ZkVmFinalityAdapter {
             network: network.to_string(),
             program_hash,
             chain_id,
+            pinned_initial_state_root: None,
+            pinned_da_commitment: None,
             chain_id_bound_in_air: false,
             descriptor: AdapterDescriptor {
                 id,
@@ -193,6 +203,29 @@ impl ZkVmFinalityAdapter {
         self
     }
 
+    /// Pins the expected pre-transition state root so a valid proof generated
+    /// from an unrelated parent state is refused before STARK verification.
+    /// An all-zero root is kept and refused fail-closed on verification.
+    ///
+    /// Convenience: exposed for stateful rollup continuity verification.
+    #[must_use]
+    pub const fn with_expected_initial_state_root(mut self, root: [u8; 32]) -> Self {
+        self.pinned_initial_state_root = Some(root);
+        self
+    }
+
+    /// Pins the expected data-availability commitment (`state_writes_digest`)
+    /// so a proof that withholds or substitutes published state writes is
+    /// refused before STARK verification. An all-zero commitment is refused
+    /// fail-closed.
+    ///
+    /// Convenience: exposed for DA-bound validity-proof verification.
+    #[must_use]
+    pub const fn with_expected_da_commitment(mut self, commitment: [u8; 32]) -> Self {
+        self.pinned_da_commitment = Some(commitment);
+        self
+    }
+
     #[cfg(test)]
     #[must_use]
     fn with_air_chain_id_binding_for_test(mut self) -> Self {
@@ -206,6 +239,10 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
         self.descriptor.clone()
     }
 
+    fn has_pinned_trust_anchor(&self) -> bool {
+        self.program_hash.is_some() && self.chain_id.is_some()
+    }
+
     fn verify(
         &self,
         evidence: &RawConsensusEvidence,
@@ -215,6 +252,11 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
             return Err(AdapterError::WrongAdapter {
                 expected: self.descriptor.name.clone(),
                 found: "another adapter".to_string(),
+            });
+        }
+        if self.network.trim().is_empty() {
+            return Err(AdapterError::ConsensusRule {
+                rule: "ZkVm network identifier must not be empty".to_string(),
             });
         }
         if evidence.network != self.network {
@@ -271,6 +313,24 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
                 reason: "a proven attestation has no depth; this caller asked for one".to_string(),
             });
         }
+        if policy.require_slashable {
+            return Err(AdapterError::UnslashableBacking);
+        }
+        if policy.max_age > 0 {
+            if decoded.inputs.block_height > policy.now {
+                return Err(AdapterError::Stale {
+                    age: decoded.inputs.block_height - policy.now,
+                    max_age: policy.max_age,
+                });
+            }
+            let age = policy.now - decoded.inputs.block_height;
+            if age > policy.max_age {
+                return Err(AdapterError::Stale {
+                    age,
+                    max_age: policy.max_age,
+                });
+            }
+        }
 
         // Empty or bare `[Halt]` bytecode performs zero computation and cannot
         // attest an external state transition.
@@ -280,28 +340,73 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
             });
         }
 
-        // The verification itself. All three parts go in; the verifier is the
-        // chain's own STARK verifier, not a reimplementation. It runs under
-        // the default activation state and then requires the proven program
-        // to be in the canonical set. The proof and the opcode gate come
-        // first, so a staged opcode is refused as "not activated" even when
-        // its program is canonical.
-        bud_proof::DefaultAdapter::verify_canonical_program(
-            &decoded.envelope,
-            &decoded.inputs,
-            &decoded.program,
-        )
-        .map_err(|e| AdapterError::Crypto { what: describe(&e) })?;
+        // Cheap constant-time and bounds prechecks run BEFORE expensive STARK
+        // verification so a peer submitting malformed metadata, an unactivated
+        // opcode, a non-canonical program, or an unpinned/mismatched program,
+        // chain id, parent root, or DA commitment burns zero FRI/FFT CPU.
+        use subtle::ConstantTimeEq;
+        if bool::from(decoded.inputs.program_hash.ct_eq(&[0u8; 32])) {
+            return Err(AdapterError::ConsensusRule {
+                rule: "zero program hash cannot attest a state transition".to_string(),
+            });
+        }
+        if decoded.inputs.chain_id == 0 {
+            return Err(AdapterError::ConsensusRule {
+                rule: "zero chain id cannot attest an external domain".to_string(),
+            });
+        }
+        if decoded.inputs.gas_used > decoded.inputs.gas_limit {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!(
+                    "gas used {} exceeds declared gas limit {}",
+                    decoded.inputs.gas_used, decoded.inputs.gas_limit
+                ),
+            });
+        }
+        if decoded.inputs.trace_len == 0 {
+            return Err(AdapterError::ConsensusRule {
+                rule: "zero-length execution trace cannot attest a state root".to_string(),
+            });
+        }
 
-        // The proof must be of THIS domain's
-        // pinned program and chain. Canonical-set membership alone let any
-        // canonical program attest anything its inputs named.
+        // Preserve exact opcode-gate-then-canonicality refusal ordering before
+        // touching the STARK proof bytes.
+        let activation = bud_isa::MainnetActivation::default();
+        for &word in &decoded.program {
+            if let Ok(instruction) = bud_isa::Instruction::decode_any(word) {
+                if !activation.allows(instruction.opcode) {
+                    return Err(AdapterError::Crypto {
+                        what: format!("opcode {:?} is not activated", instruction.opcode),
+                    });
+                }
+            }
+        }
+        let derived_program_hash = bud_proof::canonical_set::program_hash_of(&decoded.program);
+        if !bool::from(decoded.inputs.program_hash.ct_eq(&derived_program_hash)) {
+            return Err(AdapterError::Crypto {
+                what: describe(&VerifyError::PublicInputsMismatch),
+            });
+        }
+        if !bud_proof::canonical_set::is_canonical_program_hash(&derived_program_hash) {
+            return Err(AdapterError::Crypto {
+                what: describe(&VerifyError::NonCanonicalProgram(derived_program_hash)),
+            });
+        }
+
+        // Pin gates run before STARK verification: a missing, zero, or
+        // mismatched pin is rejected in microseconds without running FRI.
         let Some(program_hash) = self.program_hash else {
             return Err(AdapterError::ConsensusRule {
                 rule: "no program hash pinned; ZkVm admission is closed".to_string(),
             });
         };
-        if decoded.inputs.program_hash != program_hash {
+        if bool::from(program_hash.ct_eq(&[0u8; 32])) {
+            return Err(AdapterError::ConsensusRule {
+                rule: "pinned program hash cannot be all zeros; ZkVm admission is closed"
+                    .to_string(),
+            });
+        }
+        if !bool::from(decoded.inputs.program_hash.ct_eq(&program_hash)) {
             return Err(AdapterError::ConsensusRule {
                 rule: "the proved program is not the pinned program".to_string(),
             });
@@ -309,15 +414,18 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
         // chain_id is a prover-chosen public input today: the AIR binds
         // COL_CHAIN_ID to public_inputs[0] only, the high limb in
         // public_inputs[1] is unconstrained, and the VM has no chain-id
-        // syscall, so nothing ties the declared id to the execution. A
-        // proof of one chain's state can be re-proved under another
-        // chain's id. Until the AIR binds chain_id to the trace,
-        // production admission remains closed.
+        // syscall, so nothing ties the declared id to the execution. Until
+        // the AIR binds chain_id to the trace, production admission stays closed.
         let Some(chain_id) = self.chain_id else {
             return Err(AdapterError::ConsensusRule {
                 rule: "no chain id pinned; ZkVm admission is closed".to_string(),
             });
         };
+        if chain_id == 0 {
+            return Err(AdapterError::ConsensusRule {
+                rule: "pinned chain id cannot be zero; ZkVm admission is closed".to_string(),
+            });
+        }
         if decoded.inputs.chain_id != chain_id {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -326,11 +434,49 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
                 ),
             });
         }
+        if let Some(expected_initial) = self.pinned_initial_state_root {
+            if bool::from(expected_initial.ct_eq(&[0u8; 32])) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "expected initial state root cannot be all zeros".to_string(),
+                });
+            }
+            if !bool::from(decoded.inputs.initial_state_root.ct_eq(&expected_initial)) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "initial state root breaks state continuity with expected parent root"
+                        .to_string(),
+                });
+            }
+        }
+        if let Some(expected_da) = self.pinned_da_commitment {
+            if bool::from(expected_da.ct_eq(&[0u8; 32])) {
+                return Err(AdapterError::ConsensusRule {
+                    rule: "expected data-availability commitment cannot be all zeros".to_string(),
+                });
+            }
+            if bool::from(decoded.inputs.state_writes_digest.ct_eq(&[0u8; 32]))
+                || !bool::from(decoded.inputs.state_writes_digest.ct_eq(&expected_da))
+            {
+                return Err(AdapterError::ConsensusRule {
+                    rule:
+                        "state writes digest does not match expected data-availability commitment"
+                            .to_string(),
+                });
+            }
+        }
         if !self.chain_id_bound_in_air {
             return Err(AdapterError::ConsensusRule {
                 rule: "chain id is not bound to execution; ZkVm admission is closed".to_string(),
             });
         }
+
+        // Full Plonky3 STARK + canonical-set verification runs only after every
+        // cheap structural, pin, continuity, and DA precondition has passed.
+        bud_proof::DefaultAdapter::verify_canonical_program(
+            &decoded.envelope,
+            &decoded.inputs,
+            &decoded.program,
+        )
+        .map_err(|e| AdapterError::Crypto { what: describe(&e) })?;
 
         Ok(FinalityAttestation {
             adapter: self.descriptor.id,
@@ -901,6 +1047,14 @@ mod tests {
             matches!(err, AdapterError::ConsensusRule { .. }),
             "got: {err:?}"
         );
+        // Unslashable ZK backing must fail closed when require_slashable is set.
+        let mut slash_policy = VerificationPolicy::proven(0);
+        slash_policy.require_slashable = true;
+        let err = adapter.verify(&evidence, &slash_policy).unwrap_err();
+        assert!(
+            matches!(err, AdapterError::UnslashableBacking),
+            "require_slashable=true on ZkVm must return UnslashableBacking, got: {err:?}"
+        );
     }
 
     #[test]
@@ -943,6 +1097,191 @@ mod tests {
         assert!(matches!(
             ZkFinalityEvidence::decode(&forged),
             Err(AdapterError::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn pre_stark_gates_enforce_parent_continuity_da_pin_and_gas_bounds() {
+        let program = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("canonical build");
+        let pinned_hash = bud_proof::canonical_set::program_hash_of(&program);
+        let base = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1))
+            .with_air_chain_id_binding_for_test();
+        let raw = honest_evidence(&base, program);
+        let ev = ZkFinalityEvidence::decode(&raw.payload).expect("decodes");
+        let policy = VerificationPolicy::proven(ev.inputs.block_height + 1);
+
+        // Stateless canonical program verifies cleanly with default unpinned roots.
+        base.verify(&raw, &policy)
+            .expect("canonical proof verifies");
+
+        // Broken parent-state continuity is refused before STARK work.
+        let wrong_parent = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1))
+            .with_expected_initial_state_root([0xEE; 32]);
+        assert!(matches!(
+            wrong_parent.verify(&raw, &policy),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // Mismatched L1 DA / state_writes_digest is refused before STARK work.
+        let wrong_da = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1))
+            .with_expected_da_commitment([0xDD; 32]);
+        assert!(matches!(
+            wrong_da.verify(&raw, &policy),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // Zero pinned_program_hash, zero expected parent root, or zero DA pin fails closed.
+        let zero_pin = ZkVmFinalityAdapter::new("testnet", Some([0u8; 32]), Some(1));
+        assert!(matches!(
+            zero_pin.verify(&raw, &policy),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+        let zero_parent = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1))
+            .with_expected_initial_state_root([0u8; 32]);
+        assert!(matches!(
+            zero_parent.verify(&raw, &policy),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+        let zero_da = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1))
+            .with_expected_da_commitment([0u8; 32]);
+        assert!(matches!(
+            zero_da.verify(&raw, &policy),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        // Real non-zero pre-state commitment matches with_expected_initial_state_root.
+        let spec = crate::ai::FixedPointMlpSpec {
+            dims: vec![2, 3, 2],
+            weights: vec![1; 12],
+            biases: vec![0; 5],
+        };
+        let matmul =
+            crate::ai::execution::build_matmul_guest_program(&spec).expect("canonical matmul");
+        let matmul_hash = bud_proof::canonical_set::program_hash_of(&matmul);
+        let mut seeded_vm = bud_vm::Vm::new(65_536);
+        crate::ai::execution::setup_guest_memory(&mut seeded_vm.memory, &spec, &[5, 7])
+            .expect("seeds non-zero guest memory");
+        seeded_vm.context.block_height = 2;
+        let seeded_receipt = seeded_vm.run_receipt(&matmul);
+        assert!(seeded_receipt.success);
+        let seeded_init = bud_proof::initial_state_root_of(
+            bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(
+                &seeded_vm.trace,
+            )),
+            bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+                &seeded_vm.trace,
+            )),
+        );
+        assert_ne!(seeded_init, [0u8; 32]);
+        let seeded_inputs = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash: matmul_hash,
+            initial_state_root: seeded_init,
+            final_state_root: seeded_receipt.state_writes_digest,
+            sender: seeded_vm.context.sender,
+            nonce: seeded_vm.context.nonce,
+            block_height: 2,
+            gas_limit: seeded_vm.gas_limit,
+            gas_used: seeded_vm.gas_used,
+            exit_code: 0,
+            trace_len: u64::try_from(seeded_vm.trace.len()).expect("fits"),
+            event_digest: bud_proof::event_digest_from_events(&seeded_receipt.events),
+            state_writes_digest: seeded_receipt.state_writes_digest,
+        };
+        let seeded_env =
+            bud_proof::DefaultAdapter::prove(&seeded_vm.trace, &seeded_inputs, &matmul)
+                .expect("seeded STARK proves");
+        let seeded_raw = RawConsensusEvidence {
+            adapter: base.descriptor().id,
+            evidence_version: EVIDENCE_VERSION,
+            network: "testnet".to_string(),
+            payload: ZkFinalityEvidence {
+                envelope: seeded_env,
+                inputs: seeded_inputs,
+                program: matmul,
+            }
+            .encode()
+            .expect("encodes"),
+            declared_height: 2,
+            declared_root: seeded_receipt.state_writes_digest,
+            submitter: crate::core::address::Address([1; 32]),
+        };
+        let anchored = ZkVmFinalityAdapter::new("testnet", Some(matmul_hash), Some(1))
+            .with_air_chain_id_binding_for_test()
+            .with_expected_initial_state_root(seeded_init);
+        anchored
+            .verify(&seeded_raw, &VerificationPolicy::proven(3))
+            .expect("matching non-zero parent state root verifies");
+
+        // gas_used > gas_limit and trace_len == 0 are refused as ConsensusRule.
+        let mut bad_gas = ev.clone();
+        bad_gas.inputs.gas_used = bad_gas.inputs.gas_limit.saturating_add(1);
+        let mut raw_bad = raw.clone();
+        raw_bad.payload = bad_gas.encode().expect("encodes");
+        assert!(matches!(
+            base.verify(&raw_bad, &policy),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        let mut zero_trace = ev;
+        zero_trace.inputs.trace_len = 0;
+        raw_bad.payload = zero_trace.encode().expect("encodes");
+        assert!(matches!(
+            base.verify(&raw_bad, &policy),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+    }
+
+    #[test]
+    fn regression_max_age_past_and_future_and_empty_network() {
+        let program = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("canonical build");
+        let pinned_hash = bud_proof::canonical_set::program_hash_of(&program);
+        let base = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1))
+            .with_air_chain_id_binding_for_test();
+        let mut raw = honest_evidence(&base, program);
+        let mut ev = ZkFinalityEvidence::decode(&raw.payload).expect("decodes");
+        ev.inputs.block_height = 50;
+        raw.declared_height = 50;
+        raw.payload = ev.encode().expect("encodes");
+
+        // 1. Ancient proof beyond caller max_age window must be refused as Stale BEFORE FRI.
+        let mut stale_past = VerificationPolicy::proven(100);
+        stale_past.max_age = 10;
+        assert!(
+            matches!(
+                base.verify(&raw, &stale_past),
+                Err(AdapterError::Stale {
+                    age: 50,
+                    max_age: 10
+                })
+            ),
+            "ZkVm proof older than policy.max_age must fail closed with AdapterError::Stale"
+        );
+
+        // 2. Future block_height > policy.now when policy.max_age > 0 must be refused as Stale.
+        let mut stale_future = VerificationPolicy::proven(40);
+        stale_future.max_age = 10;
+        assert!(
+            matches!(
+                base.verify(&raw, &stale_future),
+                Err(AdapterError::Stale {
+                    age: 10,
+                    max_age: 10
+                })
+            ),
+            "ZkVm proof ahead of policy.now must fail closed with AdapterError::Stale"
+        );
+
+        // 3. Empty/whitespace network must be refused.
+        let blank = ZkVmFinalityAdapter::new("   ", Some(pinned_hash), Some(1));
+        let mut blank_raw = raw;
+        blank_raw.adapter = blank.descriptor().id;
+        blank_raw.network = "   ".to_string();
+        assert!(matches!(
+            blank.verify(&blank_raw, &VerificationPolicy::proven(50)),
+            Err(AdapterError::ConsensusRule { .. })
         ));
     }
 }

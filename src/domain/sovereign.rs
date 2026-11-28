@@ -25,12 +25,25 @@ fn nonzero_hash(value: &Hash32) -> bool {
     *value != [0u8; 32]
 }
 
+const fn is_bidi_or_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
 fn validate_label(field: &str, value: &str) -> Result<(), String> {
     let valid = !value.is_empty()
         && value.len() <= 64
         && !value.contains("..")
         && !value.contains('/')
-        && !value.bytes().any(|b| b == 0 || b.is_ascii_control());
+        && !value
+            .chars()
+            .any(|c| c.is_control() || is_bidi_or_invisible_format(c));
     if valid {
         Ok(())
     } else {
@@ -185,21 +198,33 @@ impl SovereignDomainTemplate {
 
     #[must_use]
     pub fn calculate_id(&self) -> Hash32 {
-        let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_SOVEREIGN_DOMAIN_TEMPLATE_V1");
-        hasher.update(self.domain_id.to_le_bytes());
-        hasher.update(format!("{:?}", self.class).as_bytes());
-        hasher.update(self.consensus_kind.as_bytes());
-        hasher.update(self.operator.as_bytes());
-        hasher.update([u8::from(self.requires_kyc)]);
-        hasher.update(self.compliance.root());
-        hasher.update([self.lifecycle.tag()]);
-        hasher.finalize().into()
+        let (class_tag, class_label): (u8, &[u8]) = match &self.class {
+            SovereignDomainClass::Cbdc => (1, &[]),
+            SovereignDomainClass::PublicSector => (2, &[]),
+            SovereignDomainClass::EnterprisePoa => (3, &[]),
+            SovereignDomainClass::Consortium => (4, &[]),
+            SovereignDomainClass::Custom(label) => (5, label.as_bytes()),
+        };
+        let consensus_bytes = self.consensus_kind.as_bytes();
+        crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_SOVEREIGN_DOMAIN_TEMPLATE_V1",
+            &self.domain_id.to_le_bytes(),
+            &[class_tag],
+            class_label,
+            &consensus_bytes,
+            self.operator.as_bytes(),
+            &[u8::from(self.requires_kyc)],
+            &self.compliance.root(),
+            &[self.lifecycle.tag()],
+        ])
     }
 
     #[must_use]
     pub fn verify_id(&self) -> bool {
-        self.template_id == self.calculate_id()
+        bool::from(subtle::ConstantTimeEq::ct_eq(
+            self.template_id.as_slice(),
+            self.calculate_id().as_slice(),
+        ))
     }
 
     /// Performs the requested operation.
@@ -427,6 +452,7 @@ impl SovereignDomainRegistry {
     pub fn root(&self) -> Hash32 {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_SOVEREIGN_DOMAIN_REGISTRY_V1");
+        hasher.update((self.templates.len() as u64).to_le_bytes());
         for (domain_id, template) in &self.templates {
             hasher.update(domain_id.to_le_bytes());
             hasher.update(template.template_id);
@@ -500,9 +526,9 @@ mod tests {
         assert!(sovereign.templates.contains_key(&7));
     }
 
-    /// A template presenting a PoS-registered domain as PoA must be refused.
+    /// A template presenting a PoS-registered domain as `PoA` must be refused.
     ///
-    /// The template is valid on its own (PoA plus KYC) and so is the domain;
+    /// The template is valid on its own (`PoA` plus KYC) and so is the domain;
     /// together they lie. Without the binding, a document telling an auditor
     /// "this domain is permissioned and KYC'd" could be produced.
     #[test]
@@ -713,5 +739,53 @@ mod tests {
             .validate_against_template(&template)
             .unwrap_err()
             .contains("too large"));
+    }
+
+    #[test]
+    fn sovereign_labels_refuse_bidi_overrides_and_template_id_is_length_prefixed() {
+        let ev = evidence();
+        let bad_tpl = SovereignDomainTemplate::new(
+            9,
+            SovereignDomainClass::Custom("bank\u{202E}spoof".into()),
+            ConsensusKind::PoA,
+            addr(1),
+            true,
+            ev.clone(),
+            DomainLifecycleState::Draft,
+        );
+        assert!(bad_tpl.validate().is_err());
+
+        // Distinct Custom class vs Custom consensus_kind boundaries never collide.
+        let t1 = SovereignDomainTemplate::new(
+            11,
+            SovereignDomainClass::Custom("ab".into()),
+            ConsensusKind::Custom("c".into()),
+            addr(2),
+            true,
+            ev.clone(),
+            DomainLifecycleState::Draft,
+        );
+        let t2 = SovereignDomainTemplate::new(
+            11,
+            SovereignDomainClass::Custom("a".into()),
+            ConsensusKind::Custom("bc".into()),
+            addr(2),
+            true,
+            ev,
+            DomainLifecycleState::Draft,
+        );
+        assert!(t1.verify_id() && t2.verify_id());
+        assert_ne!(t1.template_id, t2.template_id);
+
+        let (domains, operator) =
+            domain_registry_with(15, ConsensusKind::PoA, "poa-authority-quorum");
+        let mut reg = SovereignDomainRegistry::new();
+        let empty_root = reg.root();
+        reg.register_template_for_domain(
+            template_for(15, ConsensusKind::PoA, operator, true),
+            &domains,
+        )
+        .expect("register");
+        assert_ne!(reg.root(), empty_root);
     }
 }

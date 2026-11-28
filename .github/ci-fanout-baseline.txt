@@ -1,0 +1,45 @@
+# Per-push fan-out of the pull-request CI path.
+#
+# Every workflow that triggers on `pull_request` is queued again by every
+# push to a branch that heads an open pull request, and the runner pool
+# those jobs share is finite. The totals below are a budget, not a report:
+# they may fall, and they may only rise in the same change that
+# re-measures them. A job whose matrix is not literal text is counted once
+# and listed in `opaque`, so hiding a matrix behind an expression is a
+# finding rather than free capacity. A job that calls a reusable workflow
+# carries the callee's own jobs and runners, because GitHub queues the
+# callee's work under the same push; a call into another repository cannot
+# be read here, so it is counted once and listed in `opaque` too. A callee
+# that is missing, or that calls back into its caller, is a finding.
+#
+# Re-measure in the same change that moves it:
+#   cargo run --release --manifest-path xtask/gates/Cargo.toml -- ci-pull-request-fanout-is-budgeted --print-baseline
+workflows: 24
+jobs: 88
+fanout: 98
+opaque: 0
+.github/workflows/audit-guard.yml	2	2	0
+.github/workflows/benchmark.yml	1	1	0
+.github/workflows/cargo-vet.yml	1	1	0
+.github/workflows/ci.yml	41	45	0
+.github/workflows/code-scanning-sarif.yml	3	3	0
+.github/workflows/contract-lockfiles.yml	1	1	0
+.github/workflows/dependency-review.yml	1	1	0
+.github/workflows/determinism.yml	5	10	0
+.github/workflows/docker-smoke.yml	2	2	0
+.github/workflows/extra-tooling.yml	4	4	0
+.github/workflows/grype.yml	1	1	0
+.github/workflows/miri.yml	2	2	0
+.github/workflows/native-security-review.yml	1	1	0
+.github/workflows/osv-scanner.yml	1	1	0
+.github/workflows/pkcs11-pq.yml	1	1	0
+.github/workflows/release-signature.yml	1	1	0
+.github/workflows/rust.yml	2	2	0
+.github/workflows/security-audit.yml	8	9	0
+.github/workflows/semgrep.yml	1	1	0
+.github/workflows/semver.yml	1	1	0
+.github/workflows/solidity.yml	2	2	0
+.github/workflows/supply-chain-extra.yml	2	2	0
+.github/workflows/testnet-rehearsal.yml	2	2	0
+.github/workflows/typos.yml	2	2	0
+

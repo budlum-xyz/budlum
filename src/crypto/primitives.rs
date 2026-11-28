@@ -48,6 +48,7 @@ pub struct ValidatorKeyPolicy {
 }
 
 impl ValidatorKeyPolicy {
+    #[must_use]
     pub fn devnet_default() -> Self {
         Self {
             backend: KeyBackend::LocalFile,
@@ -69,12 +70,12 @@ pub enum CryptoError {
 impl std::fmt::Display for CryptoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CryptoError::KeyGeneration(s) => write!(f, "Key generation error: {s}"),
-            CryptoError::Signing(s) => write!(f, "Signing error: {s}"),
-            CryptoError::Verification(s) => write!(f, "Verification error: {s}"),
-            CryptoError::Io(s) => write!(f, "I/O error: {s}"),
-            CryptoError::InvalidKey(s) => write!(f, "Invalid key: {s}"),
-            CryptoError::PlaintextDiskKeysForbiddenOnMainnet => write!(
+            Self::KeyGeneration(s) => write!(f, "Key generation error: {s}"),
+            Self::Signing(s) => write!(f, "Signing error: {s}"),
+            Self::Verification(s) => write!(f, "Verification error: {s}"),
+            Self::Io(s) => write!(f, "I/O error: {s}"),
+            Self::InvalidKey(s) => write!(f, "Invalid key: {s}"),
+            Self::PlaintextDiskKeysForbiddenOnMainnet => write!(
                 f,
                 "CRITICAL: loading plaintext BLS/PQ secret keys directly from disk is forbidden on Mainnet without HSM protection"
             ),
@@ -95,7 +96,7 @@ pub struct BlsKeypair {
     pub public_key: Vec<u8>,
 }
 
-/// F11: zero the secret scalar when the pair is dropped.
+/// Zero the secret scalar when the pair is dropped.
 impl Drop for BlsKeypair {
     fn drop(&mut self) {
         self.secret_key = Scalar::zero();
@@ -132,12 +133,13 @@ impl BlsKeypair {
         }
         let pk = G2Affine::from(G2Projective::generator() * sk);
         let pk_compressed = pk.to_compressed().to_vec();
-        Ok(BlsKeypair {
+        Ok(Self {
             secret_key: sk,
             public_key: pk_compressed,
         })
     }
 
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = self.secret_key.to_bytes().to_vec();
         bytes.extend_from_slice(&self.public_key);
@@ -150,7 +152,7 @@ impl BlsKeypair {
     ///
     /// Returns an error if the operation fails.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
-        // Validate G2 encoding AND that pk matches sk. F10: the length is
+        // Validate G2 encoding AND that pk matches sk. The byte length is
         // exact - trailing garbage is not silently ignored - and the zero
         // scalar is refused (its public key is the identity point).
         if bytes.len() != 32 + 96 {
@@ -183,7 +185,7 @@ impl BlsKeypair {
             ));
         }
 
-        Ok(BlsKeypair {
+        Ok(Self {
             secret_key: sk,
             public_key: pk_bytes.to_vec(),
         })
@@ -232,6 +234,7 @@ impl BlsKeypair {
     /// Generate the canonical proof of possession for this public key,
     /// bound to the chain id and account address it will be registered
     /// under (R11: a `PoP` over only the key replays across chains).
+    #[must_use]
     pub fn generate_pop(&self, chain_id: u64, address: &crate::core::address::Address) -> Vec<u8> {
         let msg = crate::chain::finality::pop_signing_message(chain_id, address, &self.public_key);
         crate::chain::finality::sign_bls_pop(&self.secret_key, &msg)
@@ -305,6 +308,7 @@ pub const PQ_SCHEME_ID: &str = super::scheme::PQ_SCHEME_NAME;
 /// Exposed so the genesis check can explain a mismatch in terms an operator
 /// can act on ("this build wants 1952-byte keys, the chain uses 2592") instead
 /// of only reporting that a key failed to parse.
+#[must_use]
 pub const fn pq_public_key_len() -> usize {
     match super::scheme::SchemeId::ML_DSA_65.info() {
         Some(info) => match info.public_key_len {
@@ -317,12 +321,13 @@ pub const fn pq_public_key_len() -> usize {
 
 #[cfg(feature = "pq-ml-dsa")]
 impl PqKeyPair {
+    #[must_use]
     pub fn generate() -> Self {
         let mut seed = Zeroizing::new([0u8; pq::ML_DSA_SEED_LEN]);
         rand::rng().fill_bytes(seed.as_mut_slice());
         // A fixed-length seed and a listed scheme: the derivation cannot fail.
         let public_key = pq::ml_dsa_public_key(SchemeId::ML_DSA_65, &seed).unwrap_or_default();
-        PqKeyPair {
+        Self {
             public_key,
             secret_key: Zeroizing::new(seed.to_vec()),
         }
@@ -352,7 +357,7 @@ impl PqKeyPair {
             public_key: public_key.to_vec(),
             secret_key: Zeroizing::new(secret_key.to_vec()),
         };
-        // F10: the halves must pair. A probe signature under the key file
+        // The secret and public halves must pair. A probe signature under the key file
         // context must verify against the announced public key.
         const PAIRING_PROBE: &[u8] = b"BUDLUM_KEYFILE_PAIRING_PROBE_V1";
         let probe = kp
@@ -364,6 +369,7 @@ impl PqKeyPair {
         Ok(kp)
     }
 
+    #[must_use]
     pub fn public_key_bytes(&self) -> &[u8] {
         &self.public_key
     }
@@ -525,7 +531,7 @@ impl ValidatorKeys {
         let vrf_key = SchnorrkelKeypair::generate_with(&mut csprng);
         let pq_key = Some(PqKeyPair::generate());
         let bls_key = Some(BlsKeypair::generate()?);
-        Ok(ValidatorKeys {
+        Ok(Self {
             sig_key,
             vrf_key,
             pq_key,
@@ -666,7 +672,7 @@ impl ValidatorKeys {
         #[cfg(not(feature = "pq-ml-dsa"))]
         let pq_key: Option<PqKeyPair> = None;
 
-        // F10: the tail after the optional PQ block is either absent or
+        // The tail after the optional PQ block is either absent or
         // exactly one BLS keypair. A 1..127-byte tail used to be dropped
         // silently, losing the BLS key; extra bytes were ignored.
         let bls_key = match bytes.len().saturating_sub(cursor) {
@@ -679,7 +685,7 @@ impl ValidatorKeys {
             }
         };
 
-        Ok(ValidatorKeys {
+        Ok(Self {
             sig_key,
             vrf_key,
             pq_key,
@@ -695,7 +701,7 @@ impl ValidatorKeys {
     ///
     /// [`CryptoError::PlaintextDiskKeysForbiddenOnMainnet`] when mainnet keys
     /// carry BLS or post-quantum secrets in the clear.
-    /// F18: the engine enforces mainnet policy through
+    /// The engine enforces mainnet policy through
     /// [`crate::crypto::mainnet_policy::check_mainnet_validator_key_policy`];
     /// this hook exists for the test suite that proves the rule.
     #[cfg(test)]
@@ -726,11 +732,11 @@ impl KeyPair {
             "   Public key: {}",
             hex::encode(signing_key.verifying_key().as_bytes())
         );
-        Ok(KeyPair { signing_key })
+        Ok(Self { signing_key })
     }
     pub fn from_seed(seed: &[u8; SECRET_KEY_LENGTH]) -> Result<Self, CryptoError> {
         let signing_key = SigningKey::from_bytes(seed);
-        Ok(KeyPair { signing_key })
+        Ok(Self { signing_key })
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         if bytes.len() != SECRET_KEY_LENGTH {
@@ -769,20 +775,25 @@ impl KeyPair {
         Ok(())
     }
     /// Test-only: production code must not read the raw ed25519 seed
-    /// (F18 keeps the surface minimal; tests use it for round-trips).
+    /// (keeps the public surface minimal; tests use it for round-trips).
     #[cfg(test)]
+    #[must_use]
     pub fn private_key_bytes(&self) -> [u8; SECRET_KEY_LENGTH] {
         *self.signing_key.as_bytes()
     }
+    #[must_use]
     pub fn public_key(&self) -> VerifyingKey {
         self.signing_key.verifying_key()
     }
+    #[must_use]
     pub fn public_key_bytes(&self) -> [u8; 32] {
         self.signing_key.verifying_key().to_bytes()
     }
+    #[must_use]
     pub fn public_key_hex(&self) -> String {
         hex::encode(self.public_key_bytes())
     }
+    #[must_use]
     pub fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_LENGTH] {
         let signature = self.signing_key.sign(message);
         signature.to_bytes()
@@ -856,7 +867,7 @@ pub struct WalletKeyPair {
 #[cfg(feature = "wallet-ml-dsa")]
 impl zeroize::ZeroizeOnDrop for WalletKeyPair {}
 
-/// F11: overwrite the wallet signing key when the pair is dropped.
+/// Overwrite the wallet signing key when the pair is dropped.
 #[cfg(feature = "wallet-ml-dsa")]
 impl Drop for WalletKeyPair {
     fn drop(&mut self) {
@@ -888,6 +899,7 @@ impl WalletKeyPair {
         Self { signing_key }
     }
 
+    #[must_use]
     pub fn public_key_bytes(&self) -> [u8; ML_DSA_87_PUBLIC_KEY_LEN] {
         use ml_dsa::signature::Keypair;
         let vk = self.signing_key.verifying_key();
@@ -905,6 +917,7 @@ impl WalletKeyPair {
     /// zero-address fallback would let a malformed key spend as
     /// `[0u8; 32]`.
     #[allow(clippy::expect_used)]
+    #[must_use]
     pub fn address(&self) -> crate::core::address::Address {
         wallet_address_from_ml_dsa_87_public_key(&self.public_key_bytes())
             .expect("Valid ML-DSA-87 public key must yield a valid address")
@@ -1000,7 +1013,7 @@ pub fn wallet_address_from_ml_dsa_87_public_key(
 ///
 /// The signature must be exactly 4627 bytes and the public key exactly 2592
 /// bytes. The check runs through the dual-verifier facade (`crypto::pq`,
-/// RustCrypto `ml-dsa` and `libcrux-ml-dsa` must both accept. This path
+/// `RustCrypto` `ml-dsa` and `libcrux-ml-dsa` must both accept. This path
 /// is intentionally separate from validator PQ signatures (ML-DSA-65): user
 /// wallets are pinned to ML-DSA-87 for Category 5 security.
 ///
@@ -1044,6 +1057,7 @@ pub fn verify_ml_dsa_87_signature_in(
     .map_err(|e| CryptoError::Verification(format!("ML-DSA-87: {e}")))
 }
 
+#[must_use]
 pub fn hash_message(message: &[u8]) -> [u8; 32] {
     // A distinct hasher name keeps this single-field digest visibly separate
     // from the address derivation above: the preimages share no chain.
@@ -1100,7 +1114,7 @@ mod tests {
 
     use super::*;
 
-    // ---- (F10): key-file parsing is exact. ----
+    // ---- Key-file parsing is exact. ----
 
     #[test]
     fn bls_from_bytes_refuses_a_zero_scalar() {
@@ -1330,7 +1344,7 @@ mod tests {
     }
     #[test]
     fn test_save_and_load() {
-        // (F17): a fixed /tmp path is shared between parallel test
+        // A fixed /tmp path is shared between parallel test
         // processes; every run gets its own tempdir now.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_budlum_key");
@@ -1366,7 +1380,7 @@ fn stdout_has_64_hex_run(stdout: &[u8]) -> bool {
 /// (security audit) the public-key hex must NOT be printed to stdout by
 /// `KeyPair::generate`.
 ///
-/// (F17): the old test claimed to capture stdout but never did. The
+/// The earlier test claimed to capture stdout but never did. The
 /// check now runs `generate` inside a child process whose raw stdout is
 /// fully captured, so any printed 64-hex public key is observable. A canary
 /// test proves the detector itself works (red-green).
@@ -1539,7 +1553,7 @@ fn test_mainnet_disk_keys_forbidden_when_plaintext_bls_pq_present() {
     assert!(keys.validate_mainnet_disk_policy(false).is_ok());
 }
 
-/// RFC 9380 PoP generation is bound to the canonical public key, the chain
+/// RFC 9380 `PoP` generation is bound to the canonical public key, the chain
 /// id and the account address it is registered under (R11).
 #[test]
 fn test_bls_proof_of_possession() {

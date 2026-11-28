@@ -10,6 +10,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <!-- Section 2.6: the Join screen scans a QR. The camera is asked for
+         at the moment of scanning and a refusal is a plain refusal. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
         android:allowBackup="false"
@@ -18,14 +22,56 @@
         android:label="@string/app_name"
         android:supportsRtl="true">
 
+        <!-- The testnet custody screens. They are not the way in: section
+             6.1 says a phone that joins a Garden is a full validator, and
+             the faucet and the rewards of the testnet are a different duty
+             that nobody should be asked about on the way to a Garden. The
+             activity stays reachable for that duty, without an icon. -->
         <activity
             android:name=".ui.MainActivity"
-            android:exported="true">
+            android:exported="false" />
+
+        <!-- The three Garden screens of section 2.4. -->
+        <activity
+            android:name=".garden.GardenActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Section 5.7: the invite link itself. -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="budlum" android:host="garden" />
+            </intent-filter>
+            <!-- Section 5.8: the shape a QR carries on a local network. -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" android:pathPrefix="/g" />
+            </intent-filter>
         </activity>
+
+        <activity
+            android:name=".garden.QrScanActivity"
+            android:exported="false" />
+
+        <!-- The Garden validator itself. A validator is not a screen: it
+             holds connections, answers rounds and keeps its part of what
+             the Garden stores, and it has to do that while the phone is
+             in a pocket. The notification is the honest face of that. -->
+        <service
+            android:name=".garden.GardenValidatorService"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="budlum_garden_validator: keeps peer-to-peer connections open so this phone can validate blocks of the Garden it joined and serve the parts of its content that it holds" />
+        </service>
 
         <service
             android:name=".service.ValidatorService"

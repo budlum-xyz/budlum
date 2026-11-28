@@ -42,7 +42,7 @@ permissions:
 
 concurrency:
   group: extra-tooling-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 jobs:
   # ── 1. cargo-auditable + cargo-audit ────────────────────────────────────────
@@ -69,25 +69,7 @@ jobs:
         with:
           toolchain: "1.97.1"
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-core
@@ -173,23 +155,68 @@ jobs:
         with:
           shared-key: budlum-core
       # A pinned binary rather than building from source. The repository already
-      # uses this pattern (gitleaks, grype, typos, actionlint); it is applied
-      # sha256'lar indirilip hesaplandi; machete'ninki upstream .sha256
-      # consistently here, and it was compared byte for byte against the checksum file.
-      - name: Install cargo-machete + cargo-shear (version + sha256 pinned)
+      # uses this pattern (gitleaks, grype, typos, actionlint), and the hashes
+      # below were computed from the downloaded bytes and compared byte for byte
+      # against the upstream `.sha256` files; they are written here, not fetched.
+      #
+      # The asset download is also the only part of this job that depends on a
+      # host outside crates.io, and on 2026-11-23 that dependency was the whole
+      # failure: six retries of the machete asset returned HTTP 403 from the
+      # runner's address while the same URL served 200 from elsewhere, so the job
+      # died before it read a single manifest. A hash cannot protect against a
+      # host that says no. The fallback below builds the same pinned version from
+      # crates.io, which is a different failure domain. The division is strict:
+      # a refused connection falls back, wrong bytes never do - a hash mismatch
+      # is a security event and the job stops there.
+      - name: Install cargo-machete + cargo-shear (release asset sha256-pinned, crates.io fallback)
         run: |
           set -euo pipefail
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/machete.tar.gz \
-            https://github.com/bnjbvr/cargo-machete/releases/download/v0.8.0/cargo-machete-v0.8.0-x86_64-unknown-linux-musl.tar.gz
-          echo "020f6608f9be1562d1fb601e5808e541ccb8806e7e4dfde27d48bc22254a002c  /tmp/machete.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/machete.tar.gz -C /tmp
-          install -m755 "$(find /tmp -name cargo-machete -type f | head -1)" /usr/local/bin/cargo-machete
 
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/shear.tar.gz \
-            https://github.com/Boshen/cargo-shear/releases/download/v1.4.1/cargo-shear-x86_64-unknown-linux-musl.tar.gz
-          echo "0768ac346bb6ed097b237d75046fb357a43941e5c39f6ebf5746f96a4cb7fe03  /tmp/shear.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/shear.tar.gz -C /tmp
-          install -m755 "$(find /tmp -name cargo-shear -type f | head -1)" /usr/local/bin/cargo-shear
+          # 0 = the pinned asset is in place, 1 = the asset could not be fetched
+          # (fall back to crates.io), 2 = the asset arrived but its bytes are not
+          # the ones this file names (stop: do not build, do not continue).
+          fetch_pinned() {
+            local url="$1" out="$2" expected="$3"
+            if ! curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o "$out" "$url"; then
+              return 1
+            fi
+            if ! printf '%s  %s\n' "$expected" "$out" | sha256sum -c - >/dev/null 2>&1; then
+              echo "FATAL: ${url} did not match the sha256 written in this workflow; stopping." >&2
+              return 2
+            fi
+            return 0
+          }
+
+          install_tool() {
+            local name="$1" version="$2" url="$3" sha="$4"
+            local dir="/tmp/${name}-pinned"
+            local rc=0
+            rm -rf "${dir}"
+            mkdir -p "${dir}"
+            fetch_pinned "${url}" "${dir}/${name}.tar.gz" "${sha}" || rc=$?
+            if [ "${rc}" -eq 0 ]; then
+              tar -xzf "${dir}/${name}.tar.gz" -C "${dir}"
+              install -m755 "$(find "${dir}" -name "${name}" -type f | head -1)" "/usr/local/bin/${name}"
+              echo "${name}: installed from the pinned release asset."
+              return 0
+            fi
+            if [ "${rc}" -eq 2 ]; then
+              return 1
+            fi
+            echo "${name}: the release asset could not be fetched; building ${version} from crates.io instead." >&2
+            if ! cargo install "${name}" --version "${version}" --locked; then
+              echo "FATAL: ${name} ${version} came from neither the release asset nor crates.io, so the gate below cannot run." >&2
+              return 1
+            fi
+          }
+
+          install_tool cargo-machete 0.8.0 \
+            https://github.com/bnjbvr/cargo-machete/releases/download/v0.8.0/cargo-machete-v0.8.0-x86_64-unknown-linux-musl.tar.gz \
+            020f6608f9be1562d1fb601e5808e541ccb8806e7e4dfde27d48bc22254a002c
+
+          install_tool cargo-shear 1.4.1 \
+            https://github.com/Boshen/cargo-shear/releases/download/v1.4.1/cargo-shear-x86_64-unknown-linux-musl.tar.gz \
+            0768ac346bb6ed097b237d75046fb357a43941e5c39f6ebf5746f96a4cb7fe03
 
           cargo-machete --version
           cargo-shear --version
@@ -286,101 +313,10 @@ jobs:
       - name: The shear gate (a second opinion that can say no)
         run: cargo shear
 
-  # -- 3. Binary size visibility ----------------------------------------------
-  # REPORT: not a gate. Failing on a size threshold before calibrating it would be
-  # arbitrary; a few runs of real data must be collected first. The report goes into the PR summary.
-  binary-size:
-    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
-    # not start this job. See the note at the top of the file.
-    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
-    name: Binary Size (rapor)
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
-        with:
-          toolchain: "1.97.1"
-      - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          shared-key: budlum-core
-      - name: Install cargo-bloat (version pinned)
-        run: cargo install cargo-bloat --version 0.12.1 --locked
-      - name: Release build
-        run: cargo build --release --locked
-      - name: Size + the largest crates (into the PR summary)
-        run: |
-          set -uo pipefail
-          # Both masks here hid the same thing in two places: the release build
-          # ran in the step above, so a MISSING artifact is not a quiet
-          # "nothing to list", it is a build that did not produce what this job
-          # exists to measure. And `cargo bloat ... 2>/dev/null || echo` turned
-          # every failure of the tool into the sentence "(could not be run)"
-          # inside a green step - visibility with no consequence, which is the
-          # shape the charter calls a bos gecen kapi.
-          #
-          # Still not a size THRESHOLD (no number is agreed yet, and inventing
-          # one here would be a gate nobody chose). What blocks is narrower and
-          # certain: the measurement must exist.
-          set +e
-          ls -lh target/release/budlum-core target/release/libbudlum_core.rlib > /tmp/bloat-size.log 2>&1
-          size_status=$?
-          cargo bloat --release --crates -n 20 > /tmp/bloat-crates.log 2>&1
-          bloat_status=$?
-          set -e
-          {
-            echo "### Binary size"
-            echo '```'
-            cat /tmp/bloat-size.log
-            echo '```'
-            echo "### The crates taking the most space"
-            echo '```'
-            tail -40 /tmp/bloat-crates.log
-            echo '```'
-            echo "(ls exit: $size_status, cargo bloat exit: $bloat_status)"
-          } >> "$GITHUB_STEP_SUMMARY"
-          fail=0
-          if [ "$size_status" -ne 0 ]; then
-            echo "::error::the release artifacts are not on disk after the release build - there is nothing to measure, so the size report is empty for a reason that is not size."
-            fail=1
-          fi
-          if [ "$bloat_status" -ne 0 ]; then
-            echo "::error::cargo bloat exited $bloat_status; the crate breakdown in this summary is missing, not small."
-            sed -e 's/^/::error::/' /tmp/bloat-crates.log | head -n 5
-            fail=1
-          fi
-          exit "$fail"
-
   # -- 4. TOML formatting/lint -------------------------------------------------
   # GATE: taplo lint + format --check = FAIL.
   # Formatting drift in files such as Cargo.toml/deny.toml/config produces diff
   # noise in hand-edited supply-chain policies and hides the real change.
-  # Gizler.
   config-lint:
     # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
     # not start this job. See the note at the top of the file.
@@ -427,8 +363,8 @@ jobs:
         run: taplo lint
 
   # -- 5. Kani model checking (bond arithmetic) --------------------------------
-  # GATE: it fails if a proof fails OR if the number of harnesses run does not
-  # bildirilenden azsa = FAIL.
+  # GATE: it fails if a proof fails OR if the number of harnesses run is lower
+  # than declared.
   #
   # SECURITY.md recorded model checking as "open work": a script by this name used
   # to exist, printing a stub message and pointing at a file absent from the tree;

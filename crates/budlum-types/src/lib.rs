@@ -35,7 +35,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod checkpoint;
 pub mod class;
+pub mod handoff;
 pub mod presence;
 
 pub use class::{

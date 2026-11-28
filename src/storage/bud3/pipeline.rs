@@ -101,6 +101,12 @@ pub struct PreparedUpload {
     pub segments: Vec<Vec<Symbol>>,
 }
 
+/// One ceiling for `symbols_per_segment` across registration, the
+/// constructors, and every read path. The read side materializes
+/// `symbols_per_segment` symbols before any root check, so an unbounded
+/// record is an allocation bomb, not a storage choice.
+pub const MAX_SYMBOLS_PER_SEGMENT: u32 = 16_384;
+
 /// Why an upload or a view failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineError {
@@ -112,6 +118,8 @@ pub enum PipelineError {
     Object(Bof1Error),
     /// The placement asks for fewer symbols than a segment needs.
     TooFewSymbols { want: u32, k: u32 },
+    /// The placement asks for more symbols than the protocol ceiling.
+    TooManySymbols { want: u32, max: u32 },
     /// Some segment did not decode from the symbols given.
     SegmentMissing(u64),
     /// The decoded object does not match the commitment.
@@ -201,6 +209,12 @@ pub fn prepare_public_upload(
                 k,
             });
         }
+        if symbols_per_segment > MAX_SYMBOLS_PER_SEGMENT {
+            return Err(PipelineError::TooManySymbols {
+                want: symbols_per_segment,
+                max: MAX_SYMBOLS_PER_SEGMENT,
+            });
+        }
         let mut symbols = enc.source_symbols();
         symbols.extend(enc.repair_symbols(0, symbols_per_segment - k)?);
         let leaves: Vec<(u32, [u8; 32])> = symbols
@@ -270,6 +284,12 @@ pub fn prepare_volume_upload(
             k,
         });
     }
+    if symbols_per_segment > MAX_SYMBOLS_PER_SEGMENT {
+        return Err(PipelineError::TooManySymbols {
+            want: symbols_per_segment,
+            max: MAX_SYMBOLS_PER_SEGMENT,
+        });
+    }
     let mut symbols = encoder.source_symbols();
     symbols.extend(encoder.repair_symbols(0, symbols_per_segment - k)?);
     let leaves: Vec<(u32, [u8; 32])> = symbols
@@ -304,6 +324,16 @@ pub fn view_public<I>(record: &ObjectRecord, symbols: I) -> Result<Vec<u8>, Pipe
 where
     I: IntoIterator<Item = Symbol>,
 {
+    // The record is submitter-chosen data and both budgets below scale with
+    // `symbols_per_segment`. Refuse an overstated record at the entry, before
+    // any allocation, so a caller can never read the outcome as a missing
+    // segment.
+    if record.symbols_per_segment > MAX_SYMBOLS_PER_SEGMENT {
+        return Err(PipelineError::TooManySymbols {
+            want: record.symbols_per_segment,
+            max: MAX_SYMBOLS_PER_SEGMENT,
+        });
+    }
     let seg = Segmentation::new(record.object_len, &record.profile)
         .ok_or(PipelineError::Fountain(FountainError::InvalidProfile))?;
     let seg_count = seg.count();
@@ -431,6 +461,12 @@ where
         return Err(PipelineError::Volume(VolumeError::RootMismatch));
     }
     if record.symbol_root != [0u8; 32] {
+        if record.symbols_per_segment > MAX_SYMBOLS_PER_SEGMENT {
+            return Err(PipelineError::TooManySymbols {
+                want: record.symbols_per_segment,
+                max: MAX_SYMBOLS_PER_SEGMENT,
+            });
+        }
         let enc = SegmentEncoder::new(0, &bytes, &record.profile)?;
         let repair_count = record.symbols_per_segment.checked_sub(enc.k()).ok_or(
             PipelineError::TooFewSymbols {
@@ -586,12 +622,98 @@ pub fn view_public_optical(
     Ok(content)
 }
 
-/// Prepare sealed content (`Flags::SEALED`, Padme-padded `XChaCha20Poly1305`,
-/// `content_len = 0`, `codec = CODEC_RAW`) for upload.
+/// Maximum number of `(ContentKey, salt)` pairs retained by the in-process
+/// nonce-reuse guard for [`prepare_sealed_upload`].
+const MAX_SEEN_SEALED_SALTS: usize = 4_096;
+
+type SeenSaltEntry = ([u8; 32], [u8; super::seal::SEAL_SALT_LEN]);
+type SeenSaltLedger = (
+    std::collections::VecDeque<SeenSaltEntry>,
+    std::collections::BTreeSet<SeenSaltEntry>,
+);
+
+fn seen_sealed_salts() -> &'static std::sync::Mutex<SeenSaltLedger> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<SeenSaltLedger>> = std::sync::OnceLock::new();
+    SEEN.get_or_init(|| {
+        std::sync::Mutex::new((
+            std::collections::VecDeque::with_capacity(MAX_SEEN_SEALED_SALTS),
+            std::collections::BTreeSet::new(),
+        ))
+    })
+}
+
+fn admit_sealed_salt_for_key(
+    content_key: &super::content_id::ContentKey,
+    salt: &[u8; super::seal::SEAL_SALT_LEN],
+) -> Result<(), PipelineError> {
+    if *salt == [0u8; super::seal::SEAL_SALT_LEN] {
+        return Err(PipelineError::Seal(
+            super::seal::SealBud3Error::EncryptFailed,
+        ));
+    }
+    let entry: SeenSaltEntry = (content_key.0, *salt);
+    let mut guard = seen_sealed_salts()
+        .lock()
+        .map_err(|_| PipelineError::Seal(super::seal::SealBud3Error::EncryptFailed))?;
+    if !guard.1.insert(entry) {
+        return Err(PipelineError::Seal(
+            super::seal::SealBud3Error::EncryptFailed,
+        ));
+    }
+    if guard.0.len() >= MAX_SEEN_SEALED_SALTS {
+        if let Some(evicted) = guard.0.pop_front() {
+            guard.1.remove(&evicted);
+        }
+    }
+    guard.0.push_back(entry);
+    Ok(())
+}
+
+/// Convenience: generate a fresh 24-byte sealing salt from the OS CSPRNG.
+#[must_use]
+pub fn fresh_sealed_salt() -> [u8; super::seal::SEAL_SALT_LEN] {
+    let mut salt = [0u8; super::seal::SEAL_SALT_LEN];
+    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut salt);
+    salt
+}
+
+/// Convenience: prepare sealed content (`Flags::SEALED`, Padme-padded
+/// `XChaCha20Poly1305`, `content_len = 0`, `codec = CODEC_RAW`) using a fresh
+/// 24-byte salt drawn from the OS CSPRNG.
 ///
 /// # Errors
 ///
 /// [`PipelineError`] for a refused length, sealing failure, or coding error.
+pub fn prepare_sealed_upload_csprng(
+    content: &[u8],
+    content_key: &super::content_id::ContentKey,
+    profile: &Profile,
+    limits: &Bud3Limits,
+    symbols_per_segment: u32,
+) -> Result<PreparedUpload, PipelineError> {
+    prepare_sealed_upload(
+        content,
+        content_key,
+        fresh_sealed_salt(),
+        profile,
+        limits,
+        symbols_per_segment,
+    )
+}
+
+/// Prepare sealed content (`Flags::SEALED`, Padme-padded `XChaCha20Poly1305`,
+/// `content_len = 0`, `codec = CODEC_RAW`) for upload.
+///
+/// The 24-byte `salt` MUST be unique per `content_key`: `seal_object` derives
+/// both the `XChaCha20-Poly1305` key and 24-byte `XNonce` deterministically from
+/// `(content_key, salt)`. All-zero salts and any `(content_key, salt)` pair this
+/// node has already sealed are refused with [`PipelineError::Seal`]. Prefer
+/// [`prepare_sealed_upload_csprng`] or [`fresh_sealed_salt`] in production.
+///
+/// # Errors
+///
+/// [`PipelineError`] for a refused length, duplicate/zero salt, sealing failure,
+/// or coding error.
 pub fn prepare_sealed_upload(
     content: &[u8],
     content_key: &super::content_id::ContentKey,
@@ -603,6 +725,7 @@ pub fn prepare_sealed_upload(
     limits
         .admit_content(content.len() as u64)
         .map_err(PipelineError::Limit)?;
+    admit_sealed_salt_for_key(content_key, &salt)?;
     let object = super::seal::seal_object(content, content_key, salt)?;
     let content_id = ContentId {
         kind: super::content_id::ContentIdKind::Sealed,
@@ -629,6 +752,12 @@ pub fn prepare_sealed_upload(
             return Err(PipelineError::TooFewSymbols {
                 want: symbols_per_segment,
                 k,
+            });
+        }
+        if symbols_per_segment > MAX_SYMBOLS_PER_SEGMENT {
+            return Err(PipelineError::TooManySymbols {
+                want: symbols_per_segment,
+                max: MAX_SYMBOLS_PER_SEGMENT,
             });
         }
         let mut symbols = enc.source_symbols();
@@ -814,6 +943,18 @@ mod tests {
         assert!(matches!(
             prepare_public_upload(&content(3000), &SMALL, &Bud3Limits::default(), 17),
             Err(PipelineError::TooFewSymbols { .. })
+        ));
+        // One ceiling for every path: a placement row above the protocol
+        // maximum is an allocation bomb on the read side and is refused at
+        // the constructor already.
+        assert!(matches!(
+            prepare_public_upload(
+                &content(3000),
+                &SMALL,
+                &Bud3Limits::default(),
+                MAX_SYMBOLS_PER_SEGMENT + 1
+            ),
+            Err(PipelineError::TooManySymbols { .. })
         ));
     }
 
@@ -1008,15 +1149,9 @@ mod tests {
         let owner_key = super::super::keys::derive_object_content_key(&[0x55; 32], 1);
         let wrong_key = super::super::keys::derive_object_content_key(&[0x55; 32], 2);
         let secret = b"sealed B.U.D. 3.0 payload requiring active grant key";
-        let up = prepare_sealed_upload(
-            secret,
-            &owner_key,
-            [0x19; super::super::seal::SEAL_SALT_LEN],
-            &SMALL,
-            &Bud3Limits::default(),
-            10,
-        )
-        .unwrap();
+        let up =
+            prepare_sealed_upload_csprng(secret, &owner_key, &SMALL, &Bud3Limits::default(), 10)
+                .unwrap();
         // Public view refuses sealed content; wrong key fails AEAD / keyed ContentId.
         assert!(view_public(&up.record, up.segments.concat()).is_err());
         assert!(view_sealed(&up.record, &wrong_key, up.segments.concat()).is_err());
@@ -1025,6 +1160,66 @@ mod tests {
             view_sealed(&up.record, &owner_key, up.segments.concat()).unwrap(),
             secret
         );
+
+        // Consecutive CSPRNG-sealed uploads under the same ContentKey produce
+        // distinct commitments and ciphertexts without nonce reuse.
+        let up_second =
+            prepare_sealed_upload_csprng(secret, &owner_key, &SMALL, &Bud3Limits::default(), 10)
+                .unwrap();
+        assert_ne!(up.record.commitment, up_second.record.commitment);
+        assert_eq!(
+            view_sealed(&up_second.record, &owner_key, up_second.segments.concat()).unwrap(),
+            secret
+        );
+
+        // Zero-entropy and duplicate caller-supplied salts under the same
+        // ContentKey are refused before AEAD encryption.
+        assert!(matches!(
+            prepare_sealed_upload(
+                secret,
+                &owner_key,
+                [0u8; super::super::seal::SEAL_SALT_LEN],
+                &SMALL,
+                &Bud3Limits::default(),
+                10,
+            ),
+            Err(PipelineError::Seal(
+                super::super::seal::SealBud3Error::EncryptFailed
+            ))
+        ));
+        let caller_salt = [0x9Bu8; super::super::seal::SEAL_SALT_LEN];
+        let _first_explicit = prepare_sealed_upload(
+            b"first sealed payload under explicit salt",
+            &owner_key,
+            caller_salt,
+            &SMALL,
+            &Bud3Limits::default(),
+            10,
+        )
+        .unwrap();
+        assert!(matches!(
+            prepare_sealed_upload(
+                b"second sealed payload reusing explicit salt",
+                &owner_key,
+                caller_salt,
+                &SMALL,
+                &Bud3Limits::default(),
+                10,
+            ),
+            Err(PipelineError::Seal(
+                super::super::seal::SealBud3Error::EncryptFailed
+            ))
+        ));
+        // The same salt under a distinct ContentKey remains valid.
+        assert!(prepare_sealed_upload(
+            b"second sealed payload under distinct key",
+            &wrong_key,
+            caller_salt,
+            &SMALL,
+            &Bud3Limits::default(),
+            10,
+        )
+        .is_ok());
     }
 
     #[test]

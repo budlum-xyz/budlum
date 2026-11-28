@@ -182,9 +182,13 @@ pub fn build_repair_proven_witness(
     }
     let first_esi = placed_root_symbols.first()?.esi;
     let seg = placed_root_symbols.first()?.segment;
+    let expected_data_len = placed_root_symbols.first()?.data.len();
+    if expected_data_len == 0 {
+        return None;
+    }
     for (idx, s) in placed_root_symbols.iter().enumerate() {
         let expected_esi = first_esi.checked_add(u32::try_from(idx).ok()?)?;
-        if s.segment != seg || s.esi != expected_esi {
+        if s.segment != seg || s.esi != expected_esi || s.data.len() != expected_data_len {
             return None;
         }
     }
@@ -192,12 +196,17 @@ pub fn build_repair_proven_witness(
         .iter()
         .map(|s| (s.esi, symbol_leaf(&s.data)))
         .collect();
+    let mut seen_esis = std::collections::BTreeSet::new();
     let mut proofs = Vec::with_capacity(live_subset.len());
     for sym in live_subset {
-        if sym.segment != seg || sym.esi < first_esi {
+        if sym.segment != seg || sym.esi < first_esi || !seen_esis.insert(sym.esi) {
             return None;
         }
         let pos = usize::try_from(sym.esi - first_esi).ok()?;
+        let placed = placed_root_symbols.get(pos)?;
+        if placed.data != sym.data {
+            return None;
+        }
         let root_path = prove_symbol_root_path(&placed_leaves, pos)?;
         proofs.push(RepairSymbolProof {
             root_index,
@@ -295,11 +304,11 @@ pub fn assign_repairer(
         return None;
     }
     let ordered = rank(&repair_task_key(object, segment), &full_only);
-    if ordered.is_empty() {
+    let len_u64 = u64::try_from(ordered.len()).ok()?;
+    if len_u64 == 0 {
         return None;
     }
-    let slot =
-        usize::try_from(elapsed_blocks / REPAIR_HANDOVER_BLOCKS).unwrap_or(0) % ordered.len();
+    let slot = usize::try_from((elapsed_blocks / REPAIR_HANDOVER_BLOCKS) % len_u64).unwrap_or(0);
     ordered.get(slot).map(|c| c.validator)
 }
 
@@ -308,8 +317,9 @@ pub fn assign_repairer(
 ///
 /// # Errors
 ///
-/// [`RepairError`] if the repairer appears in `holders`, `live_symbols` cannot
-/// reconstruct the segment, or `next_esi` overflows.
+/// [`RepairError`] if the repairer appears in `holders`, `holders` has duplicate
+/// or zero-count entries, `live_symbols` cannot reconstruct the segment, or
+/// `next_esi` / symbol counts leave the protocol bounds.
 pub fn build_segment_repair<I>(
     repairer: &Address,
     segment: u64,
@@ -322,15 +332,36 @@ pub fn build_segment_repair<I>(
 where
     I: IntoIterator<Item = Symbol>,
 {
-    if holders.is_empty()
-        || holders
-            .iter()
-            .any(|(v, _, count)| v == repairer || *count == 0)
-    {
+    if holders.is_empty() {
         return Err(RepairError::InvalidNewHolders);
     }
-    let live_vec: Vec<Symbol> = live_symbols.into_iter().collect();
+    let mut seen_holders = std::collections::BTreeSet::new();
+    let mut total_new = 0u32;
+    for (validator, _, count) in holders {
+        if validator == repairer || *count == 0 || !seen_holders.insert(*validator) {
+            return Err(RepairError::InvalidNewHolders);
+        }
+        total_new = total_new
+            .checked_add(*count)
+            .ok_or(RepairError::InvalidFreshEsi)?;
+    }
+    if total_new > super::pipeline::MAX_SYMBOLS_PER_SEGMENT {
+        return Err(RepairError::InvalidFreshEsi);
+    }
+    let end_esi = next_esi
+        .checked_add(total_new)
+        .ok_or(RepairError::InvalidFreshEsi)?;
+    if end_esi > super::fountain::MAX_ESI {
+        return Err(RepairError::InvalidFreshEsi);
+    }
+
     let mut dec = SegmentDecoder::new(segment, segment_len, profile)?;
+    if next_esi < dec.k() {
+        return Err(RepairError::InvalidFreshEsi);
+    }
+
+    let max_live = usize::try_from(super::pipeline::MAX_SYMBOLS_PER_SEGMENT).unwrap_or(16_384);
+    let live_vec: Vec<Symbol> = live_symbols.into_iter().take(max_live).collect();
     let mut meter = Meter::new(
         segment_len.saturating_mul(4).saturating_add(1 << 20),
         1 << 20,
@@ -360,9 +391,6 @@ where
     if next_esi < k {
         return Err(RepairError::InvalidFreshEsi);
     }
-    let total_new: u32 = holders.iter().try_fold(0u32, |acc, (_, _, c)| {
-        acc.checked_add(*c).ok_or(RepairError::InvalidFreshEsi)
-    })?;
     let repair_offset = next_esi - k;
     let new_symbols = enc.repair_symbols(repair_offset, total_new)?;
 
@@ -436,7 +464,7 @@ pub fn verify_repaired_symbol(
 /// submits a fraudulent repair (`bud3_bad_repair_is_slashed`, Section 6.10.8).
 #[must_use]
 pub const fn bad_repair_slash_amount(repairer_stake: u64) -> u64 {
-    repairer_stake.saturating_mul(BAD_REPAIR_SLASH_BPS) / 10_000
+    ((repairer_stake as u128 * BAD_REPAIR_SLASH_BPS as u128) / 10_000) as u64
 }
 
 /// Blocks an assigned Full validator has to submit `RecordRepair` before
@@ -466,10 +494,23 @@ pub fn handover_expired_repair_duty(
     {
         return None;
     }
-    let next_assignee = ordered_full_candidates
+    let len = ordered_full_candidates.len();
+    if len == 0 {
+        return None;
+    }
+    let next_assignee = if let Some(pos) = ordered_full_candidates
         .iter()
-        .copied()
-        .find(|v| *v != duty.assignee)?;
+        .position(|v| *v == duty.assignee)
+    {
+        (1..len)
+            .filter_map(|offset| ordered_full_candidates.get((pos + offset) % len).copied())
+            .find(|v| *v != duty.assignee)?
+    } else {
+        ordered_full_candidates
+            .iter()
+            .copied()
+            .find(|v| *v != duty.assignee)?
+    };
     Some(ScheduledRepairDuty {
         object: duty.object,
         segment: duty.segment,
@@ -595,5 +636,208 @@ mod tests {
         forged.data[0] ^= 0xFF;
         assert!(!verify_repaired_symbol(0, &seg_bytes, &SMALL, &forged).unwrap());
         assert_eq!(bad_repair_slash_amount(500_000), 5_000);
+        // Large validator stakes above u64::MAX / 100 still slash exact 1% without saturating.
+        let large_stake = u64::MAX / 10;
+        assert_eq!(bad_repair_slash_amount(large_stake), large_stake / 100);
+
+        // Duplicate ESIs in repair witness subset are rejected.
+        let enc = SegmentEncoder::new(0, &seg_bytes, &SMALL).unwrap();
+        let src = enc.source_symbols();
+        assert!(build_repair_proven_witness(0, &src, &[src[0].clone(), src[0].clone()]).is_none());
+    }
+
+    #[test]
+    fn build_repair_proven_witness_rejects_mismatched_or_empty_symbol_payload() {
+        let seg_bytes = b"witness payload binding verification bytes".repeat(10);
+        let enc = SegmentEncoder::new(0, &seg_bytes, &SMALL).unwrap();
+        let src = enc.source_symbols();
+
+        // Tamper the symbol bytes in `live_subset` while preserving `(segment, esi)`:
+        // witness builder must refuse instead of pairing honest Merkle siblings with forged bytes.
+        let mut tampered = src[0].clone();
+        tampered.data[0] ^= 0xFF;
+        assert!(
+            build_repair_proven_witness(0, &src, &[tampered]).is_none(),
+            "mismatched symbol payload must not produce a repair symbol proof"
+        );
+
+        // Empty or inconsistent symbol data lengths in `placed_root_symbols` must also refuse.
+        let mut empty_placed = src.clone();
+        empty_placed[0].data.clear();
+        assert!(
+            build_repair_proven_witness(0, &empty_placed, &[empty_placed[0].clone()]).is_none()
+        );
+
+        let mut short_placed = src;
+        short_placed[1].data.pop();
+        assert!(
+            build_repair_proven_witness(0, &short_placed, &[short_placed[0].clone()]).is_none()
+        );
+    }
+
+    #[test]
+    fn build_segment_repair_rejects_duplicate_holders_and_excessive_total_new() {
+        let seg_bytes = b"segment payload for repair holder uniqueness".repeat(12);
+        let enc = SegmentEncoder::new(0, &seg_bytes, &SMALL).unwrap();
+        let k = enc.k();
+        let mut live = enc.source_symbols();
+        live.extend(enc.repair_symbols(0, 4).unwrap());
+
+        let repairer = [0xAA; 32];
+        let holder = [0xBB; 32];
+        assert_eq!(
+            build_segment_repair(
+                &repairer,
+                0,
+                seg_bytes.len() as u64,
+                &SMALL,
+                k + 4,
+                &[(holder, Class::Full, 2), (holder, Class::Full, 2)],
+                live.clone(),
+            ),
+            Err(RepairError::InvalidNewHolders)
+        );
+        assert_eq!(
+            build_segment_repair(
+                &repairer,
+                0,
+                seg_bytes.len() as u64,
+                &SMALL,
+                k + 4,
+                &[(holder, Class::Full, 2), (holder, Class::Mobile, 2)],
+                live.clone(),
+            ),
+            Err(RepairError::InvalidNewHolders)
+        );
+
+        // Excessive `total_new` above MAX_SYMBOLS_PER_SEGMENT or exceeding MAX_ESI must refuse.
+        let over_cap = super::super::pipeline::MAX_SYMBOLS_PER_SEGMENT + 1;
+        assert_eq!(
+            build_segment_repair(
+                &repairer,
+                0,
+                seg_bytes.len() as u64,
+                &SMALL,
+                k + 4,
+                &[(holder, Class::Full, over_cap)],
+                live.clone(),
+            ),
+            Err(RepairError::InvalidFreshEsi)
+        );
+        assert_eq!(
+            build_segment_repair(
+                &repairer,
+                0,
+                seg_bytes.len() as u64,
+                &SMALL,
+                super::super::fountain::MAX_ESI,
+                &[(holder, Class::Full, 2)],
+                live,
+            ),
+            Err(RepairError::InvalidFreshEsi)
+        );
+    }
+
+    #[test]
+    fn build_segment_repair_bounds_untrusted_live_symbol_iterator_before_oom() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let seg_bytes = b"bounded iterator repair defense".repeat(8);
+        let enc = SegmentEncoder::new(0, &seg_bytes, &SMALL).unwrap();
+        let k = enc.k();
+        let repairer = [0xAA; 32];
+        let holder = [0xBB; 32];
+
+        // Validation errors (e.g., `next_esi < k` or `total_new` overflow) must reject
+        // BEFORE pulling a single symbol from an untrusted iterator.
+        let pulled_pre = AtomicUsize::new(0);
+        let iter_pre = (0..1_000u32).map(|esi| {
+            pulled_pre.fetch_add(1, Ordering::Relaxed);
+            Symbol {
+                segment: 0,
+                esi,
+                data: vec![0u8; usize::from(SMALL.symbol_size)],
+            }
+        });
+        assert_eq!(
+            build_segment_repair(
+                &repairer,
+                0,
+                seg_bytes.len() as u64,
+                &SMALL,
+                k.saturating_sub(1),
+                &[(holder, Class::Full, 2)],
+                iter_pre,
+            ),
+            Err(RepairError::InvalidFreshEsi)
+        );
+        assert_eq!(
+            pulled_pre.load(Ordering::Relaxed),
+            0,
+            "invalid next_esi must reject before draining live_symbols"
+        );
+
+        // An oversized stream of invalid/wrong-segment symbols must stop at the protocol cap.
+        let cap =
+            usize::try_from(super::super::pipeline::MAX_SYMBOLS_PER_SEGMENT).unwrap_or(16_384);
+        let pulled_flood = AtomicUsize::new(0);
+        let flood = (0..(cap + 5_000)).map(|idx| {
+            pulled_flood.fetch_add(1, Ordering::Relaxed);
+            Symbol {
+                segment: 99,
+                esi: u32::try_from(idx).unwrap_or(0),
+                data: vec![0u8; usize::from(SMALL.symbol_size)],
+            }
+        });
+        assert_eq!(
+            build_segment_repair(
+                &repairer,
+                0,
+                seg_bytes.len() as u64,
+                &SMALL,
+                k + 4,
+                &[(holder, Class::Full, 2)],
+                flood,
+            ),
+            Err(RepairError::SegmentUnrecoverable)
+        );
+        assert!(
+            pulled_flood.load(Ordering::Relaxed) <= cap,
+            "pulled {} symbols exceeding MAX_SYMBOLS_PER_SEGMENT cap {}",
+            pulled_flood.load(Ordering::Relaxed),
+            cap
+        );
+    }
+
+    #[test]
+    fn handover_expired_repair_duty_cycles_past_two_offline_candidates_without_ping_pong() {
+        let c1 = [1u8; 32];
+        let c2 = [2u8; 32];
+        let c3 = [3u8; 32];
+        let candidates = [c1, c2, c3];
+        let duty0 = ScheduledRepairDuty {
+            object: [0xAB; 32],
+            segment: 0,
+            assignee: c1,
+            assigned_height: 100,
+            started: false,
+        };
+        let duty1 = handover_expired_repair_duty(&duty0, 120, &candidates).unwrap();
+        assert_eq!(duty1.assignee, c2);
+        // When `c2` also times out, handover must advance to `c3` instead of ping-ponging back to `c1`.
+        let duty2 = handover_expired_repair_duty(&duty1, 140, &candidates).unwrap();
+        assert_eq!(
+            duty2.assignee, c3,
+            "second handover must reach third candidate rather than ping-ponging back to c1"
+        );
+        let duty3 = handover_expired_repair_duty(&duty2, 160, &candidates).unwrap();
+        assert_eq!(duty3.assignee, c1);
+
+        // Duplicate entries in `ordered_full_candidates` must still advance to the next distinct validator.
+        let with_dups = [c1, c1, c2, c2, c3];
+        let after_dup = handover_expired_repair_duty(&duty0, 120, &with_dups).unwrap();
+        assert_eq!(after_dup.assignee, c2);
+        let after_dup2 = handover_expired_repair_duty(&after_dup, 140, &with_dups).unwrap();
+        assert_eq!(after_dup2.assignee, c3);
     }
 }

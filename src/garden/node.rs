@@ -20,15 +20,16 @@
 //! founded with host approval it also answers the keys that ask to join,
 //! and it does that with a transaction like any other.
 
-use super::invite::{GardenInvite, MAX_INVITE_PEERS};
+use super::invite::{fit_peers, GardenInvite};
 use super::net::{
     self, announced_address, peer_id_of, validator_dial_address, BudgetedFrame, FramePermits,
     GardenGossip, GardenNet, GardenRequest, GardenResponse, NetCommand, NetEvent, MAX_GOSSIP_BATCH,
     MAX_SYNC_COMMITS,
 };
+use super::record::{GardenRecord, DEFAULT_RECORD_TTL_MS};
 use super::settlement::{GardenBudlumLink, GardenDomainView};
 use super::state::{quorum, GardenLedger, GardenObject, GardenState};
-use super::storage::GardenContentStore;
+use super::storage::{Bud3PartCounts, GardenContentStore};
 use super::types::{
     garden_domain_id, invite_keypair, join_message, status_label, GardenAdmission,
     GardenAdmissionState, GardenBlock, GardenCommit, GardenContentKind, GardenFounding,
@@ -184,6 +185,7 @@ pub struct GardenLeaveOutcome {
 enum GardenCommand {
     Status(oneshot::Sender<Value>),
     Invite(oneshot::Sender<Result<GardenInvite, String>>),
+    Record(oneshot::Sender<Result<GardenRecord, String>>),
     Publish {
         kind: GardenContentKind,
         bytes: Vec<u8>,
@@ -207,11 +209,16 @@ enum GardenCommand {
 pub struct GardenHandle {
     commands: mpsc::Sender<GardenCommand>,
     chain_id: u64,
+    genesis_hash: Hash32,
 }
 
 impl GardenHandle {
     pub const fn chain_id(&self) -> u64 {
         self.chain_id
+    }
+
+    pub const fn genesis_hash(&self) -> Hash32 {
+        self.genesis_hash
     }
 
     async fn ask<T>(
@@ -236,6 +243,11 @@ impl GardenHandle {
     /// The invite that lets someone else join through this validator.
     pub async fn invite(&self) -> Result<GardenInvite, String> {
         self.ask(GardenCommand::Invite).await?
+    }
+
+    /// The invite record this validator signs and hands out.
+    pub async fn record(&self) -> Result<GardenRecord, String> {
+        self.ask(GardenCommand::Record).await?
     }
 
     /// Publish a message, a post or an image.
@@ -290,7 +302,7 @@ impl GardenHandle {
     }
 }
 
-fn now_ms() -> u64 {
+pub(super) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -505,6 +517,15 @@ struct Node {
     seeds: Vec<String>,
     ledger: GardenLedger,
     store: GardenContentStore,
+    /// Work this node has done since it started, for `status`.
+    ///
+    /// Three counters, because a validator that only sits in the list is
+    /// not taking part: it has to hold content, run blocks and answer
+    /// other nodes asking for content. They only ever go up, so "greater
+    /// than zero" means this node did the thing at least once.
+    parts_held: u64,
+    blocks_executed: u64,
+    parts_served: u64,
     net: mpsc::Sender<NetCommand>,
     link: Option<GardenBudlumLink>,
     reported: u64,
@@ -721,6 +742,7 @@ pub async fn spawn(
     }
 
     let mut peers = BTreeMap::new();
+    let joining = matches!(entry, GardenEntry::Invite(_));
     let (ledger, token, seeds) = match entry {
         GardenEntry::Create { title, limits } => {
             if address.is_empty() {
@@ -766,6 +788,7 @@ pub async fn spawn(
     };
 
     let chain_id = ledger.state.chain_id();
+    let genesis_hash = ledger.state.genesis.hash();
     let limits = ledger.state.genesis.limits.clone();
     let content_dir = config
         .content_dir
@@ -831,6 +854,9 @@ pub async fn spawn(
         outbox: BTreeMap::new(),
         gossip_in_flight: BTreeMap::new(),
         held_elsewhere,
+        parts_held: 0,
+        blocks_executed: 0,
+        parts_served: 0,
         mempool: BTreeMap::new(),
         my_next_nonce,
         proposals: BTreeMap::new(),
@@ -888,7 +914,54 @@ pub async fn spawn(
         stopped: false,
     };
     tokio::spawn(node.run(garden_net.events, command_rx, deposit_rx));
-    Ok(GardenHandle { commands, chain_id })
+    let handle = GardenHandle {
+        commands,
+        chain_id,
+        genesis_hash,
+    };
+    if joining {
+        wait_at_the_door(&handle).await?;
+    }
+    Ok(handle)
+}
+
+/// Longest a joiner waits for the door before it gives up.
+const JOIN_ENTER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wait until this key is in the Garden's record.
+///
+/// A join is a request, not a membership: the chain places the key in a
+/// block. Returning a handle before that block would tell the caller it is a
+/// validator while it holds no seat, and a Frozen Garden - which writes no
+/// blocks - would look like a Garden that admitted everyone. The answer is
+/// therefore the record: `Active` for a seat, `Waiting` under host approval
+/// (the host answers with no deadline), and a refusal when the Garden turned
+/// the key away, retired, or never reached the door.
+async fn wait_at_the_door(handle: &GardenHandle) -> Result<(), String> {
+    let started = Instant::now();
+    loop {
+        let status = handle.status().await?;
+        let member = status.pointer("/me/member").and_then(Value::as_str);
+        if member == Some("Active") || member == Some("Waiting") {
+            return Ok(());
+        }
+        if status.get("turned_away") == Some(&Value::Bool(true)) {
+            return Err("the Garden turned this key away".into());
+        }
+        if status.get("status").and_then(Value::as_str) == Some("Retired") {
+            return Err("the Garden was retired before this key could join".into());
+        }
+        if status.pointer("/me/stopped") == Some(&Value::Bool(true)) {
+            return Err("this node stopped before the Garden placed its key".into());
+        }
+        if started.elapsed() >= JOIN_ENTER_TIMEOUT {
+            let _ = handle.leave().await;
+            return Err(
+                "the Garden did not admit this key in time; it may be frozen or full".into(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Fetch and verify the genesis and the finalized chain from the peers an
@@ -1198,17 +1271,14 @@ impl Node {
         }
         let response = match done.outcome {
             Ok(wrote_new) => {
-                if !wrote_new {
+                if wrote_new {
+                    // A deposit that landed is content this node now holds
+                    // for the Garden, same as one it fetched itself.
+                    self.parts_held = self.parts_held.saturating_add(1);
+                } else {
                     self.store.release_background_charge(done.charged_len);
                 }
-                if done.already_published_for_me {
-                    self.wanted.remove(&done.content_id);
-                    GardenResponse::Ack
-                } else if self.note_unreferenced(done.sender, done.content_id) {
-                    GardenResponse::Ack
-                } else {
-                    GardenResponse::Refused("deposit queue is full".into())
-                }
+                self.finish_deposit(done.sender, done.content_id, done.already_published_for_me)
             }
             Err(err) => {
                 self.store.release_background_charge(done.charged_len);
@@ -1256,12 +1326,13 @@ impl Node {
         if held_by_source >= MAX_UNJOINED_PEERS_PER_SOURCE {
             return true;
         }
+        let window = grace.saturating_mul(2);
         let now = Instant::now();
         while self.unjoined_source_budget.len() >= 1024
             && !self.unjoined_source_budget.contains_key(&src)
         {
             self.unjoined_source_budget
-                .retain(|_, (start, _)| now.duration_since(*start) < grace);
+                .retain(|_, (start, _)| now.duration_since(*start) < window);
             if self.unjoined_source_budget.len() >= 1024 {
                 if let Some(first) = self.unjoined_source_budget.keys().next().copied() {
                     self.unjoined_source_budget.remove(&first);
@@ -1269,7 +1340,7 @@ impl Node {
             }
         }
         let entry = self.unjoined_source_budget.entry(src).or_insert((now, 0));
-        if now.duration_since(entry.0) >= grace {
+        if now.duration_since(entry.0) >= window {
             *entry = (now, 0);
         }
         entry.1 >= MAX_UNJOINED_PEERS_PER_SOURCE.saturating_mul(2)
@@ -1282,9 +1353,10 @@ impl Node {
         if src.is_loopback() {
             return;
         }
+        let window = grace.saturating_mul(2);
         let now = Instant::now();
         let entry = self.unjoined_source_budget.entry(src).or_insert((now, 0));
-        if now.duration_since(entry.0) >= grace {
+        if now.duration_since(entry.0) >= window {
             *entry = (now, 0);
         }
         entry.1 = entry.1.saturating_add(1);
@@ -1709,6 +1781,12 @@ impl Node {
             let peer_cap = (self.limits().max_validators as usize)
                 .saturating_mul(2)
                 .saturating_add(8);
+            // A Garden with no room does not hand a newcomer a welcome it
+            // can never redeem: the refusal names the reason, in the place
+            // the joiner reads it, before any chain state is exchanged.
+            let no_room = !self.ledger.state.has_room()
+                && !self.is_seated_validator(key)
+                && !self.ledger.state.validators.contains_key(key);
             let known_validator = self.is_seated_validator(key);
             let unjoined_count = self
                 .peers
@@ -1718,7 +1796,9 @@ impl Node {
             let unjoined_grace = self.unjoined_grace();
             let already = self.peers.contains_key(&peer);
             let mut admit = false;
-            let response = if *chain_id != self.chain_id() {
+            let response = if no_room {
+                GardenResponse::Refused("the Garden has no seat for this key".into())
+            } else if *chain_id != self.chain_id() {
                 GardenResponse::Refused("this node runs another Garden".into())
             } else if !self.holds_invite(peer, key, invite_signature) {
                 GardenResponse::Refused("the invite does not match this Garden".into())
@@ -1940,7 +2020,16 @@ impl Node {
                     return;
                 }
                 budget.1 = budget.1.saturating_add(1);
-                if let Some(bytes) = self.store.get(&content_id) {
+                // Serve from the object layer first. When this node coded the
+                // object, the bytes a peer receives are the ones B.U.D. 3.0
+                // rebuilt from its own symbols and checked against the content
+                // id, not a loose copy that merely sits in a file.
+                let served = self
+                    .store
+                    .get_coded(&content_id)
+                    .or_else(|| self.store.get(&content_id));
+                if let Some(bytes) = served {
+                    self.parts_served = self.parts_served.saturating_add(1);
                     let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                     if let Some(entry) = self.object_budget.get_mut(&peer) {
                         entry.2 = entry.2.saturating_add(len);
@@ -2081,14 +2170,7 @@ impl Node {
                         });
                     }
                     Ok(None) => {
-                        let response = if is_holder {
-                            self.wanted.remove(&content_id);
-                            GardenResponse::Ack
-                        } else if self.note_unreferenced(sender, content_id) {
-                            GardenResponse::Ack
-                        } else {
-                            GardenResponse::Refused("deposit queue is full".into())
-                        };
+                        let response = self.finish_deposit(sender, content_id, is_holder);
                         self.respond(channel, response).await;
                     }
                     Err(err) => {
@@ -2137,13 +2219,63 @@ impl Node {
             .is_some_and(|len| self.ledger.state.accounts_for(content_id, len))
     }
 
+    /// True when this validator must keep an already-published `content_id`:
+    /// it stands in the object's placement holder set, authored it, or carries
+    /// an uncommitted local `Publish` naming it.
+    fn should_retain_published(&self, sender: GardenKey, content_id: &Hash32) -> bool {
+        sender == self.me
+            || self.holders(content_id).contains(&self.me)
+            || self
+                .ledger
+                .state
+                .objects
+                .values()
+                .any(|obj| obj.content_id == *content_id && obj.author == self.me)
+            || self.has_pending(|pending| {
+                matches!(pending, GardenTxKind::Publish { content_id: cid, .. } if cid == content_id)
+            })
+    }
+
+    /// Reconcile a freshly materialized `PutObject` against the live finalized
+    /// state so a publication committed while the background disk write was in
+    /// flight can never strand bytes on a non-holder validator.
+    fn finish_deposit(
+        &mut self,
+        sender: GardenKey,
+        content_id: Hash32,
+        was_holder_at_admission: bool,
+    ) -> GardenResponse {
+        if self.holds_published(&content_id) {
+            if self.should_retain_published(sender, &content_id) {
+                self.wanted.remove(&content_id);
+                GardenResponse::Ack
+            } else {
+                self.store.remove(&content_id);
+                GardenResponse::Refused("this validator is not a holder of that publication".into())
+            }
+        } else if was_holder_at_admission && self.holders(&content_id).contains(&self.me) {
+            self.wanted.remove(&content_id);
+            GardenResponse::Ack
+        } else if self.note_unreferenced(sender, content_id) {
+            GardenResponse::Ack
+        } else {
+            GardenResponse::Refused("deposit queue is full".into())
+        }
+    }
+
     /// Track an object no finalized publication accounts for yet, under the
-    /// peer that deposited it. Returns `false` when the queue is saturated by
-    /// executable pending publications and the newly arrived deposit had to be
-    /// dropped instead of retained.
+    /// peer that deposited it. Returns `false` when the object belongs to a
+    /// finalized publication this validator does not hold, or when the deposit
+    /// queue is saturated by executable pending publications and the new
+    /// deposit had to be dropped instead of retained.
     fn note_unreferenced(&mut self, sender: GardenKey, content_id: Hash32) -> bool {
         if self.holds_published(&content_id) {
-            return true;
+            if self.should_retain_published(sender, &content_id) {
+                self.wanted.remove(&content_id);
+                return true;
+            }
+            self.store.remove(&content_id);
+            return false;
         }
         let queue = self.unreferenced.entry(sender).or_default();
         if queue.contains(&content_id) {
@@ -2272,28 +2404,7 @@ impl Node {
                     }
                 }
             }
-            TAG_ADMISSION => {
-                // Only the Garden's host has authority to refuse or accept a
-                // waiting request; a non-host validator can never forge a
-                // sticky `TurnedAway` verdict on a newcomer.
-                let from_host = self.peers.get(&peer) == Some(&self.ledger.state.host());
-                if let Ok(GardenResponse::AdmissionStatus(state)) = response {
-                    match state {
-                        GardenAdmissionState::Waiting if from_host => {
-                            self.remote_admission = Some(GardenAdmissionState::Waiting);
-                        }
-                        GardenAdmissionState::TurnedAway if from_host => {
-                            self.turned_away = true;
-                            self.remote_admission = None;
-                        }
-                        GardenAdmissionState::Seated => {
-                            self.remote_admission = None;
-                            self.request_sync(Some(peer)).await;
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            TAG_ADMISSION => self.on_admission_response(peer, response).await,
             TAG_SYNC => {
                 if self.sync_in_flight.is_some_and(|(p, _, _)| p == peer) {
                     self.sync_in_flight = None;
@@ -2407,6 +2518,7 @@ impl Node {
                 }
                 self.measured.remove(&content_id);
                 if fetch.keep && self.store.put_verified(&content_id, &bytes).is_ok() {
+                    self.parts_held = self.parts_held.saturating_add(1);
                     self.wanted.remove(&content_id);
                 }
                 for waiter in fetch.waiters {
@@ -2506,6 +2618,99 @@ impl Node {
         }
     }
 
+    async fn on_admission_response(
+        &mut self,
+        peer: PeerId,
+        response: Result<GardenResponse, String>,
+    ) {
+        // Only the Garden's host has authority to refuse or accept a waiting
+        // request; a non-host peer cannot forge `TurnedAway` or clear `Waiting`.
+        let from_host = self.peers.get(&peer) == Some(&self.ledger.state.host());
+        if let Ok(GardenResponse::AdmissionStatus(state)) = response {
+            match state {
+                GardenAdmissionState::Waiting if from_host => {
+                    self.remote_admission = Some(GardenAdmissionState::Waiting);
+                }
+                GardenAdmissionState::TurnedAway if from_host => {
+                    self.turned_away = true;
+                    self.remote_admission = None;
+                }
+                GardenAdmissionState::Seated if from_host => {
+                    self.remote_admission = None;
+                    self.request_sync(Some(peer)).await;
+                }
+                GardenAdmissionState::Seated if self.is_seated_peer(peer) => {
+                    self.request_sync(Some(peer)).await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    async fn on_proposal(&mut self, block: GardenBlock, from: Option<PeerId>) {
+        let hash = block.hash();
+        if self.seen.contains(&Seen::Block(hash)) || block.header.chain_id != self.chain_id() {
+            return;
+        }
+        if block.header.height > self.ledger.state.height.saturating_add(1) {
+            if from.is_some_and(|peer| self.is_seated_peer(peer))
+                && self.ledger.state.is_active(&block.header.proposer)
+            {
+                self.request_sync(from).await;
+            }
+            return;
+        }
+        // Verify header signature, signed transaction root and full execution
+        // before inserting `Seen::Block(hash)` or charging the proposer's
+        // per-round candidate slot.
+        if self.ledger.state.check_header(&block).is_err() {
+            return;
+        }
+        let proposer = block.header.proposer;
+        let now_round = self.local_round();
+        if self
+            .candidate_rounds
+            .get(&proposer)
+            .is_some_and(|round| *round >= now_round)
+        {
+            return;
+        }
+        let held: Vec<(Hash32, u64)> = self
+            .proposals
+            .iter()
+            .filter(|(_, held)| held.header.proposer == proposer)
+            .map(|(held_hash, held)| (*held_hash, held.header.round))
+            .collect();
+        let reached = now_round.saturating_add(1);
+        if held
+            .iter()
+            .any(|(_, round)| *round >= block.header.round && *round <= reached)
+        {
+            return;
+        }
+        self.candidate_rounds.insert(proposer, now_round);
+        if self.ledger.state.run_block(&block).is_err() {
+            return;
+        }
+        for (old, _) in held {
+            self.proposals.remove(&old);
+            self.votes.remove(&old);
+        }
+        if self.proposals.len() >= MAX_PROPOSALS.max(self.ledger.state.active().len()) {
+            return;
+        }
+        if !self.first_sight(Seen::Block(hash)) {
+            return;
+        }
+        self.proposals.insert(hash, block.clone());
+        self.gossip(&GardenGossip::Proposal(block), from).await;
+        let orphans: Vec<(Option<PeerId>, GardenVote)> = self.orphan_votes.drain(..).collect();
+        for (src, vote) in orphans {
+            self.on_vote(vote, src).await;
+        }
+        self.consider(hash).await;
+    }
+
     async fn on_gossip(&mut self, item: GardenGossip, from: Option<PeerId>) {
         match item {
             GardenGossip::Tx(tx) => {
@@ -2522,88 +2727,36 @@ impl Node {
                     self.gossip(&GardenGossip::Tx(tx), from).await;
                 }
             }
-            GardenGossip::Proposal(block) => {
-                let hash = block.hash();
-                if !self.first_sight(Seen::Block(hash)) {
-                    return;
-                }
-                if block.header.height > self.ledger.state.height.saturating_add(1) {
-                    self.request_sync(from).await;
-                    return;
-                }
-                // The header costs one signature and says who leads. What
-                // costs more, executing the block, is rationed after it: one
-                // candidate of one proposer in one round of this node's
-                // clock, and one slot for each proposer. Its block of the
-                // latest round holds the slot, unless that round is one this
-                // node's clock has not reached: a block nobody signs yet
-                // gives way to one that can be signed. A validator that
-                // signs many blocks for one height makes every node execute
-                // one a round and takes nobody's slot but its own.
-                if self.ledger.state.check_header(&block).is_err() {
-                    return;
-                }
-                let proposer = block.header.proposer;
-                let now_round = self.local_round();
-                if self
-                    .candidate_rounds
-                    .get(&proposer)
-                    .is_some_and(|round| *round >= now_round)
-                {
-                    return;
-                }
-                let held: Vec<(Hash32, u64)> = self
-                    .proposals
-                    .iter()
-                    .filter(|(_, held)| held.header.proposer == proposer)
-                    .map(|(held_hash, held)| (*held_hash, held.header.round))
-                    .collect();
-                let reached = now_round.saturating_add(1);
-                if held
-                    .iter()
-                    .any(|(_, round)| *round >= block.header.round && *round <= reached)
-                {
-                    return;
-                }
-                self.candidate_rounds.insert(proposer, now_round);
-                if self.ledger.state.run_block(&block).is_err() {
-                    return;
-                }
-                for (old, _) in held {
-                    self.proposals.remove(&old);
-                    self.votes.remove(&old);
-                }
-                if self.proposals.len() >= MAX_PROPOSALS.max(self.ledger.state.active().len()) {
-                    return;
-                }
-                self.proposals.insert(hash, block.clone());
-                self.gossip(&GardenGossip::Proposal(block), from).await;
-                let orphans: Vec<(Option<PeerId>, GardenVote)> =
-                    self.orphan_votes.drain(..).collect();
-                for (src, vote) in orphans {
-                    self.on_vote(vote, src).await;
-                }
-                self.consider(hash).await;
-            }
+            GardenGossip::Proposal(block) => self.on_proposal(block, from).await,
             GardenGossip::Vote(vote) => self.on_vote(vote, from).await,
             GardenGossip::Commit(commit) => {
-                let height = commit.block.header.height;
-                if !self.first_sight(Seen::Commit(commit.block.hash())) {
+                if commit.block.header.chain_id != self.chain_id() {
                     return;
                 }
+                let hash = commit.block.hash();
+                if self.seen.contains(&Seen::Commit(hash)) {
+                    return;
+                }
+                let height = commit.block.header.height;
+                // Record `Seen::Commit(hash)` only inside `apply_commit` after
+                // quorum verification succeeds, so a voteless or bad-quorum
+                // wrapper around a real proposal cannot drop the true commit.
                 if height == self.ledger.state.height.saturating_add(1) {
                     self.apply_commit(commit, from, true).await;
-                } else if height > self.ledger.state.height {
+                } else if height > self.ledger.state.height
+                    && !commit.votes.is_empty()
+                    && from.is_some_and(|peer| self.is_seated_peer(peer))
+                {
                     self.request_sync(from).await;
                 }
             }
             GardenGossip::Presence(signal) => {
-                let known = self.ledger.state.validators.contains_key(&signal.validator);
+                let seated = self.is_seated_validator(&signal.validator);
                 let newer = self
                     .presence_windows
                     .get(&signal.validator)
                     .is_none_or(|window| signal.window > *window);
-                if !known || !newer || signal.verify(self.chain_id()).is_err() {
+                if !seated || !newer || signal.verify(self.chain_id()).is_err() {
                     return;
                 }
                 if !self.first_sight(Seen::Presence(signal.validator, signal.window)) {
@@ -2866,9 +3019,20 @@ impl Node {
         self.apply_commit(commit, None, true).await;
     }
 
+    fn is_seated_peer(&self, peer: PeerId) -> bool {
+        self.peers
+            .get(&peer)
+            .is_some_and(|key| self.is_seated_validator(key))
+    }
+
     async fn request_sync(&mut self, from: Option<PeerId>) {
         if self.peers.is_empty() {
             return;
+        }
+        if let Some(peer) = from {
+            if !self.is_seated_peer(peer) {
+                return;
+            }
         }
         let needed = self.ledger.state.height.saturating_add(1);
         let now = Instant::now();
@@ -2878,7 +3042,7 @@ impl Node {
         // of multi-megabyte `GetCommits` exchanges.
         if let Some((in_flight_peer, in_flight_from, sent_at)) = self.sync_in_flight {
             if in_flight_from == needed
-                && self.peers.contains_key(&in_flight_peer)
+                && self.is_seated_peer(in_flight_peer)
                 && now.duration_since(sent_at) < SYNC_IN_FLIGHT_TIMEOUT
             {
                 return;
@@ -2894,12 +3058,20 @@ impl Node {
             }
             self.outbound_sync_budget.1 = self.outbound_sync_budget.1.saturating_add(1);
         }
-        let peer = if let Some(peer) = from.filter(|peer| self.peers.contains_key(peer)) {
+        let peer = if let Some(peer) = from {
             Some(peer)
         } else {
-            let count = self.peers.len().max(1);
-            self.sync_cursor = self.sync_cursor.wrapping_add(1) % count;
-            self.peers.keys().nth(self.sync_cursor).copied()
+            let seated: Vec<PeerId> = self
+                .peers
+                .iter()
+                .filter_map(|(peer, key)| self.is_seated_validator(key).then_some(*peer))
+                .collect();
+            if seated.is_empty() {
+                None
+            } else {
+                self.sync_cursor = self.sync_cursor.wrapping_add(1) % seated.len();
+                seated.get(self.sync_cursor).copied()
+            }
         };
         if let Some(peer) = peer {
             self.sync_in_flight = Some((peer, needed, now));
@@ -2927,6 +3099,7 @@ impl Node {
             tracing::debug!(error = %e, "garden commit refused");
             return false;
         }
+        self.blocks_executed = self.blocks_executed.saturating_add(1);
         self.first_sight(Seen::Commit(commit.block.hash()));
         if from.is_some_and(|peer| {
             self.peers
@@ -2934,6 +3107,9 @@ impl Node {
                 .is_some_and(|key| self.ledger.state.is_active(key))
         }) {
             self.held_elsewhere = self.held_elsewhere.max(commit.block.header.height);
+        }
+        if self.is_seated_validator(&self.me) {
+            self.remote_admission = None;
         }
         self.proposals.clear();
         self.candidate_rounds.clear();
@@ -3338,6 +3514,7 @@ impl Node {
             .map(|(peer, _)| *peer)
             .collect();
         for peer in expired_unjoined {
+            self.note_source_unjoined_admitted(peer, unjoined_grace);
             self.drop_peer_state(peer).await;
         }
         let now = Instant::now();
@@ -3486,6 +3663,25 @@ impl Node {
         }
     }
 
+    /// Read an object this node holds, through the object layer when it can.
+    ///
+    /// The coded copy is only trusted when its record agrees with the bytes
+    /// it rebuilt; otherwise the plain cache answers. Either way the caller
+    /// gets bytes that hash to `content_id`, because both roads check it.
+    fn resolve_locally(&mut self, content_id: &Hash32) -> Option<Vec<u8>> {
+        // `object_len` is the length of the coded object, header and all.
+        // The bytes handed back are the content, so the content length in
+        // the record is the one to compare against.
+        let coded_len = self
+            .store
+            .record_of(content_id)
+            .map(|record| record.content_id.len);
+        self.store
+            .get_coded(content_id)
+            .filter(|bytes| coded_len == Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX)))
+            .or_else(|| self.store.get(content_id))
+    }
+
     async fn on_command(&mut self, command: GardenCommand) {
         match command {
             GardenCommand::Status(reply) => {
@@ -3493,6 +3689,9 @@ impl Node {
             }
             GardenCommand::Invite(reply) => {
                 let _ = reply.send(self.invite());
+            }
+            GardenCommand::Record(reply) => {
+                let _ = reply.send(self.record());
             }
             GardenCommand::Publish {
                 kind,
@@ -3503,7 +3702,7 @@ impl Node {
             } => {
                 let _ = reply.send(self.publish(kind, bytes, mime, caption).await);
             }
-            GardenCommand::Resolve(content_id, reply) => match self.store.get(&content_id) {
+            GardenCommand::Resolve(content_id, reply) => match self.resolve_locally(&content_id) {
                 Some(bytes) => {
                     let _ = reply.send(Ok(bytes));
                 }
@@ -3560,7 +3759,9 @@ impl Node {
         }))
     }
 
-    fn invite(&self) -> Result<GardenInvite, String> {
+    /// Where an invite tells a joiner to knock, best first: the host, then
+    /// the validators this node has checked itself, then the seeds.
+    fn invite_peers(&self) -> Vec<String> {
         let state = &self.ledger.state;
         let host = state.host();
         let mut peers: Vec<String> = Vec::new();
@@ -3586,13 +3787,59 @@ impl Node {
                 peers.push(validator.address.clone());
             }
         }
+        // A seed is where a validator was, not where it is. Once the record
+        // places that key, the record wins: keeping the old address in the
+        // list would hand a newcomer a door that no longer opens.
+        let placed: BTreeSet<GardenKey> = state.validators.keys().copied().collect();
         for seed in &self.seeds {
-            if !peers.contains(seed) {
-                peers.push(seed.clone());
+            if peers.contains(seed) {
+                continue;
             }
+            if net::dial_address(seed).is_ok_and(|(_, id)| {
+                placed
+                    .iter()
+                    .any(|key| peer_id_of(key).is_ok_and(|own| own == id))
+            }) {
+                continue;
+            }
+            peers.push(seed.clone());
         }
-        peers.truncate(MAX_INVITE_PEERS);
-        GardenInvite::new(&state.genesis, self.token, peers)
+        peers
+    }
+
+    fn invite(&self) -> Result<GardenInvite, String> {
+        // The list is already in the order that matters: the host first,
+        // then the validators this node has verified, then the seeds. The
+        // invite keeps as many of them as it has room for, so a Garden that
+        // outgrows the line still hands out an invite that works.
+        let peers = fit_peers(self.invite_peers());
+        GardenInvite::new(&self.ledger.state.genesis, self.token, peers)
+    }
+
+    /// The invite record this validator hands out.
+    ///
+    /// Any validator may issue one: inviting is not a host privilege. The
+    /// record is signed with this node's own key, so whoever receives it
+    /// can see who opened the door and check that claim against the chain.
+    fn record(&self) -> Result<GardenRecord, String> {
+        let state = &self.ledger.state;
+        let peers = self.invite_peers();
+        if peers.is_empty() {
+            return Err("this node knows no address a joiner could reach".into());
+        }
+        // A record may not admit more keys than the Garden has seats for.
+        let uses = u16::try_from(state.genesis.limits.max_validators).unwrap_or(u16::MAX);
+        GardenRecord::issue(
+            state.genesis.chain_id,
+            state.genesis.hash(),
+            self.token,
+            state.host(),
+            peers,
+            now_ms(),
+            DEFAULT_RECORD_TTL_MS,
+            uses,
+            &self.key,
+        )
     }
 
     async fn publish(
@@ -3651,6 +3898,7 @@ impl Node {
             return Err("this node has too many pending transactions".into());
         }
         self.store.put(&bytes)?;
+        self.parts_held = self.parts_held.saturating_add(1);
         // Hand the bytes to the validators that will hold them before the
         // chain names them, so a sudden departure of this node loses nothing.
         let holders = self.holders(&content_id);
@@ -3661,6 +3909,10 @@ impl Node {
             .map(|(peer, _)| *peer)
             .collect();
         for peer in targets {
+            // Pushing the bytes to a holder is serving them too: the
+            // other node ends up with content it did not have, which is
+            // the whole point of the counter.
+            self.parts_served = self.parts_served.saturating_add(1);
             self.send(
                 peer,
                 GardenRequest::PutObject {
@@ -3796,6 +4048,7 @@ impl Node {
             })
             .collect();
         let genesis_hash = state.genesis.hash();
+        let bud3: Bud3PartCounts = self.store.part_counts();
         let budlum = match &self.link {
             Some(link) => link
                 .view_for_genesis(self.chain_id(), genesis_hash)
@@ -3830,6 +4083,7 @@ impl Node {
                     }),
                 "turned_away": self.turned_away,
                 "leaving": self.leaving.is_some(),
+                "stopped": self.stopped,
             },
             "validators": validators,
             "active_validators": state.active().len(),
@@ -3840,6 +4094,19 @@ impl Node {
             "objects": state.objects.len(),
             "objects_wanted_here": self.wanted.len(),
             "stored_object_bytes": self.store.total_bytes(),
+            "work": {
+                "parts_held": self.parts_held,
+                "blocks_executed": self.blocks_executed,
+                "parts_served": self.parts_served,
+                "bud3": {
+                    "objects_coded": bud3.objects_coded,
+                    "segments_coded": bud3.segments_coded,
+                    "symbols_made": bud3.symbols_made,
+                    "symbol_roots": bud3.symbol_roots,
+                    "objects_viewed": bud3.objects_viewed,
+                    "symbols_used": bud3.symbols_used,
+                },
+            },
             "limits": {
                 "max_validators": limits.max_validators,
                 "max_object_bytes": limits.max_object_bytes,
@@ -3957,11 +4224,18 @@ impl Node {
                 tracing::warn!(error = %e, "garden domain status could not be settled");
             }
         }
+        // The fallback is reached when this node can no longer name a
+        // dialable validator, so it falls back to the seeds it started
+        // from. It builds the record directly, which means it does not go
+        // through `check`, so the peer list is cut to the record's budget
+        // here. Without that cut this one path could hand out a record
+        // longer than the ceiling every other path enforces, and the
+        // leaver's parting invite would be the one invite nobody can read.
         let invite = self.invite().unwrap_or_else(|_| GardenInvite {
             chain_id,
             genesis_hash: self.ledger.state.genesis.hash(),
             token: self.token,
-            peers: self.seeds.clone(),
+            peers: fit_peers(self.seeds.clone()),
         });
         let outcome = GardenLeaveOutcome {
             chain_id,
@@ -4307,6 +4581,509 @@ mod tests {
         })
         .await
         .expect("the guest never became a validator");
+    }
+
+    /// Inviting is not a host privilege. Any seated validator produces a
+    /// record for the same Garden, and someone joins with it.
+    ///
+    /// This matters for what a Garden is: the host's only standing power is
+    /// liveness. If only the host could invite, a host who stepped away
+    /// would close the door behind them, and the Garden would be the host's
+    /// property rather than its members'.
+    #[tokio::test]
+    async fn garden_invite_any_validator() {
+        let host_handle = host().await;
+        let from_host = host_handle.invite().await.unwrap();
+
+        let guest = spawn(
+            GardenEntry::Invite(from_host.clone()),
+            config("guest", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while guest.status().await.unwrap()["active_validators"] != 2 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the guest never became a validator");
+
+        // The guest is not the host, and it hands out a record of its own.
+        assert_eq!(
+            guest.status().await.unwrap()["me"]["host"],
+            json!(false),
+            "the guest must not be the host for this test to mean anything"
+        );
+        let from_guest = guest.invite().await.unwrap();
+
+        // It names the same Garden, not a new one.
+        assert_eq!(from_guest.chain_id, from_host.chain_id);
+        assert_eq!(from_guest.genesis_hash, from_host.genesis_hash);
+        assert_eq!(from_guest.token, from_host.token);
+
+        // It is a record, so it obeys the record's rules. Both of these
+        // refuse an oversized record, so a round trip through them is the
+        // ceiling being enforced, checked as behaviour rather than against
+        // a number copied out of the module that owns it.
+        let link = from_guest.to_link();
+        assert_eq!(GardenInvite::parse(&link).unwrap(), from_guest);
+        assert_eq!(from_guest.qr_content().unwrap(), link);
+
+        // And it works: a third node joins on the guest's invite alone.
+        let latecomer = spawn(
+            GardenEntry::Invite(from_guest),
+            config("latecomer", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .expect("a validator's invite did not admit anyone");
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while latecomer.status().await.unwrap()["active_validators"] != 3 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the latecomer never became a validator");
+
+        latecomer.leave().await.unwrap();
+        guest.leave().await.unwrap();
+        host_handle.leave().await.unwrap();
+    }
+
+    /// The invite follows the host when the host moves.
+    ///
+    /// A host that reconnects from another network comes back with the same
+    /// key and a new address. The invite other validators hand out has to
+    /// name where the host is now; an invite that still points at the old
+    /// address is a door with the wrong number on it, and the person
+    /// holding it dials a host that is not there any more.
+    #[tokio::test]
+    async fn garden_invite_host_moves() {
+        // The same secret twice is the same validator: the host leaves and
+        // the node that returns is that host, not a newcomer.
+        let host_secret = random_bytes();
+        let host_handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits::testnet_default(),
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            host_secret,
+            None,
+        )
+        .await
+        .unwrap();
+        let first_invite = host_handle.invite().await.unwrap();
+        let first_address = host_handle.status().await.unwrap()["me"]["address"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let guest = spawn(
+            GardenEntry::Invite(first_invite.clone()),
+            config("guest", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        status_becomes(&guest, "/active_validators", json!(2)).await;
+
+        // A record handed out while two validators are up names both of
+        // them. This is the invite that has to survive the move: a door
+        // that only ever named the host would shut the moment he walked.
+        let stable_invite = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let candidate = host_handle.invite().await.unwrap();
+                if candidate.peers.len() >= 2 {
+                    return candidate;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the invite never named both validators");
+
+        // The host goes and comes back on a fresh listener.
+        let outcome = host_handle.leave().await.unwrap();
+        let returned = spawn(
+            GardenEntry::Invite(outcome.invite),
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            host_secret,
+            None,
+        )
+        .await
+        .expect("the host could not return");
+        let moved_address = returned.status().await.unwrap()["me"]["address"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        status_becomes(&guest, "/status", json!("Active")).await;
+
+        // The invite a validator hands out names where the host is now,
+        // and names it first: the head of the list is the address a joiner
+        // dials before any other.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if guest
+                    .invite()
+                    .await
+                    .is_ok_and(|i| i.peers.first() == Some(&moved_address))
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the invite never caught up with the host's new address");
+
+        // The address the guest itself arrived through stays on behind the
+        // host as a seed. That is deliberate and not a stale entry: a node
+        // keeps the addresses it came in by so it can still find the Garden
+        // when every validator record it holds has gone quiet. What would
+        // be wrong is handing the old address out *as the host*, and the
+        // check above is what rules that out.
+        let now = guest.invite().await.unwrap();
+        assert_eq!(
+            now.peers.first().map(String::as_str),
+            Some(moved_address.as_str()),
+            "the invite does not name the host's new address first: {:?}",
+            now.peers
+        );
+
+        // So when the host really moved, the address he left is no longer
+        // the one a joiner dials first. Binding port zero twice can hand
+        // back the same port, and then he did not really move at all.
+        if moved_address != first_address {
+            assert_ne!(
+                now.peers.first().map(String::as_str),
+                Some(first_address.as_str()),
+                "the invite still dials the host where he used to be"
+            );
+        }
+
+        // The point of the section: the record handed out before the move
+        // still opens the door after it. Nobody reissued it and nobody told
+        // the holder the host had moved.
+        let latecomer = spawn(
+            GardenEntry::Invite(stable_invite),
+            config("latecomer", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .expect("the invite from before the move was refused");
+        status_becomes(&latecomer, "/active_validators", json!(3)).await;
+
+        latecomer.leave().await.unwrap();
+        returned.leave().await.unwrap();
+        guest.leave().await.unwrap();
+    }
+
+    /// Every validator carries the Garden, not just the host.
+    ///
+    /// A Garden has no stake and no reward, so nothing but the code makes
+    /// a validator do its share. The three counters are the share: content
+    /// held on this disk, blocks this node ran itself, and content handed
+    /// to somebody else. A node that joined, sat in the validator list and
+    /// did none of those is a passenger, and the list would still call it
+    /// a validator. This test refuses that reading of the word.
+    #[tokio::test]
+    async fn garden_every_validator_works() {
+        let host_handle = host().await;
+        let invite = host_handle.invite().await.unwrap();
+        let first = spawn(
+            GardenEntry::Invite(invite.clone()),
+            config("first", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let second = spawn(
+            GardenEntry::Invite(invite),
+            config("second", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        for handle in [&host_handle, &first, &second] {
+            status_becomes(handle, "/active_validators", json!(3)).await;
+        }
+
+        // Each one publishes, so each one has content of its own to hold
+        // and to hand to the validators that will keep a copy.
+        say(&host_handle, "from the host").await.unwrap();
+        say(&first, "from the first guest").await.unwrap();
+        say(&second, "from the second guest").await.unwrap();
+
+        // The counters are reached by doing the work, which takes a few
+        // rounds: blocks have to be proposed, voted and applied, and the
+        // copies have to arrive. Waiting beats sleeping a fixed time.
+        for (name, handle) in [
+            ("host", &host_handle),
+            ("first", &first),
+            ("second", &second),
+        ] {
+            tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    let work = handle.status().await.unwrap()["work"].clone();
+                    if work["parts_held"].as_u64().unwrap_or(0) > 0
+                        && work["blocks_executed"].as_u64().unwrap_or(0) > 0
+                        && work["parts_served"].as_u64().unwrap_or(0) > 0
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{name} never did all three kinds of work");
+            });
+        }
+
+        second.leave().await.unwrap();
+        first.leave().await.unwrap();
+        host_handle.leave().await.unwrap();
+    }
+
+    /// A record that is not the Garden's own record opens nothing.
+    ///
+    /// An invite is the whole credential: whoever holds the line can join.
+    /// That only holds up if every other line is refused, so this walks the
+    /// ways a line can be wrong and insists on a refusal for each. The
+    /// refusals live in different places on purpose - the parser turns away
+    /// a line from another protocol version before any network call, the
+    /// joiner checks genesis against the hash the line claims, the token is
+    /// checked by signature against the key genesis carries, and the
+    /// validator cap is enforced by the chain itself - and a test that only
+    /// covered one of them would leave the others free to rot.
+    #[tokio::test]
+    async fn garden_invite_rejected() {
+        let host_handle = host().await;
+        let invite = host_handle.invite().await.unwrap();
+
+        // A line from another protocol version is refused by the parser,
+        // before anything is dialled.
+        let link = invite.to_link();
+        let other_version = link.replace("budlum-garden:1?", "budlum-garden:2?");
+        assert_ne!(other_version, link, "the link did not carry the version");
+        assert!(
+            GardenInvite::parse(&other_version).is_err(),
+            "a line from another protocol version was accepted"
+        );
+
+        // A forged token. Genesis carries the public key derived from the
+        // real token, so a join signed by anything else does not verify.
+        let mut forged_token = invite.clone();
+        forged_token.token = random_bytes();
+        assert_ne!(forged_token.token, invite.token);
+        let refused = tokio::time::timeout(
+            Duration::from_secs(30),
+            spawn(
+                GardenEntry::Invite(forged_token),
+                config("forger", "/ip4/127.0.0.1/tcp/0"),
+                random_bytes(),
+                None,
+            ),
+        )
+        .await
+        .expect("the forged token left the joiner hanging");
+        assert!(
+            refused.is_err(),
+            "a forged invite token was admitted to the Garden"
+        );
+
+        // A forged genesis hash. The joiner fetches genesis from a peer and
+        // refuses it unless it hashes to what the line claims.
+        let mut forged_genesis = invite.clone();
+        forged_genesis.genesis_hash = random_bytes();
+        let refused = tokio::time::timeout(
+            Duration::from_secs(30),
+            spawn(
+                GardenEntry::Invite(forged_genesis),
+                config("stranger", "/ip4/127.0.0.1/tcp/0"),
+                random_bytes(),
+                None,
+            ),
+        )
+        .await
+        .expect("the forged genesis left the joiner hanging");
+        assert!(
+            refused.is_err(),
+            "an invite naming a genesis the Garden does not have was admitted"
+        );
+
+        host_handle.leave().await.unwrap();
+
+        // A Garden with room for one validator is full the moment it is
+        // created. The line is genuine here: it is the Garden, not the
+        // record, that has nothing left to give.
+        let full = spawn(
+            GardenEntry::Create {
+                title: "Full".into(),
+                limits: GardenLimits {
+                    max_validators: 1,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let full_invite = full.invite().await.unwrap();
+        // Holding a genuine record still gets the holder told what this
+        // Garden is and still gets the chain read to it: the cap is on the
+        // validator set, not on the greeting. So this call may well return
+        // a running node. What the cap means is the line below it.
+        let latecomer = tokio::time::timeout(
+            Duration::from_secs(30),
+            spawn(
+                GardenEntry::Invite(full_invite),
+                config("latecomer", "/ip4/127.0.0.1/tcp/0"),
+                random_bytes(),
+                None,
+            ),
+        )
+        .await
+        .expect("the full Garden left the joiner hanging");
+
+        // A seat is taken by a block. Give the Garden rounds enough to
+        // write one and it still writes none: there is no seat to record.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        assert_eq!(
+            full.status().await.unwrap()["active_validators"],
+            json!(1),
+            "a Garden at its validator cap seated another validator"
+        );
+        if let Ok(latecomer) = latecomer {
+            assert_eq!(
+                latecomer.status().await.unwrap()["active_validators"],
+                json!(1),
+                "the latecomer counted itself into a Garden that was already full"
+            );
+            let _ = latecomer.leave().await;
+        }
+
+        full.leave().await.unwrap();
+    }
+
+    /// A Frozen Garden still hands out its invite.
+    ///
+    /// Freezing stops new blocks, not the Garden's identity. The record a
+    /// validator hands out names the chain, the genesis and the token; none
+    /// of those move while the host is away. If freezing also silenced the
+    /// invite, a host who lost their phone would take the door with them,
+    /// and the members left behind could not even tell anyone which Garden
+    /// they are in.
+    #[tokio::test]
+    async fn garden_invite_while_frozen() {
+        // Spawned by hand rather than through host(): this test needs the
+        // host's secret so the same validator can come back later.
+        let host_secret = random_bytes();
+        let host_handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits::testnet_default(),
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            host_secret,
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = host_handle.invite().await.unwrap();
+
+        let guest = spawn(
+            GardenEntry::Invite(invite.clone()),
+            config("guest", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        status_becomes(&guest, "/active_validators", json!(2)).await;
+
+        // The host goes. With the host silent past host_timeout_ms, every
+        // remaining validator observes Frozen.
+        let outcome = host_handle.leave().await.unwrap();
+        status_becomes(&guest, "/status", json!("Frozen")).await;
+
+        // Frozen, and still able to say which Garden this is.
+        let frozen_invite = guest
+            .invite()
+            .await
+            .expect("a Frozen Garden refused to hand out its invite");
+        assert_eq!(frozen_invite.chain_id, invite.chain_id);
+        assert_eq!(frozen_invite.genesis_hash, invite.genesis_hash);
+        assert_eq!(frozen_invite.token, invite.token);
+
+        let link = frozen_invite.to_link();
+        assert_eq!(GardenInvite::parse(&link).unwrap(), frozen_invite);
+        assert_eq!(frozen_invite.qr_content().unwrap(), link);
+
+        // Still Frozen: reading the invite did not restart anything.
+        assert_eq!(guest.status().await.unwrap()["status"], json!("Frozen"));
+
+        // Someone takes that invite and walks up to the door while the
+        // Garden is still Frozen. The chain is still there to be read, so
+        // the record still opens and the caller is not turned away. What a
+        // Frozen Garden cannot do is seat the newcomer: a seat is taken by
+        // a block, and a Frozen chain writes none. The join is started in
+        // the background so the seat can be watched while it runs.
+        let frozen_count = guest.status().await.unwrap()["active_validators"].clone();
+        let newcomer_secret = random_bytes();
+        let joining = tokio::spawn(async move {
+            spawn(
+                GardenEntry::Invite(frozen_invite),
+                config("newcomer", "/ip4/127.0.0.1/tcp/0"),
+                newcomer_secret,
+                None,
+            )
+            .await
+        });
+
+        // A Frozen chain writes no blocks, so nothing can seat anyone.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(
+            guest.status().await.unwrap()["active_validators"],
+            frozen_count,
+            "a Frozen Garden admitted a validator with no block to record it"
+        );
+
+        // The host comes back and the chain runs again.
+        let returned = spawn(
+            GardenEntry::Invite(outcome.invite),
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            host_secret,
+            None,
+        )
+        .await
+        .expect("the host could not return");
+        status_becomes(&guest, "/status", json!("Active")).await;
+
+        // And the key that walked up to a Frozen door takes its seat once
+        // there is a chain running to record it. Nobody asked again.
+        let newcomer = tokio::time::timeout(Duration::from_secs(60), joining)
+            .await
+            .expect("the join never finished after the host returned")
+            .expect("the joining task panicked")
+            .expect("the invite opened while Frozen was refused in the end");
+        status_becomes(&newcomer, "/active_validators", json!(3)).await;
+
+        newcomer.leave().await.unwrap();
+        returned.leave().await.unwrap();
+        guest.leave().await.unwrap();
     }
 
     /// One peer of the invite refuses. The join goes on with the next one:
@@ -5801,6 +6578,88 @@ mod tests {
             .await
     }
 
+    /// Section 11.8: the Garden does not merely sit next to B.U.D. 3.0, it
+    /// publishes through it. One node creates a Garden, publishes bytes, and
+    /// the status must show every part of the object layer having done its
+    /// work: the object coded, cut into segments, turned into RFC 6330
+    /// symbols, each segment given a custody root. Then the same bytes are
+    /// read back and the view path must be the one that answered.
+    #[tokio::test]
+    async fn garden_storage_all_parts() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 200,
+                    presence_interval_ms: 100,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Nothing has been published, so no part of the object layer has run.
+        let before = handle.status().await.unwrap();
+        assert_eq!(
+            before.pointer("/work/bud3/objects_coded"),
+            Some(&json!(0)),
+            "a fresh Garden cannot have coded anything"
+        );
+
+        // Bytes that do not fall on a symbol boundary, so the segmentation
+        // and the padding are both exercised.
+        let words = "a garden stores what it grows ".repeat(301);
+        let published = say(&handle, &words).await.expect("the publication failed");
+        let content_id: Hash32 = hex::decode(published["content_id"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        let status = status_becomes(&handle, "/work/bud3/objects_coded", json!(1)).await;
+        let bud3 = status.pointer("/work/bud3").unwrap().clone();
+        let count = |name: &str| bud3[name].as_u64().unwrap_or_default();
+        assert!(count("segments_coded") >= 1, "bof1 produced no segment");
+        assert!(
+            count("symbols_made") > count("segments_coded"),
+            "the fountain made no repair symbols: {bud3}"
+        );
+        assert_eq!(
+            count("symbol_roots"),
+            count("segments_coded"),
+            "custody must root every segment: {bud3}"
+        );
+        assert_eq!(
+            count("objects_viewed"),
+            0,
+            "publishing must not need the view path: {bud3}"
+        );
+
+        // Read it back. The resolve path prefers the object layer, so the
+        // bytes must come from the symbols and the view counter must move.
+        let seen = handle
+            .resolve(content_id)
+            .await
+            .expect("the object did not resolve");
+        assert_eq!(
+            String::from_utf8(seen).unwrap(),
+            words,
+            "B.U.D. 3.0 returned different bytes from the ones published"
+        );
+        let after = status_becomes(&handle, "/work/bud3/objects_viewed", json!(1)).await;
+        let used = after.pointer("/work/bud3/symbols_used").unwrap().as_u64();
+        assert_eq!(
+            used,
+            Some(count("symbols_made")),
+            "the view must consume the symbols the upload made"
+        );
+
+        handle.leave().await.unwrap();
+    }
+
     /// Wait until `handle` reports `wanted` at `pointer` of its status.
     async fn status_becomes(handle: &GardenHandle, pointer: &str, wanted: Value) -> Value {
         tokio::time::timeout(Duration::from_secs(30), async {
@@ -6566,7 +7425,19 @@ mod tests {
 
         // Dial each validator's own announced address directly (with 5 active
         // validators and 3 holders, exactly 2 validators are non-holders).
-        let peer_addrs = host_handle.invite().await.unwrap().peers;
+        //
+        // The addresses come from the status, which is the node's own list
+        // of validators, and not from the invite. An invite is a record a
+        // person carries, so it is held to a byte ceiling and names only as
+        // many peers as fit; it is not a directory of the Garden and must
+        // not be read as one.
+        let host_status = host_handle.status().await.unwrap();
+        let peer_addrs: Vec<String> = host_status["validators"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["address"].as_str().unwrap().to_string())
+            .collect();
         assert_eq!(peer_addrs.len(), 5, "expected all 5 validator addresses");
         let mut refused_non_holders = 0usize;
         for addr in &peer_addrs {
@@ -6668,6 +7539,9 @@ mod tests {
             seeds: Vec::new(),
             ledger,
             store: GardenContentStore::open(None, 1024 * 1024).unwrap(),
+            parts_held: 0,
+            blocks_executed: 0,
+            parts_served: 0,
             net: net_tx,
             link: None,
             reported: 0,
@@ -6735,7 +7609,7 @@ mod tests {
             stopped: false,
         };
 
-        // 164-05: forged TurnedAway from a non-host peer is ignored; host's is honored.
+        // Forged TurnedAway from a non-host peer is ignored; host's is honored.
         node.on_response(
             non_host_peer,
             TAG_ADMISSION,
@@ -6755,7 +7629,7 @@ mod tests {
         .await;
         assert!(node.turned_away, "host peer TurnedAway verdict must apply");
 
-        // 164-06: repeated sync triggers for the same height coalesce into one GetCommits.
+        // Repeated sync triggers for the same height coalesce into one GetCommits.
         node.request_sync(Some(host_peer)).await;
         node.request_sync(Some(non_host_peer)).await;
         node.request_sync(None).await;
@@ -6773,7 +7647,7 @@ mod tests {
         }
         assert_eq!(sent_syncs, 1, "concurrent sync triggers must coalesce");
 
-        // 164-10: a non-loopback /24 holding an unjoined slot blocks a second unjoined
+        // A non-loopback /24 holding an unjoined slot blocks a second unjoined
         // peer from the same /24, while another /24 is allowed through.
         let unjoined_2 = peer_id_of(&peer_b_key.public_key_bytes()).unwrap();
         let other_net_peer = PeerId::random();
@@ -6793,7 +7667,7 @@ mod tests {
             "newcomer from distinct public /24 must still be welcomed"
         );
 
-        // 164-14: rejected_addresses stays strictly bounded by MAX_REJECTED_ADDRESSES.
+        // Rejected address tracking stays strictly bounded by MAX_REJECTED_ADDRESSES.
         for i in 0..(MAX_REJECTED_ADDRESSES + 40) {
             node.record_rejected_address((me, format!("/ip4/198.51.100.1/tcp/{}", 2000 + i)));
         }
@@ -6801,5 +7675,503 @@ mod tests {
         assert!(!node
             .rejected_addresses
             .contains(&(me, "/ip4/198.51.100.1/tcp/2000".into())));
+    }
+
+    fn build_signed_commit(
+        ledger: &GardenLedger,
+        txs: Vec<SignedGardenTx>,
+        keys: &[&KeyPair],
+        ts_ms: u64,
+    ) -> GardenCommit {
+        let leader = ledger.state.leader(0).unwrap();
+        let proposer = keys
+            .iter()
+            .find(|k| k.public_key_bytes() == leader)
+            .unwrap();
+        let (header, _) = ledger.state.build_header(&txs, leader, 0, ts_ms).unwrap();
+        let proposer_signature = proposer.sign(&header.hash()).to_vec();
+        let votes = ledger
+            .state
+            .electorate(&txs)
+            .into_iter()
+            .map(|vk| {
+                let signer = keys.iter().find(|k| k.public_key_bytes() == vk).unwrap();
+                GardenVote::sign(&header, signer)
+            })
+            .collect();
+        GardenCommit {
+            block: GardenBlock {
+                header,
+                txs,
+                proposer_signature,
+            },
+            votes,
+        }
+    }
+
+    #[tokio::test]
+    async fn unverified_proposal_and_commit_gossip_cannot_poison_seen_cache() {
+        let host_key = KeyPair::generate().unwrap();
+        let seat_key = KeyPair::generate().unwrap();
+        let guest_key = KeyPair::generate().unwrap();
+        let token = [0x71u8; 32];
+        let genesis = GardenGenesis::new(
+            GardenFounding {
+                title: "seen-poison-guard".into(),
+                host_name: "host".into(),
+                host_address: String::new(),
+                limits: GardenLimits::testnet_default(),
+            },
+            host_key.public_key_bytes(),
+            1_000,
+            1,
+            &token,
+        )
+        .unwrap();
+        let chain_id = genesis.chain_id;
+        let invite_signer = invite_keypair(&token).unwrap();
+
+        let mut ref_ledger = GardenLedger::new(genesis).unwrap();
+        let seat_pub = seat_key.public_key_bytes();
+        let join_tx = GardenTx {
+            chain_id,
+            sender: seat_pub,
+            nonce: 0,
+            kind: GardenTxKind::Join {
+                name: "seat".into(),
+                address: String::new(),
+                invite_signature: invite_signer
+                    .sign(&join_message(chain_id, &seat_pub))
+                    .to_vec(),
+            },
+        }
+        .sign(&seat_key)
+        .unwrap();
+        let h1 = build_signed_commit(&ref_ledger, vec![join_tx], &[&host_key], 1_100);
+        ref_ledger.append(h1).unwrap();
+
+        let publish_id = crate::storage::ContentId::of(b"genuine").0;
+        let pub_tx = GardenTx {
+            chain_id,
+            sender: host_key.public_key_bytes(),
+            nonce: 0,
+            kind: GardenTxKind::Publish {
+                kind: GardenContentKind::Message,
+                content_id: publish_id,
+                size: 7,
+                caption: String::new(),
+                mime: "text/plain".into(),
+            },
+        }
+        .sign(&host_key)
+        .unwrap();
+        let genuine_commit =
+            build_signed_commit(&ref_ledger, vec![pub_tx], &[&host_key, &seat_key], 1_200);
+        let genuine_block = genuine_commit.block.clone();
+        let block_hash = genuine_block.hash();
+
+        let host_peer = peer_id_of(&host_key.public_key_bytes()).unwrap();
+        let guest_peer = peer_id_of(&guest_key.public_key_bytes()).unwrap();
+        let mut peers = BTreeMap::new();
+        peers.insert(host_peer, host_key.public_key_bytes());
+        peers.insert(guest_peer, guest_key.public_key_bytes());
+        let (net_tx, _net_rx) = mpsc::channel(64);
+        let (deposit_tx, _deposit_rx) = mpsc::channel(16);
+        let now = Instant::now();
+        let mut node = Node {
+            key: seat_key,
+            me: seat_pub,
+            name: "seat".into(),
+            token,
+            invite_signature: invite_signer
+                .sign(&join_message(chain_id, &seat_pub))
+                .to_vec(),
+            address: String::new(),
+            seeds: Vec::new(),
+            ledger: ref_ledger,
+            store: GardenContentStore::open(None, 1024 * 1024).unwrap(),
+            parts_held: 0,
+            blocks_executed: 0,
+            parts_served: 0,
+            net: net_tx,
+            link: None,
+            reported: 0,
+            budlum_status: None,
+            budlum_error: None,
+            peers,
+            unadmitted: BTreeMap::new(),
+            outbox: BTreeMap::new(),
+            gossip_in_flight: BTreeMap::new(),
+            held_elsewhere: 0,
+            mempool: BTreeMap::new(),
+            my_next_nonce: 1,
+            proposals: BTreeMap::new(),
+            candidate_rounds: BTreeMap::new(),
+            votes: BTreeMap::new(),
+            orphan_votes: VecDeque::new(),
+            my_votes: BTreeSet::new(),
+            host_voted: false,
+            proposed_rounds: BTreeSet::new(),
+            height_started: now,
+            pending_since: None,
+            seen: BTreeSet::new(),
+            seen_order: VecDeque::new(),
+            last_seen: BTreeMap::new(),
+            presence_windows: BTreeMap::new(),
+            my_window: 0,
+            started: now,
+            last_presence: now,
+            last_tick: now,
+            last_sync: now,
+            last_dial: now,
+            sync_cursor: 0,
+            wanted: BTreeSet::new(),
+            measured: BTreeMap::new(),
+            unreferenced: BTreeMap::new(),
+            verified_peers: BTreeSet::new(),
+            rejected_addresses: BTreeSet::new(),
+            rejected_address_order: VecDeque::new(),
+            dial_failures: BTreeMap::new(),
+            dials: BTreeMap::new(),
+            gossip_budget: BTreeMap::new(),
+            sync_budget: BTreeMap::new(),
+            sync_in_flight: None,
+            outbound_sync_budget: (now, 0),
+            object_budget: BTreeMap::new(),
+            put_object_budget: BTreeMap::new(),
+            deposit_tx,
+            deposits_in_flight: BTreeMap::new(),
+            total_deposits_in_flight: 0,
+            peer_sources: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            unjoined_source_budget: BTreeMap::new(),
+            peer_admitted_at: BTreeMap::new(),
+            disconnect_after: BTreeMap::new(),
+            turned_away_keys: BTreeSet::new(),
+            turned_away_order: VecDeque::new(),
+            remote_admission: None,
+            seed_dials: None,
+            fetches: BTreeMap::new(),
+            fetch_tags: BTreeMap::new(),
+            relays: BTreeMap::new(),
+            relay_tags: BTreeMap::new(),
+            next_tag: TAG_FIRST_FETCH,
+            leaving: None,
+            turned_away: false,
+            stopped: false,
+        };
+
+        // Forged proposal sharing exact block.hash() (bad signature + stripped body)
+        // must not poison Seen::Block.
+        let mut forged_sig_block = genuine_block.clone();
+        forged_sig_block.proposer_signature[0] ^= 0xff;
+        assert_eq!(forged_sig_block.hash(), block_hash);
+        node.on_gossip(GardenGossip::Proposal(forged_sig_block), Some(guest_peer))
+            .await;
+        let mut forged_body_block = genuine_block.clone();
+        forged_body_block.txs.clear();
+        assert_eq!(forged_body_block.hash(), block_hash);
+        node.on_gossip(GardenGossip::Proposal(forged_body_block), Some(guest_peer))
+            .await;
+        assert!(!node.proposals.contains_key(&block_hash));
+
+        // Genuine leader proposal arrives next and must be accepted.
+        node.on_gossip(
+            GardenGossip::Proposal(genuine_block.clone()),
+            Some(host_peer),
+        )
+        .await;
+        assert!(
+            node.proposals.contains_key(&block_hash),
+            "bad-signature/body Proposal poisoned Seen::Block and dropped the genuine proposal"
+        );
+
+        // Zero-vote Commit carrying real block.hash() must not poison Seen::Commit.
+        let voteless_commit = GardenCommit {
+            block: genuine_block,
+            votes: Vec::new(),
+        };
+        node.on_gossip(GardenGossip::Commit(voteless_commit), Some(guest_peer))
+            .await;
+        assert_eq!(node.ledger.state.height, 1);
+
+        // Genuine quorum Commit arrives next and must finalize height 2.
+        node.on_gossip(GardenGossip::Commit(genuine_commit), Some(host_peer))
+            .await;
+        assert_eq!(
+            node.ledger.state.height, 2,
+            "voteless Commit poisoned Seen::Commit and dropped the finalized commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn waiting_presence_sync_hijack_and_late_non_holder_deposit_are_blocked() {
+        let host_key = KeyPair::generate().unwrap();
+        let waiter_key = KeyPair::generate().unwrap();
+        let other_a = KeyPair::generate().unwrap();
+        let other_b = KeyPair::generate().unwrap();
+        let other_c = KeyPair::generate().unwrap();
+        let token = [0x72u8; 32];
+        let mut limits = GardenLimits::testnet_default();
+        limits.admission = GardenAdmission::HostApproval;
+        let genesis = GardenGenesis::new(
+            GardenFounding {
+                title: "admission-sync-storage-guard".into(),
+                host_name: "host".into(),
+                host_address: String::new(),
+                limits,
+            },
+            host_key.public_key_bytes(),
+            2_000,
+            2,
+            &token,
+        )
+        .unwrap();
+        let chain_id = genesis.chain_id;
+        let invite_signer = invite_keypair(&token).unwrap();
+        let mut ledger = GardenLedger::new(genesis).unwrap();
+        let all = [&host_key, &other_a, &other_b, &other_c];
+
+        for (idx, kp) in [&other_a, &other_b, &other_c, &waiter_key]
+            .iter()
+            .enumerate()
+        {
+            let pk = kp.public_key_bytes();
+            let join = GardenTx {
+                chain_id,
+                sender: pk,
+                nonce: 0,
+                kind: GardenTxKind::Join {
+                    name: format!("m{idx}"),
+                    address: String::new(),
+                    invite_signature: invite_signer.sign(&join_message(chain_id, &pk)).to_vec(),
+                },
+            }
+            .sign(kp)
+            .unwrap();
+            let ts = 2_100 + (ledger.state.height + 1) * 10;
+            let c1 = build_signed_commit(&ledger, vec![join], &all, ts);
+            ledger.append(c1).unwrap();
+            if idx < 3 {
+                let admit = GardenTx {
+                    chain_id,
+                    sender: host_key.public_key_bytes(),
+                    nonce: ledger.state.next_nonce(&host_key.public_key_bytes()),
+                    kind: GardenTxKind::Admit {
+                        target: pk,
+                        accept: true,
+                    },
+                }
+                .sign(&host_key)
+                .unwrap();
+                let ts2 = 2_100 + (ledger.state.height + 1) * 10;
+                let c2 = build_signed_commit(&ledger, vec![admit], &all, ts2);
+                ledger.append(c2).unwrap();
+            }
+        }
+        assert_eq!(
+            ledger
+                .state
+                .validators
+                .get(&waiter_key.public_key_bytes())
+                .map(|v| v.status),
+            Some(GardenValidatorStatus::Waiting)
+        );
+
+        let active = ledger.state.active();
+        let mut non_held_bytes = Vec::new();
+        let mut non_held_id = [0u8; 32];
+        for nonce in 0u32..10_000 {
+            let candidate = format!("payload-{nonce}").into_bytes();
+            let cid = crate::storage::ContentId::of(&candidate).0;
+            let holders = ledger.state.genesis.placement.holders(&cid, &active);
+            if holders.len() == 3 && !holders.contains(&host_key.public_key_bytes()) {
+                non_held_bytes = candidate;
+                non_held_id = cid;
+                break;
+            }
+        }
+        assert!(
+            !non_held_bytes.is_empty(),
+            "must find non-holder content id"
+        );
+
+        let pub_tx = GardenTx {
+            chain_id,
+            sender: other_a.public_key_bytes(),
+            nonce: ledger.state.next_nonce(&other_a.public_key_bytes()),
+            kind: GardenTxKind::Publish {
+                kind: GardenContentKind::Message,
+                content_id: non_held_id,
+                size: u32::try_from(non_held_bytes.len()).unwrap(),
+                caption: String::new(),
+                mime: "text/plain".into(),
+            },
+        }
+        .sign(&other_a)
+        .unwrap();
+        let pub_commit = build_signed_commit(&ledger, vec![pub_tx], &all, 3_000);
+        ledger.append(pub_commit).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let store_root = dir.path().join("objects");
+        let mut store = GardenContentStore::open(Some(&store_root), 1024 * 1024).unwrap();
+        let (path, _charged_len) = store
+            .reserve_background_write(non_held_id, &non_held_bytes)
+            .unwrap()
+            .unwrap();
+        let wrote_new =
+            GardenContentStore::write_object_file_blocking(path, non_held_bytes.clone()).unwrap();
+        assert!(wrote_new);
+
+        let host_pk = host_key.public_key_bytes();
+        let waiter_pk = waiter_key.public_key_bytes();
+        let other_a_peer = peer_id_of(&other_a.public_key_bytes()).unwrap();
+        let waiter_peer = peer_id_of(&waiter_pk).unwrap();
+        let mut peers = BTreeMap::new();
+        peers.insert(other_a_peer, other_a.public_key_bytes());
+        peers.insert(waiter_peer, waiter_pk);
+        let (net_tx, mut net_rx) = mpsc::channel(64);
+        let (deposit_tx, _deposit_rx) = mpsc::channel(16);
+        let now = Instant::now();
+        let mut node = Node {
+            key: host_key,
+            me: host_pk,
+            name: "host".into(),
+            token,
+            invite_signature: invite_signer
+                .sign(&join_message(chain_id, &host_pk))
+                .to_vec(),
+            address: String::new(),
+            seeds: Vec::new(),
+            ledger,
+            store,
+            parts_held: 0,
+            blocks_executed: 0,
+            parts_served: 0,
+            net: net_tx,
+            link: None,
+            reported: 0,
+            budlum_status: None,
+            budlum_error: None,
+            peers,
+            unadmitted: BTreeMap::new(),
+            outbox: BTreeMap::new(),
+            gossip_in_flight: BTreeMap::new(),
+            held_elsewhere: 0,
+            mempool: BTreeMap::new(),
+            my_next_nonce: 3,
+            proposals: BTreeMap::new(),
+            candidate_rounds: BTreeMap::new(),
+            votes: BTreeMap::new(),
+            orphan_votes: VecDeque::new(),
+            my_votes: BTreeSet::new(),
+            host_voted: false,
+            proposed_rounds: BTreeSet::new(),
+            height_started: now,
+            pending_since: None,
+            seen: BTreeSet::new(),
+            seen_order: VecDeque::new(),
+            last_seen: BTreeMap::new(),
+            presence_windows: BTreeMap::new(),
+            my_window: 0,
+            started: now,
+            last_presence: now,
+            last_tick: now,
+            last_sync: now,
+            last_dial: now,
+            sync_cursor: 0,
+            wanted: BTreeSet::new(),
+            measured: BTreeMap::new(),
+            unreferenced: BTreeMap::new(),
+            verified_peers: BTreeSet::new(),
+            rejected_addresses: BTreeSet::new(),
+            rejected_address_order: VecDeque::new(),
+            dial_failures: BTreeMap::new(),
+            dials: BTreeMap::new(),
+            gossip_budget: BTreeMap::new(),
+            sync_budget: BTreeMap::new(),
+            sync_in_flight: None,
+            outbound_sync_budget: (now, 0),
+            object_budget: BTreeMap::new(),
+            put_object_budget: BTreeMap::new(),
+            deposit_tx,
+            deposits_in_flight: BTreeMap::new(),
+            total_deposits_in_flight: 0,
+            peer_sources: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            unjoined_source_budget: BTreeMap::new(),
+            peer_admitted_at: BTreeMap::new(),
+            disconnect_after: BTreeMap::new(),
+            turned_away_keys: BTreeSet::new(),
+            turned_away_order: VecDeque::new(),
+            remote_admission: Some(GardenAdmissionState::Waiting),
+            seed_dials: None,
+            fetches: BTreeMap::new(),
+            fetch_tags: BTreeMap::new(),
+            relays: BTreeMap::new(),
+            relay_tags: BTreeMap::new(),
+            next_tag: TAG_FIRST_FETCH,
+            leaving: None,
+            turned_away: false,
+            stopped: false,
+        };
+
+        // Track all four independent checks so a single run reports every failure.
+        let waiter_presence = GardenPresence::sign(chain_id, 7, &waiter_key);
+        node.on_gossip(GardenGossip::Presence(waiter_presence), Some(waiter_peer))
+            .await;
+        let waiter_presence_leaked = node.presence_windows.contains_key(&waiter_pk);
+
+        node.on_response(
+            other_a_peer,
+            TAG_ADMISSION,
+            Ok(GardenResponse::AdmissionStatus(
+                GardenAdmissionState::Seated,
+            )),
+        )
+        .await;
+        let non_host_seated_cleared = node.remote_admission != Some(GardenAdmissionState::Waiting);
+        node.sync_in_flight = None;
+        while net_rx.try_recv().is_ok() {}
+
+        let mut fake_future = node.ledger.commits.last().unwrap().block.clone();
+        fake_future.header.height = node.ledger.state.height + 5;
+        node.on_gossip(GardenGossip::Proposal(fake_future), Some(waiter_peer))
+            .await;
+        let unseated_hijacked_sync = node.sync_in_flight.is_some();
+
+        let resp = node.finish_deposit(other_a.public_key_bytes(), non_held_id, false);
+        assert!(matches!(resp, GardenResponse::Refused(_)));
+        let non_holder_deposit_leaked =
+            node.store.contains(&non_held_id) || node.store.total_bytes() != 0;
+
+        // Public-prefix unjoined peer that idles past grace accrues a second strike
+        // on expiry so the same /24 cannot immediately reclaim the freed slot.
+        let grace = node.unjoined_grace();
+        let replacement_peer = PeerId::random();
+        {
+            let mut map = node.peer_sources.lock().unwrap();
+            map.insert(waiter_peer, net::SourceKey::V4([192, 0, 2]));
+            map.insert(replacement_peer, net::SourceKey::V4([192, 0, 2]));
+        }
+        node.note_source_unjoined_admitted(waiter_peer, grace);
+        node.peer_admitted_at.insert(
+            waiter_peer,
+            Instant::now() - grace - Duration::from_millis(50),
+        );
+        node.drop_strangers().await;
+        let idle_cycler_blocked = node.source_unjoined_blocked(replacement_peer, grace);
+
+        assert!(
+            !waiter_presence_leaked
+                && !non_host_seated_cleared
+                && !unseated_hijacked_sync
+                && !non_holder_deposit_leaked
+                && idle_cycler_blocked,
+            "failures: waiter_presence_leaked={waiter_presence_leaked}, \
+             non_host_seated_cleared={non_host_seated_cleared}, \
+             unseated_hijacked_sync={unseated_hijacked_sync}, \
+             non_holder_deposit_leaked={non_holder_deposit_leaked}, \
+             idle_cycler_blocked={idle_cycler_blocked}"
+        );
     }
 }

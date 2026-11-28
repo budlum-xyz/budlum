@@ -61,7 +61,7 @@ impl AdapterId {
     }
 
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -83,7 +83,7 @@ impl DomainKey {
     }
 
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -148,6 +148,24 @@ impl RawConsensusEvidence {
         acc = crate::core::hash::hash_fields_bytes(&[&acc, &self.payload]);
         acc
     }
+
+    /// Submitter-independent digest of the consensus claim bytes carried by
+    /// this envelope. Two bonded provers carrying the identical adapter,
+    /// version, network, declared height, declared root, and payload derive
+    /// the same substance digest even though their `submitter` addresses (and
+    /// therefore [`Self::digest`]) differ.
+    #[must_use]
+    pub fn substance_digest(&self) -> [u8; 32] {
+        let head = crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_EXT_EVIDENCE_SUBSTANCE_V1",
+            self.adapter.as_bytes(),
+            &self.evidence_version.to_le_bytes(),
+            self.network.as_bytes(),
+            &self.declared_height.to_le_bytes(),
+            &self.declared_root,
+        ]);
+        crate::core::hash::hash_fields_bytes(&[&head, &self.payload])
+    }
 }
 
 /// What is actually holding a claim up. This is the field a consumer reads in
@@ -194,7 +212,7 @@ impl SecurityBacking {
     /// The scheme a verified claim of this backing rests on, `None` when the
     /// backing names none (work, a bare authority set, nothing yet).
     #[must_use]
-    pub fn observed_scheme(&self) -> Option<ObservedScheme> {
+    pub const fn observed_scheme(&self) -> Option<ObservedScheme> {
         match self {
             Self::SignatureSet { scheme, .. } => Some(*scheme),
             Self::Zk { system, .. } => Some(ObservedScheme::Proof(system.assumption_class())),
@@ -273,6 +291,73 @@ pub struct FinalityAttestation {
     pub attested_tx_root: Option<Hash32>,
 }
 
+const fn encode_optional_root(root: Option<&Hash32>) -> [u8; 33] {
+    let mut out = [0u8; 33];
+    if let Some(bytes) = root {
+        if let Some((tag, body)) = out.split_first_mut() {
+            *tag = 1;
+            body.copy_from_slice(bytes);
+        }
+    }
+    out
+}
+
+fn optional_root_ct_eq(left: Option<&Hash32>, right: Option<&Hash32>) -> subtle::Choice {
+    use subtle::ConstantTimeEq;
+    let a = encode_optional_root(left);
+    let b = encode_optional_root(right);
+    a.ct_eq(&b)
+}
+
+impl FinalityAttestation {
+    /// Canonical commitment over every consensus-binding field of this
+    /// attestation (`domain`, `adapter`, `height`, `evidence_version`,
+    /// `state_root`, and the presence-tagged block, event, and transaction
+    /// sub-roots). Quorum agreement and contradiction tracking key on this
+    /// digest so two provers that agree on `state_root` while diverging on any
+    /// attested sub-root never coalesce into the same claim.
+    #[must_use]
+    pub fn claim_digest(&self) -> [u8; 32] {
+        let block = encode_optional_root(self.attested_block_hash.as_ref());
+        let event = encode_optional_root(self.attested_event_root.as_ref());
+        let tx = encode_optional_root(self.attested_tx_root.as_ref());
+        crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_EXT_CLAIM_DIGEST_V1",
+            self.domain.as_bytes(),
+            self.adapter.as_bytes(),
+            &self.height.to_le_bytes(),
+            &self.evidence_version.to_le_bytes(),
+            &self.state_root,
+            &block,
+            &event,
+            &tx,
+        ])
+    }
+
+    /// Constant-time equality over `state_root` and all three optional
+    /// sub-roots (`attested_block_hash`, `attested_event_root`,
+    /// `attested_tx_root`). Returns `false` if any root or presence flag
+    /// diverges.
+    #[must_use]
+    pub fn commits_same_roots(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        let same_state = self.state_root.ct_eq(&other.state_root);
+        let same_block = optional_root_ct_eq(
+            self.attested_block_hash.as_ref(),
+            other.attested_block_hash.as_ref(),
+        );
+        let same_event = optional_root_ct_eq(
+            self.attested_event_root.as_ref(),
+            other.attested_event_root.as_ref(),
+        );
+        let same_tx = optional_root_ct_eq(
+            self.attested_tx_root.as_ref(),
+            other.attested_tx_root.as_ref(),
+        );
+        bool::from(same_state & same_block & same_event & same_tx)
+    }
+}
+
 /// Named so a reader can tell "slot 4" from "epoch 4" from "round 4".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimeUnit {
@@ -285,7 +370,7 @@ pub enum TimeUnit {
 
 impl TimeUnit {
     #[must_use]
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Slot => "slot",
             Self::Epoch => "epoch",
@@ -382,7 +467,7 @@ impl VerificationPolicy {
     /// whose finality is a vote; a proven domain does not need the proxy, and
     /// asking one for depth makes it refuse - see [`Self::proven`].
     #[must_use]
-    pub fn strict(now: u64) -> Self {
+    pub const fn strict(now: u64) -> Self {
         Self {
             min_depth: 1,
             require_declared_match: true,
@@ -404,7 +489,7 @@ impl VerificationPolicy {
     /// `require_slashable` is false for the same reason: there is nobody to
     /// slash.
     #[must_use]
-    pub fn proven(now: u64) -> Self {
+    pub const fn proven(now: u64) -> Self {
         Self {
             min_depth: 0,
             require_declared_match: true,
@@ -453,9 +538,9 @@ pub enum AdapterError {
     Unavailable { reason: String },
 }
 
-/// The interface itself. Four required methods and one optional, and the
-/// optional one is the reason a third-party adapter can be admitted without
-/// anybody reading its source.
+/// The interface itself. Three methods are required. Optional methods default
+/// to claims that are safe when an implementation says nothing: no golden
+/// sample, no parent binding, and no pinned trust anchor.
 pub trait ExternalFinalityAdapter: Send + Sync {
     /// Who this adapter says it is. Read at registration and compared on every
     /// call, so an adapter cannot be swapped under a domain that already
@@ -509,5 +594,39 @@ pub trait ExternalFinalityAdapter: Send + Sync {
     /// is rather than passing by refusing.
     fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
         None
+    }
+
+    /// The parent block digest this evidence binds, when the adapter's own
+    /// verification checks one.
+    ///
+    /// This is the witness
+    /// [`crate::cross_domain::external::falsity`] uses to refute an accepted
+    /// attestation whose slot can no longer be re-proved - the abandoned-branch
+    /// case. It is `None` by default, which is the honest default: an adapter
+    /// that cannot bind a parent cannot answer an ancestry challenge, and
+    /// guessing one would turn a slash into an unprovable claim.
+    ///
+    /// # Contract
+    ///
+    /// Callers invoke this only on evidence that [`Self::verify`] has already
+    /// accepted, and an implementation must derive the digest from the same
+    /// bytes `verify` checked - never from a caller-supplied field, and never
+    /// from a value it did not authenticate. Returning `Some` claims "the proof
+    /// I just verified binds this parent"; returning `None` claims nothing.
+    fn attested_parent(&self, evidence: &RawConsensusEvidence) -> Option<[u8; 32]> {
+        let _ = evidence;
+        None
+    }
+
+    /// Returns `true` when this adapter instance holds a pinned trust anchor
+    /// (validator committee, PoW checkpoint header, or ZK program/chain pin).
+    ///
+    /// The default is deliberately closed: a new or third-party adapter cannot
+    /// claim an anchor merely by omitting this method. An implementation must
+    /// derive `true` from its own instance state so
+    /// [`crate::cross_domain::external::ExternalDomainFinalityBridge`] refuses
+    /// unanchored evidence before evaluating untrusted bytes.
+    fn has_pinned_trust_anchor(&self) -> bool {
+        false
     }
 }

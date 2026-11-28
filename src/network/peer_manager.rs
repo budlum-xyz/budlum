@@ -56,6 +56,10 @@ pub struct PeerScore {
     pub invalid_txs: u32,
     pub valid_contributions: u32,
     pub last_seen: Option<Instant>,
+    /// Timestamp of the latest verified protocol contribution accepted from
+    /// this peer. Unlike `last_seen`, penalty and rate-limit paths never
+    /// advance it, so non-banning faults cannot extend an idle inbound slot.
+    pub last_valid_at: Option<Instant>,
     pub rate_tokens: f64,
     pub rate_last_refill: Instant,
     /// Last refill of the vote and blob buckets. Separate from
@@ -84,6 +88,7 @@ impl Default for PeerScore {
             invalid_txs: 0,
             valid_contributions: 0,
             last_seen: None,
+            last_valid_at: None,
             rate_tokens: MAX_MSG_BURST,
             rate_last_refill: Instant::now(),
             aux_last_refill: Instant::now(),
@@ -182,13 +187,13 @@ impl SubnetKey {
 
     /// The `/24` an IPv4 address belongs to, keyed by its first three octets.
     #[must_use]
-    fn ipv4([a, b, c]: [u8; 3]) -> Self {
+    const fn ipv4([a, b, c]: [u8; 3]) -> Self {
         Self([Self::FAMILY_V4, a, b, c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     }
 
     /// The `/64` an IPv6 address belongs to, keyed by its first eight octets.
     #[must_use]
-    fn ipv6([p0, p1, p2, p3, p4, p5, p6, p7]: [u8; 8]) -> Self {
+    const fn ipv6([p0, p1, p2, p3, p4, p5, p6, p7]: [u8; 8]) -> Self {
         Self([
             Self::FAMILY_V6,
             p0,
@@ -217,16 +222,15 @@ impl SubnetKey {
                 let [a, b, c, _] = v4.octets();
                 Self::ipv4([a, b, c])
             }
-            std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-                Some(v4) => {
+            std::net::IpAddr::V6(v6) => {
+                if let Some(v4) = v6.to_ipv4_mapped() {
                     let [a, b, c, _] = v4.octets();
                     Self::ipv4([a, b, c])
-                }
-                None => {
+                } else {
                     let [p0, p1, p2, p3, p4, p5, p6, p7, ..] = v6.octets();
                     Self::ipv6([p0, p1, p2, p3, p4, p5, p6, p7])
                 }
-            },
+            }
         }
     }
 }
@@ -313,7 +317,7 @@ impl PeerManager {
     }
 
     #[must_use]
-    pub fn msg_refill_rate(&self) -> f64 {
+    pub const fn msg_refill_rate(&self) -> f64 {
         self.msg_refill_rate
     }
 
@@ -352,13 +356,13 @@ impl PeerManager {
     }
 
     #[must_use]
-    pub fn max_tracked_peers(&self) -> usize {
+    pub const fn max_tracked_peers(&self) -> usize {
         self.max_tracked_peers
     }
 
     /// Maximum admitted connections sharing the same IPv4 /24.
     #[must_use]
-    pub fn max_peers_per_subnet(&self) -> usize {
+    pub const fn max_peers_per_subnet(&self) -> usize {
         self.max_peers_per_subnet
     }
 
@@ -368,7 +372,7 @@ impl PeerManager {
 
     /// Outbound subnet diversity bound (0 = no limit).
     #[must_use]
-    pub fn max_outbound_per_subnet(&self) -> usize {
+    pub const fn max_outbound_per_subnet(&self) -> usize {
         self.max_outbound_per_subnet
     }
 
@@ -381,7 +385,7 @@ impl PeerManager {
         if self.max_outbound_per_subnet == 0 {
             return true;
         }
-        let key = subnet.map(Into::into).unwrap_or(SubnetKey::UNADDRESSED);
+        let key = subnet.map_or(SubnetKey::UNADDRESSED, Into::into);
         self.outbound_subnet_counts.get(&key).copied().unwrap_or(0) < self.max_outbound_per_subnet
     }
 
@@ -395,7 +399,7 @@ impl PeerManager {
         if self.protected_peers.contains(&peer_id) {
             return true;
         }
-        let key = subnet.map(Into::into).unwrap_or(SubnetKey::UNADDRESSED);
+        let key = subnet.map_or(SubnetKey::UNADDRESSED, Into::into);
         if !self.can_admit_outbound_subnet(Some(key)) {
             return false;
         }
@@ -424,7 +428,7 @@ impl PeerManager {
 
     /// Returns false if admitting `subnet` would exceed the eclipse bound.
     pub fn can_admit_subnet<K: Into<SubnetKey>>(&self, subnet: Option<K>) -> bool {
-        let key = subnet.map(Into::into).unwrap_or(SubnetKey::UNADDRESSED);
+        let key = subnet.map_or(SubnetKey::UNADDRESSED, Into::into);
         self.subnet_counts.get(&key).copied().unwrap_or(0) < self.max_peers_per_subnet
     }
 
@@ -445,7 +449,7 @@ impl PeerManager {
         if self.protected_peers.contains(&peer_id) {
             return true;
         }
-        let key = subnet.map(Into::into).unwrap_or(SubnetKey::UNADDRESSED);
+        let key = subnet.map_or(SubnetKey::UNADDRESSED, Into::into);
         *self.subnet_counts.entry(key).or_insert(0) += 1;
         self.peer_subnets.insert(peer_id, key);
         true
@@ -767,9 +771,13 @@ impl PeerManager {
             return false;
         };
         score.refill_tokens();
-        let cost = (objects.max(1) as f64 / 16.0).clamp(1.0, 10.0);
-        if score.agg_frame_tokens >= cost {
-            score.agg_frame_tokens -= cost;
+        let capped_units = u32::try_from(objects.max(1)).unwrap_or(u32::MAX);
+        let cost = (f64::from(capped_units) / 16.0).max(1.0);
+        // Admit when accrued tokens cover `cost`, or allow a single large frame
+        // when the peer holds at least its fresh 10-token burst while recording
+        // the full unclamped cooldown debt (bounded to 128s at 2 tokens/s).
+        if score.agg_frame_tokens >= cost || score.agg_frame_tokens >= 10.0 {
+            score.agg_frame_tokens = (score.agg_frame_tokens - cost).max(-256.0);
             true
         } else {
             let floor = if authored_by_peer {
@@ -840,9 +848,11 @@ impl PeerManager {
         let Some(score) = self.get_or_create(peer_id) else {
             return;
         };
+        let now = Instant::now();
         score.valid_contributions += 1;
         score.score = (score.score + GOOD_BEHAVIOR_REWARD).min(MAX_SCORE);
-        score.last_seen = Some(Instant::now());
+        score.last_seen = Some(now);
+        score.last_valid_at = Some(now);
     }
     /// Reset consecutive unanswered-sync strikes only after the peer actually
     /// delivers valid sync data that advances or feeds our chain.
@@ -850,12 +860,14 @@ impl PeerManager {
         let Some(score) = self.get_or_create(peer_id) else {
             return;
         };
+        let now = Instant::now();
         score.valid_contributions += 1;
         score.unanswered_sync_strikes = 0;
         score.sync_rest_until = None;
         score.sync_rests = 0;
         score.score = (score.score + GOOD_BEHAVIOR_REWARD).min(MAX_SCORE);
-        score.last_seen = Some(Instant::now());
+        score.last_seen = Some(now);
+        score.last_valid_at = Some(now);
     }
     pub fn ban_peer(&mut self, peer_id: &PeerId) {
         if self.protected_peers.contains(peer_id) {
@@ -1288,7 +1300,7 @@ mod tests {
         assert_eq!(manager.get_score(&peer), MAX_SCORE);
     }
 
-    /// Reload uses absolute expiry, not a fresh full BAN_DURATION.
+    /// Reload uses absolute expiry, not a fresh full `BAN_DURATION`.
     #[test]
     fn ban_reload_preserves_remaining() {
         let mut manager = PeerManager::new();
@@ -1328,7 +1340,7 @@ mod tests {
         assert!(manager.get_persisted_banned_peers().is_empty());
     }
 
-    /// SecurityConfig.peer_rate_limit_per_minute wires into refill rate.
+    /// `SecurityConfig.peer_rate_limit_per_minute` wires into refill rate.
     #[test]
     fn peer_rate_limit_security_profile() {
         use crate::core::chain_config::Network;
@@ -1351,7 +1363,7 @@ mod tests {
         assert_eq!(dev.max_peers_per_subnet(), 8);
     }
 
-    /// Tracked peer map has a hard ceiling (memory DoS guard).
+    /// Tracked peer map has a hard ceiling (memory `DoS` guard).
     ///
     /// The ceiling is on the map size, not on admissions: a new peer is
     /// admitted by reclaiming a spent record, and refused when every record
@@ -1627,7 +1639,7 @@ mod tests {
 
     /// Chaos: network partition isolates peer groups by subnet.
     /// Two groups on different /24 subnets cannot communicate through the
-    /// PeerManager's subnet-bound admission.
+    /// `PeerManager`'s subnet-bound admission.
     #[test]
     fn chaos_network_partition_isolates_groups() {
         let mut pm = PeerManager::new();
@@ -1854,17 +1866,17 @@ mod tests {
             ("report_invalid_block", |m, p| m.report_invalid_block(p)),
             ("report_invalid_tx", |m, p| m.report_invalid_tx(p)),
             ("report_oversized_message", |m, p| {
-                m.report_oversized_message(p)
+                m.report_oversized_message(p);
             }),
             ("report_bad_behavior", |m, p| m.report_bad_behavior(p)),
             ("report_good_behavior", |m, p| m.report_good_behavior(p)),
             ("report_unanswered_request", |m, p| {
-                m.report_unanswered_request(p)
+                m.report_unanswered_request(p);
             }),
             ("report_unjoined_block", |m, p| m.report_unjoined_block(p)),
             ("report_slow_sync", |m, p| m.report_slow_sync(p)),
             ("report_invalid_handshake", |m, p| {
-                m.report_invalid_handshake(p)
+                m.report_invalid_handshake(p);
             }),
             ("ban_peer", |m, p| m.ban_peer(p)),
             ("set_handshaked", |m, p| m.set_handshaked(p, true)),
@@ -2397,6 +2409,34 @@ mod tests {
         assert!(pm.charge_agg_frame(&flooder, 160));
         // A second immediate large frame exceeds the refilled budget and fails.
         assert!(!pm.charge_agg_frame(&flooder, 160));
+    }
+
+    #[test]
+    fn agg_frame_budget_does_not_discount_frames_above_160_verification_units() {
+        let mut pm = PeerManager::new();
+        let flooder = test_peer_id();
+        // 640 verification units (e.g. 320 claims + 320 segment attestations)
+        // represent 40 tokens of ML-DSA-87 work at 16 units/token (20s at 2/s).
+        assert!(pm.charge_agg_frame(&flooder, 640));
+        // Simulate 6 seconds of refill (+12 tokens). With a 10-token clamp this
+        // would already admit another 160-unit frame; without clamping, 30 tokens
+        // of debt dropped to -18, so another frame must still be rejected.
+        if let Some(score) = pm.peers.get_mut(&flooder) {
+            score.aux_last_refill = Instant::now()
+                .checked_sub(Duration::from_secs(6))
+                .expect("6s back");
+        }
+        assert!(
+            !pm.charge_agg_frame(&flooder, 160),
+            "oversized frame must pay full proportional verification cooldown"
+        );
+        // After 25 seconds (+50 tokens from -30 -> capped at 20), budget recovers.
+        if let Some(score) = pm.peers.get_mut(&flooder) {
+            score.aux_last_refill = Instant::now()
+                .checked_sub(Duration::from_secs(25))
+                .expect("25s back");
+        }
+        assert!(pm.charge_agg_frame(&flooder, 160));
     }
 
     #[test]

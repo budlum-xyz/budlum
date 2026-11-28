@@ -33,8 +33,9 @@ use revm::primitives::{Address, Bytes, TxKind, U256};
 use revm::{InspectEvm, Inspector, MainBuilder};
 use sha2::{Digest, Sha256};
 
+use crate::abi::{MAX_PRECOMPILE_BYTES, UNIVERSAL_CALL_PRECOMPILE, UOL_PRECOMPILE};
 use crate::db::{commit_evm_state, HostDb, ReadOnlyHostDb};
-use crate::precompile_universal::handle_universal_precompile_call;
+use crate::precompile_universal::{handle_universal_precompile_call, PrecompileValueDebit};
 
 /// Default Budlum EVM chain ID (`EIP-155`).
 pub const BUDLUM_EVM_CHAIN_ID: u64 = 45_261;
@@ -49,8 +50,58 @@ pub const QUERY_GAS_LIMIT: u64 = 16_777_216;
 pub struct BudlumEvmInspector {
     /// Set if an alias collision refused contract creation during execution.
     pub alias_collision_refused: bool,
+    /// Set if any host checkpoint commit/rollback failed during nested execution;
+    /// forces top-level execution to fail closed with `Revert`.
+    checkpoint_error: bool,
     call_checkpoints: Vec<Option<u64>>,
     create_checkpoints: Vec<Option<u64>>,
+    frame_value_debits: Vec<Vec<PrecompileValueDebit>>,
+}
+
+impl BudlumEvmInspector {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            alias_collision_refused: false,
+            checkpoint_error: false,
+            call_checkpoints: Vec::new(),
+            create_checkpoints: Vec::new(),
+            frame_value_debits: vec![Vec::new()],
+        }
+    }
+
+    fn committed_debits(&self) -> std::collections::BTreeMap<Address, U256> {
+        let mut out = std::collections::BTreeMap::new();
+        for frame in &self.frame_value_debits {
+            for d in frame {
+                let entry = out.entry(d.caller).or_insert(U256::ZERO);
+                *entry = entry.saturating_add(d.amount);
+            }
+        }
+        out
+    }
+
+    fn merge_or_revert_debits(&mut self, context: &mut EvmHostCtx<'_>, ok: bool) {
+        let Some(debits) = self.frame_value_debits.pop() else {
+            return;
+        };
+        if debits.is_empty() {
+            return;
+        }
+        if ok {
+            if let Some(parent) = self.frame_value_debits.last_mut() {
+                parent.extend(debits);
+            }
+        } else {
+            // Host checkpoint_rollback undoes the cross-VM host transfer; restore the
+            // direct caller balance deduction on the reverting sub-frame.
+            for d in debits.into_iter().rev() {
+                if let Some(acc) = context.journaled_state.evm_state_mut().get_mut(&d.caller) {
+                    acc.info.balance = acc.info.balance.saturating_add(d.amount);
+                }
+            }
+        }
+    }
 }
 
 type EvmHostCtx<'a> = Context<BlockEnv, TxEnv, CfgEnv, HostDb<'a>, Journal<HostDb<'a>>, ()>;
@@ -62,33 +113,46 @@ impl<'a> Inspector<EvmHostCtx<'a>, EthInterpreter> for BudlumEvmInspector {
         inputs: &mut CreateInputs,
     ) -> Option<CreateOutcome> {
         let caller = inputs.caller();
-        let nonce = context
-            .journaled_state
-            .evm_state()
-            .get(&caller)
-            .map_or(0, |acc| acc.info.nonce);
+        let Ok(caller_acc) = context.journaled_state.load_account(caller) else {
+            self.create_checkpoints.push(None);
+            self.frame_value_debits.push(Vec::new());
+            let gas = Gas::new_spent_with_reservoir(inputs.gas_limit(), inputs.reservoir());
+            return Some(CreateOutcome::new(
+                InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
+                None,
+            ));
+        };
+        let nonce = caller_acc.data.info.nonce;
         let candidate = inputs.created_address(nonce);
-        let collided = context
-            .journaled_state
-            .db()
-            .has_pq_alias(candidate)
-            .unwrap_or(true);
+        let reserved_precompile =
+            candidate == UNIVERSAL_CALL_PRECOMPILE || candidate == UOL_PRECOMPILE;
+        let collided = reserved_precompile
+            || context
+                .journaled_state
+                .db()
+                .has_pq_alias(candidate)
+                .unwrap_or(true);
         if collided {
             self.alias_collision_refused = true;
             self.create_checkpoints.push(None);
+            self.frame_value_debits.push(Vec::new());
             let gas = Gas::new_spent_with_reservoir(inputs.gas_limit(), inputs.reservoir());
             return Some(CreateOutcome::new(
                 InterpreterResult::new(InstructionResult::CreateCollision, Bytes::new(), gas),
                 None,
             ));
         }
-        let cp = context
-            .journaled_state
-            .db_mut()
-            .host
-            .checkpoint_begin()
-            .ok();
-        self.create_checkpoints.push(cp);
+        let Ok(cp) = context.journaled_state.db_mut().host.checkpoint_begin() else {
+            self.create_checkpoints.push(None);
+            self.frame_value_debits.push(Vec::new());
+            let gas = Gas::new_spent_with_reservoir(inputs.gas_limit(), inputs.reservoir());
+            return Some(CreateOutcome::new(
+                InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
+                None,
+            ));
+        };
+        self.create_checkpoints.push(Some(cp));
+        self.frame_value_debits.push(Vec::new());
         None
     }
 
@@ -98,21 +162,30 @@ impl<'a> Inspector<EvmHostCtx<'a>, EthInterpreter> for BudlumEvmInspector {
         _inputs: &CreateInputs,
         outcome: &mut CreateOutcome,
     ) {
+        let mut ok = outcome.result.result.is_ok();
         if let Some(Some(cp_id)) = self.create_checkpoints.pop() {
-            if outcome.result.result.is_ok() {
-                let _ = context
+            let res = if ok {
+                context
                     .journaled_state
                     .db_mut()
                     .host
-                    .checkpoint_commit(cp_id);
+                    .checkpoint_commit(cp_id)
             } else {
-                let _ = context
+                context
                     .journaled_state
                     .db_mut()
                     .host
-                    .checkpoint_rollback(cp_id);
+                    .checkpoint_rollback(cp_id)
+            };
+            if res.is_err() {
+                self.checkpoint_error = true;
+                ok = false;
+                outcome.result.result = InstructionResult::Revert;
+                outcome.result.output = Bytes::new();
+                outcome.address = None;
             }
         }
+        self.merge_or_revert_debits(context, ok);
     }
 
     fn call(
@@ -120,21 +193,33 @@ impl<'a> Inspector<EvmHostCtx<'a>, EthInterpreter> for BudlumEvmInspector {
         context: &mut EvmHostCtx<'a>,
         inputs: &mut CallInputs,
     ) -> Option<CallOutcome> {
-        if let Some(outcome) = handle_universal_precompile_call(context, inputs) {
+        let mut debit = None;
+        if let Some(outcome) = handle_universal_precompile_call(context, inputs, &mut debit) {
+            if let Some(d) = debit {
+                if let Some(parent) = self.frame_value_debits.last_mut() {
+                    parent.push(d);
+                }
+            }
             self.call_checkpoints.push(None);
+            self.frame_value_debits.push(Vec::new());
             return Some(outcome);
         }
         let cp = if inputs.is_static {
             None
         } else {
-            context
-                .journaled_state
-                .db_mut()
-                .host
-                .checkpoint_begin()
-                .ok()
+            let Ok(id) = context.journaled_state.db_mut().host.checkpoint_begin() else {
+                self.call_checkpoints.push(None);
+                self.frame_value_debits.push(Vec::new());
+                let gas = Gas::new_spent_with_reservoir(inputs.gas_limit, inputs.reservoir);
+                return Some(CallOutcome::new(
+                    InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
+                    inputs.return_memory_offset.clone(),
+                ));
+            };
+            Some(id)
         };
         self.call_checkpoints.push(cp);
+        self.frame_value_debits.push(Vec::new());
         None
     }
 
@@ -144,25 +229,33 @@ impl<'a> Inspector<EvmHostCtx<'a>, EthInterpreter> for BudlumEvmInspector {
         _inputs: &CallInputs,
         outcome: &mut CallOutcome,
     ) {
+        let mut ok = outcome.result.result.is_ok();
         if let Some(Some(cp_id)) = self.call_checkpoints.pop() {
-            if outcome.result.result.is_ok() {
-                let _ = context
+            let res = if ok {
+                context
                     .journaled_state
                     .db_mut()
                     .host
-                    .checkpoint_commit(cp_id);
+                    .checkpoint_commit(cp_id)
             } else {
-                let _ = context
+                context
                     .journaled_state
                     .db_mut()
                     .host
-                    .checkpoint_rollback(cp_id);
+                    .checkpoint_rollback(cp_id)
+            };
+            if res.is_err() {
+                self.checkpoint_error = true;
+                ok = false;
+                outcome.result.result = InstructionResult::Revert;
+                outcome.result.output = Bytes::new();
             }
         }
+        self.merge_or_revert_debits(context, ok);
     }
 }
 
-/// Stateless read-only inspector blocking `0x...B001` non-static calls and `CREATE` collisions.
+/// Stateless read-only inspector blocking `0x...B001`/`0x...B002` host side effects and `CREATE`.
 #[derive(Debug, Default)]
 struct QueryInspector;
 
@@ -172,6 +265,36 @@ impl<'a>
         EthInterpreter,
     > for QueryInspector
 {
+    fn call(
+        &mut self,
+        _context: &mut Context<
+            BlockEnv,
+            TxEnv,
+            CfgEnv,
+            ReadOnlyHostDb<'a>,
+            Journal<ReadOnlyHostDb<'a>>,
+            (),
+        >,
+        inputs: &mut CallInputs,
+    ) -> Option<CallOutcome> {
+        if inputs.bytecode_address == UNIVERSAL_CALL_PRECOMPILE
+            || inputs.target_address == UNIVERSAL_CALL_PRECOMPILE
+            || inputs.bytecode_address == UOL_PRECOMPILE
+            || inputs.target_address == UOL_PRECOMPILE
+        {
+            let gas = Gas::new_spent_with_reservoir(inputs.gas_limit, inputs.reservoir);
+            return Some(CallOutcome::new(
+                InterpreterResult::new(
+                    InstructionResult::CallNotAllowedInsideStatic,
+                    Bytes::new(),
+                    gas,
+                ),
+                inputs.return_memory_offset.clone(),
+            ));
+        }
+        None
+    }
+
     fn create(
         &mut self,
         _context: &mut Context<
@@ -243,6 +366,13 @@ fn map_halt_to_status(reason: &HaltReason) -> OutcomeStatus {
 
 impl EvmWorker {
     fn execute_inner(ctx: &BlockContext, call: &EeCall, host: &mut dyn HostApi) -> EeOutcome {
+        if call.caller.ee != EeId::EVM {
+            return EeOutcome {
+                status: OutcomeStatus::Revert,
+                output: b"invalid caller EE identity".to_vec(),
+                gas_used: 0,
+            };
+        }
         let Some(caller_addr) = parse_evm_address(&call.caller.id) else {
             return EeOutcome {
                 status: OutcomeStatus::Revert,
@@ -253,7 +383,24 @@ impl EvmWorker {
 
         let tx_kind = match call.kind {
             EeCallKind::Deploy => {
-                if call.input.is_empty() || call.input.len() > MAX_INITCODE_SIZE {
+                if !call.target.id.is_empty() && call.target.ee != EeId::EVM {
+                    return EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"invalid deploy target EE identity".to_vec(),
+                        gas_used: 0,
+                    };
+                }
+                if !call.target.id.is_empty() && call.target.id.len() != 20 {
+                    return EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"invalid deploy target EVM address".to_vec(),
+                        gas_used: 0,
+                    };
+                }
+                if call.input.is_empty()
+                    || call.input.len() > MAX_INITCODE_SIZE
+                    || call.input.first() == Some(&0xEF)
+                {
                     let _ = host.charge(call.gas_limit);
                     return EeOutcome {
                         status: OutcomeStatus::InvalidCode,
@@ -275,6 +422,13 @@ impl EvmWorker {
                 TxKind::Create
             }
             EeCallKind::Call => {
+                if call.target.ee != EeId::EVM {
+                    return EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"invalid target EE identity".to_vec(),
+                        gas_used: 0,
+                    };
+                }
                 let Some(target_addr) = parse_evm_address(&call.target.id) else {
                     return EeOutcome {
                         status: OutcomeStatus::Revert,
@@ -316,22 +470,30 @@ impl EvmWorker {
             ..TxEnv::default()
         };
 
-        let top_cp = host.checkpoint_begin().ok();
+        let Ok(top_cp) = host.checkpoint_begin() else {
+            let _ = host.charge(call.gas_limit);
+            return EeOutcome {
+                status: OutcomeStatus::Revert,
+                output: Vec::new(),
+                gas_used: call.gas_limit,
+            };
+        };
         let child_gas_charged = Rc::new(Cell::new(0u64));
-        let exec_out = {
+        let (exec_out, settled_debits, checkpoint_error) = {
             let host_db = HostDb::with_child_gas_tracker(host, chain_id, child_gas_charged.clone());
             let evm_ctx = Context::<BlockEnv, _, _, _, _, _>::new(host_db, SpecId::OSAKA)
                 .with_cfg(cfg)
                 .with_block(block_env);
-            let mut evm = evm_ctx.build_mainnet_with_inspector(BudlumEvmInspector::default());
-            evm.inspect_tx(tx_env)
+            let mut evm = evm_ctx.build_mainnet_with_inspector(BudlumEvmInspector::new());
+            let out = evm.inspect_tx(tx_env);
+            let debits = evm.inspector.committed_debits();
+            let cp_err = evm.inspector.checkpoint_error;
+            (out, debits, cp_err)
         };
 
         let Ok(result_and_state) = exec_out else {
-            if let Some(cp) = top_cp {
-                let _ = host.checkpoint_rollback(cp);
-            }
-            let _ = host.charge(call.gas_limit);
+            let _ = host.checkpoint_rollback(top_cp);
+            let _ = host.charge(call.gas_limit.saturating_sub(child_gas_charged.get()));
             return EeOutcome {
                 status: OutcomeStatus::Revert,
                 output: Vec::new(),
@@ -351,9 +513,7 @@ impl EvmWorker {
             .charge(gas_used.saturating_sub(child_gas_charged.get()))
             .is_err()
         {
-            if let Some(cp) = top_cp {
-                let _ = host.checkpoint_rollback(cp);
-            }
+            let _ = host.checkpoint_rollback(top_cp);
             return EeOutcome {
                 status: OutcomeStatus::OutOfGas,
                 output: Vec::new(),
@@ -361,20 +521,33 @@ impl EvmWorker {
             };
         }
 
+        if checkpoint_error {
+            let _ = host.checkpoint_rollback(top_cp);
+            return EeOutcome {
+                status: OutcomeStatus::Revert,
+                output: Vec::new(),
+                gas_used,
+            };
+        }
+
         match result_and_state.result {
             ExecutionResult::Success { logs, output, .. } => {
-                if commit_evm_state(host, &result_and_state.state, &logs).is_err() {
-                    if let Some(cp) = top_cp {
-                        let _ = host.checkpoint_rollback(cp);
-                    }
+                if commit_evm_state(host, &result_and_state.state, &logs, &settled_debits).is_err()
+                {
+                    let _ = host.checkpoint_rollback(top_cp);
                     return EeOutcome {
                         status: OutcomeStatus::Revert,
                         output: Vec::new(),
                         gas_used,
                     };
                 }
-                if let Some(cp) = top_cp {
-                    let _ = host.checkpoint_commit(cp);
+                if host.checkpoint_commit(top_cp).is_err() {
+                    let _ = host.checkpoint_rollback(top_cp);
+                    return EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: Vec::new(),
+                        gas_used,
+                    };
                 }
                 let out_bytes = match (call.kind, output.address()) {
                     (EeCallKind::Deploy, Some(created)) => created.as_slice().to_vec(),
@@ -387,9 +560,7 @@ impl EvmWorker {
                 }
             }
             ExecutionResult::Revert { output, .. } => {
-                if let Some(cp) = top_cp {
-                    let _ = host.checkpoint_rollback(cp);
-                }
+                let _ = host.checkpoint_rollback(top_cp);
                 EeOutcome {
                     status: OutcomeStatus::Revert,
                     output: output.to_vec(),
@@ -397,9 +568,7 @@ impl EvmWorker {
                 }
             }
             ExecutionResult::Halt { reason, .. } => {
-                if let Some(cp) = top_cp {
-                    let _ = host.checkpoint_rollback(cp);
-                }
+                let _ = host.checkpoint_rollback(top_cp);
                 EeOutcome {
                     status: map_halt_to_status(&reason),
                     output: Vec::new(),
@@ -466,60 +635,89 @@ impl ExecutionEnvironment for EvmWorker {
         q: &EeQuery,
         host: &dyn HostRead,
     ) -> Result<Vec<u8>, EeRefusal> {
+        if q.target.ee != EeId::EVM {
+            return Err(EeRefusal {
+                code: RefusalCode::InvalidCode,
+                message: "query target EE identity must be EeId::EVM".into(),
+            });
+        }
         let Some(target_addr) = parse_evm_address(&q.target.id) else {
             return Err(EeRefusal {
                 code: RefusalCode::InvalidCode,
                 message: "query target must be a 20-byte EVM address".into(),
             });
         };
+        if q.input.len() > MAX_PRECOMPILE_BYTES {
+            return Err(EeRefusal {
+                code: RefusalCode::TooLarge,
+                message: format!(
+                    "query input size {} exceeds limit {}",
+                    q.input.len(),
+                    MAX_PRECOMPILE_BYTES
+                ),
+            });
+        }
         let chain_id = if ctx.chain_id == 0 {
             BUDLUM_EVM_CHAIN_ID
         } else {
             ctx.chain_id
         };
 
-        let mut cfg = CfgEnv::new_with_spec(SpecId::OSAKA);
-        cfg.chain_id = chain_id;
-        cfg.tx_chain_id_check = false;
-        cfg.disable_nonce_check = true;
-        cfg.disable_balance_check = true;
-        cfg.disable_base_fee = true;
-        cfg.disable_eip3607 = true;
-        cfg.tx_gas_limit_cap = Some(QUERY_GAS_LIMIT);
+        let run_query = || {
+            let mut cfg = CfgEnv::new_with_spec(SpecId::OSAKA);
+            cfg.chain_id = chain_id;
+            cfg.tx_chain_id_check = false;
+            cfg.disable_nonce_check = true;
+            cfg.disable_balance_check = true;
+            cfg.disable_base_fee = true;
+            cfg.disable_eip3607 = true;
+            cfg.tx_gas_limit_cap = Some(QUERY_GAS_LIMIT);
 
-        let block_env = build_block_env(ctx);
-        let tx_env = TxEnv {
-            tx_type: 0,
-            caller: Address::ZERO,
-            gas_limit: QUERY_GAS_LIMIT,
-            gas_price: 0,
-            kind: TxKind::Call(target_addr),
-            value: U256::ZERO,
-            data: Bytes::from(q.input.clone()),
-            nonce: 0,
-            chain_id: Some(chain_id),
-            ..TxEnv::default()
+            let block_env = build_block_env(ctx);
+            let tx_env = TxEnv {
+                tx_type: 0,
+                caller: Address::ZERO,
+                gas_limit: QUERY_GAS_LIMIT,
+                gas_price: 0,
+                kind: TxKind::Call(target_addr),
+                value: U256::ZERO,
+                data: Bytes::from(q.input.clone()),
+                nonce: 0,
+                chain_id: Some(chain_id),
+                ..TxEnv::default()
+            };
+
+            let ro_db = ReadOnlyHostDb::new(host, chain_id);
+            let evm_ctx = Context::<BlockEnv, _, _, _, _, _>::new(ro_db, SpecId::OSAKA)
+                .with_cfg(cfg)
+                .with_block(block_env);
+            let mut evm = evm_ctx.build_mainnet_with_inspector(QueryInspector);
+            let res = evm.inspect_one_tx(tx_env).map_err(|e| EeRefusal {
+                code: RefusalCode::Denied,
+                message: format!("EVM query execution error: {e}"),
+            })?;
+
+            match res {
+                ExecutionResult::Success { output, .. } => Ok(output.into_data().to_vec()),
+                ExecutionResult::Revert { output, .. } => Err(EeRefusal {
+                    code: RefusalCode::Denied,
+                    message: format!("EVM query reverted ({} bytes)", output.len()),
+                }),
+                ExecutionResult::Halt { reason, .. } => Err(EeRefusal {
+                    code: RefusalCode::Denied,
+                    message: format!("EVM query halted: {reason:?}"),
+                }),
+            }
         };
 
-        let ro_db = ReadOnlyHostDb::new(host, chain_id);
-        let evm_ctx = Context::<BlockEnv, _, _, _, _, _>::new(ro_db, SpecId::OSAKA)
-            .with_cfg(cfg)
-            .with_block(block_env);
-        let mut evm = evm_ctx.build_mainnet_with_inspector(QueryInspector);
-        let res = evm.inspect_one_tx(tx_env).map_err(|e| EeRefusal {
-            code: RefusalCode::Denied,
-            message: format!("EVM query execution error: {e}"),
-        })?;
-
-        match res {
-            ExecutionResult::Success { output, .. } => Ok(output.into_data().to_vec()),
-            ExecutionResult::Revert { output, .. } => Err(EeRefusal {
+        match catch_unwind(AssertUnwindSafe(run_query)) {
+            Ok(outcome) => outcome,
+            Err(payload) => Err(EeRefusal {
                 code: RefusalCode::Denied,
-                message: format!("EVM query reverted ({} bytes)", output.len()),
-            }),
-            ExecutionResult::Halt { reason, .. } => Err(EeRefusal {
-                code: RefusalCode::Denied,
-                message: format!("EVM query halted: {reason:?}"),
+                message: format!(
+                    "EVM query engine panic: {}",
+                    panic_payload_message(&*payload)
+                ),
             }),
         }
     }
@@ -1415,6 +1613,299 @@ mod tests {
         assert_eq!(
             host.read(&ns_assets, &hk).ok().flatten(),
             Some(taker_raw.to_vec())
+        );
+    }
+
+    #[test]
+    fn evmee04_inspector_checkpoint_fail_closed_ee_identity_and_query_bounds() {
+        use budlum_uel_abi::RefusalCode;
+
+        // 1. Failing host checkpoint_rollback on a reverting sub-call caught by the parent
+        //    contract MUST force the entire transaction to fail closed (Revert), NEVER Success!
+        struct FailNestedRollbackHost {
+            inner: MemoryHost,
+            nested_rollback_failed: bool,
+        }
+        impl HostRead for FailNestedRollbackHost {
+            fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+                self.inner.read(ns, key)
+            }
+            fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
+                self.inner.bud_balance(who)
+            }
+        }
+        impl HostApi for FailNestedRollbackHost {
+            fn write(
+                &mut self,
+                ns: &Namespace,
+                key: &[u8],
+                value: Option<&[u8]>,
+            ) -> Result<(), HostError> {
+                self.inner.write(ns, key, value)
+            }
+            fn universal_call(
+                &mut self,
+                call: UniversalCall,
+            ) -> Result<UniversalResult, HostError> {
+                self.inner.universal_call(call)
+            }
+            fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+                self.inner.emit_log(log)
+            }
+            fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
+                self.inner.charge(bgu)
+            }
+            fn bud_transfer(
+                &mut self,
+                from: &EeIdentity,
+                to: &EeIdentity,
+                attos: u128,
+            ) -> Result<(), HostError> {
+                self.inner.bud_transfer(from, to, attos)
+            }
+            fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+                self.inner.checkpoint_begin()
+            }
+            fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_commit(id)
+            }
+            fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+                if id >= 3 {
+                    self.nested_rollback_failed = true;
+                    // Simulate a host rollback error that leaves the checkpoint
+                    // slot popped without rolling back, so outer commits succeed
+                    // unless the inspector tracks the failure and fails closed.
+                    let _ = self.inner.checkpoint_commit(id);
+                    return Err(HostError::Invalid(
+                        "injected nested rollback failure".into(),
+                    ));
+                }
+                self.inner.checkpoint_rollback(id)
+            }
+        }
+
+        let mut base_host = MemoryHost::new(10_000_000);
+        let deployer = EeIdentity {
+            ee: EeId::EVM,
+            id: vec![0x55; 20],
+        };
+        base_host.balances.insert(deployer.clone(), 10_000_000);
+        let ctx = BlockContext {
+            chain_id: BUDLUM_EVM_CHAIN_ID,
+            height: 40,
+            timestamp_ms: 1_762_000_000_000,
+        };
+        let mut worker = EvmWorker;
+
+        // Deploy child contract that always reverts: PUSH1 0 PUSH1 0 REVERT
+        let child_init = wrap_initcode(
+            &[],
+            &[opcode::PUSH1, 0x00, opcode::PUSH1, 0x00, opcode::REVERT],
+        );
+        let Ok(child_dep) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: deployer.clone(),
+                target: EeIdentity {
+                    ee: EeId::EVM,
+                    id: vec![0u8; 20],
+                },
+                value: BudAmount(0),
+                input: child_init,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x71; 32],
+            },
+            &mut base_host,
+        ) else {
+            panic!("child deploy faulted");
+        };
+        assert_eq!(child_dep.status, OutcomeStatus::Success);
+        let child_addr: [u8; 20] = child_dep.output.as_slice().try_into().unwrap_or([0; 20]);
+
+        // Deploy parent contract that CALLs child, ignores child's revert (POP), and returns cleanly!
+        let mut parent_rt = Asm::default();
+        parent_rt
+            .push1(0x00)
+            .push1(0x00)
+            .push1(0x00)
+            .push1(0x00)
+            .push1(0x00)
+            .push20(child_addr)
+            .op(opcode::GAS)
+            .op(opcode::CALL)
+            .op(opcode::POP)
+            .op(opcode::STOP);
+        let parent_init = wrap_initcode(&[], &parent_rt.finish());
+        let Ok(parent_dep) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: deployer.clone(),
+                target: EeIdentity {
+                    ee: EeId::EVM,
+                    id: vec![0u8; 20],
+                },
+                value: BudAmount(0),
+                input: parent_init,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x72; 32],
+            },
+            &mut base_host,
+        ) else {
+            panic!("parent deploy faulted");
+        };
+        assert_eq!(parent_dep.status, OutcomeStatus::Success);
+
+        let mut faulty_host = FailNestedRollbackHost {
+            inner: base_host,
+            nested_rollback_failed: false,
+        };
+        let Ok(call_res) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: deployer.clone(),
+                target: EeIdentity {
+                    ee: EeId::EVM,
+                    id: parent_dep.output.clone(),
+                },
+                value: BudAmount(0),
+                input: Vec::new(),
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x73; 32],
+            },
+            &mut faulty_host,
+        ) else {
+            panic!("parent call faulted");
+        };
+        assert!(
+            faulty_host.nested_rollback_failed,
+            "test fixture must trigger nested checkpoint_rollback failure"
+        );
+        assert_eq!(
+            call_res.status,
+            OutcomeStatus::Revert,
+            "failed host checkpoint_rollback must fail closed with Revert, never commit Success"
+        );
+
+        // 2. Foreign EE identity in caller/target/query must be rejected.
+        let wasm_spoof = EeIdentity {
+            ee: EeId::WASM,
+            id: vec![0x55; 20],
+        };
+        let Ok(bad_caller) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: wasm_spoof.clone(),
+                target: EeIdentity {
+                    ee: EeId::EVM,
+                    id: parent_dep.output.clone(),
+                },
+                value: BudAmount(0),
+                input: Vec::new(),
+                gas_limit: 100_000,
+                depth: 0,
+                tx_hash: [0x74; 32],
+            },
+            &mut faulty_host.inner,
+        ) else {
+            panic!("bad caller faulted");
+        };
+        assert_eq!(
+            bad_caller.status,
+            OutcomeStatus::Revert,
+            "non-EVM caller EE identity must be refused"
+        );
+        assert_eq!(bad_caller.gas_used, 0);
+
+        let Ok(bad_target) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: deployer.clone(),
+                target: wasm_spoof.clone(),
+                value: BudAmount(0),
+                input: Vec::new(),
+                gas_limit: 100_000,
+                depth: 0,
+                tx_hash: [0x75; 32],
+            },
+            &mut faulty_host.inner,
+        ) else {
+            panic!("bad target faulted");
+        };
+        assert_eq!(
+            bad_target.status,
+            OutcomeStatus::Revert,
+            "non-EVM target EE identity must be refused"
+        );
+        assert_eq!(bad_target.gas_used, 0);
+
+        let q_spoof = worker.query(
+            &ctx,
+            &EeQuery {
+                target: wasm_spoof,
+                input: Vec::new(),
+            },
+            &faulty_host.inner,
+        );
+        assert!(
+            matches!(
+                q_spoof,
+                Err(ref e) if e.code == RefusalCode::InvalidCode
+            ),
+            "query with non-EVM target EE identity must be refused"
+        );
+
+        // 3. Oversized query input must be refused with RefusalCode::TooLarge.
+        let q_huge = worker.query(
+            &ctx,
+            &EeQuery {
+                target: EeIdentity {
+                    ee: EeId::EVM,
+                    id: parent_dep.output,
+                },
+                input: vec![0u8; crate::abi::MAX_PRECOMPILE_BYTES + 1],
+            },
+            &faulty_host.inner,
+        );
+        assert!(
+            matches!(
+                q_huge,
+                Err(ref e) if e.code == RefusalCode::TooLarge
+            ),
+            "oversized query input must be refused with TooLarge"
+        );
+
+        // 4. Deploy with 0xEF-prefixed initcode must be refused as InvalidCode (EIP-3541 parity).
+        let Ok(ef_dep) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: deployer,
+                target: EeIdentity {
+                    ee: EeId::EVM,
+                    id: vec![0u8; 20],
+                },
+                value: BudAmount(0),
+                input: vec![0xEF, 0x00, 0x01],
+                gas_limit: 100_000,
+                depth: 0,
+                tx_hash: [0x76; 32],
+            },
+            &mut faulty_host.inner,
+        ) else {
+            panic!("ef deploy faulted");
+        };
+        assert_eq!(
+            ef_dep.status,
+            OutcomeStatus::InvalidCode,
+            "0xEF initcode deploy must return InvalidCode"
         );
     }
 }

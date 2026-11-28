@@ -47,23 +47,21 @@ pub const MAX_STORAGE_CHALLENGE_INTERVAL: u64 = 2_592_000;
 /// `deal_open::open_deal_escrowed`; that step follows this one.
 pub const STORAGE_MIN_OPERATOR_BOND: u64 = 1_000_000;
 
-/// The protocol-level parameters for the in-block deal path.
+/// Whether the in-block deal doors demand a `VerifyMerkle` proof envelope
+/// and a `storage_root` at open/accept time.
 ///
-/// A block carries no domain record, so the in-block executor has no
-/// `StorageDomainParams` to hand down. It uses this: the protocol bond floor and
-/// every other default, with the VerifyMerkle gate in its closed position -
-/// which is the position the profiles ship and the one the deal path is
-/// required to honour rather than silently demand an envelope regardless.
-#[must_use]
-pub fn protocol_params() -> StorageDomainParams {
-    StorageDomainParams {
-        chunk_size: 256,
-        max_committed_chunks: 1024,
-        challenge_interval: 100,
-        min_operator_bond: STORAGE_MIN_OPERATOR_BOND,
-        require_merkle_proof: false,
-    }
-}
+/// The gate is the network's activation schedule, stated per domain. Every
+/// checked-in profile ships `require_merkle_proof = false` until the 64-depth
+/// Merkle verifier exists (requiring a blob the node cannot verify protects
+/// nothing), so the in-block doors state the same `false` here - the same
+/// pattern as the bond floor constant above. The flag is threaded through
+/// the doors so the day the schedule flips, this one constant moves and both
+/// doors enforce it. The registry-level gate itself is live and tested under
+/// `storage_deal::tests::deal_open_rejects_missing_merkle_proof`.
+///
+/// WIRING: the in-block open/accept doors read this on the day the Merkle
+/// verifier lands; until then the schedule ships `false` everywhere.
+pub const STORAGE_REQUIRE_MERKLE_PROOF: bool = false;
 
 /// Per-domain parameters for a `StorageAttestation` domain.
 ///
@@ -178,6 +176,24 @@ pub fn storage_params_bytes(params: &StorageDomainParams) -> Vec<u8> {
     out.extend_from_slice(&params.challenge_interval.to_le_bytes());
     out.extend_from_slice(&params.min_operator_bond.to_le_bytes());
     out
+}
+
+/// The protocol-level parameters for the in-block deal path.
+///
+/// A block carries no domain record, so the in-block executor has no
+/// `StorageDomainParams` to hand down. It uses this: the protocol bond floor and
+/// every other default, with the VerifyMerkle gate in its closed position -
+/// which is the position the profiles ship and the one the deal path is
+/// required to honour rather than silently demand an envelope regardless.
+#[must_use]
+pub fn protocol_params() -> StorageDomainParams {
+    StorageDomainParams {
+        chunk_size: 256,
+        max_committed_chunks: 1024,
+        challenge_interval: 100,
+        min_operator_bond: STORAGE_MIN_OPERATOR_BOND,
+        require_merkle_proof: false,
+    }
 }
 
 #[cfg(test)]

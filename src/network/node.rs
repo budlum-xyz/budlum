@@ -29,7 +29,7 @@ use libp2p::{mdns, swarm::behaviour::toggle::Toggle};
 /// of the round - about 2.6 warnings per second per validator - and, on the
 /// prevote path, kept the vote out of `prevote_published`, so the node never
 /// recorded that it had already voted at that height.
-fn publish_reached_the_mesh(error: &gossipsub::PublishError) -> bool {
+const fn publish_reached_the_mesh(error: &gossipsub::PublishError) -> bool {
     matches!(error, gossipsub::PublishError::Duplicate)
 }
 
@@ -327,8 +327,46 @@ fn qc_chunk_response(
 /// height, not the height of the local tip checkpoint. A precommit at or below
 /// the last one signed could carry a different hash after a reorg, which is a
 /// slashable double sign, and would move the persisted mark backwards.
-fn precommit_height_is_new(signed_height: u64, last_precommit_height: u64) -> bool {
+const fn precommit_height_is_new(signed_height: u64, last_precommit_height: u64) -> bool {
     signed_height > last_precommit_height
+}
+
+/// The precommit door: a height ahead of the mark, or the same hash this node
+/// already precommitted at the marked height. A different hash at or below the
+/// mark is refused (`vote_would_equivocate`).
+/// May this node sign a precommit at `checkpoint_height`?
+///
+/// The same two doors as [`prevote_is_due`]: a round above the mark, or the
+/// identical round re-published on the retry cadence. The second door is
+/// never open on every beat: a vote re-signed four times a second trips the
+/// receivers' vote rate limit and gets this node banned from the very round
+/// it is trying to complete.
+fn precommit_is_due(
+    checkpoint_height: u64,
+    checkpoint_hash: &str,
+    last_precommit_height: u64,
+    last_precommit_hash: Option<&str>,
+    retry: bool,
+) -> bool {
+    checkpoint_height > last_precommit_height
+        || (retry
+            && !vote_would_equivocate(
+                checkpoint_height,
+                checkpoint_hash,
+                last_precommit_height,
+                last_precommit_hash,
+            ))
+}
+
+/// Whether the beat may re-publish the round it already marked.
+///
+/// On the retry cadence once a publication is remembered; once, immediately,
+/// when nothing is remembered - that is a process that restarted mid-round
+/// with its mark on disk, and its one re-publication is what lets the round
+/// it left complete. After that first send `published` is set and the
+/// cadence applies.
+const fn same_round_retry(retry_due: bool, published: Option<&PublishedVote>) -> bool {
+    retry_due || published.is_none()
 }
 
 /// How long a cast vote waits for its round to reach quorum before the node
@@ -397,21 +435,40 @@ fn vote_retry_due(
 /// height past the high-water mark, so the first door opens again. What must
 /// not happen is the reverse - a node that re-signs to "catch up" and equivocates.
 #[must_use]
-fn prevote_is_due(checkpoint_height: u64, last_prevote_height: u64, retry: bool) -> bool {
-    checkpoint_height > last_prevote_height || retry
+fn prevote_is_due(
+    checkpoint_height: u64,
+    checkpoint_hash: &str,
+    last_prevote_height: u64,
+    last_prevote_hash: Option<&str>,
+    retry: bool,
+) -> bool {
+    checkpoint_height > last_prevote_height
+        || (retry
+            && !vote_would_equivocate(
+                checkpoint_height,
+                checkpoint_hash,
+                last_prevote_height,
+                last_prevote_hash,
+            ))
 }
 
 fn record_cast_prevote(
     last_prevote_height: &mut u64,
+    last_prevote_hash: &mut Option<String>,
     prevote_published: &mut Option<PublishedVote>,
     epoch: u64,
     checkpoint_height: u64,
     checkpoint_hash: &str,
     now: std::time::Instant,
 ) -> bool {
+    // Re-publishing the hash already marked must not clear it: the mark keeps
+    // naming the one hash this node is allowed to re-sign at that height.
     let advanced = checkpoint_height > *last_prevote_height;
     if advanced {
         *last_prevote_height = checkpoint_height;
+        *last_prevote_hash = Some(checkpoint_hash.to_string());
+    } else if *last_prevote_height == checkpoint_height {
+        *last_prevote_hash = Some(checkpoint_hash.to_string());
     }
     *prevote_published = Some(PublishedVote {
         epoch,
@@ -603,7 +660,9 @@ fn advertised_address_is_allowed(addr: &Multiaddr, private_ok: bool) -> bool {
 /// Devnet is the one network where the peers really are on loopback; every
 /// other profile either faces the open internet or is a rehearsal of it, and
 /// there a private address in the routing table is an address nobody can dial.
-fn profile_rejects_private_advertisements(network: crate::core::chain_config::Network) -> bool {
+const fn profile_rejects_private_advertisements(
+    network: crate::core::chain_config::Network,
+) -> bool {
     !matches!(network, crate::core::chain_config::Network::Devnet)
 }
 
@@ -701,7 +760,7 @@ pub enum NodeCommand {
     ListPeers,
     /// Hard Pruning - physical deletion of B.U.D. content.
     /// Triggered ONLY by local Executor after verified `NftBurn` (`SECURITY_AUDIT_HACKER`.md).
-    /// Payload is 32-byte ContentId (mirrors budlum_core::storage::content_id::ContentId and bud_node::store::ContentId).
+    /// Payload is 32-byte `ContentId` (mirrors `budlum_core::storage::content_id::ContentId` and `bud_node::store::ContentId`).
     StoragePrune {
         cid: [u8; 32],
     },
@@ -1391,6 +1450,11 @@ pub struct Node {
     /// signing twice at one height. It used to be a local variable inside the
     /// event loop, which meant it started at zero on every restart.
     pub last_prevote_height: u64,
+    /// The checkpoint hash signed at `last_prevote_height`, so a restart can
+    /// tell "I already signed this" from "I am about to equivocate".
+    last_prevote_hash: Option<String>,
+    /// The checkpoint hash signed at `last_precommit_height`.
+    last_precommit_hash: Option<String>,
     /// The prevote this node last published, for the retry in
     /// [`FINALITY_VOTE_RETRY`]: the once-per-height marks above say a vote was
     /// signed, not that it arrived.
@@ -1593,12 +1657,69 @@ impl Drop for ReorgSlot {
 /// Declared at module level rather than inside `load_vote_history`: an item
 /// After a statement is legal but confusing, since it is in scope for the
 /// Whole function including the lines above it.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct VoteHistory {
     #[serde(default)]
     last_prevote_height: u64,
     #[serde(default)]
     last_precommit_height: u64,
+    /// The checkpoint hash this node signed at `last_prevote_height`.
+    ///
+    /// Absent in files written before this field existed. It turns the mark
+    /// from "do not sign at or below this height" into "do not sign a
+    /// *different* hash at this height": after a restart the chain replays the
+    /// same blocks, the aggregator re-opens the same rounds, and a validator
+    /// that refused to re-publish its own identical vote could never help its
+    /// cluster reach quorum again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prevote_hash: Option<String>,
+    /// The checkpoint hash this node signed at `last_precommit_height`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    precommit_hash: Option<String>,
+    /// The P2P identity that cast these votes.
+    ///
+    /// Absent in files written before this field existed. A file without an
+    /// owner is not evidence of anything, so `load_vote_history` ignores it
+    /// rather than adopting a height some other process may have written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    node: Option<String>,
+}
+
+/// Whether `history` was written by the node called `ours`.
+///
+/// Free function rather than a method so the rule is testable without a live
+/// `Node`: the rule is "an owner we can read and that is not us", and a file
+/// with no owner fails it.
+fn vote_history_was_written_by(history: &VoteHistory, ours: &str) -> bool {
+    history.node.as_deref() == Some(ours)
+}
+
+/// Whether signing `hash` at `height` would be equivocation.
+///
+/// The high-water mark exists to stop one key signing twice at one height.
+/// A *different* hash at or below the marked height is exactly that, and is
+/// refused. The same hash at exactly the marked height is not: it is the vote
+/// this node already cast, and re-publishing it is what makes a restart
+/// survivable (`src/network/node.rs` documents the same rule for the
+/// in-memory retry: same epoch, same height, same hash is idempotent at the
+/// receiver). A height below the mark is still refused whatever the hash,
+/// because the mark no longer remembers which hash sat there.
+///
+/// `marked_hash` is `None` for a file written before hashes were recorded;
+/// such a file can only authorise the strict rule it always implied.
+fn vote_would_equivocate(
+    height: u64,
+    hash: &str,
+    marked_height: u64,
+    marked_hash: Option<&str>,
+) -> bool {
+    if height > marked_height {
+        return false;
+    }
+    if height < marked_height {
+        return true;
+    }
+    marked_hash != Some(hash)
 }
 
 impl Node {
@@ -2940,125 +3061,6 @@ impl Node {
         )
     }
 
-    /// Build a `Node` with an injected system-DNS probe.
-    ///
-    /// `try_system_dns` is the seam the tests use to simulate a host without a
-    /// usable resolver; `with_key` passes a probe that always succeeds.
-    ///
-    /// # Errors
-    ///
-    /// The swarm build refusal.
-    fn with_key_and_dns_probe(
-        chain: ChainHandle,
-        local_key: identity::Keypair,
-        mdns_enabled: bool,
-        storage_node: Option<Arc<bud_node::BudBitswap>>,
-        sharding_config: Option<bud_node::ShardingConfig>,
-        try_system_dns: impl FnOnce() -> Result<(), std::io::Error>,
-    ) -> Result<Self, Box<dyn Error>> {
-        let peer_id = PeerId::from(local_key.public());
-        let mdns_requested = mdns_enabled;
-        let mdns_enabled = mdns_requested && cfg!(feature = "p2p-mdns");
-        if mdns_requested && !mdns_enabled {
-            warn!(
-                "mDNS was requested but this production/default build excludes the p2p-mdns feature; continuing with mDNS disabled"
-            );
-        }
-        let mobile_mode = sharding_config.as_ref().is_some_and(|c| c.mobile_mode);
-
-        let shard_manager =
-            sharding_config.map(|config| Arc::new(bud_node::ShardManager::new(peer_id, config)));
-        info!("Node ID: {peer_id} (mDNS: {mdns_enabled}, Mobile: {mobile_mode})");
-        let (swarm, dns_transport_available) = Self::build_swarm(
-            local_key,
-            mdns_enabled,
-            mobile_mode,
-            storage_node.as_ref(),
-            shard_manager.as_ref(),
-            try_system_dns,
-        )?;
-        let (command_tx, command_rx) = mpsc::channel(32);
-        let peer_manager = Arc::new(Mutex::new(PeerManager::new()));
-        let gossip_dedup = Arc::new(Mutex::new(GossipDedup::default()));
-        let peer_count = Arc::new(AtomicUsize::new(0));
-        let sync_state = Arc::new(AtomicUsize::new(0));
-        let sync_started_at = Arc::new(AtomicU64::new(0));
-        let sync_round_started_at = Arc::new(AtomicU64::new(0));
-        Ok(Self {
-            swarm,
-            peer_id,
-            command_tx,
-            command_rx,
-            chain,
-            peer_manager,
-            gossip_dedup,
-            qc_assemblies: HashMap::new(),
-            qc_fetches: HashMap::new(),
-            pending_qc_fetches: VecDeque::new(),
-            qc_serves: HashMap::new(),
-            cert_fetches: HashMap::new(),
-            sync_poll_cursor: 0,
-            last_observed_tip: 0,
-            stale_tip_ticks: 0,
-            bootstrap_peers: Vec::new(),
-            dns_seeds: Vec::new(),
-            dns_seed_port: 0,
-            dns_transport_available,
-            peer_count,
-            peer_connected_at: HashMap::new(),
-            sync_state,
-            sync_started_at,
-            sync_round_started_at,
-            active_sync_request: None,
-            active_sync_peer: None,
-            active_sync_locator_tip: None,
-            last_stalled_sync_peer: None,
-            empty_sync_peers_at_tip: None,
-            sync_range_cursor: None,
-            fork_rewalk: crate::network::fork_rewalk::ForkRewalkGate::new(),
-            deferred_votes: crate::network::deferred_votes::DeferredVotes::new(),
-            pending_bitswap_fetches: HashMap::new(),
-            bitswap_pending_attempts: HashMap::new(),
-            bitswap_requests: HashMap::new(),
-            bitswap_request_peers: HashMap::new(),
-            // The server budget. A battery-powered node lowers this through
-            // `with_mobile_profile`, which derives it from the power mode
-            // rather than from the boolean; deciding it twice is what let a
-            // phone at 5% hold the same ten connections as one on mains.
-            max_peers: MAX_PEERS,
-            validator_address: None,
-            last_precommit_height: 0,
-            last_prevote_height: 0,
-            prevote_published: None,
-            precommit_published: None,
-            vote_history_db: None,
-            identity_path: None,
-            banned_peer_db: None,
-            mdns_enabled,
-            sentry_shield: crate::network::sentry::SentryShieldConfig::default(),
-            sentry_policy: crate::network::sentry::SentryPolicy::default(),
-            accept_private_peer_addresses: true,
-            metrics: None,
-            aggregation: false,
-            storage_node,
-            pruning_policy: None,
-            shard_manager,
-            mobile_mode,
-            mobile_profile: None,
-            mobile_peer_ceiling: MAX_PEERS,
-            recovery_tick: StateRecoveryTick::default(),
-            recovery_mempool: crate::chain::state_recovery::RecoveryMempool::new(),
-            recovery_stash_from: None,
-            witness_requests: HashMap::new(),
-            bud3_symbol_requests: HashMap::new(),
-            bud3_custody_requests: HashMap::new(),
-            bud3_peer_limiter: crate::storage::bud3::symbol_protocol::SymbolPeerLimiter::default(),
-            reorg_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            reorg_last_completed_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            reorg_strikes: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        })
-    }
-
     fn multiaddr_uses_dns(addr: &Multiaddr) -> bool {
         addr.iter().any(|proto| {
             matches!(
@@ -3421,15 +3423,15 @@ impl Node {
                 yamux_config,
             )?
             .with_quic();
-        let (swarm, dns_transport_available) = match builder.with_dns() {
-            Ok(dns_builder) => (finish_swarm!(dns_builder, gossipsub), true),
+        match builder.with_dns() {
+            Ok(dns_builder) => Ok((finish_swarm!(dns_builder, gossipsub), true)),
             Err(dns_err) => {
                 warn!(
                     error = %dns_err,
                     "System DNS resolver unavailable; continuing with IP-only TCP (TLS 1.3 + Noise + Yamux) and QUIC transports (/dns* peers require a configured resolver)"
                 );
                 let gossipsub = Self::build_gossipsub(&local_key, mobile_mode)?;
-                let fallback = libp2p::SwarmBuilder::with_existing_identity(local_key)
+                let fallback_builder = libp2p::SwarmBuilder::with_existing_identity(local_key)
                     .with_tokio()
                     .with_tcp(
                         tcp::Config::default(),
@@ -3437,10 +3439,122 @@ impl Node {
                         yamux_config,
                     )?
                     .with_quic();
-                (finish_swarm!(fallback, gossipsub), false)
+                Ok((finish_swarm!(fallback_builder, gossipsub), false))
             }
-        };
-        Ok((swarm, dns_transport_available))
+        }
+    }
+
+    fn with_key_and_dns_probe(
+        chain: ChainHandle,
+        local_key: identity::Keypair,
+        mdns_enabled: bool,
+        storage_node: Option<Arc<bud_node::BudBitswap>>,
+        sharding_config: Option<bud_node::ShardingConfig>,
+        try_system_dns: impl FnOnce() -> Result<(), std::io::Error>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let peer_id = PeerId::from(local_key.public());
+        let mdns_requested = mdns_enabled;
+        let mdns_enabled = mdns_requested && cfg!(feature = "p2p-mdns");
+        if mdns_requested && !mdns_enabled {
+            warn!(
+                "mDNS was requested but this production/default build excludes the p2p-mdns feature; continuing with mDNS disabled"
+            );
+        }
+        let mobile_mode = sharding_config.as_ref().is_some_and(|c| c.mobile_mode);
+
+        let shard_manager =
+            sharding_config.map(|config| Arc::new(bud_node::ShardManager::new(peer_id, config)));
+        info!("Node ID: {peer_id} (mDNS: {mdns_enabled}, Mobile: {mobile_mode})");
+        let (swarm, dns_transport_available) = Self::build_swarm(
+            local_key,
+            mdns_enabled,
+            mobile_mode,
+            storage_node.as_ref(),
+            shard_manager.as_ref(),
+            try_system_dns,
+        )?;
+        let (command_tx, command_rx) = mpsc::channel(32);
+        let peer_manager = Arc::new(Mutex::new(PeerManager::new()));
+        let gossip_dedup = Arc::new(Mutex::new(GossipDedup::default()));
+        let peer_count = Arc::new(AtomicUsize::new(0));
+        let sync_state = Arc::new(AtomicUsize::new(0));
+        let sync_started_at = Arc::new(AtomicU64::new(0));
+        let sync_round_started_at = Arc::new(AtomicU64::new(0));
+        Ok(Self {
+            swarm,
+            peer_id,
+            command_tx,
+            command_rx,
+            chain,
+            peer_manager,
+            gossip_dedup,
+            qc_assemblies: HashMap::new(),
+            qc_fetches: HashMap::new(),
+            pending_qc_fetches: VecDeque::new(),
+            qc_serves: HashMap::new(),
+            cert_fetches: HashMap::new(),
+            sync_poll_cursor: 0,
+            last_observed_tip: 0,
+            stale_tip_ticks: 0,
+            bootstrap_peers: Vec::new(),
+            dns_seeds: Vec::new(),
+            dns_seed_port: 0,
+            dns_transport_available,
+            peer_count,
+            peer_connected_at: HashMap::new(),
+            sync_state,
+            sync_started_at,
+            sync_round_started_at,
+            active_sync_request: None,
+            active_sync_peer: None,
+            active_sync_locator_tip: None,
+            last_stalled_sync_peer: None,
+            empty_sync_peers_at_tip: None,
+            sync_range_cursor: None,
+            fork_rewalk: crate::network::fork_rewalk::ForkRewalkGate::new(),
+            deferred_votes: crate::network::deferred_votes::DeferredVotes::new(),
+            pending_bitswap_fetches: HashMap::new(),
+            bitswap_pending_attempts: HashMap::new(),
+            bitswap_requests: HashMap::new(),
+            bitswap_request_peers: HashMap::new(),
+            // The server budget. A battery-powered node lowers this through
+            // `with_mobile_profile`, which derives it from the power mode
+            // rather than from the boolean; deciding it twice is what let a
+            // phone at 5% hold the same ten connections as one on mains.
+            max_peers: MAX_PEERS,
+            validator_address: None,
+            last_precommit_height: 0,
+            last_prevote_height: 0,
+            last_prevote_hash: None,
+            last_precommit_hash: None,
+            prevote_published: None,
+            precommit_published: None,
+            vote_history_db: None,
+            identity_path: None,
+            banned_peer_db: None,
+            mdns_enabled,
+            sentry_shield: crate::network::sentry::SentryShieldConfig::default(),
+            accept_private_peer_addresses: true,
+            sentry_policy: crate::network::sentry::SentryPolicy::default(),
+            metrics: None,
+            aggregation: false,
+            storage_node,
+            pruning_policy: None,
+            shard_manager,
+            mobile_mode,
+            mobile_profile: None,
+            mobile_peer_ceiling: MAX_PEERS,
+            recovery_tick: StateRecoveryTick::default(),
+            recovery_mempool: crate::chain::state_recovery::RecoveryMempool::new(),
+            recovery_stash_from: None,
+            witness_requests: HashMap::new(),
+            bud3_symbol_requests: HashMap::new(),
+            bud3_custody_requests: HashMap::new(),
+            bud3_peer_limiter: crate::storage::bud3::symbol_protocol::SymbolPeerLimiter::default(),
+            reorg_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reorg_last_completed_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            reorg_strikes: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        })
     }
 
     /// Declare that this node runs on a battery, and how full it is.
@@ -3569,8 +3683,10 @@ impl Node {
         // Marks that do not survive a restart cost half the bond. There is no
         // Network on which the unsafe default is the right one.
         if self.vote_history_db.is_none() {
-            self.vote_history_db = Some(std::path::PathBuf::from(
-                format!("./data/{network:?}/vote-history.json").to_lowercase(),
+            self.vote_history_db = Some(Self::default_vote_history_path(
+                network,
+                std::path::Path::new("data"),
+                &self.peer_id.to_base58(),
             ));
         }
         // Kademlia poisoning: `Identify` accepts whatever a peer
@@ -3655,6 +3771,40 @@ impl Node {
         self
     }
 
+    /// Dial `addr` using a freshly allocated OS ephemeral source port.
+    ///
+    /// `libp2p-tcp`'s default [`PortUse::Reuse`] binds outbound sockets to
+    /// `0.0.0.0:<listener_port>` whenever the node has a listener on
+    /// `127.0.0.1:<listener_port>`. On multi-homed hosts or sandboxes where a
+    /// non-`SO_REUSEPORT` socket holds `<listener_port>` on a secondary local
+    /// interface, `bind(0.0.0.0:<listener_port>)` fails with `EADDRINUSE`
+    /// before `connect()` and `libp2p-tcp` does not fall back. Allocating a
+    /// fresh port avoids wildcard listener-port collisions while
+    /// [`PeerCondition::DisconnectedAndNotDialing`] prevents duplicate
+    /// concurrent dials to the same known `PeerId`.
+    fn dial_multiaddr(
+        &mut self,
+        addr: Multiaddr,
+        known_peer: Option<PeerId>,
+    ) -> Result<(), libp2p::swarm::DialError> {
+        use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
+
+        let peer_id = known_peer.or_else(|| crate::network::sentry::peer_id_from_multiaddr(&addr));
+        let opts = if let Some(peer_id) = peer_id {
+            DialOpts::peer_id(peer_id)
+                .condition(PeerCondition::DisconnectedAndNotDialing)
+                .addresses(vec![addr])
+                .allocate_new_port()
+                .build()
+        } else {
+            DialOpts::unknown_peer_id()
+                .address(addr)
+                .allocate_new_port()
+                .build()
+        };
+        self.swarm.dial(opts)
+    }
+
     /// Dials every configured sentry peer that is not currently connected.
     /// Used on startup, periodic reconnect, and starvation recovery for
     /// [`crate::network::sentry::SentryRole::ShieldedValidator`].
@@ -3663,17 +3813,21 @@ impl Node {
             if self.peer_manager_lock().is_banned(&peer_id) || self.swarm.is_connected(&peer_id) {
                 continue;
             }
-            if let Err(e) = self.swarm.dial(addr.clone()) {
-                warn!("Shielded validator failed to dial sentry {peer_id} at {addr}: {e}");
-            } else {
-                info!("Shielded validator dialing sentry {peer_id} at {addr}");
+            match self.dial_multiaddr(addr.clone(), Some(peer_id)) {
+                Ok(()) => {
+                    info!("Shielded validator dialing sentry {peer_id} at {addr}");
+                }
+                Err(libp2p::swarm::DialError::DialPeerConditionFalse(_)) => {}
+                Err(e) => {
+                    warn!("Shielded validator failed to dial sentry {peer_id} at {addr}: {e}");
+                }
             }
         }
     }
 
     /// Active sentry-validator shield configuration on this node.
     #[must_use]
-    pub fn sentry_shield(&self) -> &crate::network::sentry::SentryShieldConfig {
+    pub const fn sentry_shield(&self) -> &crate::network::sentry::SentryShieldConfig {
         &self.sentry_shield
     }
 
@@ -3747,15 +3901,19 @@ impl Node {
                 .gossipsub
                 .add_explicit_peer(&peer_id);
             if !self.swarm.is_connected(&peer_id) {
-                if let Err(e) = self.swarm.dial(addr.clone()) {
-                    tracing::debug!(
-                        peer = %peer_id,
-                        addr = %addr,
-                        error = %e,
-                        "Sentry shield reconnect dial deferred"
-                    );
-                } else {
-                    info!("Sentry shield: dialing protected peer {peer_id} at {addr}");
+                match self.dial_multiaddr(addr.clone(), Some(peer_id)) {
+                    Ok(()) => {
+                        info!("Sentry shield: dialing protected peer {peer_id} at {addr}");
+                    }
+                    Err(libp2p::swarm::DialError::DialPeerConditionFalse(_)) => {}
+                    Err(e) => {
+                        tracing::debug!(
+                            peer = %peer_id,
+                            addr = %addr,
+                            error = %e,
+                            "Sentry shield reconnect dial deferred"
+                        );
+                    }
                 }
             }
         }
@@ -3839,7 +3997,10 @@ impl Node {
         {
             return Err("validator sentry shield refuses dialing non-sentry peer".into());
         }
-        self.swarm.dial(remote)?;
+        match self.dial_multiaddr(remote, target_peer) {
+            Ok(()) | Err(libp2p::swarm::DialError::DialPeerConditionFalse(_)) => {}
+            Err(e) => return Err(Box::new(e)),
+        }
         info!("Dialing {addr}");
         Ok(())
     }
@@ -3885,7 +4046,7 @@ impl Node {
         }
         if !self.sentry_policy.can_share_in_dht(&peer_id) {
             if !self.swarm.is_connected(&peer_id) {
-                let _ = self.swarm.dial(multiaddr);
+                let _ = self.dial_multiaddr(multiaddr, Some(peer_id));
             }
             return Ok(());
         }
@@ -3897,12 +4058,37 @@ impl Node {
                 .add_address(&peer_id, multiaddr.clone());
         }
         if !self.swarm.is_connected(&peer_id) {
-            let _ = self.swarm.dial(multiaddr);
+            let _ = self.dial_multiaddr(multiaddr, Some(peer_id));
         }
         if !self.sentry_shield.is_validator_shielded() {
             self.swarm.behaviour_mut().kad.bootstrap()?;
         }
         Ok(())
+    }
+
+    /// Where one node's vote high-water marks live when nothing names a path.
+    ///
+    /// Scoped by node, not only by network. A path keyed on the network alone
+    /// is shared by every node that starts from the same working directory,
+    /// which is what a devnet, a multi-node rehearsal and two side-by-side
+    /// experiments all do: the first validator to precommit writes its mark
+    /// there and the next node reads it as its own. The mark that exists to
+    /// stop one key signing twice then stops every *other* key from signing
+    /// at all, which is a liveness failure on a fresh chain rather than the
+    /// double-sign it was meant to prevent.
+    ///
+    /// `<data_dir>/<network>/<node-id>/vote-history.json`, where `node-id` is
+    /// the node's P2P identity: the one thing two nodes never share.
+    fn default_vote_history_path(
+        network: crate::core::chain_config::Network,
+        data_dir: &std::path::Path,
+        node_id: &str,
+    ) -> std::path::PathBuf {
+        data_dir
+            .join(network.name().to_lowercase())
+            .join("nodes")
+            .join(node_id)
+            .join("vote-history.json")
     }
 
     /// Restore the vote high-water marks written by a previous run.
@@ -3930,26 +4116,53 @@ impl Node {
         // Bounded: the vote history is two integers. Anything larger is not
         // a vote history, and reading it would be an allocation chosen by
         // whatever wrote the file rather than by this node.
-        match crate::core::bounded_read::read_to_string_bounded(
+        let data = match crate::core::bounded_read::read_to_string_bounded(
             path,
             crate::core::bounded_read::MAX_CONTROL_FILE_BYTES,
         ) {
-            Ok(data) => match serde_json::from_str::<VoteHistory>(&data) {
-                Ok(v) => {
-                    self.last_prevote_height = v.last_prevote_height;
-                    self.last_precommit_height = v.last_precommit_height;
-                    info!(
-                        prevote = v.last_prevote_height,
-                        precommit = v.last_precommit_height,
-                        "Vote history restored; this node will not re-sign at or below these heights"
-                    );
-                }
-                Err(e) => warn!(error = %e, path = %path.display(),
-                    "Vote history unreadable; starting from zero (a restart across a reorg could double-sign)"),
-            },
-            Err(e) if e.is_not_found() => {}
-            Err(e) => warn!(error = %e, path = %path.display(), "Vote history could not be read"),
+            Ok(data) => data,
+            Err(e) if e.is_not_found() => return,
+            Err(e) => {
+                warn!(error = %e, path = %path.display(), "Vote history could not be read");
+                return;
+            }
+        };
+        let restored = match serde_json::from_str::<VoteHistory>(&data) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, path = %path.display(),
+                    "Vote history unreadable; starting from zero (a restart across a reorg could double-sign)");
+                return;
+            }
+        };
+        // A mark this node did not write is not this node's mark. The file has
+        // always been keyed by network alone, so any two nodes started from one
+        // directory have been reading each other's heights; taking a foreign
+        // mark silently is the safe direction for double-signing and the fatal
+        // one for liveness, because a consensus key would then refuse to sign
+        // anything at or below a height it never voted at. Refuse the file, say
+        // so once, and start from zero: this node's own mark can only come from
+        // this node's own votes.
+        let ours = self.peer_id.to_base58();
+        if !vote_history_was_written_by(&restored, &ours) {
+            warn!(
+                path = %path.display(),
+                owner = restored.node.as_deref().unwrap_or("<unowned file>"),
+                ours,
+                "Vote history was not written by this node; ignoring it so a foreign mark cannot stop this validator signing"
+            );
+            return;
         }
+        self.last_prevote_height = restored.last_prevote_height;
+        self.last_precommit_height = restored.last_precommit_height;
+        self.last_prevote_hash = restored.prevote_hash.clone();
+        self.last_precommit_hash = restored.precommit_hash.clone();
+        info!(
+            prevote = restored.last_prevote_height,
+            precommit = restored.last_precommit_height,
+            re_publish_allowed = restored.prevote_hash.is_some(),
+            "Vote history restored; this node will not sign a different hash at or below these heights"
+        );
     }
 
     /// Record the vote high-water marks before any vote reaches the wire.
@@ -3962,13 +4175,30 @@ impl Node {
         let Some(ref path) = self.vote_history_db else {
             return Ok(());
         };
-        Self::write_vote_history_file(path, self.last_prevote_height, self.last_precommit_height)
+        Self::write_vote_history_file_with_hashes(
+            path,
+            &VoteHistory {
+                last_prevote_height: self.last_prevote_height,
+                last_precommit_height: self.last_precommit_height,
+                prevote_hash: self.last_prevote_hash.clone(),
+                precommit_hash: self.last_precommit_hash.clone(),
+                node: Some(self.peer_id.to_base58()),
+            },
+        )
     }
 
-    fn write_vote_history_file(
+    /// Persists the high-water marks as the one on-disk shape both sides share.
+    ///
+    /// The writer takes [`VoteHistory`] rather than a widening list of loose
+    /// fields. Hand-building the JSON here is how the reader and the writer
+    /// drift: `load_vote_history` deserialises `VoteHistory`, so a field added
+    /// to the struct and forgotten in a hand-written `json!` literal is read
+    /// back as its `#[serde(default)]` - a silently reset high-water mark,
+    /// which is the double-sign this file exists to prevent. One struct, one
+    /// shape, and the parameter count stops growing with it.
+    fn write_vote_history_file_with_hashes(
         path: &std::path::Path,
-        last_prevote_height: u64,
-        last_precommit_height: u64,
+        history: &VoteHistory,
     ) -> Result<(), String> {
         let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
             warn!(path = %path.display(), "vote-history path has no parent directory");
@@ -3978,10 +4208,10 @@ impl Node {
             warn!(error = %e, path = %path.display(), "Cannot create vote-history directory");
             return Err(format!("cannot create vote-history directory: {e}"));
         }
-        let body = serde_json::json!({
-            "last_prevote_height": last_prevote_height,
-            "last_precommit_height": last_precommit_height,
-        });
+        let Ok(body) = serde_json::to_string(history) else {
+            warn!(path = %path.display(), "Vote history could not be encoded; withholding the vote rather than losing the mark");
+            return Err("cannot encode vote history".into());
+        };
         let tmp = parent.join(format!(
             ".{}.tmp",
             path.file_name()
@@ -3992,7 +4222,7 @@ impl Node {
             {
                 use std::io::Write;
                 let mut f = std::fs::File::create(&tmp)?;
-                f.write_all(body.to_string().as_bytes())?;
+                f.write_all(body.as_bytes())?;
                 f.sync_all()?;
             }
             std::fs::rename(&tmp, path)?;
@@ -4418,10 +4648,13 @@ impl Node {
                     if agg_state.active
                         && agg_state.prevote_quorum_reached
                         && !agg_state.precommit_quorum_reached
-                        && (precommit_height_is_new(
+                        && precommit_is_due(
                             agg_state.checkpoint_height,
+                            &agg_state.checkpoint_hash,
                             self.last_precommit_height,
-                        ) || precommit_retry)
+                            self.last_precommit_hash.as_deref(),
+                            same_round_retry(precommit_retry, self.precommit_published.as_ref()),
+                        )
                     {
                         if precommit_retry {
                             info!(
@@ -4456,14 +4689,26 @@ impl Node {
                                 // hash, and a round that has moved to another
                                 // hash at the same height is never signed again.
                                 let prev_precommit_height = self.last_precommit_height;
+                                let prev_precommit_hash = self.last_precommit_hash.clone();
                                 let advanced = precommit_height_is_new(
                                     agg_state.checkpoint_height,
                                     self.last_precommit_height,
                                 );
-                                if advanced {
+                                let marks_the_same_round = self.last_precommit_height
+                                    == agg_state.checkpoint_height
+                                    && self.last_precommit_hash.as_deref()
+                                        == Some(agg_state.checkpoint_hash.as_str());
+                                // A re-publication of the round this node
+                                // already marked needs no new durable write;
+                                // a new height (or the first hash for the
+                                // marked height) does.
+                                if advanced || !marks_the_same_round {
                                     self.last_precommit_height = agg_state.checkpoint_height;
+                                    self.last_precommit_hash =
+                                        Some(agg_state.checkpoint_hash.clone());
                                     if let Err(e) = self.save_vote_history() {
                                         self.last_precommit_height = prev_precommit_height;
+                                        self.last_precommit_hash = prev_precommit_hash.clone();
                                         tracing::error!(
                                             error = %e,
                                             height = agg_state.checkpoint_height,
@@ -4587,8 +4832,10 @@ impl Node {
                         && agg_state.checkpoint_height > 0
                         && prevote_is_due(
                             agg_state.checkpoint_height,
+                            &agg_state.checkpoint_hash,
                             self.last_prevote_height,
-                            prevote_retry,
+                            self.last_prevote_hash.as_deref(),
+                            same_round_retry(prevote_retry, self.prevote_published.as_ref()),
                         )
                     {
                         if prevote_retry {
@@ -4623,9 +4870,11 @@ impl Node {
                                 // signed prevote on the wire with a stale mark
                                 // on disk.
                                 let prev_prevote_height = self.last_prevote_height;
+                                let prev_prevote_hash = self.last_prevote_hash.clone();
                                 let prev_published = self.prevote_published.clone();
                                 if record_cast_prevote(
                                     &mut self.last_prevote_height,
+                                    &mut self.last_prevote_hash,
                                     &mut self.prevote_published,
                                     epoch,
                                     checkpoint_height,
@@ -4634,6 +4883,7 @@ impl Node {
                                 ) {
                                     if let Err(e) = self.save_vote_history() {
                                         self.last_prevote_height = prev_prevote_height;
+                                        self.last_prevote_hash = prev_prevote_hash.clone();
                                         self.prevote_published = prev_published;
                                         tracing::error!(
                                             error = %e,
@@ -4951,10 +5201,16 @@ impl Node {
                                             .behaviour_mut()
                                             .gossipsub
                                             .add_explicit_peer(added_id);
-                                        if let Err(e) = self.swarm.dial(addr.clone()) {
-                                            warn!(
-                                                "Live sentry rotation failed to dial {added_id} at {addr}: {e}"
-                                            );
+                                        match self.dial_multiaddr(addr.clone(), Some(*added_id)) {
+                                            Ok(())
+                                            | Err(
+                                                libp2p::swarm::DialError::DialPeerConditionFalse(_),
+                                            ) => {}
+                                            Err(e) => {
+                                                warn!(
+                                                    "Live sentry rotation failed to dial {added_id} at {addr}: {e}"
+                                                );
+                                            }
                                         }
                                     }
                                     info!(
@@ -5118,6 +5374,18 @@ impl Node {
                                 );
                             }
                         }
+                        SwarmEvent::ListenerError { listener_id, error } => {
+                            warn!("Listener {listener_id:?} error: {error}");
+                        }
+                        SwarmEvent::ListenerClosed {
+                            listener_id,
+                            addresses,
+                            reason: Err(err),
+                        } => {
+                            warn!(
+                                "Listener {listener_id:?} on {addresses:?} closed with error: {err}"
+                            );
+                        }
                         SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                             let remote = endpoint.get_remote_address();
                             let subnet = subnet_bucket(remote);
@@ -5240,13 +5508,7 @@ impl Node {
                                 );
                                 let _ = self.swarm.disconnect_peer_id(peer_id);
                                 if newly_connected {
-                                    self.peer_count
-                                        .fetch_update(
-                                            Ordering::SeqCst,
-                                            Ordering::SeqCst,
-                                            |v| Some(v.saturating_sub(1)),
-                                        )
-                                        .ok();
+                                    saturating_atomic_sub(&self.peer_count);
                                     {
                                         let mut pm = self.peer_manager_lock();
                                         pm.note_disconnected(&peer_id);
@@ -5386,13 +5648,7 @@ impl Node {
                                 d
                             };
                             if was_connected {
-                                self.peer_count
-                                    .fetch_update(
-                                        Ordering::SeqCst,
-                                        Ordering::SeqCst,
-                                        |v| Some(v.saturating_sub(1)),
-                                    )
-                                    .ok();
+                                saturating_atomic_sub(&self.peer_count);
                             }
                             // Mark the gossip score record evictable.
                             // It is NOT deleted: a peer one message
@@ -5464,8 +5720,14 @@ impl Node {
                                     for (peer_id, addr) in peers {
                                         info!("mDNS discovered: {peer_id} at {addr}");
                                         self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                                        if let Err(e) = self.swarm.dial(addr.clone()) {
-                                            warn!("Failed to dial discovered peer: {e}");
+                                        match self.dial_multiaddr(addr, Some(peer_id)) {
+                                            Ok(())
+                                            | Err(
+                                                libp2p::swarm::DialError::DialPeerConditionFalse(_),
+                                            ) => {}
+                                            Err(e) => {
+                                                warn!("Failed to dial discovered peer: {e}");
+                                            }
                                         }
                                     }
                                 }
@@ -5850,16 +6112,23 @@ impl Node {
                                             self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                             continue;
                                         }
-                                        // A frame carries one object verification per claim on
-                                        // the chain actor, so charge the peer proportional to its
-                                        // claim count before dispatching to `self.chain`.
-                                        let objects = frame
-                                            .get(..4)
-                                            .and_then(|count| <[u8; 4]>::try_from(count).ok())
-                                            .map_or(usize::MAX, |count| {
-                                                usize::try_from(u32::from_be_bytes(count))
-                                                    .unwrap_or(usize::MAX)
-                                            });
+                                        // Each claim and each segment attestation costs native
+                                        // verification work on the chain actor. Reject malformed
+                                        // headers up front and charge the full verification count.
+                                        let Some(objects) =
+                                            NetworkMessage::agg_frame_verification_units(&frame)
+                                        else {
+                                            if gossip_authored {
+                                                let mut pm = self.peer_manager_lock();
+                                                pm.report_bad_behavior(&peer_id);
+                                            }
+                                            self.report_gossip(
+                                                &id,
+                                                &peer_id,
+                                                gossipsub::MessageAcceptance::Reject,
+                                            );
+                                            continue;
+                                        };
                                         let within_budget = {
                                             let mut pm = self.peer_manager_lock();
                                             pm.charge_agg_frame_from(&peer_id, gossip_authored, objects)
@@ -6965,15 +7234,28 @@ impl Node {
                                                     .send_response(channel, Vec::new());
                                                 continue;
                                             }
+                                            let already_handshaked =
+                                                self.peer_manager_lock().is_handshaked(&peer);
+                                            if !already_handshaked
+                                                && !NetworkMessage::wire_is_handshake(&request)
+                                            {
+                                                warn!("Rejected pre-handshake sync payload from {peer}");
+                                                let _ = self
+                                                    .swarm
+                                                    .behaviour_mut()
+                                                    .sync
+                                                    .send_response(channel, Vec::new());
+                                                continue;
+                                            }
                                             let parsed = NetworkMessage::from_bytes_validated(&request);
                                             let is_handshake = matches!(
                                                 parsed,
                                                 Ok(NetworkMessage::Handshake { .. })
                                                     | Ok(NetworkMessage::HandshakeAck { .. })
                                             );
-                                            let handshaked = is_handshake
-                                                || self.peer_manager_lock().is_handshaked(&peer);
-                                            if !handshaked {
+                                            if !(is_handshake
+                                                || self.peer_manager_lock().is_handshaked(&peer))
+                                            {
                                                 warn!("Rejected sync request from unhandshaked peer {peer}");
                                                 let _ = self
                                                     .swarm
@@ -8259,9 +8541,244 @@ const _: fn(&mut Node) = |node| {
     assert_send(node.run());
 };
 
+/// Decrements `counter` by one with saturation at zero.
+///
+/// The drift compiler deprecates `Atomic::fetch_update` in favor of a rename
+/// that does not exist on the merge-barrier toolchain, so the same one-sided
+/// update is written as an explicit compare-and-swap loop: the closure it
+/// replaced always returned the next value, so retrying the swap on the
+/// observed value is an exact equivalent.
+fn saturating_atomic_sub(counter: &AtomicUsize) {
+    let mut cur = counter.load(Ordering::SeqCst);
+    while let Err(actual) = counter.compare_exchange_weak(
+        cur,
+        cur.saturating_sub(1),
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    ) {
+        cur = actual;
+    }
+}
+
+#[cfg(test)]
+mod peer_count_saturation_tests {
+    use super::saturating_atomic_sub;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn decrement_saturates_at_zero() {
+        let counter = AtomicUsize::new(2);
+        saturating_atomic_sub(&counter);
+        saturating_atomic_sub(&counter);
+        saturating_atomic_sub(&counter);
+        saturating_atomic_sub(&counter);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn concurrent_decrements_never_underflow() {
+        let counter = Arc::new(AtomicUsize::new(2000));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let counter = Arc::clone(&counter);
+                std::thread::spawn(move || {
+                    for _ in 0..250 {
+                        saturating_atomic_sub(&counter);
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("worker thread must not panic");
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+}
+
 #[cfg(test)]
 mod vote_history_wiring_tests {
     use crate::core::chain_config::Network;
+
+    /// A default vote-history path must be private to *one node*, not to one
+    /// network.
+    ///
+    /// Every live devnet measured on 2026-11-20 shared one directory: four
+    /// validator processes started from the same working directory, and the
+    /// default `./data/devnet/vote-history.json` gave them one file. One node's
+    /// precommit high-water mark then reached the others through that file, and
+    /// the report below is what a real run printed: a freshly assembled genesis
+    /// whose chain was three blocks old, and a node refusing to sign because a
+    /// mark left by a *different* validator said height 66 was already voted.
+    ///
+    /// Two independent devnets in one directory is the same defect without any
+    /// restart, and it needs no unusual configuration: that is what the default
+    /// path does on its own.
+    ///
+    /// Canary: give the default back its network-only path and this fails.
+    #[test]
+    fn default_vote_history_path_is_private_to_one_node() {
+        let first = super::Node::default_vote_history_path(
+            Network::Devnet,
+            std::path::Path::new("/srv/bud/data"),
+            "12D3KooWA",
+        );
+        let second = super::Node::default_vote_history_path(
+            Network::Devnet,
+            std::path::Path::new("/srv/bud/data"),
+            "12D3KooWB",
+        );
+        assert_ne!(
+            first, second,
+            "two nodes on one network must not share one vote-history file: {first:?}"
+        );
+        assert!(
+            first.starts_with("/srv/bud/data/devnet"),
+            "the mark stays under the data directory it was derived from: {first:?}"
+        );
+        assert!(first.ends_with("vote-history.json"));
+    }
+
+    /// A vote-history file that names another node must not be adopted.
+    ///
+    /// This is the case the default path created for real: one directory, four
+    /// validators, one file. Relocating the default fixes the runs that never
+    /// name a path; this fixes the runs that name one, deliberately or by
+    /// copy-paste, and the file a previous buggy run left behind. Ignoring the
+    /// file is the safe direction: a wrong high-water mark can only withhold a
+    /// vote this node owes, never authorise one it has already cast.
+    ///
+    /// Canary: drop the owner comparison from `load_vote_history` and the
+    /// foreign branch below stops being reachable in the way this asserts.
+    #[test]
+    fn a_foreign_vote_history_file_is_not_adopted() {
+        let own_record = super::VoteHistory {
+            last_prevote_height: 9,
+            last_precommit_height: 7,
+            prevote_hash: Some("aa".to_string()),
+            precommit_hash: Some("aa".to_string()),
+            node: Some("node-a".to_string()),
+        };
+        let imported = super::VoteHistory {
+            last_prevote_height: 66,
+            last_precommit_height: 66,
+            prevote_hash: None,
+            precommit_hash: None,
+            node: Some("node-b".to_string()),
+        };
+        let legacy = super::VoteHistory {
+            last_prevote_height: 66,
+            last_precommit_height: 66,
+            prevote_hash: None,
+            precommit_hash: None,
+            node: None,
+        };
+        assert!(super::vote_history_was_written_by(&own_record, "node-a"));
+        assert!(!super::vote_history_was_written_by(&imported, "node-a"));
+        assert!(
+            !super::vote_history_was_written_by(&legacy, "node-a"),
+            "a file with no owner says nothing about who wrote it"
+        );
+        // The owner round-trips through the on-disk shape, including absence.
+        let encoded = serde_json::to_string(&imported).unwrap();
+        assert!(encoded.contains("\"node\":\"node-b\""));
+        let decoded: super::VoteHistory = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.node.as_deref(), Some("node-b"));
+        let legacy_decoded: super::VoteHistory =
+            serde_json::from_str("{\"last_prevote_height\":1,\"last_precommit_height\":1}")
+                .unwrap();
+        assert!(legacy_decoded.node.is_none());
+    }
+
+    /// A restart must be able to re-publish its own vote, and nothing else.
+    ///
+    /// The high-water mark was a bare height, so a restarted validator refused
+    /// to sign anything at or below it - including the identical vote it had
+    /// already cast on the identical chain. Measured on a four-node devnet that
+    /// was stopped and restarted on its own databases: finality froze at 40
+    /// while the chain kept producing, and the nodes settled at precommit
+    /// heights 40/30/0/8 because none of them would re-open its round.
+    ///
+    /// Re-publishing the same hash at the same height is not equivocation: the
+    /// aggregator counts each voter once and de-duplicates by
+    /// (voter, epoch, height), which this file already documents for the
+    /// in-memory retry. A different hash at or below the mark is equivocation
+    /// and stays refused, and so does any height below the mark, whose hash the
+    /// mark no longer remembers.
+    ///
+    /// Canary: make the mark a bare height again and the same-hash branch
+    /// below fails; drop the hash comparison and the different-hash branch
+    /// fails.
+    /// Four nodes restarted together re-signed the round they came back to
+    /// on every 250 ms beat (683 publications in 150 s), tripped each other's
+    /// vote rate limit, banned one another and never reached quorum again.
+    /// The same-round door opens once for a process that remembers no
+    /// publication, then only on the retry cadence.
+    #[test]
+    fn the_same_round_is_re_published_once_after_a_restart_then_on_the_cadence() {
+        let t0 = std::time::Instant::now();
+        let published = super::PublishedVote {
+            epoch: 4,
+            checkpoint_height: 40,
+            checkpoint_hash: "aa".repeat(32),
+            at: t0,
+        };
+        // Nothing remembered: the restart door.
+        assert!(super::same_round_retry(false, None));
+        // Remembered and fresh: closed.
+        let fresh = super::vote_retry_due(Some(&published), 4, 40, &"aa".repeat(32), t0);
+        assert!(!super::same_round_retry(fresh, Some(&published)));
+        // Remembered and overdue: the cadence door.
+        let overdue = super::vote_retry_due(
+            Some(&published),
+            4,
+            40,
+            &"aa".repeat(32),
+            t0 + super::FINALITY_VOTE_RETRY,
+        );
+        assert!(super::same_round_retry(overdue, Some(&published)));
+    }
+
+    #[test]
+    fn a_restart_may_re_publish_its_own_vote_but_never_a_different_one() {
+        // Same height, same hash: the vote this node already cast.
+        assert!(!super::vote_would_equivocate(40, "aa", 40, Some("aa")));
+        // Same height, different hash: the one thing a validator must never do.
+        assert!(super::vote_would_equivocate(40, "bb", 40, Some("aa")));
+        // Below the mark: refused whatever the hash, because the mark no longer
+        // remembers which hash sat there.
+        assert!(super::vote_would_equivocate(38, "aa", 40, Some("aa")));
+        // Ahead of the mark: a new round, always allowed.
+        assert!(!super::vote_would_equivocate(42, "cc", 40, Some("aa")));
+        // A mark written before hashes were recorded can only imply the strict
+        // rule it always had: nothing at or below the height is re-signable.
+        assert!(super::vote_would_equivocate(40, "aa", 40, None));
+        // The doors agree with the rule, and the same round only opens on a
+        // retry: without one the marked vote is NOT re-signed on every beat.
+        assert!(super::prevote_is_due(40, "aa", 40, Some("aa"), true));
+        assert!(!super::prevote_is_due(40, "aa", 40, Some("aa"), false));
+        assert!(!super::prevote_is_due(40, "bb", 40, Some("aa"), true));
+        assert!(super::precommit_is_due(40, "aa", 40, Some("aa"), true));
+        assert!(!super::precommit_is_due(40, "aa", 40, Some("aa"), false));
+        assert!(!super::precommit_is_due(40, "bb", 40, Some("aa"), true));
+        // A fresh round needs no retry flag.
+        assert!(super::prevote_is_due(42, "cc", 40, Some("aa"), false));
+        assert!(super::precommit_is_due(42, "cc", 40, Some("aa"), false));
+        // Recording the same round twice keeps the hash rather than clearing it.
+        let mut height = 40u64;
+        let mut hash = Some("aa".to_string());
+        let mut published = None;
+        assert!(!super::record_cast_prevote(
+            &mut height,
+            &mut hash,
+            &mut published,
+            2,
+            40,
+            "aa",
+            std::time::Instant::now(),
+        ));
+        assert_eq!(hash.as_deref(), Some("aa"));
+    }
 
     /// Every network must get a vote-history path by default.
     ///
@@ -8952,7 +9469,9 @@ mod sync_handler_order_tests {
         assert!(
             !super::prevote_is_due(
                 published.checkpoint_height,
+                "bb",
                 published.checkpoint_height,
+                Some("aa"),
                 other_hash
             ),
             "so the node signs nothing at the reorged checkpoint height"
@@ -8960,7 +9479,9 @@ mod sync_handler_order_tests {
         assert!(
             super::prevote_is_due(
                 published.checkpoint_height + 10,
+                "cc",
                 published.checkpoint_height,
+                Some("aa"),
                 false
             ),
             "and it votes again as soon as the interval clears the high-water mark"
@@ -9327,17 +9848,27 @@ mod finality_publish_tests {
             prevote_is_due, record_cast_prevote, vote_retry_due, PublishedVote, FINALITY_VOTE_RETRY,
         };
         let mut last_prevote_height = 0u64;
+        let mut last_prevote_hash: Option<String> = None;
         let mut prevote_published: Option<PublishedVote> = None;
         let t0 = std::time::Instant::now();
+        let hash_a = "aa".repeat(32);
+        let hash_b = "bb".repeat(32);
 
         // Validator signs prevote for hash_a at height 100; publish fails (e.g. NoPeersSubscribedToTopic).
-        assert!(prevote_is_due(100, last_prevote_height, false));
+        assert!(prevote_is_due(
+            100,
+            &hash_a,
+            last_prevote_height,
+            None,
+            false
+        ));
         let advanced = record_cast_prevote(
             &mut last_prevote_height,
+            &mut last_prevote_hash,
             &mut prevote_published,
             1,
             100,
-            "aa".repeat(32).as_str(),
+            &hash_a,
             t0,
         );
         assert!(advanced);
@@ -9348,12 +9879,18 @@ mod finality_publish_tests {
             prevote_published.as_ref(),
             1,
             100,
-            "bb".repeat(32).as_str(),
+            &hash_b,
             t0 + FINALITY_VOTE_RETRY,
         );
         assert!(!retry_different_hash);
         assert!(
-            !prevote_is_due(100, last_prevote_height, retry_different_hash),
+            !prevote_is_due(
+                100,
+                &hash_b,
+                last_prevote_height,
+                last_prevote_hash.as_deref(),
+                retry_different_hash
+            ),
             "validator must stay silent rather than signing a second hash at height 100"
         );
 
@@ -9362,27 +9899,79 @@ mod finality_publish_tests {
             prevote_published.as_ref(),
             1,
             100,
-            "aa".repeat(32).as_str(),
+            &hash_a,
             t0 + FINALITY_VOTE_RETRY,
         );
         assert!(retry_same_hash);
-        assert!(prevote_is_due(100, last_prevote_height, retry_same_hash));
+        assert!(prevote_is_due(
+            100,
+            &hash_a,
+            last_prevote_height,
+            last_prevote_hash.as_deref(),
+            retry_same_hash
+        ));
+        // A restart reads the same mark from disk and remembers no
+        // publication: the same round is eligible exactly once through the
+        // restart door, and not on every beat afterwards.
+        assert!(prevote_is_due(
+            100,
+            &hash_a,
+            last_prevote_height,
+            last_prevote_hash.as_deref(),
+            super::same_round_retry(false, None)
+        ));
+        assert!(!prevote_is_due(
+            100,
+            &hash_a,
+            last_prevote_height,
+            last_prevote_hash.as_deref(),
+            super::same_round_retry(false, prevote_published.as_ref())
+        ));
     }
     #[test]
     fn write_vote_history_file_persists_atomically_and_reports_unwritable_target() {
         let dir = tempfile::tempdir().unwrap();
         let history_path = dir.path().join("votes").join("history.json");
-        super::Node::write_vote_history_file(&history_path, 14, 12).unwrap();
+        super::Node::write_vote_history_file_with_hashes(
+            &history_path,
+            &super::VoteHistory {
+                last_prevote_height: 14,
+                last_precommit_height: 12,
+                prevote_hash: Some("aa".to_string()),
+                precommit_hash: Some("bb".to_string()),
+                node: Some("node-a".to_string()),
+            },
+        )
+        .unwrap();
         let persisted: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&history_path).unwrap()).unwrap();
         assert_eq!(persisted["last_prevote_height"], 14);
         assert_eq!(persisted["last_precommit_height"], 12);
+        assert_eq!(
+            persisted["node"], "node-a",
+            "the mark must name the node that cast the votes it stands for"
+        );
+        assert_eq!(
+            persisted["prevote_hash"], "aa",
+            "the mark must name the hash it permits a restart to re-publish"
+        );
+        assert_eq!(persisted["precommit_hash"], "bb");
 
         // Pointing the history file at an existing directory must fail loudly
         // so the caller withholds the vote instead of gossiping unrecorded bytes.
         let dir_as_file = dir.path().join("occupied_dir");
         std::fs::create_dir_all(&dir_as_file).unwrap();
-        assert!(super::Node::write_vote_history_file(&dir_as_file, 16, 14).is_err());
+        assert!(super::Node::write_vote_history_file_with_hashes(
+            &dir_as_file,
+            &super::VoteHistory {
+                last_prevote_height: 16,
+                last_precommit_height: 14,
+                prevote_hash: None,
+                precommit_hash: None,
+                node: Some("node-a".to_string()),
+            },
+        )
+        .is_err());
     }
 
     #[test]
@@ -9885,6 +10474,51 @@ mod finality_publish_tests {
             "a fresh unhandshaked peer must stay tracked until its deadline passes"
         );
     }
+
+    #[test]
+    fn non_banning_penalties_do_not_extend_handshaked_idle_slot() {
+        use super::{Duration, HashMap, PeerId, PeerManager};
+
+        let mut pm = PeerManager::new();
+        let noisy_squatter = PeerId::random();
+        let sync_contributor = PeerId::random();
+
+        assert!(pm.note_connected::<crate::network::peer_manager::SubnetKey>(noisy_squatter, None));
+        assert!(
+            pm.note_connected::<crate::network::peer_manager::SubnetKey>(sync_contributor, None)
+        );
+        pm.set_handshaked(&noisy_squatter, true);
+        pm.set_handshaked(&sync_contributor, true);
+
+        // Penalty paths refresh `last_seen` without banning; they must not
+        // count as valid protocol activity for holding an inbound slot.
+        pm.report_unjoined_block(&noisy_squatter);
+        pm.report_unanswered_request(&noisy_squatter);
+        let _ = pm.charge_agg_frame_from(&noisy_squatter, false, 320);
+        let _ = pm.charge_agg_frame_from(&noisy_squatter, false, 320);
+        assert!(!pm.is_banned(&noisy_squatter));
+        assert!(pm
+            .get_peer_info(&noisy_squatter)
+            .and_then(|s| s.last_seen)
+            .is_some());
+
+        // Delivering valid sync data refreshes `last_valid_at` and preserves the slot.
+        pm.report_sync_success(&sync_contributor);
+
+        let now = std::time::Instant::now();
+        let mut connected_at = HashMap::new();
+        connected_at.insert(noisy_squatter, now - Duration::from_secs(3_600));
+        connected_at.insert(sync_contributor, now - Duration::from_secs(3_600));
+
+        let expired = super::drain_expired_unhandshaked_peers(
+            &mut connected_at,
+            &pm,
+            now,
+            Duration::from_secs(30),
+        );
+        assert_eq!(expired, vec![noisy_squatter]);
+        assert!(connected_at.contains_key(&sync_contributor));
+    }
 }
 
 /// Identify connected peers that have held a connection for longer than the
@@ -9912,11 +10546,15 @@ fn drain_expired_unhandshaked_peers(
             spent.push(*peer);
             continue;
         }
-        let last_activity = pm
-            .get_peer_info(peer)
-            .and_then(|score| score.last_seen)
-            .map_or(*admitted, |seen| seen.max(*admitted));
-        let limit = if pm.is_handshaked(peer) {
+        let handshaked = pm.is_handshaked(peer);
+        let last_activity = if handshaked {
+            pm.get_peer_info(peer)
+                .and_then(|score| score.last_valid_at)
+                .map_or(*admitted, |seen| seen.max(*admitted))
+        } else {
+            *admitted
+        };
+        let limit = if handshaked {
             HANDSHAKED_IDLE_DEADLINE
         } else {
             deadline
@@ -10312,5 +10950,155 @@ mod identity_file_tests {
             "hostname bootstrap must fail explicitly when DNS transport is unavailable"
         );
         actor_task.abort();
+    }
+
+    #[tokio::test]
+    async fn validator_dials_and_rotates_sentries_when_non_loopback_interface_holds_listen_port() {
+        use crate::chain::blockchain::Blockchain;
+        use crate::chain::chain_actor::ChainActor;
+        use crate::consensus::pow::PoWEngine;
+        use crate::network::sentry::{SentryConfig, SentryPolicy};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        // Discover a local non-loopback IPv4 interface address (e.g. eth0 on
+        // multi-homed hosts or sandbox VMs) via UDP routing table lookup.
+        let probe = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .expect("bind udp socket for local interface probe");
+        probe
+            .connect((Ipv4Addr::new(198, 51, 100, 1), 9))
+            .expect("route probe to TEST-NET-2");
+        let non_loopback_ip = match probe.local_addr().expect("probe local addr").ip() {
+            IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => ip,
+            other => panic!("expected non-loopback local IPv4 interface, got {other}"),
+        };
+
+        // Reserve three distinct ports and simultaneously occupy the validator's
+        // port on the non-loopback interface WITHOUT SO_REUSEPORT (just as a
+        // host port-forwarder or another tenant service does). When the
+        // validator listens on `127.0.0.1:port_val`, libp2p-tcp's default
+        // `PortUse::Reuse` binds outbound dials to `0.0.0.0:port_val`, colliding
+        // with `non_loopback_ip:port_val` (`EADDRINUSE`) unless outbound dials
+        // allocate a fresh ephemeral port.
+        let listener_a =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve sentry A port");
+        let listener_b =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve sentry B port");
+        let (port_val, _occupied_non_loopback_listener) = (0..64)
+            .find_map(|_| {
+                let lo = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).ok()?;
+                let port = lo.local_addr().ok()?.port();
+                let ext = std::net::TcpListener::bind((non_loopback_ip, port)).ok()?;
+                drop(lo);
+                Some((port, ext))
+            })
+            .expect("reserve port free on both loopback and non-loopback interface");
+        let port_a = listener_a.local_addr().expect("sentry A addr").port();
+        let port_b = listener_b.local_addr().expect("sentry B addr").port();
+        drop(listener_a);
+        drop(listener_b);
+
+        let make_chain = || {
+            let consensus = Arc::new(PoWEngine::new(0));
+            let blockchain = Blockchain::new(consensus, None, 45265, None);
+            let (actor, client) = ChainActor::new(blockchain);
+            let task = tokio::spawn(async move { Box::pin(actor.run()).await });
+            (client, task)
+        };
+
+        let (chain_a, chain_a_task) = make_chain();
+        let (chain_b, chain_b_task) = make_chain();
+        let (chain_val, chain_val_task) = make_chain();
+
+        let mut sentry_a = Node::new(chain_a).expect("sentry A");
+        let sentry_a_id = sentry_a.peer_id;
+        sentry_a
+            .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_a)
+            .expect("listen sentry A");
+
+        let mut sentry_b = Node::new(chain_b).expect("sentry B");
+        let sentry_b_id = sentry_b.peer_id;
+        sentry_b
+            .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_b)
+            .expect("listen sentry B");
+
+        let sentry_a_addr = format!("/ip4/127.0.0.1/tcp/{port_a}/p2p/{sentry_a_id}");
+        let sentry_b_addr = format!("/ip4/127.0.0.1/tcp/{port_b}/p2p/{sentry_b_id}");
+
+        let val_policy = SentryPolicy::from_config(&SentryConfig {
+            role: "validator".to_string(),
+            sentry_peers: vec![sentry_a_addr],
+            allowed_private_cidrs: vec!["127.0.0.1/32".to_string()],
+            ..Default::default()
+        })
+        .expect("validator policy");
+        let mut validator = Node::new(chain_val)
+            .expect("validator")
+            .with_sentry_policy(val_policy);
+        let validator_id = validator.peer_id;
+        validator
+            .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_val)
+            .expect("listen validator on loopback while non-loopback holds same port");
+
+        let sentry_policy = SentryPolicy::from_config(&SentryConfig {
+            role: "sentry".to_string(),
+            private_peers: vec![validator_id.to_string()],
+            allowed_private_cidrs: vec!["127.0.0.1/32".to_string()],
+            ..Default::default()
+        })
+        .expect("sentry policy");
+        let mut sentry_a = sentry_a.with_sentry_policy(sentry_policy.clone());
+        let mut sentry_b = sentry_b.with_sentry_policy(sentry_policy);
+
+        let val_client = validator.get_client();
+        let h_sa = tokio::spawn(async move { Box::pin(sentry_a.run()).await });
+        let h_sb = tokio::spawn(async move { Box::pin(sentry_b.run()).await });
+        let h_val = tokio::spawn(async move { Box::pin(validator.run()).await });
+
+        let mut connected_a = false;
+        let mut last_status_a = None;
+        for _ in 0..80 {
+            let st = val_client.admin_sentry_status().await.expect("status A");
+            if st.connected_sentries == vec![sentry_a_id.to_string()] {
+                connected_a = true;
+                break;
+            }
+            last_status_a = Some((st.configured_sentries, st.connected_sentries));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            connected_a,
+            "validator failed to connect to Sentry A while {non_loopback_ip}:{port_val} was occupied; last status: {last_status_a:?}"
+        );
+
+        let diff = val_client
+            .admin_update_sentries(vec![sentry_b_addr])
+            .await
+            .expect("live sentry rotation");
+        assert_eq!(diff.removed, vec![sentry_a_id]);
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.added[0].0, sentry_b_id);
+
+        let mut connected_b = false;
+        let mut last_status_b = None;
+        for _ in 0..80 {
+            let st = val_client.admin_sentry_status().await.expect("status B");
+            if st.connected_sentries == vec![sentry_b_id.to_string()] {
+                connected_b = true;
+                break;
+            }
+            last_status_b = Some((st.configured_sentries, st.connected_sentries));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            connected_b,
+            "validator failed live rotation to Sentry B while {non_loopback_ip}:{port_val} was occupied; last status: {last_status_b:?}"
+        );
+
+        h_val.abort();
+        h_sa.abort();
+        h_sb.abort();
+        chain_a_task.abort();
+        chain_b_task.abort();
+        chain_val_task.abort();
     }
 }

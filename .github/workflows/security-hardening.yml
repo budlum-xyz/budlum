@@ -24,7 +24,7 @@ on:
 
 concurrency:
   group: security-hardening-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 permissions:
   contents: read
@@ -46,25 +46,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       # The version was unpinned. extra-tooling.yml pins the same tool to 0.8.0;
       # the same version and the same sha256 are used here too, otherwise two
       # workflows would run different tools under the same name.
@@ -191,25 +173,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: cargo install cargo-mutants
         run: cargo install cargo-mutants --locked
       # Canary: a crate is written with a test that deliberately asserts nothing
@@ -362,25 +326,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       # Version pinned. An unpinned install made the parse script below the
       # victim of whichever output shape the newest release emitted; the parser
       # still tolerates the list shape, but the pin stops the JSON from being
@@ -469,25 +415,7 @@ jobs:
           # on. The ASan job already keys itself separately; this one did not.
           shared-key: tsan
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       # Canary: a deliberately racing program is written and TSan is expected to
       # catch it. If it does not, the tool is not working and a clean report says
       # nothing. Without the canary a green job would say not that the scan ran,
@@ -660,14 +588,16 @@ jobs:
           sled = "0.34.7"
           EOF
           cat > /tmp/tsan-sled-canary/src/main.rs <<'EOF'
-          // The racing memory is ours; only the stack is sled's.
+          // The racing memory is a heap allocation of our own (matching the
+          // primary canary, so LLVM cannot keep a stack slot in registers and
+          // hide the conflicting stores); only the call stack is sled's.
           fn main() {
               let db = sled::Config::new()
                   .temporary(true)
                   .open()
                   .expect("the canary needs a store to borrow a stack frame from");
-              let mut value = 0i64;
-              let ptr = std::ptr::addr_of_mut!(value) as usize;
+              let shared = Box::into_raw(Box::new(0i64));
+              let ptr = shared as usize;
               let start = std::sync::Arc::new(std::sync::Barrier::new(2));
 
               // Thread A: the write happens INSIDE a closure sled invokes, so
@@ -680,26 +610,34 @@ jobs:
                       for i in 0..5_000u32 {
                           let _ = db.update_and_fetch(b"canary", |_old| {
                               let p = ptr as *mut i64;
-                              unsafe { *p += 1 }
+                              unsafe {
+                                  let cur = std::ptr::read(p);
+                                  std::ptr::write(p, cur.wrapping_add(1));
+                              }
+                              std::hint::black_box(p);
                               Some(i.to_le_bytes().to_vec())
                           });
                       }
                   })
               };
-              // Thread B: the same address, no sled on this side at all.
+              // Thread B: the same heap address, no sled on this side at all.
               let outside = {
                   let s = std::sync::Arc::clone(&start);
                   std::thread::spawn(move || {
                       let p = ptr as *mut i64;
                       s.wait();
                       for _ in 0..2_000_000 {
-                          unsafe { *p += 1 }
+                          unsafe {
+                              let cur = std::ptr::read(p);
+                              std::ptr::write(p, cur.wrapping_add(1));
+                          }
                           std::hint::black_box(p);
                       }
                   })
               };
               inside.join().expect("join");
               outside.join().expect("join");
+              let value = unsafe { *Box::from_raw(shared) };
               println!("{value}");
           }
           EOF
@@ -710,6 +648,12 @@ jobs:
           cargo +nightly-2026-07-19 run -Zbuild-std --target x86_64-unknown-linux-gnu \
             > /tmp/tsan-sled-canary.log 2>&1
           set -e
+          sled_canary_bin="target/x86_64-unknown-linux-gnu/debug/tsan-sled-canary"
+          if [ -f "$sled_canary_bin" ] && ! nm -an "$sled_canary_bin" 2>/dev/null | grep -q '__tsan_init'; then
+            echo "::error::the sled-frame canary binary carries no ThreadSanitizer runtime (no __tsan_init symbol)." >&2
+            tail -40 /tmp/tsan-sled-canary.log >&2
+            exit 1
+          fi
           if grep -q "WARNING: ThreadSanitizer" /tmp/tsan-sled-canary.log; then
             echo "sled-frame canary OK: a race in our own memory is still reported"
             echo "even though one of its stacks goes through sled."
@@ -850,25 +794,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       # Canary: a model that deliberately takes locks in reverse order is written
       # and loom is expected to find the deadlock. If it does not, the real tests
       # being green would say not that the ordering is correct, but at most that

@@ -70,7 +70,7 @@ pub fn replacement_placement_digest(new_shares: &[(u64, Share)]) -> [u8; 32] {
         .collect();
     rows.sort_unstable();
     let count = (rows.len() as u64).to_le_bytes();
-    let mut flat = Vec::with_capacity(rows.len() * (8 + 32 + 1 + 4 + 4));
+    let mut flat = Vec::with_capacity(rows.len().saturating_mul(8 + 32 + 1 + 4 + 4));
     for (segment, validator, class, first_esi, symbols) in rows {
         flat.extend_from_slice(&segment.to_le_bytes());
         flat.extend_from_slice(&validator);
@@ -105,7 +105,7 @@ pub fn replace_attestation_digest(
     let codec = new_record.codec.to_le_bytes();
     let syms_per_seg = new_record.symbols_per_segment.to_le_bytes();
     let roots_count = (new_record.symbol_roots.len() as u64).to_le_bytes();
-    let mut roots_flat = Vec::with_capacity(new_record.symbol_roots.len() * 32);
+    let mut roots_flat = Vec::with_capacity(new_record.symbol_roots.len().saturating_mul(32));
     for root in &new_record.symbol_roots {
         roots_flat.extend_from_slice(root);
     }
@@ -273,9 +273,13 @@ pub enum ReplaceError {
         got: usize,
         need: usize,
     },
+    /// Same placement-group validator supplied more than one attestation.
+    DuplicateAttester(Address),
     AttesterOutsidePlacementGroup(Address),
     InvalidAttestationSignature(Address),
     NoIndependentAttester,
+    /// Replacement record or placement shares violate structural B.U.D. 3.0 invariants.
+    InvalidReplacementRecord(&'static str),
     /// Different content produced: rejected AND proposer is slashed 1% under bad-repair rule!
     ContentIdMismatch {
         proposer_slash_atoms: u64,
@@ -287,7 +291,10 @@ pub enum ReplaceError {
 /// 2. `new_record.codec` must be registered and open on testnet (`bud_codec::is_open`).
 /// 3. If `new_record.content_id != old_record.content_id`, refuses AND computes the
 ///    1% bad-repair slash (`bad_repair_slash_amount(proposer_stake)`).
-/// 4. Requires at least `MIN_REPLACE_ATTESTATIONS` (3) distinct Full validators from
+/// 4. Requires structurally valid `new_record` metadata (non-zero commitment, non-empty
+///    object length, valid profile, bounded `symbols_per_segment`, segment-aligned
+///    non-zero `symbol_roots`) and well-formed `new_shares` placement.
+/// 5. Requires at least `MIN_REPLACE_ATTESTATIONS` (3) distinct Full validators from
 ///    `placement_group_full` signing `(old_record.commitment, new_record)` with their
 ///    registered consensus ML-DSA-65 keys, including at least one attester independent
 ///    of `sender`.
@@ -322,28 +329,64 @@ pub fn admit_object_replacement(
         });
     }
 
-    let digest =
-        replace_attestation_digest(chain_id, &old_record.commitment, new_record, new_shares);
+    if new_record.commitment == [0u8; 32] {
+        return Err(ReplaceError::InvalidReplacementRecord(
+            "zero replacement commitment",
+        ));
+    }
+    if new_record.object_len == 0 {
+        return Err(ReplaceError::InvalidReplacementRecord(
+            "zero replacement object length",
+        ));
+    }
+    if !new_record.profile.is_valid() {
+        return Err(ReplaceError::InvalidReplacementRecord(
+            "invalid replacement profile",
+        ));
+    }
+    if new_record.symbols_per_segment == 0
+        || new_record.symbols_per_segment > super::pipeline::MAX_SYMBOLS_PER_SEGMENT
+    {
+        return Err(ReplaceError::InvalidReplacementRecord(
+            "replacement symbols_per_segment out of bounds",
+        ));
+    }
+    let Some(segmentation) =
+        super::segment::Segmentation::new(new_record.object_len, &new_record.profile)
+    else {
+        return Err(ReplaceError::InvalidReplacementRecord(
+            "invalid replacement segmentation",
+        ));
+    };
+    let expected_segments = segmentation.count();
+    if new_record.symbol_roots.len() as u64 != expected_segments
+        || new_record.symbol_roots.contains(&[0u8; 32])
+    {
+        return Err(ReplaceError::InvalidReplacementRecord(
+            "replacement symbol_roots mismatch",
+        ));
+    }
+
+    // Reject outside-group, duplicate, mismatched, under-quorum, or non-independent
+    // attestation lists before spending post-quantum ML-DSA-65 verification cycles.
     let mut distinct_attesters = BTreeSet::new();
     for att in attestations {
         if !placement_group_full.contains(&att.validator) {
             return Err(ReplaceError::AttesterOutsidePlacementGroup(att.validator));
+        }
+        if !distinct_attesters.insert(att.validator) {
+            return Err(ReplaceError::DuplicateAttester(att.validator));
         }
         if att.verified_content_id != old_record.content_id {
             return Err(ReplaceError::ContentIdMismatch {
                 proposer_slash_atoms: bad_repair_slash_amount(proposer_stake),
             });
         }
-        if att.new_commitment != new_record.commitment {
+        if att.new_commitment != new_record.commitment
+            || !validator_keys.contains_key(&att.validator)
+        {
             return Err(ReplaceError::InvalidAttestationSignature(att.validator));
         }
-        let Some(pk) = validator_keys.get(&att.validator) else {
-            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
-        };
-        if verify(SchemeId::ML_DSA_65, pk, &digest, STORAGE_V2, &att.signature).is_err() {
-            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
-        }
-        distinct_attesters.insert(att.validator);
     }
 
     if distinct_attesters.len() < MIN_REPLACE_ATTESTATIONS {
@@ -354,6 +397,70 @@ pub fn admit_object_replacement(
     }
     if !distinct_attesters.iter().any(|v| v != sender) {
         return Err(ReplaceError::NoIndependentAttester);
+    }
+
+    let digest =
+        replace_attestation_digest(chain_id, &old_record.commitment, new_record, new_shares);
+    for att in attestations {
+        let Some(pk) = validator_keys.get(&att.validator) else {
+            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
+        };
+        if verify(SchemeId::ML_DSA_65, pk, &digest, STORAGE_V2, &att.signature).is_err() {
+            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
+        }
+    }
+
+    // Validate replacement placement structure after signatures are authenticated so
+    // unsigned wire mutations continue to surface as invalid attestation signatures.
+    if new_shares.is_empty() {
+        return Err(ReplaceError::InvalidReplacementRecord(
+            "empty replacement placement",
+        ));
+    }
+    let mut seen_holders: BTreeSet<(u64, Address)> = BTreeSet::new();
+    let mut per_segment_ranges: BTreeMap<u64, Vec<(u32, u32)>> = BTreeMap::new();
+    for (segment, share) in new_shares {
+        if *segment >= expected_segments {
+            return Err(ReplaceError::InvalidReplacementRecord(
+                "replacement share segment out of range",
+            ));
+        }
+        if share.symbols == 0 {
+            return Err(ReplaceError::InvalidReplacementRecord(
+                "zero-symbol replacement share",
+            ));
+        }
+        let Some(end_esi) = share.first_esi.checked_add(share.symbols) else {
+            return Err(ReplaceError::InvalidReplacementRecord(
+                "replacement share ESI overflow",
+            ));
+        };
+        if end_esi > super::fountain::MAX_ESI {
+            return Err(ReplaceError::InvalidReplacementRecord(
+                "replacement share exceeds MAX_ESI",
+            ));
+        }
+        if !seen_holders.insert((*segment, share.validator)) {
+            return Err(ReplaceError::InvalidReplacementRecord(
+                "duplicate replacement share holder",
+            ));
+        }
+        per_segment_ranges
+            .entry(*segment)
+            .or_default()
+            .push((share.first_esi, end_esi));
+    }
+    for ranges in per_segment_ranges.values_mut() {
+        ranges.sort_unstable();
+        for pair in ranges.windows(2) {
+            if let (Some(&(_, prev_end)), Some(&(next_start, _))) = (pair.first(), pair.get(1)) {
+                if prev_end > next_start {
+                    return Err(ReplaceError::InvalidReplacementRecord(
+                        "overlapping replacement share ESI range",
+                    ));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -369,11 +476,11 @@ pub struct PendingReplacementBarrier {
 }
 
 impl PendingReplacementBarrier {
-    /// True once every replacement custody share has been acknowledged.
+    /// True once a non-zero replacement custody barrier has been fully acknowledged.
     /// Convenience: exposed for registry share retirement sweep.
     #[must_use]
     pub const fn can_retire_old_shares(&self) -> bool {
-        self.observed_acks >= self.required_acks
+        self.required_acks > 0 && self.observed_acks >= self.required_acks
     }
 }
 
@@ -682,6 +789,306 @@ mod tests {
             ),
             Err(ReplaceError::InvalidAttestationSignature([1u8; 32])),
             "the same signatures must not admit a placement they never signed"
+        );
+    }
+
+    #[test]
+    fn duplicate_validator_attestations_are_rejected_and_every_share_field_is_bound() {
+        let cid = ContentId {
+            kind: ContentIdKind::Public,
+            len: 4_096,
+            digest: [0x51; 32],
+        };
+        let old_rec = sample_record([0x61; 32], cid, 0);
+        let new_rec = sample_record([0x62; 32], cid, 1);
+        let keys = key_map(&[1, 2, 3, 4]);
+        let pg: BTreeSet<Address> = [1u8, 2, 3, 4].into_iter().map(|b| [b; 32]).collect();
+        let shares = sample_shares(&[1, 2, 3]);
+
+        // Mutating class, first_esi, symbols, or segment must each fail signature check.
+        let mut class_mut = shares.clone();
+        class_mut[0].1.class = Class::Mobile;
+        let mut esi_mut = shares.clone();
+        esi_mut[0].1.first_esi += 1;
+        let mut sym_mut = shares.clone();
+        sym_mut[0].1.symbols += 1;
+        let mut seg_mut = shares.clone();
+        seg_mut[0].0 = 1;
+        let atts: Vec<_> = [1u8, 2, 3]
+            .into_iter()
+            .map(|b| {
+                sign_replace_attestation([b; 32], &[b; 32], &old_rec.commitment, &new_rec, &shares)
+                    .unwrap()
+            })
+            .collect();
+        for mutated in [class_mut, esi_mut, sym_mut, seg_mut] {
+            assert_eq!(
+                admit_object_replacement(
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    (&[9u8; 32], &[1u8; 32], 100_000),
+                    (&old_rec, &new_rec),
+                    &mutated,
+                    (&pg, &keys),
+                    &atts,
+                ),
+                Err(ReplaceError::InvalidAttestationSignature([1u8; 32])),
+            );
+        }
+
+        // Duplicate entries for the same attester must be refused fail-closed even
+        // when three distinct signers are also present, preventing PQ signature-check
+        // amplification via padded attestation vectors.
+        let mut dup = atts.clone();
+        dup.push(atts[0].clone());
+        assert_eq!(
+            admit_object_replacement(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+                (&[9u8; 32], &[1u8; 32], 100_000),
+                (&old_rec, &new_rec),
+                &shares,
+                (&pg, &keys),
+                &dup,
+            ),
+            Err(ReplaceError::DuplicateAttester([1u8; 32])),
+            "duplicate replacement attester must be rejected before repeated PQ verification"
+        );
+    }
+
+    #[test]
+    fn pending_replacement_barrier_refuses_zero_required_acks_retirement() {
+        let zero_req = PendingReplacementBarrier {
+            old_object: [1u8; 32],
+            new_object: [2u8; 32],
+            required_acks: 0,
+            observed_acks: 0,
+        };
+        assert!(
+            !zero_req.can_retire_old_shares(),
+            "a barrier requiring zero acks must never authorize retiring old shares"
+        );
+
+        let partial = PendingReplacementBarrier {
+            old_object: [1u8; 32],
+            new_object: [2u8; 32],
+            required_acks: 3,
+            observed_acks: 2,
+        };
+        assert!(!partial.can_retire_old_shares());
+
+        let ready = PendingReplacementBarrier {
+            old_object: [1u8; 32],
+            new_object: [2u8; 32],
+            required_acks: 3,
+            observed_acks: 3,
+        };
+        assert!(ready.can_retire_old_shares());
+    }
+
+    #[test]
+    fn admit_object_replacement_rejects_zero_commitment_invalid_profile_and_bad_record_bounds() {
+        let cid = ContentId::public(b"structural replacement record check");
+        let old_rec = sample_record([10u8; 32], cid, 0);
+        let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32]].into();
+        let keys = key_map(&[1, 2, 3]);
+        let shares = sample_shares(&[1, 2, 3]);
+
+        let sign_all = |rec: &ObjectRecord| -> Vec<ReplaceAttestation> {
+            [1u8, 2, 3]
+                .into_iter()
+                .map(|b| {
+                    sign_replace_attestation([b; 32], &[b; 32], &old_rec.commitment, rec, &shares)
+                        .unwrap()
+                })
+                .collect()
+        };
+
+        let mut zero_commit = sample_record([0u8; 32], cid, 1);
+        zero_commit.commitment = [0u8; 32];
+        let mut zero_len = sample_record([21u8; 32], cid, 1);
+        zero_len.object_len = 0;
+        let mut bad_profile = sample_record([22u8; 32], cid, 1);
+        bad_profile.profile.symbol_size = 0;
+        let mut zero_syms = sample_record([23u8; 32], cid, 1);
+        zero_syms.symbols_per_segment = 0;
+        let mut over_syms = sample_record([24u8; 32], cid, 1);
+        over_syms.symbols_per_segment = super::super::pipeline::MAX_SYMBOLS_PER_SEGMENT + 1;
+        let mut zero_root = sample_record([25u8; 32], cid, 1);
+        zero_root.symbol_roots = vec![[0u8; 32]];
+        let mut empty_roots = sample_record([26u8; 32], cid, 1);
+        empty_roots.symbol_roots = Vec::new();
+
+        for bad_rec in [
+            zero_commit,
+            zero_len,
+            bad_profile,
+            zero_syms,
+            over_syms,
+            zero_root,
+            empty_roots,
+        ] {
+            let atts = sign_all(&bad_rec);
+            let res = admit_object_replacement(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+                (&[9u8; 32], &[1u8; 32], 100_000),
+                (&old_rec, &bad_rec),
+                &shares,
+                (&pg, &keys),
+                &atts,
+            );
+            assert!(
+                res.is_err(),
+                "malformed replacement record {bad_rec:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn admit_object_replacement_rejects_empty_zero_symbol_duplicate_and_overlapping_new_shares() {
+        let cid = ContentId::public(b"replacement placement integrity check");
+        let old_rec = sample_record([10u8; 32], cid, 0);
+        let new_rec = sample_record([20u8; 32], cid, 1);
+        let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32]].into();
+        let keys = key_map(&[1, 2, 3]);
+
+        let bad_placements: Vec<Vec<(u64, Share)>> = vec![
+            // Empty placement
+            Vec::new(),
+            // Zero-symbol share
+            vec![(
+                0,
+                Share {
+                    validator: [1u8; 32],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 0,
+                },
+            )],
+            // Duplicate (segment, validator) holder
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: [1u8; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 1,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: [1u8; 32],
+                        class: Class::Full,
+                        first_esi: 1,
+                        symbols: 1,
+                    },
+                ),
+            ],
+            // Overlapping ESI ranges on segment 0
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: [1u8; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 2,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: [2u8; 32],
+                        class: Class::Full,
+                        first_esi: 1,
+                        symbols: 2,
+                    },
+                ),
+            ],
+            // Out-of-range segment index (object has only 1 segment)
+            vec![(
+                1,
+                Share {
+                    validator: [1u8; 32],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 1,
+                },
+            )],
+            // ESI overflow past MAX_ESI
+            vec![(
+                0,
+                Share {
+                    validator: [1u8; 32],
+                    class: Class::Full,
+                    first_esi: super::super::fountain::MAX_ESI,
+                    symbols: 2,
+                },
+            )],
+        ];
+
+        for bad_shares in bad_placements {
+            let atts: Vec<ReplaceAttestation> = [1u8, 2, 3]
+                .into_iter()
+                .map(|b| {
+                    sign_replace_attestation(
+                        [b; 32],
+                        &[b; 32],
+                        &old_rec.commitment,
+                        &new_rec,
+                        &bad_shares,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let res = admit_object_replacement(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+                (&[9u8; 32], &[1u8; 32], 100_000),
+                (&old_rec, &new_rec),
+                &bad_shares,
+                (&pg, &keys),
+                &atts,
+            );
+            assert!(
+                res.is_err(),
+                "signed malformed replacement shares {bad_shares:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn admit_object_replacement_rejects_unsigned_share_mutation_as_invalid_signature() {
+        let cid = ContentId::public(b"unsigned share mutation signature error");
+        let old_rec = sample_record([10u8; 32], cid, 0);
+        let new_rec = sample_record([20u8; 32], cid, 1);
+        let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32]].into();
+        let keys = key_map(&[1, 2, 3]);
+        let signed_shares = sample_shares(&[1, 2, 3]);
+        let atts: Vec<ReplaceAttestation> = [1u8, 2, 3]
+            .into_iter()
+            .map(|b| {
+                sign_replace_attestation(
+                    [b; 32],
+                    &[b; 32],
+                    &old_rec.commitment,
+                    &new_rec,
+                    &signed_shares,
+                )
+                .unwrap()
+            })
+            .collect();
+
+        // Tampering placement to empty after signing must still fail signature verification.
+        assert_eq!(
+            admit_object_replacement(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+                (&[9u8; 32], &[1u8; 32], 100_000),
+                (&old_rec, &new_rec),
+                &[],
+                (&pg, &keys),
+                &atts,
+            ),
+            Err(ReplaceError::InvalidAttestationSignature([1u8; 32]))
         );
     }
 }

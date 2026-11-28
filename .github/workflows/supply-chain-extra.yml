@@ -20,13 +20,13 @@ on:
     branches: [main, consensus-of-consensuses]
   schedule:
     # Weekly hygiene scan (effects of cargo update + new deps)
-    - cron: '17 3 * * 3' # Wednesday 03:17 UTC
+    - cron: '17 16 * * 3' # Wednesday 16:17 UTC
   workflow_dispatch:
 
 # Read-only.
 concurrency:
   group: supply-chain-extra-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 permissions:
   contents: read
@@ -54,25 +54,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Install cargo-udeps (locked; the crates.io version is evidenced in the log)
         run: cargo +nightly install cargo-udeps --locked
       - name: Canary (vacuous-gate protection)
@@ -137,25 +119,7 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 .github/scripts/install_protoc.py
       - name: Install cargo-geiger (locked; the crates.io version is evidenced in the log)
         run: cargo install cargo-geiger --locked
       - name: Canary (vacuous-gate protection)
@@ -198,7 +162,7 @@ jobs:
 
           # budzero is a separate workspace and its root is a VIRTUAL manifest (only
           # [workspace], no package). cargo-geiger refuses to run at such a root:
-          # reddediyor: "is a virtual manifest, but this command requires
+          # "is a virtual manifest, but this command requires
           # "running against an actual package". So until now this step had not
           # scanned a single crate of budzero - during the `|| true` era this passed
           # silently, and it surfaced once the gate became fail-closed.

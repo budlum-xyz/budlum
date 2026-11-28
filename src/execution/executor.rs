@@ -222,6 +222,64 @@ impl Executor {
         })
     }
 
+    /// Active bond floor for `validator` on `chain_id`, honoring both Filiz
+    /// seat registration and `ValidatorClass::Full` directory records alongside
+    /// any governance-raised registry `min_stake`.
+    fn validator_active_floor(state: &AccountState, validator: &Address, chain_id: u64) -> u64 {
+        let is_full_seat = state
+            .get_validator(validator)
+            .is_some_and(|v| v.filiz.is_some())
+            || state
+                .validator_directory
+                .get(validator)
+                .is_some_and(|record| record.class.holds_seat());
+        if is_full_seat {
+            state.full_validator_stake_floor(chain_id)
+        } else {
+            state.validator_stake_floor(chain_id)
+        }
+    }
+
+    /// Validator's own slashable bond (aggregate stake minus delegated stake).
+    fn validator_self_bond(state: &AccountState, validator: &Address) -> u64 {
+        let aggregate = state.get_validator(validator).map_or(0, |v| v.stake);
+        aggregate.saturating_sub(state.registry.delegated_stake(validator))
+    }
+
+    /// Enforce both aggregate and self-bond floors after any stake or delegation
+    /// exit on `validator`, clamping snapshotted vote weight on active proposals
+    /// and mirroring the post-exit stake into the permissionless registry.
+    fn enforce_validator_exit_floor(
+        state: &mut AccountState,
+        validator: &Address,
+        chain_id: u64,
+    ) -> u64 {
+        let floor = Self::validator_active_floor(state, validator, chain_id);
+        let self_bond = Self::validator_self_bond(state, validator);
+        if let Some(entry) = state.get_validator_mut(validator) {
+            if entry.stake == 0 || entry.stake < floor || self_bond < floor {
+                entry.active = false;
+            }
+        }
+
+        let live_eligible_stake = state
+            .get_validator(validator)
+            .filter(|v| v.is_eligible(state.epoch_index))
+            .map_or(0, |v| v.stake);
+        for proposal in &mut state.governance.proposals {
+            if proposal.status == crate::core::governance::ProposalStatus::Active {
+                let snapshot = proposal.vote_weight_of(validator);
+                proposal.reduce_vote_weight(
+                    validator,
+                    snapshot.saturating_sub(snapshot.min(live_eligible_stake)),
+                );
+            }
+        }
+
+        state.sync_validator_registration_with_floor(validator, floor);
+        floor
+    }
+
     /// Apply one transaction's state effect. Admission control is NOT here:
     /// `validate_transaction` has already run over this transaction at the
     /// ingest gate, including the `tx.nonce == account.nonce` check - the
@@ -532,8 +590,13 @@ impl Executor {
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
 
-                let min_stake = crate::core::chain_config::Network::from_chain_id(tx.chain_id)
-                    .map_or(1, |network| network.min_stake());
+                let delegated_stake = state.registry.delegated_stake(&tx.from);
+                let min_stake = if delegated_stake > 0 {
+                    Self::validator_active_floor(state, &tx.from, tx.chain_id)
+                } else {
+                    crate::core::chain_config::Network::from_chain_id(tx.chain_id)
+                        .map_or(1, |network| network.min_stake())
+                };
                 let liveness_suspended = state.liveness.is_suspended(&tx.from);
                 let validator = state.get_validator_mut(&tx.from);
 
@@ -541,10 +604,13 @@ impl Executor {
                     v.stake = v.stake.checked_add(stake_amount).ok_or_else(|| {
                         BudlumError::validation("stake_overflow", "stake overflow")
                     })?;
+                    let new_self_bond = v.stake.saturating_sub(delegated_stake);
                     // `!v.jailed && !liveness_suspended` is not decoration:
                     // neither a timed jail nor a V-4 liveness suspension can
-                    // be lifted silently by a 1-unit stake top-up.
+                    // be lifted silently by a 1-unit stake top-up. Likewise,
+                    // delegated stake cannot shield a sub-floor self-bond.
                     v.active = v.stake >= min_stake
+                        && new_self_bond >= min_stake
                         && v.is_consensus_ready()
                         && !v.jailed
                         && !liveness_suspended;
@@ -592,6 +658,16 @@ impl Executor {
                         format!("Delegation exceeds spendable balance: have {spendable}, need {total_cost}"),
                     ));
                 }
+                let delegation_floor =
+                    Self::validator_active_floor(state, validator, tx.chain_id);
+                if state.get_validator(validator).is_some()
+                    && Self::validator_self_bond(state, validator) < delegation_floor
+                {
+                    return Err(BudlumError::validation(
+                        "delegation_failed",
+                        "validator self bond is below the network delegation floor",
+                    ));
+                }
                 state
                     .delegate_to_validator(&tx.from, validator, tx.amount)
                     .map_err(|error| BudlumError::validation("delegation_failed", error))?;
@@ -611,6 +687,7 @@ impl Executor {
                 state
                     .begin_delegation_unbonding(&tx.from, validator, tx.amount)
                     .map_err(|error| BudlumError::validation("delegation_unbond_failed", error))?;
+                Self::enforce_validator_exit_floor(state, validator, tx.chain_id);
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "delegation unbond fee underflow")
@@ -671,9 +748,20 @@ impl Executor {
                         "Redelegation requires a positive amount, zero recipient, and empty data",
                     ));
                 }
+                let target_floor =
+                    Self::validator_active_floor(state, to_validator, tx.chain_id);
+                if state.get_validator(to_validator).is_some()
+                    && Self::validator_self_bond(state, to_validator) < target_floor
+                {
+                    return Err(BudlumError::validation(
+                        "redelegation_failed",
+                        "target validator self bond is below the network delegation floor",
+                    ));
+                }
                 state
                     .redelegate_to_validator(&tx.from, from_validator, to_validator, tx.amount)
                     .map_err(|error| BudlumError::validation("redelegation_failed", error))?;
+                Self::enforce_validator_exit_floor(state, from_validator, tx.chain_id);
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "redelegation fee underflow")
@@ -715,8 +803,13 @@ impl Executor {
                     .validate(tx.from, tx.chain_id)
                     .map_err(|error| BudlumError::validation("invalid_consensus_keys", error))?;
 
-                let min_stake = crate::core::chain_config::Network::from_chain_id(tx.chain_id)
-                    .map_or(1, |network| network.min_stake());
+                let delegated_stake = state.registry.delegated_stake(&tx.from);
+                let min_stake = if delegated_stake > 0 {
+                    Self::validator_active_floor(state, &tx.from, tx.chain_id)
+                } else {
+                    crate::core::chain_config::Network::from_chain_id(tx.chain_id)
+                        .map_or(1, |network| network.min_stake())
+                };
                 let liveness_suspended = state.liveness.is_suspended(&tx.from);
                 let validator = state.get_validator_mut(&tx.from).ok_or_else(|| {
                     BudlumError::validation(
@@ -734,9 +827,12 @@ impl Executor {
                 validator.bls_public_key = registration.bls_public_key.clone();
                 validator.pop_signature = registration.pop_signature.clone();
                 validator.pq_public_key = registration.pq_public_key.clone();
-                // Same jail and suspension rule as the stake paths: registering
-                // consensus keys does not lift a jail or a V-4 suspension early.
+                let self_bond = validator.stake.saturating_sub(delegated_stake);
+                // Same jail, suspension, and self-bond rule as the stake paths:
+                // registering consensus keys cannot lift a penalty or shield a
+                // sub-floor self-bond behind delegated stake.
                 validator.active = validator.stake >= min_stake
+                    && self_bond >= min_stake
                     && validator.is_consensus_ready()
                     && validator.verify_pop_is_valid(tx.chain_id)
                     && !validator.jailed
@@ -872,38 +968,15 @@ impl Executor {
                     .checked_sub(tx.amount)
                     .ok_or_else(|| BudlumError::validation("stake_underflow", "stake underflow"))?;
 
-                let is_full_seat = state
-                    .get_validator(&tx.from)
-                    .is_some_and(|validator| validator.filiz.is_some());
-                let unstake_floor = if is_full_seat {
-                    state.full_validator_stake_floor(tx.chain_id)
-                } else {
-                    state.validator_stake_floor(tx.chain_id)
-                };
                 if let Some(validator) = state.get_validator_mut(&tx.from) {
                     validator.stake = new_stake;
-                    if validator.stake == 0 || validator.stake < unstake_floor {
-                        validator.active = false;
-                    }
                 }
 
-                // Clamp snapshotted vote weight on open proposals to `min(snapshot, live_stake)`
-                // (or zero when the validator leaves the eligible set), matching delegation and
-                // redelegation exits so self-stake added after a vote and later unstaked cannot
-                // erase snapshotted weight it was never part of, while pre-vote exits trim the gap.
-                let live_eligible_stake = state
-                    .get_validator(&tx.from)
-                    .filter(|v| v.is_eligible(state.epoch_index))
-                    .map_or(0, |v| v.stake);
-                for proposal in &mut state.governance.proposals {
-                    if proposal.status == crate::core::governance::ProposalStatus::Active {
-                        let snapshot = proposal.vote_weight_of(&tx.from);
-                        proposal.reduce_vote_weight(
-                            &tx.from,
-                            snapshot.saturating_sub(snapshot.min(live_eligible_stake)),
-                        );
-                    }
-                }
+                // Enforce both aggregate and self-bond floors across Filiz and
+                // ValidatorClass::Full directory seats, clamp snapshotted vote
+                // weight on open proposals, and sync the reduced bond into the
+                // permissionless registry.
+                Self::enforce_validator_exit_floor(state, &tx.from, tx.chain_id);
 
                 // The unbonding window is a governance parameter
                 // (`RegistryParams::unbonding_epochs`, whitelisted in
@@ -921,14 +994,6 @@ impl Executor {
                         amount: tx.amount,
                         release_epoch: state.epoch_index.saturating_add(unbonding_epochs),
                     });
-
-                // Mirror the reduced stake into the permissionless registry.
-                // `Stake` calls this; `Unstake` did not, so the registry kept
-                // Showing the pre-unstake stake forever. `registry.is_active`
-                // Is what the liveness / invalid-vote slashing paths and the
-                // RPC member views consult, and `registry.root()` is hashed
-                // Into the state root, so the stale entry was consensus state.
-                state.sync_validator_registration_with_floor(&tx.from, unstake_floor);
 
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -2460,10 +2525,90 @@ impl Executor {
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::AiOfferData { cid, price } => {
-                state
+                let current_block = state.current_block_height;
+                let policy = crate::tokenomics::pool_deposit::policy_of(
+                    crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+                );
+                let crate::tokenomics::pool_deposit::PoolDepositClass::OwnerRefundable {
+                    ttl_blocks,
+                } = policy.class
+                else {
+                    return Err(BudlumError::validation(
+                        "offer_pool_deposit",
+                        "a content listing is not shielded-class; refusing the wrong ledger",
+                    ));
+                };
+                // The TTL sweep: before a new listing may occupy a slot, up
+                // to 16 rows whose occupancy ended give their deposits back.
+                // A row comes back when its offer is gone or closed (the
+                // registry prunes closed offers lazily, so the refund rides
+                // the next listing), or when a live row outlived the table's
+                // TTL - and that eviction asks `ttl_sweep_permitted` first,
+                // so the day this registry's root stops being a flat row
+                // walk, the sweep stops with it. A pre-field row carries
+                // `created_at_block == 0`: its age is unknown, and a wrong
+                // eviction is not fail-closed, so it is never TTL-swept.
+                let offer_row_prefix = "content-offer:";
+                let mut reclaim: Vec<(String, Option<u64>)> = Vec::new();
+                for (key, _) in state.pool_deposit_rows.range(offer_row_prefix.to_string()..) {
+                    if !key.starts_with(offer_row_prefix) || reclaim.len() == 16 {
+                        break;
+                    }
+                    let Ok(id) = key[offer_row_prefix.len()..].parse::<u64>() else {
+                        continue;
+                    };
+                    match state.marketplace.get_offer(id) {
+                        None => reclaim.push((key.clone(), None)),
+                        Some(offer) if !offer.active => reclaim.push((key.clone(), Some(id))),
+                        Some(offer)
+                            if offer.created_at_block != 0
+                                && current_block.saturating_sub(offer.created_at_block)
+                                    > ttl_blocks
+                                && crate::tokenomics::pool_deposit::ttl_sweep_permitted(
+                                    policy.class,
+                                    crate::tokenomics::pool_deposit::RegistryRootShape::FlatRowSet,
+                                    crate::tokenomics::pool_deposit::RowLiveness::Live,
+                                ) =>
+                        {
+                            reclaim.push((key.clone(), Some(id)));
+                        }
+                        Some(_) => {}
+                    }
+                }
+                for (key, evicted_offer) in reclaim {
+                    if let Some(id) = evicted_offer {
+                        state.marketplace.offers.remove(&id);
+                    }
+                    state
+                        .release_pool_deposit_row(&key)
+                        .map_err(|e| BudlumError::validation("offer_pool_deposit", e))?;
+                }
+                let full_cost = policy.deposit.checked_add(tx.fee).ok_or_else(|| {
+                    BudlumError::validation(
+                        "offer_pool_deposit",
+                        "deposit + fee arithmetic overflow",
+                    )
+                })?;
+                if state.spendable_balance(&tx.from) < full_cost {
+                    return Err(BudlumError::validation(
+                        "offer_pool_deposit",
+                        "spendable balance cannot cover the listing deposit and the fee",
+                    ));
+                }
+                let id = state
                     .marketplace
-                    .create_offer(tx.from, *cid, *price)
+                    .create_offer(tx.from, *cid, *price, current_block)
                     .map_err(|e| BudlumError::validation("offer_invalid", e))?;
+                if let Err(e) = state.lock_pool_deposit_row(
+                    &format!("{offer_row_prefix}{id}"),
+                    &tx.from,
+                    policy.deposit,
+                ) {
+                    // Same-breath unwind: a listing that could not lock its
+                    // deposit must not stay live rent-free.
+                    state.marketplace.offers.remove(&id);
+                    return Err(BudlumError::validation("offer_pool_deposit", e));
+                }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -3252,10 +3397,53 @@ impl Executor {
                         "commitment is not a packed field element",
                     ));
                 }
+                // Occupying a slot in the shared note pool locks the
+                // single-table deposit (decision: shared-pool occupancy is
+                // priced as locked capital, never burned). The whole cost is
+                // refused up front so no partial mutation can strand money.
+                let policy: crate::tokenomics::pool_deposit::PoolDepositPolicy =
+                    crate::tokenomics::pool_deposit::policy_of(
+                        crate::tokenomics::pool_deposit::SharedPool::PrivacyNote,
+                    );
+                // The aggregate ledger is only for claims that ride
+                // rollovers; any other class must take the row ledger, so
+                // the class gates the path fail-closed.
+                let crate::tokenomics::pool_deposit::PoolDepositClass::ShieldedBalance =
+                    policy.class
+                else {
+                    return Err(BudlumError::validation(
+                        "privacy_note_deposit",
+                        "the note pool's table row is not shielded-class; refusing the wrong ledger",
+                    ));
+                };
+                let deposit = policy.deposit;
+                let full_cost = deposit.checked_add(tx.fee).ok_or_else(|| {
+                    BudlumError::validation(
+                        "privacy_note_deposit",
+                        "deposit + fee arithmetic overflow",
+                    )
+                })?;
+                if state.spendable_balance(&tx.from) < full_cost {
+                    return Err(BudlumError::validation(
+                        "privacy_note_deposit",
+                        "spendable balance cannot cover the pool deposit and the fee",
+                    ));
+                }
                 state
+                    .lock_pool_deposit(&tx.from, deposit)
+                    .map_err(|e| BudlumError::validation("privacy_note_deposit", e))?;
+                // A registry refusal releases the deposit in the same
+                // breath: a refused row must not strand the depositor's
+                // money in escrow.
+                if let Err(e) = state
                     .note_registry
                     .insert_note_for_owner(*commitment, tx.from)
-                    .map_err(|e| BudlumError::validation("privacy_note_insert", e))?;
+                {
+                    state.release_pool_deposit(&tx.from, deposit).map_err(|r| {
+                        BudlumError::validation("privacy_note_deposit_release", r)
+                    })?;
+                    return Err(BudlumError::validation("privacy_note_insert", e));
+                }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -3352,7 +3540,7 @@ impl Executor {
                         "authorization_sig invalid for tx.from",
                     ));
                 }
-                state
+                let displaced = state
                     .note_registry
                     .apply_transfer_for_owner(
                         &tx.from,
@@ -3362,6 +3550,19 @@ impl Executor {
                         &sub.nullifier_proofs,
                     )
                     .map_err(|e| BudlumError::validation("private_transfer_apply", e))?;
+                // The 1-for-1 rollover re-records every output under the
+                // spender, so each displaced depositor's occupancy claim
+                // rides along instead of being refunded - a refund here
+                // would leave the fresh output rows holding slots with
+                // nothing locked behind them. A row recorded before the
+                // deposit era carries no claim and moves nothing.
+                let note_deposit = crate::tokenomics::pool_deposit::policy_of(
+                    crate::tokenomics::pool_deposit::SharedPool::PrivacyNote,
+                )
+                .deposit;
+                for displaced_owner in &displaced {
+                    state.move_pool_deposit_claim(displaced_owner, &tx.from, note_deposit);
+                }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -3748,18 +3949,83 @@ impl Executor {
                 // tested at full depth for the sender-binding rules, the
                 // recovery quorum arithmetic, and every registry gate.
                 // Two things the door itself owes, and nothing more:
-                // identity writes commit state, they never move value -
+                // identity writes commit state, they never carry an amount -
                 if tx.amount != 0 {
                     return Err(BudlumError::validation(
                         "identity_amount_must_be_zero",
                         "an identity transaction commits state; an unspent amount would be silently burned",
                     ));
                 }
+                // Occupying a registry row locks the single-table deposit
+                // behind that exact row; a successful revoke closes its row
+                // and refunds whoever locked it, exactly once. A row with
+                // no record (pre-deposit era) refunds nothing. The row
+                // ledger is only for owner-refundable classes: the class
+                // gates the path, so a table edit that flipped a row to
+                // shielded would refuse here instead of stranding money.
+                let owner_refundable_deposit = |pool: crate::tokenomics::pool_deposit::SharedPool|
+                 -> Result<u64, BudlumError> {
+                    let policy: crate::tokenomics::pool_deposit::PoolDepositPolicy =
+                        crate::tokenomics::pool_deposit::policy_of(pool);
+                    match policy.class {
+                        crate::tokenomics::pool_deposit::PoolDepositClass::OwnerRefundable {
+                            ..
+                        } => Ok(policy.deposit),
+                        crate::tokenomics::pool_deposit::PoolDepositClass::ShieldedBalance => {
+                            Err(BudlumError::validation(
+                                "identity_pool_deposit",
+                                "an identity row is not shielded-class; refusing the wrong ledger",
+                            ))
+                        }
+                    }
+                };
+                let deposit_plan: Option<(String, u64)> = match identity_tx {
+                    crate::registry::identity::IdentityTx::Register { record } => Some((
+                        format!("identity-record:{}", hex::encode(record.subject.as_bytes())),
+                        owner_refundable_deposit(
+                            crate::tokenomics::pool_deposit::SharedPool::IdentityRecord,
+                        )?,
+                    )),
+                    crate::registry::identity::IdentityTx::Issue { credential, .. } => Some((
+                        format!(
+                            "identity-credential:{}",
+                            hex::encode(crate::registry::identity::credential_id(credential))
+                        ),
+                        owner_refundable_deposit(
+                            crate::tokenomics::pool_deposit::SharedPool::IssuedCredential,
+                        )?,
+                    )),
+                    _ => None,
+                };
+                let refund_key: Option<String> = match identity_tx {
+                    crate::registry::identity::IdentityTx::Revoke { credential } => Some(format!(
+                        "identity-credential:{}",
+                        hex::encode(crate::registry::identity::credential_id(credential))
+                    )),
+                    _ => None,
+                };
+                if let Some((key, amount)) = &deposit_plan {
+                    let full_cost = amount.checked_add(tx.fee).ok_or_else(|| {
+                        BudlumError::validation(
+                            "identity_pool_deposit",
+                            "deposit + fee arithmetic overflow",
+                        )
+                    })?;
+                    if state.spendable_balance(&tx.from) < full_cost {
+                        return Err(BudlumError::validation(
+                            "identity_pool_deposit",
+                            "spendable balance cannot cover the row deposit and the fee",
+                        ));
+                    }
+                    state
+                        .lock_pool_deposit_row(key, &tx.from, *amount)
+                        .map_err(|e| BudlumError::validation("identity_pool_deposit", e))?;
+                }
                 // - and the domain is read from state, where the node's own
                 // engine put it, never from the transaction: a caller
                 // declaring "this is PoA" would be manufacturing write
                 // authority for the master registry.
-                crate::registry::identity::execute_identity_tx_in(
+                if let Err(e) = crate::registry::identity::execute_identity_tx_in(
                     &state.scheme_registry,
                     &mut state.identity,
                     &tx.from,
@@ -3767,8 +4033,25 @@ impl Executor {
                     &state.execution_domain,
                     state.epoch_index,
                     tx.chain_id,
-                )
-                .map_err(|e| BudlumError::validation("identity_tx_failed", e.to_string()))?;
+                ) {
+                    // A registry refusal releases the freshly locked
+                    // deposit in the same breath: a refused row must not
+                    // strand the depositor's money.
+                    if let Some((key, _)) = &deposit_plan {
+                        state.release_pool_deposit_row(key).map_err(|r| {
+                            BudlumError::validation("identity_pool_deposit_release", r)
+                        })?;
+                    }
+                    return Err(BudlumError::validation(
+                        "identity_tx_failed",
+                        e.to_string(),
+                    ));
+                }
+                if let Some(key) = &refund_key {
+                    state
+                        .release_pool_deposit_row(key)
+                        .map_err(|r| BudlumError::validation("identity_pool_deposit_release", r))?;
+                }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -3910,10 +4193,24 @@ impl Executor {
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
-            TransactionType::VerifyStark(_) => {
+            TransactionType::VerifyStark(stmt) => {
                 // Phase 5 split-STARK verification carries zero transfer amount;
                 // `Claim::Poly` provenance and Stage 2 (`verify_algebra`) are
-                // enforced against `AirRegistry` during block aggregation checks.
+                // enforced against `AirRegistry` during block aggregation checks,
+                // while network eligibility and canonical field/aux bounds are
+                // enforced directly here as defense in depth.
+                if matches!(
+                    crate::core::chain_config::Network::from_chain_id(tx.chain_id),
+                    Some(
+                        crate::core::chain_config::Network::Mainnet
+                            | crate::core::chain_config::Network::Testnet
+                    )
+                ) {
+                    return Err(BudlumError::validation(
+                        "verify_stark_network_disabled",
+                        "VerifyStark is disabled on Mainnet and Testnet while aggregation mode On is closed",
+                    ));
+                }
                 if tx.amount != 0 {
                     return Err(BudlumError::validation(
                         "verify_stark_amount_nonzero",
@@ -3926,6 +4223,9 @@ impl Executor {
                         "a VerifyStark transaction must reference its Claim::Poly digest",
                     ));
                 }
+                crate::aggregation::air_registry::validate_verify_stark_envelope(stmt).map_err(
+                    |err| BudlumError::validation("verify_stark_invalid_envelope", err.to_string()),
+                )?;
                 if state.spendable_balance(&tx.from) < total_cost {
                     return Err(BudlumError::validation(
                         "insufficient_balance",
@@ -4839,6 +5139,14 @@ impl Executor {
         Ok(())
     }
 
+    /// Apply `transactions` to `state` for `block_producer`.
+    ///
+    /// A rejected block leaves `state` as it was; the effects never land.
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable message describing the first refusal raised by
+    /// [`Self::apply_block_checked`].
     pub fn apply_block(
         state: &mut AccountState,
         transactions: &[Transaction],
@@ -4867,6 +5175,11 @@ impl Executor {
     /// Apply a whole block atomically. A rejected block leaves `state` exactly
     /// as it was before the call, including effects from transactions earlier
     /// in the same block.
+    /// # Errors
+    ///
+    /// Returns the first [`BudlumError`] raised by admission, execution, or a
+    /// block-level check. On error the input `state` is unchanged: all effects go to a
+    /// candidate clone that is committed only after the block validates.
     pub fn apply_block_checked(
         state: &mut AccountState,
         transactions: &[Transaction],
@@ -5086,7 +5399,7 @@ impl Executor {
                     ));
                 }
                 crate::core::governance::GovernanceAction::SetEncryptionPolicy(policy) => {
-                    // P12-4: DAO parameter-only update. This cannot grant decrypt
+                    // DAO parameter-only update. This cannot grant decrypt
                     // Authority or bypass user-owned AccessGrant checks.
                     state
                         .marketplace
@@ -5094,7 +5407,7 @@ impl Executor {
                         .map_err(|e| BudlumError::validation("pollen_encryption_policy", e))?;
                 }
                 crate::core::governance::GovernanceAction::SetConstitutionParameter(parameter) => {
-                    // P12-10: Constitution Engine updates are bounded. Hard
+                    // Constitution Engine updates are bounded. Hard
                     // Guardrails (AI default-deny, no governance read override,
                     // Permissionless core, PoA isolation) fail closed in
                     // ConstitutionRegistry::set_parameter.
@@ -5154,11 +5467,25 @@ impl Executor {
                 } => {
                     // The anchor is inside `external_intake_root`, so this arm is
                     // the only production writer and every node reaches it with
-                    // the same inputs. A vote that names the anchor it expected
-                    // to find is applied only if that is what is installed: a
-                    // vote taken against one sync committee or checkpoint must
-                    // not land on its successor, which is what an unbound
-                    // "replace whatever is there" would allow.
+                    // the same inputs. The network name is a key in a consensus
+                    // map, so the bound proposal validation applies is enforced
+                    // again here: a write that reached state without it would be
+                    // a key nobody bounded.
+                    if network.len() > crate::core::governance::MAX_PINNED_NETWORK_BYTES {
+                        return Err(BudlumError::validation(
+                            "external_anchor_network_too_long",
+                            format!(
+                                "network name is {} bytes; the limit is {}",
+                                network.len(),
+                                crate::core::governance::MAX_PINNED_NETWORK_BYTES
+                            ),
+                        ));
+                    }
+                    // A vote that names the anchor it expected to find is
+                    // applied only if that is what is installed: a vote taken
+                    // against one sync committee or checkpoint must not land on
+                    // its successor, which is what an unbound "replace whatever
+                    // is there" would allow.
                     let observed = state
                         .settlement
                         .external_intake
@@ -5175,11 +5502,39 @@ impl Executor {
                             ),
                         ));
                     }
-                    let family = anchor.family();
+                    let family: crate::cross_domain::external::intake::AnchorFamily =
+                        anchor.family();
                     state
                         .settlement
                         .external_intake
-                        .install_pinned_anchor(&network, anchor);
+                        .install_pinned_anchor(&network, anchor.clone());
+                    // Read back through the family-keyed view the adapters use,
+                    // not the bare map the install wrote. The two keyings agree
+                    // here because `family` came off the value that was
+                    // installed; a disagreement would mean the name is holding
+                    // one family's anchor where another family reads.
+                    let installed = state
+                        .settlement
+                        .external_intake
+                        .pinned_anchor(family, &network)
+                        .ok_or_else(|| {
+                            BudlumError::validation(
+                                "external_anchor_install_readback",
+                                format!(
+                                    "the {} anchor for network {network} did not install",
+                                    family.as_str()
+                                ),
+                            )
+                        })?;
+                    if installed != anchor {
+                        return Err(BudlumError::validation(
+                            "external_anchor_install_mismatch",
+                            format!(
+                                "the {} anchor installed for network {network} is not the one the vote named",
+                                family.as_str()
+                            ),
+                        ));
+                    }
                     tracing::info!(
                         "Installed external anchor: family={} network={} justification={}",
                         family.as_str(),
@@ -5928,7 +6283,11 @@ mod tests {
         let (mainnet, _, devnet) = boundary_chain_ids();
         let who = Address::from([22u8; 32]);
         let mut state = AccountState::new();
-        state.add_balance(&who, 1_000);
+        let deposit = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::PrivacyNote,
+        )
+        .deposit;
+        state.add_balance(&who, 1_000 + deposit);
         let c = budlum_note_packing::hash_from_field(42);
         let tx_devnet = Transaction::new_with_chain_id(
             who,
@@ -5943,6 +6302,11 @@ mod tests {
         Executor::apply_transaction_checked(&mut state, &tx_devnet)
             .expect("note insertion must succeed on devnet");
         assert!(state.note_registry.contains_commitment(&c));
+        assert_eq!(
+            state.pool_deposit_escrow.get(&who).copied(),
+            Some(deposit),
+            "the live row locks the table deposit"
+        );
 
         let c_main = budlum_note_packing::hash_from_field(43);
         let tx_mainnet = Transaction::new_with_chain_id(
@@ -6136,6 +6500,261 @@ mod tests {
         }
     }
 
+    use crate::pollen::offers;
+
+    /// The content-listing deposit economy, end to end through the door.
+    fn listing_tx(
+        who: Address,
+        nonce: u64,
+        chain_id: u64,
+        tag: &[u8],
+    ) -> crate::core::transaction::Transaction {
+        Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            0,
+            100,
+            nonce,
+            vec![],
+            chain_id,
+            TransactionType::AiOfferData {
+                cid: crate::storage::content_id::ContentId::of(tag),
+                price: 1,
+            },
+        )
+    }
+
+    #[test]
+    fn a_listing_locks_the_table_deposit_behind_a_row() {
+        let (mainnet, _, _) = boundary_chain_ids();
+        let policy = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        );
+        let who = Address::from([31u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&who, policy.deposit * 3);
+        Executor::apply_transaction_checked(&mut state, &listing_tx(who, 0, mainnet, b"d-d"))
+            .expect("a funded listing enters");
+        assert_eq!(
+            state.pool_deposit_rows.get("content-offer:0"),
+            Some(&(who, policy.deposit)),
+            "the row records who locked exactly the table deposit"
+        );
+        assert_eq!(
+            state.get_balance(&who),
+            policy.deposit * 3 - policy.deposit - 100,
+            "the deposit left the balance alongside the fee"
+        );
+        assert_eq!(
+            state.pool_deposit_escrow.get(&who).copied(),
+            Some(policy.deposit),
+            "the deposit sits in escrow, not burned"
+        );
+        let offer = state.marketplace.get_offer(0).expect("live offer");
+        assert_eq!(offer.created_at_block, state.current_block_height);
+    }
+
+    #[test]
+    fn a_seller_who_cannot_cover_the_deposit_cannot_list() {
+        let (mainnet, _, _) = boundary_chain_ids();
+        let who = Address::from([32u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&who, 150);
+        let err =
+            Executor::apply_transaction_checked(&mut state, &listing_tx(who, 0, mainnet, b"d-d"))
+                .expect_err("fee money alone must not occupy a slot");
+        assert_eq!(err.code(), "offer_pool_deposit");
+        assert!(
+            state.marketplace.get_offer(0).is_none(),
+            "a refused listing must not stay in the registry"
+        );
+        assert!(state.pool_deposit_rows.is_empty());
+    }
+
+    #[test]
+    fn an_expired_listing_is_swept_and_refunded_by_the_next_listing() {
+        let (mainnet, _, _) = boundary_chain_ids();
+        let policy = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        );
+        let crate::tokenomics::pool_deposit::PoolDepositClass::OwnerRefundable { ttl_blocks } =
+            policy.class
+        else {
+            panic!("content offers are owner-refundable");
+        };
+        let squatter = Address::from([33u8; 32]);
+        let newcomer = Address::from([34u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&squatter, policy.deposit * 2);
+        state.add_balance(&newcomer, policy.deposit * 2);
+        state.current_block_height = 1;
+        Executor::apply_transaction_checked(
+            &mut state,
+            &listing_tx(squatter, 0, mainnet, b"stale"),
+        )
+        .expect("the squatter lists");
+        state.current_block_height = 1 + ttl_blocks + 1;
+        Executor::apply_transaction_checked(
+            &mut state,
+            &listing_tx(newcomer, 0, mainnet, b"fresh"),
+        )
+        .expect("the newcomer lists");
+        assert!(
+            state.marketplace.get_offer(0).is_none(),
+            "the expired listing left the pool"
+        );
+        assert!(
+            !state.pool_deposit_rows.contains_key("content-offer:0"),
+            "the swept row is gone"
+        );
+        assert_eq!(
+            state.get_balance(&squatter),
+            policy.deposit * 2 - 100,
+            "the sweep returned the deposit; only the fee was spent"
+        );
+        assert_eq!(
+            state.pool_deposit_rows.get("content-offer:1"),
+            Some(&(newcomer, policy.deposit)),
+            "the newcomer's row is live"
+        );
+    }
+
+    #[test]
+    fn a_listing_of_unknown_age_is_never_ttl_swept() {
+        let (mainnet, _, _) = boundary_chain_ids();
+        let policy = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        );
+        let elder = Address::from([35u8; 32]);
+        let newcomer = Address::from([36u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&elder, policy.deposit * 2);
+        state.add_balance(&newcomer, policy.deposit * 2);
+        state.marketplace.offers.insert(
+            5,
+            offers::DataOffer {
+                id: 5,
+                seller: elder,
+                cid: crate::storage::content_id::ContentId::of(b"pre-field"),
+                price: 1,
+                active: true,
+                created_at_block: 0,
+            },
+        );
+        state.marketplace.next_offer_id = 6;
+        state
+            .lock_pool_deposit_row("content-offer:5", &elder, policy.deposit)
+            .expect("the elder row carries a deposit");
+        state.current_block_height = u64::MAX / 2;
+        Executor::apply_transaction_checked(
+            &mut state,
+            &listing_tx(newcomer, 0, mainnet, b"fresh"),
+        )
+        .expect("the newcomer lists");
+        assert!(
+            state.marketplace.get_offer(5).is_some(),
+            "age-unknown rows are never evicted: a wrong eviction is not fail-closed"
+        );
+        assert_eq!(
+            state.pool_deposit_rows.get("content-offer:5"),
+            Some(&(elder, policy.deposit)),
+        );
+    }
+
+    #[test]
+    fn a_closed_listing_returns_its_deposit_on_the_next_sweep() {
+        let (mainnet, _, _) = boundary_chain_ids();
+        let policy = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        );
+        let seller = Address::from([37u8; 32]);
+        let newcomer = Address::from([38u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&seller, policy.deposit * 2);
+        state.add_balance(&newcomer, policy.deposit * 2);
+        state.current_block_height = 1;
+        Executor::apply_transaction_checked(&mut state, &listing_tx(seller, 0, mainnet, b"sold"))
+            .expect("the seller lists");
+        state
+            .marketplace
+            .close_offer(0, &seller)
+            .expect("the seller closes");
+        state.current_block_height = 2;
+        Executor::apply_transaction_checked(
+            &mut state,
+            &listing_tx(newcomer, 0, mainnet, b"fresh"),
+        )
+        .expect("the newcomer lists");
+        assert!(
+            !state.pool_deposit_rows.contains_key("content-offer:0"),
+            "the closed row's deposit came back"
+        );
+        assert_eq!(
+            state.get_balance(&seller),
+            policy.deposit * 2 - 100,
+            "closing cost the seller only the listing fee"
+        );
+        assert!(
+            state.marketplace.get_offer(0).is_none(),
+            "the sweep finished the registry's lazy prune"
+        );
+    }
+
+    #[test]
+    fn the_sweep_reclaims_at_most_sixteen_rows_per_listing() {
+        let (mainnet, _, _) = boundary_chain_ids();
+        let policy = crate::tokenomics::pool_deposit::policy_of(
+            crate::tokenomics::pool_deposit::SharedPool::ContentOffer,
+        );
+        let elder = Address::from([39u8; 32]);
+        let newcomer = Address::from([40u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&elder, policy.deposit * 32);
+        state.add_balance(&newcomer, policy.deposit * 2);
+        for id in 0..20u64 {
+            state.marketplace.offers.insert(
+                id,
+                offers::DataOffer {
+                    id,
+                    seller: elder,
+                    cid: crate::storage::content_id::ContentId::of(&id.to_le_bytes()),
+                    price: 1,
+                    active: true,
+                    created_at_block: 1,
+                },
+            );
+            state
+                .lock_pool_deposit_row(&format!("content-offer:{id}"), &elder, policy.deposit)
+                .expect("each row carries a deposit");
+        }
+        state.marketplace.next_offer_id = 20;
+        let crate::tokenomics::pool_deposit::PoolDepositClass::OwnerRefundable { ttl_blocks } =
+            policy.class
+        else {
+            panic!("content offers are owner-refundable");
+        };
+        state.current_block_height = 1 + ttl_blocks + 1;
+        Executor::apply_transaction_checked(
+            &mut state,
+            &listing_tx(newcomer, 0, mainnet, b"fresh"),
+        )
+        .expect("the newcomer lists");
+        let remaining_elder_rows = state
+            .pool_deposit_rows
+            .keys()
+            .filter(|k| k.starts_with("content-offer:") && **k != format!("content-offer:{}", 20))
+            .count();
+        assert_eq!(
+            remaining_elder_rows, 4,
+            "exactly sixteen expired rows come back per listing"
+        );
+        assert_eq!(
+            state.pool_deposit_escrow.get(&elder).copied(),
+            Some(policy.deposit * 4),
+            "sixteen deposits returned, four still occupy"
+        );
+    }
+
     /// G-4 at the boundary itself: the guard runs before the liquidity probe,
     /// which creates the sender row. A refusal from an address that holds
     /// nothing must leave that address absent, not funded-with-zero.
@@ -6239,7 +6858,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_113_block_nonce_failures_are_atomic() {
+    fn block_nonce_failures_are_atomic() {
         use crate::core::transaction::DEFAULT_CHAIN_ID;
 
         let sender = Address::from([0x31; 32]);
@@ -6286,7 +6905,7 @@ mod tests {
     }
 
     #[test]
-    fn blg_113_direct_execution_rejects_exhausted_nonce_before_mutation() {
+    fn direct_execution_rejects_exhausted_nonce_before_mutation() {
         use crate::core::transaction::DEFAULT_CHAIN_ID;
 
         let sender = Address::from([0x35; 32]);
@@ -6774,6 +7393,167 @@ mod tests {
             !after.active,
             "validator below governance-raised registry min_stake must be deactivated"
         );
+    }
+
+    #[test]
+    fn delegation_shield_and_exit_cannot_leave_underbonded_active_validator_on_live_networks() {
+        for network in [
+            crate::core::chain_config::Network::Testnet,
+            crate::core::chain_config::Network::Mainnet,
+        ] {
+            let chain_id = network.chain_id().value();
+            let floor = network.min_stake();
+
+            // Path A: confederate delegates `floor`, validator unstakes own self-bond
+            // down to 1 atom while aggregate stake stays above `floor`, then confederate
+            // undelegates `floor`. Neither step may leave an active consensus seat or
+            // duty-lane membership backed by sub-floor self-bond.
+            let mut state = AccountState::new();
+            let val = Address::from([0x81u8; 32]);
+            let peer = Address::from([0x82u8; 32]);
+            let confederate = Address::from([0x83u8; 32]);
+            state.add_balance(&val, 10_000);
+            state.add_balance(&confederate, floor.saturating_mul(3));
+            state.add_validator_with_floor(val, floor, floor);
+            state.add_validator_with_floor(peer, floor, floor);
+
+            let delegate = Transaction::new_with_chain_id(
+                confederate,
+                Address::zero(),
+                floor,
+                10,
+                0,
+                Vec::new(),
+                chain_id,
+                TransactionType::Delegate { validator: val },
+            );
+            Executor::apply_transaction_checked(&mut state, &delegate)
+                .expect("confederate delegation to full-floor validator succeeds");
+
+            let drain_self = Transaction::new_with_chain_id(
+                val,
+                Address::zero(),
+                floor - 1,
+                10,
+                0,
+                Vec::new(),
+                chain_id,
+                TransactionType::Unstake,
+            );
+            Executor::apply_transaction_checked(&mut state, &drain_self)
+                .expect("self-unstake executes");
+            let after_self_drain = state.get_validator(&val).expect("validator retained");
+            assert!(
+                !after_self_drain.active,
+                "validator with 1-atom self-bond below {network:?} floor must deactivate even when delegated stake shields aggregate stake"
+            );
+            assert!(
+                !state.duty_lane_signers_for_chain(chain_id).contains(&val),
+                "self-bond-drained validator must lose zero-fee duty-lane admission on {network:?}"
+            );
+
+            // A 1-atom Stake top-up must NOT reactivate the validator while its
+            // self-bond (2 atoms) remains below the live network floor even though
+            // aggregate stake (`floor + 2`) exceeds `floor`.
+            let dust_topup = Transaction::new_with_chain_id(
+                val,
+                Address::zero(),
+                1,
+                10,
+                1,
+                Vec::new(),
+                chain_id,
+                TransactionType::Stake,
+            );
+            Executor::apply_transaction_checked(&mut state, &dust_topup)
+                .expect("dust stake top-up executes");
+            assert!(
+                !state.get_validator(&val).expect("validator retained").active,
+                "1-atom stake top-up must not reactivate sub-floor self-bond behind delegation on {network:?}"
+            );
+
+            // Also verify direct Undelegate and Redelegate exits when a validator's
+            // aggregate stake drops below the network floor (e.g. after a governance
+            // floor increase or delegated exit).
+            let undelegate = Transaction::new_with_chain_id(
+                confederate,
+                Address::zero(),
+                floor,
+                10,
+                1,
+                Vec::new(),
+                chain_id,
+                TransactionType::Undelegate { validator: val },
+            );
+            Executor::apply_transaction_checked(&mut state, &undelegate)
+                .expect("confederate undelegation succeeds");
+            let after_undelegate = state.get_validator(&val).expect("validator retained");
+            assert_eq!(after_undelegate.stake, 2);
+            assert!(!after_undelegate.active);
+
+            // Path B: governance raises min_stake above `peer`'s self-bond while `peer`
+            // holds delegation; Undelegate and Redelegate dropping `peer` below the floor
+            // must immediately deactivate `peer` and zero its open governance vote weight.
+            let mut state_b = AccountState::new();
+            state_b.add_balance(&confederate, floor.saturating_mul(3));
+            state_b.add_validator_with_floor(val, floor, floor);
+            state_b.add_validator_with_floor(peer, floor.saturating_mul(2), floor);
+            let del_b = Transaction::new_with_chain_id(
+                confederate,
+                Address::zero(),
+                floor,
+                10,
+                0,
+                Vec::new(),
+                chain_id,
+                TransactionType::Delegate { validator: val },
+            );
+            Executor::apply_transaction_checked(&mut state_b, &del_b)
+                .expect("initial delegation succeeds");
+            let mut raised = *state_b.registry.params();
+            raised.min_stake = floor.saturating_add(500);
+            state_b.registry.set_params(raised);
+            let redel = Transaction::new_with_chain_id(
+                confederate,
+                Address::zero(),
+                floor,
+                10,
+                1,
+                Vec::new(),
+                chain_id,
+                TransactionType::Redelegate {
+                    from_validator: val,
+                    to_validator: peer,
+                },
+            );
+            Executor::apply_transaction_checked(&mut state_b, &redel)
+                .expect("redelegation to well-bonded peer succeeds");
+            let val_after_redel = state_b.get_validator(&val).expect("source retained");
+            assert!(
+                !val_after_redel.active,
+                "redelegation dropping source validator below floor on {network:?} must deactivate source"
+            );
+            assert!(
+                !state_b.duty_lane_signers_for_chain(chain_id).contains(&val),
+                "deactivated source validator must leave duty lane on {network:?}"
+            );
+
+            // A validator whose self-bond sits below the network floor must refuse fresh delegations.
+            let low_self_delegate = Transaction::new_with_chain_id(
+                confederate,
+                Address::zero(),
+                1_000,
+                10,
+                2,
+                Vec::new(),
+                chain_id,
+                TransactionType::Delegate { validator: val },
+            );
+            assert!(
+                Executor::apply_transaction_checked(&mut state_b, &low_self_delegate).is_err(),
+                "underbonded validator must refuse fresh delegation on {network:?}"
+            );
+        }
     }
 
     #[test]

@@ -86,15 +86,18 @@ pub struct InvalidVoteTracker {
 }
 
 impl InvalidVoteTracker {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.current_epoch == 0 && self.counts.is_empty() && self.reported.is_empty()
     }
 
     /// Current invalid-vote count for a validator in the tracker's active epoch.
+    #[must_use]
     pub fn invalid_count(&self, validator: &Address) -> u64 {
         self.counts.get(validator).copied().unwrap_or(0)
     }
@@ -109,6 +112,7 @@ impl InvalidVoteTracker {
     }
 
     /// The epoch the current counts belong to.
+    #[must_use]
     pub fn current_epoch(&self) -> u64 {
         self.current_epoch
     }
@@ -251,6 +255,7 @@ impl InvalidVoteTracker {
 }
 
 impl InvalidVoteTracker {
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();

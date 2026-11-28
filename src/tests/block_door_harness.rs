@@ -40,6 +40,7 @@ fn genesis(sender: Address) -> GenesisConfig {
 
 impl BlockHarness {
     /// Open a fresh chain at `path` with a new funded sender.
+    #[must_use]
     pub fn open(path: &str) -> Self {
         let key = KeyPair::generate().expect("a key pair generates");
         let sender = Address::from(key.public_key_bytes());
@@ -112,7 +113,7 @@ impl BlockHarness {
         Self::reopen(&path, key, sender)
     }
 
-    /// A PoW domain operated by the harness sender, ready for a
+    /// A `PoW` domain operated by the harness sender, ready for a
     /// `SettlementTx::RegisterDomain`.
     pub fn operated_domain(&self, id: crate::domain::DomainId) -> crate::domain::ConsensusDomain {
         self.operated_domain_of_kind(id, crate::domain::ConsensusKind::PoW)
@@ -142,7 +143,7 @@ impl BlockHarness {
         ))
     }
 
-    /// Register two domains the sender operates (101, PoW, and 102, PoS) and
+    /// Register two domains the sender operates (101, `PoW`, and 102, `PoS`) and
     /// `asset_id` against domain 101, then lock `amount` of the sender's
     /// balance toward `recipient` on domain 102. Each write is its own block.
     pub fn lock_through_blocks(

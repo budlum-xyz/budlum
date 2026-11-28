@@ -1,10 +1,11 @@
 name: Semver Check
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   # Heavy battery. It runs on pull requests to `main` (the PR that merges the
-  # stack), on the schedule and on demand. A stacked pull request (base
+  # stack), on demand and on pushes to `main`. A stacked pull request (base
   # `testnet-quantum` or `testnet`) runs the PR gates in ci.yml,
   # security-audit.yml, semgrep.yml and the other light workflows, and skips the
   # jobs of this file through the job-level condition: GitHub evaluates the
@@ -12,15 +13,11 @@ on:
   # so the filter alone does not keep it out. This keeps one push from queueing
   # more work than the shared runner pool can finish before the next push cancels it.
   pull_request:
-    branches: [main, consensus-of-consensuses]
-  # On demand: an operator can start this battery on a branch without
-  # pushing to it, which is how a blocked stack gets its heavy evidence
-  # when the queue is empty enough to take one more run.
-  workflow_dispatch:
+    branches: [main, consensus-of-consensuses, agg-phase-2, agg/phase-2-sig-claims, agg/phase-3-recursion-stark, agg/phase-4-program-claims, audit-2026-11-16, audit-testnet-2026-11, budlum, budlum-4-you, budlum-osv-coverage-agent, budlum-unification, budlum-universal, diag-rehearsal-a, diag-rehearsal-b, ortak-teslim]
 
 concurrency:
   group: semver-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.base_ref != 'testnet' && github.base_ref != 'ortak-teslim' }}
 
 permissions:
   contents: read
@@ -83,25 +80,7 @@ jobs:
           # rust-cache's `cargo metadata` call blows up at the root (Error log).
           workspaces: ./current
       - name: Install protoc
-        run: |
-          set -euo pipefail
-          if ! command -v protoc >/dev/null 2>&1; then
-            case "$(uname -m)" in
-              aarch64|arm64)
-                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
-                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
-                ;;
-              *)
-                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
-                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
-                ;;
-            esac
-            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
-              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
-            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
-            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
-            rm -f /tmp/protoc.zip
-          fi
+        run: python3 current/.github/scripts/install_protoc.py
       - name: Install cargo-semver-checks (locked)
         run: cargo +1.97.1 install cargo-semver-checks --locked
       - name: Gate canary (vacuous-gate protection)

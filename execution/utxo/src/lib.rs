@@ -137,9 +137,17 @@ fn spent_key(utxo_id: &[u8; 32]) -> Vec<u8> {
     k
 }
 
+/// Maximum UTXO evaluation stack depth (matches Bitcoin consensus `MAX_STACK_SIZE`).
+const MAX_UTXO_STACK_ITEMS: usize = 1_000;
+/// Maximum UTXO stack element byte length (matches Bitcoin `MAX_SCRIPT_ELEMENT_SIZE`).
+const MAX_UTXO_ELEMENT_BYTES: usize = 520;
+/// Maximum pubkeys in `OP_CHECKMULTISIG` (matches Bitcoin standard 20-key ceiling).
+const MAX_MULTISIG_PUBKEYS: usize = 20;
+
 fn derive_utxo_id(caller: &[u8], tx_hash: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(b"BDLM_UTXO_OUTPOINT_V1");
+    h.update((caller.len() as u64).to_le_bytes());
     h.update(caller);
     h.update(tx_hash);
     h.finalize().into()
@@ -206,9 +214,22 @@ fn eval_script(
         }
         *gas_used = next;
         match op {
-            ScriptOp::PushBytes(b) => stack.push(b.clone()),
-            ScriptOp::PushNum(n) => stack.push(n.to_le_bytes().to_vec()),
+            ScriptOp::PushBytes(b) => {
+                if b.len() > MAX_UTXO_ELEMENT_BYTES || stack.len() >= MAX_UTXO_STACK_ITEMS {
+                    return Err(b"UTXO stack bound exceeded".to_vec());
+                }
+                stack.push(b.clone());
+            }
+            ScriptOp::PushNum(n) => {
+                if stack.len() >= MAX_UTXO_STACK_ITEMS {
+                    return Err(b"UTXO stack bound exceeded".to_vec());
+                }
+                stack.push(n.to_le_bytes().to_vec());
+            }
             ScriptOp::OpDup => {
+                if stack.len() >= MAX_UTXO_STACK_ITEMS {
+                    return Err(b"UTXO stack bound exceeded".to_vec());
+                }
                 let Some(top) = stack.last().cloned() else {
                     return Err(b"OP_DUP underflow".to_vec());
                 };
@@ -272,8 +293,27 @@ fn eval_script(
                 stack.push(req.to_le_bytes().to_vec());
             }
             ScriptOp::OpCheckMultiSigHash { threshold, pubkeys } => {
-                if *threshold == 0 || *threshold > pubkeys.len() {
+                if *threshold == 0
+                    || *threshold > pubkeys.len()
+                    || pubkeys.len() > MAX_MULTISIG_PUBKEYS
+                {
                     return Err(b"invalid multisig threshold".to_vec());
+                }
+                // Parse every key and deduplicate on canonical 33-byte compressed SEC1
+                // form so one private key cannot be listed twice in compressed and
+                // uncompressed encodings to bypass an M-of-N threshold.
+                let mut parsed_keys = Vec::with_capacity(pubkeys.len());
+                let mut canonical_unique: std::collections::BTreeSet<Vec<u8>> =
+                    std::collections::BTreeSet::new();
+                for pk_bytes in pubkeys {
+                    let Ok(key) = VerifyingKey::from_sec1_bytes(pk_bytes) else {
+                        return Err(b"invalid multisig pubkey".to_vec());
+                    };
+                    let canonical = key.to_encoded_point(true).as_bytes().to_vec();
+                    if !canonical_unique.insert(canonical) {
+                        return Err(b"duplicate multisig pubkey".to_vec());
+                    }
+                    parsed_keys.push(key);
                 }
                 let mut verified = 0usize;
                 let mut next_pubkey = 0usize;
@@ -290,11 +330,8 @@ fn eval_script(
                         continue;
                     }
                     let mut matched = false;
-                    while let Some(pk_bytes) = pubkeys.get(next_pubkey) {
+                    while let Some(key) = parsed_keys.get(next_pubkey) {
                         next_pubkey += 1;
-                        let Ok(key) = VerifyingKey::from_sec1_bytes(pk_bytes) else {
-                            continue;
-                        };
                         if key.verify_prehash(sighash, &signature).is_ok() {
                             verified += 1;
                             matched = true;
@@ -414,7 +451,44 @@ impl ExecutionEnvironment for UtxoScriptWorker {
                     gas_used,
                 });
             };
+            // Published code is permanent state every validator keeps:
+            // the deploy pays the shared per-byte publication rate.
+            let publish_gas = u64::try_from(call.input.len())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(25);
+            gas_used = gas_used.saturating_add(publish_gas);
+            if gas_used > call.gas_limit || host.charge(publish_gas).is_err() {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::OutOfGas,
+                    output: Vec::new(),
+                    gas_used: call.gas_limit,
+                });
+            }
             let utxo_id = derive_utxo_id(&call.caller.id, &call.tx_hash);
+            match host.read(&ns, &utxo_key(&utxo_id)) {
+                Ok(Some(_)) => {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"UTXO already exists".to_vec(),
+                        gas_used,
+                    });
+                }
+                Ok(None) => {}
+                Err(budlum_uel_abi::HostError::OutOfGas) => {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::OutOfGas,
+                        output: Vec::new(),
+                        gas_used: call.gas_limit,
+                    });
+                }
+                Err(_) => {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"UTXO existence check failed".to_vec(),
+                        gas_used,
+                    });
+                }
+            }
             if host
                 .write(&ns, &utxo_key(&utxo_id), Some(&call.input))
                 .is_err()
@@ -439,17 +513,29 @@ impl ExecutionEnvironment for UtxoScriptWorker {
                 gas_used,
             });
         };
-        if host
-            .read(&ns, &spent_key(&utxo_id))
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            return Ok(EeOutcome {
-                status: OutcomeStatus::Revert,
-                output: b"UTXO already spent".to_vec(),
-                gas_used,
-            });
+        match host.read(&ns, &spent_key(&utxo_id)) {
+            Ok(Some(_)) => {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"UTXO already spent".to_vec(),
+                    gas_used,
+                });
+            }
+            Ok(None) => {}
+            Err(budlum_uel_abi::HostError::OutOfGas) => {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::OutOfGas,
+                    output: Vec::new(),
+                    gas_used: call.gas_limit,
+                });
+            }
+            Err(_) => {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"UTXO spent check failed".to_vec(),
+                    gas_used,
+                });
+            }
         }
         let Ok(Some(blob)) = host.read(&ns, &utxo_key(&utxo_id)) else {
             return Ok(EeOutcome {
@@ -498,24 +584,35 @@ impl ExecutionEnvironment for UtxoScriptWorker {
             });
         }
 
+        let Ok(cp) = host.checkpoint_begin() else {
+            return Ok(EeOutcome {
+                status: OutcomeStatus::Revert,
+                output: b"UTXO checkpoint begin failed".to_vec(),
+                gas_used,
+            });
+        };
         if host
             .write(&ns, &spent_key(&utxo_id), Some(&witness.recipient))
             .is_err()
+            || host
+                .emit_log(EeLog {
+                    emitter: EeIdentity {
+                        ee: EeId::UTXO,
+                        id: utxo_id.to_vec(),
+                    },
+                    topics: vec![witness.recipient.to_vec()],
+                    data: lock.value_atoms.to_le_bytes().to_vec(),
+                })
+                .is_err()
+            || host.checkpoint_commit(cp).is_err()
         {
+            let _ = host.checkpoint_rollback(cp);
             return Ok(EeOutcome {
                 status: OutcomeStatus::Revert,
                 output: b"failed to record UTXO spend".to_vec(),
                 gas_used,
             });
         }
-        let _ = host.emit_log(EeLog {
-            emitter: EeIdentity {
-                ee: EeId::UTXO,
-                id: utxo_id.to_vec(),
-            },
-            topics: vec![witness.recipient.to_vec()],
-            data: lock.value_atoms.to_le_bytes().to_vec(),
-        });
         Ok(EeOutcome {
             status: OutcomeStatus::Success,
             output: witness.recipient.to_vec(),
@@ -841,5 +938,322 @@ mod tests {
         };
         assert_eq!(valid_spend.status, OutcomeStatus::Success);
         assert_eq!(valid_spend.output, recipient.to_vec());
+    }
+
+    #[test]
+    fn multisig_rejects_same_key_encoded_compressed_and_uncompressed() {
+        use k256::ecdsa::{signature::hazmat::PrehashSigner, SigningKey};
+
+        let Ok(signing_key) = SigningKey::from_bytes((&[9u8; 32]).into()) else {
+            panic!("signing key");
+        };
+        let compressed_pk = signing_key
+            .verifying_key()
+            .to_encoded_point(true)
+            .as_bytes()
+            .to_vec();
+        let uncompressed_pk = signing_key
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        assert_ne!(compressed_pk, uncompressed_pk);
+
+        let lock = UtxoLockScript {
+            witness_ops: Vec::new(),
+            lock_ops: vec![ScriptOp::OpCheckMultiSigHash {
+                threshold: 2,
+                pubkeys: vec![compressed_pk, uncompressed_pk],
+            }],
+            value_atoms: 500,
+        };
+        let Ok(blob) = encode_utxo_script(&lock) else {
+            panic!("encode");
+        };
+        let mut worker = UtxoScriptWorker::with_activation_height(Some(0));
+        let mut host = MemoryHost::new(1_000_000);
+        let Ok(caller) = EeIdentity::new(EeId::UTXO, vec![0x61; 32]) else {
+            panic!("caller");
+        };
+        let Ok(deploy) = worker.execute(
+            &ctx(1),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: budlum_uel_abi::BudAmount(0),
+                input: blob,
+                gas_limit: 100_000,
+                depth: 0,
+                tx_hash: [0x44; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("deploy");
+        };
+        assert_eq!(deploy.status, OutcomeStatus::Success);
+        let Ok(utxo_id) = <[u8; 32]>::try_from(deploy.output.as_slice()) else {
+            panic!("utxo id");
+        };
+
+        let spend_tx = [0x55; 32];
+        let recipient = [0x77; 32];
+        let sighash = utxo_multisig_sighash(&spend_tx, &utxo_id, &caller.id, &recipient);
+        let Ok(raw_sig): Result<Signature, _> = signing_key.sign_prehash(&sighash) else {
+            panic!("sign");
+        };
+        let sig_bytes = raw_sig.normalize_s().unwrap_or(raw_sig).to_bytes().to_vec();
+        let Ok(witness) = serde_json::to_vec(&UtxoSpendWitness {
+            unlock_ops: vec![
+                ScriptOp::PushBytes(sig_bytes.clone()),
+                ScriptOp::PushBytes(sig_bytes),
+            ],
+            recipient,
+        }) else {
+            panic!("witness");
+        };
+        let Ok(target) = EeIdentity::new(EeId::UTXO, utxo_id.to_vec()) else {
+            panic!("target");
+        };
+        let Ok(bypass_attempt) = worker.execute(
+            &ctx(2),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller,
+                target,
+                value: budlum_uel_abi::BudAmount(0),
+                input: witness,
+                gas_limit: 100_000,
+                depth: 0,
+                tx_hash: spend_tx,
+            },
+            &mut host,
+        ) else {
+            panic!("spend");
+        };
+        assert_eq!(
+            bypass_attempt.status,
+            OutcomeStatus::Revert,
+            "a single key in compressed + uncompressed SEC1 form must never satisfy 2-of-2 multisig"
+        );
+    }
+
+    #[test]
+    fn spend_fails_closed_when_spent_key_host_read_errors() {
+        use budlum_uel_abi::{
+            BudAmount, HostError, HostRead, OutOfGas, UniversalCall, UniversalResult,
+        };
+
+        struct FailingSpentReadHost {
+            inner: MemoryHost,
+        }
+
+        impl HostRead for FailingSpentReadHost {
+            fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+                if key.starts_with(b"spent:") {
+                    return Err(HostError::Invalid("injected spent read failure".into()));
+                }
+                self.inner.read(ns, key)
+            }
+
+            fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
+                self.inner.bud_balance(who)
+            }
+        }
+
+        impl HostApi for FailingSpentReadHost {
+            fn write(
+                &mut self,
+                ns: &Namespace,
+                key: &[u8],
+                value: Option<&[u8]>,
+            ) -> Result<(), HostError> {
+                self.inner.write(ns, key, value)
+            }
+
+            fn bud_transfer(
+                &mut self,
+                from: &EeIdentity,
+                to: &EeIdentity,
+                attos: u128,
+            ) -> Result<(), HostError> {
+                self.inner.bud_transfer(from, to, attos)
+            }
+
+            fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+                self.inner.emit_log(log)
+            }
+
+            fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
+                self.inner.charge(bgu)
+            }
+
+            fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+                self.inner.checkpoint_begin()
+            }
+
+            fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_commit(id)
+            }
+
+            fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+                self.inner.checkpoint_rollback(id)
+            }
+
+            fn universal_call(
+                &mut self,
+                call: UniversalCall,
+            ) -> Result<UniversalResult, HostError> {
+                self.inner.universal_call(call)
+            }
+        }
+
+        let secret = b"fail-closed-spent-check";
+        let expected_hash = Sha256::digest(secret).to_vec();
+        let lock = UtxoLockScript {
+            witness_ops: Vec::new(),
+            lock_ops: vec![
+                ScriptOp::OpSha256,
+                ScriptOp::PushBytes(expected_hash),
+                ScriptOp::OpEqual,
+            ],
+            value_atoms: 250,
+        };
+        let Ok(blob) = encode_utxo_script(&lock) else {
+            panic!("encode");
+        };
+        let mut worker = UtxoScriptWorker::with_activation_height(Some(0));
+        let mut host = MemoryHost::new(1_000_000);
+        let Ok(caller) = EeIdentity::new(EeId::UTXO, vec![0x81; 32]) else {
+            panic!("caller");
+        };
+        let Ok(deploy) = worker.execute(
+            &ctx(1),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: BudAmount(0),
+                input: blob,
+                gas_limit: 100_000,
+                depth: 0,
+                tx_hash: [0x61; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("deploy");
+        };
+        assert_eq!(deploy.status, OutcomeStatus::Success);
+        let Ok(utxo_id) = <[u8; 32]>::try_from(deploy.output.as_slice()) else {
+            panic!("utxo id");
+        };
+        let Ok(target) = EeIdentity::new(EeId::UTXO, utxo_id.to_vec()) else {
+            panic!("target");
+        };
+        let Ok(witness) = serde_json::to_vec(&UtxoSpendWitness {
+            unlock_ops: vec![ScriptOp::PushBytes(secret.to_vec())],
+            recipient: [0x91; 32],
+        }) else {
+            panic!("witness");
+        };
+        let Ok(first_spend) = worker.execute(
+            &ctx(2),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: target.clone(),
+                value: BudAmount(0),
+                input: witness.clone(),
+                gas_limit: 100_000,
+                depth: 0,
+                tx_hash: [0x62; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("first spend");
+        };
+        assert_eq!(first_spend.status, OutcomeStatus::Success);
+
+        // Now inject a host.read error on the spent-marker lookup: must NOT double-spend!
+        let mut faulty_host = FailingSpentReadHost { inner: host };
+        let Ok(second_spend) = worker.execute(
+            &ctx(3),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller,
+                target,
+                value: BudAmount(0),
+                input: witness,
+                gas_limit: 100_000,
+                depth: 0,
+                tx_hash: [0x63; 32],
+            },
+            &mut faulty_host,
+        ) else {
+            panic!("second spend");
+        };
+        assert_eq!(
+            second_spend.status,
+            OutcomeStatus::Revert,
+            "host.read error on spent marker must fail closed instead of double-spending"
+        );
+    }
+
+    #[test]
+    fn utxo_deploy_charges_per_byte_of_published_script() {
+        let mut worker = UtxoScriptWorker::with_activation_height(Some(0));
+        let lock = UtxoLockScript {
+            witness_ops: Vec::new(),
+            lock_ops: vec![
+                ScriptOp::PushBytes(vec![0x5A; 400]),
+                ScriptOp::OpDrop,
+                ScriptOp::PushNum(1),
+            ],
+            value_atoms: 0,
+        };
+        let Ok(blob) = encode_utxo_script(&lock) else {
+            panic!("blob");
+        };
+        let expected_gas = 1_000 + (blob.len() as u64) * 25;
+        let Ok(caller) = EeIdentity::new(EeId::UTXO, vec![0x88; 32]) else {
+            panic!("caller");
+        };
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(low) = worker.execute(
+            &ctx(1),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: budlum_uel_abi::BudAmount(0),
+                input: blob.clone(),
+                gas_limit: expected_gas - 1,
+                depth: 0,
+                tx_hash: [0x71; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("low");
+        };
+        assert_eq!(low.status, OutcomeStatus::OutOfGas);
+
+        let Ok(ok) = worker.execute(
+            &ctx(1),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: caller,
+                value: budlum_uel_abi::BudAmount(0),
+                input: blob,
+                gas_limit: expected_gas,
+                depth: 0,
+                tx_hash: [0x72; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("ok");
+        };
+        assert_eq!(ok.status, OutcomeStatus::Success);
+        assert_eq!(ok.gas_used, expected_gas);
     }
 }

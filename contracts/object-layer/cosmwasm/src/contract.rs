@@ -14,8 +14,8 @@
 use crate::verifier;
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{
-    entry_point, from_json, Binary, DepsMut, Env, Event, MessageInfo, Response, StdError,
-    StdResult, Uint128,
+    entry_point, from_json, to_json_binary, Binary, Deps, DepsMut, Env, Event, MessageInfo,
+    Response, StdError, StdResult, Uint128,
 };
 use cw20::Cw20ReceiveMsg;
 use cw_storage_plus::{Item, Map};
@@ -36,7 +36,11 @@ const LAST_ACCEPTED_AT: Item<u64> = Item::new("last_accepted_at");
 const HOME_NONCE: Map<&str, u64> = Map::new("home_nonce");
 
 #[cw_serde]
-pub struct InstantiateMsg {}
+#[derive(Default)]
+pub struct InstantiateMsg {
+    /// Optional pinned finality committee bound once at instantiation.
+    pub committee: Option<verifier::CommitteeConfig>,
+}
 
 #[cw_serde]
 pub enum ExecuteMsg {
@@ -48,6 +52,17 @@ pub enum ExecuteMsg {
     /// identity of `info.sender`.
     HomeCall {
         calls: Binary,
+    },
+    /// Permissionlessly rotate the finality committee via a `> 2/3` handoff certificate.
+    RotateCommittee {
+        handoff: verifier::CommitteeHandoffProof,
+    },
+    /// Verify and record a finalized Budlum checkpoint via signature-format proof.
+    RecordCheckpoint {
+        height: u64,
+        state_root: [u8; 32],
+        header_hash: [u8; 32],
+        proof: verifier::SignedFinalityProof,
     },
     AcceptHeader {
         height: u64,
@@ -67,19 +82,50 @@ pub struct ArriveMsg {
     pub recipient: Option<String>,
 }
 
+#[cw_serde]
+pub enum QueryMsg {
+    HeightFinal { height: u64 },
+    RootAtHeight { height: u64 },
+    LatestFinalHeight {},
+    FinalityModeAtHeight { height: u64 },
+    AcceptedProofFormat {},
+}
+
 #[entry_point]
 pub fn instantiate(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
-    _msg: InstantiateMsg,
+    msg: InstantiateMsg,
 ) -> StdResult<Response> {
     if !info.funds.is_empty() {
         return Err(StdError::generic_err("no funds at instantiate"));
     }
     LAST_ACCEPTED_HEIGHT.save(deps.storage, &0)?;
     LAST_ACCEPTED_AT.save(deps.storage, &env.block.time.seconds())?;
+    if let Some(committee) = msg.committee.as_ref() {
+        verifier::initialize_committee(deps.storage, committee)?;
+    }
     Ok(Response::new())
+}
+
+#[entry_point]
+pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
+    match msg {
+        QueryMsg::HeightFinal { height } => {
+            to_json_binary(&verifier::height_final(deps.storage, height))
+        }
+        QueryMsg::RootAtHeight { height } => {
+            to_json_binary(&verifier::root_at_height(deps.storage, height))
+        }
+        QueryMsg::LatestFinalHeight {} => {
+            to_json_binary(&verifier::latest_final_height(deps.storage))
+        }
+        QueryMsg::FinalityModeAtHeight { height } => {
+            to_json_binary(&verifier::finality_mode_at_height(deps.storage, height))
+        }
+        QueryMsg::AcceptedProofFormat {} => to_json_binary(&verifier::accepted_proof_format()),
+    }
 }
 
 fn recipient(msg: &Binary) -> StdResult<Option<String>> {
@@ -181,11 +227,35 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
                     .add_attribute("calls", hex::encode(calls.as_slice())),
             ))
         }
+        ExecuteMsg::RotateCommittee { handoff } => {
+            let new_epoch = verifier::rotate_committee(deps.storage, deps.api, &handoff)?;
+            Ok(Response::new()
+                .add_attribute("action", "rotate_committee")
+                .add_attribute("epoch", new_epoch.to_string()))
+        }
+        ExecuteMsg::RecordCheckpoint {
+            height,
+            state_root,
+            header_hash,
+            proof,
+        } => {
+            verifier::record(
+                deps.storage,
+                deps.api,
+                height,
+                state_root,
+                header_hash,
+                &proof,
+            )?;
+            Ok(Response::new()
+                .add_attribute("action", "record_checkpoint")
+                .add_attribute("height", height.to_string()))
+        }
         ExecuteMsg::AcceptHeader { height } => {
             if height <= LAST_ACCEPTED_HEIGHT.load(deps.storage)? {
                 return Err(StdError::generic_err("not newer"));
             }
-            if !verifier::height_final(height) {
+            if !verifier::height_final(deps.storage, height) {
                 return Err(StdError::generic_err("not final"));
             }
             LAST_ACCEPTED_HEIGHT.save(deps.storage, &height)?;

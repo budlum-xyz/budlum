@@ -53,7 +53,7 @@ rqrr = "0.11"
 hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-postcard = { version = "1.0", features = ["alloc"] }
+postcard = { version = "1.0", default-features = false, features = ["alloc"] }
 sled = "0.34"
 
 # P2P Networking
@@ -149,7 +149,10 @@ shake = "=0.1.0"
 p192 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic"] }
 p224 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic"] }
 hash2curve = { version = "0.14.0", default-features = false }
-k256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "hash2curve", "std"] }
+# `schnorr`: the Babylon EOTS adapter verifies BIP340 signatures over
+# secp256k1. Pinned to the same k256 release as the ECDSA paths so one
+# arithmetic backend serves both.
+k256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "hash2curve", "schnorr", "std"] }
 p256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "hash2curve"] }
 curve25519-dalek = { version = "=5.0.0", default-features = false, features = ["alloc"] }
 jsonrpsee = { version = "0.26", features = ["server", "macros"] }
@@ -290,8 +293,18 @@ name = "garden_scenario"
 path = "tests/garden/garden_scenario.rs"
 
 [[test]]
+name = "garden_acceptance"
+path = "tests/garden/garden_acceptance.rs"
+
+[[test]]
 name = "garden_nat"
 path = "tests/garden/garden_nat.rs"
+
+[[test]]
+# Section 9.1: the ten APK acceptance checks, run against the phone's real
+# Garden library (`garden-phone`) and a real node. Needs both binaries built.
+name = "garden_apk"
+path = "tests/garden/garden_apk.rs"
 
 # Ratio-pipeline packing throughput, serial against rayon. Runs in CI as the
 # `Ratio rayon vs serial throughput` step; its numbers belong to the host that ran
@@ -435,6 +448,19 @@ expect_used = "deny"
 [profile.test]
 opt-level = 1
 debug = false
+
+# `test` inherits `dev`'s `debug-assertions = true`. raptorq 2.0.0's hot paths
+# (GF(256) table setup, RNG) carry debug assertions that turn the k=4096
+# `SourceBlockEncoder::new` into ~179 s instead of ~13 ms (measured A/B on the
+# same tree), which is why `bud3_fountain_acceptance` never finishes and why
+# `Budlum Core library test` sits in_progress for over an hour. The
+# `[profile.dev.package.raptorq] opt-level = 3` override below was already in
+# place and is *not* the culprit: cargo applies it to this profile too. Turn
+# the assertions off for this one crate and leave the decoder's own errors to
+# the tests that assert on them.
+[profile.test.package.raptorq]
+debug-assertions = false
+overflow-checks = false
 
 [profile.dev.package.keccak]
 opt-level = 3

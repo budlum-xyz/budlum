@@ -170,7 +170,7 @@ impl Default for BnsRegistry {
 }
 
 impl BnsRegistry {
-    /// F14: the renewal window, in epochs, that the previous owner keeps after
+    /// The renewal grace window, in epochs, that the previous owner keeps after
     /// a name expires. During that window no third party can register the name,
     /// which protects against squatting and front-running. It is roughly a
     /// 30-day window, at about 100 epochs per day.
@@ -214,7 +214,7 @@ impl BnsRegistry {
             && !label.ends_with('-')
             // Reject RFC 5891 ACE / Punycode labels (`xn--...` and any `??--...`
             // reserved tag) to prevent homograph spoofing across .bud and gateway hosts.
-            && !(label.len() >= 4 && label.as_bytes().get(2..4) == Some(b"--"))
+            && label.as_bytes().get(2..4) != Some(b"--")
             && label
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
@@ -631,6 +631,9 @@ impl BnsRegistry {
         let expires_at = current_epoch
             .checked_add(duration)
             .ok_or(BnsError::InvalidDuration)?;
+        expires_at
+            .checked_add(Self::GRACE_PERIOD)
+            .ok_or(BnsError::InvalidDuration)?;
         let record = NameRecord::try_new(name.clone(), owner, current_epoch, expires_at)?;
         // Cap total name count - fail-closed.
         //
@@ -692,6 +695,9 @@ impl BnsRegistry {
         let base_epoch = record.expires_at.max(current_epoch);
         let new_expires_at = base_epoch
             .checked_add(duration)
+            .ok_or(BnsError::InvalidDuration)?;
+        new_expires_at
+            .checked_add(Self::GRACE_PERIOD)
             .ok_or(BnsError::InvalidDuration)?;
         if new_expires_at.saturating_sub(current_epoch) > MAX_DURATION {
             return Err(BnsError::InvalidDuration);
@@ -1098,25 +1104,22 @@ impl BnsRegistry {
         if *caller == Address::zero() {
             return Err(BnsError::InvalidName);
         }
-        match name {
-            Some(name) => {
-                if !Self::is_valid_name(&name) {
-                    return Err(BnsError::InvalidName);
-                }
-                let record = self.names.get(&name).ok_or(BnsError::InvalidName)?;
-                if record.expires_at <= current_epoch {
-                    return Err(BnsError::Expired);
-                }
-                if &record.owner != caller && record.address.as_ref() != Some(caller) {
-                    return Err(BnsError::NotOwner);
-                }
-                self.primary_names.insert(*caller, name);
-                Ok(())
+        if let Some(name) = name {
+            if !Self::is_valid_name(&name) {
+                return Err(BnsError::InvalidName);
             }
-            None => {
-                self.primary_names.remove(caller);
-                Ok(())
+            let record = self.names.get(&name).ok_or(BnsError::InvalidName)?;
+            if record.expires_at <= current_epoch {
+                return Err(BnsError::Expired);
             }
+            if &record.owner != caller && record.address.as_ref() != Some(caller) {
+                return Err(BnsError::NotOwner);
+            }
+            self.primary_names.insert(*caller, name);
+            Ok(())
+        } else {
+            self.primary_names.remove(caller);
+            Ok(())
         }
     }
 

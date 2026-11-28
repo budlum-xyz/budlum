@@ -47,11 +47,13 @@ pub struct LivenessTracker {
 }
 
 impl LivenessTracker {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Current consecutive-miss count for a validator.
+    #[must_use]
     pub fn missed_count(&self, validator: &Address) -> u64 {
         self.missed.get(validator).copied().unwrap_or(0)
     }
@@ -205,10 +207,12 @@ impl LivenessTracker {
 }
 
 impl LivenessTracker {
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.missed.is_empty() && self.streak_start_epoch.is_empty() && self.reported.is_empty()
     }
 
+    #[must_use]
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();

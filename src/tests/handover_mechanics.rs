@@ -55,7 +55,7 @@ fn finality_stall_is_eight_checkpoints() {
     assert_eq!(FINALITY_STALL_CHECKPOINTS, 8);
 }
 
-/// Finality stall blocks is checkpoint_interval * stall_checkpoints.
+/// Finality stall blocks is `checkpoint_interval` * `stall_checkpoints`.
 #[test]
 fn finality_stall_blocks_is_consistent() {
     assert_eq!(

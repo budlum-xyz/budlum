@@ -16,9 +16,9 @@
 //! multiplications of its own: it stitches each node's padded input directly
 //! from its children's proven chip outputs and checks the bound STARK proofs.
 //!
-//! WIRING: unwired - the Phase 3 `StarkBackend` invokes `prove_tick_chips` and
-//! `verify_tick_chips` for production tick proofs; until Phase 3 lands,
-//! `benches/agg_tick_steps` and `src/aggregation/tests/programs.rs` drive them.
+//! WIRING: unwired - Phase 3 `StarkBackend` entry point, not yet wired in the node.
+//! Once Phase 3 lands it invokes `prove_tick_chips` and `verify_tick_chips`;
+//! until then `benches/agg_tick_steps` and `src/aggregation/tests/programs.rs` drive them.
 
 use bud_proof::chips::batch::{pad_rate_blocks, RATE_BYTES};
 use bud_proof::chips::keccak::{
@@ -172,7 +172,12 @@ fn single_block_state(parts: &[&[u8]]) -> Result<[u64; 25], TickChipError> {
 
 fn squeeze_hash(output: &[u64; 25]) -> Hash32 {
     let mut out = [0u8; 32];
-    for (chunk, word) in out.chunks_exact_mut(8).zip(output.iter().take(4)) {
+    for (chunk, word) in out
+        .as_chunks_mut::<8>()
+        .0
+        .iter_mut()
+        .zip(output.iter().take(4))
+    {
         chunk.copy_from_slice(&word.to_le_bytes());
     }
     out

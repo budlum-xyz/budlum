@@ -29,9 +29,10 @@ pub const GOVERNANCE_TARGETED_ACTION_DELAY_EPOCHS: u64 = 5;
 ///
 /// The name is a key in a consensus map, so it is bounded at proposal time.
 ///
-/// WIRING: unwired - the anchor-vote proposal path that enforces it lands with
-/// the governance intake slice; the bound is defined here first so the vote type
-/// and its admission check cannot drift apart.
+/// WIRING: pub so a `PinExternalAnchor` proposer and this file's own proposal
+/// validation (and its tests) share one declared limit instead of each
+/// hand-copying the same magic number; the production check is the
+/// `network.len()` comparison a few lines below, in this file.
 pub const MAX_PINNED_NETWORK_BYTES: usize = 64;
 
 /// A zero activation delay is not a timelock.
@@ -1381,7 +1382,7 @@ mod tests {
         );
     }
 
-    /// The constitution's MinConstitutionProposalEpochs binds
+    /// The constitution's `MinConstitutionProposalEpochs` binds
     /// constitution amendments instead of the hard coded 10.
     #[test]
     fn amendment_respects_min_constitution_proposal_epochs() {

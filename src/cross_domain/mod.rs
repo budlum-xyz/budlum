@@ -2,6 +2,8 @@ pub mod bridge;
 pub mod bridge_relayer;
 pub mod bridge_tx;
 pub mod chain_adapter;
+pub mod economic_guard;
+pub mod event_bus;
 pub mod event_tree;
 pub mod evm;
 pub mod external;
@@ -13,6 +15,15 @@ pub mod relayer;
 pub use bridge::{AssetId, BridgeError, BridgeState, BridgeStatus, BridgeTransfer};
 pub use bridge_relayer::{BridgeRelayerPipeline, PipelineError};
 pub use chain_adapter::{AdapterError, AdapterRegistry, ChainAdapter};
+pub use economic_guard::{
+    BridgeEconomicGuard, ContradictionEvidence, ContradictionOutcome, DomainCeilingPolicy,
+    DomainEconomicRecord, DomainGuardStatus, EconomicGuardError, GuardedExternalAdapter,
+};
+pub use event_bus::{
+    event_bus_payload_hash, evm_event_topic0, CallbackInvocation, EventBusError,
+    EventDeliveryProof, EventSubscription, EventSubscriptionRequest, EventTopicFilter,
+    UniversalEventBus,
+};
 pub use event_tree::{DomainEvent, DomainEventKind, DomainEventTree, MerkleProof};
 pub use external::{
     admit, decode_external_evidence, encode_external_evidence, profile_of, AdapterDescriptor,

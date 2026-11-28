@@ -47,6 +47,12 @@ pub(crate) const TESTS: &[&str] = &[
     "deferred_votes_two_pass_replay_and_prevote_retry_until_precommit_quorum",
     "failed_prevote_publish_still_advances_high_water_mark_and_blocks_reorg_equivocation",
     "write_vote_history_file_persists_atomically_and_reports_unwritable_target",
+    // The vote high-water mark is per node, not per network: one shared file
+    // let a mark left by a different validator stop this one signing, which
+    // is a liveness failure on a fresh chain rather than the double-sign the
+    // mark exists to prevent.
+    "default_vote_history_path_is_private_to_one_node",
+    "a_foreign_vote_history_file_is_not_adopted",
 ];
 
 pub fn run(_root: &Path, log: &Path) -> Result<String, String> {

@@ -73,6 +73,7 @@ pub fn hours_to_epochs(
 }
 
 /// Canonical 32-byte signing digest for a presence window (Section 7.8 item 2).
+///
 /// All four fields, including the domain tag, are length-prefixed under G-5.
 /// The shared definition is the same function the mobile core signs.
 #[must_use]
@@ -281,8 +282,7 @@ impl PresenceAggregate {
             let is_set = self
                 .bitmap
                 .get(byte_idx)
-                .map(|b| (*b >> bit_idx) & 1 == 1)
-                .unwrap_or(false);
+                .is_some_and(|b| (*b >> bit_idx) & 1 == 1);
             if !is_set {
                 continue;
             }

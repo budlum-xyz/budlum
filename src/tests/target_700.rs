@@ -28,7 +28,7 @@ fn cid(b: u8) -> ContentId {
 }
 
 /// Ten distinct mints must yield ten distinct, retrievable token ids
-/// (consolidates the former nft_test_val_1..10 copies).
+/// (consolidates the former `nft_test_val_1..10` copies).
 #[test]
 fn nft_mint_table_distinct_ids() {
     let mut r = NftRegistry::new();
@@ -52,7 +52,7 @@ fn nft_mint_table_distinct_ids() {
 }
 
 /// Ten distinct names register and resolve back to their owners
-/// (consolidates the former bns_test_val_1..10 copies).
+/// (consolidates the former `bns_test_val_1..10` copies).
 #[test]
 fn bns_register_table_resolves_owners() {
     let mut r = BnsRegistry::new();
@@ -75,18 +75,18 @@ fn bns_register_duplicate_live_name_rejected() {
 }
 
 /// Ten distinct offers are created and retrievable by id
-/// (consolidates the former market_test_val_1..10 copies).
+/// (consolidates the former `market_test_val_1..10` copies).
 #[test]
 fn market_create_offer_table() {
     let mut r = MarketplaceRegistry::new();
     for i in 1..=10u8 {
-        let id = r.create_offer(addr(i), cid(i), u64::from(i)).unwrap();
+        let id = r.create_offer(addr(i), cid(i), u64::from(i), 7).unwrap();
         assert!(r.get_offer(id).is_some(), "created offer {id} missing");
     }
 }
 
 /// A fresh relayer has no pending relays
-/// (consolidates the former relay_test_val_1..10 copies).
+/// (consolidates the former `relay_test_val_1..10` copies).
 #[test]
 fn relayer_starts_empty() {
     let r = UniversalRelayer::new(RelayerConfig::default());
@@ -94,7 +94,7 @@ fn relayer_starts_empty() {
 }
 
 /// A fresh account state starts at epoch 0
-/// (consolidates the former state_test_val_1..20 copies).
+/// (consolidates the former `state_test_val_1..20` copies).
 #[test]
 fn account_state_genesis_defaults() {
     let s = AccountState::new();

@@ -754,6 +754,20 @@ impl SentryPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Polling budget for the live-failover test: 400 x 50 ms = 20 s.
+    ///
+    /// A sentry rotation is an asynchronous dial, so the only thing a wait can
+    /// mean is "give the dial time to land". The previous budget was 40 steps
+    /// (2 s), which encoded the idle-machine number: the happy path converges in
+    /// about 0.35 s, and the same run under load needs more than 2 s. Twenty
+    /// seconds is a convergence deadline, not a performance claim, and a passing
+    /// run breaks out of the loop on the first observed rotation.
+    ///
+    /// This does not make the test deterministic on its own: after 20 s the
+    /// residual failure still reports `configured = [B]`, `connected = []`, i.e.
+    /// the dial to the rotated sentry never lands at all. That is a defect in the
+    /// rotation path, not a deadline problem.
+    const SENTRY_FAILOVER_WAIT_STEPS: usize = 400;
 
     fn random_peer() -> PeerId {
         PeerId::random()
@@ -943,37 +957,48 @@ mod tests {
         use crate::consensus::pow::PoWEngine;
         use crate::network::node::Node;
 
-        fn pick_free_port() -> u16 {
-            let listener =
-                std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind ephemeral port");
-            listener.local_addr().expect("local addr").port()
+        /// Four distinct free ports.
+        ///
+        /// Held together: a port released and asked for again can be handed
+        /// back, and two nodes listening on one port is a failure that looks
+        /// like a sentry policy refusal.
+        fn pick_free_ports() -> [u16; 4] {
+            let listeners: Vec<std::net::TcpListener> = (0..4)
+                .map(|_| {
+                    std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                        .expect("bind ephemeral port")
+                })
+                .collect();
+            let mut ports = [0u16; 4];
+            for (port, listener) in ports.iter_mut().zip(&listeners) {
+                *port = listener.local_addr().expect("local addr").port();
+            }
+            ports
         }
 
         fn make_chain() -> crate::chain::chain_actor::ChainHandle {
             let consensus = Arc::new(PoWEngine::new(0));
             let blockchain = Blockchain::new(consensus, None, 45265, None);
             let (actor, client) = ChainActor::new(blockchain);
-            tokio::spawn(async move { actor.run().await });
+            tokio::spawn(async move { Box::pin(actor.run()).await });
             client
         }
 
         // Start Sentry A and Sentry B plus an unauthorized public attacker node.
+        let [port_a, port_b, port_att, port_val] = pick_free_ports();
         let mut sentry_a = Node::new(make_chain()).expect("sentry A");
         let sentry_a_id = sentry_a.peer_id;
-        let port_a = pick_free_port();
         sentry_a
             .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_a)
             .expect("listen sentry A");
 
         let mut sentry_b = Node::new(make_chain()).expect("sentry B");
         let sentry_b_id = sentry_b.peer_id;
-        let port_b = pick_free_port();
         sentry_b
             .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_b)
             .expect("listen sentry B");
 
         let mut attacker = Node::new(make_chain()).expect("attacker");
-        let port_att = pick_free_port();
         attacker
             .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_att)
             .expect("listen attacker");
@@ -994,7 +1019,6 @@ mod tests {
             .expect("validator")
             .with_sentry_policy(val_policy);
         let validator_id = validator.peer_id;
-        let port_val = pick_free_port();
         validator
             .listen_on(IpAddr::V4(Ipv4Addr::LOCALHOST), port_val)
             .expect("listen validator");
@@ -1021,14 +1045,15 @@ mod tests {
         // Attacker tries to dial the shielded validator directly.
         attacker.dial(&validator_addr).expect("attacker dials");
 
-        let h_sa = tokio::spawn(async move { sentry_a.run().await });
-        let h_sb = tokio::spawn(async move { sentry_b.run().await });
-        let h_att = tokio::spawn(async move { attacker.run().await });
-        let h_val = tokio::spawn(async move { validator.run().await });
+        let h_sa = tokio::spawn(async move { Box::pin(sentry_a.run()).await });
+        let h_sb = tokio::spawn(async move { Box::pin(sentry_b.run()).await });
+        let h_att = tokio::spawn(async move { Box::pin(attacker.run()).await });
+        let h_val = tokio::spawn(async move { Box::pin(validator.run()).await });
 
-        // Wait for Validator <-> Sentry A connection to come up.
+        // Wait for Validator <-> Sentry A connection to come up. See
+        // `SENTRY_FAILOVER_WAIT_STEPS` for why the budget is generous.
         let mut connected_a = false;
-        for _ in 0..40 {
+        for _ in 0..SENTRY_FAILOVER_WAIT_STEPS {
             let st = val_client.admin_sentry_status().await.expect("status");
             if st.connected_sentries == vec![sentry_a_id.to_string()] {
                 connected_a = true;
@@ -1065,7 +1090,11 @@ mod tests {
         assert_eq!(diff.added[0].0, sentry_b_id);
 
         let mut connected_b = false;
-        for _ in 0..40 {
+        // Keep the last snapshot: a bare `assert!` here says the failover did
+        // not finish and nothing about where it stopped, so a flake has to be
+        // reproduced by hand. Configured-vs-connected is the whole state.
+        let mut last_status = None;
+        for _ in 0..SENTRY_FAILOVER_WAIT_STEPS {
             let st = val_client
                 .admin_sentry_status()
                 .await
@@ -1074,9 +1103,14 @@ mod tests {
                 connected_b = true;
                 break;
             }
+            last_status = Some(st);
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(connected_b, "validator should fail over live to Sentry B");
+        assert!(
+            connected_b,
+            "validator should fail over live to Sentry B; last status: {:?}",
+            last_status.map(|st| (st.configured_sentries, st.connected_sentries))
+        );
         let sb_status = sb_client
             .admin_sentry_status()
             .await
