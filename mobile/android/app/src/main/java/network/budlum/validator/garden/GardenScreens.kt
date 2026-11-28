@@ -68,7 +68,7 @@ fun GardenApp(
     val gardenTitle = stringResource(R.string.g_default_title)
 
     // Enable FLAG_SECURE while 24-word recovery phrases are on screen.
-    val isSecretStep = step == Step.Seed
+    val isSecretStep = step == Step.Seed || step == Step.SeedVerify
     LaunchedEffect(isSecretStep) {
         onSecureScreen(isSecretStep)
     }
@@ -188,6 +188,7 @@ fun GardenApp(
             // The words are shown once; block system back so the user never loses
             // their recovery phrase by accident before confirming they noted it.
             Step.Seed -> Step.Seed
+            Step.SeedVerify -> Step.Seed
             Step.Wallet -> {
                 wantedTestnet = false
                 walletReturnStep
@@ -208,23 +209,6 @@ fun GardenApp(
         when (current) {
             Step.Blocks -> BlockFieldScreen(
                 model = model,
-                onCube = { cell ->
-                    // A place on the floor is the wallet. Pressing one takes
-                    // that coordinate - two people one step apart are standing
-                    // beside each other, and that is the whole social model -
-                    // and then opens the wallet this phone has, or makes one
-                    // and shows its words.
-                    model.settle(cell)
-                    if (model.state.walletExists) {
-                        wantedTestnet = false
-                        walletReturnStep = Step.Blocks
-                        step = Step.Wallet
-                    } else {
-                        model.createWallet()
-                        walletReturnStep = Step.Blocks
-                        step = Step.Seed
-                    }
-                },
                 onGo = { goes ->
                     when (goes) {
                         BlockGoes.Testnet -> {
@@ -317,19 +301,22 @@ fun GardenApp(
             }
 
             Step.Seed -> SeedPhraseScreen(model) {
-                // The seed frame ends on one button: the words are written down
-                // and the sheet is done. Copying the file's verify frame here
-                // would mean asking a person to type twenty-four words back on
-                // a phone, which the design asks for nowhere else and the flow
-                // has no room for.
-                if (wantedTestnet) {
-                    wantedTestnet = false
-                    onTestnet()
-                    step = Step.Blocks
-                } else {
-                    step = Step.Choose
-                }
+                step = Step.SeedVerify
             }
+
+            Step.SeedVerify -> SeedVerifyScreen(
+                model = model,
+                onBackToWords = { step = Step.Seed },
+                onVerified = {
+                    if (wantedTestnet) {
+                        wantedTestnet = false
+                        onTestnet()
+                        step = Step.Blocks
+                    } else {
+                        step = Step.Choose
+                    }
+                },
+            )
 
             Step.Choose -> ChooseScreen(
                 model = model,

@@ -7,8 +7,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,8 +33,6 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
@@ -73,21 +69,8 @@ import network.budlum.validator.R
  * never collide on any background.
  */
 
-/**
- * A ground: what the floor is painted, and every colour that has to move with it.
- *
- * The design file does not ship three skins, it ships a ring of grounds - the
- * two-column palette on the depo page is one swatch per ground - and picking one
- * repaints the mesh, the sheets, the ink and the rules together. Three named
- * grounds stay as they were (they are what the preference file already holds and
- * what the frames draw), and any colour in the ring is a ground too.
- *
- * Everything that is not the ground itself answers from here, which is the whole
- * point: a screen that reaches for a literal white is a screen that stays white
- * on a green ground.
- */
-data class Skin(
-    val name: String,
+/** The three skins offered by the top-right Figma skin switch. */
+enum class Skin(
     val behind: Color,
     val surface: Color,
     val ink: Color,
@@ -101,110 +84,52 @@ data class Skin(
     val danger: Color,
     val isDark: Boolean,
 ) {
-    /** The mesh this ground lays down. */
-    fun tile(): Int = when {
-        isDark -> R.drawable.tile_ground
-        // The sage ground is the only painted one with a mesh of its own in the
-        // file, and it is named here by its measured value: inside this class
-        // `Sage` is the ground, not the ink.
-        behind.toArgb() == SAGE_GROUND -> R.drawable.tile_sage
-        else -> R.drawable.tile_page
-    }
+    Page(
+        behind = Color(0xFFFBFCFA),
+        surface = Color(0xFFFBFCFA),
+        ink = Color(0xFF060705),
+        surfaceInk = Color(0xFF060705),
+        muted = Color(0xFF5D635A),
+        surfaceMuted = Color(0xFF5D635A),
+        rule = Color(0xFFE0E4DC),
+        surfaceRule = Color(0xFFE6E6E6),
+        accent = Color(0xFF566B49),
+        accentOnSurface = Color(0xFF566B49),
+        danger = Color(0xFF8C0000),
+        isDark = false,
+    ),
+    Sage(
+        behind = Color(0xFF98AE89),
+        surface = Color(0xFFFBFCFA),
+        ink = Color(0xFF060705),
+        surfaceInk = Color(0xFF060705),
+        muted = Color(0xFF263022),
+        surfaceMuted = Color(0xFF5D635A),
+        rule = Color(0xFF7B916D),
+        surfaceRule = Color(0xFFD9E0D4),
+        accent = Color(0xFF060705),
+        accentOnSurface = Color(0xFF566B49),
+        danger = Color(0xFF6E0000),
+        isDark = false,
+    ),
+    Ground(
+        behind = Color(0xFF060705),
+        surface = Color(0xFF0E100C),
+        ink = Color(0xFFFBFCFA),
+        surfaceInk = Color(0xFFFBFCFA),
+        muted = Color(0xFF9EA69A),
+        surfaceMuted = Color(0xFF9EA69A),
+        rule = Color(0xFF252A22),
+        surfaceRule = Color(0xFF252A22),
+        accent = Color(0xFF98AE89),
+        accentOnSurface = Color(0xFF98AE89),
+        danger = Color(0xFFF27272),
+        isDark = true,
+    );
 
     companion object {
-        /** `#98AE89`, the sage ground, as an Int for the mesh test above. */
-        private val SAGE_GROUND: Int = 0xFF98AE89.toInt()
-
-        val Page = Skin(
-            name = "page",
-            behind = Color(0xFFFBFCFA),
-            surface = Color(0xFFFBFCFA),
-            ink = Color(0xFF060705),
-            surfaceInk = Color(0xFF060705),
-            muted = Color(0xFF5D635A),
-            surfaceMuted = Color(0xFF5D635A),
-            rule = Color(0xFFE0E4DC),
-            surfaceRule = Color(0xFFD9D9D9),
-            accent = Color(0xFF566B49),
-            accentOnSurface = Color(0xFF566B49),
-            danger = Color(0xFF8C0000),
-            isDark = false,
-        )
-
-        val Sage = Skin(
-            name = "sage",
-            behind = Color(0xFF98AE89),
-            surface = Color(0xFFFBFCFA),
-            ink = Color(0xFF060705),
-            surfaceInk = Color(0xFF060705),
-            muted = Color(0xFF263022),
-            surfaceMuted = Color(0xFF5D635A),
-            rule = Color(0xFF7B916D),
-            surfaceRule = Color(0xFFD9E0D4),
-            accent = Color(0xFF060705),
-            accentOnSurface = Color(0xFF566B49),
-            danger = Color(0xFF6E0000),
-            isDark = false,
-        )
-
-        val Ground = Skin(
-            name = "ground",
-            behind = Color(0xFF060705),
-            surface = Color(0xFF0E100C),
-            ink = Color(0xFFFBFCFA),
-            surfaceInk = Color(0xFFFBFCFA),
-            muted = Color(0xFF9EA69A),
-            surfaceMuted = Color(0xFF9EA69A),
-            rule = Color(0xFF252A22),
-            surfaceRule = Color(0xFF252A22),
-            accent = Color(0xFF98AE89),
-            accentOnSurface = Color(0xFF98AE89),
-            danger = Color(0xFFF27272),
-            isDark = true,
-        )
-
-        /**
-         * The ring of grounds, measured off the depo page's palette swatches.
-         *
-         * Sampled from the exported frame rather than guessed: each entry is the
-         * centre pixel of one swatch (`42:113`).
-         */
-        val hues: List<Color> = listOf(
-            Color(0xFFA0A789), Color(0xFFAE9A89), Color(0xFFAE8989),
-            Color(0xFF898FAE), Color(0xFF9FAE89), Color(0xFF94AE8C),
-            Color(0xFF89AE8E), Color(0xFF89AE99), Color(0xFF89ABA7),
-            Color(0xFF89AAAE), Color(0xFFAE89AA), Color(0xFFAE8999),
-            Color(0xFFAE898F), Color(0xFFAEA592), Color(0xFFAEAE89),
-            Color(0xFF9A89AE), Color(0xFF9AAE89), Color(0xFF89AEA4),
-        )
-
-        /** The three painted grounds, then every swatch on the ring. */
-        val ring: List<Skin> = listOf(Page, Sage, Ground) + hues.map(::of)
-
-        /** A ground painted `ground`, with every layer that follows it. */
-        fun of(ground: Color): Skin {
-            val dark = ground.luminance() < 0.35f
-            val hex = ground.toArgb().toUInt().toString(16).takeLast(6)
-            return Skin(
-                name = "ground-$hex",
-                behind = ground,
-                surface = if (dark) Color(0xFF0E100C) else Color(0xFFFBFCFA),
-                ink = if (dark) Color(0xFFFBFCFA) else Color(0xFF060705),
-                surfaceInk = if (dark) Color(0xFFFBFCFA) else Color(0xFF060705),
-                muted = if (dark) Color(0xFF9EA69A) else Color(0xFF263022),
-                surfaceMuted = if (dark) Color(0xFF9EA69A) else Color(0xFF5D635A),
-                rule = if (dark) Color(0xFF252A22) else Color(0xFFE0E4DC),
-                surfaceRule = if (dark) Color(0xFF252A22) else Color(0xFFD9D9D9),
-                accent = if (dark) Color(0xFF98AE89) else Color(0xFF566B49),
-                accentOnSurface = if (dark) Color(0xFF98AE89) else Color(0xFF566B49),
-                danger = if (dark) Color(0xFFF27272) else Color(0xFF8C0000),
-                isDark = dark,
-            )
-        }
-
-        /** A stored ground by name; an older name still finds its paint. */
         fun fromName(name: String?): Skin =
-            ring.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: Page
+            entries.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: Page
     }
 }
 
@@ -218,46 +143,16 @@ data class Skin(
  */
 val TILE = 20.dp
 
-/**
- * A place on the floor.
- *
- * The lattice has no origin corner: a block never sits at (0,0), and the
- * places around any block are (x+1,y), (x,y+1) and (x+1,y+1) - the three the
- * sheet fills first when it draws a cluster. Two people whose blocks are
- * neighbours in this lattice are standing beside each other; two whose blocks
- * are not are not, however close the drawing makes them look.
- */
-data class Cell(val x: Int, val y: Int) {
-    /** Where a person can stand next to here, nearest first. */
-    val neighbours: List<Cell>
-        get() = listOf(
-            Cell(x - 1, y),
-            Cell(x, y - 1),
-            Cell(x - 1, y - 1),
-            Cell(x + 1, y),
-            Cell(x, y + 1),
-            Cell(x + 1, y + 1),
-        ).filter { it.x >= 0 && it.y >= 0 && (it.x != 0 || it.y != 0) }
-
-    /** Beside each other means one step in the lattice, either way. */
-    fun beside(other: Cell): Boolean = neighbours.contains(other)
-}
-
-/**
- * The lit block: 32dp, which is the file's 64 against this floor's 20dp mesh.
- *
- * The same number is the step a person steps by when they move to the block
- * beside them, so it is also the unit the coordinate system counts in.
- */
-val CUBE = 32.dp
-
-/** The passive surface the file carries beside the mesh (`#D9D9D9`). */
-internal val Passive = Color(0xFFD9D9D9)
-
 /** The cube tile, repeated across the viewport with smooth skin transitions. */
 @Composable
 fun CubeFloor(theme: Skin, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    val tile = ImageBitmap.imageResource(theme.tile())
+    val tile = ImageBitmap.imageResource(
+        when (theme) {
+            Skin.Page -> R.drawable.tile_page
+            Skin.Sage -> R.drawable.tile_sage
+            Skin.Ground -> R.drawable.tile_ground
+        },
+    )
     val animatedBg by animateColorAsState(
         targetValue = theme.behind,
         animationSpec = tween(GardenMotion.BASE_MS, easing = GardenMotion.Ease),
@@ -485,20 +380,19 @@ fun SkinSwitch(
     )
     Row(
         modifier = modifier
-            .horizontalScroll(rememberScrollState())
             .border(1.dp, current.rule, RoundedCornerShape(3.dp))
             .background(current.surface.copy(alpha = 0.85f), RoundedCornerShape(3.dp))
             .padding(3.dp),
         horizontalArrangement = Arrangement.spacedBy(3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Skin.ring.forEach { option ->
+        Skin.entries.forEach { option ->
             val selected = current == option
             val desc = labels[option] ?: option.name
             val borderColor = when {
-                selected && current.isDark -> Chalk
+                selected && current.isDark -> Page
                 selected -> Ink
-                option.isDark -> Color(0xFF3A3F38)
+                option == Skin.Ground -> Color(0xFF3A3F38)
                 else -> Color(0xFFC9CFC5)
             }
             Box(
@@ -526,7 +420,7 @@ fun GardenBrandMark(
 ) {
     val tint = when {
         skin == Skin.Sage && !onSurface -> Ink
-        skin.isDark -> Sage
+        skin == Skin.Ground -> Sage
         else -> null
     }
     Image(

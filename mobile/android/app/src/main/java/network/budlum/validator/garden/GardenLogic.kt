@@ -28,36 +28,6 @@ object GardenLogic {
     }
 
     /**
-     * What a code is for.
-     *
-     * The same six digits, and the same signed record behind them, can open one
-     * of two doors: a Garden to join as a validator beside the others, or one
-     * person to talk to. The difference travels in the link's fragment, outside
-     * the signed record, so nothing that is signed changes.
-     */
-    enum class InvitePurpose {
-        /** Join the Garden and work as one of its validators. */
-        Garden,
-
-        /** Talk to one person, without joining anything. */
-        Person,
-    }
-
-    /** The link form of an invite, carrying what the code is for. */
-    fun inviteLink(record: String, purpose: InvitePurpose): String = when (purpose) {
-        InvitePurpose.Garden -> "budlum://garden/join#$record"
-        InvitePurpose.Person -> "budlum://garden/dm#$record"
-    }
-
-    /** Which door a link opens. Anything unreadable is a Garden invite. */
-    fun invitePurposeOf(text: String?): InvitePurpose =
-        if (text?.lowercase()?.contains("budlum://garden/dm#") == true) {
-            InvitePurpose.Person
-        } else {
-            InvitePurpose.Garden
-        }
-
-    /**
      * Extract a Budlum Garden invite only when clipboard text clearly carries one.
      *
      * Section 5.9: ordinary clipboard text is never processed or retained.

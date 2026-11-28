@@ -257,23 +257,6 @@ impl GardenPhone {
     /// Picks a written-down code back up on the first call after a
     /// restart, so the hour continues where it was rather than starting
     /// again from nothing.
-    /// Put the code that is live out of the way and open a new one.
-    ///
-    /// One live code at a time. Asking for a new one burns the old, so the six
-    /// digits somebody already wrote down stop meaning anything the moment a
-    /// replacement is asked for - which is the only way a short code can be
-    /// said out loud and still be worth something.
-    pub fn new_code(&self) -> Result<GardenCode, GardenError> {
-        {
-            let mut desk = self.desk.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(live) = desk.as_ref() {
-                live.burn();
-            }
-            *desk = None;
-        }
-        self.open_code()
-    }
-
     pub fn code_now(&self) -> Option<GardenCode> {
         let mut desk = self.desk.lock().unwrap_or_else(|e| e.into_inner());
         if desk.as_ref().is_some_and(rendezvous::Desk::expired) {

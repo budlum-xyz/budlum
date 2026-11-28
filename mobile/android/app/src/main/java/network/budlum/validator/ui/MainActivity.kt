@@ -107,10 +107,12 @@ fun ValidatorDashboardScreen(
     val scope = rememberCoroutineScope()
     var endpoint by rememberSaveable { mutableStateOf("") }
     var rpcEndpoint by rememberSaveable { mutableStateOf("") }
-    // The faucet has one destination and the phone already knows it: this
-    // phone's own wallet. A validator drawing its own faucet is the whole
-    // flow, so there is nothing to type and nothing to get wrong here.
     var address by rememberSaveable { mutableStateOf("") }
+    // The faucet needs somewhere to send to, and this phone now has a
+    // wallet of its own, so the field starts filled in with its address
+    // rather than asking a person to copy thirty-two bytes by hand. It
+    // stays editable: sending to a wallet held elsewhere is a thing
+    // people legitimately do.
     val context = LocalContext.current
     LaunchedEffect(Unit) {
         if (address.isEmpty()) {
@@ -145,6 +147,9 @@ fun ValidatorDashboardScreen(
             skin = skin,
             modifier = Modifier.align(Alignment.CenterHorizontally),
         )
+        Text(text = stringResource(R.string.onboarding_disclosure))
+        Text(text = stringResource(R.string.validator_unavailable))
+        Text(text = stringResource(R.string.faucet_explanation))
         OutlinedTextField(
             value = endpoint,
             onValueChange = { endpoint = it; outcome = null },
@@ -154,11 +159,15 @@ fun ValidatorDashboardScreen(
             singleLine = true,
         )
         if (endpoint.isNotBlank() && !validEndpoint) Text(stringResource(R.string.faucet_invalid_endpoint))
-        if (address.isNotEmpty()) {
-            Text(stringResource(R.string.faucet_own_wallet, address))
-        } else {
-            Text(stringResource(R.string.faucet_no_wallet))
-        }
+        OutlinedTextField(
+            value = address,
+            onValueChange = { address = it; outcome = null; balanceResult = null },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text(stringResource(R.string.faucet_wallet_address)) },
+            enabled = !busy,
+            singleLine = true,
+        )
+        if (address.isNotBlank() && !validAddress) Text(stringResource(R.string.faucet_invalid_address))
         Button(
             enabled = !busy && validEndpoint && validAddress,
             onClick = {
@@ -199,6 +208,7 @@ fun ValidatorDashboardScreen(
             null -> Unit
         }
 
+        Text(stringResource(R.string.balance_explanation))
         OutlinedTextField(
             value = rpcEndpoint,
             onValueChange = { rpcEndpoint = it; balanceResult = null },

@@ -12,6 +12,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import network.budlum.validator.R
@@ -88,38 +89,33 @@ private val budlumDarkColors = darkColorScheme(
     onError = Ink,
 )
 
-/**
- * The measured radii: 16 for panels and rows, 32 for the widest shell, 8 for
- * controls and chips. The file's chat and wallet frames carry 16 and 32 and
- * nothing else; 6 and 4 were this theme's own invention.
- */
+/** Panel and row square, control and chip 8, shell 12 - the token radii. */
 private val budlumShapes = Shapes(
     extraSmall = RoundedCornerShape(0.dp),
     small = RoundedCornerShape(8.dp),
-    medium = RoundedCornerShape(16.dp),
-    large = RoundedCornerShape(16.dp),
-    extraLarge = RoundedCornerShape(32.dp),
+    medium = RoundedCornerShape(8.dp),
+    large = RoundedCornerShape(12.dp),
+    extraLarge = RoundedCornerShape(12.dp),
 )
 
 /**
  * Two families, each kept to its own job.
  *
  * `budlum_regular` is the house display face (79 glyphs, display/headline/title).
- * Mako is the text face, and it is the only one the Garden frames use: the
- * chat, wallet and seed frames of the design file name `Mako` at 24/32/40 with
- * zero letter-spacing, so a body set in Bricolage was never the sheet's type.
- * Mako ships one weight; Android synthesises nothing here, and the design does
- * not ask for a bolder one.
- *
- * The OFL text ships beside it at `mobile/android/LICENSES/mako-OFL.txt`.
+ * Bricolage Grotesque is the text face (full Turkish coverage across four static weights).
  */
 private val budlum = FontFamily(Font(R.font.budlum_regular))
 
-private val mako = FontFamily(Font(R.font.mako_regular))
+private val bricolage = FontFamily(
+    Font(R.font.bricolage_grotesque_regular, FontWeight.Normal),
+    Font(R.font.bricolage_grotesque_medium, FontWeight.Medium),
+    Font(R.font.bricolage_grotesque_semibold, FontWeight.SemiBold),
+    Font(R.font.bricolage_grotesque_bold, FontWeight.Bold),
+)
 
 private val budlumType = Typography().run {
     val heading = TextStyle(fontFamily = budlum)
-    val text = TextStyle(fontFamily = mako)
+    val text = TextStyle(fontFamily = bricolage)
     copy(
         displayLarge = displayLarge.merge(heading),
         displayMedium = displayMedium.merge(heading),
@@ -136,8 +132,7 @@ private val budlumType = Typography().run {
         labelLarge = labelLarge.merge(text),
         labelMedium = labelMedium.merge(text),
         labelSmall = labelSmall.merge(text).copy(
-            // Figma sets letter-spacing 0 on every frame of this surface.
-            letterSpacing = 0.sp,
+            letterSpacing = 1.0.sp,
             fontSize = 11.sp,
         ),
     )

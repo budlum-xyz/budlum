@@ -54,10 +54,10 @@ import network.budlum.validator.R
  */
 
 /** The panel radius, 16 px in the file at 3x density. */
-internal val SHEET_RADIUS = 16.dp
+internal val SHEET_RADIUS = 6.dp
 
 /** The control radius the buttons and word boxes use. */
-internal val CONTROL_RADIUS = 8.dp
+internal val CONTROL_RADIUS = 4.dp
 
 /** The portrait square beside a name, 100 px in the wallet sheets. */
 internal val PORTRAIT = 34.dp
@@ -236,28 +236,40 @@ fun WordCell(
     modifier: Modifier = Modifier,
     masked: Boolean = false,
 ) {
-    // One box per word, number inside it: the seed frame draws a single thin
-    // chip with the position in front, not a number plate beside a field.
     Row(
-        modifier = modifier
-            .height(28.dp)
-            .border(1.dp, skin.surfaceRule, RoundedCornerShape(CONTROL_RADIUS))
-            .padding(horizontal = 8.dp),
+        modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Text(
-            "$number.",
-            style = MaterialTheme.typography.labelSmall,
-            color = skin.surfaceMuted,
-        )
-        Text(
-            text = if (masked) "******" else word,
-            style = MaterialTheme.typography.bodySmall,
-            color = if (masked) skin.surfaceMuted else skin.surfaceInk,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Box(
+            modifier = Modifier
+                .width(30.dp)
+                .height(34.dp)
+                .border(1.dp, skin.surfaceRule, RoundedCornerShape(CONTROL_RADIUS)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "$number.",
+                style = MaterialTheme.typography.labelSmall,
+                color = skin.surfaceMuted,
+            )
+        }
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(34.dp)
+                .border(1.dp, skin.surfaceRule, RoundedCornerShape(CONTROL_RADIUS))
+                .padding(horizontal = 8.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(
+                text = if (masked) "******" else word,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (masked) skin.surfaceMuted else skin.surfaceInk,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
@@ -316,16 +328,16 @@ fun Wordmark(
     skin: Skin = Skin.Page,
     modifier: Modifier = Modifier,
 ) {
-    val tint = when {
-        skin.isDark -> Sage
-        skin.behind == Sage -> Ink
-        else -> null
+    val tint = when (skin) {
+        Skin.Sage -> Ink
+        Skin.Ground -> Sage
+        Skin.Page -> null
     }
     Image(
         painter = painterResource(R.drawable.budlum_wordmark),
         contentDescription = stringResource(R.string.app_name),
         colorFilter = tint?.let { ColorFilter.tint(it) },
-        modifier = modifier.height(14.dp),
+        modifier = modifier.height(22.dp),
     )
 }
 

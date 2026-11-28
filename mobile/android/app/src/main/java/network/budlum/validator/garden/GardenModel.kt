@@ -12,7 +12,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import network.budlum.validator.R
-import network.budlum.validator.core.DeviceWalletSeal
 import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.budlum_garden_ffi.GardenAnswer
@@ -89,8 +88,6 @@ data class GardenState(
     val pendingJoinLink: String = "",
     val clipboardInvite: String = "",
     val dismissedClipboardInvite: String = "",
-    /** The place on the floor this phone took, and with it its coordinate. */
-    val seat: Cell? = null,
 ) {
     val waitingCount: Int get() = people.count { it.waiting }
     val seated: Boolean get() = GardenLogic.isGardenSeated(status)
@@ -112,41 +109,12 @@ class GardenModel(
 
     private val phone: GardenPhone by lazy { GardenHolder.phone(app) }
 
-    /**
-     * The wallet's sealing passphrase, held by the Keystore rather than typed.
-     *
-     * The design file has no passphrase control on the wallet screens, so the
-     * phone supplies one: thirty-two random bytes wrapped by a non-exportable
-     * Keystore key. See [DeviceWalletSeal] for why this is not a weaker seal.
-     */
-    private val seal by lazy { DeviceWalletSeal(app) }
-
-    var state by mutableStateOf(GardenState(seat = storedSeat()))
+    var state by mutableStateOf(GardenState())
         private set
 
     /** The active floor skin, persisted as a non-secret UI preference. */
     var skin by mutableStateOf(Skin.fromName(prefs.getString(PREF_SKIN, null)))
         private set
-
-    /**
-     * Take a place on the floor.
-     *
-     * The coordinate is the wallet's address on the floor rather than a label:
-     * two people whose places are neighbours in the lattice are standing beside
-     * each other, and the Garden only shows someone else's block when they are
-     * standing beside you.
-     */
-    fun settle(cell: Cell) {
-        if (state.seat == cell) return
-        state = state.copy(seat = cell)
-        prefs.edit().putInt(PREF_SEAT_X, cell.x).putInt(PREF_SEAT_Y, cell.y).apply()
-    }
-
-    /** The place this phone took in an earlier run, if it took one. */
-    private fun storedSeat(): Cell? {
-        if (!prefs.contains(PREF_SEAT_X)) return null
-        return Cell(prefs.getInt(PREF_SEAT_X, 0), prefs.getInt(PREF_SEAT_Y, 0))
-    }
 
     fun selectSkin(next: Skin) {
         if (skin == next) return
@@ -240,13 +208,42 @@ class GardenModel(
             state = state.copy(message = app.getString(R.string.g_file_unreadable))
             return@background
         }
-        // No file-size ceiling is offered here. The screen has no control for
-        // one in the design file, and a number invented on this side would be a
-        // second source of truth next to the chain parameter: what the Garden
-        // accepts is the Garden's answer, and the core refuses what it refuses.
+        // The object size ceiling is a chain parameter published in status;
+        // read it dynamically and let the core enforce when no status is present.
+        //
+        // It is the ceiling this Garden was founded with, and a genesis
+        // cannot be amended, so a Garden started before the ceiling rose
+        // keeps the one it has. Saying whose rule it is spares someone
+        // looking for the setting that would change it.
+        val ceiling = objectCeiling()
+        if (ceiling != null && bytes.size > ceiling) {
+            state = state.copy(
+                message = app.getString(
+                    R.string.g_file_too_big,
+                    readableSize(bytes.size.toLong()),
+                    readableSize(ceiling.toLong()),
+                ),
+            )
+            return@background
+        }
         phone.sendFile(bytes.toHex(), mime, caption)
         refreshChatLocked()
     }
+
+    /** Bytes as a person reads them. */
+    private fun readableSize(bytes: Long): String = when {
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+        else -> "${bytes / 1024 / 1024} MB"
+    }
+
+    private fun objectCeiling(): Int? = runCatching {
+        JSONObject(state.status)
+            .optJSONObject("garden")
+            ?.optJSONObject("limits")
+            ?.optInt("max_object_bytes", 0)
+            ?.takeIf { it > 0 }
+    }.getOrNull()
 
     private fun fileName(uri: android.net.Uri): String {
         val cursor = app.contentResolver.query(uri, null, null, null, null) ?: return "file"
@@ -363,30 +360,15 @@ class GardenModel(
     fun readWallet() = background(quiet = true) {
         val here = runCatching { phone.walletExists() }.getOrDefault(false)
         val address = if (here) runCatching { phone.walletAddress() }.getOrNull().orEmpty() else ""
-        // The passphrase is the phone's, not a person's, so "is the wallet
-        // open" is a question this process can answer: ask the core to open
-        // the file with the Keystore secret. A file this phone cannot open -
-        // a Keystore reset, say - is a real state and the person has to hear
-        // it rather than watch every action fail one by one.
-        var unreadable: String? = null
-        val opens = if (here) {
-            runCatching { phone.walletOpen(seal.secret()) }
-                .onFailure { unreadable = it.message }
-                .isSuccess
-        } else {
-            false
-        }
         state = state.copy(
             walletExists = here,
             walletAddress = address,
             walletLoaded = true,
-            walletUnlocked = here && opens,
-            message = unreadable ?: state.message,
         )
     }
 
-    fun createWallet() = background {
-        val seed = phone.walletCreate(seal.secret())
+    fun createWallet(password: String) = background {
+        val seed = phone.walletCreate(password)
         state = state.copy(
             walletExists = true,
             walletAddress = seed.address,
@@ -396,9 +378,9 @@ class GardenModel(
         )
     }
 
-    fun restoreWallet(words: String) = background {
+    fun restoreWallet(words: String, password: String) = background {
         val normalized = GardenLogic.normalizeMnemonicWords(words).joinToString(" ")
-        val address = phone.walletRestore(normalized, seal.secret())
+        val address = phone.walletRestore(normalized, password)
         state = state.copy(
             walletExists = true,
             walletAddress = address,
@@ -408,35 +390,20 @@ class GardenModel(
         )
     }
 
+    fun unlockWallet(password: String) = background {
+        val address = phone.walletOpen(password)
+        state = state.copy(walletUnlocked = true, walletAddress = address)
+    }
+
+    fun lockWallet() {
+        state = state.copy(walletUnlocked = false)
+    }
+
     fun forgetMnemonic() {
         state = state.copy(mnemonic = emptyList())
     }
 
     fun wordCount(): Int = runCatching { phone.walletWordCount().toInt() }.getOrDefault(24)
-
-    /** What the next code is for: a Garden to join, or one person to talk to. */
-    var invitePurpose by mutableStateOf(GardenLogic.InvitePurpose.Garden)
-        private set
-
-    fun selectInvitePurpose(next: GardenLogic.InvitePurpose) {
-        invitePurpose = next
-    }
-
-    /**
-     * Ask for a new code, burning the one that was live.
-     *
-     * The screen calls this when a person presses "new code": the old digits
-     * stop being answered before the new ones exist, so nothing is ever live
-     * twice.
-     */
-    fun newCode() = background {
-        val opened = phone.newCode()
-        state = state.copy(
-            code = opened.code,
-            codeSecondsLeft = opened.secondsLeft.toLong(),
-            record = opened.record.ifBlank { state.record },
-        )
-    }
 
     fun openCode() = background {
         val opened = phone.openCode()
@@ -732,10 +699,6 @@ class GardenModel(
     companion object {
         private const val UI_PREFS = "budlum_garden_ui"
         private const val PREF_SKIN = "skin"
-
-        /** The floor coordinate this phone took. A place, not a secret. */
-        private const val PREF_SEAT_X = "seat_x"
-        private const val PREF_SEAT_Y = "seat_y"
         private const val FEED_LIMIT = 100u
         private val HEX = "0123456789abcdef".toCharArray()
     }
