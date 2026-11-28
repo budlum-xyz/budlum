@@ -42,6 +42,11 @@ impl MobileLightClient {
     /// Returns [`CheckpointVerifyError::MalformedHash`] if either anchor digest
     /// is not a canonical 64-character lowercase hex string.
     pub fn new(trusted: TrustedCheckpoint, chain_id: u64) -> Result<Self, CheckpointVerifyError> {
+        if chain_id == 0 {
+            return Err(CheckpointVerifyError::CertificateBinding(
+                "chain_id must be non-zero".into(),
+            ));
+        }
         trusted.validate()?;
         Ok(Self {
             trusted,
@@ -106,6 +111,16 @@ impl MobileLightClient {
     /// not advance, or [`CheckpointVerifyError::SetChanged`] if `verified.set_hash`
     /// differs from the trusted validator set.
     pub fn advance(&mut self, verified: &VerifiedCheckpoint) -> Result<(), CheckpointVerifyError> {
+        if !is_canonical_hash(&verified.block_hash) {
+            return Err(CheckpointVerifyError::MalformedHash(
+                verified.block_hash.clone(),
+            ));
+        }
+        if !is_canonical_hash(&verified.state_root) {
+            return Err(CheckpointVerifyError::MalformedHash(
+                verified.state_root.clone(),
+            ));
+        }
         if verified.height <= self.trusted.height {
             return Err(CheckpointVerifyError::NotForward {
                 trusted: self.trusted.height,
