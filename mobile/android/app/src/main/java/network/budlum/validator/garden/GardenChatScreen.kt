@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -68,7 +67,7 @@ fun ChatScreen(model: GardenModel) {
     val listState = rememberLazyListState()
     val picker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent(),
-    ) { uri -> if (uri != null) model.sendTextFrom(uri) }
+    ) { uri -> if (uri != null) model.sendFile(uri) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -258,8 +257,6 @@ private fun MessageProofDialog(
     val clipboard = LocalClipboardManager.current
     val haptic = LocalHapticFeedback.current
     var copiedLabel by remember { mutableStateOf(false) }
-    // The other half of B.U.D. 3: what crossed as text comes back as a QR code.
-    val asQr = rememberQrBitmap(line.text.orEmpty())
 
     Dialog(onDismissRequest = onDismiss) {
         Sheet(skin = skin) {
@@ -282,21 +279,6 @@ private fun MessageProofDialog(
                     )
                 }
                 Rule(skin = skin)
-                if (asQr != null) {
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Image(
-                            bitmap = asQr,
-                            contentDescription = stringResource(R.string.g_message_qr),
-                            modifier = Modifier.size(160.dp),
-                        )
-                        Label(stringResource(R.string.g_message_qr), skin = skin)
-                    }
-                    Rule(skin = skin)
-                }
                 Fact(
                     name = stringResource(R.string.g_block, line.height.toInt()),
                     value = line.who,

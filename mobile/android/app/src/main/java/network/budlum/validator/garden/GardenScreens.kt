@@ -376,18 +376,14 @@ fun GardenApp(
                     CodeJoinScreen(
                         model = model,
                         onJoined = {
-                            // A code opened for one person is a talk, not a
-                            // room: the seat is the same, the first screen is not.
-                            tab = if (model.state.dmPending) 0 else 1
-                            model.clearDm()
+                            tab = 1
                             step = Step.Garden
                         },
                     )
                     val seated = model.state.myKey.isNotEmpty() && model.state.seated
                     LaunchedEffect(seated) {
                         if (seated) {
-                            tab = if (model.state.dmPending) 0 else 1
-                            model.clearDm()
+                            tab = 1
                             step = Step.Garden
                         }
                     }

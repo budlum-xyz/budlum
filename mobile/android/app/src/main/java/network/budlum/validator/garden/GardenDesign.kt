@@ -101,7 +101,20 @@ data class Skin(
     val danger: Color,
     val isDark: Boolean,
 ) {
+    /** The mesh this ground lays down. */
+    fun tile(): Int = when {
+        isDark -> R.drawable.tile_ground
+        // The sage ground is the only painted one with a mesh of its own in the
+        // file, and it is named here by its measured value: inside this class
+        // `Sage` is the ground, not the ink.
+        behind.toArgb() == SAGE_GROUND -> R.drawable.tile_sage
+        else -> R.drawable.tile_page
+    }
+
     companion object {
+        /** `#98AE89`, the sage ground, as an Int for the mesh test above. */
+        private val SAGE_GROUND: Int = 0xFF98AE89.toInt()
+
         val Page = Skin(
             name = "page",
             behind = Color(0xFFFBFCFA),
@@ -244,6 +257,7 @@ internal val Passive = Color(0xFFD9D9D9)
 /** The cube tile, repeated across the viewport with smooth skin transitions. */
 @Composable
 fun CubeFloor(theme: Skin, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    val tile = ImageBitmap.imageResource(theme.tile())
     val animatedBg by animateColorAsState(
         targetValue = theme.behind,
         animationSpec = tween(GardenMotion.BASE_MS, easing = GardenMotion.Ease),
@@ -253,47 +267,29 @@ fun CubeFloor(theme: Skin, modifier: Modifier = Modifier, content: @Composable (
         modifier = modifier
             .fillMaxSize()
             .background(animatedBg)
-            .drawBehind { floorMesh(theme) },
+            .drawBehind { tileAcross(tile) },
     ) {
         content()
     }
 }
 
-/**
- * The mesh, drawn from the ground's own inks.
- *
- * The file carries three exported tiles, one per painted ground, so any ground
- * picked off the ring fell back to the page tile and the mesh stopped belonging
- * to the colour under it. Drawing the mesh instead of stamping a PNG means every
- * ground - the three named ones and all eighteen on the ring - lays down lines
- * and a mark that are made of its own rule and ink.
- */
-private fun DrawScope.floorMesh(ground: Skin) {
+/** Lay the tile edge to edge at its own size, the way the sheet does. */
+private fun DrawScope.tileAcross(tile: ImageBitmap) {
     val step = TILE.toPx()
     if (step <= 0f) return
-    val hairline = ground.rule.copy(alpha = 0.55f)
-    val mark = ground.ink.copy(alpha = 0.16f)
-    var y = step
+    var y = 0f
     while (y < size.height) {
-        drawLine(hairline, androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width, y), strokeWidth = 1f)
-        y += step
-    }
-    var x = step
-    while (x < size.width) {
-        drawLine(hairline, androidx.compose.ui.geometry.Offset(x, 0f), androidx.compose.ui.geometry.Offset(x, size.height), strokeWidth = 1f)
-        x += step
-    }
-    // The four-point mark the tile carries, at the centre of every second cell.
-    val arm = step * 0.10f
-    var cy = step * 1.5f
-    while (cy < size.height) {
-        var cx = step * 1.5f
-        while (cx < size.width) {
-            drawLine(mark, androidx.compose.ui.geometry.Offset(cx - arm, cy), androidx.compose.ui.geometry.Offset(cx + arm, cy), strokeWidth = 1f)
-            drawLine(mark, androidx.compose.ui.geometry.Offset(cx, cy - arm), androidx.compose.ui.geometry.Offset(cx, cy + arm), strokeWidth = 1f)
-            cx += step * 2f
+        var x = 0f
+        while (x < size.width) {
+            drawImage(
+                image = tile,
+                dstOffset = androidx.compose.ui.unit.IntOffset(x.toInt(), y.toInt()),
+                dstSize = androidx.compose.ui.unit.IntSize(step.toInt(), step.toInt()),
+                alpha = 0.52f,
+            )
+            x += step
         }
-        cy += step * 2f
+        y += step
     }
 }
 

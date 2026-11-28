@@ -206,8 +206,4 @@
     <string name="g_keys_setup">setup permissions battery notifications</string>
     <string name="g_keys_testnet">testnet faucet rpc balance</string>
     <string name="g_all_options">all options</string>
-    <string name="g_groups">Groups</string>
-    <string name="g_group_members">%1$d working as one</string>
-    <string name="g_text_only">Only text travels in the Garden</string>
-    <string name="g_message_qr">Read as a code</string>
 </resources>

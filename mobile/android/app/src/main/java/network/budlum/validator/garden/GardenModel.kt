@@ -91,8 +91,6 @@ data class GardenState(
     val dismissedClipboardInvite: String = "",
     /** The place on the floor this phone took, and with it its coordinate. */
     val seat: Cell? = null,
-    /** A code was opened for one person, so joining lands in the talk, not the room. */
-    val dmPending: Boolean = false,
 ) {
     val waitingCount: Int get() = people.count { it.waiting }
     val seated: Boolean get() = GardenLogic.isGardenSeated(status)
@@ -233,30 +231,20 @@ class GardenModel(
         }
     }
 
-    /**
-     * Send what a picked item *says*, not the item.
-     *
-     * B.U.D. 3 turns a QR code into text, stores the text, and turns it back into
-     * a QR code or into content on the other side. So the thing that crosses the
-     * Garden is text; a picker that hands over bytes is only useful for what
-     * those bytes read as. An item that is not text is refused rather than
-     * shipped as an unreadable blob.
-     */
-    fun sendTextFrom(uri: android.net.Uri) = background {
+    fun sendFile(uri: android.net.Uri) = background {
         val resolver = app.contentResolver
+        val mime = resolver.getType(uri) ?: "application/octet-stream"
         val caption = fileName(uri)
         val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
         if (bytes == null) {
             state = state.copy(message = app.getString(R.string.g_file_unreadable))
             return@background
         }
-        val text = runCatching { bytes.toString(Charsets.UTF_8) }.getOrNull()
-        if (text.isNullOrBlank() || text.any { it.code < 0x09 }) {
-            state = state.copy(message = app.getString(R.string.g_text_only))
-            return@background
-        }
-        val body = if (caption.isBlank() || text.contains(caption)) text else caption + "\n" + text
-        phone.send(body, "")
+        // No file-size ceiling is offered here. The screen has no control for
+        // one in the design file, and a number invented on this side would be a
+        // second source of truth next to the chain parameter: what the Garden
+        // accepts is the Garden's answer, and the core refuses what it refuses.
+        phone.sendFile(bytes.toHex(), mime, caption)
         refreshChatLocked()
     }
 
@@ -546,9 +534,6 @@ class GardenModel(
     /** Preview who is inviting and when the record expires before joining. */
     fun preview(record: String) {
         val trimmed = record.trim()
-        state = state.copy(
-            dmPending = GardenLogic.invitePurposeOf(trimmed) == GardenLogic.InvitePurpose.Person,
-        )
         if (trimmed.isEmpty()) {
             state = state.copy(preview = "", previewRecord = "")
             return
@@ -570,15 +555,10 @@ class GardenModel(
         }
     }
 
-    /** Whether the invite that brought us here was for one person. */
-    fun clearDm() {
-        if (state.dmPending) state = state.copy(dmPending = false)
-    }
-
     fun join(record: String, onSuccess: () -> Unit = {}) {
         if (!selfTestPassed()) return
         background(onSuccess = onSuccess) {
-            val answer = phone.join(GardenLogic.joinForm(record), name)
+            val answer = phone.join(record.trim(), name)
             state = state.copy(
                 status = answer.json,
                 preview = "",

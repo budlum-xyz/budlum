@@ -206,8 +206,4 @@
     <string name="g_keys_setup">hazirlik izin pil bildirim</string>
     <string name="g_keys_testnet">testnet musluk rpc bakiye</string>
     <string name="g_all_options">tüm seçenekler</string>
-    <string name="g_groups">Gruplar</string>
-    <string name="g_group_members">%1$d kişi birlikte</string>
-    <string name="g_text_only">Bahçede yalnızca metin taşınır</string>
-    <string name="g_message_qr">Kod olarak oku</string>
 </resources>

@@ -245,6 +245,7 @@ fun BlockField(
     // mesh is, not from where the glass is.
     var pan by remember { mutableStateOf(Offset.Zero) }
     val haptic = LocalHapticFeedback.current
+    val mark = ImageBitmap.imageResource(skin.tile())
 
     BoxWithConstraints(modifier = modifier) {
         val density = LocalDensity.current
@@ -311,17 +312,16 @@ fun BlockField(
                             size = Size(size.width + reach * 2, size.height + reach * 2),
                         )
                         drawRect(color = if (mine) skin.accentOnSurface else fillFor(skin, lifted))
-                        // The same mark the floor lays down, at the cube's own
-                        // scale: a plus at the centre of each half.
-                        val half = cubePx / SPAN
-                        val arm = half * 0.18f
-                        val ink = skin.ink.copy(alpha = 0.40f)
+                        val step = (cubePx / SPAN).toInt()
                         for (down in 0 until SPAN) {
                             for (across in 0 until SPAN) {
-                                val cx = (across + 0.5f) * half
-                                val cy = (down + 0.5f) * half
-                                drawLine(ink, Offset(cx - arm, cy), Offset(cx + arm, cy), strokeWidth = 1f)
-                                drawLine(ink, Offset(cx, cy - arm), Offset(cx, cy + arm), strokeWidth = 1f)
+                                drawImage(
+                                    image = mark,
+                                    dstOffset = IntOffset(across * step, down * step),
+                                    dstSize = IntSize(step, step),
+                                    colorFilter = ColorFilter.tint(skin.ink.copy(alpha = 0.40f)),
+                                    alpha = 0.45f,
+                                )
                             }
                         }
                     }
