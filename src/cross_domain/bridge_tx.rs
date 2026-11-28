@@ -408,6 +408,20 @@ pub fn mint_from_verified_event(
         source_domain,
     )
     .map_err(|e| e.to_string())?;
+    // The event-proven mint is this chain's supply-creating door, and the
+    // circuit alone does not answer for it: `enforce_sentry_circuit_clear`
+    // reads a stored escalation, while `observe` returns a circuit to `Open`
+    // after a healthy report and nothing lowers the global alarm. A domain can
+    // therefore read clear on the stored circuit while `crqc_alarm_active()`
+    // together with its `ClassicalOnly` posture says it may not settle - and
+    // `check_certificate_value_gate` refuses exactly that move through
+    // `enforce_quantum_posture`. Same predicate, one place, so the two doors
+    // cannot disagree about one bridge mint.
+    crate::settlement::finality_gate::enforce_quantum_posture(
+        &state.bridge_state.consensus_sentry,
+        source_domain,
+    )
+    .map_err(|e| e.to_string())?;
     ensure_domain_class_intake(state, source_domain, source_height)?;
     // A finalized proof may arrive out of order and be staged in the
     // commitment registry; bridge verification may not consume it until the
@@ -2080,6 +2094,200 @@ mod tests {
         assert!(
             err.contains("conflicting") || err.contains("ambiguous"),
             "got: {err}"
+        );
+    }
+
+    /// The event-proven mint asks the posture predicate the value gate asks, so
+    /// an active CRQC alarm refuses a `ClassicalOnly` source domain in block,
+    /// not only on the route-query path.
+    ///
+    /// Measured before this test existed: `mint_from_verified_event` asked
+    /// `enforce_domain_not_refuted` and `enforce_sentry_circuit_clear` and
+    /// nothing else, while `check_certificate_value_gate` - the door the CLI and
+    /// the RPC route query use - also asks `enforce_quantum_posture`. One alarm,
+    /// two answers.
+    ///
+    /// The live state machine makes the two guards agree by construction *while
+    /// its own code runs*: `observe` re-freezes a `ClassicalOnly` domain under an
+    /// active alarm and `recover_after_governance_cooldown` refuses to reopen
+    /// one. That agreement is a property of two functions, not of the type.
+    /// `ConsensusSentry` is `Serialize`/`Deserialize` and its audit root is
+    /// committed into the account state root, so the state every door reads can
+    /// also arrive by restore. This test builds that state directly - alarm up,
+    /// posture `ClassicalOnly`, circuit `Open` - which is exactly what a restore
+    /// of a snapshot taken before the alarm produced, and asserts the mint still
+    /// refuses. The circuit-only door admits it; the posture half is the honest
+    /// witness and does not depend on which function wrote the state.
+    #[test]
+    fn mint_refuses_a_classical_only_source_domain_under_a_crqc_alarm() {
+        use crate::cross_domain::event_tree::DomainEventTree;
+        use crate::cross_domain::external::sentry::{
+            ConsensusSentry, DomainQuantumPosture, SentryCircuitState, SentryDomainPolicy,
+            SentryObservation, DEFAULT_MAX_RESTAKE_SHARE_PPM,
+        };
+        use crate::domain::types::DomainCommitment;
+        use crate::registry::role::roles::RELAYER;
+        use crate::settlement::domains::accept_verified_commitment;
+        use crate::settlement::finality_gate::{
+            enforce_quantum_posture, enforce_sentry_circuit_clear, ValueGate, ValueGateRefusal,
+        };
+
+        let mut state = AccountState::new();
+        let d10 = default_domain(10, ConsensusKind::PoW, 45262, POW_HEADER_CHAIN_ADAPTER, 1);
+        let d11 = default_domain(11, ConsensusKind::PoW, 45263, POW_HEADER_CHAIN_ADAPTER, 1);
+        crate::settlement::domains::register_domain(&mut state, d10).unwrap();
+        crate::settlement::domains::register_domain(&mut state, d11).unwrap();
+        register_asset(&mut state, ASSET, 10).unwrap();
+
+        let owner = Address::from([0x61; 32]);
+        let recipient = Address::from([0x62; 32]);
+        let carrier = Address::from([0x63; 32]);
+        let min_stake = state.registry.params().min_stake;
+        state.add_balance(&owner, 10_000 + FEE);
+        state.add_balance(&carrier, min_stake.saturating_add(1_000));
+        state
+            .registry
+            .register(carrier, RELAYER, min_stake, 0)
+            .unwrap();
+
+        let locked = lock(
+            &mut state,
+            owner,
+            &LockRequest {
+                source_domain: 10,
+                target_domain: 11,
+                source_height: 1,
+                event_index: 0,
+                asset_id: ASSET,
+                recipient,
+                amount: 1_000,
+                expiry_height: 500,
+            },
+            FEE,
+            1,
+        )
+        .unwrap();
+        let lock_event = locked.1;
+
+        let mut tree = DomainEventTree::new();
+        tree.push(lock_event.clone());
+        let proof = tree.proof(0).unwrap();
+        let block_hash = [0xD3u8; 32];
+        accept_verified_commitment(
+            &mut state,
+            DomainCommitment {
+                domain_id: 10,
+                domain_height: 1,
+                domain_block_hash: block_hash,
+                parent_domain_block_hash: [0u8; 32],
+                state_root: [0x13u8; 32],
+                tx_root: [0u8; 32],
+                event_root: tree.root(),
+                validator_set_hash: [0u8; 32],
+                consensus_kind: ConsensusKind::PoW,
+                finality_proof_hash: [0x34u8; 32],
+                timestamp_ms: 1_000,
+                sequence: 0,
+                producer: None,
+                state_updates: std::collections::BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+        // The sentry state a restore hands the doors: an alarm that went up
+        // after this domain was last observed, and a circuit that still reads
+        // `Open` because nothing re-evaluated it since. Built through the public
+        // state, not through a private setter, because `ConsensusSentry` is
+        // serialized into the committed account state root - this is a state a
+        // node can be holding, not a state the type can forbid.
+        let key = ConsensusSentry::domain_key_for_id(10);
+        let restored = {
+            let mut sentry = ConsensusSentry::new();
+            sentry
+                .register_domain(
+                    key.clone(),
+                    SentryDomainPolicy {
+                        consensus_family: "pow-header-chain-v1".into(),
+                        quantum_posture: DomainQuantumPosture::ClassicalOnly,
+                        max_finality_stall_secs: 3_600,
+                        min_trusting_window_secs: 600,
+                        max_reorg_blocks: 6,
+                        max_consecutive_proof_failures: 3,
+                        max_restake_share_ppm: DEFAULT_MAX_RESTAKE_SHARE_PPM,
+                        recovery_cooldown_secs: 3_600,
+                    },
+                )
+                .unwrap();
+            sentry
+                .observe(&SentryObservation {
+                    domain_id: key.clone(),
+                    height: 1,
+                    state_root: [0x13u8; 32],
+                    observed_at_secs: 1_000,
+                    remaining_trust_window_secs: None,
+                    restake_share_ppm: 0,
+                })
+                .expect("a healthy attestation");
+            // One pass through the wire form the node persists, carrying the two
+            // fields a restore taken before the alarm would hand back.
+            let mut wire = serde_json::to_value(&sentry).expect("the sentry is serializable");
+            wire["crqc_alarm_active"] = serde_json::json!(true);
+            wire["domains"][&key]["circuit"] = serde_json::json!("Open");
+            serde_json::from_value::<ConsensusSentry>(wire)
+                .expect("the restored state is one the wire form can carry")
+        };
+        assert!(
+            restored.crqc_alarm_active(),
+            "the restored sentry must carry the alarm"
+        );
+        let watched = restored
+            .domain(&key)
+            .expect("the restored sentry must watch the source domain");
+        assert!(matches!(watched.circuit, SentryCircuitState::Open));
+        assert_eq!(
+            watched.policy.quantum_posture,
+            DomainQuantumPosture::ClassicalOnly
+        );
+        state.bridge_state.consensus_sentry = restored;
+
+        // The circuit-only door is what the mint used to trust. It reads clear
+        // here, so a door that asked only this would credit the recipient.
+        enforce_sentry_circuit_clear(
+            &state.bridge_state.consensus_sentry,
+            ValueGate::BridgeMint,
+            10,
+        )
+        .expect("the circuit reads clear; the posture must be what refuses");
+        assert_eq!(
+            enforce_quantum_posture(&state.bridge_state.consensus_sentry, 10),
+            Err(ValueGateRefusal::QuantumPostureUnfit {
+                domain_id: 10,
+                posture: "ClassicalOnly".to_string(),
+            }),
+            "the posture predicate shared with the value gate must refuse here"
+        );
+
+        let err = execute_bridge_tx(
+            &mut state,
+            &ctx(carrier),
+            &BridgeTx::Mint(Box::new(ProvenBridgeEvent {
+                domain: 10,
+                height: 1,
+                sequence: 0,
+                expected_block_hash: block_hash,
+                event: lock_event,
+                proof,
+            })),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("quantum"),
+            "the refusal must be the posture, got: {err}"
+        );
+        assert_eq!(
+            state.get_balance(&recipient),
+            0,
+            "a refused mint must not credit the recipient"
         );
     }
 }
