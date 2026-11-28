@@ -89,7 +89,7 @@ pub struct AlarmEntry {
 }
 
 /// The chained alarm log. `Default` gives an empty log at the genesis link.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AlarmLog {
     entries: Vec<AlarmEntry>,
     /// The latest link, or `None` when the log is empty.
@@ -100,12 +100,20 @@ pub struct AlarmLog {
     next_seq: u64,
 }
 
+impl Default for AlarmLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AlarmLog {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            entries: Vec::new(),
+            head: None,
             window_anchor: genesis_link(),
-            ..Self::default()
+            next_seq: 0,
         }
     }
 
@@ -124,6 +132,7 @@ impl AlarmLog {
         hasher.update(prev);
         hasher.update(report_sig);
         hasher.update([kind.as_byte()]);
+        hasher.update((detail.len() as u64).to_le_bytes());
         hasher.update(detail.as_bytes());
         hasher.update(seq.to_le_bytes());
         hasher.finalize().into()
@@ -154,12 +163,21 @@ impl AlarmLog {
     }
 
     /// Walk the chain and recompute every link: `true` only when the retained
-    /// window is contiguous from the window anchor and no entry was altered.
+    /// window is contiguous from the window anchor, `head` matches the tip,
+    /// entries are within capacity with distinct report signatures, and no
+    /// entry was altered.
     #[must_use]
     pub fn verify_integrity(&self) -> bool {
+        if self.entries.len() > MAX_ALARM_LOG_ENTRIES {
+            return false;
+        }
         let mut expected_prev = self.window_anchor;
         let mut prev_seq: Option<u64> = None;
+        let mut seen_sigs = std::collections::BTreeSet::new();
         for entry in &self.entries {
+            if !seen_sigs.insert(entry.report_sig) {
+                return false;
+            }
             if entry.prev_link != expected_prev {
                 return false;
             }
@@ -181,7 +199,7 @@ impl AlarmLog {
             expected_prev = entry.link;
             prev_seq = Some(entry.seq);
         }
-        true
+        self.head == self.entries.last().map(|e| e.link)
     }
 
     /// The log's root: a single digest over the window anchor, the head, and
