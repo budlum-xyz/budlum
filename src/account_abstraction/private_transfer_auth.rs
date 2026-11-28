@@ -146,6 +146,12 @@ impl PrivateTransferAuth {
     ///
     /// [`PrivateTransferError::NullifierAlreadySpent`].
     pub fn verify_nullifier(&self, spent: &BTreeSet<[u8; 32]>) -> Result<(), PrivateTransferError> {
+        if bool::from(subtle::ConstantTimeEq::ct_eq(
+            self.nullifier.as_slice(),
+            &[0u8; 32],
+        )) {
+            return Err(PrivateTransferError::InvalidAuthorization);
+        }
         if spent.contains(&self.nullifier) {
             return Err(PrivateTransferError::NullifierAlreadySpent);
         }
@@ -162,7 +168,20 @@ impl PrivateTransferAuth {
         if self.amount == 0 {
             return Err(PrivateTransferError::ZeroAmount);
         }
-        if transfer_commitment(&self.nullifier, self.amount, blinding) != self.commitment {
+        if bool::from(subtle::ConstantTimeEq::ct_eq(
+            blinding.as_slice(),
+            &[0u8; 32],
+        )) || bool::from(subtle::ConstantTimeEq::ct_eq(
+            self.commitment.as_slice(),
+            &[0u8; 32],
+        )) {
+            return Err(PrivateTransferError::CommitmentMismatch);
+        }
+        let expected = transfer_commitment(&self.nullifier, self.amount, blinding);
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            expected.as_slice(),
+            self.commitment.as_slice(),
+        )) {
             return Err(PrivateTransferError::CommitmentMismatch);
         }
         Ok(())

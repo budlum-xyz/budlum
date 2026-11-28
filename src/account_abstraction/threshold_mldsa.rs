@@ -166,6 +166,14 @@ impl MultisigPolicy {
                 count: owners.len(),
             });
         }
+        if owners.iter().any(|pk| {
+            bool::from(subtle::ConstantTimeEq::ct_eq(
+                pk.as_slice(),
+                &[0u8; ML_DSA_87_PUBLIC_KEY_LEN],
+            ))
+        }) {
+            return Err(ThresholdError::NoOwners);
+        }
         let mut sorted = owners.clone();
         sorted.sort_unstable();
         let before = sorted.len();
@@ -229,6 +237,17 @@ impl MultisigPolicy {
         message: &[u8],
         signatures: &[OwnerSignature],
     ) -> Result<(), ThresholdError> {
+        if signatures.len() < self.threshold {
+            return Err(ThresholdError::ThresholdNotMet {
+                valid: signatures.len(),
+                threshold: self.threshold,
+            });
+        }
+        if signatures.len() > self.owners.len() {
+            return Err(ThresholdError::TooManyOwners {
+                count: signatures.len(),
+            });
+        }
         let mut seen: Vec<&[u8; ML_DSA_87_PUBLIC_KEY_LEN]> = Vec::with_capacity(signatures.len());
         for (index, entry) in signatures.iter().enumerate() {
             if !self.owners.contains(&entry.public_key) {
@@ -237,6 +256,9 @@ impl MultisigPolicy {
             if seen.contains(&&entry.public_key) {
                 return Err(ThresholdError::RepeatedSigner { index });
             }
+            seen.push(&entry.public_key);
+        }
+        for (index, entry) in signatures.iter().enumerate() {
             verify_ml_dsa_87_signature_in(
                 registry,
                 crate::crypto::ctx::TX_V6,
@@ -245,13 +267,6 @@ impl MultisigPolicy {
                 &entry.public_key,
             )
             .map_err(|_| ThresholdError::InvalidSignature { index })?;
-            seen.push(&entry.public_key);
-        }
-        if seen.len() < self.threshold {
-            return Err(ThresholdError::ThresholdNotMet {
-                valid: seen.len(),
-                threshold: self.threshold,
-            });
         }
         Ok(())
     }
