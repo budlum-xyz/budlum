@@ -66,6 +66,9 @@ pub mod rpc;
 mod tee;
 /// V5 transfers the node accepts, and the V7 composite transfer.
 pub mod transfer;
+/// Universal payment intents, solver quotes, receipts, light-client unified
+/// balance proofs, remote-account derivation, and `.bud` lookalike safety.
+pub mod universal_payment;
 /// The V3 wallet: 24 words, SHAKE256 branches, Address V3.
 pub mod wallet_v3;
 
@@ -126,6 +129,8 @@ pub enum WalletError {
     TeeUnavailable(String),
     /// A private transfer was requested while note privacy is off.
     NotePrivacyDisabled,
+    /// Universal payment intent, quote, receipt, or light-client proof failure.
+    UniversalPayment(String),
 }
 
 impl std::fmt::Display for WalletError {
@@ -155,6 +160,7 @@ impl std::fmt::Display for WalletError {
                 f,
                 "note privacy disabled - enable WalletPrivacyConfig::note_privacy_enabled"
             ),
+            WalletError::UniversalPayment(m) => write!(f, "universal payment error: {m}"),
         }
     }
 }
@@ -947,6 +953,34 @@ pub mod uniffi_bindings {
     ) -> Result<String, String> {
         crate::bns::resolve_bns(name, answers, headers).map(|v| v.to_json())
     }
+
+    /// Deterministically derive a remote-account address hex string for `caip2`.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on invalid CAIP-2 identifiers or zero owner addresses.
+    /// exposed for: the wallet crate's SDK surface - mobile hosts call this via UniFFI.
+    pub fn derive_remote_account_address_hex(
+        caip2: &str,
+        owner: &crate::BudlumAddress,
+        salt: &[u8; 32],
+    ) -> Result<String, String> {
+        crate::universal_payment::derive_remote_account_address(caip2, owner, salt)
+            .map(hex::encode)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Parse a `budlum:pay?...` URI and validate address-bar safety fail-closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the strict validation error if the URI is malformed or unsafe.
+    /// exposed for: the wallet crate's SDK surface - mobile hosts call this via UniFFI.
+    pub fn parse_payment_request_uri(
+        uri: &str,
+    ) -> Result<crate::universal_payment::PaymentRequest, String> {
+        crate::universal_payment::PaymentRequest::parse_uri(uri).map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(feature = "wasm")]
@@ -1426,6 +1460,100 @@ impl Wallet {
         signature: &SignatureBytes,
     ) -> bool {
         verify_signature(public_key, ctx, message, signature)
+    }
+
+    /// Sign a universal payment intent with ML-DSA-87 under `CROSS_DOMAIN_V1`.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed if the intent is invalid or its `payer` does not match this wallet.
+    /// exposed for: the wallet crate's SDK surface - mobile, browser, and CLI hosts call this directly.
+    pub fn sign_payment_intent(
+        &self,
+        intent: universal_payment::UniversalPaymentIntent,
+    ) -> Result<universal_payment::SignedPaymentIntent, WalletError> {
+        intent
+            .validate()
+            .map_err(|e| WalletError::UniversalPayment(e.to_string()))?;
+        if intent.payer != self.address() {
+            return Err(WalletError::UniversalPayment(
+                "intent.payer does not match signing wallet address".into(),
+            ));
+        }
+        let digest = intent.signing_digest();
+        let signature = self.sign_for(crypto::ctx::CROSS_DOMAIN_V1, &digest);
+        Ok(universal_payment::SignedPaymentIntent {
+            intent,
+            payer_public_key: self.public_key(),
+            signature,
+        })
+    }
+
+    /// Sign a binding solver quote with ML-DSA-87 under `CROSS_DOMAIN_V1`.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed if the quote is invalid or its `solver` does not match this wallet.
+    /// exposed for: the wallet crate's SDK surface - solver and wallet SDK hosts call this directly.
+    pub fn sign_solver_quote(
+        &self,
+        quote: universal_payment::SolverQuote,
+    ) -> Result<universal_payment::SignedSolverQuote, WalletError> {
+        quote
+            .validate()
+            .map_err(|e| WalletError::UniversalPayment(e.to_string()))?;
+        if quote.solver != self.address() {
+            return Err(WalletError::UniversalPayment(
+                "quote.solver does not match signing wallet address".into(),
+            ));
+        }
+        let digest = quote.signing_digest();
+        let signature = self.sign_for(crypto::ctx::CROSS_DOMAIN_V1, &digest);
+        Ok(universal_payment::SignedSolverQuote {
+            quote,
+            solver_public_key: self.public_key(),
+            signature,
+        })
+    }
+
+    /// Deterministically derive this wallet's remote-account address on `caip2`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses invalid CAIP-2 identifiers.
+    /// exposed for: the wallet crate's SDK surface - mobile, browser, and CLI hosts call this directly.
+    pub fn derive_remote_account(
+        &self,
+        caip2: &str,
+        salt: &[u8; 32],
+    ) -> Result<[u8; 32], WalletError> {
+        universal_payment::derive_remote_account_address(caip2, &self.address(), salt)
+            .map_err(|e| WalletError::UniversalPayment(e.to_string()))
+    }
+
+    /// Verify a slice of untrusted RPC balance proofs against `headers` and
+    /// return a unified portfolio belonging exclusively to this wallet.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed if any proof belongs to another owner, fails Merkle
+    /// verification against `headers`, duplicates a location, or overflows.
+    /// exposed for: the wallet crate's SDK surface - mobile, browser, and CLI hosts call this directly.
+    pub fn verify_unified_portfolio<S: universal_payment::StateHeaderSource + ?Sized>(
+        &self,
+        proofs: &[universal_payment::BalanceProofBranch],
+        headers: &S,
+    ) -> Result<universal_payment::UnifiedPortfolio, WalletError> {
+        let me = self.address();
+        for proof in proofs {
+            if proof.owner != me {
+                return Err(WalletError::UniversalPayment(
+                    "balance proof owner does not match this wallet".into(),
+                ));
+            }
+        }
+        universal_payment::UnifiedPortfolio::from_verified_proofs(proofs, headers)
+            .map_err(|e| WalletError::UniversalPayment(e.to_string()))
     }
 
     /// Seed (32-byte ML-DSA-87 xi). Not part of the public API: the raw
