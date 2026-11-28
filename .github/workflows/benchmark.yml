@@ -6,7 +6,7 @@ on:
     # daily integration pull request into `main` does not - that path is
     # budgeted by `ci-pull-request-fanout-is-budgeted` and the evidence-window
     # owner dispatches this workflow on the wave head instead.
-    branches: [consensus-of-consensuses]
+    branches: [testnet, consensus-of-consensuses]
   workflow_dispatch:
   push:
     branches: [main]
