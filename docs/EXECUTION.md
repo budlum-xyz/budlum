@@ -110,7 +110,7 @@ STARK proving on every call.
 
 ## 8. WASM (CosmWasm ABI) and Cosmos Compatibility Gateway (`the implementation track`)
 
-- Out-of-process worker: `budlum-ee-wasm` (`execution/wasm/`, `wasmi = "=2.0.2"`),
+- Out-of-process worker: `budlum-ee-wasm` (`execution/wasm/`, `wasmi = "=2.0.3"`),
  floating-point instructions forbidden (`floats(false)`), 64 MiB linear-memory limit,
  IBC entry points and `StakingMsg` / `DistributionMsg` / `GovMsg` / `IbcMsg` refused.
 - Foreign transaction lane: `Foreign::Cosmos` (`src/execution/coordinator/foreign/cosmos.rs`),
