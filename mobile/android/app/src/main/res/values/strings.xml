@@ -5,13 +5,11 @@
     <string name="notif_status_template">Stored: %1$s | Last audit: %2$s | Net: %3$s</string>
     <string name="notif_boot_resume_title">Budlum Validator Duties Unavailable</string>
     <string name="notif_boot_resume_body">Validator duties are not connected yet. Audits are not running. Reopen the app to view its status.</string>
-    <string name="onboarding_disclosure">This build does not store or audit network content. Future validators may store erasure-coded shares, and sealed content must remain end-to-end encrypted. Faucet requests may perform bounded anti-bot proof of work, not block mining.</string>
     <string name="security_tradeoff_note">Owner spend, staking, rotation and unbonding are unavailable. This phone holds a wallet and can sign with it, but no Keystore-backed biometric or PIN authorization guards that signature yet. Operator and BLS key wrapping alone does not make validator duties operational.</string>
     <string name="action_faucet_request">Submit faucet request (100 BUD)</string>
-    <string name="validator_unavailable">Registering stake on the chain is not wired to this screen yet. The faucet sends test tokens to the address above; it does not create a stake.</string>
-    <string name="faucet_explanation">Enter the HTTPS origin of your testnet faucet and the 0x-prefixed 32-byte address of a wallet you control. This phone makes its own wallet, so the address above can be its own. Never type your twenty-four words into a faucet, here or anywhere else. A submitted transfer is not a confirmed balance. The faucet may limit requests by address and IP.</string>
     <string name="faucet_endpoint">Faucet HTTPS origin (https://faucet.your-domain)</string>
-    <string name="faucet_wallet_address">Your wallet address (0x…)</string>
+    <string name="faucet_own_wallet">This phone's own wallet: %1$s</string>
+    <string name="faucet_no_wallet">This phone holds no wallet yet, so there is nowhere to send test tokens. Make one first.</string>
     <string name="faucet_pending">Solving the faucet challenge and submitting request…</string>
     <string name="faucet_submitted">Transfer submitted, not yet confirmed. Check the transaction hash in a chain explorer before assuming any funds are available:</string>
     <string name="faucet_invalid_endpoint">Enter a valid HTTPS faucet origin, without a path, query or credentials.</string>
@@ -23,7 +21,6 @@
     <string name="faucet_rejected">Faucet rejected the request or its proof. Check the endpoint and wallet address, then wait before retrying.</string>
     <string name="faucet_network_error">Request or reply failed. A transfer may still have been submitted; check your wallet before retrying.</string>
     <string name="faucet_invalid_receipt">Faucet sent an invalid receipt. No balance was credited; check your wallet independently.</string>
-    <string name="balance_explanation">Read-only account lookup. Enter a trusted testnet RPC HTTPS origin below, then refresh after a faucet request. A node-reported balance is not a verified account proof, finality, or proof you own the address; this app still cannot stake or spend.</string>
     <string name="balance_rpc_endpoint">Testnet RPC HTTPS origin (https://rpc.your-domain)</string>
     <string name="balance_refresh">Read RPC balance</string>
     <string name="balance_pending">Checking chain and reading account balance…</string>
@@ -101,7 +98,6 @@
     <string name="g_kept_here">kept here</string>
     <string name="g_checked">checked</string>
     <string name="g_sending">going</string>
-    <string name="g_file_too_big">that file is %1$s and this Garden was founded to take %2$s</string>
     <string name="g_parts_held">parts held</string>
     <string name="g_stored">stored</string>
     <string name="g_coded">objects coded</string>
@@ -111,9 +107,6 @@
     <string name="g_leave">leave</string>
     <!-- The phone's own wallet. One phone holds one. -->
     <string name="w_wallet">wallet</string>
-    <string name="w_what_a_wallet_is">Your wallet is twenty-four words. The phone seals them under a password and keeps nothing else; the words are the only way back in, and nobody can give them to you again.</string>
-    <string name="w_password_hint">a password only you know</string>
-    <string name="w_password_floor">At least eight characters. It seals the wallet on this phone; it is not sent anywhere.</string>
     <string name="w_make">Make my wallet</string>
     <string name="w_restore_instead">I already have words</string>
     <string name="w_restore">Put my wallet back</string>
@@ -132,7 +125,6 @@
     <string name="w_no_wallet_yet">no wallet yet</string>
     <string name="w_noted_go_on">Noted, go on</string>
     <string name="w_thats_it">That is it</string>
-    <string name="w_sign_in">Sign in</string>
     <string name="w_open_transfers">open transfers</string>
     <string name="w_you">You</string>
     <string name="w_tokens_none">0 tokens (0M BUD)</string>
@@ -200,18 +192,11 @@
     <string name="g_skin_page">Light</string>
     <string name="g_skin_sage">Sage</string>
     <string name="g_skin_ground">Dark</string>
-    <string name="w_show_password">show</string>
-    <string name="w_hide_password">hide</string>
-    <string name="w_password_ok">password length met</string>
-    <string name="w_password_short">%1$d more characters needed</string>
     <string name="w_word_count">%1$d / %2$d words</string>
     <string name="w_tap_to_reveal">tap to reveal recovery words</string>
     <string name="w_reveal_hint">Make sure nobody is looking at your screen. Screenshots are blocked here.</string>
     <string name="w_back_to_words">show words again</string>
     <string name="w_receive_qr">receive qr</string>
-    <string name="w_lock_wallet">lock</string>
-    <string name="w_unlocked_badge">unlocked</string>
-    <string name="w_locked_badge">locked</string>
     <string name="w_open_testnet">testnet faucet &amp; balance</string>
     <string name="w_address_copied">Address copied</string>
     <string name="b_testnet">testnet</string>

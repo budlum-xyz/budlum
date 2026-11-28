@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import network.budlum.validator.R
+import network.budlum.validator.core.DeviceWalletSeal
 import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.budlum_garden_ffi.GardenAnswer
@@ -108,6 +109,15 @@ class GardenModel(
     private val prefs = app.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
 
     private val phone: GardenPhone by lazy { GardenHolder.phone(app) }
+
+    /**
+     * The wallet's sealing passphrase, held by the Keystore rather than typed.
+     *
+     * The design file has no passphrase control on the wallet screens, so the
+     * phone supplies one: thirty-two random bytes wrapped by a non-exportable
+     * Keystore key. See [DeviceWalletSeal] for why this is not a weaker seal.
+     */
+    private val seal by lazy { DeviceWalletSeal(app) }
 
     var state by mutableStateOf(GardenState())
         private set
@@ -208,42 +218,13 @@ class GardenModel(
             state = state.copy(message = app.getString(R.string.g_file_unreadable))
             return@background
         }
-        // The object size ceiling is a chain parameter published in status;
-        // read it dynamically and let the core enforce when no status is present.
-        //
-        // It is the ceiling this Garden was founded with, and a genesis
-        // cannot be amended, so a Garden started before the ceiling rose
-        // keeps the one it has. Saying whose rule it is spares someone
-        // looking for the setting that would change it.
-        val ceiling = objectCeiling()
-        if (ceiling != null && bytes.size > ceiling) {
-            state = state.copy(
-                message = app.getString(
-                    R.string.g_file_too_big,
-                    readableSize(bytes.size.toLong()),
-                    readableSize(ceiling.toLong()),
-                ),
-            )
-            return@background
-        }
+        // No file-size ceiling is offered here. The screen has no control for
+        // one in the design file, and a number invented on this side would be a
+        // second source of truth next to the chain parameter: what the Garden
+        // accepts is the Garden's answer, and the core refuses what it refuses.
         phone.sendFile(bytes.toHex(), mime, caption)
         refreshChatLocked()
     }
-
-    /** Bytes as a person reads them. */
-    private fun readableSize(bytes: Long): String = when {
-        bytes < 1024 -> "$bytes B"
-        bytes < 1024 * 1024 -> "${bytes / 1024} KB"
-        else -> "${bytes / 1024 / 1024} MB"
-    }
-
-    private fun objectCeiling(): Int? = runCatching {
-        JSONObject(state.status)
-            .optJSONObject("garden")
-            ?.optJSONObject("limits")
-            ?.optInt("max_object_bytes", 0)
-            ?.takeIf { it > 0 }
-    }.getOrNull()
 
     private fun fileName(uri: android.net.Uri): String {
         val cursor = app.contentResolver.query(uri, null, null, null, null) ?: return "file"
@@ -360,15 +341,30 @@ class GardenModel(
     fun readWallet() = background(quiet = true) {
         val here = runCatching { phone.walletExists() }.getOrDefault(false)
         val address = if (here) runCatching { phone.walletAddress() }.getOrNull().orEmpty() else ""
+        // The passphrase is the phone's, not a person's, so "is the wallet
+        // open" is a question this process can answer: ask the core to open
+        // the file with the Keystore secret. A file this phone cannot open -
+        // a Keystore reset, say - is a real state and the person has to hear
+        // it rather than watch every action fail one by one.
+        var unreadable: String? = null
+        val opens = if (here) {
+            runCatching { phone.walletOpen(seal.secret()) }
+                .onFailure { unreadable = it.message }
+                .isSuccess
+        } else {
+            false
+        }
         state = state.copy(
             walletExists = here,
             walletAddress = address,
             walletLoaded = true,
+            walletUnlocked = here && opens,
+            message = unreadable ?: state.message,
         )
     }
 
-    fun createWallet(password: String) = background {
-        val seed = phone.walletCreate(password)
+    fun createWallet() = background {
+        val seed = phone.walletCreate(seal.secret())
         state = state.copy(
             walletExists = true,
             walletAddress = seed.address,
@@ -378,9 +374,9 @@ class GardenModel(
         )
     }
 
-    fun restoreWallet(words: String, password: String) = background {
+    fun restoreWallet(words: String) = background {
         val normalized = GardenLogic.normalizeMnemonicWords(words).joinToString(" ")
-        val address = phone.walletRestore(normalized, password)
+        val address = phone.walletRestore(normalized, seal.secret())
         state = state.copy(
             walletExists = true,
             walletAddress = address,
@@ -388,15 +384,6 @@ class GardenModel(
             walletUnlocked = true,
             walletLoaded = true,
         )
-    }
-
-    fun unlockWallet(password: String) = background {
-        val address = phone.walletOpen(password)
-        state = state.copy(walletUnlocked = true, walletAddress = address)
-    }
-
-    fun lockWallet() {
-        state = state.copy(walletUnlocked = false)
     }
 
     fun forgetMnemonic() {

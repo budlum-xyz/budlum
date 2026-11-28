@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -32,9 +31,6 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import network.budlum.validator.R
@@ -48,7 +44,6 @@ import network.budlum.validator.core.MobileConstants
  * masked until tapped, and verified by three positions before leaving memory.
  */
 
-private const val MIN_PASSWORD = 8
 private const val CHECKED_WORDS = 3
 
 /** No wallet yet: create a fresh 24-word wallet or restore an existing one. */
@@ -58,8 +53,6 @@ fun WalletStartScreen(
     onBack: () -> Unit,
     spotlight: List<SpotlightEntry> = emptyList(),
 ) {
-    var password by remember { mutableStateOf("") }
-    var showPassword by remember { mutableStateOf(false) }
     var words by remember { mutableStateOf("") }
     var restoring by remember { mutableStateOf(false) }
     val state = model.state
@@ -67,7 +60,6 @@ fun WalletStartScreen(
     val clipboard = LocalClipboardManager.current
     val expectedWords = remember { model.wordCount() }
     val typedWords = remember(words) { GardenLogic.normalizeMnemonicWords(words) }
-    val missingChars = (MIN_PASSWORD - password.length).coerceAtLeast(0)
 
     BudlumPage(
         skin = skin,
@@ -91,12 +83,6 @@ fun WalletStartScreen(
                             MobileConstants.TESTNET_CHAIN_ID.toString(),
                         skin = skin,
                     )
-                    Text(
-                        text = stringResource(R.string.w_what_a_wallet_is),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = skin.surfaceInk,
-                    )
-
                     if (restoring) {
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Row(
@@ -148,67 +134,12 @@ fun WalletStartScreen(
                         }
                     }
 
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { fresh ->
-                            password = fresh
-                            model.clearMessage()
-                        },
-                        placeholder = {
-                            Label(stringResource(R.string.w_password_hint), skin = skin)
-                        },
-                        singleLine = true,
-                        visualTransformation = if (showPassword) {
-                            VisualTransformation.None
-                        } else {
-                            PasswordVisualTransformation()
-                        },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        trailingIcon = {
-                            Box(
-                                modifier = Modifier
-                                    .clickable { showPassword = !showPassword }
-                                    .padding(8.dp),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                EyeIcon(visible = showPassword, tint = skin.surfaceMuted)
-                            }
-                        },
-                        colors = gardenTextFieldColors(skin),
-                        shape = RoundedCornerShape(CONTROL_RADIUS),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = if (missingChars == 0) {
-                                stringResource(R.string.w_password_ok)
-                            } else if (password.isNotEmpty()) {
-                                stringResource(R.string.w_password_short, missingChars)
-                            } else {
-                                stringResource(R.string.w_password_floor)
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (missingChars == 0) {
-                                skin.accentOnSurface
-                            } else {
-                                skin.surfaceMuted
-                            },
-                        )
-                    }
-
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         if (restoring) {
                             PillButton(
                                 text = stringResource(R.string.w_restore),
-                                onTap = { model.restoreWallet(words, password) },
-                                enabled = !state.busy &&
-                                    password.length >= MIN_PASSWORD &&
-                                    typedWords.size == expectedWords,
+                                onTap = { model.restoreWallet(words) },
+                                enabled = !state.busy && typedWords.size == expectedWords,
                                 skin = skin,
                                 primary = true,
                                 modifier = Modifier.fillMaxWidth(),
@@ -226,8 +157,8 @@ fun WalletStartScreen(
                         } else {
                             PillButton(
                                 text = stringResource(R.string.w_make),
-                                onTap = { model.createWallet(password) },
-                                enabled = !state.busy && password.length >= MIN_PASSWORD,
+                                onTap = { model.createWallet() },
+                                enabled = !state.busy,
                                 skin = skin,
                                 primary = true,
                                 modifier = Modifier.fillMaxWidth(),
@@ -450,8 +381,6 @@ fun WalletScreen(
     onTestnet: () -> Unit,
     spotlight: List<SpotlightEntry> = emptyList(),
 ) {
-    var password by remember { mutableStateOf("") }
-    var showPassword by remember { mutableStateOf(false) }
     var showQr by remember { mutableStateOf(false) }
     var copied by remember { mutableStateOf(false) }
     val state = model.state
@@ -480,12 +409,7 @@ fun WalletScreen(
                     name = stringResource(R.string.w_you),
                     address = GardenLogic.shortAddress(state.walletAddress),
                     under = stringResource(R.string.w_chain) + " " +
-                        MobileConstants.TESTNET_CHAIN_ID.toString() + " · " +
-                        if (state.walletUnlocked) {
-                            stringResource(R.string.w_unlocked_badge)
-                        } else {
-                            stringResource(R.string.w_locked_badge)
-                        },
+                        MobileConstants.TESTNET_CHAIN_ID.toString(),
                     skin = skin,
                     trailing = {
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -573,67 +497,13 @@ fun WalletScreen(
                     skin = skin,
                 )
 
-                if (!state.walletUnlocked) {
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { fresh ->
-                            password = fresh
-                            model.clearMessage()
-                        },
-                        placeholder = {
-                            Label(stringResource(R.string.w_password_hint), skin = skin)
-                        },
-                        singleLine = true,
-                        visualTransformation = if (showPassword) {
-                            VisualTransformation.None
-                        } else {
-                            PasswordVisualTransformation()
-                        },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        trailingIcon = {
-                            Box(
-                                modifier = Modifier
-                                    .clickable { showPassword = !showPassword }
-                                    .padding(8.dp),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                EyeIcon(visible = showPassword, tint = skin.surfaceMuted)
-                            }
-                        },
-                        colors = gardenTextFieldColors(skin),
-                        shape = RoundedCornerShape(CONTROL_RADIUS),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    PillButton(
-                        text = stringResource(R.string.w_sign_in),
-                        onTap = {
-                            model.unlockWallet(password)
-                            password = ""
-                        },
-                        enabled = !state.busy && password.isNotEmpty(),
-                        skin = skin,
-                        primary = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                } else {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        PillButton(
-                            text = stringResource(R.string.w_open_testnet),
-                            onTap = onTestnet,
-                            skin = skin,
-                            primary = true,
-                            modifier = Modifier.weight(1f),
-                        )
-                        PillButton(
-                            text = stringResource(R.string.w_lock_wallet),
-                            onTap = { model.lockWallet() },
-                            skin = skin,
-                        )
-                    }
-                }
+                PillButton(
+                    text = stringResource(R.string.w_open_testnet),
+                    onTap = onTestnet,
+                    skin = skin,
+                    primary = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
 
                 if (state.message.isNotEmpty()) {
                     Text(
