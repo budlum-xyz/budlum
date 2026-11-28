@@ -93,6 +93,9 @@ pub(crate) fn check_signature_list(signatures: &[AnchorSignature]) -> Result<(),
         });
     }
     for (i, sig) in signatures.iter().enumerate() {
+        if sig.signature.is_empty() {
+            return Err(AnchorError::InvalidSignature);
+        }
         if signatures
             .iter()
             .take(i)
@@ -108,6 +111,21 @@ pub(crate) fn check_signature_list(signatures: &[AnchorSignature]) -> Result<(),
 /// verified: bounded list, the chain, and the key epoch (an anchor
 /// from a rotated-out epoch is dead on arrival).
 fn precheck(anchor: &PqAnchor, ledger: &AnchorKeyLedger) -> Result<(), AnchorError> {
+    if anchor.chain_id == 0 {
+        return Err(AnchorError::WrongChain {
+            expected: ledger.chain_id,
+            got: 0,
+        });
+    }
+    if anchor.height == 0 {
+        return Err(AnchorError::Ledger("anchor height must be non-zero"));
+    }
+    if anchor.key_epoch == 0 {
+        return Err(AnchorError::StaleAnchorEpoch {
+            anchor_epoch: 0,
+            current_epoch: ledger.key_epoch,
+        });
+    }
     check_signature_list(&anchor.signatures)?;
     if bool::from(anchor.aggregate_root.ct_eq(&[0u8; 32])) {
         return Err(AnchorError::ZeroDigest {

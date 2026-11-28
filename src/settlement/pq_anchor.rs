@@ -55,12 +55,11 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
 use super::cold_quorum::{verify_quorum, DeviceSignature, QuorumError};
-use super::cold_wallet::{ColdWalletState, RotationError};
+use super::cold_wallet::{ColdWalletState, RotationError, MAX_ROTATION_REASON_BYTES};
 use crate::consensus::merkle_tree::{combine_sha3, merkle_root, promote_sha3};
 use crate::crypto::facts::QuantumClass;
 use crate::domain::types::ConsensusKind;
 
-#[cfg(test)]
 pub(crate) use super::pq_anchor_verify::check_signature_list;
 pub use super::pq_anchor_verify::{
     verify_anchor_full, verify_anchor_leaf_light, verify_anchor_light, MAX_ANCHOR_MERKLE_DEPTH,
@@ -712,6 +711,21 @@ pub fn assemble_anchor(
     key_epoch: u32,
     signers: &[&dyn AnchorSigner],
 ) -> Result<PqAnchor, AnchorError> {
+    if chain_id == 0 {
+        return Err(AnchorError::WrongChain {
+            expected: 1,
+            got: 0,
+        });
+    }
+    if height == 0 {
+        return Err(AnchorError::Ledger("anchor height must be non-zero"));
+    }
+    if key_epoch == 0 {
+        return Err(AnchorError::StaleAnchorEpoch {
+            anchor_epoch: 0,
+            current_epoch: 1,
+        });
+    }
     let (stark_root, crossdomain_root) = roots;
     {
         use subtle::ConstantTimeEq;
@@ -751,7 +765,19 @@ pub fn assemble_anchor(
             return Err(AnchorError::DuplicateSignature);
         }
         match signer.sign(&payload) {
-            Ok(signature) => anchor.signatures.push(signature),
+            Ok(signature) => {
+                if signature.key_index != signer.key_index() || signature.signature.is_empty() {
+                    return Err(AnchorError::InvalidSignature);
+                }
+                if anchor
+                    .signatures
+                    .iter()
+                    .any(|s| s.key_index == signature.key_index)
+                {
+                    return Err(AnchorError::DuplicateSignature);
+                }
+                anchor.signatures.push(signature);
+            }
             Err(err) => last_refusal = Some(err),
         }
     }
@@ -821,6 +847,48 @@ pub fn build_anchor_for_height(
 ///
 /// [`AnchorError::EmissionIo`] naming the stage that failed.
 pub fn append_anchor_log(log_path: &std::path::Path, anchor: &PqAnchor) -> Result<(), AnchorError> {
+    use subtle::ConstantTimeEq;
+    if anchor.chain_id == 0 {
+        return Err(AnchorError::WrongChain {
+            expected: 1,
+            got: 0,
+        });
+    }
+    if anchor.height == 0 {
+        return Err(AnchorError::Ledger("anchor height must be non-zero"));
+    }
+    if anchor.key_epoch == 0 {
+        return Err(AnchorError::StaleAnchorEpoch {
+            anchor_epoch: 0,
+            current_epoch: 1,
+        });
+    }
+    if bool::from(anchor.aggregate_root.ct_eq(&[0u8; 32])) {
+        return Err(AnchorError::ZeroDigest {
+            field: "aggregate_root",
+        });
+    }
+    if let Some(sr) = anchor.stark_root.as_ref() {
+        if bool::from(sr.ct_eq(&[0u8; 32])) {
+            return Err(AnchorError::ZeroDigest {
+                field: "stark_root",
+            });
+        }
+    }
+    if let Some(cr) = anchor.crossdomain_root.as_ref() {
+        if bool::from(cr.ct_eq(&[0u8; 32])) {
+            return Err(AnchorError::ZeroDigest {
+                field: "crossdomain_root",
+            });
+        }
+    }
+    check_signature_list(&anchor.signatures)?;
+    if anchor.signatures.len() < super::anchor_ledger::ANCHOR_THRESHOLD {
+        return Err(AnchorError::ThresholdNotReached {
+            required: super::anchor_ledger::ANCHOR_THRESHOLD,
+            valid: anchor.signatures.len(),
+        });
+    }
     let line =
         serde_json::to_string(anchor).map_err(|_| AnchorError::EmissionIo("json serialize"))?;
     use std::io::Write as _;
@@ -885,6 +953,20 @@ pub fn rotate_anchor_key_with_committee(
     reason: &str,
     certificates: &[DeviceSignature],
 ) -> Result<u32, AnchorError> {
+    // Cheap deterministic bounds run before any 29,792-byte SLH-DSA-SHAKE-256s
+    // hypertree verification so malformed emergency requests burn zero hash CPU.
+    if at_height == 0 || reason.trim().is_empty() {
+        return Err(AnchorError::Rotation(RotationError::EmptyReason));
+    }
+    if reason.len() > MAX_ROTATION_REASON_BYTES {
+        return Err(AnchorError::Rotation(RotationError::ReasonTooLong {
+            bytes: reason.len(),
+            maximum: MAX_ROTATION_REASON_BYTES,
+        }));
+    }
+    if state.key_epoch == u32::MAX {
+        return Err(AnchorError::Rotation(RotationError::EpochExhausted));
+    }
     // S2: the committee comes from the wallet's pinned state, never from
     // the caller.
     if state.trusted_devices.len() != state.policy.device_count as usize {
@@ -1585,5 +1667,101 @@ mod tests {
                 assert!(verify_anchor_leaf_light(&anchor, &ledger, &extra).is_err());
             }
         }
+    }
+
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn assemble_log_verify_and_committee_rotation_enforce_fail_closed_invariants() {
+        use crate::settlement::anchor_ledger::test_support;
+
+        struct SpoofedSlotSigner {
+            advertised_slot: u8,
+            inner: SoftwareMlDsa87Signer,
+        }
+        impl AnchorSigner for SpoofedSlotSigner {
+            fn backend(&self) -> SignerBackend {
+                SignerBackend::Software
+            }
+            fn key_index(&self) -> u8 {
+                self.advertised_slot
+            }
+            fn sign(&self, payload: &[u8]) -> Result<AnchorSignature, AnchorError> {
+                self.inner.sign(payload)
+            }
+        }
+
+        let s0 = SoftwareMlDsa87Signer::from_seed(0, &[0x51; 32]);
+        let s1 = SoftwareMlDsa87Signer::from_seed(1, &[0x52; 32]);
+        let spoof = SpoofedSlotSigner {
+            advertised_slot: 1,
+            inner: SoftwareMlDsa87Signer::from_seed(0, &[0x51; 32]),
+        };
+        let leaves = [[0x42u8; 32]];
+        assert_eq!(
+            assemble_anchor(45_261, 360, &leaves, (None, None), 1, &[&s0, &spoof])
+                .unwrap_err()
+                .kind(),
+            "anchor-invalid-signature"
+        );
+        assert!(assemble_anchor(0, 360, &leaves, (None, None), 1, &[&s0, &s1]).is_err());
+        assert!(assemble_anchor(45_261, 0, &leaves, (None, None), 1, &[&s0, &s1]).is_err());
+        assert!(assemble_anchor(45_261, 360, &leaves, (None, None), 0, &[&s0, &s1]).is_err());
+
+        let ledger = test_support::software_ledger(CHAIN, 1);
+        let sig0 = test_support::signer(0);
+        let sig1 = test_support::signer(1);
+        let valid_anchor = assemble_anchor(
+            ledger.chain_id,
+            360,
+            &leaves,
+            (None, None),
+            ledger.key_epoch,
+            &[&sig0, &sig1],
+        )
+        .expect("valid anchor");
+        let mut zero_height = valid_anchor.clone();
+        zero_height.height = 0;
+        assert!(verify_anchor_full(&zero_height, &ledger).is_err());
+        assert!(verify_anchor_light(&zero_height, &ledger).is_err());
+
+        let mut empty_sig = valid_anchor.clone();
+        empty_sig.signatures[0].signature.clear();
+        assert_eq!(
+            verify_anchor_full(&empty_sig, &ledger).unwrap_err().kind(),
+            "anchor-invalid-signature"
+        );
+
+        let log_path = temp_log_path("kiris07-fail-closed");
+        let _ = std::fs::remove_file(&log_path);
+        let mut unsigned = valid_anchor;
+        unsigned.signatures.clear();
+        assert!(append_anchor_log(&log_path, &unsigned).is_err());
+        assert!(!log_path.exists());
+
+        let signers = crate::settlement::cold_quorum::dev_fixture_device_signers();
+        let identities: Vec<_> = signers.iter().map(|d| d.identity.clone()).collect();
+        let mut state = ColdWalletState::new(crate::settlement::cold_wallet::ColdWalletPolicy {
+            chain_id: 7,
+            max_value_per_settlement_atoms: 1000,
+            max_value_per_epoch_atoms: 3000,
+            min_height_advance: 1,
+            epoch_length_blocks: 100,
+            required_quorum: 3,
+            device_count: 6,
+            refusal_history_capacity: 8,
+        })
+        .with_trusted_devices(identities);
+        assert_eq!(
+            rotate_anchor_key_with_committee(&mut state, 1200, "   \t\n  ", &[])
+                .unwrap_err()
+                .kind(),
+            "anchor-committee-rotation"
+        );
+        assert_eq!(
+            rotate_anchor_key_with_committee(&mut state, 0, "compromised key", &[])
+                .unwrap_err()
+                .kind(),
+            "anchor-committee-rotation"
+        );
     }
 }

@@ -428,6 +428,16 @@ pub fn verify_quorum(
             rule: rule.to_string(),
         });
     }
+    if payload.is_empty() || payload.iter().all(|&b| b == 0) {
+        return Err(QuorumError::InvalidPolicy {
+            rule: "quorum payload must be non-empty and non-zero".to_string(),
+        });
+    }
+    if current_key_epoch == 0 {
+        return Err(QuorumError::InvalidPolicy {
+            rule: "current_key_epoch must be non-zero".to_string(),
+        });
+    }
     if signatures.len() > policy.device_count as usize {
         return Err(QuorumError::TooManySignatures {
             device_count: policy.device_count,
@@ -446,10 +456,23 @@ pub fn verify_quorum(
     // a device key is 64 bytes. An Ed25519 key never gets as far as a
     // verification attempt.
     for identity in identities {
+        if identity.device_id == 0 {
+            return Err(QuorumError::InvalidPolicy {
+                rule: "committee device_id must be non-zero".to_string(),
+            });
+        }
         if identity.verifying_key.len() != COLD_DEVICE_KEY_LEN {
             return Err(QuorumError::BadKeyLength {
                 device_id: identity.device_id,
                 got: identity.verifying_key.len(),
+            });
+        }
+        if bool::from(subtle::ConstantTimeEq::ct_eq(
+            identity.verifying_key.as_slice(),
+            [0u8; COLD_DEVICE_KEY_LEN].as_slice(),
+        )) {
+            return Err(QuorumError::InvalidPolicy {
+                rule: "committee verifying_key must not be all-zero".to_string(),
             });
         }
     }
@@ -848,5 +871,53 @@ mod tests {
         let err = verify_quorum(&policy(), &identities, &payload, 1, &sigs)
             .expect_err("duplicate device_id in committee identity set must be refused");
         assert_eq!(err.kind(), "quorum-duplicate-device-id");
+    }
+
+    #[test]
+    fn verify_quorum_rejects_empty_zero_payload_zero_epoch_device_zero_and_zero_vk() {
+        let payload = payload();
+        let signers = dev_fixture_device_signers();
+        let identities: Vec<SignerIdentity> = signers.iter().map(|s| s.identity.clone()).collect();
+        let sigs: Vec<DeviceSignature> = signers[..3]
+            .iter()
+            .map(|s| s.sign_payload(&payload, 1))
+            .collect();
+
+        assert_eq!(
+            verify_quorum(&policy(), &identities, &[], 1, &sigs)
+                .unwrap_err()
+                .kind(),
+            "quorum-invalid-policy"
+        );
+        assert_eq!(
+            verify_quorum(&policy(), &identities, &[0u8; 32], 1, &sigs)
+                .unwrap_err()
+                .kind(),
+            "quorum-invalid-policy"
+        );
+        assert_eq!(
+            verify_quorum(&policy(), &identities, &payload, 0, &sigs)
+                .unwrap_err()
+                .kind(),
+            "quorum-invalid-policy"
+        );
+
+        let mut zero_id_identities = identities.clone();
+        zero_id_identities[0].device_id = 0;
+        assert_eq!(
+            verify_quorum(&policy(), &zero_id_identities, &payload, 1, &sigs)
+                .unwrap_err()
+                .kind(),
+            "quorum-invalid-policy"
+        );
+
+        let mut zero_vk_identities = identities;
+        zero_vk_identities[0].verifying_key = vec![0u8; COLD_DEVICE_KEY_LEN];
+        assert_eq!(
+            verify_quorum(&policy(), &zero_vk_identities, &payload, 1, &sigs)
+                .unwrap_err()
+                .kind(),
+            "quorum-invalid-policy"
+        );
     }
 }

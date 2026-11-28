@@ -63,4 +63,47 @@ mod tests {
             "a lone leaf and a self-paired pair must not share a root"
         );
     }
+
+    #[test]
+    fn node_promotion_and_empty_domains_are_disjoint_and_proofs_reject_count_replay() {
+        let leaf = hash_fields_bytes(&[b"leaf-domain", &[0x5Au8; 32]]);
+        let empty = merkle_root(&[]);
+        assert_ne!(empty, [0u8; 32]);
+        assert_ne!(
+            merkle_node_hash(&leaf, &leaf),
+            merkle_odd_promote_hash(&leaf)
+        );
+
+        let leaves = vec![
+            hash_fields_bytes(&[b"leaf-domain", &[1u8]]),
+            hash_fields_bytes(&[b"leaf-domain", &[2u8]]),
+            hash_fields_bytes(&[b"leaf-domain", &[3u8]]),
+        ];
+        let root = merkle_root(&leaves);
+        let path = crate::consensus::merkle_tree::merkle_proof_for_leaf(
+            &leaves,
+            2,
+            merkle_node_hash,
+            merkle_odd_promote_hash,
+        )
+        .expect("odd tail proof");
+        assert!(crate::consensus::merkle_tree::verify_merkle_proof(
+            &leaves[2],
+            2,
+            leaves.len(),
+            &path,
+            &root,
+            merkle_node_hash,
+            merkle_odd_promote_hash,
+        ));
+        assert!(!crate::consensus::merkle_tree::verify_merkle_proof(
+            &leaves[2],
+            2,
+            leaves.len() + 1,
+            &path,
+            &root,
+            merkle_node_hash,
+            merkle_odd_promote_hash,
+        ));
+    }
 }
