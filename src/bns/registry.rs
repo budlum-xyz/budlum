@@ -1356,6 +1356,7 @@ impl BnsRegistry {
             && self.primary_sellers == default_primary_sellers()
             && self.reserved_labels == default_reserved_labels()
             && self.primary_names.is_empty()
+            && self.max_names == default_max_names()
     }
 
     /// Canonical SHA-256 commitment over the auxiliary fields of `record` not
@@ -1534,7 +1535,7 @@ impl BnsRegistry {
 
     /// Registry-wide metadata commitment (`BDLM_BNS_META_V1`) covering non-leaf
     /// registry configuration (`base_cost`, `reserved_labels`, `primary_sellers`,
-    /// `primary_names`, and `names.len()`).
+    /// `primary_names`, non-default `max_names`, and `names.len()`).
     #[must_use]
     pub fn meta_digest(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
@@ -1562,6 +1563,10 @@ impl BnsRegistry {
                 hasher.update((name.len() as u64).to_le_bytes());
                 hasher.update(name.as_bytes());
             }
+        }
+        if self.max_names != default_max_names() {
+            hasher.update(b"max_names");
+            hasher.update((self.max_names as u64).to_le_bytes());
         }
         hasher.update((self.names.len() as u64).to_le_bytes());
         hasher.finalize().into()
@@ -2078,5 +2083,66 @@ mod tests {
             !reg.primary_names.contains_key(&alice),
             "reclaim_expired must clear the prior owner's primary_names pointer"
         );
+    }
+
+    #[test]
+    fn max_names_is_committed_to_is_empty_meta_digest_and_root() {
+        let default_reg = BnsRegistry::new();
+        assert!(default_reg.is_empty());
+
+        let mut capped_two = BnsRegistry::new();
+        capped_two.max_names = 2;
+        assert!(
+            !capped_two.is_empty(),
+            "non-default max_names must prevent is_empty() from omitting the registry from state root"
+        );
+        assert_ne!(
+            capped_two.meta_digest(),
+            default_reg.meta_digest(),
+            "non-default max_names must change meta_digest"
+        );
+        assert_ne!(
+            capped_two.root(),
+            default_reg.root(),
+            "non-default max_names must change BnsRegistry::root"
+        );
+
+        let mut capped_three = BnsRegistry::new();
+        capped_three.max_names = 3;
+        assert_ne!(
+            capped_two.meta_digest(),
+            capped_three.meta_digest(),
+            "distinct max_names ceilings must produce distinct meta_digest values"
+        );
+        assert_ne!(
+            capped_two.root(),
+            capped_three.root(),
+            "distinct max_names ceilings must produce distinct registry roots"
+        );
+
+        let alice = Address([0x61; 32]);
+        let bob = Address([0x62; 32]);
+        let carol = Address([0x63; 32]);
+        assert!(capped_two
+            .register("alice.bud".into(), alice, 0, 100)
+            .is_ok());
+        assert!(capped_two.register("bob.bud".into(), bob, 0, 100).is_ok());
+        assert_eq!(
+            capped_two.register("carol.bud".into(), carol, 0, 100),
+            Err(BnsError::NameTaken)
+        );
+
+        assert!(capped_three
+            .register("alice.bud".into(), alice, 0, 100)
+            .is_ok());
+        assert!(capped_three.register("bob.bud".into(), bob, 0, 100).is_ok());
+        assert_ne!(
+            capped_two.root(),
+            capped_three.root(),
+            "identical live names with different max_names caps must not share a root"
+        );
+        assert!(capped_three
+            .register("carol.bud".into(), carol, 0, 100)
+            .is_ok());
     }
 }

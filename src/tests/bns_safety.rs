@@ -40,3 +40,26 @@ fn bns_base_cost_is_positive() {
     let reg = BnsRegistry::default();
     assert!(reg.base_cost > 0);
 }
+
+#[test]
+fn bns_max_names_is_committed_to_account_state_root() {
+    use crate::core::account::AccountState;
+
+    let mut default_state = AccountState::default();
+    let mut capped_two = AccountState::default();
+    capped_two.bns_registry.max_names = 2;
+    let mut capped_three = AccountState::default();
+    capped_three.bns_registry.max_names = 3;
+
+    assert!(!capped_two.bns_registry.is_empty());
+    assert_ne!(
+        default_state.calculate_state_root(),
+        capped_two.calculate_state_root(),
+        "non-default max_names must alter AccountState::calculate_state_root"
+    );
+    assert_ne!(
+        capped_two.calculate_state_root(),
+        capped_three.calculate_state_root(),
+        "distinct max_names ceilings must alter AccountState::calculate_state_root"
+    );
+}
