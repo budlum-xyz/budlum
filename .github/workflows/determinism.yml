@@ -163,6 +163,23 @@ jobs:
     timeout-minutes: 150
     env:
       CARGO_INCREMENTAL: "0"
+      # What this leg measures is whether the consensus digest comes out
+      # byte-equal on the three platforms, not whether the shipped binary is
+      # optimal. The production release profile (fat LTO, one codegen unit) is
+      # the most expensive configuration available, and on 2026-11-26 the macOS
+      # leg had not finished compiling when its 150-minute budget expired: it
+      # was cancelled with rustc and cargo still running, 144.7 minutes after
+      # its last build output, while ubuntu finished in 53.2 and windows in 69.2
+      # minutes on the same tree. Producing the same semantics with a cheaper
+      # build is what this leg needs.
+      #
+      # The production profile does not go unmeasured: genesis-reproducibility
+      # builds it twice from scratch with a clean cache between the two and
+      # compares the genesis hash, and the release-profile-pins gate still holds
+      # the manifest's five pinned fields. This is a per-job environment
+      # override, not an edit to [profile.release].
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
