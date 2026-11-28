@@ -68,7 +68,7 @@ fun GardenApp(
     val gardenTitle = stringResource(R.string.g_default_title)
 
     // Enable FLAG_SECURE while 24-word recovery phrases are on screen.
-    val isSecretStep = step == Step.Seed || step == Step.SeedVerify
+    val isSecretStep = step == Step.Seed
     LaunchedEffect(isSecretStep) {
         onSecureScreen(isSecretStep)
     }
@@ -188,7 +188,6 @@ fun GardenApp(
             // The words are shown once; block system back so the user never loses
             // their recovery phrase by accident before confirming they noted it.
             Step.Seed -> Step.Seed
-            Step.SeedVerify -> Step.Seed
             Step.Wallet -> {
                 wantedTestnet = false
                 walletReturnStep

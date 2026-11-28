@@ -38,8 +38,6 @@ enum class Step {
     /** Twenty-four recovery words, shown once under FLAG_SECURE. */
     Seed,
 
-    /** Confirming three words before releasing them from memory. */
-    SeedVerify,
 }
 
 /**
