@@ -14,20 +14,25 @@
 //! The key security properties:
 //!
 //! 1. **Oracle-free pricing**: price is derived from on-chain AMM reserves
-//!    (`x * y = k` constant product), TWAP'd over `MIN_TWAP_EPOCHS` to
-//!    resist single-block manipulation.
-//! 2. **State-root provenance**: the AMM reserves used for pricing carry a
-//!    Merkle proof that they exist in the canonical state root. No oracle
-//!    can lie about reserves it cannot prove.
-//! 3. **Collateral seize bounds**: when a position is liquidated, the
-//!    seized collateral is computed as `debt * (1 + LIQUIDATION_PENALTY_BPS)`
-//!    converted through the TWAP price, clamped to the position's available
-//!    collateral. Over-seizing is impossible.
-//! 4. **Deterministic**: same inputs always produce the same liquidation
-//!    outcome. No randomness, no external state reads.
+//!    (`x * y = k` constant product), TWAP'd over `MIN_TWAP_EPOCHS` with
+//!    minimum geometric liquidity (`MIN_POOL_LIQUIDITY`) and bounded
+//!    consecutive-observation price jumps (`MAX_CONSECUTIVE_PRICE_JUMP_BPS`)
+//!    to resist dust-pool and sandwich manipulation.
+//! 2. **Overflow-free 256-bit arithmetic (`O-H.5`)**: instantaneous prices,
+//!    TWAP accumulation, health factors, and collateral seizure amounts use
+//!    exact 256-bit (`U256`) multiply-divide arithmetic so 18-decimal (`1e18`)
+//!    token amounts never saturate `u128`.
+//! 3. **State-root provenance**: the AMM reserves used for pricing carry a
+//!    Merkle proof that they exist in the canonical state root, all belonging
+//!    to a single consistent AMM domain.
+//! 4. **Collateral seize bounds**: when a position is strictly unhealthy
+//!    (`health_bps < maintenance_threshold_bps`), seized collateral is
+//!    clamped to available collateral across unique `(domain_id, asset_id)` legs.
 //!
 //! WIRING: used by the settlement domain to process cross-domain
 //! liquidation transactions against positions backed by external collateral.
+
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -38,14 +43,160 @@ use crate::domain::types::Hash32;
 pub const MIN_TWAP_EPOCHS: u64 = 3;
 /// Maximum TWAP observation epochs.
 pub const MAX_TWAP_EPOCHS: u64 = 100;
+/// Minimum elapsed epoch span (`last.epoch - first.epoch`) across a TWAP window.
+pub const MIN_TWAP_EPOCH_SPAN: u64 = 2;
+/// Minimum geometric AMM pool liquidity (`reserve_x * reserve_y >= MIN_POOL_LIQUIDITY^2`)
+/// required so 1-wei dust pools cannot dictate liquidation TWAPs (`O-H.4`).
+pub const MIN_POOL_LIQUIDITY: u128 = 50;
+/// Maximum allowed instantaneous price ratio between two consecutive TWAP
+/// observations in basis points (`50_000 bps` = `5.0x`, `O-H.4`).
+pub const MAX_CONSECUTIVE_PRICE_JUMP_BPS: u64 = 50_000;
 /// Liquidation penalty in basis points (5%).
 pub const LIQUIDATION_PENALTY_BPS: u64 = 500;
 /// BPS denominator.
 const BPS_DEN: u64 = 10_000;
+/// Fixed-point price scale (`1e18`).
+const PRICE_SCALE: u128 = 1_000_000_000_000_000_000;
 /// Maximum position count in a batch liquidation.
 pub const MAX_BATCH_SIZE: usize = 64;
 /// Maximum TWAP observations per position.
 pub const MAX_OBSERVATIONS: usize = 128;
+
+/// Exact 256-bit unsigned integer (`hi * 2^128 + lo`) for overflow-free
+/// 18-decimal AMM price, TWAP, health-factor, and seizure calculations (`O-H.5`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct U256 {
+    hi: u128,
+    lo: u128,
+}
+
+impl U256 {
+    const ZERO: Self = Self { hi: 0, lo: 0 };
+
+    const fn from_u128(v: u128) -> Self {
+        Self { hi: 0, lo: v }
+    }
+
+    /// Exact 256-bit product `a * b` of two `u128` operands (never overflows).
+    const fn mul_u128(a: u128, b: u128) -> Self {
+        let mask64: u128 = 0xFFFF_FFFF_FFFF_FFFF;
+        let a_lo = a & mask64;
+        let a_hi = a >> 64;
+        let b_lo = b & mask64;
+        let b_hi = b >> 64;
+
+        let p0 = a_lo * b_lo;
+        let p1 = a_lo * b_hi;
+        let p2 = a_hi * b_lo;
+        let p3 = a_hi * b_hi;
+
+        let mid1 = (p0 >> 64) + (p1 & mask64) + (p2 & mask64);
+        let lo = (p0 & mask64) | ((mid1 & mask64) << 64);
+        let hi = p3 + (p1 >> 64) + (p2 >> 64) + (mid1 >> 64);
+        Self { hi, lo }
+    }
+
+    fn checked_add(self, rhs: Self) -> Option<Self> {
+        let (lo, carry) = self.lo.overflowing_add(rhs.lo);
+        let hi = self
+            .hi
+            .checked_add(rhs.hi)?
+            .checked_add(u128::from(carry))?;
+        Some(Self { hi, lo })
+    }
+
+    fn checked_mul_u128(self, rhs: u128) -> Option<Self> {
+        if rhs == 0 || self == Self::ZERO {
+            return Some(Self::ZERO);
+        }
+        let low_part = Self::mul_u128(self.lo, rhs);
+        let high_part = Self::mul_u128(self.hi, rhs);
+        if high_part.hi != 0 {
+            return None;
+        }
+        let hi = low_part.hi.checked_add(high_part.lo)?;
+        Some(Self {
+            hi,
+            lo: low_part.lo,
+        })
+    }
+
+    fn shl1_with_bit(self, bit: u128) -> Self {
+        let hi = (self.hi << 1) | (self.lo >> 127);
+        let lo = (self.lo << 1) | (bit & 1);
+        Self { hi, lo }
+    }
+
+    fn sub_assign(&mut self, rhs: Self) {
+        let (lo, borrow) = self.lo.overflowing_sub(rhs.lo);
+        let hi = self
+            .hi
+            .wrapping_sub(rhs.hi)
+            .wrapping_sub(u128::from(borrow));
+        self.lo = lo;
+        self.hi = hi;
+    }
+
+    fn bit_at(self, bit_index: u32) -> u128 {
+        if bit_index < 128 {
+            (self.lo >> bit_index) & 1
+        } else {
+            (self.hi >> (bit_index - 128)) & 1
+        }
+    }
+
+    fn set_bit(&mut self, bit_index: u32) {
+        if bit_index < 128 {
+            self.lo |= 1u128 << bit_index;
+        } else {
+            self.hi |= 1u128 << (bit_index - 128);
+        }
+    }
+
+    /// Exact unsigned 256-bit floor division `self / divisor` (`None` iff `divisor == 0`).
+    fn checked_div(self, divisor: Self) -> Option<Self> {
+        if divisor == Self::ZERO {
+            return None;
+        }
+        if self < divisor {
+            return Some(Self::ZERO);
+        }
+        if self.hi == 0 && divisor.hi == 0 {
+            return Some(Self::from_u128(self.lo / divisor.lo));
+        }
+        let mut quotient = Self::ZERO;
+        let mut remainder = Self::ZERO;
+        let mut bit = 256u32;
+        while bit > 0 {
+            bit -= 1;
+            let b = self.bit_at(bit);
+            // If `remainder`'s top bit (bit 255) was 1 before shifting, `2 * remainder + b >= 2^256 > divisor`.
+            let overflow_256 = (remainder.hi >> 127) != 0;
+            remainder = remainder.shl1_with_bit(b);
+            if overflow_256 || remainder >= divisor {
+                remainder.sub_assign(divisor);
+                quotient.set_bit(bit);
+            }
+        }
+        Some(quotient)
+    }
+
+    const fn to_u128_checked(self) -> Option<u128> {
+        if self.hi == 0 {
+            Some(self.lo)
+        } else {
+            None
+        }
+    }
+
+    const fn to_u128_saturating(self) -> u128 {
+        if self.hi == 0 {
+            self.lo
+        } else {
+            u128::MAX
+        }
+    }
+}
 
 /// An AMM reserve snapshot at a specific state root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,7 +292,7 @@ pub enum LiquidationError {
     BonusExceedsCap { got_bps: u64, max_bps: u64 },
     /// Requested debt repayment is zero or exceeds the close-factor ceiling.
     InvalidCloseAmount { requested: u128, max_repay: u128 },
-    /// Missing delivery proof or collateral custody root for cross-domain seizure.
+    /// Missing delivery proof, custody root, or TWAP pool/leg invariant violation.
     MissingProofAnchor(String),
 }
 
@@ -202,7 +353,9 @@ impl core::fmt::Display for LiquidationError {
     }
 }
 
-/// Validate that a TWAP observation sequence is well-formed.
+/// Validate that a TWAP observation sequence is well-formed, carries minimum
+/// geometric pool liquidity, spans at least `MIN_TWAP_EPOCH_SPAN` epochs, and
+/// exhibits no extreme single-step sandwich jump (`O-H.4`).
 fn validate_observations(observations: &[AmmReserveSnapshot]) -> Result<(), LiquidationError> {
     let n = observations.len();
     if (n as u64) < MIN_TWAP_EPOCHS {
@@ -218,67 +371,107 @@ fn validate_observations(observations: &[AmmReserveSnapshot]) -> Result<(), Liqu
         });
     }
     for w in observations.windows(2) {
-        if w[1].epoch <= w[0].epoch {
+        let Some(prev) = w.first() else {
+            continue;
+        };
+        let Some(curr) = w.get(1) else {
+            continue;
+        };
+        if curr.epoch <= prev.epoch {
             return Err(LiquidationError::NonMonotonicEpochs {
-                prev: w[0].epoch,
-                current: w[1].epoch,
+                prev: prev.epoch,
+                current: curr.epoch,
             });
         }
     }
+    if let (Some(first), Some(last)) = (observations.first(), observations.last()) {
+        let span = last.epoch.saturating_sub(first.epoch);
+        if span < MIN_TWAP_EPOCH_SPAN {
+            return Err(LiquidationError::MissingProofAnchor(format!(
+                "TWAP epoch window span {span} is below minimum {MIN_TWAP_EPOCH_SPAN}"
+            )));
+        }
+        if span > MAX_TWAP_EPOCHS {
+            return Err(LiquidationError::MissingProofAnchor(format!(
+                "TWAP epoch window span {span} exceeds maximum {MAX_TWAP_EPOCHS}"
+            )));
+        }
+    }
+    let min_k = U256::mul_u128(MIN_POOL_LIQUIDITY, MIN_POOL_LIQUIDITY);
+    let mut prev_price: Option<u128> = None;
     for obs in observations {
         if obs.reserve_x == 0 || obs.reserve_y == 0 {
             return Err(LiquidationError::ZeroReserve { epoch: obs.epoch });
         }
+        let k = U256::mul_u128(obs.reserve_x, obs.reserve_y);
+        if k < min_k {
+            return Err(LiquidationError::MissingProofAnchor(format!(
+                "insufficient AMM pool liquidity at epoch {}: sqrt(k) < {MIN_POOL_LIQUIDITY}",
+                obs.epoch
+            )));
+        }
+        let price = instant_price_scaled(obs.reserve_x, obs.reserve_y)?;
+        if price == 0 {
+            return Err(LiquidationError::PriceOverflow);
+        }
+        if let Some(prev) = prev_price {
+            let (hi, lo) = if price >= prev {
+                (price, prev)
+            } else {
+                (prev, price)
+            };
+            let max_allowed = U256::mul_u128(lo, u128::from(MAX_CONSECUTIVE_PRICE_JUMP_BPS))
+                .checked_div(U256::from_u128(u128::from(BPS_DEN)))
+                .unwrap_or(U256::ZERO);
+            if U256::from_u128(hi) > max_allowed {
+                return Err(LiquidationError::MissingProofAnchor(format!(
+                    "excessive consecutive AMM price deviation at epoch {} (> {MAX_CONSECUTIVE_PRICE_JUMP_BPS} bps)",
+                    obs.epoch
+                )));
+            }
+        }
+        prev_price = Some(price);
     }
     Ok(())
 }
 
-/// Compute the instantaneous price from a constant-product AMM.
-/// Returns price as `reserve_y / reserve_x` scaled by `1e18`.
+/// Compute the instantaneous price from a constant-product AMM using 256-bit
+/// intermediate multiplication so 18-decimal reserves never overflow (`O-H.5`).
+/// Returns price as `(reserve_y * 1e18) / reserve_x`.
 fn instant_price_scaled(reserve_x: u128, reserve_y: u128) -> Result<u128, LiquidationError> {
-    // price = reserve_y / reserve_x, scaled by 1e18
-    // = (reserve_y * 1e18) / reserve_x
-    let scale: u128 = 1_000_000_000_000_000_000; // 1e18
-    reserve_y
-        .checked_mul(scale)
-        .and_then(|num| num.checked_div(reserve_x))
+    if reserve_x == 0 {
+        return Err(LiquidationError::PriceOverflow);
+    }
+    let numerator = U256::mul_u128(reserve_y, PRICE_SCALE);
+    let quotient = numerator
+        .checked_div(U256::from_u128(reserve_x))
+        .ok_or(LiquidationError::PriceOverflow)?;
+    quotient
+        .to_u128_checked()
         .ok_or(LiquidationError::PriceOverflow)
 }
 
-/// Validate that the TWAP price is a rational number (non-zero reserves).
-fn validate_twap_rational_price(
-    observations: &[AmmReserveSnapshot],
-) -> Result<(), LiquidationError> {
-    for obs in observations {
-        if obs.reserve_x == 0 || obs.reserve_y == 0 {
-            return Err(LiquidationError::ZeroReserve { epoch: obs.epoch });
-        }
-    }
-    Ok(())
-}
-
-/// Compute the TWAP price from a sequence of AMM observations.
-/// Uses time-weighted arithmetic mean of instantaneous prices.
+/// Compute the TWAP price from a sequence of AMM observations using 256-bit
+/// weighted accumulation (`O-H.5`).
 fn compute_twap_price(observations: &[AmmReserveSnapshot]) -> Result<u128, LiquidationError> {
-    validate_twap_rational_price(observations)?;
-
-    // Time-weighted average: sum(price_i * duration_i) / sum(duration_i)
-    // Duration of each observation is (next_epoch - this_epoch), except the
-    // last which has duration 1 (it's the current price).
-    let mut weighted_sum: u128 = 0;
+    let mut weighted_sum = U256::ZERO;
     let mut total_duration: u128 = 0;
 
     for (i, obs) in observations.iter().enumerate() {
+        if obs.reserve_x == 0 || obs.reserve_y == 0 {
+            return Err(LiquidationError::ZeroReserve { epoch: obs.epoch });
+        }
         let price = instant_price_scaled(obs.reserve_x, obs.reserve_y)?;
         let duration = observations.get(i + 1).map_or(1u128, |next| {
             u128::from(next.epoch.saturating_sub(obs.epoch))
         });
-        weighted_sum = weighted_sum.saturating_add(
-            price
-                .checked_mul(duration)
-                .ok_or(LiquidationError::PriceOverflow)?,
-        );
-        total_duration = total_duration.saturating_add(duration);
+        let term = U256::mul_u128(price, duration);
+        weighted_sum = weighted_sum
+            .checked_add(term)
+            .ok_or(LiquidationError::PriceOverflow)?;
+        total_duration = total_duration
+            .checked_add(duration)
+            .ok_or(LiquidationError::PriceOverflow)?;
     }
 
     if total_duration == 0 {
@@ -288,29 +481,78 @@ fn compute_twap_price(observations: &[AmmReserveSnapshot]) -> Result<u128, Liqui
         });
     }
 
-    Ok(weighted_sum / total_duration)
+    let avg = weighted_sum
+        .checked_div(U256::from_u128(total_duration))
+        .ok_or(LiquidationError::PriceOverflow)?;
+    avg.to_u128_checked().ok_or(LiquidationError::PriceOverflow)
 }
 
-/// Compute the amount of collateral to seize for a liquidation.
-/// Returns (seized, `debt_repaid`, remainder).
+/// Exact 256-bit health factor in BPS:
+/// `floor((collateral_y * 1e18 * 10_000) / (twap_price_scaled * debt_x))`.
+fn compute_health_bps(collateral_y: u128, debt_x: u128, twap_price_scaled: u128) -> u64 {
+    if debt_x == 0 || twap_price_scaled == 0 {
+        return u64::MAX;
+    }
+    let scale_times_bps = PRICE_SCALE.saturating_mul(u128::from(BPS_DEN)); // 1e22 fits in u128
+    let numerator = U256::mul_u128(collateral_y, scale_times_bps);
+    let denominator = U256::mul_u128(twap_price_scaled, debt_x);
+    let Some(q) = numerator.checked_div(denominator) else {
+        return u64::MAX;
+    };
+    match q.to_u128_checked() {
+        Some(v) => u64::try_from(v).unwrap_or(u64::MAX),
+        None => u64::MAX,
+    }
+}
+
+/// Exact 256-bit collateral seizure amount:
+/// `min(collateral_y, floor((repay_debt_x * twap_price_scaled * (10_000 + bonus_bps)) / (1e18 * 10_000)))`.
+fn compute_seize_amount_y(
+    repay_debt_x: u128,
+    collateral_y: u128,
+    twap_price_scaled: u128,
+    bonus_bps: u64,
+) -> Result<u128, LiquidationError> {
+    let bonus_mult = u128::from(BPS_DEN.saturating_add(bonus_bps));
+    let scale_times_bps = PRICE_SCALE.saturating_mul(u128::from(BPS_DEN)); // 1e22 fits in u128
+                                                                           // Evaluate `(repay_debt_x * twap_price_scaled)` in U256, then if `* bonus_mult` fits in U256
+                                                                           // divide directly; otherwise divide `(repay_debt_x * bonus_mult)` first when that fits in u128.
+    let base = U256::mul_u128(repay_debt_x, twap_price_scaled);
+    let debt_in_y = if let Some(num) = base.checked_mul_u128(bonus_mult) {
+        num.checked_div(U256::from_u128(scale_times_bps))
+            .ok_or(LiquidationError::PriceOverflow)?
+            .to_u128_saturating()
+    } else {
+        // Fallback when `repay_debt_x * twap_price_scaled * bonus_mult >= 2^256`:
+        // divide `base` by `PRICE_SCALE` first (exact up to 1e-18), then multiply by `bonus_mult / BPS_DEN`.
+        let scaled_down = base
+            .checked_div(U256::from_u128(PRICE_SCALE))
+            .ok_or(LiquidationError::PriceOverflow)?;
+        scaled_down
+            .checked_mul_u128(bonus_mult)
+            .ok_or(LiquidationError::PriceOverflow)?
+            .checked_div(U256::from_u128(u128::from(BPS_DEN)))
+            .ok_or(LiquidationError::PriceOverflow)?
+            .to_u128_saturating()
+    };
+    Ok(debt_in_y.min(collateral_y))
+}
+
+/// Compute the amount of collateral to seize for a batch liquidation.
+/// Returns `(seized, debt_repaid, remainder)`.
 fn compute_seized_collateral(
     debt_x: u128,
     collateral_y: u128,
     twap_price_scaled: u128,
-) -> (u128, u128, u128) {
-    let scale: u128 = 1_000_000_000_000_000_000; // 1e18
-    let penalty_multiplier = BPS_DEN + LIQUIDATION_PENALTY_BPS; // 10500
-
-    // debt_in_y = debt_x * price * (1 + penalty) / scale / BPS_DEN
-    // = debt_x * twap_price_scaled * penalty_multiplier / (scale * BPS_DEN)
-    let debt_in_y = debt_x
-        .saturating_mul(twap_price_scaled)
-        .saturating_mul(u128::from(penalty_multiplier))
-        / (scale * u128::from(BPS_DEN));
-
-    let seized = debt_in_y.min(collateral_y);
+) -> Result<(u128, u128, u128), LiquidationError> {
+    let seized = compute_seize_amount_y(
+        debt_x,
+        collateral_y,
+        twap_price_scaled,
+        LIQUIDATION_PENALTY_BPS,
+    )?;
     let remainder = collateral_y.saturating_sub(seized);
-    (seized, debt_x, remainder)
+    Ok((seized, debt_x, remainder))
 }
 
 /// Validate the liquidation parameters are well-formed.
@@ -336,8 +578,8 @@ fn validate_liquidation_params(
 /// Given a TWAP observation sequence and a set of positions, computes
 /// which positions are eligible for liquidation and returns the outcomes.
 ///
-/// A position is eligible when its health factor is below its maintenance
-/// threshold. Health factor is `collateral_value / debt` in BPS.
+/// A position is eligible when its health factor is strictly below its
+/// maintenance threshold (`health_bps < maintenance_threshold_bps`).
 ///
 /// # Errors
 ///
@@ -357,7 +599,6 @@ pub fn execute_liquidation(
     let twap_epoch = observations.last().map_or(0, |o| o.epoch);
 
     let mut outcomes = Vec::new();
-    let scale: u128 = 1_000_000_000_000_000_000; // 1e18
 
     for pos in positions {
         if pos.debt_x == 0 {
@@ -366,23 +607,14 @@ pub fn execute_liquidation(
             });
         }
 
-        // Health factor = (collateral_y * scale / twap_price) / debt_x * 10000
-        // = collateral_y * scale * 10000 / (twap_price * debt_x)
-        let collateral_value_x = pos.collateral_y.saturating_mul(scale) / twap_price.max(1);
-
-        // health_bps = collateral_value_x * 10000 / debt_x
-        let health_bps = collateral_value_x
-            .saturating_mul(u128::from(BPS_DEN))
-            .checked_div(pos.debt_x)
-            .unwrap_or(u128::from(u64::MAX));
-
-        if health_bps > u128::from(pos.maintenance_threshold_bps) {
-            // Position is healthy, skip.
+        let health_bps = compute_health_bps(pos.collateral_y, pos.debt_x, twap_price);
+        if health_bps >= pos.maintenance_threshold_bps {
+            // Position meets or exceeds its maintenance requirement, skip.
             continue;
         }
 
         let (seized, repaid, remainder) =
-            compute_seized_collateral(pos.debt_x, pos.collateral_y, twap_price);
+            compute_seized_collateral(pos.debt_x, pos.collateral_y, twap_price)?;
 
         outcomes.push(LiquidationOutcome {
             position_id: pos.position_id,
@@ -559,9 +791,9 @@ pub struct ProvenLiquidationResult {
 ///
 /// # Errors
 ///
-/// Returns [`LiquidationError`] if `position.debt_x == 0`, any observation fails
-/// Merkle proof verification against `certified_roots`, or the TWAP sequence is
-/// malformed.
+/// Returns [`LiquidationError`] if `position.debt_x == 0`, observations span
+/// multiple AMM domains, any observation fails Merkle proof verification against
+/// `certified_roots`, or the TWAP sequence is malformed.
 pub fn prove_position_health(
     position: &LiquidationPosition,
     debt_domain_id: u32,
@@ -574,9 +806,20 @@ pub fn prove_position_health(
         });
     }
 
+    let mut expected_amm_domain: Option<u32> = None;
     let mut snapshots = Vec::with_capacity(observations.len());
     let mut obs_digests = Vec::with_capacity(observations.len());
     for obs in observations {
+        if let Some(first_domain) = expected_amm_domain {
+            if obs.domain_id != first_domain {
+                return Err(LiquidationError::MissingProofAnchor(format!(
+                    "TWAP observations mix distinct AMM source domains ({first_domain} vs {})",
+                    obs.domain_id
+                )));
+            }
+        } else {
+            expected_amm_domain = Some(obs.domain_id);
+        }
         let Some(certified_root) = certified_roots.get(&(obs.domain_id, obs.snapshot.epoch)) else {
             return Err(LiquidationError::InvalidReserveProof {
                 domain_id: obs.domain_id,
@@ -592,21 +835,17 @@ pub fn prove_position_health(
     let twap_price_scaled = compute_twap_price(&snapshots)?;
     let twap_epoch = snapshots.last().map_or(0, |s| s.epoch);
 
-    let scale: u128 = 1_000_000_000_000_000_000;
-    let collateral_value_x = position.collateral_y.saturating_mul(scale) / twap_price_scaled.max(1);
-    let health_bps_u128 = collateral_value_x
-        .saturating_mul(u128::from(BPS_DEN))
-        .checked_div(position.debt_x)
-        .unwrap_or(u128::from(u64::MAX));
-    let health_bps = u64::try_from(health_bps_u128).unwrap_or(u64::MAX);
-    let liquidatable = health_bps <= position.maintenance_threshold_bps;
+    let health_bps = compute_health_bps(position.collateral_y, position.debt_x, twap_price_scaled);
+    let liquidatable = health_bps < position.maintenance_threshold_bps;
 
+    let amm_domain_id = expected_amm_domain.unwrap_or(0);
     let observations_commitment =
         crate::unification::unification_merkle_root(b"BDLM_LIQ_OBSERVATIONS_V1", &obs_digests);
     let health_proof_digest = crate::core::hash::hash_fields_bytes(&[
         b"BDLM_LIQ_HEALTH_PROOF_V1",
         &position.position_id.to_le_bytes(),
         &debt_domain_id.to_le_bytes(),
+        &amm_domain_id.to_le_bytes(),
         &twap_price_scaled.to_le_bytes(),
         &twap_epoch.to_le_bytes(),
         &health_bps.to_le_bytes(),
@@ -642,22 +881,12 @@ pub struct CrossDomainLiquidationParams {
 /// cross-domain liquidation (debt on `params.debt_domain_id`, collateral legs
 /// across arbitrary domains anchored by custody or remote-account proof roots).
 ///
-/// Rejects fail-closed if:
-/// - Any AMM reserve observation fails Merkle verification against `certified_roots`.
-/// - The position is healthy (`!health.liquidatable`).
-/// - `params.bonus_bps > LIQ_BONUS_MAX_BPS` or `params.repay_debt_x` is zero /
-///   exceeds the 50% close-factor ceiling (`LIQ_CLOSE_FACTOR_MAX_BPS`).
-/// - `params.delivery_proof_root` or any collateral leg `custody_or_remote_root`
-///   is all-zero.
-/// - Collateral legs are empty or exceed `MAX_COLLATERAL_LEGS`, or their sum
-///   disagrees with `position.collateral_y`.
-///
 /// Convenience: unified oracle-free cross-domain liquidation coordinator
 /// combining state-root reserve provenance with close-factor and bonus bounds.
 ///
 /// # Errors
 ///
-/// Returns [`LiquidationError`] on any failed proof, health, bound, or anchor check.
+/// Returns [`LiquidationError`] on any failed proof, health, bound, duplicate-leg, or anchor check.
 pub fn execute_proven_cross_domain_liquidation(
     position: &LiquidationPosition,
     certified_roots: &std::collections::BTreeMap<(u32, u64), Hash32>,
@@ -682,11 +911,18 @@ pub fn execute_proven_cross_domain_liquidation(
         )));
     }
 
+    let mut seen_leg_keys = BTreeSet::new();
     let mut total_leg_collateral = 0u128;
     for leg in collateral_legs {
         if leg.custody_or_remote_root == [0u8; 32] {
             return Err(LiquidationError::MissingProofAnchor(format!(
                 "collateral leg on domain {} missing non-zero custody/remote root",
+                leg.domain_id
+            )));
+        }
+        if !seen_leg_keys.insert((leg.domain_id, leg.asset_id)) {
+            return Err(LiquidationError::MissingProofAnchor(format!(
+                "duplicate collateral leg for domain {} and asset",
                 leg.domain_id
             )));
         }
@@ -714,12 +950,12 @@ pub fn execute_proven_cross_domain_liquidation(
         });
     }
 
-    let max_repay = (position
-        .debt_x
-        .saturating_mul(u128::from(LIQ_CLOSE_FACTOR_MAX_BPS))
-        / u128::from(BPS_DEN))
-    .max(1)
-    .min(position.debt_x);
+    let max_repay = U256::mul_u128(position.debt_x, u128::from(LIQ_CLOSE_FACTOR_MAX_BPS))
+        .checked_div(U256::from_u128(u128::from(BPS_DEN)))
+        .and_then(U256::to_u128_checked)
+        .unwrap_or(position.debt_x)
+        .max(1)
+        .min(position.debt_x);
     if params.repay_debt_x == 0 || params.repay_debt_x > max_repay {
         return Err(LiquidationError::InvalidCloseAmount {
             requested: params.repay_debt_x,
@@ -727,14 +963,12 @@ pub fn execute_proven_cross_domain_liquidation(
         });
     }
 
-    let scale: u128 = 1_000_000_000_000_000_000;
-    let bonus_mult = u128::from(BPS_DEN.saturating_add(params.bonus_bps));
-    let mut target_seize_y = params
-        .repay_debt_x
-        .saturating_mul(health.twap_price_scaled)
-        .saturating_mul(bonus_mult)
-        / (scale * u128::from(BPS_DEN));
-    target_seize_y = target_seize_y.min(position.collateral_y);
+    let target_seize_y = compute_seize_amount_y(
+        params.repay_debt_x,
+        position.collateral_y,
+        health.twap_price_scaled,
+        params.bonus_bps,
+    )?;
 
     // Deterministic canonical ordering by `(domain_id, asset_id)` so seizure is
     // caller-order-independent across multi-domain collateral legs.
