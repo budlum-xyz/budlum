@@ -468,6 +468,7 @@ pub fn verify_anchored_result<'a>(
     let proof: crate::cross_domain::event_tree::MerkleProof = bincode::options()
         .with_fixint_encoding()
         .with_limit(MAX_RELAYER_INTENT_PROOF_BYTES)
+        .reject_trailing_bytes()
         .deserialize(&result.receipt_proof)
         .map_err(|e| format!("invalid external result receipt proof: {e}"))?;
     if proof.siblings.len() > 64 || proof.leaf != result.result_leaf() {
@@ -596,13 +597,20 @@ impl RelayerPolicyRegistry {
         current_block: u64,
     ) -> Result<[u8; 32], String> {
         intent.validate(policy, current_block)?;
-        self.prune_expired(current_block);
         if self.intents.contains_key(&intent.intent_id) || self.is_settled(&intent.intent_id) {
             return Err("RelayerPolicyRegistry intent already exists".into());
         }
-        if self.intents.len() >= MAX_RELAYER_INTENTS {
+        let live_count = self
+            .intents
+            .iter()
+            .filter(|(id, existing)| {
+                existing.deadline_block > current_block || self.escrowed.contains_key(*id)
+            })
+            .count();
+        if live_count >= MAX_RELAYER_INTENTS {
             return Err("RelayerPolicyRegistry intent limit exceeded".into());
         }
+        self.prune_expired(current_block);
         let id = intent.intent_id;
         self.intents.insert(id, intent);
         Ok(id)
@@ -1732,5 +1740,103 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn verify_anchored_result_rejects_trailing_bytes_and_refused_submit_preserves_state() {
+        let mut roots = BTreeMap::new();
+        let msg = crate::cross_domain::message::CrossDomainMessage::new(
+            crate::cross_domain::message::CrossDomainMessageParams {
+                source_domain: ExternalChain::Ethereum.domain_id(),
+                target_domain: 1,
+                source_height: 10,
+                event_index: 0,
+                nonce: 1,
+                sender: addr(1),
+                recipient: addr(2),
+                payload_hash: [0x55; 32],
+                kind: crate::cross_domain::message::MessageKind::Custom(
+                    INTENT_EXECUTED_KIND.to_vec(),
+                ),
+                expiry_height: 0,
+            },
+        );
+        let mut res = RelayerExternalResult {
+            chain: ExternalChain::Ethereum,
+            tx_hash: "0xabc".into(),
+            success: true,
+            message: Some(msg),
+            receipt_proof: Vec::new(),
+            external_state_root: [0u8; 32],
+        };
+        let leaf = res.result_leaf();
+        let proof = crate::cross_domain::event_tree::MerkleProof {
+            leaf,
+            index: 0,
+            siblings: Vec::new(),
+        };
+        res.receipt_proof = bincode::serialize(&proof).unwrap();
+        res.external_state_root = leaf;
+        roots.insert(ExternalChain::Ethereum.domain_id(), leaf);
+        assert!(verify_anchored_result(&roots, &res).is_ok());
+
+        // Appending trailing garbage bytes must fail closed rather than silently parsing prefix!
+        res.receipt_proof
+            .extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let trailing_err = verify_anchored_result(&roots, &res)
+            .expect_err("receipt_proof carrying trailing bytes must fail closed");
+        assert!(trailing_err.contains("invalid external result receipt proof"));
+
+        // Duplicate/settled `submit_intent` refusal must not mutate state by pruning other rows first.
+        let owner = addr(3);
+        let policy = PolicyEnvelope {
+            owner,
+            session_key: None,
+            spending_cap: 1_000,
+            allowed_domains: vec![1, 2],
+            requires_multisig: false,
+            requires_hsm: false,
+            expires_at_block: 500,
+        };
+        let i_old = UserIntent::new(
+            owner,
+            1,
+            2,
+            RelayerActionKind::ExternalTransaction {
+                chain: ExternalChain::Ethereum,
+                target_address: "0x1111".into(),
+                payload_hash: [0x21; 32],
+            },
+            100,
+            20,
+            1,
+            policy.policy_hash(),
+            addr(4),
+        );
+        let i_settled = UserIntent::new(
+            owner,
+            1,
+            2,
+            RelayerActionKind::ExternalTransaction {
+                chain: ExternalChain::Ethereum,
+                target_address: "0x2222".into(),
+                payload_hash: [0x22; 32],
+            },
+            100,
+            200,
+            2,
+            policy.policy_hash(),
+            addr(4),
+        );
+        let mut reg = RelayerPolicyRegistry::new();
+        reg.submit_intent(i_old, &policy, 10).unwrap();
+        reg.settled_intents.insert(i_settled.intent_id);
+        let len_before = reg.intents.len();
+        assert!(reg.submit_intent(i_settled, &policy, 30).is_err());
+        assert_eq!(
+            reg.intents.len(),
+            len_before,
+            "refused submit_intent must not mutate registry via premature prune_expired"
+        );
     }
 }

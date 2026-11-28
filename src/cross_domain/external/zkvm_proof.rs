@@ -240,7 +240,7 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
     }
 
     fn has_pinned_trust_anchor(&self) -> bool {
-        self.program_hash.is_some() && self.chain_id.is_some()
+        self.program_hash.is_some_and(|h| h != [0u8; 32]) && self.chain_id.is_some_and(|id| id != 0)
     }
 
     fn verify(
@@ -312,6 +312,9 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
             return Err(AdapterError::Unavailable {
                 reason: "a proven attestation has no depth; this caller asked for one".to_string(),
             });
+        }
+        if policy.require_slashable {
+            return Err(AdapterError::UnslashableBacking);
         }
         if policy.max_age > 0 {
             if decoded.inputs.block_height > policy.now {
@@ -497,6 +500,21 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
             adapter_version: self.descriptor.adapter_version,
             evidence_version: evidence.evidence_version,
         })
+    }
+
+    fn verify_observed(
+        &self,
+        evidence: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+        observer: &mut dyn crate::crypto::facts::CryptoObserver,
+    ) -> Result<FinalityAttestation, AdapterError> {
+        use crate::crypto::facts::{AssumptionClass, ObservedScheme};
+        use crate::crypto::scheme::SchemeId;
+
+        let att = self.verify(evidence, policy)?;
+        observer.observe(ObservedScheme::Proof(AssumptionClass::Hash));
+        observer.observe(ObservedScheme::Scheme(SchemeId::BUDZERO_STARK_V2));
+        Ok(att)
     }
 
     fn fault_probes(&self) -> Vec<FaultProbe> {
@@ -1272,5 +1290,51 @@ mod tests {
             blank.verify(&blank_raw, &VerificationPolicy::proven(50)),
             Err(AdapterError::ConsensusRule { .. })
         ));
+    }
+
+    #[test]
+    fn zkvm_refuses_slashable_policy_zero_pin_anchor_and_observes_pq_hash_stark() {
+        use crate::crypto::facts::{AssumptionClass, CryptoFacts, ObservedScheme};
+        use crate::crypto::scheme::SchemeId;
+
+        let program = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("canonical build");
+        let pinned_hash = bud_proof::canonical_set::program_hash_of(&program);
+
+        // Zero program_hash or zero chain_id is a closed configuration and must NOT claim
+        // `has_pinned_trust_anchor() == true`.
+        assert!(
+            !ZkVmFinalityAdapter::new("testnet", Some([0u8; 32]), Some(1))
+                .has_pinned_trust_anchor()
+        );
+        assert!(
+            !ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(0))
+                .has_pinned_trust_anchor()
+        );
+
+        let adapter = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1))
+            .with_air_chain_id_binding_for_test();
+        assert!(adapter.has_pinned_trust_anchor());
+        let raw = honest_evidence(&adapter, program);
+
+        // Unbonded ZkVm proof carries no local slash escrow -> require_slashable must fail closed.
+        let mut slash_policy = VerificationPolicy::proven(3);
+        slash_policy.require_slashable = true;
+        assert!(matches!(
+            adapter.verify(&raw, &slash_policy),
+            Err(AdapterError::UnslashableBacking)
+        ));
+
+        // verify_observed must record pure-PQ Hash / BUDZERO_STARK_V2 facts so quantum
+        // classical-domain isolation never freezes a pure-STARK ZkVm domain.
+        let mut facts = CryptoFacts::default();
+        adapter
+            .verify_observed(&raw, &VerificationPolicy::proven(3), &mut facts)
+            .expect("verify_observed succeeds");
+        assert!(
+            facts.count(ObservedScheme::Proof(AssumptionClass::Hash)) >= 1
+                || facts.count(ObservedScheme::Scheme(SchemeId::BUDZERO_STARK_V2)) >= 1,
+            "ZkVmFinalityAdapter::verify_observed must record hash-STARK crypto facts"
+        );
     }
 }
