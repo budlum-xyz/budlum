@@ -92,6 +92,65 @@ fn workflows_and_dependabot_are_current() {
         "workflows naming the deleted branch: {stale:?}"
     );
 
+    const RETIRED_PR_BRANCHES: &[&str] = &[
+        "agg-phase-2",
+        "agg/phase-2-sig-claims",
+        "agg/phase-3-recursion-stark",
+        "agg/phase-4-program-claims",
+        "agg/phase-5-pcs-claims",
+        "audit-2026-11-16",
+        "budlum",
+        "budlum-osv-coverage-agent",
+        "budlum-stack",
+        "budlum-unification",
+        "budlum-universal",
+        "diag-rehearsal-a",
+        "diag-rehearsal-b",
+    ];
+    let mut retired_hits = Vec::new();
+    let claim_text = read(".github/workflows/ci-trigger-branches.txt");
+    for line in claim_text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        if RETIRED_PR_BRANCHES.contains(&line) {
+            retired_hits.push(format!("ci-trigger-branches.txt -> {line}"));
+        }
+    }
+    for entry in std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !std::path::Path::new(&name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("yml") || e.eq_ignore_ascii_case("yaml"))
+        {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        for line in text.lines() {
+            let trimmed = line.trim();
+            let Some(rest) = trimmed.strip_prefix("branches:") else {
+                continue;
+            };
+            for item in rest.trim().trim_matches(['[', ']'].as_ref()).split(',') {
+                let b = item.trim().trim_matches(['"', '\''].as_ref());
+                if RETIRED_PR_BRANCHES.contains(&b) {
+                    retired_hits.push(format!("{name} -> {b}"));
+                }
+            }
+        }
+    }
+    retired_hits.sort();
+    assert!(
+        retired_hits.is_empty(),
+        "retired remote branches remain in CI trigger claims or workflow branch filters: {retired_hits:?}"
+    );
+
     let dependabot = read(".github/dependabot.yml");
     for lock_dir in [
         "/bud",

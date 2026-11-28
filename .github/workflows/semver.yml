@@ -21,7 +21,7 @@ on:
   # `ci-full-battery-parity` now fails when a branch listed in
   # `.github/workflows/ci-full-battery-branches.txt` is left out of either place.
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-50, agg-phase-2, agg/phase-2-sig-claims, agg/phase-3-recursion-stark, agg/phase-4-program-claims, audit-2026-11-16, audit-testnet-2026-11, budlum, budlum-4-you, budlum-osv-coverage-agent, budlum-unification, budlum-universal, diag-rehearsal-a, diag-rehearsal-b, ortak-teslim]
+    branches: [main, consensus-of-consensuses, testnet-50, audit-testnet-2026-11, budlum-4-you, ortak-teslim]
 
 concurrency:
   group: semver-${{ github.ref }}
