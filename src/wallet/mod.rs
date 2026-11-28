@@ -66,6 +66,12 @@ const CIPHER_NAME: &str = "xchacha20poly1305";
 ///
 /// Returns a refusal naming both ids when the node serves another network.
 pub fn bind_signing_chain_id(node_chain_id: u64, requested: u64) -> Result<u64, String> {
+    if requested == 0 || node_chain_id == 0 {
+        return Err(
+            "chain id 0 is never a valid signing replay domain; specify mainnet (45260), testnet (45261), or devnet (45262)"
+                .to_string(),
+        );
+    }
     if node_chain_id != requested {
         return Err(format!(
             "the node serves chain id {node_chain_id}, but --signing-chain-id {requested} was \
@@ -336,6 +342,16 @@ impl SigningKey {
     ///
     /// The composite signer's refusal (a scheme the registry does not allow).
     pub fn sign(&self, tx: &mut crate::core::transaction::Transaction) -> Result<(), String> {
+        if tx.chain_id == 0 {
+            return Err("refusing to sign transaction with chain_id 0".into());
+        }
+        if tx.from != self.address() {
+            return Err(format!(
+                "transaction sender {} does not match wallet address {}",
+                tx.from.to_hex(),
+                self.address().to_hex()
+            ));
+        }
         match self {
             Self::V3(account) => {
                 use rand::Rng;
@@ -381,6 +397,16 @@ impl KeyFile {
     pub fn seal(entropy: &[u8; 32], password: &str, iterations: u32) -> Result<Self, WalletError> {
         use chacha20poly1305::aead::{Aead, KeyInit};
         use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+        if password.chars().count() < 8 {
+            return Err(WalletError::Format(
+                "wallet password must have at least 8 characters".into(),
+            ));
+        }
+        if iterations == 0 || iterations > MAX_KDF_ITERATIONS {
+            return Err(WalletError::Format(format!(
+                "PBKDF2 iterations {iterations} outside 1..={MAX_KDF_ITERATIONS}"
+            )));
+        }
         let mut salt = [0u8; 16];
         let mut nonce = [0u8; 24];
         {
@@ -389,8 +415,8 @@ impl KeyFile {
             rng.fill_bytes(&mut salt);
             rng.fill_bytes(&mut nonce);
         }
-        let key = pbkdf2_sha256(password.as_bytes(), &salt, iterations.max(1));
-        let cipher = XChaCha20Poly1305::new_from_slice(&key)
+        let key = zeroize::Zeroizing::new(pbkdf2_sha256(password.as_bytes(), &salt, iterations));
+        let cipher = XChaCha20Poly1305::new_from_slice(&*key)
             .map_err(|_| WalletError::Format("cipher key".into()))?;
         let nonce_value =
             XNonce::try_from(nonce.as_slice()).map_err(|_| WalletError::Format("nonce".into()))?;
@@ -400,7 +426,7 @@ impl KeyFile {
         Ok(Self {
             version: KEY_FILE_VERSION,
             kdf: KDF_NAME.into(),
-            iterations: iterations.max(1),
+            iterations,
             salt: hex::encode(salt),
             cipher: CIPHER_NAME.into(),
             nonce: hex::encode(nonce),
@@ -460,20 +486,24 @@ impl KeyFile {
                 nonce.len()
             )));
         }
-        if ciphertext.len() < MIN_CIPHERTEXT_LEN {
+        if ciphertext.len() != 32 + MIN_CIPHERTEXT_LEN {
             return Err(WalletError::Format(format!(
-                "ciphertext length {} < minimum {MIN_CIPHERTEXT_LEN}",
-                ciphertext.len()
+                "ciphertext length {} != expected {}",
+                ciphertext.len(),
+                32 + MIN_CIPHERTEXT_LEN
             )));
         }
-        let key = pbkdf2_sha256(password.as_bytes(), &salt, self.iterations);
-        let cipher = XChaCha20Poly1305::new_from_slice(&key)
+        let key =
+            zeroize::Zeroizing::new(pbkdf2_sha256(password.as_bytes(), &salt, self.iterations));
+        let cipher = XChaCha20Poly1305::new_from_slice(&*key)
             .map_err(|_| WalletError::Format("cipher key".into()))?;
         let nonce_value = XNonce::try_from(nonce.as_slice())
             .map_err(|_| WalletError::Format("nonce length".into()))?;
-        let plain = cipher
-            .decrypt(&nonce_value, ciphertext.as_slice())
-            .map_err(|_| WalletError::WrongPassword)?;
+        let plain = zeroize::Zeroizing::new(
+            cipher
+                .decrypt(&nonce_value, ciphertext.as_slice())
+                .map_err(|_| WalletError::WrongPassword)?,
+        );
         let entropy = <[u8; 32]>::try_from(plain.as_slice())
             .map_err(|_| WalletError::Format("sealed entropy length".into()))?;
         let address = if self.is_legacy() {
