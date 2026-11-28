@@ -586,6 +586,20 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
                 reason: e.to_string(),
             })?;
         let free_collateral = self.verify_collateral(&ev)?;
+        if free_collateral == 0 {
+            return Err(AdapterError::ConsensusRule {
+                rule: "Symbiotic curated vault cannot claim economic finality with zero free collateral"
+                    .into(),
+            });
+        }
+        let min_backing_weight = u128::from(ev.pq_signatures.len() as u64);
+        if free_collateral < min_backing_weight {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!(
+                    "Symbiotic free_collateral ({free_collateral}) is below PQ signer count ({min_backing_weight})"
+                ),
+            });
+        }
 
         if policy.min_depth > 1 {
             return Err(AdapterError::InsufficientDepth {
@@ -622,7 +636,8 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
             return Err(AdapterError::UnslashableBacking);
         }
 
-        let digest = ev.digest();
+        let _bundle_digest = ev.digest();
+        let digest = evidence.digest();
         let backing = SecurityBacking::SignatureSet {
             scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
             signers: ev.pq_signatures.len() as u64,

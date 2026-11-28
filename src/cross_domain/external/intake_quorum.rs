@@ -147,7 +147,14 @@ impl QuorumRound {
     pub fn progress(&self, policy: &QuorumPolicy) -> RoundProgress {
         let answers = self.answers();
         let (standings, infrastructure_failures) = group_answers(&answers);
-        let remaining = policy.max_participants.saturating_sub(self.entries.len());
+        // Seats are per kind of answer; the seats a reader wants to know
+        // about are the ones a claim can still take.
+        let claim_entries = self
+            .entries
+            .iter()
+            .filter(|e| matches!(e.answer, Answer::Claim(_)))
+            .count();
+        let remaining = policy.max_participants.saturating_sub(claim_entries);
         RoundProgress {
             lead_unassailable: lead_is_unassailable(&answers, policy, remaining),
             decided: decide(&answers, policy).decided(),
@@ -415,7 +422,18 @@ impl QuorumRounds {
         if round.has_answered(&evidence.submitter) {
             return Err(RoundError::DuplicateAnswer);
         }
-        if round.entries.len() >= policy.max_participants {
+        // Seats are counted per kind of answer. A refusal is a vote about the
+        // bytes its prover carried, and threshold-many provers with a bad
+        // signature could fill a round before the honest claims arrived;
+        // they no longer take the seats a claim needs, and claims do not
+        // take theirs. Each kind keeps the cap, so the round stays bounded.
+        let is_claim = verified.is_ok();
+        let same_kind = round
+            .entries
+            .iter()
+            .filter(|e| matches!(e.answer, Answer::Claim(_)) == is_claim)
+            .count();
+        if same_kind >= policy.max_participants {
             return Err(RoundError::RoundFull {
                 max: policy.max_participants,
             });
@@ -487,12 +505,24 @@ impl QuorumRounds {
                 //   otherwise the round stays open and waits, because
                 //   waiting costs nothing and a frozen round costs a
                 //   challenge game.
-                let at_threshold = groups
+                // Only claims can still decide a disputed round in the claim's
+                // favour, and only claims spend the claim seats: refusals beside
+                // them are votes about their own bytes (see `decide`).
+                let claim_groups: Vec<&AnswerGroup> = groups
+                    .iter()
+                    .filter(|g| matches!(g.answer, Answer::Claim(_)))
+                    .collect();
+                let at_threshold = claim_groups
                     .iter()
                     .filter(|g| g.count >= policy.agreement_threshold)
                     .count();
-                let remaining = policy.max_participants.saturating_sub(round.entries.len());
-                let best = groups.iter().map(|g| g.count).max().unwrap_or(0);
+                let claim_entries = round
+                    .entries
+                    .iter()
+                    .filter(|e| matches!(e.answer, Answer::Claim(_)))
+                    .count();
+                let remaining = policy.max_participants.saturating_sub(claim_entries);
+                let best = claim_groups.iter().map(|g| g.count).max().unwrap_or(0);
                 if at_threshold >= 2 {
                     RoundState::Disputed
                 } else if remaining > 0

@@ -105,7 +105,12 @@ fn strip_pub_vis(t: &str) -> &str {
 
 /// The first identifier on the line, or `None` when there is none.
 fn ident_start(t: &str) -> Option<(&str, &str)> {
-    let end = t.find(|c: char| !c.is_ascii_alphanumeric() && c != '_')?;
+    if t.is_empty() {
+        return None;
+    }
+    let end = t
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .unwrap_or(t.len());
     if end == 0 {
         return None;
     }
@@ -120,7 +125,12 @@ fn ident_start(t: &str) -> Option<(&str, &str)> {
 /// The first type name on the line: `[A-Za-z_][A-Za-z0-9_:]*`, so a
 /// path-qualified type like `super::entries` is read as one token.
 fn type_ident(t: &str) -> Option<(&str, &str)> {
-    let end = t.find(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')?;
+    if t.is_empty() {
+        return None;
+    }
+    let end = t
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+        .unwrap_or(t.len());
     if end == 0 {
         return None;
     }
@@ -233,6 +243,223 @@ fn iter_field(candidate: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Strip leading `&`, optional lifetime `'a`, and optional `mut` from a type
+/// expression so `&'a mut HashMap<K, V>` becomes `HashMap<K, V>`.
+fn strip_ref_type(mut ty: &str) -> &str {
+    ty = ty.trim_start();
+    while let Some(rest) = ty.strip_prefix('&') {
+        let mut r = rest.trim_start();
+        if let Some(after_quote) = r.strip_prefix('\'') {
+            let len = after_quote
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(after_quote.len());
+            r = after_quote[len..].trim_start();
+        }
+        if let Some(after_mut) = r.strip_prefix("mut") {
+            if after_mut.bytes().next().is_some_and(|b| !is_word_byte(b)) {
+                r = after_mut.trim_start();
+            }
+        }
+        ty = r;
+    }
+    ty
+}
+
+/// Extract `(param_name, last_type_segment)` bindings from a function header
+/// spanning `lines[start..]` up to the opening `{` of the body.
+fn parse_fn_params(lines: &[&str], start: usize) -> HashMap<String, String> {
+    let mut header = String::new();
+    for line in lines.iter().skip(start).take(12) {
+        let code = line.split("//").next().unwrap_or(line);
+        header.push(' ');
+        if let Some(brace) = code.find('{') {
+            header.push_str(&code[..brace]);
+            break;
+        }
+        header.push_str(code);
+    }
+    let Some(fn_pos) = header.find("fn ") else {
+        return HashMap::new();
+    };
+    let after_fn = &header[fn_pos + 3..];
+    let Some((_name, rest)) = ident_start(after_fn.trim_start()) else {
+        return HashMap::new();
+    };
+    let mut rest = rest.trim_start();
+    if let Some(after_lt) = rest.strip_prefix('<') {
+        let mut depth = 1i64;
+        let mut end = None;
+        for (i, c) in after_lt.char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end_idx) = end else {
+            return HashMap::new();
+        };
+        rest = after_lt[end_idx..].trim_start();
+    }
+    let Some(in_parens) = rest.strip_prefix('(') else {
+        return HashMap::new();
+    };
+    let mut paren_depth = 1i64;
+    let mut close_idx = None;
+    for (i, c) in in_parens.char_indices() {
+        match c {
+            '(' => paren_depth += 1,
+            ')' => {
+                paren_depth -= 1;
+                if paren_depth == 0 {
+                    close_idx = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close_idx else {
+        return HashMap::new();
+    };
+    let params_str = &in_parens[..close];
+
+    // Split top-level comma-separated parameters (ignoring commas inside `<..>` or `(..)`).
+    let mut parts: Vec<&str> = Vec::new();
+    let mut angle = 0i64;
+    let mut paren = 0i64;
+    let mut seg_start = 0usize;
+    for (i, c) in params_str.char_indices() {
+        match c {
+            '<' => angle += 1,
+            '>' => angle = (angle - 1).max(0),
+            '(' => paren += 1,
+            ')' => paren = (paren - 1).max(0),
+            ',' if angle == 0 && paren == 0 => {
+                parts.push(&params_str[seg_start..i]);
+                seg_start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&params_str[seg_start..]);
+
+    let mut out = HashMap::new();
+    for raw in parts {
+        let p = raw.trim();
+        if p.is_empty() || p.ends_with("self") {
+            continue;
+        }
+        let Some((lhs, rhs)) = p.split_once(':') else {
+            continue;
+        };
+        let lhs = lhs.trim();
+        let lhs = lhs
+            .strip_prefix("mut")
+            .filter(|s| s.bytes().next().is_some_and(|b| b.is_ascii_whitespace()))
+            .map_or(lhs, str::trim_start);
+        let Some((param_name, rem)) = ident_start(lhs) else {
+            continue;
+        };
+        if !rem.trim().is_empty() || param_name == "self" {
+            continue;
+        }
+        let ty = strip_ref_type(rhs);
+        if let Some((type_name, _)) = type_ident(ty) {
+            let last = type_name.rsplit("::").next().unwrap_or(type_name);
+            out.insert(param_name.to_string(), last.to_string());
+        }
+    }
+    out
+}
+
+/// Detect `for <binding> in (&|&mut)? <ident> (.iter()|.values()|.keys()|...)?`
+/// or `let <local> = (&|&mut)? <ident>` parameter/local iteration inside a
+/// hashing function body.
+fn iter_binding(candidate: &str) -> Option<String> {
+    let pos = candidate.find("for ")?;
+    let rest = &candidate[pos + 4..];
+    let in_pos = rest.find(" in ")?;
+    let binding = &rest[..in_pos];
+    if binding.trim().is_empty() {
+        return None;
+    }
+    let mut after = rest[in_pos + 4..].trim_start();
+    if let Some(r) = after.strip_prefix('&') {
+        after = r.trim_start();
+        if let Some(r_mut) = after.strip_prefix("mut") {
+            if r_mut.bytes().next().is_some_and(|b| !is_word_byte(b)) {
+                after = r_mut.trim_start();
+            }
+        }
+    }
+    let (ident, after_ident) = ident_start(after)?;
+    if ident == "self" {
+        return None;
+    }
+    let after_ident = after_ident.trim_start();
+    let after_method = if let Some(r) = after_ident.strip_prefix('.') {
+        let r = r.trim_start();
+        let matched = ITER_METHODS.iter().find(|m| r.starts_with(**m))?;
+        &r[matched.len()..]
+    } else {
+        after_ident
+    };
+    let tail = after_method.trim_start();
+    let chained = after_ident.starts_with('.') && tail.starts_with('.');
+    if tail.starts_with('{') || tail.starts_with('&') || chained {
+        Some(ident.to_string())
+    } else {
+        None
+    }
+}
+
+/// Detect local variable declarations `let (mut)? <var> (: <Type>)? = <rhs>;`
+/// inside a hashing function body that construct or alias an unordered map/set
+/// (`HashMap::new`, `HashMap::from`, `FxHashMap::default`, explicit type
+/// annotation `: HashMap<..>`, or rebinding an unordered parameter/local).
+fn local_unordered_decl(sline: &str, locals: &HashMap<String, String>) -> Option<(String, String)> {
+    let t = sline.trim_start().strip_prefix("let ")?.trim_start();
+    let t = t
+        .strip_prefix("mut")
+        .filter(|s| s.bytes().next().is_some_and(|b| b.is_ascii_whitespace()))
+        .map_or(t, str::trim_start);
+    let (var_name, rest) = ident_start(t)?;
+    let rest = rest.trim_start();
+    // Explicit type annotation: `let m: HashMap<K, V> = ...` or `let m: &Entries = ...`
+    if let Some(after_colon) = rest.strip_prefix(':') {
+        let ty = strip_ref_type(after_colon);
+        if let Some((type_name, _)) = type_ident(ty) {
+            let last = type_name.rsplit("::").next().unwrap_or(type_name);
+            return Some((var_name.to_string(), last.to_string()));
+        }
+    }
+    // Inferred constructor or rebinding: `let m = HashMap::from(...)` or `let m = &param;`
+    let rhs = rest.strip_prefix('=')?.trim_start();
+    let rhs = strip_ref_type(rhs);
+    let (rhs_head, after_head) = type_ident(rhs)?;
+    if let Some((prefix, _method)) = rhs_head.rsplit_once("::") {
+        let ty_seg = prefix.rsplit("::").next().unwrap_or(prefix);
+        return Some((var_name.to_string(), ty_seg.to_string()));
+    }
+    let after_head = after_head.trim_start();
+    if (after_head.starts_with(';') || after_head.starts_with(".clone()"))
+        && locals.contains_key(rhs_head)
+    {
+        return locals
+            .get(rhs_head)
+            .cloned()
+            .map(|k| (var_name.to_string(), k));
+    }
+    None
 }
 
 /// Look up `name` under `scope`, walking from the deepest module to the
@@ -475,24 +702,52 @@ fn scan_file(path: &std::path::Path, rel: &str) -> Result<Vec<Finding>, String> 
         }
     }
 
-    // Walk function bodies on the raw lines, like the shell gate.
+    // Walk function bodies on the raw lines, like the shell gate, plus
+    // parameter and local-binding tracking so passing `&HashMap<K, V>` or
+    // building a local `HashMap` inside a hashing fn cannot slip past `self.<field>`.
     let mut inside = false;
+    let mut opened_body = false;
     let mut depth = 0i64;
     let mut fname = String::new();
     let mut start = 0usize;
+    let mut fn_locals: HashMap<String, String> = HashMap::new();
     for (idx, line) in lines.iter().enumerate() {
-        if let Some(name) = is_hashing_fn(line) {
+        let sline = scrubbed_lines.get(idx).copied().unwrap_or(line);
+        if let Some(name) = is_hashing_fn(sline) {
             if !inside {
-                inside = true;
-                depth = 0;
-                fname = name;
-                start = idx;
+                // Trait method declarations ending in `;` without `{` have no body.
+                let mut sig_only = false;
+                for ahead in scrubbed_lines.iter().skip(idx).take(12) {
+                    if ahead.contains('{') {
+                        break;
+                    }
+                    if ahead.trim_end().ends_with(';') {
+                        sig_only = true;
+                        break;
+                    }
+                }
+                if !sig_only {
+                    inside = true;
+                    opened_body = false;
+                    depth = 0;
+                    fname = name;
+                    start = idx;
+                    fn_locals = parse_fn_params(&scrubbed_lines, idx);
+                }
             }
         }
         if !inside {
             continue;
         }
-        depth += brace_delta(line);
+        if sline.contains('{') {
+            opened_body = true;
+        }
+        depth += brace_delta(sline);
+        if opened_body {
+            if let Some((var_name, ty_seg)) = local_unordered_decl(sline, &fn_locals) {
+                fn_locals.insert(var_name, ty_seg);
+            }
+        }
         // rustfmt splits a long `for` header across lines; join the next
         // three lines before searching (four total).
         let window = lines[idx..(idx + 4).min(lines.len())]
@@ -500,10 +755,9 @@ fn scan_file(path: &std::path::Path, rel: &str) -> Result<Vec<Finding>, String> 
             .map(|l| l.trim())
             .collect::<Vec<_>>()
             .join(" ");
-        let field = iter_field(line).or_else(|| iter_field(&window));
-        if let Some(field) = field {
-            let scope = line_scopes.get(idx).cloned().unwrap_or_default();
-            let mut kind = scoped_get(&declared, &scope, &field).cloned();
+        let scope = line_scopes.get(idx).cloned().unwrap_or_default();
+        let resolve_aliases = |initial: Option<String>| -> Option<String> {
+            let mut kind = initial;
             let mut seen: HashSet<String> = HashSet::new();
             while let Some(current) = kind.clone() {
                 if !seen.insert(current.clone()) {
@@ -514,6 +768,22 @@ fn scan_file(path: &std::path::Path, rel: &str) -> Result<Vec<Finding>, String> 
                     None => break,
                 }
             }
+            kind
+        };
+
+        let iter_target: Option<(String, Option<String>)> = iter_field(line)
+            .or_else(|| iter_field(&window))
+            .map(|f| {
+                let raw_kind = scoped_get(&declared, &scope, &f).cloned();
+                (format!("self.{f}"), resolve_aliases(raw_kind))
+            })
+            .or_else(|| {
+                let b = iter_binding(line).or_else(|| iter_binding(&window))?;
+                let raw_kind = fn_locals.get(&b).cloned();
+                Some((b, resolve_aliases(raw_kind)))
+            });
+
+        if let Some((target_label, kind)) = iter_target {
             if kind.as_deref().is_some_and(|k| UNORDERED.contains(&k)) {
                 let body = lines[idx..(idx + 40).min(lines.len())].join("\n");
                 let body = body
@@ -525,14 +795,18 @@ fn scan_file(path: &std::path::Path, rel: &str) -> Result<Vec<Finding>, String> 
                         path: rel.to_string(),
                         line: idx + 1,
                         fname: fname.clone(),
-                        field,
+                        field: target_label,
                         kind: kind.unwrap_or_default(),
                     });
                 }
             }
         }
-        if depth <= 0 && idx > start {
+        if opened_body && depth <= 0 {
             inside = false;
+            fn_locals.clear();
+        } else if !opened_body && idx > start + 12 {
+            inside = false;
+            fn_locals.clear();
         }
     }
     Ok(findings)
@@ -558,7 +832,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     for f in &findings {
         writeln!(
             msg,
-            "  {}:{}  fn {}() iterates self.{}: {}<..>",
+            "  {}:{}  fn {}() iterates {}: {}<..>",
             f.path, f.line, f.fname, f.field, f.kind
         )
         .expect("writing to a String cannot fail");
@@ -695,6 +969,37 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
+    // Parameter bypass: passing `&HashMap<K, V>` (or an aliased map) as an
+    // argument to a hashing function instead of reading `self.<field>` must fail.
+    let param_hashmap = "use std::collections::HashMap;\npub fn compute_hash(entries: &HashMap<u64, u64>) -> [u8; 32] {\n    let mut hasher = Sha256::new();\n    for (k, v) in entries {\n        hasher.update(k.to_le_bytes());\n        hasher.update(v.to_le_bytes());\n    }\n    hasher.finalize().into()\n}\n";
+    if fixture_passes(&dir, param_hashmap)? {
+        failures.push(String::from(
+            "a &HashMap parameter iterated inside compute_hash was accepted",
+        ));
+    }
+
+    // Aliased parameter bypass wrapped across lines.
+    let param_alias = "type Entries<K, V> = FxHashMap<K, V>;\npub fn digest<'a>(\n    rows: &'a Entries<u64, u64>,\n) -> [u8; 32] {\n    let mut hasher = Sha256::new();\n    for v in rows.values() {\n        hasher.update(v.to_le_bytes());\n    }\n    hasher.finalize().into()\n}\n";
+    if fixture_passes(&dir, param_alias)? {
+        failures.push(String::from(
+            "an aliased FxHashMap parameter iterated inside digest was accepted",
+        ));
+    }
+
+    // Local HashMap constructed inside a hashing function and folded into digest.
+    let local_hashmap = "pub fn state_root(items: &[(u64, u64)]) -> [u8; 32] {\n    let mut m = HashMap::new();\n    for (k, v) in items { m.insert(*k, *v); }\n    let mut hasher = Sha256::new();\n    for (k, v) in &m {\n        hasher.update(k.to_le_bytes());\n        hasher.update(v.to_le_bytes());\n    }\n    hasher.finalize().into()\n}\n";
+    if fixture_passes(&dir, local_hashmap)? {
+        failures.push(String::from(
+            "a local HashMap iterated inside state_root was accepted",
+        ));
+    }
+
+    // Ordered `&BTreeMap` parameter must pass cleanly.
+    let param_btreemap = "use std::collections::BTreeMap;\npub fn compute_hash(entries: &BTreeMap<u64, u64>) -> [u8; 32] {\n    let mut hasher = Sha256::new();\n    for (k, v) in entries {\n        hasher.update(k.to_le_bytes());\n        hasher.update(v.to_le_bytes());\n    }\n    hasher.finalize().into()\n}\n";
+    if !fixture_passes(&dir, param_btreemap)? {
+        failures.push(String::from("an ordered &BTreeMap parameter was flagged"));
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
     if failures.is_empty() {
         Ok(String::from(
@@ -704,9 +1009,11 @@ pub fn self_test() -> Result<String, String> {
              generic application, one behind a path-qualified alias use, one \
              behind a visibility-qualified alias, one behind a path-qualified \
              visibility, one shadowed inside a module, one whose scope is \
-             protected from comment/string braces and one protected from a \
-             char-literal brace are all rejected; an ordered map, a non-hashing \
-             HashMap and a write-to-own-slot loop all pass.",
+             protected from comment/string braces, one protected from a \
+             char-literal brace, a &HashMap parameter, an aliased FxHashMap \
+             parameter and a local HashMap are all rejected; an ordered map, an \
+             ordered &BTreeMap parameter, a non-hashing HashMap and a \
+             write-to-own-slot loop all pass.",
         ))
     } else {
         Err(failures.join("; "))

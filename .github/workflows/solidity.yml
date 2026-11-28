@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack, agg/phase-5-pcs-claims]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden]
   # On demand, for issue 203: the external-domain contract compile must be
   # startable on a blocked head without pushing to it. Same per-ref
   # concurrency group as the event runs, so no extra queue lane.
