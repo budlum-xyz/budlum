@@ -2,7 +2,7 @@
 # The binary embeds this file; the scanned tree must carry the same
 # bytes and hash to the same digest. Re-measure in the same change:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- gate-source-provenance --print-baseline
-digest: 28733856bc654c80bfd5b5a318a175a03d79694e9bb319fec95082dacd04fc87
+digest: ac505f493354fbc04536a12f224e779a93571858becbf9da8d18e37b6302a53b
 files: 195
 Cargo.lock	7e8ca4b31fc0795bb139134686126f1d552e1e75e9ffbc2089fbc52944a48a1f
 Cargo.toml	57fec6fa2ed265f1ff40dcabd14a53866a6f199525861d51dcf68a11f0c5a407
@@ -45,7 +45,7 @@ src/gates/ci_fanout_budget.rs	5aba779330894d7d558f6fcc208b2682309a9018eae93f29c7
 src/gates/ci_jobs_end_on_cancel.rs	5cfd73898d13a99799ae81441c7cd548fc037301e2c826024ed071624e97eb65
 src/gates/ci_workflow_guards.rs	5a90921ecfcf0c30ec1507c1c4a80ce153c5e518ddbb718a3af417102703413e
 src/gates/classical_crypto_is_paired.rs	4f73e2b022cedc016181510b3f1f0c57952ca78297ae44492c83afcddec48026
-src/gates/clippy_extra.rs	7a25e77e50905e4a9036cd77c97dfdc2e5ee628b5385f908767cea0d19998cda
+src/gates/clippy_extra.rs	4c01245b5e0b17c08ce714ba5941f1b810d0585fd9321507ed6a3d93d348b94e
 src/gates/coding_audit_samples_the_relationship.rs	380c361b511e8c828866237b6ec4bbc4e2a690ff06141e009ddc67c26ca2fae1
 src/gates/concept_names.rs	c2aa83380f32eb55845c71a81f47b94b48cc380080537abba34fbdc7a9c55aac
 src/gates/consensus_maps_ordered.rs	ca5b134c031b53f7f71dd5fcfa58abaab8383b779272543ca42c511604bd7c5a

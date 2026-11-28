@@ -69,7 +69,44 @@ fn is_clippy_warning(line: &str) -> bool {
 fn count_json(path: &Path) -> Result<u64, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("the clippy JSON is missing/empty ({}): {e}", path.display()))?;
-    Ok(text.lines().filter(|l| is_clippy_warning(l)).count() as u64)
+    let mut finished = false;
+    let mut count = 0u64;
+    for line in text.lines() {
+        if finished {
+            return Err("clippy JSON contains data after build-finished".to_string());
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(line).map_err(|e| format!("invalid clippy JSON: {e}"))?;
+        match value.get("reason").and_then(serde_json::Value::as_str) {
+            Some("build-finished") => {
+                if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
+                    return Err("clippy build did not succeed".to_string());
+                }
+                finished = true;
+            }
+            Some("compiler-message") => {
+                let level = value
+                    .get("message")
+                    .and_then(|m| m.get("level"))
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "clippy diagnostic has no level".to_string())?;
+                if level == "error" {
+                    return Err("clippy emitted a compiler error".to_string());
+                }
+                if is_clippy_warning(line) {
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| "clippy warning count overflow".to_string())?;
+                }
+            }
+            Some(_) => {}
+            None => return Err("clippy JSON event has no reason".to_string()),
+        }
+    }
+    if !finished {
+        return Err("clippy JSON has no successful build-finished event".to_string());
+    }
+    Ok(count)
 }
 
 /// # Errors
@@ -120,16 +157,16 @@ pub fn self_test() -> Result<String, String> {
             s.push_str("{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"code\":{\"code\":\"clippy::x\"},\"rendered\":\"\"}}\n");
         }
         // Lines that carry the reason but not the level or not the code:
-        // a rustc error, a rustc warning, a note. None of them is a
+        // a rustc warning or a note. None of them is a
         // pedantic/nursery warning, and none of them may count.
         for _ in 0..n {
-            s.push_str("{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"code\":{\"code\":\"E0308\"},\"rendered\":\"\"}}\n");
             s.push_str("{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"code\":{\"code\":\"unused_variables\"},\"rendered\":\"\"}}\n");
             s.push_str("{\"reason\":\"compiler-message\",\"message\":{\"level\":\"note\",\"code\":null,\"rendered\":\"clippy::x\"}}\n");
             // A rustc warning whose rendered text names a clippy lint: not a
             // clippy warning, whatever the text says.
             s.push_str("{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"code\":{\"code\":\"unused_variables\"},\"rendered\":\"warning: unused variable; see clippy::x\"}}\n");
         }
+        s.push_str("{\"reason\":\"build-finished\",\"success\":true}\n");
         std::fs::write(dir.join(name), s).map_err(|e| e.to_string())
     };
     // 10 against a baseline of 11: at or under, and inside the slack.
@@ -159,4 +196,75 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "canary OK: over the baseline FAILs, within the slack PASSes, and a stale baseline FAILs (the gate is not vacuous in either direction).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run;
+
+    fn measure(name: &str, ending: &str) -> Result<Result<String, String>, String> {
+        let dir = crate::gates::rust_literals::exclusive_scratch_dir(name)?;
+        std::fs::create_dir_all(dir.join(".github")).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join(".github/clippy-extra-baseline.txt"), "11\n")
+            .map_err(|e| e.to_string())?;
+        let warning = "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"code\":{\"code\":\"clippy::x\"}}}\n";
+        let stream = format!("{}{ending}", warning.repeat(10));
+        let path = dir.join("stream.json");
+        std::fs::write(&path, stream).map_err(|e| e.to_string())?;
+        let verdict = run(&dir, &path);
+        std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        Ok(verdict)
+    }
+
+    #[test]
+    fn complete_success_is_measured() -> Result<(), String> {
+        assert!(measure(
+            "clippy-complete",
+            "{\"reason\":\"build-finished\",\"success\":true}\n"
+        )?
+        .is_ok());
+        Ok(())
+    }
+    #[test]
+    fn failed_build_is_not_a_measurement() -> Result<(), String> {
+        assert!(measure("clippy-failed", "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\"}}\n{\"reason\":\"build-finished\",\"success\":false}\n")?.is_err());
+        Ok(())
+    }
+    #[test]
+    fn compiler_error_is_never_accepted() -> Result<(), String> {
+        assert!(measure("clippy-error", "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\"}}\n{\"reason\":\"build-finished\",\"success\":true}\n")?.is_err());
+        Ok(())
+    }
+    #[test]
+    fn missing_completion_is_not_a_measurement() -> Result<(), String> {
+        assert!(measure("clippy-incomplete", "")?.is_err());
+        Ok(())
+    }
+    #[test]
+    fn corrupt_trailing_data_is_not_a_measurement() -> Result<(), String> {
+        assert!(measure(
+            "clippy-trailing",
+            "{\"reason\":\"build-finished\",\"success\":true}\nnot-json\n"
+        )?
+        .is_err());
+        Ok(())
+    }
+    #[test]
+    fn diagnostic_without_level_is_not_a_measurement() -> Result<(), String> {
+        assert!(measure(
+            "clippy-malformed",
+            "{\"reason\":\"compiler-message\"}\n{\"reason\":\"build-finished\",\"success\":true}\n"
+        )?
+        .is_err());
+        Ok(())
+    }
+    #[test]
+    fn event_without_reason_is_not_a_measurement() -> Result<(), String> {
+        assert!(measure(
+            "clippy-reason",
+            "{}\n{\"reason\":\"build-finished\",\"success\":true}\n"
+        )?
+        .is_err());
+        Ok(())
+    }
 }
