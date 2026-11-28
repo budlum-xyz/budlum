@@ -106,6 +106,12 @@ pub enum SettlementTx {
 
     /// Universal Object Layer state write (closed by `ACTIVATION` until M7).
     ObjectLayer(Box<crate::object_layer::ObjectLayerTx>),
+    /// Permissionless relayer-free domain commitment submission verified purely
+    /// by finality proof cryptography without requiring a bonded `RELAYER`.
+    SubmitCommitmentDirect(Box<VerifiedDomainCommitment>),
+    /// Permissionless relayer-free cross-domain message delivery verified purely
+    /// against the committed domain event root without requiring a bonded `RELAYER`.
+    DeliverMessageDirect(Box<DeliverMessage>),
 }
 
 /// Equality by wire encoding: the payloads carry proof types that define no
@@ -162,10 +168,12 @@ fn deliver_message(
     state: &mut AccountState,
     ctx: &SettlementTxContext,
     delivery: &DeliverMessage,
+    require_relayer: bool,
 ) -> Result<(), SettlementTxError> {
-    if !state
-        .registry
-        .is_active(&ctx.sender, crate::registry::role::roles::RELAYER)
+    if require_relayer
+        && !state
+            .registry
+            .is_active(&ctx.sender, crate::registry::role::roles::RELAYER)
     {
         return Err(SettlementTxError::CarrierNotBonded);
     }
@@ -2004,51 +2012,10 @@ pub fn execute_settlement_tx(
                 .map_err(SettlementTxError::Refused)
         }
         SettlementTx::SubmitCommitment(payload) => {
-            if !state
-                .registry
-                .is_active(&ctx.sender, crate::registry::role::roles::RELAYER)
-            {
-                return Err(SettlementTxError::CarrierNotBonded);
-            }
-            refuse_classical_only_quorum_on_mainnet(ctx.chain_id, &payload.proof)?;
-            let mut observed = crate::crypto::facts::CryptoFacts::new();
-            verify_commitment_finality_observed(
-                state,
-                &payload.commitment,
-                &payload.proof,
-                ctx.bls,
-                &mut observed,
-            )
-            .map_err(SettlementTxError::Refused)?;
-            let outcome = accept_verified_commitment(state, payload.commitment.clone())
-                .map_err(SettlementTxError::Refused)?;
-            // The facts are recorded only for a commitment that advanced the
-            // domain: a frozen domain or an old resubmission verified nothing
-            // new.
-            if outcome == CommitmentOutcome::Advanced {
-                state
-                    .settlement
-                    .domains
-                    .record_observed(payload.commitment.domain_id, &observed);
-                if matches!(payload.proof, FinalityProof::AggregatedProg { .. }) {
-                    if let Some(domain) = state
-                        .settlement
-                        .domains
-                        .get(payload.commitment.domain_id)
-                        .cloned()
-                    {
-                        let _ = state
-                            .settlement
-                            .claimed_domain_finality
-                            .verify_and_certify_commitment(
-                                &domain,
-                                &payload.commitment,
-                                &payload.proof,
-                            );
-                    }
-                }
-            }
-            Ok(())
+            submit_verified_commitment_inner(state, ctx, payload, true)
+        }
+        SettlementTx::SubmitCommitmentDirect(payload) => {
+            submit_verified_commitment_inner(state, ctx, payload, false)
         }
         SettlementTx::RegisterSovereignTemplate(template) => {
             if template.operator != ctx.sender {
@@ -2096,9 +2063,59 @@ pub fn execute_settlement_tx(
         SettlementTx::SharedSecurity(shared_tx) => {
             crate::settlement::shared_security::execute_shared_security_tx(state, ctx, shared_tx)
         }
-        SettlementTx::DeliverMessage(delivery) => deliver_message(state, ctx, delivery),
+        SettlementTx::DeliverMessage(delivery) => deliver_message(state, ctx, delivery, true),
+        SettlementTx::DeliverMessageDirect(delivery) => {
+            deliver_message(state, ctx, delivery, false)
+        }
         SettlementTx::ObjectLayer(uol_tx) => execute_object_layer_tx(state, ctx, uol_tx),
     }
+}
+
+fn submit_verified_commitment_inner(
+    state: &mut AccountState,
+    ctx: &SettlementTxContext,
+    payload: &VerifiedDomainCommitment,
+    require_relayer: bool,
+) -> Result<(), SettlementTxError> {
+    if require_relayer
+        && !state
+            .registry
+            .is_active(&ctx.sender, crate::registry::role::roles::RELAYER)
+    {
+        return Err(SettlementTxError::CarrierNotBonded);
+    }
+    refuse_classical_only_quorum_on_mainnet(ctx.chain_id, &payload.proof)?;
+    let mut observed = crate::crypto::facts::CryptoFacts::new();
+    verify_commitment_finality_observed(
+        state,
+        &payload.commitment,
+        &payload.proof,
+        ctx.bls,
+        &mut observed,
+    )
+    .map_err(SettlementTxError::Refused)?;
+    let outcome = accept_verified_commitment(state, payload.commitment.clone())
+        .map_err(SettlementTxError::Refused)?;
+    if outcome == CommitmentOutcome::Advanced {
+        state
+            .settlement
+            .domains
+            .record_observed(payload.commitment.domain_id, &observed);
+        if matches!(payload.proof, FinalityProof::AggregatedProg { .. }) {
+            if let Some(domain) = state
+                .settlement
+                .domains
+                .get(payload.commitment.domain_id)
+                .cloned()
+            {
+                let _ = state
+                    .settlement
+                    .claimed_domain_finality
+                    .verify_and_certify_commitment(&domain, &payload.commitment, &payload.proof);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn domain_has_bound_authority(domain: &ConsensusDomain) -> bool {

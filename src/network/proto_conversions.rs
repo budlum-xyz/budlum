@@ -101,6 +101,21 @@ fn decode_verify_stark_tx(
         .map_err(|e| format!("Invalid VerifyStark payload: {e}"))
 }
 
+fn decode_frame_tx(data: &[u8]) -> Result<crate::execution::frame_tx::FrameTransaction, String> {
+    decode_bounded_bincode(data, MAX_VERIFY_STARK_TX_BYTES)
+        .map_err(|e| format!("Invalid FrameTx payload: {e}"))
+}
+
+fn decode_defi_tx(data: &[u8]) -> Result<crate::defi::DeFiTx, String> {
+    decode_bounded_bincode(data, MAX_VERIFY_STARK_TX_BYTES)
+        .map_err(|e| format!("Invalid DeFi payload: {e}"))
+}
+
+fn decode_unification_tx(data: &[u8]) -> Result<crate::unification::tx::UnificationTx, String> {
+    decode_bounded_bincode(data, MAX_VERIFY_STARK_TX_BYTES)
+        .map_err(|e| format!("Invalid Unification payload: {e}"))
+}
+
 /// Decode a peer-supplied transaction-type payload under both a byte ceiling
 /// and an aggregate collection-count budget. `what` names the wire union arm
 /// in the refusal; fixint encoding and legacy trailing bytes stay compatible.
@@ -393,6 +408,28 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 Some(pb::proto_transaction::TypePayload::VerifyStark(
                     pb::ProtoVerifyStarkTx {
                         data: bincode_payload_or_log("VerifyStarkTx", verify_tx.as_ref()),
+                    },
+                )),
+            ),
+            TransactionType::FrameTx(frame_tx) => (
+                pb::ProtoTransactionType::FrameTx as i32,
+                Some(pb::proto_transaction::TypePayload::FrameTx(
+                    pb::ProtoFrameTx {
+                        data: bincode_payload_or_log("FrameTx", frame_tx.as_ref()),
+                    },
+                )),
+            ),
+            TransactionType::DeFi(defi_tx) => (
+                pb::ProtoTransactionType::Defi as i32,
+                Some(pb::proto_transaction::TypePayload::Defi(pb::ProtoDeFiTx {
+                    data: bincode_payload_or_log("DeFiTx", defi_tx.as_ref()),
+                })),
+            ),
+            TransactionType::Unification(uni_tx) => (
+                pb::ProtoTransactionType::Unification as i32,
+                Some(pb::proto_transaction::TypePayload::Unification(
+                    pb::ProtoUnificationTx {
+                        data: bincode_payload_or_log("UnificationTx", uni_tx.as_ref()),
                     },
                 )),
             ),
@@ -1482,6 +1519,27 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 };
                 TransactionType::VerifyStark(Box::new(decode_verify_stark_tx(&payload.data)?))
             }
+            pb::ProtoTransactionType::FrameTx => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::FrameTx(p)) => p,
+                    _ => return Err("Missing or mismatched FrameTx payload".into()),
+                };
+                TransactionType::FrameTx(Box::new(decode_frame_tx(&payload.data)?))
+            }
+            pb::ProtoTransactionType::Defi => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::Defi(p)) => p,
+                    _ => return Err("Missing or mismatched DeFi payload".into()),
+                };
+                TransactionType::DeFi(Box::new(decode_defi_tx(&payload.data)?))
+            }
+            pb::ProtoTransactionType::Unification => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::Unification(p)) => p,
+                    _ => return Err("Missing or mismatched Unification payload".into()),
+                };
+                TransactionType::Unification(Box::new(decode_unification_tx(&payload.data)?))
+            }
             pb::ProtoTransactionType::CrossDomainMessage => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::CrossDomainMessage(p)) => p,
@@ -2176,6 +2234,8 @@ impl From<&BlockHeader> for pb::ProtoBlockHeader {
             witness_root: header.witness_root.map(Vec::from).unwrap_or_default(),
             seat_participation: encode_seat_participation(&header.seat_participation),
             frame_hash: header.frame_hash.map(Vec::from).unwrap_or_default(),
+            uel_execution_root: header.uel_execution_root.map(Vec::from).unwrap_or_default(),
+            uel_receipts_root: header.uel_receipts_root.map(Vec::from).unwrap_or_default(),
             producer_public_key: header.producer_public_key.clone(),
             slashing_reports: header
                 .slashing_reports
@@ -2260,6 +2320,14 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
                 "block header seat_participation",
             )?,
             frame_hash: decode_optional_hash32(proto.frame_hash, "block header frame_hash")?,
+            uel_execution_root: decode_optional_hash32(
+                proto.uel_execution_root,
+                "block header uel_execution_root",
+            )?,
+            uel_receipts_root: decode_optional_hash32(
+                proto.uel_receipts_root,
+                "block header uel_receipts_root",
+            )?,
         })
     }
 }
@@ -2304,6 +2372,13 @@ impl From<&Block> for pb::ProtoBlock {
                 .as_ref()
                 .map(crate::aggregation::frame::ClaimFrame::encode)
                 .unwrap_or_default(),
+            uel_execution_root: block.uel_execution_root.map(Vec::from).unwrap_or_default(),
+            uel_receipts_root: block.uel_receipts_root.map(Vec::from).unwrap_or_default(),
+            uel_transactions: block
+                .uel_transactions
+                .iter()
+                .filter_map(|utx| bincode::serialize(utx).ok())
+                .collect(),
             producer_public_key: block.producer_public_key.clone(),
             slashing_reports: block
                 .slashing_reports
@@ -2406,6 +2481,27 @@ impl TryFrom<pb::ProtoBlock> for Block {
             )?,
             frame_hash: decode_optional_hash32(proto.frame_hash, "block frame_hash")?,
             claim_frame: crate::aggregation::chain::decode_wire_frame(&proto.claim_frame)?,
+            uel_execution_root: decode_optional_hash32(
+                proto.uel_execution_root,
+                "block uel_execution_root",
+            )?,
+            uel_receipts_root: decode_optional_hash32(
+                proto.uel_receipts_root,
+                "block uel_receipts_root",
+            )?,
+            uel_transactions: {
+                if proto.uel_transactions.len() > crate::consensus::MAX_TRANSACTIONS_PER_BLOCK {
+                    return Err("Too many UEL transactions in block".into());
+                }
+                let mut decoded_uel = Vec::with_capacity(proto.uel_transactions.len());
+                for raw_utx in proto.uel_transactions {
+                    decoded_uel.push(
+                        decode_bounded_bincode(&raw_utx, 512 * 1024)
+                            .map_err(|e| format!("Invalid block UEL transaction: {e}"))?,
+                    );
+                }
+                decoded_uel
+            },
         })
     }
 }

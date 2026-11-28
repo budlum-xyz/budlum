@@ -5106,4 +5106,179 @@ mod rpc_tests {
             -32004
         );
     }
+
+    const COMMITMENT_KEYS: [(u32, u64, u64); 5] =
+        [(1, 12, 1), (1, 13, 1), (2, 7, 1), (2, 7, 2), (3, 1, 1)];
+
+    fn keyed_commitment(
+        domain_id: u32,
+        height: u64,
+        sequence: u64,
+        salt: u8,
+    ) -> crate::domain::DomainCommitment {
+        crate::domain::DomainCommitment {
+            domain_id,
+            domain_height: height,
+            domain_block_hash: [salt; 32],
+            parent_domain_block_hash: [0x20; 32],
+            state_root: [0x30; 32],
+            tx_root: [0x41; 32],
+            event_root: [0x42; 32],
+            finality_proof_hash: [0x43; 32],
+            consensus_kind: crate::domain::types::ConsensusKind::PoW,
+            validator_set_hash: [0xB0; 32],
+            timestamp_ms: 1_000,
+            sequence,
+            producer: None,
+            state_updates: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn insert_keys(chain: &mut Blockchain, keys: &[(u32, u64, u64)]) {
+        for (at, &(domain_id, height, sequence)) in keys.iter().enumerate() {
+            chain
+                .state
+                .settlement
+                .commitments
+                .insert(keyed_commitment(
+                    domain_id,
+                    height,
+                    sequence,
+                    u8::try_from(at + 1).unwrap(),
+                ))
+                .expect("insert a commitment");
+        }
+    }
+
+    fn from_0x(value: &serde_json::Value) -> crate::domain::Hash32 {
+        let text = value.as_str().expect("a 0x hex string");
+        hex::decode(text.trim_start_matches("0x"))
+            .expect("hex")
+            .try_into()
+            .expect("32 bytes")
+    }
+
+    fn rebuild_root(
+        answer: &serde_json::Value,
+        leaf_index: usize,
+    ) -> (crate::domain::Hash32, Option<crate::domain::Hash32>) {
+        use crate::consensus::merkle_tree::merkle_root_from_proof;
+        use crate::settlement::commitment_tree::{merkle_node_hash, merkle_odd_promote_hash};
+        let leaf = from_0x(&answer["leafHash"]);
+        let siblings: Vec<crate::domain::Hash32> = answer["siblings"]
+            .as_array()
+            .expect("the sibling path is an array")
+            .iter()
+            .map(from_0x)
+            .collect();
+        (
+            leaf,
+            merkle_root_from_proof(
+                &leaf,
+                leaf_index,
+                &siblings,
+                merkle_node_hash,
+                merkle_odd_promote_hash,
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn domain_commitment_rpc_proves_membership_and_refuses_an_unknown_key() {
+        use crate::consensus::merkle_tree::odd_promotion_sentinel;
+
+        let keys = COMMITMENT_KEYS;
+        let mut chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        insert_keys(&mut chain, &keys[..3]);
+        let header = chain.build_global_header(None);
+        let committed_root = header.domain_commitment_root;
+        chain.state.settlement.global_headers.push(header);
+        insert_keys(&mut chain, &keys[3..]);
+        let moved_root = chain.state.settlement.commitments.root();
+        assert_ne!(moved_root, committed_root);
+
+        let (server, _chain) = setup_with_blockchain(chain).await;
+
+        for (at, &(domain_id, height, sequence)) in keys.iter().enumerate() {
+            let answer = server
+                .get_domain_commitment(domain_id, height, sequence)
+                .await
+                .unwrap_or_else(|e| panic!("bud_getDomainCommitment answers key {at}: {e}"));
+            assert_eq!(
+                answer["domainCommitmentRoot"],
+                format!("0x{}", hex::encode(moved_root))
+            );
+            assert_eq!(answer["leafIndex"], format!("0x{at:x}"));
+            assert_eq!(answer["leafCount"], "0x5");
+            assert_eq!(answer["commitment"]["sequence"], format!("0x{sequence:x}"));
+            let (leaf, rebuilt) = rebuild_root(&answer, at);
+            assert_eq!(
+                answer["commitment"]["leafHash"],
+                format!("0x{}", hex::encode(leaf))
+            );
+            assert_eq!(rebuilt, Some(moved_root));
+            assert_eq!(answer["committedHeader"], serde_json::Value::Null);
+        }
+        let tail = server
+            .get_domain_commitment(3, 1, 1)
+            .await
+            .expect("bud_getDomainCommitment answers the promoted tail");
+        assert_eq!(from_0x(&tail["siblings"][0]), odd_promotion_sentinel());
+
+        let unknown = server
+            .get_domain_commitment(9, 1, 1)
+            .await
+            .expect_err("bud_getDomainCommitment refuses a key the registry does not hold");
+        assert_eq!(unknown.code(), -32602);
+        let wrong_sequence = server
+            .get_domain_commitment(1, 12, 2)
+            .await
+            .expect_err("bud_getDomainCommitment refuses a sequence that was never accepted");
+        assert_eq!(wrong_sequence.code(), -32602);
+
+        let (empty, _chain) = setup().await;
+        assert_eq!(
+            empty
+                .get_domain_commitment(1, 0, 0)
+                .await
+                .expect_err("bud_getDomainCommitment refuses on an empty registry")
+                .code(),
+            -32602
+        );
+    }
+
+    #[tokio::test]
+    async fn domain_commitment_rpc_names_the_header_that_commits_its_root() {
+        use crate::settlement::global_block::GlobalBlockHeader;
+
+        let keys = COMMITMENT_KEYS;
+        let mut chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        insert_keys(&mut chain, &keys[..3]);
+        let header = chain.build_global_header(None);
+        let root = header.domain_commitment_root;
+        let header_hash = GlobalBlockHeader::calculate_hash_bytes(&header);
+        assert_eq!(root, chain.state.settlement.commitments.root());
+        chain.state.settlement.global_headers.push(header);
+        let (server, _chain) = setup_with_blockchain(chain).await;
+
+        for (at, &(domain_id, height, sequence)) in keys.iter().enumerate().take(3) {
+            let answer = server
+                .get_domain_commitment(domain_id, height, sequence)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("bud_getDomainCommitment answers anchored key {at}: {e}")
+                });
+            assert_eq!(
+                answer["domainCommitmentRoot"],
+                format!("0x{}", hex::encode(root))
+            );
+            assert_eq!(answer["committedHeader"]["globalHeight"], "0x0");
+            assert_eq!(
+                answer["committedHeader"]["globalHash"],
+                format!("0x{}", hex::encode(header_hash))
+            );
+            let (_, rebuilt) = rebuild_root(&answer, at);
+            assert_eq!(rebuilt, Some(root));
+        }
+    }
 }

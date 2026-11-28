@@ -90,6 +90,11 @@ state = "closed"
 evidence = "polkavm_is_closed_on_testnet"
 
 [[feature]]
+id = "rv32"
+state = "closed"
+evidence = "rv32_is_closed_on_testnet"
+
+[[feature]]
 id = "private_dedup"
 state = "closed"
 evidence = "private_dedup_is_closed_on_testnet"

@@ -400,6 +400,10 @@ pub struct NodeConfig {
     /// `[anchor]` section: the PQ anchor emission of this node.
     #[arg(skip)]
     pub anchor: AnchorSection,
+
+    /// `[execution]` section: external `budlum-ee-*` worker endpoints.
+    #[arg(skip)]
+    pub execution: ExecutionSection,
     // --- Outbound bridge (relayer) ---
     //
     // `RelayerWorker::with_adapters` existed and nothing called it, because
@@ -517,6 +521,7 @@ impl Default for NodeConfig {
             storage_replication_factor: 3,
             storage_mandatory_sharding: true,
             anchor: AnchorSection::default(),
+            execution: ExecutionSection::default(),
         }
     }
 }
@@ -536,7 +541,27 @@ pub struct FileConfig {
     pub features: Option<FeaturesSection>,
     pub consensus: Option<ConsensusSection>, // for integration of other sections
     pub anchor: Option<AnchorSection>,
+    pub execution: Option<ExecutionSection>,
     pub compat: Option<CompatSection>,
+}
+
+/// `[execution]` TOML section configuring out-of-process `budlum-ee-*` workers.
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+/// Convenience: CLI config deserialization surface for external EE workers.
+pub struct ExecutionSection {
+    pub workers: Option<Vec<ExecutionWorkerEntry>>,
+}
+
+/// One `[[execution.workers]]` entry in node TOML configuration.
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+/// Convenience: CLI config deserialization surface for an external EE worker socket.
+pub struct ExecutionWorkerEntry {
+    pub ee: u8,
+    pub socket_path: String,
+    pub binary_path: Option<String>,
+    pub required: Option<bool>,
 }
 
 /// Ecosystem compatibility RPC gateway sections (`[compat.*]`, `Section 8.11.1`).
@@ -1162,6 +1187,9 @@ impl NodeConfig {
 
         if let Some(anchor) = fc.anchor {
             self.anchor = anchor;
+        }
+        if let Some(execution) = fc.execution {
+            self.execution = execution;
         }
 
         if let Some(consensus) = fc.consensus {

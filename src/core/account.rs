@@ -849,6 +849,14 @@ pub struct AccountState {
     /// operator RPCs. Written only by block execution now, and folded into
     /// the root once it holds a record.
     pub settlement: crate::settlement::SettlementRegistries,
+    /// Native EIP-8141 account abstraction policies (session keys + guardians).
+    pub frame_policies: crate::execution::frame_tx::FrameRegistry,
+    /// Native deterministic DeFi engine (AMM + TWAP + Lending + Batch Auction + Options + CLOB).
+    pub defi: crate::defi::DeFiEngine,
+    /// Authenticated unified storage fabric (`bns://`, `bud3://`, `ipfs://`, `ar://`, ...).
+    pub unified_storage: crate::unification::UnifiedStorageFabric,
+    /// Default-private `K1 / K2 / K3 / K4` data-layering registry (lazily bound to `chain_id`).
+    pub data_layers: Option<crate::privacy::data_layering::DataLayerRegistry>,
     /// On-chain burn-reserve account the timed burn consumes. `None` when $BUD
     /// Tokenomics is not enabled for this chain (e.g. plain devnet genesis).
     pub burn_reserve_address: Option<Address>,
@@ -1068,6 +1076,10 @@ impl AccountState {
             pool_deposit_escrow: BTreeMap::new(),
             pool_deposit_rows: BTreeMap::new(),
             settlement: crate::settlement::SettlementRegistries::new(),
+            frame_policies: crate::execution::frame_tx::FrameRegistry::new(),
+            defi: crate::defi::DeFiEngine::new(),
+            unified_storage: crate::unification::UnifiedStorageFabric::new(),
+            data_layers: None,
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
             dirty_accounts: HashSet::new(),
@@ -1138,6 +1150,10 @@ impl AccountState {
             pool_deposit_escrow: BTreeMap::new(),
             pool_deposit_rows: BTreeMap::new(),
             settlement: crate::settlement::SettlementRegistries::new(),
+            frame_policies: crate::execution::frame_tx::FrameRegistry::new(),
+            defi: crate::defi::DeFiEngine::new(),
+            unified_storage: crate::unification::UnifiedStorageFabric::new(),
+            data_layers: None,
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
             dirty_accounts: HashSet::new(),
@@ -1218,6 +1234,10 @@ impl AccountState {
             pool_deposit_escrow: BTreeMap::new(),
             pool_deposit_rows: BTreeMap::new(),
             settlement: crate::settlement::SettlementRegistries::new(),
+            frame_policies: crate::execution::frame_tx::FrameRegistry::new(),
+            defi: crate::defi::DeFiEngine::new(),
+            unified_storage: crate::unification::UnifiedStorageFabric::new(),
+            data_layers: None,
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
             dirty_accounts: HashSet::new(),
@@ -1359,6 +1379,10 @@ impl AccountState {
             pool_deposit_escrow: snapshot.pool_deposit_escrow.clone().unwrap_or_default(),
             pool_deposit_rows: snapshot.pool_deposit_rows.clone().unwrap_or_default(),
             settlement: snapshot.settlement.clone().unwrap_or_default(),
+            frame_policies: snapshot.frame_policies.clone().unwrap_or_default(),
+            defi: snapshot.defi.clone().unwrap_or_default(),
+            unified_storage: snapshot.unified_storage.clone().unwrap_or_default(),
+            data_layers: snapshot.data_layers.clone(),
             base_fee: snapshot.base_fee,
             fee_distributions: Vec::new(),
             dirty_accounts: HashSet::new(),
@@ -6333,6 +6357,24 @@ impl AccountState {
         if !self.quantum_accounts.is_empty() {
             final_hasher.update(b"quantum_accounts_v1");
             final_hasher.update(self.quantum_accounts.root());
+        }
+        if !self.frame_policies.is_empty() {
+            final_hasher.update(b"frame_policies_v1");
+            final_hasher.update(self.frame_policies.state_root());
+        }
+        if !self.defi.is_empty() {
+            final_hasher.update(b"defi_engine_v1");
+            final_hasher.update(self.defi.state_root());
+        }
+        if !self.unified_storage.is_empty() {
+            final_hasher.update(b"unified_storage_v1");
+            final_hasher.update(self.unified_storage.state_root());
+        }
+        if let Some(layers) = &self.data_layers {
+            if !layers.is_empty() {
+                final_hasher.update(b"data_layers_v1");
+                final_hasher.update(layers.state_root());
+            }
         }
         // The scheme registry folds in once any status has moved from genesis
         // (a chain that never moved one keeps its root byte-exact).

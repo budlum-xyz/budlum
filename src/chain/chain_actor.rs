@@ -15,6 +15,26 @@ pub enum AiPaymentDirection {
     To,
 }
 
+/// What `bud_getDomainCommitment` answers from: one canonical (in-block)
+/// commitment, the path from its leaf to the commitment root the node's
+/// registry computes now, and the newest committed checkpoint header, so the
+/// reader can say which header, if any, commits exactly that root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainCommitmentRead {
+    /// The commitment the registry holds under the requested key.
+    pub commitment: crate::domain::DomainCommitment,
+    /// The path from the commitment's leaf to `root`.
+    pub proof: crate::domain::commitment_registry::DomainCommitmentInclusionProof,
+    /// The commitment root the registry computes now (`domain_commitment_root`
+    /// of the next checkpoint header).
+    pub root: crate::domain::Hash32,
+    /// The height of the chain tip the read was taken at.
+    pub tip_height: u64,
+    /// `(global_height, header hash, domain_commitment_root)` of the newest
+    /// committed checkpoint header; `None` before the first checkpoint.
+    pub latest_header: Option<(u64, crate::domain::Hash32, crate::domain::Hash32)>,
+}
+
 /// The storage repair picture at one caller-supplied margin.
 ///
 /// Two lists, kept apart on purpose. An object in `repairable` still has at
@@ -253,6 +273,12 @@ pub enum ChainCommand {
     GetUniversalDomains(oneshot::Sender<crate::unification::UniversalDomainCatalog>),
     GetDomainCommitments(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetDomainCommitmentsWithGarden(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
+    GetDomainCommitment(
+        crate::domain::DomainId,
+        u64,
+        u64,
+        oneshot::Sender<Option<DomainCommitmentRead>>,
+    ),
     GetConsensusDomains(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
     GetConsensusDomainsWithGarden(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
     RegisterGardenDomain(
@@ -1913,6 +1939,28 @@ impl ChainHandle {
             .send(ChainCommand::GetDomainCommitmentsWithGarden(tx))
             .await;
         rx.await.unwrap_or_default()
+    }
+
+    /// One canonical commitment with its Merkle path to the commitment root
+    /// and the newest committed checkpoint header; `None` for a key the
+    /// registry does not hold.
+    pub async fn get_domain_commitment(
+        &self,
+        domain_id: crate::domain::DomainId,
+        domain_height: u64,
+        sequence: u64,
+    ) -> Option<DomainCommitmentRead> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetDomainCommitment(
+                domain_id,
+                domain_height,
+                sequence,
+                tx,
+            ))
+            .await;
+        rx.await.unwrap_or(None)
     }
 
     /// Query the latest committed height of `domain_id`.
@@ -3744,6 +3792,36 @@ impl ChainActor {
                 }
                 ChainCommand::GetDomainCommitmentsWithGarden(tx) => {
                     let _ = tx.send(self.blockchain.domain_commitments_with_garden());
+                }
+                ChainCommand::GetDomainCommitment(domain_id, domain_height, sequence, tx) => {
+                    let registry = &self.blockchain.state.settlement.commitments;
+                    let read = registry
+                        .get(domain_id, domain_height, sequence)
+                        .cloned()
+                        .zip(registry.prove(domain_id, domain_height, sequence))
+                        .map(|(commitment, proof)| DomainCommitmentRead {
+                            commitment,
+                            proof,
+                            root: registry.root(),
+                            tip_height: self.blockchain.chain.last().map_or(0, |b| b.index),
+                            latest_header: self
+                                .blockchain
+                                .state
+                                .settlement
+                                .global_headers
+                                .latest()
+                                .or_else(|| self.blockchain.global_headers.last())
+                                .map(|header| {
+                                    (
+                                        header.global_height,
+                                        crate::settlement::global_block::GlobalBlockHeader::calculate_hash_bytes(
+                                            header,
+                                        ),
+                                        header.domain_commitment_root,
+                                    )
+                                }),
+                        });
+                    let _ = tx.send(read);
                 }
                 ChainCommand::GetConsensusDomains(tx) => {
                     // Public RPC (`bud_getConsensusDomains`) reads canonical

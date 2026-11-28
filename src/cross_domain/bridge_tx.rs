@@ -106,6 +106,16 @@ pub enum BridgeTx {
         source_domain: DomainId,
         proof: MerkleProof,
     },
+    /// Permissionless relayer-free mint verified strictly by event Merkle proof.
+    DirectMint(Box<ProvenBridgeEvent>),
+    /// Permissionless relayer-free unlock verified strictly by burn Merkle proof.
+    DirectUnlock(Box<ProvenBridgeEvent>),
+    /// Permissionless relayer-free message proof relay verified strictly by Merkle inclusion.
+    DirectRelayProof {
+        message_id: MessageId,
+        source_domain: DomainId,
+        proof: MerkleProof,
+    },
 }
 
 /// Equality by wire encoding: the payloads carry event and proof types that
@@ -1309,6 +1319,9 @@ pub fn execute_bridge_tx(
             ensure_carrier(state, &ctx.sender)?;
             mint_from_verified_event(state, proven, ctx.sender, ctx.height).map_err(refused)
         }
+        BridgeTx::DirectMint(proven) => {
+            mint_from_verified_event(state, proven, ctx.sender, ctx.height).map_err(refused)
+        }
         BridgeTx::BurnWithEvent(request) => {
             let recipient = state
                 .bridge_state
@@ -1324,6 +1337,9 @@ pub fn execute_bridge_tx(
         }
         BridgeTx::Unlock(proven) => {
             ensure_carrier(state, &ctx.sender)?;
+            unlock_from_verified_event(state, proven, ctx.height).map_err(refused)
+        }
+        BridgeTx::DirectUnlock(proven) => {
             unlock_from_verified_event(state, proven, ctx.height).map_err(refused)
         }
         BridgeTx::RelayProof {
@@ -1343,6 +1359,20 @@ pub fn execute_bridge_tx(
             .map(|_| ())
             .map_err(refused)
         }
+        BridgeTx::DirectRelayProof {
+            message_id,
+            source_domain,
+            proof,
+        } => submit_relay_proof(
+            state,
+            *message_id,
+            ctx.sender,
+            proof,
+            *source_domain,
+            ctx.height,
+        )
+        .map(|_| ())
+        .map_err(refused),
     }
 }
 

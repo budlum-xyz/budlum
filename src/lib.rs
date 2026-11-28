@@ -28,6 +28,7 @@ pub mod cross_domain;
 pub mod crypto;
 pub mod data_market;
 pub mod deed;
+pub mod defi;
 pub mod domain;
 pub mod education_domain;
 pub mod error;

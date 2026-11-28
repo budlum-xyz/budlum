@@ -626,7 +626,7 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// dropped a registered account would compute a different root, which is why
 /// the field enters the digest under the `>= 16` gate rather than being left
 /// for serde defaults to silently restore as empty.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 17;
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 18;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -824,6 +824,18 @@ pub struct StateSnapshotV2 {
     /// aggregate escrow above).
     #[serde(default)]
     pub pool_deposit_rows: Option<BTreeMap<String, (Address, u64)>>,
+    /// EIP-8141 native account-abstraction registry (schema-18 bump).
+    #[serde(default)]
+    pub frame_policies: Option<crate::execution::frame_tx::FrameRegistry>,
+    /// Native deterministic DeFi engine (schema-18 bump).
+    #[serde(default)]
+    pub defi: Option<crate::defi::DeFiEngine>,
+    /// Unified content-addressed storage fabric (schema-18 bump).
+    #[serde(default)]
+    pub unified_storage: Option<crate::unification::UnifiedStorageFabric>,
+    /// Default-private K1..K4 cryptographic data-layering registry (schema-18 bump).
+    #[serde(default)]
+    pub data_layers: Option<crate::privacy::data_layering::DataLayerRegistry>,
 
     // --- C4 (P2): manifest signature (schema-4 wire). ---
     // RFC_GAP1 section 7: Ed25519 single signature + trust list + AllowUnsigned transition.
@@ -1042,6 +1054,10 @@ impl StateSnapshotV2 {
             quantum_accounts: Some(account_state.quantum_accounts.clone()),
             pool_deposit_escrow: Some(account_state.pool_deposit_escrow.clone()),
             pool_deposit_rows: Some(account_state.pool_deposit_rows.clone()),
+            frame_policies: Some(account_state.frame_policies.clone()),
+            defi: Some(account_state.defi.clone()),
+            unified_storage: Some(account_state.unified_storage.clone()),
+            data_layers: account_state.data_layers.clone(),
             // `Registry`, `liveness`, and `invalid_votes` are no longer
             // Fields on `AccountState` (ghost-hunted). The struct fields were
             // Already removed above; the live state is recovered by routing
@@ -1261,6 +1277,12 @@ impl StateSnapshotV2 {
         if self.schema_version >= 17 {
             hash_opt_serializable(&mut hasher, &self.pool_deposit_escrow);
             hash_opt_serializable(&mut hasher, &self.pool_deposit_rows);
+        }
+        if self.schema_version >= 18 {
+            hash_opt_serializable(&mut hasher, &self.frame_policies);
+            hash_opt_serializable(&mut hasher, &self.defi);
+            hash_opt_serializable(&mut hasher, &self.unified_storage);
+            hash_opt_serializable(&mut hasher, &self.data_layers);
         }
         // --- The PoA admission + compliance pair (schema-7 bump, /.
         // Same gate logic as identity and vault: at 6 and
@@ -2900,6 +2922,8 @@ mod tests {
     const SCHEMA16_KEYS: &[&str] = &["quantum_accounts"];
     /// Shared-pool deposit escrow: the schema-17 change.
     const SCHEMA17_KEYS: &[&str] = &["pool_deposit_escrow", "pool_deposit_rows"];
+    /// Unified Frame/DeFi/Storage/Data-Layering registries: the schema-18 change.
+    const SCHEMA18_KEYS: &[&str] = &["frame_policies", "defi", "unified_storage", "data_layers"];
 
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
     /// the fields it must not lose. `snapshot_hash` is deliberately outside:
@@ -3067,6 +3091,11 @@ mod tests {
             // shared-pool deposit escrow (schema-17 bump: default-filled AND digested)
             "pool_deposit_escrow",
             "pool_deposit_rows",
+            // unified frame/defi/storage/data-layering registries (schema-18 bump)
+            "frame_policies",
+            "defi",
+            "unified_storage",
+            "data_layers",
             // identity registry (schema-5 bump: default-filled AND digested)
             "identity",
             // vault folder registry (schema-6 bump: same discipline)
@@ -3113,6 +3142,7 @@ mod tests {
                 SCHEMA14_KEYS,
                 SCHEMA16_KEYS,
                 SCHEMA17_KEYS,
+                SCHEMA18_KEYS,
             ]
             .concat(),
             2,
@@ -3134,6 +3164,7 @@ mod tests {
             SCHEMA14_KEYS,
             SCHEMA16_KEYS,
             SCHEMA17_KEYS,
+            SCHEMA18_KEYS,
         ]
         .concat()
         {
@@ -3253,6 +3284,7 @@ mod tests {
                 SCHEMA14_KEYS,
                 SCHEMA16_KEYS,
                 SCHEMA17_KEYS,
+                SCHEMA18_KEYS,
             ]
             .concat(),
             3,
@@ -3272,6 +3304,7 @@ mod tests {
             SCHEMA14_KEYS,
             SCHEMA16_KEYS,
             SCHEMA17_KEYS,
+            SCHEMA18_KEYS,
         ]
         .concat()
         {
@@ -3367,6 +3400,7 @@ mod tests {
                 SCHEMA14_KEYS,
                 SCHEMA16_KEYS,
                 SCHEMA17_KEYS,
+                SCHEMA18_KEYS,
             ]
             .concat(),
             4,
@@ -3385,6 +3419,7 @@ mod tests {
             SCHEMA14_KEYS,
             SCHEMA16_KEYS,
             SCHEMA17_KEYS,
+            SCHEMA18_KEYS,
         ]
         .concat()
         {

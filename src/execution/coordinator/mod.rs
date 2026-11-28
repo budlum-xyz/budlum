@@ -64,8 +64,17 @@ use sha2::{Digest, Sha256};
 /// Maximum `BudZero` contract bytecode size accepted at deployment (256 KiB).
 pub const MAX_BUDZERO_CODE_BYTES: usize = 256 * 1024;
 
-/// Typed UEL call payload submitted to the coordinator.
+/// Startup configuration entry for an out-of-process `budlum-ee-*` Unix-socket worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerSocketSpec {
+    pub ee: EeId,
+    pub socket_path: std::path::PathBuf,
+    pub binary_path: Option<std::path::PathBuf>,
+    pub required: bool,
+}
+
+/// Typed UEL call payload submitted to the coordinator.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum UelAction {
     /// Deploy `code` into `ee` (with deterministic `salt`).
     Deploy { code: Vec<u8>, salt: [u8; 32] },
@@ -74,7 +83,7 @@ pub enum UelAction {
 }
 
 /// ML-DSA-87 sender authentication bound to a [`UelTx`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UelTxAuth {
     /// Sender's NIST FIPS 204 ML-DSA-87 public key deriving `UelTx::sender`.
     pub public_key: Vec<u8>,
@@ -82,12 +91,26 @@ pub struct UelTxAuth {
     pub signature: Vec<u8>,
 }
 
+mod serde_ee_id {
+    use budlum_uel_abi::EeId;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(ee: &EeId, serializer: S) -> Result<S::Ok, S::Error> {
+        ee.0.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<EeId, D::Error> {
+        u8::deserialize(deserializer).map(EeId)
+    }
+}
+
 /// Canonical UEL transaction envelope executed by [`ExecutionCoordinator`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UelTx {
     pub tx_hash: [u8; 32],
     pub sender: Address,
     pub nonce: u64,
+    #[serde(with = "serde_ee_id")]
     pub ee: EeId,
     pub action: UelAction,
     pub value_attos: u128,

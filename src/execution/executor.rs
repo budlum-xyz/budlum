@@ -502,7 +502,8 @@ impl Executor {
                 | TransactionType::Stake
                 | TransactionType::Delegate { .. }
                 | TransactionType::AiOperatorWithdraw
-        ) && state.spendable_balance(&tx.from) < total_cost
+        ) && !matches!(&tx.tx_type, TransactionType::FrameTx(f) if f.sponsor.is_some())
+            && state.spendable_balance(&tx.from) < total_cost
         {
             return Err(BudlumError::validation(
                 "vesting_locked",
@@ -4659,6 +4660,146 @@ impl Executor {
                             })?;
                     }
                 }
+            }
+            TransactionType::FrameTx(frame_tx) => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(BudlumError::validation(
+                        "frame_tx_shape",
+                        "FrameTx requires zero outer amount, recipient, and data",
+                    ));
+                }
+                if frame_tx.sponsor.is_none() && state.spendable_balance(&tx.from) < total_cost {
+                    return Err(BudlumError::validation(
+                        "vesting_locked",
+                        format!(
+                            "Transaction cost exceeds spendable balance (vesting-locked funds cannot be spent): need {total_cost}"
+                        ),
+                    ));
+                }
+                let mut touched_addrs = std::collections::BTreeSet::new();
+                touched_addrs.insert(tx.from);
+                touched_addrs.insert(frame_tx.sender);
+                if let Some(sp) = frame_tx.sponsor {
+                    touched_addrs.insert(sp);
+                }
+                for frame in &frame_tx.frames {
+                    touched_addrs.insert(frame.target);
+                    if let Some(crate::execution::frame_tx::FrameAction::Transfer { to, .. }) =
+                        &frame.action
+                    {
+                        touched_addrs.insert(*to);
+                    }
+                }
+                let mut balance_view: std::collections::BTreeMap<Address, u64> = touched_addrs
+                    .iter()
+                    .map(|addr| (*addr, state.spendable_balance(addr)))
+                    .collect();
+                let original_view = balance_view.clone();
+                let mut staged_policies = state.frame_policies.clone();
+                crate::execution::frame_tx::apply_frame_tx_on_ledgers(
+                    &mut staged_policies,
+                    &mut balance_view,
+                    &tx.from,
+                    crate::execution::frame_tx::FrameExecContext {
+                        chain_id: tx.chain_id,
+                        height: state.current_block_height,
+                        epoch: state.epoch_index,
+                        actual_fee: total_cost,
+                    },
+                    frame_tx,
+                )
+                .map_err(|e| BudlumError::validation("frame_tx_refused", e.to_string()))?;
+
+                for (addr, new_bal) in &balance_view {
+                    let old_bal = original_view.get(addr).copied().unwrap_or(0);
+                    if *new_bal < old_bal {
+                        let delta = old_bal - *new_bal;
+                        if state.spendable_balance(addr) < delta {
+                            return Err(BudlumError::validation(
+                                "balance_underflow",
+                                "frame balance underflow",
+                            ));
+                        }
+                    } else if *new_bal > old_bal {
+                        let delta = *new_bal - old_bal;
+                        state.get_balance(addr).checked_add(delta).ok_or_else(|| {
+                            BudlumError::validation("balance_overflow", "frame balance overflow")
+                        })?;
+                    }
+                }
+                Self::checked_next_nonce(state.get_nonce(&tx.from))?;
+
+                state.frame_policies = staged_policies;
+                for (addr, new_bal) in &balance_view {
+                    let old_bal = original_view.get(addr).copied().unwrap_or(0);
+                    if *new_bal < old_bal {
+                        let delta = old_bal - *new_bal;
+                        let acct = state.get_or_create(addr);
+                        acct.balance = acct.balance.checked_sub(delta).ok_or_else(|| {
+                            BudlumError::validation("balance_underflow", "frame balance underflow")
+                        })?;
+                    } else if *new_bal > old_bal {
+                        let delta = *new_bal - old_bal;
+                        let acct = state.get_or_create(addr);
+                        acct.balance = acct.balance.checked_add(delta).ok_or_else(|| {
+                            BudlumError::validation("balance_overflow", "frame balance overflow")
+                        })?;
+                    }
+                }
+                let sender = state.get_or_create(&tx.from);
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
+            }
+            TransactionType::DeFi(defi_tx) => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(BudlumError::validation(
+                        "defi_tx_shape",
+                        "DeFi transactions require zero outer amount, recipient, and data",
+                    ));
+                }
+                if state.spendable_balance(&tx.from) < total_cost {
+                    return Err(BudlumError::validation(
+                        "insufficient_balance",
+                        format!("the fee exceeds the spendable balance: need {total_cost}"),
+                    ));
+                }
+                let epoch = state.epoch_index;
+                crate::defi::execute_defi_on_engine(&mut state.defi, tx.from, epoch, defi_tx)
+                    .map_err(|e| BudlumError::validation("defi_tx_refused", e))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
+            }
+            TransactionType::Unification(uni_tx) => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(BudlumError::validation(
+                        "unification_tx_shape",
+                        "Unification transactions require zero outer amount, recipient, and data",
+                    ));
+                }
+                if state.spendable_balance(&tx.from) < total_cost {
+                    return Err(BudlumError::validation(
+                        "insufficient_balance",
+                        format!("the fee exceeds the spendable balance: need {total_cost}"),
+                    ));
+                }
+                let ctx = crate::unification::tx::UnificationTxContext {
+                    sender: tx.from,
+                    chain_id: tx.chain_id,
+                };
+                crate::unification::tx::execute_unification_on_ledgers(
+                    &mut state.unified_storage,
+                    &mut state.data_layers,
+                    &ctx,
+                    uni_tx,
+                )
+                .map_err(|e| BudlumError::validation("unification_tx_refused", e))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::RoleBond { role } => {
                 // The verifier family's production

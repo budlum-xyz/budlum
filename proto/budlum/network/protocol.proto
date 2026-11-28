@@ -154,6 +154,12 @@ enum ProtoTransactionType {
     BNS_SET_SUBDOMAIN_CONTENT = 79;
     // Phase 5 split-STARK verification transaction (`verify_algebra` against `AirRegistry`).
     VERIFY_STARK = 80;
+    // EIP-8141 native frame account-abstraction transaction.
+    FRAME_TX = 81;
+    // Native deterministic DeFi primitive transaction (AMM / BatchAuction / Lending / Options / CLOB).
+    DEFI = 82;
+    // Unified storage fabric & K1..K4 data-layering state transition.
+    UNIFICATION = 83;
 }
 
 message ProtoTransaction {
@@ -227,6 +233,9 @@ message ProtoTransaction {
         ProtoValidatorTx validator = 71;
         ProtoStorageV3Tx storage_v3 = 72;
         ProtoVerifyStarkTx verify_stark = 73;
+        ProtoFrameTx frame_tx = 74;
+        ProtoDeFiTx defi = 75;
+        ProtoUnificationTx unification = 76;
     }
     // ML-DSA-87 (FIPS 204) public key for V5 user transactions.
     // For V4 transactions this is empty.
@@ -539,6 +548,8 @@ message ProtoBlockHeader {
     // Hash of the claim frame of the block. Empty when the block carries no
     // frame.
     bytes frame_hash = 22;
+    bytes uel_execution_root = 23;
+    bytes uel_receipts_root = 24;
 }
 
 // The seats whose precommits for `checkpoint` the proposer collected. The
@@ -587,6 +598,9 @@ message ProtoBlock {
     // The claim frame in its canonical encoding. Empty when the block
     // carries none.
     bytes claim_frame = 26;
+    bytes uel_execution_root = 27;
+    bytes uel_receipts_root = 28;
+    repeated bytes uel_transactions = 29;
 }
 
 
@@ -678,6 +692,21 @@ message ProtoStorageV3Tx {
 // A Phase 5 split-STARK verification transaction: the bincode encoding of
 // `VerifyStarkTx` (commitments, public values, opened values; zero FRI proof).
 message ProtoVerifyStarkTx {
+    bytes data = 1;
+}
+
+// An EIP-8141 native frame transaction: the bincode encoding of `FrameTransaction`.
+message ProtoFrameTx {
+    bytes data = 1;
+}
+
+// A native deterministic DeFi transaction: the bincode encoding of `DeFiTx`.
+message ProtoDeFiTx {
+    bytes data = 1;
+}
+
+// A unified data-layering / storage fabric transaction: the bincode encoding of `UnificationTx`.
+message ProtoUnificationTx {
     bytes data = 1;
 }
 

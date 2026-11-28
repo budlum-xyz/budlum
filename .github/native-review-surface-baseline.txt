@@ -2,8 +2,8 @@
 # The surface is enumerated from the tree; growth and silent removal
 # both fail the gate. Re-measure in the same change that moves it:
 #   cargo run --release --manifest-path xtask/gates/Cargo.toml -- native-security-review --print-surface
-digest: 5c705058c9cfa084ec2a9da573946db172775235c3980235b07fed1b6f0c254b
-entries: 107
+digest: e052365b46c194607ca9238daeaba79e60445b05bde02061627a8fdc250da1e0
+entries: 108
 bin	src/bin/bud-migrate.rs
 bin	src/bin/bud.rs
 bin	src/bin/budlum-domain-producer.rs
@@ -55,6 +55,7 @@ manifest	execution/move/Cargo.toml
 manifest	execution/near/Cargo.toml
 manifest	execution/plutus/Cargo.toml
 manifest	execution/polkavm/Cargo.toml
+manifest	execution/rv32/Cargo.toml
 manifest	execution/svm/Cargo.toml
 manifest	execution/tvm/Cargo.toml
 manifest	execution/utxo/Cargo.toml

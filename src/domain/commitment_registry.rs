@@ -322,6 +322,81 @@ impl DomainCommitmentRegistry {
     }
 }
 
+/// A Merkle sibling path from one domain commitment leaf to the root of the
+/// commitment tree a checkpoint header commits (`domain_commitment_root`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainCommitmentInclusionProof {
+    /// The leaf's position among the tree's leaves in registry key order.
+    pub leaf_index: usize,
+    /// The number of leaves the root was computed over.
+    pub leaf_count: usize,
+    /// The sibling digests, leaf layer first.
+    pub siblings: Vec<Hash32>,
+}
+
+impl DomainCommitmentInclusionProof {
+    /// Verify that `leaf` at `leaf_index` rebuilds `root` using the canonical
+    /// settlement Merkle combine functions.
+    #[must_use]
+    pub fn verify(&self, leaf: &Hash32, root: &Hash32) -> bool {
+        self.leaf_index < self.leaf_count
+            && crate::consensus::merkle_tree::merkle_root_from_proof(
+                leaf,
+                self.leaf_index,
+                &self.siblings,
+                crate::settlement::commitment_tree::merkle_node_hash,
+                crate::settlement::commitment_tree::merkle_odd_promote_hash,
+            )
+            .is_some_and(|rebuilt| rebuilt == *root)
+    }
+}
+
+impl DomainCommitmentRegistry {
+    /// Build a Merkle inclusion proof from `(domain_id, domain_height, sequence)` to
+    /// [`Self::root`], returning `None` when absent.
+    #[must_use]
+    pub fn prove(
+        &self,
+        domain_id: DomainId,
+        domain_height: u64,
+        sequence: u64,
+    ) -> Option<DomainCommitmentInclusionProof> {
+        let key = (domain_id, domain_height, sequence);
+        let mut leaves = Vec::with_capacity(
+            self.commitments
+                .len()
+                .saturating_add(self.unavailable_quarantined.len()),
+        );
+        let mut leaf_index = None;
+        for (at, (held, commitment)) in self.commitments.iter().enumerate() {
+            if *held == key {
+                leaf_index = Some(at);
+            }
+            leaves.push(commitment.leaf_hash());
+        }
+        for (dom_id, dom_height, block_hash) in &self.unavailable_quarantined {
+            let mut h = Sha3_256::new();
+            h.update(b"BDLM_DA_QUARANTINE_LEAF_V1");
+            h.update(dom_id.to_le_bytes());
+            h.update(dom_height.to_le_bytes());
+            h.update(block_hash);
+            leaves.push(h.finalize().into());
+        }
+        let leaf_index = leaf_index?;
+        let siblings = crate::consensus::merkle_tree::merkle_proof(
+            &leaves,
+            leaf_index,
+            crate::settlement::commitment_tree::merkle_node_hash,
+            crate::settlement::commitment_tree::merkle_odd_promote_hash,
+        )?;
+        Some(DomainCommitmentInclusionProof {
+            leaf_index,
+            leaf_count: leaves.len(),
+            siblings,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +533,61 @@ mod tests {
             .insert(retry)
             .expect_err("quarantined unavailable commitment must remain blocked");
         assert!(err.contains("quarantined"), "unexpected err: {err}");
+    }
+
+    fn numbered(number: u64) -> DomainCommitment {
+        commitment(number, [u8::try_from(number + 1).unwrap_or(1); 32])
+    }
+
+    #[test]
+    fn every_commitment_proves_into_the_registry_root() {
+        for count in 1..=6u64 {
+            let mut registry = DomainCommitmentRegistry::new();
+            for number in 0..count {
+                registry.insert(numbered(number)).unwrap();
+            }
+            let root = registry.root();
+            for number in 0..count {
+                let leaf = registry.get(1, 10, number).unwrap().leaf_hash();
+                let proof = registry
+                    .prove(1, 10, number)
+                    .unwrap_or_else(|| panic!("sequence {number} of {count} has a path"));
+                assert_eq!(proof.leaf_index, usize::try_from(number).unwrap());
+                assert_eq!(proof.leaf_count, usize::try_from(count).unwrap());
+                assert!(
+                    proof.verify(&leaf, &root),
+                    "sequence {number} of {count} must rebuild the root"
+                );
+                let odd_tail = number + 1 == count && count > 1 && count % 2 == 1;
+                assert_eq!(
+                    proof.siblings.first()
+                        == Some(&crate::consensus::merkle_tree::odd_promotion_sentinel()),
+                    odd_tail,
+                    "sequence {number} of {count}: the sentinel marks the promoted tail and nothing else"
+                );
+                let mut forged = proof.clone();
+                if forged.siblings.is_empty() {
+                    forged.leaf_count = 0;
+                } else {
+                    forged.siblings[0][0] ^= 0x01;
+                }
+                assert!(
+                    !forged.verify(&leaf, &root),
+                    "an altered path for sequence {number} of {count} must be refused"
+                );
+            }
+            assert!(
+                registry.prove(1, 10, count).is_none(),
+                "an absent key has no path"
+            );
+            assert!(
+                registry.prove(2, 10, 0).is_none(),
+                "another domain has no path"
+            );
+        }
+        assert!(
+            DomainCommitmentRegistry::new().prove(1, 0, 0).is_none(),
+            "an empty registry proves nothing"
+        );
     }
 }

@@ -2,6 +2,8 @@ pub mod budzero_ee;
 pub mod coordinator;
 pub mod ee;
 pub mod executor;
+pub mod frame_tx;
 pub mod proof_verifier;
+pub mod rv32_vm;
 pub mod uer;
 pub mod zkvm;

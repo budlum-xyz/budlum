@@ -30,6 +30,7 @@ pub mod domain_catalog;
 pub mod output_composer;
 pub mod payment_router;
 pub mod storage_fabric;
+pub mod tx;
 
 pub use abi_bridge::{
     AbiBridgeError, CanonicalCallArg, CrossVmBridge, CrossVmCallEnvelope, CrossVmCallRequest,

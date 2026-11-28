@@ -384,6 +384,16 @@ impl UnifiedStorageFabric {
         Self::default()
     }
 
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty() && self.bns_bindings.is_empty()
+    }
+
+    #[must_use]
+    pub fn object_owner(&self, digest: &Hash32) -> Option<Hash32> {
+        self.object_owners.get(digest).copied()
+    }
+
     /// Registers a content object (or updates its replicas) and indexes every
     /// native storage locator (`bud://`, `ipfs://`, `ar://`, `filecoin://`, ...).
     ///

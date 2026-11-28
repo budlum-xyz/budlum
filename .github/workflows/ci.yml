@@ -1679,6 +1679,7 @@ jobs:
             execution/near
             execution/plutus
             execution/polkavm
+            execution/rv32
             execution/svm
             execution/tvm
             execution/utxo
@@ -1726,6 +1727,9 @@ jobs:
       - name: Format (ee-polkavm)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path execution/polkavm/Cargo.toml --all -- --check
+      - name: Format (ee-rv32)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path execution/rv32/Cargo.toml --all -- --check
       - name: Format (ee-svm)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path execution/svm/Cargo.toml --all -- --check
@@ -1777,6 +1781,9 @@ jobs:
       - name: Clippy (ee-polkavm)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo clippy --manifest-path execution/polkavm/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (ee-rv32)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path execution/rv32/Cargo.toml --all-targets -- -D warnings
       - name: Clippy (ee-svm)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo clippy --manifest-path execution/svm/Cargo.toml --all-targets -- -D warnings
@@ -1838,6 +1845,9 @@ jobs:
       - name: Tests (ee-polkavm)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo test --manifest-path execution/polkavm/Cargo.toml
+      - name: Tests (ee-rv32)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path execution/rv32/Cargo.toml
       - name: Tests (ee-svm)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo test --manifest-path execution/svm/Cargo.toml

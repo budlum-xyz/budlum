@@ -1,13 +1,9 @@
-//! WIRING: unwired - default-private tier classifier awaits consensus transaction integration.
+//! WIRING: wired through `src/unification/tx.rs` (`UnificationTx`) into
+//! `AccountState::data_layers` (`TransactionType::Unification`) and committed in
+//! `AccountState::state_root_body` / `StateSnapshotV2`.
 //!
 //! Default-private `K1 / K2 / K3 / K4` cryptographic data-layering, post-quantum
 //! selective disclosure, and off-chain anchor registry.
-//!
-//! WIRING: unwired - the disclosure layers are re-exported by `crate::privacy`
-//! but no production path constructs them yet: shielded transfer stays
-//! fail-closed on the live network, and opening a disclosure lane before the
-//! private-transfer protocol is enabled would publish what the ledger is
-//! required to hide. Until then this module's test suite is its only caller.
 //!
 //! Layers:
 //! - `K1Public`: world-readable payload verified against its original commitment.
@@ -260,6 +256,16 @@ impl DataLayerRegistry {
     #[must_use]
     pub fn record_count(&self) -> usize {
         self.records.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    #[must_use]
+    pub const fn chain_id(&self) -> u64 {
+        self.chain_id
     }
 
     /// Fetch an immutable view of `record_id`.

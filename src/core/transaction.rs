@@ -837,6 +837,15 @@ pub enum TransactionType {
     /// the chain executes Stage 2 (`verify_algebra`) against `AirRegistry`.
     /// Appended last because `bincode` encodes the variant index.
     VerifyStark(Box<crate::aggregation::programs::pcs_claim::VerifyStarkTx>),
+    /// Protocol-native EIP-8141 Frame Transaction (bounded session keys,
+    /// guardian recovery, explicit gas sponsorship; zero bundler monopoly).
+    FrameTx(Box<crate::execution::frame_tx::FrameTransaction>),
+    /// Native deterministic DeFi primitive transaction (AMM, Batch Auction,
+    /// Lending, Fully-Collateralized Options, and OrderBook).
+    DeFi(Box<crate::defi::DeFiTx>),
+    /// Unified content-addressed storage fabric & default-private K1..K4
+    /// data-layering state transition.
+    Unification(Box<crate::unification::tx::UnificationTx>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2739,6 +2748,14 @@ impl Transaction {
             TransactionType::StorageV3(_) => schedule.contract_call_gas * 2,
             // Stage 2 (`verify_algebra`) constraint evaluation without FRI.
             TransactionType::VerifyStark(_) => schedule.contract_call_gas,
+            TransactionType::FrameTx(f) => schedule
+                .contract_call_gas
+                .saturating_mul(u64::try_from(f.frames.len().max(1)).unwrap_or(1))
+                .saturating_add(schedule.gas_per_signature),
+            TransactionType::DeFi(_) => schedule.contract_call_gas * 2,
+            TransactionType::Unification(_) => {
+                schedule.contract_call_gas * 2 + schedule.gas_per_signature
+            }
             TransactionType::RoleBond { .. } => schedule.contract_call_gas,
             // A registry write that re-derives the manifest id over every
             // shard: priced like the registry arms beside it. Opening a deal
@@ -2789,7 +2806,8 @@ impl Transaction {
                 | crate::settlement::domains::SettlementTx::SubmitZkProof(_),
             ) => schedule.contract_call_gas * 4 + schedule.gas_per_signature * 8,
             TransactionType::Settlement(
-                crate::settlement::domains::SettlementTx::SubmitCommitment(_),
+                crate::settlement::domains::SettlementTx::SubmitCommitment(_)
+                | crate::settlement::domains::SettlementTx::SubmitCommitmentDirect(_),
             ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature,
             TransactionType::Settlement(crate::settlement::domains::SettlementTx::ProofMarket(
                 market,
@@ -2837,7 +2855,10 @@ impl Transaction {
             TransactionType::Bridge(
                 crate::cross_domain::bridge_tx::BridgeTx::Mint(_)
                 | crate::cross_domain::bridge_tx::BridgeTx::Unlock(_)
-                | crate::cross_domain::bridge_tx::BridgeTx::RelayProof { .. },
+                | crate::cross_domain::bridge_tx::BridgeTx::RelayProof { .. }
+                | crate::cross_domain::bridge_tx::BridgeTx::DirectMint(_)
+                | crate::cross_domain::bridge_tx::BridgeTx::DirectUnlock(_)
+                | crate::cross_domain::bridge_tx::BridgeTx::DirectRelayProof { .. },
             ) => schedule.contract_call_gas * 3 + schedule.gas_per_signature,
             TransactionType::Bridge(_) => schedule.contract_call_gas * 2,
         };
@@ -3258,6 +3279,9 @@ const fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::BnsRemoveSubdomain => 77,
         TransactionType::BnsSetSubdomainContent => 79,
         TransactionType::VerifyStark(_) => 80,
+        TransactionType::FrameTx(_) => 81,
+        TransactionType::DeFi(_) => 82,
+        TransactionType::Unification(_) => 83,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -4243,6 +4267,18 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             put_u8(out, 80);
             encode_verify_stark_tx(verify_tx, out);
         }
+        TransactionType::FrameTx(frame_tx) => {
+            put_u8(out, 81);
+            encode_frame_tx(frame_tx, out);
+        }
+        TransactionType::DeFi(defi_tx) => {
+            put_u8(out, 82);
+            encode_defi_tx(defi_tx, out);
+        }
+        TransactionType::Unification(uni_tx) => {
+            put_u8(out, 83);
+            encode_unification_tx(uni_tx, out);
+        }
         TransactionType::ExternalDomain(external_tx) => {
             put_u8(out, 53);
             encode_external_domain_tx(external_tx, out);
@@ -4403,6 +4439,24 @@ fn encode_bridge_tx(tx: &crate::cross_domain::bridge_tx::BridgeTx, out: &mut Vec
             put_u32(out, *source_domain);
             encode_merkle_proof(proof, out);
         }
+        BridgeTx::DirectMint(proven) => {
+            put_u8(out, 6);
+            encode_proven_bridge_event(proven, out);
+        }
+        BridgeTx::DirectUnlock(proven) => {
+            put_u8(out, 7);
+            encode_proven_bridge_event(proven, out);
+        }
+        BridgeTx::DirectRelayProof {
+            message_id,
+            source_domain,
+            proof,
+        } => {
+            put_u8(out, 8);
+            put_fixed(out, message_id);
+            put_u32(out, *source_domain);
+            encode_merkle_proof(proof, out);
+        }
     }
 }
 
@@ -4464,6 +4518,17 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
             put_fixed(out, &payload.commitment.leaf_hash());
             // A proof bincode cannot encode cannot cross the wire either, and
             // the door refuses it; the marker keeps the preimage total.
+            match crate::domain::hash_finality_proof(&payload.proof) {
+                Ok(hash) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &hash);
+                }
+                Err(_) => put_u8(out, 0),
+            }
+        }
+        SettlementTx::SubmitCommitmentDirect(payload) => {
+            put_u8(out, 11);
+            put_fixed(out, &payload.commitment.leaf_hash());
             match crate::domain::hash_finality_proof(&payload.proof) {
                 Ok(hash) => {
                     put_u8(out, 1);
@@ -4569,6 +4634,22 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
             let bytes = postcard::to_allocvec(uol_tx.as_ref())
                 .unwrap_or_else(|_| b"budlum/object-layer/serialize-failed".to_vec());
             put_bytes(out, &bytes);
+        }
+        SettlementTx::DeliverMessageDirect(delivery) => {
+            put_u8(out, 12);
+            put_u32(out, delivery.domain_id);
+            put_u64(out, delivery.domain_height);
+            put_u64(out, delivery.sequence);
+            put_fixed(out, &delivery.block_hash);
+            let event = bincode::serialize(&delivery.event)
+                .unwrap_or_else(|_| b"budlum/deliver/serialize-failed".to_vec());
+            put_bytes(out, &event);
+            put_fixed(out, &delivery.proof.leaf);
+            put_u64(out, delivery.proof.index as u64);
+            put_u64(out, delivery.proof.siblings.len() as u64);
+            for sibling in &delivery.proof.siblings {
+                put_fixed(out, sibling);
+            }
         }
     }
 }
@@ -4807,6 +4888,453 @@ fn encode_verify_stark_tx(
         put_ext_slice(out, chunk);
     }
     put_opt_ext_slice(out, tx.opened_values.random.as_ref());
+}
+
+fn encode_frame_tx(tx: &crate::execution::frame_tx::FrameTransaction, out: &mut Vec<u8>) {
+    use crate::execution::frame_tx::{FrameAction, FrameAuthorityProof, FrameKind};
+    put_fixed(out, tx.sender.as_bytes());
+    put_option_address(out, tx.sponsor);
+    put_u64(out, tx.chain_id);
+    put_u64(out, tx.nonce);
+    put_u64(out, tx.max_fee);
+    put_u64(out, u64::try_from(tx.frames.len()).unwrap_or(u64::MAX));
+    for frame in &tx.frames {
+        put_u8(
+            out,
+            match frame.kind {
+                FrameKind::Verify => 0,
+                FrameKind::SponsorApprove => 1,
+                FrameKind::Sender => 2,
+                FrameKind::Default => 3,
+            },
+        );
+        put_fixed(out, frame.target.as_bytes());
+        put_u64(out, frame.gas_limit);
+        match &frame.authority {
+            None => put_u8(out, 0),
+            Some(FrameAuthorityProof::RootOwner) => put_u8(out, 1),
+            Some(FrameAuthorityProof::SessionKey {
+                session_id,
+                signer_pk,
+                signature,
+            }) => {
+                put_u8(out, 2);
+                put_fixed(out, session_id);
+                put_bytes(out, signer_pk);
+                put_bytes(out, signature);
+            }
+            Some(FrameAuthorityProof::GuardianQuorum {
+                approvals,
+                new_owner,
+            }) => {
+                put_u8(out, 3);
+                put_u64(out, u64::try_from(approvals.len()).unwrap_or(u64::MAX));
+                for a in approvals {
+                    put_fixed(out, a.guardian.as_bytes());
+                    put_bytes(out, &a.public_key);
+                    put_bytes(out, &a.signature);
+                }
+                put_fixed(out, new_owner.as_bytes());
+            }
+        }
+        put_option_fixed32(out, frame.sponsor_digest);
+        match &frame.sponsor_auth {
+            None => put_u8(out, 0),
+            Some(auth) => {
+                put_u8(out, 1);
+                put_bytes(out, &auth.public_key);
+                put_bytes(out, &auth.signature);
+            }
+        }
+        match &frame.action {
+            None => put_u8(out, 0),
+            Some(FrameAction::Transfer { to, amount }) => {
+                put_u8(out, 1);
+                put_fixed(out, to.as_bytes());
+                put_u64(out, *amount);
+            }
+            Some(FrameAction::RegisterPolicy {
+                guardians,
+                threshold,
+                timelock_blocks,
+            }) => {
+                put_u8(out, 2);
+                put_u64(out, u64::try_from(guardians.len()).unwrap_or(u64::MAX));
+                for g in guardians {
+                    put_fixed(out, g.as_bytes());
+                }
+                put_u32(out, *threshold);
+                put_u64(out, *timelock_blocks);
+            }
+            Some(FrameAction::GrantSessionKey(grant)) => {
+                put_u8(out, 3);
+                put_fixed(out, &grant.session_id);
+                put_fixed(out, &grant.signer_key_hash);
+                put_u64(out, grant.max_per_tx);
+                put_u64(out, grant.epoch_cap);
+                put_u64(out, grant.spent_in_epoch);
+                put_u64(out, grant.last_epoch);
+                put_u64(out, grant.expiry_height);
+                put_u64(
+                    out,
+                    u64::try_from(grant.allowed_targets.len()).unwrap_or(u64::MAX),
+                );
+                for addr in &grant.allowed_targets {
+                    put_fixed(out, addr.as_bytes());
+                }
+                put_u8(out, u8::from(grant.active));
+            }
+            Some(FrameAction::RevokeSessionKey { session_id }) => {
+                put_u8(out, 4);
+                put_fixed(out, session_id);
+            }
+            Some(FrameAction::ProposeGuardianRecovery {
+                new_owner,
+                approvers,
+            }) => {
+                put_u8(out, 5);
+                put_fixed(out, new_owner.as_bytes());
+                put_u64(out, u64::try_from(approvers.len()).unwrap_or(u64::MAX));
+                for a in approvers {
+                    put_fixed(out, a.as_bytes());
+                }
+            }
+            Some(FrameAction::FinalizeGuardianRecovery) => put_u8(out, 6),
+        }
+    }
+}
+
+fn encode_defi_tx(tx: &crate::defi::DeFiTx, out: &mut Vec<u8>) {
+    use crate::defi::batch_auction::AuctionSide;
+    use crate::defi::options::OptionKind;
+    use crate::defi::orderbook::BookSide;
+    use crate::defi::DeFiTx;
+    match tx {
+        DeFiTx::CreateAmmPool {
+            pool_id,
+            asset_a,
+            asset_b,
+            amount_a,
+            amount_b,
+            fee_bps,
+        } => {
+            put_u8(out, 0);
+            put_fixed(out, pool_id);
+            put_fixed(out, asset_a);
+            put_fixed(out, asset_b);
+            put_u128(out, *amount_a);
+            put_u128(out, *amount_b);
+            put_u64(out, *fee_bps);
+        }
+        DeFiTx::AddAmmLiquidity {
+            pool_id,
+            amount_a,
+            amount_b,
+        } => {
+            put_u8(out, 1);
+            put_fixed(out, pool_id);
+            put_u128(out, *amount_a);
+            put_u128(out, *amount_b);
+        }
+        DeFiTx::RemoveAmmLiquidity { pool_id, shares } => {
+            put_u8(out, 2);
+            put_fixed(out, pool_id);
+            put_u128(out, *shares);
+        }
+        DeFiTx::SwapAmm {
+            pool_id,
+            a_to_b,
+            amount_in,
+            min_amount_out,
+        } => {
+            put_u8(out, 3);
+            put_fixed(out, pool_id);
+            put_u8(out, u8::from(*a_to_b));
+            put_u128(out, *amount_in);
+            put_u128(out, *min_amount_out);
+        }
+        DeFiTx::OpenBatchAuction {
+            batch_id,
+            asset_base,
+            asset_quote,
+        } => {
+            put_u8(out, 4);
+            put_fixed(out, batch_id);
+            put_fixed(out, asset_base);
+            put_fixed(out, asset_quote);
+        }
+        DeFiTx::SubmitBatchOrder {
+            batch_id,
+            side,
+            limit_price,
+            quantity,
+        } => {
+            put_u8(out, 5);
+            put_fixed(out, batch_id);
+            put_u8(
+                out,
+                match side {
+                    AuctionSide::Bid => 0,
+                    AuctionSide::Ask => 1,
+                },
+            );
+            put_u128(out, *limit_price);
+            put_u128(out, *quantity);
+        }
+        DeFiTx::ClearBatchAuction { batch_id } => {
+            put_u8(out, 6);
+            put_fixed(out, batch_id);
+        }
+        DeFiTx::CreateLendingMarket {
+            market_id,
+            borrow_collateral_ratio_bps,
+            liquidation_threshold_bps,
+            base_rate_bps,
+        } => {
+            put_u8(out, 7);
+            put_fixed(out, market_id);
+            put_u64(out, *borrow_collateral_ratio_bps);
+            put_u64(out, *liquidation_threshold_bps);
+            put_u64(out, *base_rate_bps);
+        }
+        DeFiTx::SupplyLending { market_id, amount } => {
+            put_u8(out, 8);
+            put_fixed(out, market_id);
+            put_u128(out, *amount);
+        }
+        DeFiTx::BorrowLendingFromAmmTwap {
+            market_id,
+            twap_pool_id,
+            collateral_added,
+            borrow_amount,
+        } => {
+            put_u8(out, 9);
+            put_fixed(out, market_id);
+            put_fixed(out, twap_pool_id);
+            put_u128(out, *collateral_added);
+            put_u128(out, *borrow_amount);
+        }
+        DeFiTx::LiquidateLendingFromAmmTwap {
+            borrower,
+            market_id,
+            twap_pool_id,
+            repay_debt,
+        } => {
+            put_u8(out, 10);
+            put_fixed(out, borrower.as_bytes());
+            put_fixed(out, market_id);
+            put_fixed(out, twap_pool_id);
+            put_u128(out, *repay_debt);
+        }
+        DeFiTx::WriteOption {
+            series_id,
+            kind,
+            strike_price,
+            size,
+            premium,
+            expiry_epoch,
+        } => {
+            put_u8(out, 11);
+            put_fixed(out, series_id);
+            put_u8(
+                out,
+                match kind {
+                    OptionKind::CoveredCall => 0,
+                    OptionKind::CashSecuredPut => 1,
+                },
+            );
+            put_u128(out, *strike_price);
+            put_u128(out, *size);
+            put_u128(out, *premium);
+            put_u64(out, *expiry_epoch);
+        }
+        DeFiTx::BuyOption { series_id } => {
+            put_u8(out, 12);
+            put_fixed(out, series_id);
+        }
+        DeFiTx::SettleOptionFromAmmTwap {
+            series_id,
+            twap_pool_id,
+        } => {
+            put_u8(out, 13);
+            put_fixed(out, series_id);
+            put_fixed(out, twap_pool_id);
+        }
+        DeFiTx::PlaceBookOrder {
+            book_id,
+            side,
+            price,
+            quantity,
+        } => {
+            put_u8(out, 14);
+            put_fixed(out, book_id);
+            put_u8(
+                out,
+                match side {
+                    BookSide::Bid => 0,
+                    BookSide::Ask => 1,
+                },
+            );
+            put_u128(out, *price);
+            put_u128(out, *quantity);
+        }
+        DeFiTx::CancelBookOrder { book_id, order_id } => {
+            put_u8(out, 15);
+            put_fixed(out, book_id);
+            put_u64(out, *order_id);
+        }
+    }
+}
+
+fn encode_storage_replica(
+    r: &crate::unification::storage_fabric::StorageReplica,
+    out: &mut Vec<u8>,
+) {
+    put_string(out, r.network.scheme());
+    put_u32(out, r.domain_id);
+    put_string(out, &r.native_locator);
+    put_u8(out, r.verification as u8);
+    put_u8(out, u8::from(r.available));
+    put_u32(out, r.latency_ms);
+}
+
+fn encode_layer_owner_auth(
+    auth: &crate::privacy::data_layering::LayerOwnerAuth,
+    out: &mut Vec<u8>,
+) {
+    put_u64(out, auth.chain_id);
+    put_u64(out, auth.nonce);
+    put_bytes(out, &auth.owner_ml_dsa_65_pk);
+    put_bytes(out, &auth.signature);
+}
+
+fn encode_unification_tx(tx: &crate::unification::tx::UnificationTx, out: &mut Vec<u8>) {
+    use crate::unification::storage_fabric::StorageReplicaProof;
+    use crate::unification::tx::UnificationTx;
+    match tx {
+        UnificationTx::RegisterStorageObject { record } => {
+            put_u8(out, 0);
+            put_fixed(out, &record.sha3_256_digest);
+            put_fixed(out, &record.sha256_digest);
+            put_u64(out, record.byte_len);
+            put_string(out, &record.content_type);
+            put_u64(
+                out,
+                u64::try_from(record.replicas.len()).unwrap_or(u64::MAX),
+            );
+            for rep in &record.replicas {
+                encode_storage_replica(rep, out);
+            }
+        }
+        UnificationTx::AttachStorageReplica {
+            content_sha3,
+            replica,
+            proof,
+        } => {
+            put_u8(out, 1);
+            put_fixed(out, content_sha3);
+            encode_storage_replica(replica, out);
+            match proof {
+                StorageReplicaProof::Bud3Custody {
+                    data_shards,
+                    parity_shards,
+                    custody_merkle_root,
+                } => {
+                    put_u8(out, 0);
+                    put_u32(out, u32::from(*data_shards));
+                    put_u32(out, u32::from(*parity_shards));
+                    put_fixed(out, custody_merkle_root);
+                }
+                StorageReplicaProof::ContentHashPreimage { payload } => {
+                    put_u8(out, 1);
+                    put_bytes(out, payload);
+                }
+                StorageReplicaProof::ExternalDomainMerkle {
+                    domain_id,
+                    finalized_state_root,
+                    leaf_index,
+                    leaf_count,
+                    proof: nodes,
+                } => {
+                    put_u8(out, 2);
+                    put_u32(out, *domain_id);
+                    put_fixed(out, finalized_state_root);
+                    put_u64(out, u64::try_from(*leaf_index).unwrap_or(u64::MAX));
+                    put_u64(out, u64::try_from(*leaf_count).unwrap_or(u64::MAX));
+                    put_u64(out, u64::try_from(nodes.len()).unwrap_or(u64::MAX));
+                    for n in nodes {
+                        put_fixed(out, n);
+                    }
+                }
+            }
+        }
+        UnificationTx::BindUnifiedBnsName {
+            bns_name,
+            content_sha3,
+        } => {
+            put_u8(out, 2);
+            put_string(out, bns_name);
+            put_fixed(out, content_sha3);
+        }
+        UnificationTx::RegisterDataConfidential {
+            record_id,
+            commitment,
+            declared_byte_len,
+            owner_ml_dsa_65_pk,
+        } => {
+            put_u8(out, 3);
+            put_fixed(out, record_id);
+            put_fixed(out, commitment);
+            put_u64(out, *declared_byte_len);
+            put_bytes(out, owner_ml_dsa_65_pk);
+        }
+        UnificationTx::RegisterDataOffchainAnchor {
+            record_id,
+            content_sha3_256,
+            declared_byte_len,
+            locator_hash,
+            owner_ml_dsa_65_pk,
+        } => {
+            put_u8(out, 4);
+            put_fixed(out, record_id);
+            put_fixed(out, content_sha3_256);
+            put_u64(out, *declared_byte_len);
+            put_fixed(out, locator_hash);
+            put_bytes(out, owner_ml_dsa_65_pk);
+        }
+        UnificationTx::IssueDataGrant {
+            record_id,
+            grant_tag,
+            auth,
+        } => {
+            put_u8(out, 5);
+            put_fixed(out, record_id);
+            put_fixed(out, grant_tag);
+            encode_layer_owner_auth(auth, out);
+        }
+        UnificationTx::TransitionDataToPseudonymous {
+            record_id,
+            stealth_salt,
+            auth,
+        } => {
+            put_u8(out, 6);
+            put_fixed(out, record_id);
+            put_fixed(out, stealth_salt);
+            encode_layer_owner_auth(auth, out);
+        }
+        UnificationTx::DeclassifyDataToPublic {
+            record_id,
+            plaintext,
+            blind_salt,
+            auth,
+        } => {
+            put_u8(out, 7);
+            put_fixed(out, record_id);
+            put_bytes(out, plaintext);
+            put_option_fixed32(out, *blind_salt);
+            encode_layer_owner_auth(auth, out);
+        }
+    }
 }
 
 fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Vec<u8>) {

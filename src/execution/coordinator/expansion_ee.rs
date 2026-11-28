@@ -107,6 +107,14 @@ fn execute_expansion_call(
 ) -> Result<EeOutcome, EeRefusal> {
     check_network_open(spec.ee, ctx)?;
     let store_ns = ns(spec.namespace)?;
+    if spec.ee == EeId::RV32 {
+        return crate::execution::rv32_vm::execute_rv32_call(
+            &store_ns,
+            call,
+            spec.max_code_bytes,
+            host,
+        );
+    }
     match call.kind {
         EeCallKind::Deploy => {
             let _info =
@@ -234,6 +242,9 @@ macro_rules! define_expansion_ee {
             }
 
             fn validate_deploy(&self, code: &[u8]) -> Result<CodeInfo, EeRefusal> {
+                if Self::SPEC.ee == EeId::RV32 {
+                    return crate::execution::rv32_vm::validate_rv32_deploy(code, $max_bytes);
+                }
                 validate_non_empty(code, $max_bytes, $label, $abi)
             }
 

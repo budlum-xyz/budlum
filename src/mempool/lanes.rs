@@ -128,6 +128,67 @@ struct SingleLane {
     sender_nonces: BTreeSet<([u8; 32], u64, u64)>,
 }
 
+/// Default maximum blocks a valid FOCIL inclusion transaction may wait before
+/// receiving guaranteed reserve inclusion priority in block assembly.
+pub const FOCIL_DEFAULT_MAX_WAIT_BLOCKS: u64 = 4;
+
+/// Maximum share (25% = 2,500 bps) of block BGU budget reserved for overdue
+/// FOCIL inclusion transactions so priority-fee markets remain healthy.
+pub const FOCIL_BLOCK_BGU_RESERVE_BPS: u64 = 2_500;
+
+/// Metadata tracking an inclusion-list candidate under FOCIL censorship resistance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocilEntry {
+    pub tx_hash: [u8; 32],
+    pub first_seen_block: u64,
+    pub max_wait_blocks: u64,
+}
+
+/// Censorship-resistant FOCIL inclusion tracker layered onto [`MultiLaneMempool`].
+#[derive(Debug, Clone, Default)]
+pub struct FocilInclusionQueue {
+    entries: BTreeMap<[u8; 32], FocilEntry>,
+}
+
+impl FocilInclusionQueue {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
+    }
+
+    pub fn record(&mut self, tx_hash: [u8; 32], current_block: u64, max_wait_blocks: u64) {
+        let wait = max_wait_blocks.max(1);
+        self.entries.entry(tx_hash).or_insert(FocilEntry {
+            tx_hash,
+            first_seen_block: current_block,
+            max_wait_blocks: wait,
+        });
+    }
+
+    pub fn remove(&mut self, tx_hash: &[u8; 32]) {
+        self.entries.remove(tx_hash);
+    }
+
+    #[must_use]
+    pub fn is_overdue(&self, tx_hash: &[u8; 32], current_block: u64) -> bool {
+        self.entries
+            .get(tx_hash)
+            .is_some_and(|e| current_block.saturating_sub(e.first_seen_block) >= e.max_wait_blocks)
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 /// Six-lane isolated transaction pool with priority-fee cross-lane selection.
 #[derive(Debug, Clone)]
 pub struct MultiLaneMempool {
@@ -138,6 +199,7 @@ pub struct MultiLaneMempool {
     seen_solana_sigs: BTreeSet<[u8; 32]>,
     solana_sigs_by_blockhash: BTreeMap<[u8; 32], BTreeSet<[u8; 32]>>,
     seen_duty_windows: BTreeSet<([u8; 32], u64)>,
+    focil_queue: FocilInclusionQueue,
 }
 
 impl MultiLaneMempool {
@@ -154,7 +216,75 @@ impl MultiLaneMempool {
             seen_solana_sigs: BTreeSet::new(),
             solana_sigs_by_blockhash: BTreeMap::new(),
             seen_duty_windows: BTreeSet::new(),
+            focil_queue: FocilInclusionQueue::new(),
         }
+    }
+
+    /// Track an admitted lane transaction inside the censorship-resistant FOCIL inclusion queue.
+    pub fn track_focil(&mut self, tx_hash: [u8; 32], current_block: u64, max_wait_blocks: u64) {
+        self.focil_queue
+            .record(tx_hash, current_block, max_wait_blocks);
+    }
+
+    /// Return queued entries whose wait age has reached their FOCIL inclusion deadline.
+    #[must_use]
+    pub fn overdue_focil_entries(&self, current_block: u64) -> Vec<LaneEntry> {
+        let mut out = Vec::new();
+        for lane in self.lanes.values() {
+            for entry in lane.entries.values() {
+                if self.focil_queue.is_overdue(&entry.tx_hash, current_block) {
+                    out.push(entry.clone());
+                }
+            }
+        }
+        out.sort_by_key(|e| {
+            let age = self
+                .focil_queue
+                .entries
+                .get(&e.tx_hash)
+                .map_or(0, |f| current_block.saturating_sub(f.first_seen_block));
+            (std::cmp::Reverse(age), e.tx_hash)
+        });
+        out
+    }
+
+    /// FOCIL-aware block selection: allocates up to 25% of `block_bgu_budget` to overdue
+    /// inclusion-aged transactions first (anti-censorship guarantee), then fills the
+    /// remaining budget with highest effective priority fee across all lanes.
+    #[must_use]
+    pub fn select_for_block_with_focil(
+        &self,
+        base_fee_atto: u128,
+        block_bgu_budget: u64,
+        current_block: u64,
+    ) -> Vec<LaneEntry> {
+        let reserve_bgu = block_bgu_budget.saturating_mul(FOCIL_BLOCK_BGU_RESERVE_BPS) / 10_000;
+        let mut picked = Vec::new();
+        let mut picked_hashes = BTreeSet::new();
+        let mut used_bgu: u64 = 0;
+
+        for entry in self.overdue_focil_entries(current_block) {
+            if entry.max_fee_per_bgu_atto < base_fee_atto {
+                continue;
+            }
+            if used_bgu.saturating_add(entry.gas_limit_bgu) <= reserve_bgu {
+                used_bgu = used_bgu.saturating_add(entry.gas_limit_bgu);
+                picked_hashes.insert(entry.tx_hash);
+                picked.push(entry);
+            }
+        }
+
+        for entry in self.select_for_block(base_fee_atto, block_bgu_budget) {
+            if picked_hashes.contains(&entry.tx_hash) {
+                continue;
+            }
+            if used_bgu.saturating_add(entry.gas_limit_bgu) <= block_bgu_budget {
+                used_bgu = used_bgu.saturating_add(entry.gas_limit_bgu);
+                picked_hashes.insert(entry.tx_hash);
+                picked.push(entry);
+            }
+        }
+        picked
     }
 
     /// Record a new canonical Budlum block hash, retaining the latest 150 hashes.
@@ -473,6 +603,38 @@ impl MultiLaneMempool {
     pub fn prune_duty_windows_before(&mut self, min_window: u64) {
         self.seen_duty_windows
             .retain(|(_, window_id)| *window_id >= min_window);
+    }
+
+    /// Evict committed transaction hashes across all lanes after block inclusion.
+    pub fn evict_committed(&mut self, committed: &[[u8; 32]]) {
+        for hash in committed {
+            self.focil_queue.remove(hash);
+            for lane in self.lanes.values_mut() {
+                if let Some(entry) = lane.entries.remove(hash) {
+                    lane.used_bytes = lane.used_bytes.saturating_sub(entry.raw_bytes.len());
+                    match entry.replay {
+                        LaneReplayRule::AccountNonce { sender, nonce } => {
+                            lane.sender_nonces.remove(&(sender, nonce, 0));
+                        }
+                        LaneReplayRule::AptosSequence {
+                            sender, sequence, ..
+                        } => {
+                            lane.sender_nonces.remove(&(sender, sequence, 0));
+                        }
+                        LaneReplayRule::CosmosSequence {
+                            sender,
+                            account_number,
+                            sequence,
+                        } => {
+                            lane.sender_nonces
+                                .remove(&(sender, sequence, account_number));
+                        }
+                        LaneReplayRule::SolanaWindow { .. } | LaneReplayRule::DutyWindow { .. } => {
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

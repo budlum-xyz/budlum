@@ -180,6 +180,8 @@ mod tests {
             witness_root: None,
             seat_participation: None,
             frame_hash: None,
+            uel_execution_root: None,
+            uel_receipts_root: None,
         };
         let enc = encode_block_header(&header);
         assert!(!enc.is_empty());
