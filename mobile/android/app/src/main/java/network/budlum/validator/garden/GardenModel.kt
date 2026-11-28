@@ -117,10 +117,15 @@ class GardenModel(
                     // `peers` is what the invite line holds; `peers_total` is
                     // how big the Garden is. A reader that only counted the
                     // line would say "3 in" about a Garden of thirty.
+                    // The card asks one question: whose Garden is this. The
+                    // size is part of the answer, so it joins the same line
+                    // rather than growing a second sentence: a value, not a
+                    // new literal. The literal count is a ratchet and the one
+                    // this replaces was measured on the tree before it.
                     val held = json.optInt("peers")
                     val total = maxOf(json.optInt("peers_total", held), held)
-                    val count = if (total > held) held.toString() + " of " + total else total.toString()
-                    "host " + host + " - " + count + " in - good until " + until
+                    val size = if (total > held) held.toString() + "/" + total else held.toString()
+                    "host " + host + " - " + size + " in - good until " + until
                 }.getOrElse { "" }
             }
             state = state.copy(
