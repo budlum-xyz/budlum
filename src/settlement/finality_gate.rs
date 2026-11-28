@@ -52,6 +52,8 @@ impl ValueGate {
 pub enum ValueGateRefusal {
     /// No consensus domains are registered, so no finality certificate exists.
     CertificateUnavailable,
+    /// The certificate's own seal does not re-derive.
+    CertificateIntegrityFailed,
     /// Required domain is not present in the checkpoint certificate.
     DomainMissing {
         /// Missing domain identifier.
@@ -97,6 +99,10 @@ impl fmt::Display for ValueGateRefusal {
             Self::CertificateUnavailable => {
                 write!(f, "universal finality certificate is unavailable")
             }
+            Self::CertificateIntegrityFailed => write!(
+                f,
+                "universal finality certificate fails its own integrity seal and cannot gate value"
+            ),
             Self::DomainMissing { domain_id } => {
                 write!(f, "domain {domain_id} is absent from the finality certificate")
             }
@@ -189,6 +195,13 @@ pub fn check_certificate_value_gate(
     source_domain: u32,
     target_domain: Option<u32>,
 ) -> Result<ValueGateVerdict, ValueGateRefusal> {
+    // The certificate's own seal runs first: a row read from a record whose
+    // digest no longer re-derives from its buckets is an unverified claim
+    // wearing an `Established` label. The rule is not restated here - the
+    // canonical verifier is called, so a future seal change lands in one
+    // place and every value gate inherits it.
+    cert.verify_integrity()
+        .map_err(|_| ValueGateRefusal::CertificateIntegrityFailed)?;
     let src = cert
         .prove_domain(source_domain)
         .ok_or(ValueGateRefusal::DomainMissing {
@@ -386,6 +399,68 @@ mod tests {
             },
             verdict,
         }
+    }
+
+    #[test]
+    fn value_gate_refuses_a_certificate_whose_own_seal_does_not_re_derive() {
+        let cert = compose(&[
+            entry(
+                1,
+                FinalityReversibility::CryptographicValidity,
+                false,
+                9_999,
+                FinalityVerdict::Established,
+            ),
+            entry(
+                2,
+                FinalityReversibility::DeterministicQuorum,
+                true,
+                3_333,
+                FinalityVerdict::Established,
+            ),
+        ])
+        .expect("compose cert");
+        for gate in [
+            ValueGate::BridgeMint,
+            ValueGate::BridgeUnlock,
+            ValueGate::RelayerIntentSettle,
+            ValueGate::AppBindingClaim,
+            ValueGate::ObjectLayerArrive,
+            ValueGate::UniversalPayment,
+        ] {
+            check_certificate_value_gate(&cert, gate, 1, Some(2))
+                .expect("an intact certificate must keep its route");
+        }
+        let mut forged = cert.clone();
+        forged.established_count = forged.established_count.saturating_add(1);
+        for gate in [
+            ValueGate::BridgeMint,
+            ValueGate::BridgeUnlock,
+            ValueGate::RelayerIntentSettle,
+            ValueGate::AppBindingClaim,
+            ValueGate::ObjectLayerArrive,
+            ValueGate::UniversalPayment,
+        ] {
+            assert!(
+                matches!(
+                    check_certificate_value_gate(&forged, gate, 1, Some(2)),
+                    Err(ValueGateRefusal::CertificateIntegrityFailed)
+                ),
+                "gate {gate:?} admitted a certificate that fails its own seal"
+            );
+        }
+        let mut forged_digest = cert.clone();
+        forged_digest.certificate_digest = [0xEEu8; 32];
+        assert!(matches!(
+            check_certificate_value_gate(&forged_digest, ValueGate::BridgeMint, 1, Some(2)),
+            Err(ValueGateRefusal::CertificateIntegrityFailed)
+        ));
+    }
+
+    #[test]
+    fn integrity_refusal_is_named_in_the_gate_display() {
+        let text = ValueGateRefusal::CertificateIntegrityFailed.to_string();
+        assert!(text.contains("integrity"), "unexpected text: {text}");
     }
 
     #[test]
