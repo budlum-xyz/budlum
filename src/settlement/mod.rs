@@ -54,8 +54,8 @@ pub use liquidation_proof::{
     AmmReserveSnapshot, CollateralLegSpec, CrossDomainLiquidationParams, CrossDomainSeizureLeg,
     LiquidationError, LiquidationOutcome, LiquidationPosition, ProofCarryingHealth,
     ProvenLiquidationResult, ProvenReserveObservation, LIQUIDATION_PENALTY_BPS, LIQ_BONUS_MAX_BPS,
-    LIQ_CLOSE_FACTOR_MAX_BPS, LIQ_RESERVE_LEAF_TAG, MAX_BATCH_SIZE, MAX_OBSERVATIONS,
-    MAX_TWAP_EPOCHS, MIN_TWAP_EPOCHS,
+    LIQ_CLOSE_FACTOR_MAX_BPS, LIQ_RESERVE_LEAF_TAG, MAX_BATCH_SIZE, MAX_CONSECUTIVE_PRICE_JUMP_BPS,
+    MAX_OBSERVATIONS, MAX_TWAP_EPOCHS, MIN_POOL_LIQUIDITY, MIN_TWAP_EPOCHS, MIN_TWAP_EPOCH_SPAN,
 };
 pub use notary::{
     anchor_notary_entries, verify_notary_proof_offline, NotaryAnchorRequest, NotaryEntry,
